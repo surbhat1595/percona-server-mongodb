@@ -920,8 +920,8 @@ var ReplSetTest = function(opts) {
                         // Node sees two primaries.
                         if (nodesPrimary !== -1) {
                             print("AwaitNodesAgreeOnPrimary: Retrying because " + nodes[i].name +
-                                  " thinks both " + nodes[nodesPrimary].name + " and " +
-                                  nodes[j].name + " are primary.");
+                                  " thinks both " + self.nodes[nodesPrimary].name + " and " +
+                                  self.nodes[j].name + " are primary.");
 
                             return false;
                         }
@@ -940,13 +940,13 @@ var ReplSetTest = function(opts) {
                     primary = nodesPrimary;
                 } else if (primary !== nodesPrimary) {
                     print("AwaitNodesAgreeOnPrimary: Retrying because " + nodes[i].name +
-                          " thinks the primary is " + nodes[nodesPrimary].name + " instead of " +
-                          nodes[primary].name);
+                          " thinks the primary is " + self.nodes[nodesPrimary].name +
+                          " instead of " + self.nodes[primary].name);
                     return false;
                 }
             }
 
-            print("AwaitNodesAgreeOnPrimary: Nodes agreed on primary " + nodes[primary].name);
+            print("AwaitNodesAgreeOnPrimary: Nodes agreed on primary " + self.nodes[primary].name);
             return true;
         }, "Awaiting nodes to agree on primary timed out", timeout);
     };
@@ -1930,32 +1930,13 @@ var ReplSetTest = function(opts) {
         readAtClusterTime,
     } = {}) {
         return sessions.map(session => {
-            const commandObj = {dbHash: 1};
+            const commandObj = {dbHash: 1, filterCapped: filterCapped};
             if (readAtClusterTime !== undefined) {
                 commandObj.$_internalReadAtClusterTime = readAtClusterTime;
             }
 
             const db = session.getDatabase(dbName);
-            const res = assert.commandWorked(db.runCommand(commandObj));
-
-            // The "capped" field in the dbHash command response is new as of MongoDB 4.0.
-            const cappedCollections = new Set(filterCapped ? res.capped : []);
-
-            for (let collName of Object.keys(res.collections)) {
-                // Capped collections are not necessarily truncated at the same points across
-                // replica set members and may therefore not have the same md5sum. We remove them
-                // from the dbHash command response to avoid an already known case of a mismatch.
-                // See SERVER-16049 for more details.
-                if (cappedCollections.has(collName)) {
-                    delete res.collections[collName];
-                    // The "uuids" field in the dbHash command response is new as of MongoDB 4.0.
-                    if (res.hasOwnProperty("uuids")) {
-                        delete res.uuids[collName];
-                    }
-                }
-            }
-
-            return res;
+            return assert.commandWorked(db.runCommand(commandObj));
         });
     };
 

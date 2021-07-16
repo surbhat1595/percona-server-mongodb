@@ -337,7 +337,6 @@ variables:
   - enterprise-rhel-62-64-bit-multi-txn-oplog-entries
   - enterprise-rhel-62-64-bit-required-inmem
   - enterprise-rhel-62-64-bit-required-majority-read-concern-off
-  - enterprise-rhel-67-s390x
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-70-64-bit-kitchen-sink
   - enterprise-rhel-70-64-bit-no-libunwind
@@ -350,7 +349,6 @@ variables:
   - enterprise-rhel-82-arm64
   - enterprise-suse12-64
   - enterprise-suse15-64
-  - enterprise-suse12-s390x
   - enterprise-ubuntu-dynamic-1604-64-bit
   - enterprise-ubuntu-dynamic-1604-clang
   - enterprise-ubuntu1604-64
@@ -359,7 +357,6 @@ variables:
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu1804-ppc64le
-  - enterprise-ubuntu1804-s390x
   - enterprise-ubuntu2004-64
   - enterprise-windows
   - enterprise-windows-compile-all
@@ -401,8 +398,6 @@ variables:
   - rhel62
   - enterprise-rhel-62-64-bit
   - enterprise-rhel-62-64-bit-coverage
-  - rhel-67-s390x
-  - enterprise-rhel-67-s390x
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
@@ -415,9 +410,7 @@ variables:
   - enterprise-rhel-80-64-bit
   - enterprise-rhel-82-arm64
   - suse12
-  - suse12-s390x
   - enterprise-suse12-64
-  - enterprise-suse12-s390x
   - suse15
   - enterprise-suse15-64
   - ubuntu1604
@@ -431,13 +424,11 @@ variables:
   - ubuntu1804
   - ubuntu1804-arm64
   - ubuntu2004-arm64
-  - ubuntu1804-s390x
   - ubuntu2004
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu1804-ppc64le
-  - enterprise-ubuntu1804-s390x
   - enterprise-ubuntu2004-64
   - enterprise-windows
   - windows
@@ -1483,6 +1474,10 @@ functions:
         elif [ $resmoke_exit_code != 0 ]; then
           # On failure save the resmoke exit code.
           echo $resmoke_exit_code > resmoke_error_code
+        elif [ $resmoke_exit_code = 0 ]; then
+          # On success delete core files.
+          core_files=$(/usr/bin/find -H .. \( -name "*.core" -o -name "*.mdmp" \) 2> /dev/null)
+          rm -rf $core_files
         fi
         exit $resmoke_exit_code
         fi # end if [[ ${disable_unit_tests} && ! -f ${skip_tests|/dev/null} ]]
@@ -8631,6 +8626,41 @@ tasks:
           $python buildscripts/validate_commit_message.py "$commit_message_content"
         fi
 
+- name: check_for_todos
+  exec_timeout_secs: 600 # 10 minute timeout
+  commands:
+    - command: manifest.load
+    - func: "git get project"
+    - func: "set task expansion macros"
+    - func: "configure evergreen api credentials"
+    - func: "set up virtualenv"
+    - command: shell.exec
+      type: test
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          ${activate_virtualenv}
+
+          set -o verbose
+          set -o errexit
+
+          # Since `commit_message` is an evergreen expansion, we need a way to ensure we
+          # properly deal with any special characters that could cause issues (like "). To
+          # do this, we will write it out to a file, then read that file into a variable.
+          if [ "${is_commit_queue}" = "true" ]; then
+            cat > commit_message.txt <<END_OF_COMMIT_MSG
+          ${commit_message}
+          END_OF_COMMIT_MSG
+
+            commit_message_content=$(cat commit_message.txt)
+            rm commit_message.txt
+
+            $python buildscripts/todo_check.py --commit-message "$commit_message_content"
+          else
+            $python buildscripts/todo_check.py --patch-build ${version_id}
+          fi
+
 - <<: *task_template
   name: mqlrun
   commands:
@@ -9250,87 +9280,6 @@ buildvariants:
     distros:
     - ubuntu1804-test
 
-- name: ubuntu1804-s390x
-  display_name: Ubuntu 18.04 s390x
-  run_on:
-  - ubuntu1804-zseries-test
-  batchtime: 10080 # 7 days
-  expansions:
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: s390x-ubuntu1804
-    compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling
-    multiversion_platform: ubuntu1804
-    multiversion_edition: targeted
-    multiversion_architecture: s390x
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: s390x
-    packager_distro: ubuntu1804
-    repo_edition: org
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - ubuntu1804-zseries-build
-  - name: jsCore
-  - name: replica_sets_jscore_passthrough
-  - name: .publish
-    distros:
-    - ubuntu1804-test
-
-- name: enterprise-ubuntu1804-s390x
-  display_name: Enterprise Ubuntu 18.04 s390x
-  modules:
-  - enterprise
-  run_on:
-  - ubuntu1804-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-ubuntu1804
-    compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling
-    resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: ubuntu1804
-    repo_edition: enterprise
-    multiversion_platform: ubuntu1804
-    multiversion_architecture: s390x
-    multiversion_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - ubuntu1804-zseries-build
-  - name: aggregation
-  - name: audit
-  - name: .auth !.multiversion !.jscore
-  - name: .misc_js
-  - name: .encrypt
-  - name: .integration !.audit
-    distros:
-    - ubuntu1804-zseries-build
-  - name: .jscore .common !.auth
-  - name: jsCore_op_query
-  - name: .read_write_concern
-  - name: replica_sets
-  - name: .replica_sets .common
-  - name: sasl
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.multiversion
-  - name: .sharding .txns
-  - name: snmp
-  - name: .publish
-    distros:
-    - ubuntu1804-test
-
 - name: ubuntu2004
   display_name: Ubuntu 20.04
   run_on:
@@ -9696,7 +9645,7 @@ buildvariants:
     packager_distro: amazon2
     repo_edition: org
     scons_cache_scope: shared
-    large_distro_name: amazon-build
+    large_distro_name: amazon2-build
   tasks:
   - name: compile_all_run_unittests_TG
     distros:
@@ -10369,6 +10318,130 @@ buildvariants:
   - name: lint_errorcodes
   - name: burn_in_tests_gen
   - name: burn_in_tests_multiversion_gen
+  - name: check_for_todos
+  - name: .aggfuzzer
+  - name: .aggregation
+  - name: audit
+  - name: .auth
+  - name: burn_in_tags_gen
+  - name: buildscripts_test
+  - name: unittest_shell_hang_analyzer_gen
+  - name: .causally_consistent !.sharding
+  - name: .change_streams
+  - name: .misc_js
+  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+    distros:
+    - rhel62-large
+  - name: disk_wiredtiger
+  - name: .encrypt
+  - name: idl_tests
+  - name: initial_sync_fuzzer_gen
+  - name: .integration
+    distros:
+    - rhel62-large
+  - name: .jscore .common
+  - name: jsCore_minimum_batch_size
+  - name: jsCore_op_query
+  - name: jsCore_txns_large_txns_format
+  - name: jsonSchema
+  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
+  - name: libunwind_tests
+  - name: multiversion_sanity_check_gen
+  - name: mqlrun
+  - name: .multi_shard
+  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+  - name: multiversion_gen
+  - name: .query_fuzzer
+  - name: .random_multiversion_replica_sets
+  - name: .read_write_concern .large
+    distros:
+    - rhel62-large
+  - name: .read_write_concern !.large
+  - name: .replica_sets !.encrypt !.auth
+    distros:
+    - rhel62-large
+  - name: replica_sets_reconfig_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_reconfig_jscore_stepdown_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough
+    distros:
+    - rhel62-large
+  - name: .read_only
+  - name: .rollbackfuzzer
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_ssl
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .txns
+  - name: .sharding .common
+  - name: snmp
+  - name: .stitch
+  - name: .updatefuzzer
+  - name: secondary_reads_passthrough_gen
+  - name: test_packages
+    distros:
+    - ubuntu1604-packer
+  - name: .publish
+    distros:
+        - rhel62-small
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_selection_json_test_TG
+
+- name: enterprise-rhel-62-64-bit-store_fam_images_in_side_coll
+  display_name: "Enterprise RHEL 6.2 (storeFindAndModifyImagesInSideCollection=True)"
+  batchtime: 480 # 8 hours
+  modules:
+  - enterprise
+  run_on:
+  - rhel62-small
+  expansions:
+    test_flags: >-
+      --mongodSetParameters="{storeFindAndModifyImagesInSideCollection: true}"
+      --excludeWithAnyTags=requires_mmapv1,requires_storing_fam_images_in_oplog
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-rhel62
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    multiversion_platform: rhel62
+    multiversion_edition: enterprise
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: rhel62
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    jstestfuzz_num_generated_files: 40
+    jstestfuzz_concurrent_num_files: 10
+    target_resmoke_time: 10
+    max_sub_suites: 3
+    large_distro_name: rhel62-large
+    burn_in_tag_buildvariants: enterprise-rhel-62-64-bit-majority-read-concern-off enterprise-rhel-62-64-bit-inmem linux-64-duroff enterprise-rhel-62-64-bit-multiversion
+  tasks:
+  - name: compile_all_run_unittests_TG
+    distros:
+    - rhel62-large
+  - name: lint_pylinters
+  - name: lint_clang_format
+  - name: lint_eslint
+  - name: lint_cpplint
+  - name: lint_fuzzer_sanity_patch
+  - name: lint_yaml
+  - name: lint_errorcodes
+  - name: burn_in_tests_gen
+  - name: burn_in_tests_multiversion_gen
+  - name: check_for_todos
   - name: .aggfuzzer
   - name: .aggregation
   - name: audit
@@ -10750,6 +10823,7 @@ buildvariants:
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    test_flags: --excludeWithAnyTags=resource_intensive
     compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
     multiversion_platform: rhel62
     multiversion_edition: enterprise
@@ -11451,50 +11525,6 @@ buildvariants:
     distros:
     - rhel70-small
 
-- name: enterprise-rhel-67-s390x
-  display_name: Enterprise RHEL 6.7 s390x
-  modules:
-  - enterprise
-  run_on:
-  - rhel67-zseries-test
-  stepback: false
-  expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    compile_flags: --ssl MONGO_DISTMOD=rhel67 -j3 CCFLAGS="-march=z9-109 -mtune=z10" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --use-hardware-crc32=off
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: rhel67
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-rhel67
-    repo_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel67-zseries-build
-  - name: .aggregation .common
-  - name: audit
-  - name: .auth !.multiversion
-  - name: .misc_js
-  - name: .encrypt
-  - name: .integration !.audit !.sharded
-    distros:
-    - rhel67-zseries-build
-  - name: .jscore .common
-  - name: jsCore_minimum_batch_size
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.multiversion
-  - name: snmp
-  - name: .stitch
-  - name: secondary_reads_passthrough_gen
-  - name: .publish
-    distros:
-    - rhel62-small
-
 - name: rhel-72-s390x
   display_name: RHEL 7.2 s390x
   run_on:
@@ -11520,32 +11550,6 @@ buildvariants:
   - name: .publish
     distros:
     - rhel70-small
-
-- name: rhel-67-s390x
-  display_name: RHEL 6.7 s390x
-  run_on:
-  - rhel67-zseries-test
-  expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel67 -j3 CCFLAGS="-march=z9-109 -mtune=z10" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --use-hardware-crc32=off
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: s390x
-    packager_distro: rhel67
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: s390x-rhel67
-    repo_edition: org
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel67-zseries-build
-  - name: jsCore
-  - name: replica_sets_jscore_passthrough
-  - name: ssl_gen
-  - name: .publish
-    distros:
-    - rhel62-small
 
 ###########################################
 #          Ubuntu buildvariants           #
@@ -11722,88 +11726,6 @@ buildvariants:
   - name: .publish
     distros:
     - suse12-small
-
-- name: enterprise-suse12-s390x
-  display_name: Enterprise SLES 12 s390x
-  modules:
-  - enterprise
-  run_on:
-  - suse12-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: suse12
-    repo_edition: enterprise
-    multiversion_platform: suse12
-    multiversion_architecture: s390x
-    multiversion_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - suse12-zseries-build
-  - name: .aggregation .common
-  - name: audit
-  - name: .auth !.multiversion !.jscore
-  - name: .misc_js
-  - name: .encrypt
-  - name: .integration !.audit
-    distros:
-    - suse12-zseries-build
-  - name: .jscore .common !.auth
-  - name: jsCore_op_query
-  - name: .read_write_concern
-  - name: replica_sets
-  - name: .replica_sets .common
-  - name: sasl
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.multiversion
-  - name: snmp
-  - name: .stitch
-  - name: secondary_reads_passthrough_gen
-  - name: .publish
-    distros:
-    - suse12-test
-
-- name: suse12-s390x
-  display_name: SLES 12 s390x
-  run_on:
-  - suse12-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: s390x-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: s390x
-    packager_distro: suse12
-    repo_edition: org
-    multiversion_platform: suse12
-    multiversion_architecture: s390x
-    multiversion_edition: targeted
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - suse12-zseries-build
-  - name: jsCore
-  - name: replica_sets_jscore_passthrough
-  - name: ssl_gen
-  - name: .publish
-    distros:
-    - suse12-test
-
 
 - name: suse12
   display_name: SUSE 12

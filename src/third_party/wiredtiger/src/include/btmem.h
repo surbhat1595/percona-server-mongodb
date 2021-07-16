@@ -635,13 +635,16 @@ struct __wt_page {
     } u;
 
     /*
-     * Page entries, type and flags are positioned at the end of the WT_PAGE union to reduce cache
-     * misses in the row-store search function.
+     * Page entry count, page-wide prefix information, type and flags are positioned at the end of
+     * the WT_PAGE union to reduce cache misses when searching row-store pages.
      *
      * The entries field only applies to leaf pages, internal pages use the page-index entries
      * instead.
      */
     uint32_t entries; /* Leaf page entries */
+
+    uint32_t prefix_start; /* Best page prefix starting slot */
+    uint32_t prefix_stop;  /* Maximum slot to which the best page prefix applies */
 
 #define WT_PAGE_IS_INTERNAL(page) \
     ((page)->type == WT_PAGE_COL_INT || (page)->type == WT_PAGE_ROW_INT)
@@ -668,6 +671,19 @@ struct __wt_page {
     uint8_t flags_atomic;               /* Atomic flags, use F_*_ATOMIC */
 
     uint8_t unused[2]; /* Unused padding */
+
+    size_t memory_footprint; /* Memory attached to the page */
+
+    /* Page's on-disk representation: NULL for pages created in memory. */
+    const WT_PAGE_HEADER *dsk;
+
+    /* If/when the page is modified, we need lots more information. */
+    WT_PAGE_MODIFY *modify;
+
+    /*
+     * !!!
+     * This is the 64 byte boundary, try to keep hot fields above here.
+     */
 
 /*
  * The page's read generation acts as an LRU value for each page in the
@@ -697,16 +713,6 @@ struct __wt_page {
 #define WT_READGEN_START_VALUE 100
 #define WT_READGEN_STEP 100
     uint64_t read_gen;
-
-    size_t memory_footprint; /* Memory attached to the page */
-
-    /* Page's on-disk representation: NULL for pages created in memory. */
-    const WT_PAGE_HEADER *dsk;
-
-    /* If/when the page is modified, we need lots more information. */
-    WT_PAGE_MODIFY *modify;
-
-    /* This is the 64 byte boundary, try to keep hot fields above here. */
 
     uint64_t cache_create_gen; /* Page create timestamp */
     uint64_t evict_pass_gen;   /* Eviction pass generation */
@@ -1111,14 +1117,13 @@ struct __wt_update {
     volatile uint8_t prepare_state; /* prepare state */
 
 /* AUTOMATIC FLAG VALUE GENERATION START */
-#define WT_UPDATE_BEHIND_MIXED_MODE 0x01u        /* Update that older than a mixed mode update. */
-#define WT_UPDATE_CLEARED_HS 0x02u               /* Update that cleared the history store. */
-#define WT_UPDATE_DS 0x04u                       /* Update has been written to the data store. */
-#define WT_UPDATE_HS 0x08u                       /* Update has been written to history store. */
-#define WT_UPDATE_PREPARE_RESTORED_FROM_DS 0x10u /* Prepared update restored from data store. */
-#define WT_UPDATE_RESTORED_FAST_TRUNCATE 0x20u   /* Fast truncate instantiation */
-#define WT_UPDATE_RESTORED_FROM_DS 0x40u         /* Update restored from data store. */
-#define WT_UPDATE_RESTORED_FROM_HS 0x80u         /* Update restored from history store. */
+#define WT_UPDATE_DS 0x01u                       /* Update has been written to the data store. */
+#define WT_UPDATE_FIXED_HS 0x02u                 /* Update that fixed the history store. */
+#define WT_UPDATE_HS 0x04u                       /* Update has been written to history store. */
+#define WT_UPDATE_PREPARE_RESTORED_FROM_DS 0x08u /* Prepared update restored from data store. */
+#define WT_UPDATE_RESTORED_FAST_TRUNCATE 0x10u   /* Fast truncate instantiation */
+#define WT_UPDATE_RESTORED_FROM_DS 0x20u         /* Update restored from data store. */
+#define WT_UPDATE_RESTORED_FROM_HS 0x40u         /* Update restored from history store. */
                                                  /* AUTOMATIC FLAG VALUE GENERATION STOP */
     uint8_t flags;
 
@@ -1187,17 +1192,17 @@ struct __wt_update_value {
  * avoid heap allocation, add a few additional slots to that array.
  */
 #define WT_MAX_MODIFY_UPDATE 10
-#define WT_MODIFY_VECTOR_STACK_SIZE (WT_MAX_MODIFY_UPDATE + 10)
+#define WT_UPDATE_VECTOR_STACK_SIZE 20
 
 /*
- * WT_MODIFY_VECTOR --
- * 	A resizable array for storing modify updates. The allocation strategy is similar to that of
+ * WT_UPDATE_VECTOR --
+ * 	A resizable array for storing updates. The allocation strategy is similar to that of
  *	llvm::SmallVector<T> where we keep space on the stack for the regular case but fall back to
  *	dynamic allocation as needed.
  */
-struct __wt_modify_vector {
+struct __wt_update_vector {
     WT_SESSION_IMPL *session;
-    WT_UPDATE *list[WT_MODIFY_VECTOR_STACK_SIZE];
+    WT_UPDATE *list[WT_UPDATE_VECTOR_STACK_SIZE];
     WT_UPDATE **listp;
     size_t allocated_bytes;
     size_t size;
@@ -1302,10 +1307,9 @@ struct __wt_insert_head {
         NULL :                                                          \
         (page)->modify->mod_row_update[WT_ROW_SLOT(page, ip)])
 /*
- * WT_ROW_INSERT_SMALLEST references an additional slot past the end of the
- * "one per WT_ROW slot" insert array.  That's because the insert array requires
- * an extra slot to hold keys that sort before any key found on the original
- * page.
+ * WT_ROW_INSERT_SMALLEST references an additional slot past the end of the "one per WT_ROW slot"
+ * insert array. That's because the insert array requires an extra slot to hold keys that sort
+ * before any key found on the original page.
  */
 #define WT_ROW_INSERT_SMALLEST(page)                                    \
     ((page)->modify == NULL || (page)->modify->mod_row_insert == NULL ? \

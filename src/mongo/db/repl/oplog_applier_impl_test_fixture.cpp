@@ -71,12 +71,11 @@ void OplogApplierImplOpObserver::onDelete(OperationContext* opCtx,
                                           const NamespaceString& nss,
                                           OptionalCollectionUUID uuid,
                                           StmtId stmtId,
-                                          bool fromMigrate,
-                                          const boost::optional<BSONObj>& deletedDoc) {
+                                          const OpObserver::OplogDeleteEntryArgs& args) {
     if (!onDeleteFn) {
         return;
     }
-    onDeleteFn(opCtx, nss, uuid, stmtId, fromMigrate, deletedDoc);
+    onDeleteFn(opCtx, nss, uuid, stmtId, args);
 }
 
 void OplogApplierImplOpObserver::onCreateCollection(OperationContext* opCtx,
@@ -150,7 +149,8 @@ Status OplogApplierImplTest::_applyOplogEntryOrGroupedInsertsWrapper(
     OplogApplication::Mode oplogApplicationMode) {
     UnreplicatedWritesBlock uwb(opCtx);
     DisableDocumentValidation validationDisabler(opCtx);
-    return applyOplogEntryOrGroupedInserts(opCtx, batch, oplogApplicationMode);
+    const bool dataIsConsistent = true;
+    return applyOplogEntryOrGroupedInserts(opCtx, batch, oplogApplicationMode, dataIsConsistent);
 }
 
 void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
@@ -181,13 +181,12 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
                                   const NamespaceString& nss,
                                   OptionalCollectionUUID uuid,
                                   StmtId stmtId,
-                                  bool fromMigrate,
-                                  const boost::optional<BSONObj>& deletedDoc) {
+                                  const OpObserver::OplogDeleteEntryArgs& args) {
         applyOpCalled = true;
         checkOpCtx(opCtx);
         ASSERT_EQUALS(NamespaceString("test.t"), nss);
-        ASSERT(deletedDoc);
-        ASSERT_BSONOBJ_EQ(op.getObject(), *deletedDoc);
+        ASSERT(args.deletedDoc);
+        ASSERT_BSONOBJ_EQ(op.getObject(), *(args.deletedDoc));
         return Status::OK();
     };
 
@@ -218,7 +217,9 @@ Status OplogApplierImplTest::runOpsSteadyState(std::vector<OplogEntry> ops) {
         opsPtrs.push_back(&op);
     }
     WorkerMultikeyPathInfo pathInfo;
-    return oplogApplier.applyOplogBatchPerWorker(_opCtx.get(), &opsPtrs, &pathInfo);
+    const bool dataIsConsistent = true;
+    return oplogApplier.applyOplogBatchPerWorker(
+        _opCtx.get(), &opsPtrs, &pathInfo, dataIsConsistent);
 }
 
 Status OplogApplierImplTest::runOpInitialSync(const OplogEntry& op) {

@@ -587,7 +587,7 @@ void scheduleWritesToOplog(OperationContext* opCtx,
     // setup/teardown overhead across many writes.
     const size_t kMinOplogEntriesPerThread = 16;
     const bool enoughToMultiThread =
-        ops.size() >= kMinOplogEntriesPerThread * writerPool->getStats().numThreads;
+        ops.size() >= kMinOplogEntriesPerThread * writerPool->getStats().options.maxThreads;
 
     // Only doc-locking engines support parallel writes to the oplog because they are required to
     // ensure that oplog entries are ordered correctly, even if inserted out-of-order. Additionally,
@@ -601,7 +601,7 @@ void scheduleWritesToOplog(OperationContext* opCtx,
     }
 
 
-    const size_t numOplogThreads = writerPool->getStats().numThreads;
+    const size_t numOplogThreads = writerPool->getStats().options.maxThreads;
     const size_t numOpsPerThread = ops.size() / numOplogThreads;
     for (size_t thread = 0; thread < numOplogThreads; thread++) {
         size_t begin = thread * numOpsPerThread;
@@ -634,7 +634,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
     // Increment the batch size stat.
     oplogApplicationBatchSize.increment(ops.size());
 
-    std::vector<WorkerMultikeyPathInfo> multikeyVector(_writerPool->getStats().numThreads);
+    std::vector<WorkerMultikeyPathInfo> multikeyVector(_writerPool->getStats().options.maxThreads);
     {
         // Each node records cumulative batch application stats for itself using this timer.
         TimerHolder timer(&applyBatchStats);
@@ -660,7 +660,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         std::vector<std::vector<OplogEntry>> derivedOps;
 
         std::vector<std::vector<const OplogEntry*>> writerVectors(
-            _writerPool->getStats().numThreads);
+            _writerPool->getStats().options.maxThreads);
         fillWriterVectors(opCtx, &ops, &writerVectors, &derivedOps);
 
         // Wait for writes to finish before applying ops.
@@ -675,6 +675,10 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
             pauseBatchApplicationAfterWritingOplogEntries.pauseWhileSet(opCtx);
         }
 
+        // Read `minValid` prior to it possibly being written to.
+        const bool isDataConsistent =
+            _consistencyMarkers->getMinValid(opCtx) < ops.front().getOpTime();
+
         // Reset consistency markers in case the node fails while applying ops.
         if (!getOptions().skipWritesToOplog) {
             _consistencyMarkers->setOplogTruncateAfterPoint(opCtx, Timestamp());
@@ -682,8 +686,9 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         }
 
         {
-            std::vector<Status> statusVector(_writerPool->getStats().numThreads, Status::OK());
 
+            std::vector<Status> statusVector(_writerPool->getStats().options.maxThreads,
+                                             Status::OK());
             // Doles out all the work to the writer pool threads. writerVectors is not modified,
             // but  applyOplogBatchPerWorker will modify the vectors that it contains.
             invariant(writerVectors.size() == statusVector.size());
@@ -691,23 +696,24 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                 if (writerVectors[i].empty())
                     continue;
 
-                _writerPool->schedule(
-                    [this,
-                     &writer = writerVectors.at(i),
-                     &status = statusVector.at(i),
-                     &multikeyVector = multikeyVector.at(i)](auto scheduleStatus) {
-                        invariant(scheduleStatus);
+                _writerPool->schedule([this,
+                                       &writer = writerVectors.at(i),
+                                       &status = statusVector.at(i),
+                                       &multikeyVector = multikeyVector.at(i),
+                                       isDataConsistent = isDataConsistent](auto scheduleStatus) {
+                    invariant(scheduleStatus);
 
-                        auto opCtx = cc().makeOperationContext();
+                    auto opCtx = cc().makeOperationContext();
 
-                        // This code path is only executed on secondaries and initial syncing nodes,
-                        // so it is safe to exclude any writes from Flow Control.
-                        opCtx->setShouldParticipateInFlowControl(false);
+                    // This code path is only executed on secondaries and initial syncing nodes,
+                    // so it is safe to exclude any writes from Flow Control.
+                    opCtx->setShouldParticipateInFlowControl(false);
 
-                        status = opCtx->runWithoutInterruptionExceptAtGlobalShutdown([&] {
-                            return applyOplogBatchPerWorker(opCtx.get(), &writer, &multikeyVector);
-                        });
+                    status = opCtx->runWithoutInterruptionExceptAtGlobalShutdown([&] {
+                        return applyOplogBatchPerWorker(
+                            opCtx.get(), &writer, &multikeyVector, isDataConsistent);
                     });
+                });
             }
 
             _writerPool->waitForIdle();
@@ -908,7 +914,8 @@ void OplogApplierImpl::fillWriterVectors(
 
 Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
                                        const OplogEntryOrGroupedInserts& entryOrGroupedInserts,
-                                       OplogApplication::Mode oplogApplicationMode) {
+                                       OplogApplication::Mode oplogApplicationMode,
+                                       const bool isDataConsistent) {
     // Guarantees that applyOplogEntryOrGroupedInserts' context matches that of its calling
     // function, applyOplogBatchPerWorker.
     invariant(!opCtx->writesAreReplicated());
@@ -978,6 +985,7 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
                                                           entryOrGroupedInserts,
                                                           shouldAlwaysUpsert,
                                                           oplogApplicationMode,
+                                                          isDataConsistent,
                                                           incrementOpsAppliedStats);
                     if (!status.isOK() && status.code() == ErrorCodes::WriteConflict) {
                         throw WriteConflictException();
@@ -1015,7 +1023,8 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
 
 Status OplogApplierImpl::applyOplogBatchPerWorker(OperationContext* opCtx,
                                                   std::vector<const OplogEntry*>* ops,
-                                                  WorkerMultikeyPathInfo* workerMultikeyPathInfo) {
+                                                  WorkerMultikeyPathInfo* workerMultikeyPathInfo,
+                                                  const bool isDataConsistent) {
     UnreplicatedWritesBlock uwb(opCtx);
     DisableDocumentValidation validationDisabler(opCtx);
     // Since we swap the locker in stash / unstash transaction resources,
@@ -1060,8 +1069,8 @@ Status OplogApplierImpl::applyOplogBatchPerWorker(OperationContext* opCtx,
 
             // If we didn't create a group, try to apply the op individually.
             try {
-                const Status status =
-                    applyOplogEntryOrGroupedInserts(opCtx, &entry, oplogApplicationMode);
+                const Status status = applyOplogEntryOrGroupedInserts(
+                    opCtx, &entry, oplogApplicationMode, isDataConsistent);
 
                 if (!status.isOK()) {
                     // Tried to apply an update operation but the document is missing, there must be

@@ -349,7 +349,7 @@ public:
                 // Three cases:
                 //
                 // First, initialDataTimestamp is Timestamp(0, 1) -> Take full checkpoint. This is
-                // when there is no consistent view of the data (i.e: during initial sync).
+                // when there is no consistent view of the data (e.g: during initial sync).
                 //
                 // Second, stableTimestamp < initialDataTimestamp: Skip checkpoints. The data on
                 // disk is prone to being rolled back. Hold off on checkpoints.  Hope that the
@@ -362,6 +362,11 @@ public:
                     UniqueWiredTigerSession session = _sessionCache->getSession();
                     WT_SESSION* s = session->getSession();
                     invariantWTOK(s->checkpoint(s, "use_timestamp=false"));
+                    LOGV2_FOR_RECOVERY(5576602,
+                                       2,
+                                       "Completed unstable checkpoint.",
+                                       "initialDataTimestamp"_attr =
+                                           initialDataTimestamp.toString());
                 } else if (stableTimestamp < initialDataTimestamp) {
                     LOGV2_FOR_RECOVERY(
                         23985,
@@ -707,6 +712,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
       _inRepairMode(repair),
       _readOnly(readOnly),
       _keepDataHistory(serverGlobalParams.enableMajorityReadConcern) {
+    _pinnedOplogTimestamp.store(Timestamp::max().asULL());
     boost::filesystem::path journalPath = path;
     journalPath /= "journal";
     if (_durable) {
@@ -3385,28 +3391,30 @@ boost::optional<Timestamp> WiredTigerKVEngine::getOplogNeededForCrashRecovery() 
 }
 
 Timestamp WiredTigerKVEngine::getPinnedOplog() const {
+    // The storage engine may have been told to keep oplog back to a certain timestamp.
+    Timestamp pinned = Timestamp(_pinnedOplogTimestamp.load());
+
     {
         stdx::lock_guard<Latch> lock(_oplogPinnedByBackupMutex);
         if (!storageGlobalParams.allowOplogTruncation) {
             // If oplog truncation is not allowed, then return the min timestamp so that no history
-            // is
-            // ever allowed to be deleted.
+            // is ever allowed to be deleted.
             return Timestamp::min();
         }
         if (_oplogPinnedByBackup) {
             // All the oplog since `_oplogPinnedByBackup` should remain intact during the backup.
-            return _oplogPinnedByBackup.get();
+            return std::min(_oplogPinnedByBackup.get(), pinned);
         }
     }
 
     auto oplogNeededForCrashRecovery = getOplogNeededForCrashRecovery();
     if (!_keepDataHistory) {
         // We use rollbackViaRefetch, so we only need to pin oplog for crash recovery.
-        return oplogNeededForCrashRecovery.value_or(Timestamp::max());
+        return std::min((oplogNeededForCrashRecovery.value_or(Timestamp::max())), pinned);
     }
 
     if (oplogNeededForCrashRecovery) {
-        return oplogNeededForCrashRecovery.value();
+        return std::min(oplogNeededForCrashRecovery.value(), pinned);
     }
 
     auto status = getOplogNeededForRollback();
@@ -3416,6 +3424,10 @@ Timestamp WiredTigerKVEngine::getPinnedOplog() const {
 
     // If getOplogNeededForRollback fails, don't truncate any oplog right now.
     return Timestamp::min();
+}
+
+void WiredTigerKVEngine::setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) {
+    _pinnedOplogTimestamp.store(pinnedTimestamp.asULL());
 }
 
 bool WiredTigerKVEngine::supportsReadConcernSnapshot() const {

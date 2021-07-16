@@ -44,14 +44,18 @@
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
+#include "mongo/db/repl/image_collection_entry_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/server_options.h"
@@ -150,8 +154,9 @@ struct OpTimeBundle {
 /**
  * Write oplog entry(ies) for the update operation.
  */
-OpTimeBundle replLogUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    MutableOplogEntry oplogEntry;
+OpTimeBundle replLogUpdate(OperationContext* opCtx,
+                           const OplogUpdateEntryArgs& args,
+                           MutableOplogEntry oplogEntry) {
     oplogEntry.setNss(args.nss);
     oplogEntry.setUuid(args.uuid);
 
@@ -159,23 +164,24 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& 
     repl::appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, args.updateArgs.stmtId);
 
     OpTimeBundle opTimes;
-    const auto storePreImageForRetryableWrite =
+    const auto storePreImageInOplogForRetryableWrite =
         (args.updateArgs.storeDocOption == CollectionUpdateArgs::StoreDocOption::PreImage &&
-         opCtx->getTxnNumber());
-    if (storePreImageForRetryableWrite || args.updateArgs.preImageRecordingEnabledForCollection) {
+         opCtx->getTxnNumber() && !oplogEntry.getNeedsRetryImage());
+    if (storePreImageInOplogForRetryableWrite ||
+        args.updateArgs.preImageRecordingEnabledForCollection) {
         MutableOplogEntry noopEntry = oplogEntry;
         invariant(args.updateArgs.preImageDoc);
         noopEntry.setOpType(repl::OpTypeEnum::kNoop);
         noopEntry.setObject(*args.updateArgs.preImageDoc);
         oplogLink.preImageOpTime = logOperation(opCtx, &noopEntry);
-        if (storePreImageForRetryableWrite) {
+        if (storePreImageInOplogForRetryableWrite) {
             opTimes.prePostImageOpTime = oplogLink.preImageOpTime;
         }
     }
 
     // This case handles storing the post image for retryable findAndModify's.
     if (args.updateArgs.storeDocOption == CollectionUpdateArgs::StoreDocOption::PostImage &&
-        opCtx->getTxnNumber()) {
+        opCtx->getTxnNumber() && !oplogEntry.getNeedsRetryImage()) {
         MutableOplogEntry noopEntry = oplogEntry;
         noopEntry.setOpType(repl::OpTypeEnum::kNoop);
         noopEntry.setObject(args.updateArgs.updatedDoc);
@@ -200,20 +206,20 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& 
  */
 OpTimeBundle replLogDelete(OperationContext* opCtx,
                            const NamespaceString& nss,
+                           MutableOplogEntry* oplogEntry,
                            OptionalCollectionUUID uuid,
                            StmtId stmtId,
                            bool fromMigrate,
                            const boost::optional<BSONObj>& deletedDoc) {
-    MutableOplogEntry oplogEntry;
-    oplogEntry.setNss(nss);
-    oplogEntry.setUuid(uuid);
+    oplogEntry->setNss(nss);
+    oplogEntry->setUuid(uuid);
 
     repl::OplogLink oplogLink;
-    repl::appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, stmtId);
+    repl::appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, stmtId);
 
     OpTimeBundle opTimes;
     if (deletedDoc) {
-        MutableOplogEntry noopEntry = oplogEntry;
+        MutableOplogEntry noopEntry = *oplogEntry;
         noopEntry.setOpType(repl::OpTypeEnum::kNoop);
         noopEntry.setObject(*deletedDoc);
         auto noteOplog = logOperation(opCtx, &noopEntry);
@@ -221,14 +227,32 @@ OpTimeBundle replLogDelete(OperationContext* opCtx,
         oplogLink.preImageOpTime = noteOplog;
     }
 
-    oplogEntry.setOpType(repl::OpTypeEnum::kDelete);
-    oplogEntry.setObject(documentKeyDecoration(opCtx));
-    oplogEntry.setFromMigrateIfTrue(fromMigrate);
+    oplogEntry->setOpType(repl::OpTypeEnum::kDelete);
+    oplogEntry->setObject(documentKeyDecoration(opCtx));
+    oplogEntry->setFromMigrateIfTrue(fromMigrate);
     // oplogLink could have been changed to include preImageOpTime by the previous no-op write.
-    repl::appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, stmtId);
-    opTimes.writeOpTime = logOperation(opCtx, &oplogEntry);
-    opTimes.wallClockTime = oplogEntry.getWallClockTime();
+    repl::appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, stmtId);
+    opTimes.writeOpTime = logOperation(opCtx, oplogEntry);
+    opTimes.wallClockTime = oplogEntry->getWallClockTime();
     return opTimes;
+}
+
+void writeToImageCollection(OperationContext* opCtx,
+                            const LogicalSessionId& sessionId,
+                            const Timestamp timestamp,
+                            repl::RetryImageEnum imageKind,
+                            const BSONObj& dataImage) {
+    repl::ImageEntry imageEntry;
+    imageEntry.set_id(sessionId);
+    imageEntry.setTxnNumber(opCtx->getTxnNumber().get());
+    imageEntry.setTs(timestamp);
+    imageEntry.setImageKind(imageKind);
+    imageEntry.setImage(dataImage);
+
+    repl::UnreplicatedWritesBlock unreplicated(opCtx);
+    AutoGetCollection imageCollectionRaii(
+        opCtx, NamespaceString::kConfigImagesNamespace, LockMode::MODE_IX);
+    Helpers::upsert(opCtx, NamespaceString::kConfigImagesNamespace.toString(), imageEntry.toBSON());
 }
 
 }  // namespace
@@ -506,7 +530,42 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
 
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
-        opTime = replLogUpdate(opCtx, args);
+        MutableOplogEntry oplogEntry;
+        // Check if we're in a retryable write that should save the image to
+        // `config.image_collection`. This is the only time
+        // `gStoreFindAndModifyImagesInSideCollection` may be queried for this update.
+        if (opCtx->getTxnNumber() && repl::gStoreFindAndModifyImagesInSideCollection.load()) {
+            // If we've stored a preImage:
+            if (args.updateArgs.storeDocOption == CollectionUpdateArgs::StoreDocOption::PreImage &&
+                // And we're not writing to a noop entry anyways for
+                // `preImageRecordingEnabledForCollection`:
+                !args.updateArgs.preImageRecordingEnabledForCollection) {
+                oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPreImage});
+            } else if (args.updateArgs.storeDocOption ==
+                       CollectionUpdateArgs::StoreDocOption::PostImage) {
+                // Or if we're storing a postImage.
+                oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPostImage});
+            }
+        }
+
+        opTime = replLogUpdate(opCtx, args, oplogEntry);
+
+        if (oplogEntry.getNeedsRetryImage()) {
+            // If the oplog entry has `needsRetryImage`, copy the image into image collection.
+            const BSONObj& dataImage = [&]() {
+                if (oplogEntry.getNeedsRetryImage().get() == repl::RetryImageEnum::kPreImage) {
+                    return args.updateArgs.preImageDoc.get();
+                } else {
+                    return args.updateArgs.updatedDoc;
+                }
+            }();
+            writeToImageCollection(opCtx,
+                                   *opCtx->getLogicalSessionId(),
+                                   opTime.writeOpTime.getTimestamp(),
+                                   oplogEntry.getNeedsRetryImage().get(),
+                                   dataImage);
+        }
+
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
@@ -555,8 +614,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
                               const NamespaceString& nss,
                               OptionalCollectionUUID uuid,
                               StmtId stmtId,
-                              bool fromMigrate,
-                              const boost::optional<BSONObj>& deletedDoc) {
+                              const OplogDeleteEntryArgs& args) {
     auto& documentKey = documentKeyDecoration(opCtx);
     invariant(!documentKey.isEmpty());
 
@@ -567,13 +625,39 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     OpTimeBundle opTime;
     if (inMultiDocumentTransaction) {
         auto operation = MutableOplogEntry::makeDeleteOperation(nss, uuid.get(), documentKey);
-        if (deletedDoc) {
-            operation.setPreImage(deletedDoc->getOwned());
+        if (args.deletedDoc && args.preImageRecordingEnabledForCollection) {
+            operation.setPreImage(args.deletedDoc->getOwned());
         }
 
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
-        opTime = replLogDelete(opCtx, nss, uuid, stmtId, fromMigrate, deletedDoc);
+        MutableOplogEntry oplogEntry;
+        if (args.deletedDoc && repl::gStoreFindAndModifyImagesInSideCollection.load() &&
+            !args.preImageRecordingEnabledForCollection) {
+            // If we have a deleted document and the image should be saved to
+            // `config.image_collection`...
+            invariant(opCtx->getTxnNumber());
+
+            oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPreImage});
+        }
+
+        boost::optional<BSONObj> deletedDocForOplog = boost::none;
+        if (args.deletedDoc && !oplogEntry.getNeedsRetryImage()) {
+            // If we have a deletedDoc preImage and we're not writing it to
+            // `config.image_collection`, instead write it to the oplog.
+            deletedDocForOplog = {*(args.deletedDoc)};
+        }
+        opTime = replLogDelete(
+            opCtx, nss, &oplogEntry, uuid, stmtId, args.fromMigrate, deletedDocForOplog);
+
+        if (oplogEntry.getNeedsRetryImage()) {
+            writeToImageCollection(opCtx,
+                                   *opCtx->getLogicalSessionId(),
+                                   opTime.writeOpTime.getTimestamp(),
+                                   repl::RetryImageEnum::kPreImage,
+                                   *(args.deletedDoc));
+        }
+
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
@@ -581,7 +665,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     }
 
     if (nss != NamespaceString::kSessionTransactionsTableNamespace) {
-        if (!fromMigrate) {
+        if (!args.fromMigrate) {
             shardObserveDeleteOp(opCtx,
                                  nss,
                                  documentKey,
@@ -872,11 +956,11 @@ std::vector<repl::ReplOperation>::iterator packTransactionStatementsForApplyOps(
     for (stmtIter = stmtBegin; stmtIter != stmtEnd; stmtIter++) {
         const auto& stmt = *stmtIter;
         // Stop packing when either number of transaction operations is reached, or when the next
-        // one would put the array over the maximum BSON Object User Size.  We rely on the
-        // head room between BSONObjMaxUserSize and BSONObjMaxInternalSize to cover the
-        // BSON overhead and the other applyOps fields.  But if the array with a single operation
-        // exceeds BSONObjMaxUserSize, we still log it, as a single max-length operation
-        // should be able to be applied.
+        // one would put the array over the maximum BSON Object User Size.  We rely on the head room
+        // between BSONObjMaxUserSize and BSONObjMaxInternalSize to cover the BSON overhead and the
+        // other applyOps fields.  But if the array with a single operation exceeds
+        // BSONObjMaxUserSize, we still log it, as a single max-length operation should be able to
+        // be applied.
         if (opsArray.arrSize() == gMaxNumberOfTransactionOperationsInSingleOplogEntry ||
             (opsArray.arrSize() > 0 &&
              (opsArray.len() + OplogEntry::getDurableReplOperationSize(stmt) > BSONObjMaxUserSize)))
@@ -901,12 +985,11 @@ std::vector<repl::ReplOperation>::iterator packTransactionStatementsForApplyOps(
 // builder object already has  an 'applyOps' field appended pointing to the desired array of ops
 // i.e. { "applyOps" : [op1, op2, ...] }
 //
-// @param txnState the 'state' field of the transaction table entry update.
-// @param startOpTime the optime of the 'startOpTime' field of the transaction table entry update.
-// If boost::none, no 'startOpTime' field will be included in the new transaction table entry. Only
-// meaningful if 'updateTxnTable' is true.
-// @param updateTxnTable determines whether the transactions table will updated after the oplog
-// entry is written.
+// @param txnState the 'state' field of the transaction table entry update.  @param startOpTime the
+// optime of the 'startOpTime' field of the transaction table entry update. If boost::none, no
+// 'startOpTime' field will be included in the new transaction table entry. Only meaningful if
+// 'updateTxnTable' is true.  @param updateTxnTable determines whether the transactions table will
+// updated after the oplog entry is written.
 //
 // Returns the optime of the written oplog entry.
 OpTimeBundle logApplyOpsForTransaction(OperationContext* opCtx,

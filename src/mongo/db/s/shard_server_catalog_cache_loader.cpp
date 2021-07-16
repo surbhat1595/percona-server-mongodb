@@ -63,6 +63,7 @@ using CollectionAndChangedChunks = CatalogCacheLoader::CollectionAndChangedChunk
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangPersistCollectionAndChangedChunksAfterDropChunks);
+MONGO_FAIL_POINT_DEFINE(hangCollectionFlush);
 
 AtomicWord<unsigned long long> taskIdGenerator{0};
 
@@ -984,6 +985,11 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(Oper
 void ShardServerCatalogCacheLoader::_runCollAndChunksTasks(const NamespaceString& nss) {
     auto context = _contexts.makeOperationContext(*Client::getCurrent());
 
+    if (MONGO_unlikely(hangCollectionFlush.shouldFail())) {
+        LOGV2(5710200, "Hit hangCollectionFlush failpoint");
+        hangCollectionFlush.pauseWhileSet();
+    }
+
     bool taskFinished = false;
     bool inShutdown = false;
     try {
@@ -1233,10 +1239,10 @@ ShardServerCatalogCacheLoader::_getCompletePersistedMetadataForSecondarySinceVer
         LOGV2_FOR_CATALOG_REFRESH(
             24114,
             1,
-            "Cache loader read meatadata while updates were being applied: this metadata may be "
+            "Cache loader read metadata while updates were being applied: this metadata may be "
             "incomplete. Retrying. Refresh state before read: {beginRefreshState}. Current refresh "
             "state: {endRefreshState}",
-            "Cache loader read meatadata while updates were being applied: this metadata may be "
+            "Cache loader read metadata while updates were being applied: this metadata may be "
             "incomplete. Retrying",
             "beginRefreshState"_attr = beginRefreshState,
             "endRefreshState"_attr = endRefreshState);
@@ -1283,8 +1289,17 @@ void ShardServerCatalogCacheLoader::CollAndChunkTaskList::addTask(collAndChunkTa
         return;
     }
 
+    const auto& lastTask = _tasks.back();
+    if (lastTask.termCreated != task.termCreated) {
+        _tasks.emplace_back(std::move(task));
+        return;
+    }
+
     if (task.dropped) {
-        invariant(_tasks.back().maxQueryVersion == task.minQueryVersion);
+        invariant(lastTask.maxQueryVersion == task.minQueryVersion,
+                  str::stream() << "The version of the added task is not contiguous with that of "
+                                << "the previous one: LastTask {" << lastTask.toString() << "}, "
+                                << "AddedTask {" << task.toString() << "}");
 
         // As an optimization, on collection drop, clear any pending tasks in order to prevent any
         // throw-away work from executing. Because we have no way to differentiate whether the
@@ -1298,8 +1313,11 @@ void ShardServerCatalogCacheLoader::CollAndChunkTaskList::addTask(collAndChunkTa
         }
     } else {
         // Tasks must have contiguous versions, unless a complete reload occurs.
-        invariant(_tasks.back().maxQueryVersion == task.minQueryVersion ||
-                  !task.minQueryVersion.isSet());
+        invariant(lastTask.maxQueryVersion == task.minQueryVersion || !task.minQueryVersion.isSet(),
+                  str::stream() << "The added task is not the first and its version is not "
+                                << "contiguous with that of the previous one: LastTask {"
+                                << lastTask.toString() << "}, AddedTask {" << task.toString()
+                                << "}");
 
         _tasks.emplace_back(std::move(task));
     }
@@ -1395,7 +1413,7 @@ ShardServerCatalogCacheLoader::CollAndChunkTaskList::getEnqueuedMetadataForTerm(
                 // Make sure we do not append a duplicate chunk. The diff query is GTE, so there can
                 // be duplicates of the same exact versioned chunk across tasks. This is no problem
                 // for our diff application algorithms, but it can return unpredictable numbers of
-                // chunks for testing purposes. Eliminate unpredicatable duplicates for testing
+                // chunks for testing purposes. Eliminate unpredictable duplicates for testing
                 // stability.
                 auto taskCollectionAndChangedChunksIt =
                     task.collectionAndChangedChunks->changedChunks.begin();

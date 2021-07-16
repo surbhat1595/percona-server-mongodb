@@ -21,6 +21,7 @@ Ailamaki
 Alakuijala
 Alexandrescu's
 Alloc
+Async
 AsyncOp
 Athanassoulis
 Athlon
@@ -539,6 +540,7 @@ boolean
 br
 breakpoint
 bs
+bstorage
 bswap
 bt
 btcur
@@ -739,6 +741,7 @@ dup
 eee
 eg
 egrep
+el
 emp
 encodings
 encryptor
@@ -1032,6 +1035,7 @@ mbss
 mem
 memalign
 membar
+memcmp
 memcpy
 memdup
 memget
@@ -1044,6 +1048,7 @@ metadata's
 metafile
 mfence
 minorp
+mips
 mkdir
 mmap
 mmrand
@@ -1108,6 +1113,7 @@ nuls
 num
 numSymbols
 numbare
+objs
 offpage
 ok
 oldv
@@ -1444,6 +1450,7 @@ variadic
 vectorized
 versa
 vfprintf
+vh
 vm
 vpack
 vpmsum
@@ -1480,6 +1487,7 @@ wrlsn
 ws
 wtbench
 wti
+wtobj
 wtperf
 wtperf's
 wts
@@ -1487,6 +1495,7 @@ wtstats
 xF
 xdeadbeef
 xff
+xfff
 xxxx
 xxxxx
 xxxxxx

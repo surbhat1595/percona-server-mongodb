@@ -216,8 +216,10 @@ __rec_need_save_upd(
     if (F_ISSET(r, WT_REC_CHECKPOINT) && upd_select->upd == NULL)
         return (false);
 
-    return (!__wt_txn_tw_stop_visible_all(session, &upd_select->tw) &&
-      !__wt_txn_tw_start_visible_all(session, &upd_select->tw));
+    if (WT_TIME_WINDOW_HAS_STOP(&upd_select->tw))
+        return (!__wt_txn_tw_stop_visible_all(session, &upd_select->tw));
+    else
+        return (!__wt_txn_tw_start_visible_all(session, &upd_select->tw));
 }
 
 /*
@@ -253,7 +255,7 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, v
     upd_memsize = 0;
     max_ts = WT_TS_NONE;
     max_txn = WT_TXN_NONE;
-    has_newer_updates = upd_saved = false;
+    has_newer_updates = supd_restore = upd_saved = false;
     is_hs_page = F_ISSET(session->dhandle, WT_DHANDLE_HS);
     session_txnid = WT_SESSION_TXN_SHARED(session)->id;
 
@@ -481,6 +483,16 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, v
                      */
                     WT_ASSERT(session, same_txn_valid_upd->type != WT_UPDATE_TOMBSTONE);
                     upd_select->upd = upd = same_txn_valid_upd;
+
+                } else if (same_txn_valid_upd != NULL && vpack != NULL && vpack->tw.prepare) {
+                    /*
+                     * The on-disk version is from an aborted prepare transaction. Therefore, use
+                     * the update from the same transaction as the selected update. We are sure that
+                     * the on-disk prepared update has been aborted because otherwise we would have
+                     * chosen it as an update this tombstone can be applied to.
+                     */
+                    WT_ASSERT(session, same_txn_valid_upd->type != WT_UPDATE_TOMBSTONE);
+                    upd_select->upd = upd = same_txn_valid_upd;
                 }
             }
         }
@@ -613,8 +625,6 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, v
         supd_restore = F_ISSET(r, WT_REC_EVICT) &&
           (has_newer_updates || F_ISSET(S2C(session), WT_CONN_IN_MEMORY) ||
             page->type == WT_PAGE_COL_FIX);
-        if (supd_restore)
-            r->cache_write_restore = true;
         WT_ERR(__rec_update_save(session, r, ins, ripcip,
           upd_select->upd != NULL && upd_select->upd->type == WT_UPDATE_TOMBSTONE ? NULL :
                                                                                     upd_select->upd,
@@ -630,6 +640,13 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, v
             F_SET(tombstone, WT_UPDATE_DS);
         upd_saved = upd_select->upd_saved = true;
     }
+
+    /*
+     * Set statistics for update restore evictions. Update restore eviction debug mode forces update
+     * restores to both committed or uncommitted changes.
+     */
+    if (supd_restore || F_ISSET(r, WT_REC_SCRUB))
+        r->cache_write_restore = true;
 
     /*
      * Paranoia: check that we didn't choose an update that has since been rolled back.

@@ -599,6 +599,7 @@ env.Library(
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
         '$BUILD_DIR/mongo/rpc/rpc',
         '$BUILD_DIR/mongo/rpc/command_status',
+        '$BUILD_DIR/mongo/rpc/rewrite_state_change_errors',
         'audit',
         'command_generic_argument',
         'commands/server_status_core',
@@ -716,6 +717,7 @@ env.Library(
         'dbdirectclient',
         'index/index_access_method',
         'query_exec',
+        'repl/repl_server_parameters',
         'stats/fill_locker_info',
         'stats/top',
         'stats/transaction_stats',
@@ -842,6 +844,9 @@ env.Library(
         "$BUILD_DIR/mongo/s/grid",
     ],
     LIBDEPS_PRIVATE=[
+        'dbhelpers',
+        'repl/image_collection_entry',
+        'repl/repl_server_parameters',
         'transaction',
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
         "$BUILD_DIR/mongo/db/catalog/commit_quorum_options",
@@ -1829,6 +1834,9 @@ env.Library(
         'repl/repl_coordinator_interface',
         'service_context',
         'update/update_driver',
+    ],
+    LIBDEPS_PRIVATE=[
+        'repl/image_collection_entry',
     ],
 )
 

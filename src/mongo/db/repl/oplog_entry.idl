@@ -34,7 +34,7 @@ global:
 imports:
     - "mongo/idl/basic_types.idl"
     - "mongo/db/logical_session_id.idl"
-    - "mongo/db/repl/optime_and_wall_time_base.idl"
+    - "mongo/db/repl/optime_base.idl"
     - "mongo/db/repl/replication_types.idl"
 
 enums:
@@ -47,6 +47,13 @@ enums:
             kUpdate: "u"
             kDelete: "d"
             kNoop: "n"
+    RetryImage:
+        description: "Dictates whether a pre-image or post-image is to be stored on behalf of this
+                      retryable write."
+        type: string
+        values:
+            kPreImage: "preImage"
+            kPostImage: "postImage"
 
 structs:
     DurableReplOperation:
@@ -94,9 +101,9 @@ structs:
         description: A document in which the server stores an oplog entry.
         inline_chained_structs: true
         chained_structs:
-            OperationSessionInfo : OperationSessionInfo
+            OperationSessionInfo: OperationSessionInfo
             DurableReplOperation: DurableReplOperation
-            OpTimeAndWallTimeBase: OpTimeAndWallTimeBase
+            OpTimeBase: OpTimeBase
         fields:
             h:
                 cpp_name: hash
@@ -108,6 +115,10 @@ structs:
                 type: safeInt64
                 default: 2
                 description: "The version of the oplog"
+            wall:
+                cpp_name: wallClockTime
+                type: date
+                description: "A wallclock time with MS resolution"
             fromMigrate:
                 type: bool
                 optional: true
@@ -132,3 +143,8 @@ structs:
                 optional: true
                 description: "The optime of another oplog entry that contains the document
                               after an update was applied."
+            needsRetryImage:
+                type: RetryImage
+                optional: true
+                description: "Identifies whether a secondary should store a pre-image or post-image
+                              associated with this oplog entry."

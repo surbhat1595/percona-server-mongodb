@@ -157,15 +157,11 @@ public:
     }
 
     void setTimestamp(Timestamp value) & {
-        getOpTimeAndWallTimeBase().setTimestamp(std::move(value));
+        getOpTimeBase().setTimestamp(std::move(value));
     }
 
     void setTerm(boost::optional<std::int64_t> value) & {
-        getOpTimeAndWallTimeBase().setTerm(std::move(value));
-    }
-
-    void setWallClockTime(Date_t value) & {
-        getOpTimeAndWallTimeBase().setWallClockTime(std::move(value));
+        getOpTimeBase().setTerm(std::move(value));
     }
 
     /**
@@ -222,6 +218,7 @@ public:
     using MutableOplogEntry::getDurableReplOperation;
     using MutableOplogEntry::getFromMigrate;
     using MutableOplogEntry::getHash;
+    using MutableOplogEntry::getNeedsRetryImage;
     using MutableOplogEntry::getNss;
     using MutableOplogEntry::getObject;
     using MutableOplogEntry::getObject2;
@@ -289,7 +286,8 @@ public:
                const boost::optional<StmtId>& statementId,
                const boost::optional<OpTime>& prevWriteOpTimeInTransaction,
                const boost::optional<OpTime>& preImageOpTime,
-               const boost::optional<OpTime>& postImageOpTime);
+               const boost::optional<OpTime>& postImageOpTime,
+               const boost::optional<repl::RetryImageEnum>& needsRetryImage = boost::none);
 
     // DEPRECATED: This constructor can throw. Use static parse method instead.
     explicit OplogEntry(BSONObj raw);

@@ -1782,14 +1782,12 @@ __split_insert(WT_SESSION_IMPL *session, WT_REF *ref)
 
     if (type == WT_PAGE_ROW_LEAF) {
         /*
-         * Copy the first key from the original page into first ref in
-         * the new parent. Pages created in memory always have a
-         * "smallest" insert list, so look there first.  If we don't
-         * find one, get the first key from the disk image.
+         * Copy the first key from the original page into first ref in the new parent. Pages created
+         * in memory always have a "smallest" insert list, so look there first. If we don't find
+         * one, get the first key from the disk image.
          *
-         * We can't just use the key from the original ref: it may have
-         * been suffix-compressed, and after the split the truncated key
-         * may not be valid.
+         * We can't just use the key from the original ref: it may have been suffix-compressed, and
+         * after the split the truncated key may not be valid.
          */
         WT_ERR(__wt_scr_alloc(session, 0, &key));
         if ((ins = WT_SKIP_FIRST(WT_ROW_INSERT_SMALLEST(page))) != NULL) {
@@ -2259,10 +2257,12 @@ __wt_split_rewrite(WT_SESSION_IMPL *session, WT_REF *ref, WT_MULTI *multi)
      * Pages with unresolved changes are not marked clean during reconciliation, do it now.
      *
      * Don't count this as eviction making progress, we did a one-for-one rewrite of a page in
-     * memory, typical in the case of cache pressure.
+     * memory, typical in the case of cache pressure unless the cache is configured for scrub and
+     * page doesn't have any skipped updates.
      */
     __wt_page_modify_clear(session, page);
-    F_SET_ATOMIC(page, WT_PAGE_EVICT_NO_PROGRESS);
+    if (!F_ISSET(S2C(session)->cache, WT_CACHE_EVICT_SCRUB) || multi->supd_restore)
+        F_SET_ATOMIC(page, WT_PAGE_EVICT_NO_PROGRESS);
     __wt_ref_out(session, ref);
 
     /* Swap the new page into place. */

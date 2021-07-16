@@ -127,6 +127,20 @@ all:
     test_file: jstests/replsets/reconfig_removes_node_in_rollback.js
   - ticket: SERVER-50486
     test_file: jstests/replsets/dont_refresh_session_prepare_secondary.js
+  - ticket: SERVER-55725
+    test_file: jstests/sharding/time_zone_info_mongos.js
+  - ticket: SERVER-53760
+    test_file: jstests/core/sort_spill_estimate_data_size.js
+  - ticket: SERVER-57117
+    test_file: jstests/sharding/read_pref_with_hedging_mode.js
+  - ticket: SERVER-57173
+    test_file: jstests/replsets/invalidate_images_when_minvalid.js
+  - ticket: SERVER-56468
+    test_file: jstests/core/neq_null_correctly_cache.js
+  - ticket: SERVER-56377
+    test_file: jstests/concurrency/fsm_workloads/findAndModify_flip_location.js
+  - ticket: SERVER-57476
+    test_file: jstests/replsets/assert_on_prepare_conflict_with_hole.js
 
 suites:
 

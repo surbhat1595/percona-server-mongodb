@@ -549,9 +549,9 @@ TEST_F(OpObserverTest, MultipleAboutToDeleteAndOnDelete) {
     AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
     WriteUnitOfWork wunit(opCtx.get());
     opObserver.aboutToDelete(opCtx.get(), nss, BSON("_id" << 1));
-    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, false, boost::none);
+    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, {});
     opObserver.aboutToDelete(opCtx.get(), nss, BSON("_id" << 1));
-    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, false, boost::none);
+    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, {});
 }
 
 DEATH_TEST_F(OpObserverTest, AboutToDeleteMustPreceedOnDelete, "invariant") {
@@ -559,7 +559,7 @@ DEATH_TEST_F(OpObserverTest, AboutToDeleteMustPreceedOnDelete, "invariant") {
     auto opCtx = cc().makeOperationContext();
     cc().swapLockState(std::make_unique<LockerNoop>());
     NamespaceString nss = {"test", "coll"};
-    opObserver.onDelete(opCtx.get(), nss, {}, kUninitializedStmtId, false, boost::none);
+    opObserver.onDelete(opCtx.get(), nss, {}, kUninitializedStmtId, {});
 }
 
 DEATH_TEST_F(OpObserverTest, EachOnDeleteRequiresAboutToDelete, "invariant") {
@@ -568,8 +568,8 @@ DEATH_TEST_F(OpObserverTest, EachOnDeleteRequiresAboutToDelete, "invariant") {
     cc().swapLockState(std::make_unique<LockerNoop>());
     NamespaceString nss = {"test", "coll"};
     opObserver.aboutToDelete(opCtx.get(), nss, {});
-    opObserver.onDelete(opCtx.get(), nss, {}, kUninitializedStmtId, false, boost::none);
-    opObserver.onDelete(opCtx.get(), nss, {}, kUninitializedStmtId, false, boost::none);
+    opObserver.onDelete(opCtx.get(), nss, {}, kUninitializedStmtId, {});
+    opObserver.onDelete(opCtx.get(), nss, {}, kUninitializedStmtId, {});
 }
 
 DEATH_TEST_REGEX_F(OpObserverTest,
@@ -583,11 +583,7 @@ DEATH_TEST_REGEX_F(OpObserverTest,
     opObserver.onReplicationRollback(opCtx.get(), rbInfo);
 }
 
-/**
- * Test fixture for testing OpObserver behavior specific to multi-document transactions.
- */
-
-class OpObserverTransactionTest : public OpObserverTest {
+class OpObserverTxnParticipantTest : public OpObserverTest {
 public:
     void setUp() override {
         OpObserverTest::setUp();
@@ -602,9 +598,7 @@ public:
         opCtx()->setTxnNumber(txnNum());
         opCtx()->setInMultiDocumentTransaction();
         _sessionCheckout = std::make_unique<MongoDOperationContextSession>(opCtx());
-
-        auto txnParticipant = TransactionParticipant::get(opCtx());
-        txnParticipant.beginOrContinue(opCtx(), *opCtx()->getTxnNumber(), false, true);
+        _txnParticipant.emplace(TransactionParticipant::get(opCtx()));
     }
 
     void tearDown() override {
@@ -615,6 +609,54 @@ public:
         OpObserverTest::tearDown();
     }
 
+
+protected:
+    Session* session() {
+        return OperationContextSession::get(opCtx());
+    }
+
+    OpObserverImpl& opObserver() {
+        return *_opObserver;
+    }
+
+    OperationContext* opCtx() {
+        return _opCtx.get();
+    }
+
+    TxnNumber& txnNum() {
+        return _txnNum;
+    }
+
+    TransactionParticipant::Participant& txnParticipant() {
+        return *_txnParticipant;
+    }
+
+private:
+    class ExposeOpObserverTimes : public OpObserver {
+    public:
+        typedef OpObserver::ReservedTimes ReservedTimes;
+    };
+
+    ServiceContext::UniqueOperationContext _opCtx;
+
+    boost::optional<OpObserverImpl> _opObserver;
+    boost::optional<ExposeOpObserverTimes::ReservedTimes> _times;
+    boost::optional<TransactionParticipant::Participant> _txnParticipant;
+
+    std::unique_ptr<MongoDOperationContextSession> _sessionCheckout;
+    TxnNumber _txnNum = 0;
+};
+
+/**
+ * Test fixture for testing OpObserver behavior specific to multi-document transactions.
+ */
+
+class OpObserverTransactionTest : public OpObserverTxnParticipantTest {
+public:
+    void setUp() override {
+        OpObserverTxnParticipantTest::setUp();
+        txnParticipant().beginOrContinue(opCtx(), *opCtx()->getTxnNumber(), false, true);
+    }
 
 protected:
     void checkSessionAndTransactionFields(const BSONObj& oplogEntry) {
@@ -682,36 +724,6 @@ protected:
             ASSERT_EQ(*startOpTime, *txnRecord.getStartOpTime());
         }
     }
-
-    Session* session() {
-        return OperationContextSession::get(opCtx());
-    }
-
-    OpObserverImpl& opObserver() {
-        return *_opObserver;
-    }
-
-    OperationContext* opCtx() {
-        return _opCtx.get();
-    }
-
-    TxnNumber& txnNum() {
-        return _txnNum;
-    }
-
-private:
-    class ExposeOpObserverTimes : public OpObserver {
-    public:
-        typedef OpObserver::ReservedTimes ReservedTimes;
-    };
-
-    ServiceContext::UniqueOperationContext _opCtx;
-
-    boost::optional<OpObserverImpl> _opObserver;
-    boost::optional<ExposeOpObserverTimes::ReservedTimes> _times;
-
-    std::unique_ptr<MongoDOperationContextSession> _sessionCheckout;
-    TxnNumber _txnNum = 0;
 };
 
 TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
@@ -749,7 +761,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
                                nss1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
 
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
@@ -1256,12 +1268,12 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
                                nss1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
     opObserver().aboutToDelete(opCtx(),
                                nss2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
     auto oplogEntry = getSingleOplogEntry(opCtx());
@@ -1322,6 +1334,110 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
                                                         << "ns" << nss.toString() << "ui" << uuid
                                                         << "o" << BSON("_id" << 0))));
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntry.getObject());
+}
+
+/**
+ * Test fixture for testing OpObserver behavior specific to retryable findAndModify.
+ */
+class OpObserverRetryableFindAndModifyTest : public OpObserverTxnParticipantTest {
+public:
+    void setUp() override {
+        OpObserverTxnParticipantTest::setUp();
+        // Set parameter to indicate that pre- and post- images should be stored in a side
+        // collection rather than the oplog.
+        std::ignore = ServerParameterSet::getGlobal()
+                          ->getMap()
+                          .find("storeFindAndModifyImagesInSideCollection")
+                          ->second->setFromString("true");
+        txnParticipant().beginOrContinue(opCtx(), txnNum(), boost::none, boost::none);
+    }
+
+    void tearDown() override {
+        // Ensure the server parameter is set back to the default if we fail the test midway.
+        std::ignore = ServerParameterSet::getGlobal()
+                          ->getMap()
+                          .find("storeFindAndModifyImagesInSideCollection")
+                          ->second->setFromString("false");
+        OpObserverTxnParticipantTest::tearDown();
+    }
+};
+
+TEST_F(OpObserverRetryableFindAndModifyTest,
+       RetryableFindAndModifyUpdateRequestingPostImageHasNeedsRetryImage) {
+    NamespaceString nss = {"test", "coll"};
+    const auto uuid = CollectionUUID::gen();
+
+    CollectionUpdateArgs updateArgs;
+    updateArgs.stmtId = 0;
+    updateArgs.updatedDoc = BSON("_id" << 0 << "data"
+                                       << "x");
+    updateArgs.update = BSON("$set" << BSON("data"
+                                            << "x"));
+    updateArgs.criteria = BSON("_id" << 0);
+    updateArgs.storeDocOption = CollectionUpdateArgs::StoreDocOption::PostImage;
+    OplogUpdateEntryArgs update(std::move(updateArgs), nss, uuid);
+
+    WriteUnitOfWork wunit(opCtx());
+    AutoGetDb autoDb(opCtx(), nss.db(), MODE_X);
+    opObserver().onUpdate(opCtx(), update);
+    // Asserts that only a single oplog entry was created. In essence, we did not create any
+    // no-op image entries in the oplog.
+    const auto oplogEntry = getSingleOplogEntry(opCtx());
+    ASSERT_FALSE(oplogEntry.hasField(repl::OplogEntryBase::kPreImageOpTimeFieldName));
+    ASSERT_FALSE(oplogEntry.hasField(repl::OplogEntryBase::kPostImageOpTimeFieldName));
+    ASSERT_TRUE(oplogEntry.hasField(repl::OplogEntryBase::kNeedsRetryImageFieldName));
+    ASSERT_EQUALS(oplogEntry.getStringField(repl::OplogEntryBase::kNeedsRetryImageFieldName),
+                  "postImage"_sd);
+}
+
+TEST_F(OpObserverRetryableFindAndModifyTest,
+       RetryableFindAndModifyUpdateRequestingPreImageHasNeedsRetryImage) {
+    NamespaceString nss = {"test", "coll"};
+    const auto uuid = CollectionUUID::gen();
+
+    CollectionUpdateArgs updateArgs;
+    updateArgs.stmtId = 0;
+    updateArgs.preImageDoc = BSON("_id" << 0 << "data"
+                                        << "y");
+    updateArgs.update = BSON("$set" << BSON("data"
+                                            << "x"));
+    updateArgs.criteria = BSON("_id" << 0);
+    updateArgs.storeDocOption = CollectionUpdateArgs::StoreDocOption::PreImage;
+    OplogUpdateEntryArgs update(std::move(updateArgs), nss, uuid);
+
+    WriteUnitOfWork wunit(opCtx());
+    AutoGetDb autoDb(opCtx(), nss.db(), MODE_X);
+    opObserver().onUpdate(opCtx(), update);
+    // Asserts that only a single oplog entry was created. In essence, we did not create any
+    // no-op image entries in the oplog.
+    const auto oplogEntry = getSingleOplogEntry(opCtx());
+    ASSERT_FALSE(oplogEntry.hasField(repl::OplogEntryBase::kPreImageOpTimeFieldName));
+    ASSERT_FALSE(oplogEntry.hasField(repl::OplogEntryBase::kPostImageOpTimeFieldName));
+    ASSERT_TRUE(oplogEntry.hasField(repl::OplogEntryBase::kNeedsRetryImageFieldName));
+    ASSERT_EQUALS(oplogEntry.getStringField(repl::OplogEntryBase::kNeedsRetryImageFieldName),
+                  "preImage"_sd);
+}
+
+TEST_F(OpObserverRetryableFindAndModifyTest, RetryableFindAndModifyDeleteHasNeedsRetryImage) {
+    NamespaceString nss = {"test", "coll"};
+    const auto uuid = CollectionUUID::gen();
+
+    WriteUnitOfWork wunit(opCtx());
+    AutoGetDb autoDb(opCtx(), nss.db(), MODE_X);
+    const auto deletedDoc = BSON("_id" << 0 << "data"
+                                       << "x");
+    opObserver().aboutToDelete(opCtx(), nss, deletedDoc);
+    OpObserver::OplogDeleteEntryArgs args;
+    args.deletedDoc = &deletedDoc;
+    opObserver().onDelete(opCtx(), nss, uuid, 0, args);
+    // Asserts that only a single oplog entry was created. In essence, we did not create any
+    // no-op image entries in the oplog.
+    const auto oplogEntry = getSingleOplogEntry(opCtx());
+    ASSERT_FALSE(oplogEntry.hasField(repl::OplogEntryBase::kPreImageOpTimeFieldName));
+    ASSERT_FALSE(oplogEntry.hasField(repl::OplogEntryBase::kPostImageOpTimeFieldName));
+    ASSERT_TRUE(oplogEntry.hasField(repl::OplogEntryBase::kNeedsRetryImageFieldName));
+    ASSERT_EQUALS(oplogEntry.getStringField(repl::OplogEntryBase::kNeedsRetryImageFieldName),
+                  "preImage"_sd);
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
@@ -1487,8 +1603,11 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionPreImageTest) {
 
     const auto deletedDoc = BSON("_id" << 1 << "data"
                                        << "z");
+    OpObserver::OplogDeleteEntryArgs args;
+    args.deletedDoc = &deletedDoc;
+    args.preImageRecordingEnabledForCollection = true;
     opObserver().aboutToDelete(opCtx(), nss1, deletedDoc);
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, false, deletedDoc);
+    opObserver().onDelete(opCtx(), nss1, uuid1, 0, args);
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 2);
@@ -1561,8 +1680,11 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPreImageTest) {
 
     const auto deletedDoc = BSON("_id" << 1 << "data"
                                        << "z");
+    OpObserver::OplogDeleteEntryArgs args;
+    args.deletedDoc = &deletedDoc;
+    args.preImageRecordingEnabledForCollection = true;
     opObserver().aboutToDelete(opCtx(), nss1, deletedDoc);
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, false, deletedDoc);
+    opObserver().onDelete(opCtx(), nss1, uuid1, 0, args);
 
     repl::OpTime prepareOpTime;
     {
@@ -1629,12 +1751,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
                                nss1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
     opObserver().aboutToDelete(opCtx(),
                                nss2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
@@ -1843,12 +1965,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
                                nss1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
     opObserver().aboutToDelete(opCtx(),
                                nss2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, false, boost::none);
+    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
 
     repl::OpTime prepareOpTime;
     {

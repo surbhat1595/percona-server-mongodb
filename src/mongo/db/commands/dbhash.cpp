@@ -121,6 +121,19 @@ public:
                 str::stream() << "Invalid db name: " << ns,
                 NamespaceString::validDBName(ns, NamespaceString::DollarInDbNameBehavior::Allow));
 
+        // Capped collections perform un-timestamped writes to delete expired documents. As a
+        // result, dbHash will fail when reading documents that have just been deleted. To avoid
+        // this, capped collections can be filtered out to avoid an already known case of a
+        // mismatch.
+        bool filterCapped = false;
+        if (auto elem = cmdObj["filterCapped"]) {
+            uassert(ErrorCodes::TypeMismatch,
+                    "The 'filterCapped' option must be a boolean",
+                    elem.type() == BSONType::Bool);
+
+            filterCapped = elem.boolean();
+        }
+
         if (auto elem = cmdObj["$_internalReadAtClusterTime"]) {
             uassert(ErrorCodes::InvalidOptions,
                     "The '$_internalReadAtClusterTime' option is only supported when testing"
@@ -207,7 +220,7 @@ public:
             // just failed and is trying to write using the same timestamp we are using to read.
             // Impose a generous maximum timeout to force dbHash to time out and allow the index
             // build to make progress. See SERVER-53376.
-            opCtx->lockState()->setMaxLockTimeout(duration_cast<Milliseconds>(Seconds(30)));
+            opCtx->lockState()->setMaxLockTimeout(duration_cast<Milliseconds>(Seconds(15)));
 
             // Additionally, if we are performing a read at a timestamp, then we allow oplog
             // application to proceed concurrently with the dbHash command. This is done
@@ -280,6 +293,10 @@ public:
                 return true;
 
             if (collection->isCapped()) {
+                if (filterCapped) {
+                    return true;
+                }
+
                 cappedCollectionSet.insert(collNss.coll().toString());
             }
 

@@ -192,6 +192,9 @@ void _gatherIndexEntryErrors(OperationContext* opCtx,
                              ValidateResultsMap* indexNsResultsMap,
                              ValidateResults* result) {
     indexConsistency->setSecondPhase();
+    if (!indexConsistency->limitMemoryUsageForSecondPhase(result)) {
+        return;
+    }
 
     LOGV2_OPTIONS(
         20297, {LogComponent::kIndex}, "Starting to traverse through all the document key sets");
@@ -428,6 +431,13 @@ Status validate(OperationContext* opCtx,
     // constructor fail the cmd, as opposed to returning OK with valid:false.
     ValidateState validateState(opCtx, nss, background, options, turnOnExtraLoggingForTest);
 
+    // Capped collections perform un-timestamped writes to delete expired documents. As a result,
+    // background validation will fail when reading documents that have just been deleted.
+    uassert(ErrorCodes::CommandNotSupported,
+            str::stream() << "Cannot run background validation on capped collection '" << nss
+                          << "', use foreground validation instead",
+            !background || !validateState.getCollection()->isCapped());
+
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     // Check whether we are allowed to read from this node after acquiring our locks. If we are
     // in a state where we cannot read, we should not run validate.
@@ -459,7 +469,7 @@ Status validate(OperationContext* opCtx,
         // an index build that has just failed and is trying to write using the same timestamp we
         // are using to read. Impose a generous maximum timeout to force validate to time out and
         // allow the index build to make progress. See SERVER-53445.
-        opCtx->lockState()->setMaxLockTimeout(duration_cast<Milliseconds>(Seconds(30)));
+        opCtx->lockState()->setMaxLockTimeout(duration_cast<Milliseconds>(Seconds(15)));
     }
 
     try {

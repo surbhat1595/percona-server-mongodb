@@ -31,9 +31,12 @@ ReplSetTest.prototype.upgradeSet = function(options, user, pwd) {
         }
     }
 
-    assert.eq(
-        this.getPrimary(), primary, "Primary changed unexpectedly after upgrading secondaries");
-    this.upgradePrimary(primary, Object.assign({}, options), user, pwd);
+    if (this.getPrimary() == primary) {
+        this.upgradePrimary(primary, Object.assign({}, options), user, pwd);
+    } else {
+        // An election occured during upgrade, old primary is now a secondary.
+        this.upgradeMembers([primary], Object.assign({}, options), user, pwd);
+    }
 };
 
 function mergeNodeOptions(nodeOptions, options) {
@@ -91,6 +94,24 @@ ReplSetTest.prototype.upgradePrimary = function(primary, options, user, pwd) {
         oldPrimary.getDB('admin').auth(user, pwd);
     }
     jsTest.authenticate(oldPrimary);
+
+    // waitForState() runs the logout command via asCluster() on either the current primary or the
+    // first node in the replica set so we re-authenticate on all connections before calling
+    // awaitNodesAgreeOnPrimary().
+    for (const node of this.nodes) {
+        const connStatus =
+            assert.commandWorked(node.adminCommand({connectionStatus: 1, showPrivileges: true}));
+
+        const connIsAuthenticated = connStatus.authInfo.authenticatedUsers.length > 0;
+        if (connIsAuthenticated) {
+            continue;
+        }
+
+        if (user != undefined) {
+            node.getDB('admin').auth(user, pwd);
+        }
+        jsTest.authenticate(node);
+    }
 
     this.awaitNodesAgreeOnPrimary();
     primary = this.getPrimary();
@@ -164,8 +185,16 @@ ReplSetTest.prototype.stepdown = function(nodeId) {
 ReplSetTest.prototype.reconnect = function(node) {
     var nodeId = this.getNodeId(node);
     this.nodes[nodeId] = new Mongo(node.host);
+    // Skip the 'authenticated' property because the new connection hasn't been authenticated even
+    // if the original one was. This ensures Mongo.prototype.getDB() will attempt to authenticate
+    // automatically if TestData is configured appropriately.
+    //
+    // Skip the '_defaultSession' property because the DriverSession object is bound to the original
+    // connection object. Copying the '_defaultSession' property would cause commands to go through
+    // the original connection despite methods being called on DB objects from the new connection.
+    const except = new Set(["authenticated", "_defaultSession"]);
     for (var i in node) {
-        if (typeof (node[i]) == "function")
+        if (typeof (node[i]) == "function" || except.has(i))
             continue;
         this.nodes[nodeId][i] = node[i];
     }

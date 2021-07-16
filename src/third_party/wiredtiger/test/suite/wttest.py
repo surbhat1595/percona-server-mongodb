@@ -43,7 +43,7 @@ except ImportError:
 
 from contextlib import contextmanager
 import errno, glob, os, re, shutil, sys, time, traceback
-import wiredtiger, wtscenario
+import wiredtiger, wtscenario, wthooks
 
 def shortenWithEllipsis(s, maxlen):
     if len(s) > maxlen:
@@ -183,6 +183,7 @@ class ExtensionList(list):
 class WiredTigerTestCase(unittest.TestCase):
     _globalSetup = False
     _printOnceSeen = {}
+    _ttyDescriptor = None   # set this early, to allow tty() to be called any time.
 
     # conn_config can be overridden to add to basic connection configuration.
     # Can be a string or a callable function or lambda expression.
@@ -200,14 +201,15 @@ class WiredTigerTestCase(unittest.TestCase):
     conn_extensions = ()
 
     @staticmethod
-    def globalSetup(preserveFiles = False, useTimestamp = False,
+    def globalSetup(preserveFiles = False, removeAtStart = True, useTimestamp = False,
                     gdbSub = False, lldbSub = False, verbose = 1, builddir = None, dirarg = None,
-                    longtest = False, ignoreStdout = False, seedw = 0, seedz = 0):
+                    longtest = False, zstdtest = False, ignoreStdout = False, seedw = 0, seedz = 0, hookmgr = None):
         WiredTigerTestCase._preserveFiles = preserveFiles
         d = 'WT_TEST' if dirarg == None else dirarg
         if useTimestamp:
             d += '.' + time.strftime('%Y%m%d-%H%M%S', time.localtime())
-        shutil.rmtree(d, ignore_errors=True)
+        if removeAtStart:
+            shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d)
         wtscenario.set_long_run(longtest)
         WiredTigerTestCase._parentTestdir = d
@@ -217,6 +219,7 @@ class WiredTigerTestCase(unittest.TestCase):
         WiredTigerTestCase._gdbSubprocess = gdbSub
         WiredTigerTestCase._lldbSubprocess = lldbSub
         WiredTigerTestCase._longtest = longtest
+        WiredTigerTestCase._zstdtest = zstdtest
         WiredTigerTestCase._verbose = verbose
         WiredTigerTestCase._ignoreStdout = ignoreStdout
         WiredTigerTestCase._dupout = os.dup(sys.stdout.fileno())
@@ -224,9 +227,11 @@ class WiredTigerTestCase(unittest.TestCase):
         WiredTigerTestCase._stderr = sys.stderr
         WiredTigerTestCase._concurrent = False
         WiredTigerTestCase._globalSetup = True
-        WiredTigerTestCase._ttyDescriptor = None
         WiredTigerTestCase._seeds = [521288629, 362436069]
         WiredTigerTestCase._randomseed = False
+        if hookmgr == None:
+            hookmgr = wthooks.WiredTigerHookManager()
+        WiredTigerTestCase._hookmgr = hookmgr
         if seedw != 0 and seedz != 0:
             WiredTigerTestCase._randomseed = True
             WiredTigerTestCase._seeds = [seedw, seedz]
@@ -400,8 +405,19 @@ class WiredTigerTestCase(unittest.TestCase):
     def setUp(self):
         if not hasattr(self.__class__, 'wt_ntests'):
             self.__class__.wt_ntests = 0
+
+        # We want to have a unique execution directory name for each test.
+        # When a test fails, or with the -p option, we want to preserve the
+        # directory.  For the non concurrent case, this is easy, we use the
+        # class name (like test_base02) and append a class-specific counter.
+        # This is short, somewhat descriptive, and unique.
+        #
+        # Class-specific counters won't work for the concurrent case. To
+        # get uniqueness we use a sanitized "short" identifier.  Despite its name,
+        # this is not short (with scenarios at least), but it is descriptive
+        # and unique.
         if WiredTigerTestCase._concurrent:
-            self.testsubdir = self.shortid() + '.' + str(self.__class__.wt_ntests)
+            self.testsubdir = self.sanitized_shortid()
         else:
             self.testsubdir = self.className() + '.' + str(self.__class__.wt_ntests)
         self.testdir = os.path.join(WiredTigerTestCase._parentTestdir, self.testsubdir)
@@ -745,8 +761,30 @@ class WiredTigerTestCase(unittest.TestCase):
     def shortid(self):
         return self.id().replace("__main__.","")
 
+    def sanitized_shortid(self):
+        """
+        Return a name that is suitable for creating file system names.
+        In particular, names with scenarios look like
+        'test_file.test_file.test_funcname(scen1.scen2.scen3)'.
+        So transform '(', but remove final ')'.
+        """
+        return self.shortid().translate(str.maketrans('($[]/ ','______', ')'))
+
     def className(self):
         return self.__class__.__name__
+
+def zstdtest(description):
+    """
+    Used as a function decorator, for example, @wttest.zstdtest("description").
+    The decorator indicates that this test function should only be included
+    when running the test suite with the --zstd option.
+    """
+    def runit_decorator(func):
+        return func
+    if not WiredTigerTestCase._zstdtest:
+        return unittest.skip(description + ' (enable with --zstd)')
+    else:
+        return runit_decorator
 
 def longtest(description):
     """

@@ -300,7 +300,7 @@ __rollback_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_PAGE *page
 
         /* Get the full update value from the data store. */
         unpack = &_unpack;
-        __wt_row_leaf_value_cell(session, page, rip, NULL, unpack);
+        __wt_row_leaf_value_cell(session, page, rip, unpack);
     } else {
         /* Unpack a column cell. */
         WT_ERR(__wt_scr_alloc(session, WT_INTPACK64_MAXSIZE, &key));
@@ -346,17 +346,17 @@ __rollback_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_PAGE *page
 
         /*
          * Do not include history store updates greater than on-disk data store version to construct
-         * a full update to restore. Include the most recent updates than the on-disk version
-         * shouldn't be problem as the on-disk version in history store is always a full update. It
-         * is better to not to include those updates as it unnecessarily increases the rollback to
-         * stable time.
+         * a full update to restore except when the on-disk update is prepared. Including more
+         * recent updates than the on-disk version shouldn't be problem as the on-disk version in
+         * history store is always a full update. It is better to not to include those updates as it
+         * unnecessarily increases the rollback to stable time.
          *
          * Comparing with timestamps here has no problem unlike in search flow where the timestamps
          * may be reset during reconciliation. RTS detects an on-disk update is unstable based on
          * the written proper timestamp, so comparing against it with history store shouldn't have
          * any problem.
          */
-        if (hs_start_ts <= unpack->tw.start_ts) {
+        if (hs_start_ts <= unpack->tw.start_ts || unpack->tw.prepare) {
             if (type == WT_UPDATE_MODIFY)
                 WT_ERR(__wt_modify_apply_item(
                   session, S2BT(session)->value_format, &full_value, hs_value->data));
@@ -377,10 +377,14 @@ __rollback_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_PAGE *page
          * stop timestamp if the original update's commit timestamp is out of order. We may see
          * records newer than or equal to the onpage value if eviction runs concurrently with
          * checkpoint. In that case, don't verify the first record.
+         *
+         * If we have fixed the out-of-order timestamps, then the newer update reinserted with an
+         * older timestamp may have a durable timestamp that is smaller than the current stop
+         * durable timestamp.
          */
         WT_ASSERT(session,
           hs_stop_durable_ts <= newer_hs_durable_ts || hs_start_ts == hs_stop_durable_ts ||
-            first_record);
+            hs_start_ts == newer_hs_durable_ts || first_record);
 
         if (hs_stop_durable_ts < newer_hs_durable_ts)
             WT_STAT_CONN_DATA_INCR(session, txn_rts_hs_stop_older_than_newer_start);
@@ -419,7 +423,7 @@ __rollback_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_PAGE *page
               __wt_timestamp_to_string(hs_durable_ts, ts_string[1]),
               __wt_timestamp_to_string(hs_stop_durable_ts, ts_string[2]),
               __wt_timestamp_to_string(rollback_timestamp, ts_string[3]), hs_tw->start_txn, type);
-            WT_ASSERT(session, hs_tw->start_ts < unpack->tw.start_ts);
+            WT_ASSERT(session, unpack->tw.prepare || hs_tw->start_ts <= unpack->tw.start_ts);
             valid_update_found = true;
             break;
         }
@@ -487,11 +491,19 @@ __rollback_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_PAGE *page
             WT_STAT_CONN_DATA_INCR(session, txn_rts_hs_restore_updates);
 
             /*
-             * We have a tombstone on the original update chain and it is behind the stable
-             * timestamp, we need to restore that as well.
+             * We have a tombstone on the original update chain and it is stable according to the
+             * timestamp and txnid, we need to restore that as well.
              */
-            if (hs_stop_durable_ts <= rollback_timestamp &&
-              hs_stop_durable_ts < newer_hs_durable_ts) {
+            if (!__rollback_check_if_txnid_non_committed(session, hs_tw->stop_txn) &&
+              hs_stop_durable_ts <= rollback_timestamp) {
+                /*
+                 * The restoring tombstone timestamp must be zero or less than previous update start
+                 * timestamp or the on-disk update is an out of order prepared.
+                 */
+                WT_ASSERT(session,
+                  hs_stop_durable_ts == WT_TS_NONE || hs_stop_durable_ts < newer_hs_durable_ts ||
+                    unpack->tw.prepare);
+
                 WT_ERR(__wt_upd_alloc_tombstone(session, &tombstone, NULL));
                 /*
                  * Set the transaction id of updates to WT_TXN_NONE when called from recovery,
@@ -584,7 +596,7 @@ __rollback_abort_ondisk_kv(WT_SESSION_IMPL *session, WT_REF *ref, WT_COL *cip, W
     WT_ASSERT(session, (rip != NULL && cip == NULL) || (rip == NULL && cip != NULL));
 
     if (rip != NULL)
-        __wt_row_leaf_value_cell(session, page, rip, NULL, vpack);
+        __wt_row_leaf_value_cell(session, page, rip, vpack);
     else {
         kcell = WT_COL_PTR(page, cip);
         __wt_cell_unpack_kv(session, page->dsk, kcell, vpack);
@@ -1371,6 +1383,31 @@ err:
 }
 
 /*
+ * __rollback_progress_msg --
+ *     Log a verbose message about the progress of the current rollback to stable.
+ */
+static void
+__rollback_progress_msg(WT_SESSION_IMPL *session, struct timespec rollback_start,
+  uint64_t rollback_count, uint64_t *rollback_msg_count)
+{
+    struct timespec cur_time;
+    uint64_t time_diff;
+
+    __wt_epoch(session, &cur_time);
+
+    /* Time since the rollback started. */
+    time_diff = WT_TIMEDIFF_SEC(cur_time, rollback_start);
+
+    if ((time_diff / WT_PROGRESS_MSG_PERIOD) > *rollback_msg_count) {
+        __wt_verbose(session, WT_VERB_RECOVERY_PROGRESS,
+          "Rollback to stable has been running for %" PRIu64 " seconds and has inspected %" PRIu64
+          " files. For more detailed logging, enable WT_VERB_RTS",
+          time_diff, rollback_count);
+        ++(*rollback_msg_count);
+    }
+}
+
+/*
  * __rollback_to_stable_btree_apply --
  *     Perform rollback to stable to all files listed in the metadata, apart from the metadata and
  *     history store files.
@@ -1385,7 +1422,8 @@ __rollback_to_stable_btree_apply(WT_SESSION_IMPL *session)
     WT_TXN_GLOBAL *txn_global;
     wt_timestamp_t max_durable_ts, newest_start_durable_ts, newest_stop_durable_ts,
       rollback_timestamp;
-    uint64_t rollback_txnid;
+    struct timespec rollback_timer;
+    uint64_t rollback_count, rollback_msg_count, rollback_txnid;
     uint32_t btree_id;
     size_t addr_size;
     char ts_string[2][WT_TS_INT_STRING_SIZE];
@@ -1394,8 +1432,11 @@ __rollback_to_stable_btree_apply(WT_SESSION_IMPL *session)
     bool dhandle_allocated, perform_rts;
 
     txn_global = &S2C(session)->txn_global;
-    rollback_txnid = 0;
+    rollback_count = rollback_msg_count = rollback_txnid = 0;
     addr_size = 0;
+
+    /* Initialize the verbose tracking timer. */
+    __wt_epoch(session, &rollback_timer);
 
     /*
      * Copy the stable timestamp, otherwise we'd need to lock it each time it's accessed. Even
@@ -1408,7 +1449,7 @@ __rollback_to_stable_btree_apply(WT_SESSION_IMPL *session)
       __wt_timestamp_to_string(rollback_timestamp, ts_string[0]),
       __wt_timestamp_to_string(txn_global->oldest_timestamp, ts_string[1]));
 
-    WT_ASSERT(session, F_ISSET(session, WT_SESSION_LOCKED_SCHEMA));
+    WT_ASSERT(session, FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_SCHEMA));
     WT_RET(__wt_metadata_cursor(session, &cursor));
 
     if (F_ISSET(S2C(session), WT_CONN_RECOVERING))
@@ -1419,6 +1460,10 @@ __rollback_to_stable_btree_apply(WT_SESSION_IMPL *session)
           S2C(session)->recovery_ckpt_snapshot_count);
 
     while ((ret = cursor->next(cursor)) == 0) {
+        /* Log a progress message. */
+        __rollback_progress_msg(session, rollback_timer, rollback_count, &rollback_msg_count);
+        ++rollback_count;
+
         WT_ERR(cursor->get_key(cursor, &uri));
         dhandle_allocated = perform_rts = false;
 
@@ -1586,58 +1631,29 @@ err:
  *     Rollback all modifications with timestamps more recent than the passed in timestamp.
  */
 static int
-__rollback_to_stable(WT_SESSION_IMPL *session)
+__rollback_to_stable(WT_SESSION_IMPL *session, bool no_ckpt)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
+    WT_TXN_GLOBAL *txn_global;
 
     conn = S2C(session);
+    txn_global = &conn->txn_global;
 
-    WT_RET(__rollback_to_stable_check(session));
+    /*
+     * Rollback to stable should ignore tombstones in the history store since it needs to scan the
+     * entire table sequentially.
+     */
+    F_SET(session, WT_SESSION_ROLLBACK_TO_STABLE);
+
+    WT_ERR(__rollback_to_stable_check(session));
 
     /*
      * Allocate a non-durable btree bitstring. We increment the global value before using it, so the
      * current value is already in use, and hence we need to add one here.
      */
     conn->stable_rollback_maxfile = conn->next_file_id + 1;
-    WT_WITH_SCHEMA_LOCK(session, ret = __rollback_to_stable_btree_apply(session));
-
-    return (ret);
-}
-
-/*
- * __wt_rollback_to_stable --
- *     Rollback all modifications with timestamps more recent than the passed in timestamp.
- */
-int
-__wt_rollback_to_stable(WT_SESSION_IMPL *session, const char *cfg[], bool no_ckpt)
-{
-    WT_DECL_RET;
-    WT_TXN_GLOBAL *txn_global;
-
-    WT_UNUSED(cfg);
-
-    txn_global = &S2C(session)->txn_global;
-
-    /*
-     * Don't use the connection's default session: we are working on data handles and (a) don't want
-     * to cache all of them forever, plus (b) can't guarantee that no other method will be called
-     * concurrently. Copy parent session no logging option to the internal session to make sure that
-     * rollback to stable doesn't generate log records.
-     */
-    WT_RET(__wt_open_internal_session(S2C(session), "txn rollback_to_stable", true,
-      F_MASK(session, WT_SESSION_NO_LOGGING), &session));
-
-    /*
-     * Rollback to stable should ignore tombstones in the history store since it needs to scan the
-     * entire table sequentially.
-     */
-    WT_STAT_CONN_SET(session, txn_rollback_to_stable_running, 1);
-    F_SET(session, WT_SESSION_ROLLBACK_TO_STABLE);
-    ret = __rollback_to_stable(session);
-    F_CLR(session, WT_SESSION_ROLLBACK_TO_STABLE);
-    WT_STAT_CONN_SET(session, txn_rollback_to_stable_running, 0);
-    WT_RET(ret);
+    WT_ERR(__rollback_to_stable_btree_apply(session));
 
     /* Rollback the global durable timestamp to the stable timestamp. */
     txn_global->has_durable_timestamp = txn_global->has_stable_timestamp;
@@ -1648,8 +1664,39 @@ __wt_rollback_to_stable(WT_SESSION_IMPL *session, const char *cfg[], bool no_ckp
      * ensure that both in-memory and on-disk versions are the same unless caller requested for no
      * checkpoint.
      */
-    if (!F_ISSET(S2C(session), WT_CONN_IN_MEMORY) && !no_ckpt)
-        WT_TRET(session->iface.checkpoint(&session->iface, "force=1"));
+    if (!F_ISSET(conn, WT_CONN_IN_MEMORY) && !no_ckpt)
+        WT_ERR(session->iface.checkpoint(&session->iface, "force=1"));
+
+err:
+    F_CLR(session, WT_SESSION_ROLLBACK_TO_STABLE);
+    return (ret);
+}
+
+/*
+ * __wt_rollback_to_stable --
+ *     Rollback the database to the stable timestamp.
+ */
+int
+__wt_rollback_to_stable(WT_SESSION_IMPL *session, const char *cfg[], bool no_ckpt)
+{
+    WT_DECL_RET;
+
+    WT_UNUSED(cfg);
+
+    /*
+     * Don't use the connection's default session: we are working on data handles and (a) don't want
+     * to cache all of them forever, plus (b) can't guarantee that no other method will be called
+     * concurrently. Copy parent session no logging option to the internal session to make sure that
+     * rollback to stable doesn't generate log records.
+     */
+    WT_RET(__wt_open_internal_session(S2C(session), "txn rollback_to_stable", true,
+      F_MASK(session, WT_SESSION_NO_LOGGING), 0, &session));
+
+    WT_STAT_CONN_SET(session, txn_rollback_to_stable_running, 1);
+    WT_WITH_CHECKPOINT_LOCK(
+      session, WT_WITH_SCHEMA_LOCK(session, ret = __rollback_to_stable(session, no_ckpt)));
+    WT_STAT_CONN_SET(session, txn_rollback_to_stable_running, 0);
+
     WT_TRET(__wt_session_close_internal(session));
 
     return (ret);

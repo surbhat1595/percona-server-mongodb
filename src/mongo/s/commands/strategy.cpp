@@ -66,10 +66,12 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/logical_time_metadata.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
+#include "mongo/rpc/rewrite_state_change_errors.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/parallel.h"
 #include "mongo/s/client/shard_connection.h"
@@ -370,11 +372,12 @@ void runCommand(OperationContext* opCtx,
         return;
     }
 
+    const auto isHello = command->getName() == "hello"_sd || command->getName() == "isMaster"_sd;
+
     opCtx->setExhaust(OpMsg::isFlagSet(m, OpMsg::kExhaustSupported));
     const auto session = opCtx->getClient()->session();
     if (session) {
-        if (!opCtx->isExhaust() ||
-            (command->getName() != "hello"_sd && command->getName() != "isMaster"_sd)) {
+        if (!opCtx->isExhaust() || !isHello) {
             InExhaustIsMaster::get(session.get())->setInExhaustIsMaster(false, commandName);
         }
     }
@@ -451,6 +454,13 @@ void runCommand(OperationContext* opCtx,
 
     boost::optional<RouterOperationContextSession> routerSession;
     try {
+        if (isHello) {
+            // Preload generic ClientMetadata ahead of our first hello request. After the first
+            // request, metaElement should always be empty.
+            auto metaElem = request.body[kMetadataDocumentName];
+            ClientMetadata::setFromMetadata(opCtx->getClient(), metaElem);
+        }
+
         rpc::readRequestMetadata(opCtx, request.body, command->requiresAuth());
 
         CommandHelpers::evaluateFailCommandFailPoint(opCtx, invocation.get());
@@ -894,10 +904,13 @@ void runCommand(OperationContext* opCtx,
         // 2. For other commands in a transaction, they shouldn't get a writeConcern error so
         //    this setting doesn't apply.
         //
-        // isInternalClient is set to true to suppress mongos from returning the RetryableWriteError
-        // label.
-        auto errorLabels = getErrorLabels(
-            opCtx, osi, command->getName(), e.code(), boost::none, true /* isInternalClient */);
+        auto errorLabels = getErrorLabels(opCtx,
+                                          osi,
+                                          command->getName(),
+                                          e.code(),
+                                          boost::none,
+                                          false /* isInternalClient */,
+                                          true /* isMongos */);
         errorBuilder->appendElements(errorLabels);
         throw;
     }
@@ -907,6 +920,7 @@ void runCommand(OperationContext* opCtx,
 
 DbResponse Strategy::queryOp(OperationContext* opCtx, const NamespaceString& nss, DbMessage* dbm) {
     globalOpCounters.gotQuery();
+    globalOpCounters.gotQueryDeprecated();
 
     ON_BLOCK_EXIT([opCtx] {
         Grid::get(opCtx)->catalogCache()->checkAndRecordOperationBlockedByRefresh(
@@ -1101,6 +1115,11 @@ DbResponse Strategy::clientCommand(OperationContext* opCtx, const Message& m) {
             dbResponse.nextInvocation = reply->getNextInvocation();
         }
     }
+    if (auto doc =
+            rpc::RewriteStateChangeErrors::rewrite(reply->getBodyBuilder().asTempObj(), opCtx)) {
+        reply->reset();
+        reply->getBodyBuilder().appendElements(*doc);
+    }
     dbResponse.response = reply->done();
 
     return dbResponse;
@@ -1142,6 +1161,7 @@ DbResponse Strategy::getMore(OperationContext* opCtx, const NamespaceString& nss
     const long long cursorId = dbm->pullInt64();
 
     globalOpCounters.gotGetMore();
+    globalOpCounters.gotGetMoreDeprecated();
 
     // TODO: Handle stale config exceptions here from coll being dropped or sharded during op for
     // now has same semantics as legacy request.
@@ -1197,7 +1217,7 @@ void Strategy::killCursors(OperationContext* opCtx, DbMessage* dbm) {
                           << ".",
             numCursors >= 1 && numCursors < 30000);
 
-    globalOpCounters.gotOp(dbKillCursors, false);
+    globalOpCounters.gotKillCursorsDeprecated();
 
     ConstDataCursor cursors(dbm->getArray(numCursors));
 
@@ -1263,12 +1283,16 @@ void Strategy::writeOp(OperationContext* opCtx, DbMessage* dbm) {
                [&]() {
                    switch (msg.operation()) {
                        case dbInsert: {
-                           return InsertOp::parseLegacy(msg).serialize({});
+                           auto op = InsertOp::parseLegacy(msg);
+                           globalOpCounters.gotInsertsDeprecated(op.getDocuments().size());
+                           return op.serialize({});
                        }
                        case dbUpdate: {
+                           globalOpCounters.gotUpdateDeprecated();
                            return UpdateOp::parseLegacy(msg).serialize({});
                        }
                        case dbDelete: {
+                           globalOpCounters.gotDeleteDeprecated();
                            return DeleteOp::parseLegacy(msg).serialize({});
                        }
                        default:

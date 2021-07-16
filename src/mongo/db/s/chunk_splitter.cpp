@@ -95,15 +95,15 @@ Status splitChunkAtMultiplePoints(OperationContext* opCtx,
                               << " parts at a time."};
     }
 
-    const auto status = splitChunk(opCtx,
-                                   nss,
-                                   shardKeyPattern.toBSON(),
-                                   chunkRange,
-                                   splitPoints,
-                                   shardId.toString(),
-                                   collectionVersion.epoch());
-
-    return status.getStatus().withContext("split failed");
+    return splitChunk(opCtx,
+                      nss,
+                      shardKeyPattern.toBSON(),
+                      chunkRange,
+                      splitPoints,
+                      shardId.toString(),
+                      collectionVersion.epoch())
+        .getStatus()
+        .withContext("split failed");
 }
 
 /**
@@ -403,24 +403,19 @@ void ChunkSplitter::_runAutosplit(std::shared_ptr<ChunkSplitStateDriver> chunkSp
         const bool shouldBalance = isAutoBalanceEnabled(opCtx.get(), nss, balancerConfig);
 
         LOGV2(21908,
-              "autosplitted {namespace} chunk: {chunk} with {splitPoints} split points "
-              "(maxChunkSizeBytes: {maxChunkSizeBytes}). {extraInfo}",
+              "autosplitted {namespace} chunk: [{minKey},{maxKey}) with {splitPoints} split points "
+              "(maxChunkSizeBytes: {maxChunkSizeBytes}, lastmod: {lastmod}). {extraInfo}",
               "autosplitted chunk",
               "namespace"_attr = nss,
-              "chunk"_attr = redact(chunk.toString()),
+              "minKey"_attr = redact(chunk.getMin()),
+              "maxKey"_attr = redact(chunk.getMax()),
+              "lastmod"_attr = redact(chunk.getLastmod().toBSON()),
               "splitPoints"_attr = splitPoints.size(),
               "maxChunkSizeBytes"_attr = maxChunkSizeBytes,
               "extraInfo"_attr =
                   (topChunkMinKey.isEmpty() ? ""
                                             : "top chunk migration suggested" +
                            (std::string)(shouldBalance ? "" : ", but no migrations allowed)")));
-
-        // Because the ShardServerOpObserver uses the metadata from the CSS for tracking incoming
-        // writes, if we split a chunk but do not force a CSS refresh, subsequent inserts will see
-        // stale metadata and so will not trigger a chunk split. If we force metadata refresh here,
-        // we can limit the amount of time that the op observer is tracking writes on the parent
-        // chunk rather than on its child chunks.
-        forceShardFilteringMetadataRefresh(opCtx.get(), nss, false);
 
         // Balance the resulting chunks if the autobalance option is enabled and if we split at the
         // first or last chunk on the collection as part of top chunk optimization.

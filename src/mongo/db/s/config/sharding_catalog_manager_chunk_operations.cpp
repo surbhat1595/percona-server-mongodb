@@ -39,6 +39,7 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
@@ -1034,6 +1035,15 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     const ShardId& toShard,
     const boost::optional<Timestamp>& validAfter) {
 
+    // TODO(SERVER-53283): Remove the logic around fcvRegion to re-enable
+    // the concurrent execution of moveChunk() and setFCV().
+    FixedFCVRegion fcvRegion(opCtx);
+    uassert(ErrorCodes::ConflictingOperationInProgress,
+            "Cannot commit a chunk migration request "
+            "while the cluster is being upgraded or downgraded",
+            !fcvRegion->isUpgradingOrDowngrading());
+
+
     auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
     // Must hold the shard lock until the entire commit finishes to serialize with removeShard.
@@ -1730,9 +1740,11 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
     }
 }
 
-void ShardingCatalogManager::setAllowMigrationsAndBumpOneChunk(OperationContext* opCtx,
-                                                               const NamespaceString& nss,
-                                                               bool allowMigrations) {
+void ShardingCatalogManager::setAllowMigrationsAndBumpOneChunk(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const boost::optional<UUID>& collectionUUID,
+    bool allowMigrations) {
     std::set<ShardId> shardsIds;
     {
         // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
@@ -1742,6 +1754,13 @@ void ShardingCatalogManager::setAllowMigrationsAndBumpOneChunk(OperationContext*
         const auto cm = uassertStatusOK(
             Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx,
                                                                                          nss));
+
+        uassert(ErrorCodes::InvalidUUID,
+                str::stream() << "Collection uuid " << collectionUUID
+                              << " in the request does not match the current uuid " << cm.getUUID()
+                              << " for ns " << nss,
+                !collectionUUID || collectionUUID == cm.getUUID());
+
         cm.getAllShardIds(&shardsIds);
         withTransaction(
             opCtx, CollectionType::ConfigNS, [&](OperationContext* opCtx, TxnNumber txnNumber) {
@@ -1752,16 +1771,26 @@ void ShardingCatalogManager::setAllowMigrationsAndBumpOneChunk(OperationContext*
                     ? BSON("$unset" << BSON(CollectionType::kAllowMigrationsFieldName << ""))
                     : BSON("$set" << BSON(CollectionType::kAllowMigrationsFieldName << false));
 
-                writeToConfigDocumentInTxn(
+                BSONObj query = BSON(CollectionType::kNssFieldName << nss.ns());
+                if (collectionUUID) {
+                    query =
+                        query.addFields(BSON(CollectionType::kUuidFieldName << *collectionUUID));
+                }
+
+                const auto res = writeToConfigDocumentInTxn(
                     opCtx,
                     CollectionType::ConfigNS,
-                    BatchedCommandRequest::buildUpdateOp(
-                        CollectionType::ConfigNS,
-                        BSON(CollectionType::kNssFieldName << nss.ns()) /* query */,
-                        update /* update */,
-                        false /* upsert */,
-                        false /* multi */),
+                    BatchedCommandRequest::buildUpdateOp(CollectionType::ConfigNS,
+                                                         query,
+                                                         update /* update */,
+                                                         false /* upsert */,
+                                                         false /* multi */),
                     txnNumber);
+                const auto numDocsModified = UpdateOp::parseResponse(res).getN();
+                uassert(ErrorCodes::ConflictingOperationInProgress,
+                        str::stream() << "Expected to match one doc for query " << query
+                                      << " but matched " << numDocsModified,
+                        numDocsModified == 1);
 
                 // Bump the chunk version for one single chunk
                 invariant(!shardsIds.empty());

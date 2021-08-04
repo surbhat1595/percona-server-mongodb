@@ -8,13 +8,14 @@ from __future__ import annotations
 import datetime
 import distutils.spawn  # pylint: disable=no-name-in-module
 import re
-from typing import Set
+from typing import Set, List
 
 import yaml
 
 import buildscripts.util.runcommand as runcommand
 
 ENTERPRISE_MODULE_NAME = "enterprise"
+ASAN_SIGNATURE = "detect_leaks=1"
 
 
 def parse_evergreen_file(path, evergreen_binary="evergreen"):
@@ -61,11 +62,11 @@ class EvergreenProjectConfig(object):  # pylint: disable=too-many-instance-attri
             self.distro_names.update(variant.distro_names)
 
     @property
-    def task_names(self):
+    def task_names(self) -> List[str]:
         """Get the list of task names."""
         return list(self._tasks_by_name.keys())
 
-    def get_task(self, task_name):
+    def get_task(self, task_name: str) -> Task:
         """Return the task with the given name as a Task instance."""
         return self._tasks_by_name.get(task_name)
 
@@ -113,7 +114,7 @@ class Task(object):
         """Get the list of task names this task depends on."""
         return self.raw.get("depends_on", [])
 
-    def _find_func_command(self, func_command):
+    def find_func_command(self, func_command):
         """Return the 'func_command' if found, or None."""
         for command in self.raw.get("commands", []):
             if command.get("func") == func_command:
@@ -123,25 +124,17 @@ class Task(object):
     @property
     def generate_resmoke_tasks_command(self):
         """Return the 'generate resmoke tasks' command if found, or None."""
-        func = self._find_func_command("generate resmoke tasks")
-        return func if func is not None else self._find_func_command(
-            "generate randomized multiversion tasks")
+        return self.find_func_command("generate resmoke tasks")
 
     @property
-    def generate_randomized_multiversion_command(self):
-        """Return the 'generate resmoke tasks' command if found, or None."""
-        return self._find_func_command("generate randomized multiversion tasks")
-
-    @property
-    def is_generate_resmoke_task(self):
+    def is_generate_resmoke_task(self) -> bool:
         """Return True if 'generate resmoke tasks' command is found."""
-        return (self.generate_resmoke_tasks_command is not None
-                or self.generate_randomized_multiversion_command is not None)
+        return self.generate_resmoke_tasks_command is not None
 
     @property
     def run_tests_command(self):
         """Return the 'run tests' command if found, or None."""
-        return self._find_func_command("run tests")
+        return self.find_func_command("run tests")
 
     @property
     def is_run_tests_task(self):
@@ -151,12 +144,7 @@ class Task(object):
     @property
     def multiversion_setup_command(self):
         """Return the 'do multiversion setup' command if found, or None."""
-        return self._find_func_command("do multiversion setup")
-
-    @property
-    def is_multiversion_task(self):
-        """Return True if a multiversion path is found."""
-        return self.multiversion_setup_command is not None or self.multiversion_path is not None
+        return self.find_func_command("do multiversion setup")
 
     @property
     def generated_task_name(self):
@@ -182,15 +170,16 @@ class Task(object):
         return suite_name
 
     @property
-    def multiversion_path(self):
+    def require_multiversion(self):
         """Get the multiversion path if task uses multiversion setup, or None."""
+        command_obj = None
         if self.is_run_tests_task:
-            return self.run_tests_command.get("vars", {}).get("task_path_suffix")
+            command_obj = self.run_tests_command
 
         if self.is_generate_resmoke_task:
-            return self.generate_resmoke_tasks_command.get("vars", {}).get("use_multiversion")
+            command_obj = self.generate_resmoke_tasks_command
 
-        return None
+        return command_obj.get("vars", {}).get("require_multiversion")
 
     @property
     def resmoke_args(self):
@@ -352,6 +341,13 @@ class Variant(object):
     def num_jobs_available(self):
         """Get the value of the num_jobs_available expansion or None if not found."""
         return self.expansion("num_jobs_available")
+
+    def is_asan_build(self) -> bool:
+        """Determine if this task is an ASAN build."""
+        san_options = self.expansion("san_options")
+        if san_options:
+            return ASAN_SIGNATURE in san_options
+        return False
 
 
 class VariantTask(Task):

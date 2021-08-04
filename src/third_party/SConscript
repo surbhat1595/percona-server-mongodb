@@ -230,6 +230,30 @@ env.AddMethod(injectThirdParty, 'InjectThirdParty')
 
 env = env.Clone()
 
+# Construct an empty object file that we can use to produce the
+# library for every shim. This avoids the need to create and name a
+# different empty source file for every third-party library, as we did
+# in the past.
+
+empty_source=env.Textfile(
+    target='third_party_shim.cpp',
+    source=str(),
+)
+env.Alias('generated-sources', empty_source)
+
+empty_object = env.LibraryObject(
+    target='third_party_shim',
+    source=empty_source,
+)
+
+def shim_library(env, name, **kwargs):
+    return env.Library(
+        target=f"shim_{name}",
+        source=empty_object[0],
+        **kwargs,
+    )
+env.AddMethod(shim_library, 'ShimLibrary')
+
 murmurEnv = env.Clone()
 murmurEnv.InjectThirdParty(libraries=['fmt'])
 murmurEnv.SConscript('murmurhash3/SConscript', exports={ 'env' : murmurEnv })
@@ -250,8 +274,6 @@ s2Env.SConscript('s2/SConscript', exports={'env' : s2Env})
 if use_libunwind:
     unwindEnv = env.Clone(
         LIBDEPS_NO_INHERIT=[
-            '$BUILD_DIR/shim_crt',
-            '$BUILD_DIR/shim_cxx',
             '$BUILD_DIR/third_party/shim_allocator',
         ],
     )
@@ -472,8 +494,6 @@ if "tom" in env["MONGO_CRYPTO"]:
 
 gperftoolsEnv = env.Clone(
     LIBDEPS_NO_INHERIT=[
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
         '$BUILD_DIR/third_party/shim_allocator',
     ],
 )

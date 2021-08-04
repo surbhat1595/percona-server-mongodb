@@ -505,15 +505,6 @@ add_option("cxx-std",
     help="Select the C++ langauge standard to build with",
 )
 
-add_option("dynamic-runtime",
-    choices=["force", "off", "auto"],
-    const="on",
-    default="auto",
-    help="Force the static compiler and C++ runtimes to be linked dynamically",
-    nargs="?",
-    type="choice",
-)
-
 def find_mongo_custom_variables():
     files = []
     paths = [path for path in sys.path if 'site_scons' in path]
@@ -1291,24 +1282,6 @@ env.AddMethod(mongo_platform.env_os_is_wrapper, 'TargetOSIs')
 env.AddMethod(mongo_platform.env_get_os_name_wrapper, 'GetTargetOSName')
 
 
-def shim_library(env, name, needs_link=False, *args, **kwargs):
-    nodes = env.Library(
-        target=f"shim_{name}" if name else name,
-        source=[
-            f"shim_{name}.cpp" if name else name,
-        ],
-        *args,
-        **kwargs
-    )
-
-    for n in nodes:
-        setattr(n.attributes, "needs_link", needs_link)
-
-    return nodes
-
-env.AddMethod(shim_library, 'ShimLibrary')
-
-
 def conf_error(env, msg, *args):
     print(msg.format(*args))
     print("See {0} for details".format(env.File('$CONFIGURELOG').abspath))
@@ -1805,121 +1778,6 @@ if link_model.startswith("dynamic"):
                 env['LIBDEPS_TAG_EXPANSIONS'].append(libdeps_tags_expand_incomplete)
 
 
-# If requested, wrap the static runtime libraries in shims and use those to link
-# them dynamically. This allows us to "convert" runtimes in toolchains that have
-# linker scripts in place of shared libraries which actually link the static
-# library instead. The benefit of making this conversion is that shared
-# libraries produced by these toolchains are smaller because we don't end up
-# spreading runtime symbols all over the place, and in turn they should also
-# get loaded by the dynamic linker more quickly as well.
-dynamicRT = get_option("dynamic-runtime")
-
-if dynamicRT == "auto":
-    if env.ToolchainIs('msvc'):
-        # TODO: SERVER-53102
-        # Windows Enterprise *requires* a dynamic CRT because it needs to have
-        # shared state in order to load the external libraries required for SSL,
-        # LDAP, etc. This state of affairs may eventually change as Windows
-        # dynamic builds improve, but for now we just force a dynamic CRT with
-        # Windows until we have some way of detecting when we can get away with
-        # a static CRT.
-        #
-        # Ideally, we should be determining whether a static build is requested,
-        # and if so, whether a dynamic CRT *must* be used in such a case.
-
-        dynamicRT = "force"
-
-    elif get_option("link-model") != "dynamic":
-        dynamicRT = "off"
-
-    elif env.TargetOSIs('linux') and env.ToolchainIs('gcc', 'clang'):
-        def CheckRuntimeLibraries(context):
-            context.Message("Checking whether any runtime libraries are linker scripts... ")
-
-            result = {}
-            libs = [ 'libgcc', 'libgcc_s', 'libgcc_eh' ]
-
-            if get_option('libc++'):
-                libs.append('libc++')
-            else:
-                libs.append('libstdc++')
-
-            compiler = subprocess.Popen(
-                [context.env['CXX'], "-print-search-dirs"],
-                stdout=subprocess.PIPE
-            )
-
-            # This just pulls out the library paths and *only* the library
-            # paths, deleting all other lines. It also removes the leading
-            # "libraries" tag from the line so only the paths are left in
-            # the output.
-            sed = subprocess.Popen(
-                [
-                    "sed",
-                    "/^lib/b 1;d;:1;s,.*:[^=]*=,,",
-                ],
-                stdin=compiler.stdout,
-                stdout=subprocess.PIPE
-            )
-            compiler.stdout.close()
-
-            search_paths = sed.communicate()[0].decode('utf-8').split(':')
-
-            for lib in libs:
-                for search_path in search_paths:
-                    lib_file = os.path.join(search_path, lib + ".so")
-                    if os.path.exists(lib_file):
-                        file_type = subprocess.check_output(["file", lib_file]).decode('utf-8')
-                        match = re.search('ASCII text', file_type)
-                        result[lib] = bool(match)
-                        break
-            if any(result.values()):
-                ret = "yes"
-            else:
-                ret = "no"
-            context.Result(ret)
-            return ret
-
-        detectStaticRuntime = Configure(detectEnv, help=False, custom_tests = {
-            'CheckRuntimeLibraries' : CheckRuntimeLibraries,
-        })
-
-        if detectStaticRuntime.CheckRuntimeLibraries() == "yes":
-            # TODO: SERVER-48291
-            # Set this to "force" when the issue with jsCore test failures with
-            # dynamic runtime have been resolved.
-            dynamicRT = "off"
-        else:
-            dynamicRT = "off"
-
-        detectStaticRuntime.Finish()
-
-if dynamicRT == "force":
-    if not (env.TargetOSIs('linux') or env.TargetOSIs('windows')):
-        env.FatalError("A dynamic runtime can be forced only on Windows and Linux at this time.")
-
-    # GCC and Clang get configured in src/SConscript so as to avoid affecting
-    # the conftests.
-    if env.ToolchainIs('msvc'):
-        if debugBuild:
-            env.Append(CCFLAGS=["/MDd"])
-        else:
-            env.Append(CCFLAGS=["/MD"])
-
-    else:
-        if get_option("link-model") != "dynamic":
-            env.FatalError("A dynamic runtime can only be forced with dynamic linking on this toolchain.")
-
-        if not env.ToolchainIs('gcc', 'clang'):
-            env.FatalError("Don't know how to force a dynamic runtime on this toolchain.")
-
-if dynamicRT == "off" and env.ToolchainIs('msvc'):
-    if debugBuild:
-        env.Append(CCFLAGS=["/MTd"])
-    else:
-        env.Append(CCFLAGS=["/MT"])
-
-
 if optBuild:
     env.SetConfigHeaderDefine("MONGO_CONFIG_OPTIMIZED_BUILD")
 
@@ -2021,23 +1879,14 @@ if env['_LIBDEPS'] == '$_LIBDEPS_OBJS':
     # command but instead runs a function.
     env["BUILDERS"]["StaticLibrary"].action = SCons.Action.Action(write_uuid_to_file, "Generating placeholder library $TARGET")
 
-libdeps_typeinfo = False
-
 if get_option('build-tools') == 'next':
     import libdeps_next as libdeps
-
-    if (has_option('sanitize') and 'undefined' in get_option('sanitize')
-        and env.ToolchainIs('clang', 'gcc')
-        and (env.TargetOSIs('posix') and not env.TargetOSIs('darwin'))):
-
-        libdeps_typeinfo = True
 
     libdeps.setup_environment(
         env,
         emitting_shared=(link_model.startswith("dynamic")),
         debug=get_option('libdeps-debug'),
-        linting=get_option('libdeps-linting'),
-        sanitize_typeinfo=libdeps_typeinfo)
+        linting=get_option('libdeps-linting'))
 else:
     import libdeps
 
@@ -2407,6 +2256,10 @@ elif env.TargetOSIs('windows'):
     if not any(flag.startswith('/DEBUG') for flag in env['LINKFLAGS']):
         env.Append(LINKFLAGS=["/DEBUG"])
 
+    # /MD:  use the multithreaded, DLL version of the run-time library (MSVCRT.lib/MSVCR###.DLL)
+    # /MDd: Defines _DEBUG, _MT, _DLL, and uses MSVCRTD.lib/MSVCRD###.DLL
+    env.Append(CCFLAGS=["/MDd" if debugBuild else "/MD"])
+
     if optBuild:
         # /O1:  optimize for size
         # /O2:  optimize for speed (as opposed to size)
@@ -2595,14 +2448,8 @@ if env.TargetOSIs('posix'):
     # On OS X, clang doesn't want the pthread flag at link time, or it
     # issues warnings which make it impossible for us to declare link
     # warnings as errors. See http://stackoverflow.com/a/19382663.
-    #
-    # We don't need it anyway since we explicitly link to -lpthread,
-    # so all we need beyond that is the preprocessor variable.
-    if not env.ToolchainIs('clang'):
-        env.Append(
-            CPPDEFINES=[("_REENTRANT", "1")],
-            LINKFLAGS=["-pthread"]
-        )
+    if not (env.TargetOSIs('darwin') and env.ToolchainIs('clang')):
+        env.Append( LINKFLAGS=["-pthread"] )
 
     # SERVER-9761: Ensure early detection of missing symbols in dependent libraries at program
     # startup.
@@ -2884,7 +2731,7 @@ def doConfigure(myenv):
 
     conf.Finish()
 
-    # We require macOS 10.12 or newer
+    # We require macOS 10.14 or newer
     if env.TargetOSIs('darwin'):
 
         # TODO: Better error messages, mention the various -mX-version-min-flags in the error, and
@@ -2895,7 +2742,7 @@ def doConfigure(myenv):
             #include <AvailabilityMacros.h>
             #include <TargetConditionals.h>
 
-            #if TARGET_OS_OSX && (__MAC_OS_X_VERSION_MIN_REQUIRED < __MAC_10_12)
+            #if TARGET_OS_OSX && (__MAC_OS_X_VERSION_MIN_REQUIRED < __MAC_10_14)
             #error 1
             #endif
             """
@@ -2910,7 +2757,7 @@ def doConfigure(myenv):
         })
 
         if not conf.CheckDarwinMinima():
-            conf.env.ConfError("Required target minimum of macOS 10.12 not found")
+            conf.env.ConfError("Required target minimum of macOS 10.14 not found")
 
         conf.Finish()
 
@@ -3713,11 +3560,28 @@ def doConfigure(myenv):
             if not using_fsan and not AddToCCFLAGSIfSupported(myenv, "-fno-sanitize-recover"):
                 AddToCCFLAGSIfSupported(myenv, "-fno-sanitize-recover=undefined")
             myenv.AppendUnique(CPPDEFINES=['UNDEFINED_BEHAVIOR_SANITIZER'])
+
             # If anything is changed, added, or removed in ubsan_options, be
             # sure to make the corresponding changes to the appropriate build
             # variants in etc/evergreen.yml
             ubsan_options = "print_stacktrace=1"
             myenv['ENV']['UBSAN_OPTIONS'] = ubsan_options + symbolizer_option
+
+            # In dynamic builds, the `vptr` sanitizer check can
+            # require additional LIBDEPS edges. That is very
+            # inconvenient, because such builds can't use z,defs. The
+            # result is a very fragile link graph, where refactoring
+            # the link graph in one place can have surprising effects
+            # in others. Instead, we just disable the `vptr` sanitizer
+            # for dynamic builds. We tried some other approaches in
+            # SERVER-49798 of adding a new LIBDEPS_TYPEINFO type, but
+            # that didn't address the fundamental issue that the
+            # correct link graph for a dynamic+ubsan build isn't the
+            # same as the correct link graph for a regular dynamic
+            # build.
+            if link_model == "dynamic":
+                if AddToCCFLAGSIfSupported(myenv, "-fno-sanitize=vptr"):
+                    myenv.AppendUnique(LINKFLAGS=["-fno-sanitize=vptr"])
 
     if myenv.ToolchainIs('msvc') and optBuild:
         # http://blogs.msdn.com/b/vcblog/archive/2013/09/11/introducing-gw-compiler-switch.aspx
@@ -4281,10 +4145,8 @@ def doConfigure(myenv):
                     language='C++')
     if posix_system:
         conf.env.SetConfigHeaderDefine("MONGO_CONFIG_HAVE_HEADER_UNISTD_H")
-        conf.CheckLib('c')
         conf.CheckLib('rt')
         conf.CheckLib('dl')
-        conf.CheckLib('pthread')
 
     if posix_monotonic_clock:
         conf.env.SetConfigHeaderDefine("MONGO_CONFIG_HAVE_POSIX_MONOTONIC_CLOCK")
@@ -4763,41 +4625,6 @@ if get_option('ninja') != 'disabled':
         new_emitter = SCons.Builder.ListEmitter([base_emitter, winlink_workaround_emitter])
         builder.emitter = new_emitter
 
-    if libdeps_typeinfo and get_option('build-tools') == 'next':
-        # ninja will not handle the list action libdeps creates so in order for
-        # to build ubsan with ninja, we need to undo the list action and then
-        # create a special rule to handle the shlink typeinfo checks. If ninja is
-        # updated to handle list actions correctly, this whole section can go away.
-        base_action = env['BUILDERS']['SharedLibrary'].action
-        base_action.list[:] = base_action.list[:-2]
-
-        # Now we rewrite the command and set it up as a rule for ninja shlinks. We are
-        # cramming this all into a single command for ninja, so it is broken apart with
-        # commentation for each part.
-        env.NinjaRule(
-            "SHLINK",
-            libdeps.get_typeinfo_link_command().format(
-                ninjalink="$env$SHLINK @$out.rsp && ",
-                ldpath="",
-                target="${out}",
-                libdeps_tags="printenv",
-                tag='libdeps-cyclic-typeinfo'
-            ),
-            description="Linking $out",
-            deps=None,
-            pool="local_pool",
-            use_depfile=False,
-            use_response_file=True)
-
-        provider = env.NinjaGenResponseFileProvider(
-            "SHLINK",
-            "$SHLINK",
-            custom_env={
-                "TYPEINFO_TAGS":"'$LIBDEPS_TAGS'",
-                "LD_LIBRARY_PATH":"'$_LIBDEPS_LD_PATH'"})
-        env.NinjaRuleMapping("${SHLINKCOM}", provider)
-        env.NinjaRuleMapping(env["SHLINKCOM"], provider)
-
     # idlc.py has the ability to print it's implicit dependencies
     # while generating, Ninja can consume these prints using the
     # deps=msvc method.
@@ -5272,7 +5099,6 @@ module_sconscripts = moduleconfig.get_module_sconscripts(mongo_modules)
 # and they are exported here, as well.
 Export([
     'debugBuild',
-    'dynamicRT',
     'endian',
     'free_monitoring',
     'get_option',

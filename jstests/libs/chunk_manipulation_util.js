@@ -121,7 +121,7 @@ function configureMoveChunkFailPoint(shardConnection, stepNumber, mode) {
 }
 
 //
-// Wait for moveChunk to reach a step (1 through 6). Assumes only one active
+// Wait for moveChunk to reach a step (1 through 7). Assumes only one active
 // moveChunk running in shardConnection.
 //
 function waitForMoveChunkStep(shardConnection, stepNumber) {
@@ -160,10 +160,11 @@ function waitForMoveChunkStep(shardConnection, stepNumber) {
 var migrateStepNames = {
     deletedPriorDataInRange: 1,
     copiedIndexes: 2,
-    cloned: 3,
-    catchup: 4,  // About to enter steady state.
-    steady: 5,
-    done: 6
+    rangeDeletionTaskScheduled: 3,
+    cloned: 4,
+    catchup: 5,  // About to enter steady state.
+    steady: 6,
+    done: 7
 };
 
 //
@@ -203,7 +204,7 @@ function configureMigrateFailPoint(shardConnection, stepNumber, mode) {
 }
 
 //
-// Wait for moveChunk to reach a step (1 through 6).
+// Wait for moveChunk to reach a step (1 through 7).
 //
 function waitForMigrateStep(shardConnection, stepNumber) {
     var searchString = 'step ' + stepNumber, admin = shardConnection.getDB('admin');

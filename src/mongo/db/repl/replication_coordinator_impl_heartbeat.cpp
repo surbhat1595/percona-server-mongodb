@@ -57,7 +57,6 @@
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/vote_requester.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/session_catalog.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/mutex.h"
@@ -247,6 +246,25 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
             // Asynchronous stepdown could happen, but it will wait for _mutex and execute
             // after this function, so we cannot and don't need to wait for it to finish.
             _processReplSetMetadata_inlock(replMetadata.getValue());
+        }
+
+        // Arbiters are always expected to report null durable optimes (and wall times).
+        // If that is not the case here, make sure to correct these times before ingesting them.
+        auto memberInConfig = _rsConfig.findMemberByHostAndPort(target);
+        if ((hbResponse.hasState() && hbResponse.getState().arbiter()) ||
+            (_rsConfig.isInitialized() && memberInConfig && memberInConfig->isArbiter())) {
+            if (hbResponse.hasDurableOpTime() &&
+                (!hbResponse.getDurableOpTime().isNull() ||
+                 hbResponse.getDurableOpTimeAndWallTime().wallTime != Date_t())) {
+                LOGV2_FOR_HEARTBEATS(
+                    5662000,
+                    1,
+                    "Received non-null durable optime/walltime for arbiter from heartbeat. "
+                    "Ignoring value(s).",
+                    "target"_attr = target,
+                    "durableOpTimeAndWallTime"_attr = hbResponse.getDurableOpTimeAndWallTime());
+                hbResponse.unsetDurableOpTimeAndWallTime();
+            }
         }
     }
     const Date_t now = _replExecutor->now();
@@ -505,11 +523,6 @@ void ReplicationCoordinatorImpl::_stepDownFinish(
     }
 
     auto opCtx = cc().makeOperationContext();
-
-    // To prevent a deadlock between session checkout and RSTL lock taking, disallow new sessions
-    // from being checked out. Existing sessions currently checked out will be killed by the
-    // killOpThread.
-    ScopedBlockSessionCheckouts blockSessions(opCtx.get());
 
     // kill all write operations which are no longer safe to run on step down. Also, operations that
     // have taken global lock in S mode and operations blocked on prepare conflict will be killed to
@@ -791,11 +804,6 @@ void ReplicationCoordinatorImpl::_heartbeatReconfigFinish(
     if (_shouldStepDownOnReconfig(lk, newConfig, myIndex)) {
         _topCoord->prepareForUnconditionalStepDown();
         lk.unlock();
-
-        // To prevent a deadlock between session checkout and RSTL lock taking, disallow new
-        // sessions from being checked out. Existing sessions currently checked out will be killed
-        // by the killOpThread.
-        ScopedBlockSessionCheckouts blockSessions(opCtx.get());
 
         // Primary node will be either unelectable or removed after the configuration change.
         // So, finish the reconfig under RSTL, so that the step down occurs safely.

@@ -565,11 +565,15 @@ __wt_block_free(WT_SESSION_IMPL *session, WT_BLOCK *block, const uint8_t *addr, 
     wt_off_t offset;
     uint32_t checksum, objectid, size;
 
-    WT_UNUSED(addr_size);
     WT_STAT_DATA_INCR(session, block_free);
 
     /* Crack the cookie. */
-    WT_RET(__wt_block_buffer_to_addr(block, addr, &objectid, &offset, &size, &checksum));
+    WT_RET(__wt_block_addr_unpack(
+      session, block, addr, addr_size, &objectid, &offset, &size, &checksum));
+
+    /* We can't reuse free space in an object. */
+    if (objectid != block->objectid)
+        return (0);
 
     __wt_verbose(session, WT_VERB_BLOCK, "free %" PRIu32 ": %" PRIdMAX "/%" PRIdMAX, objectid,
       (intmax_t)offset, (intmax_t)size);
@@ -578,14 +582,11 @@ __wt_block_free(WT_SESSION_IMPL *session, WT_BLOCK *block, const uint8_t *addr, 
     WT_RET(__wt_block_misplaced(
       session, block, "free", offset, size, true, __PRETTY_FUNCTION__, __LINE__));
 #endif
-    if (objectid == block->objectid) {
-        WT_RET(__wt_block_ext_prealloc(session, 5));
-        __wt_spin_lock(session, &block->live_lock);
-        ret = __wt_block_off_free(session, block, objectid, offset, (wt_off_t)size);
-        __wt_spin_unlock(session, &block->live_lock);
-    } else {
-        /* TODO: update stats about older files to drive garbage collection. */
-    }
+
+    WT_RET(__wt_block_ext_prealloc(session, 5));
+    __wt_spin_lock(session, &block->live_lock);
+    ret = __wt_block_off_free(session, block, objectid, offset, (wt_off_t)size);
+    __wt_spin_unlock(session, &block->live_lock);
 
     return (ret);
 }
@@ -603,7 +604,7 @@ __wt_block_off_free(
     /* If a sync is running, no other sessions can free blocks. */
     WT_ASSERT(session, WT_SESSION_BTREE_SYNC_SAFE(session, S2BT(session)));
 
-    /* TODO: track stats for old files to drive garbage collection. */
+    /* We can't reuse free space in an object. */
     if (objectid != block->objectid)
         return (0);
 

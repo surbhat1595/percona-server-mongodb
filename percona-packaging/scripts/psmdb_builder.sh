@@ -321,6 +321,7 @@ install_deps() {
     fi
     CURPLACE=$(pwd)
     if [ "x$OS" = "xrpm" ]; then
+      yum -y update
       yum -y install wget
       add_percona_yum_repo
       wget http://jenkins.percona.com/yum-repo/percona-dev.repo
@@ -331,7 +332,6 @@ install_deps() {
       yum install -y patchelf
       RHEL=$(rpm --eval %rhel)
       if [ x"$RHEL" = x6 ]; then
-        yum -y update
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel git
         yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel libpcap-devel

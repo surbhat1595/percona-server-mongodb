@@ -978,9 +978,13 @@ build_tarball(){
         local r_path=$2
         for elf in $(find ${elf_path} -maxdepth 1 -exec file {} \; | grep 'ELF ' | cut -d':' -f1); do
             echo "Checking LD_RUNPATH for ${elf}"
-            if [ -z $(patchelf --print-rpath ${elf}) ]; then
+            local elf_rpath=$(patchelf --print-rpath ${elf})
+            if [ -z ${elf_rpath} ]; then
                 echo "Changing RUNPATH for ${elf}"
                 patchelf --set-rpath ${r_path} ${elf}
+            else
+                echo "Adding RUNPATH for ${elf}"
+                patchelf --set-rpath "${elf_rpath}:${r_path}" ${elf}
             fi
         done
     }

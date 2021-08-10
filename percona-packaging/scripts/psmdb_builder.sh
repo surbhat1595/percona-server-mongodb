@@ -666,11 +666,6 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
-    if [ x"${DEBIAN}" = "xbullseye" ]; then
-        sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
-        sed -i 's:etc/:/etc/:g' ${BUILDDIR}/debian/percona-server-mongodb-server.conffiles
-    fi
-    #
     mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.default
     mv ${BUILDDIR}/debian/mongod.service ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.service
     #
@@ -735,6 +730,10 @@ build_deb(){
     cp -av percona-packaging/debian/rules debian/
     set_compiler
     fix_rules
+    if [ x"${DEBIAN}" = "xbullseye" ]; then
+        sed -i 's:dh-systemd,::' debian/control
+        sed -i 's:etc/:/etc/:g' debian/percona-server-mongodb-server.conffiles
+    fi
     sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh
     sed -i 's|GitCommit="$(git rev-parse HEAD)"|GitCommit="$PSMDB_TOOLS_COMMIT_HASH"|' mongo-tools/set_goenv.sh
     sed -i 's|go build|go build -a -x|' mongo-tools/build.sh

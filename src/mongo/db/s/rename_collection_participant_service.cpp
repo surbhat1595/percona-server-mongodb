@@ -64,10 +64,6 @@ void dropCollectionLocally(OperationContext* opCtx, const NamespaceString& nss) 
         }
     }();
 
-    if (knownNss) {
-        uassertStatusOK(shardmetadatautil::dropChunksAndDeleteCollectionsEntry(opCtx, nss));
-    }
-
     LOGV2_DEBUG(5515100,
                 1,
                 "Dropped target collection locally on renameCollection participant",
@@ -82,25 +78,35 @@ void renameOrDropTarget(OperationContext* opCtx,
                         const NamespaceString& fromNss,
                         const NamespaceString& toNss,
                         const RenameCollectionOptions& options,
-                        const UUID& sourceUUID) {
+                        const UUID& sourceUUID,
+                        const boost::optional<UUID>& targetUUID) {
     {
         Lock::DBLock dbLock(opCtx, toNss.db(), MODE_IS);
         Lock::CollectionLock collLock(opCtx, toNss, MODE_IS);
         const auto targetCollPtr =
             CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, toNss);
-        if (targetCollPtr && targetCollPtr->uuid() == sourceUUID) {
-            // Early return if the rename previously succeeded
-            return;
+        if (targetCollPtr) {
+            if (targetCollPtr->uuid() == sourceUUID) {
+                // Early return if the rename previously succeeded
+                return;
+            }
+            uassert(5807602,
+                    str::stream() << "Target collection " << toNss
+                                  << " UUID does not match the provided UUID.",
+                    !targetUUID || targetCollPtr->uuid() == *targetUUID);
         }
     }
 
     {
-        // Clear CollectionShardingRuntime entry for the toNss collection.
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-        Lock::DBLock dbLock(opCtx, toNss.db(), MODE_IX);
-        Lock::CollectionLock collLock(opCtx, toNss, MODE_IX);
-        auto* csr = CollectionShardingRuntime::get(opCtx, toNss);
-        csr->clearFilteringMetadata(opCtx);
+        Lock::DBLock dbLock(opCtx, fromNss.db(), MODE_IS);
+        Lock::CollectionLock collLock(opCtx, fromNss, MODE_IS);
+        // ensure idempotency by checking sourceUUID
+        const auto sourceCollPtr =
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, fromNss);
+        uassert(ErrorCodes::CommandFailed,
+                str::stream() << "Source Collection " << fromNss
+                              << " UUID does not match provided uuid.",
+                !sourceCollPtr || sourceCollPtr->uuid() == sourceUUID);
     }
 
     try {
@@ -260,7 +266,8 @@ SemiFuture<void> RenameParticipantInstance::run(
                 _doc.getForwardableOpMetadata().setOn(opCtx);
 
                 const RenameCollectionOptions options{_doc.getDropTarget(), _doc.getStayTemp()};
-                renameOrDropTarget(opCtx, fromNss(), toNss(), options, _doc.getSourceUUID());
+                renameOrDropTarget(
+                    opCtx, fromNss(), toNss(), options, _doc.getSourceUUID(), _doc.getTargetUUID());
 
                 restoreRangeDeletionTasksForRename(opCtx, toNss());
             }))
@@ -296,6 +303,34 @@ SemiFuture<void> RenameParticipantInstance::run(
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
 
+                // Clear the CollectionShardingRuntime entry
+                auto clearFilteringMetadata = [&](const NamespaceString& nss) {
+                    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+                    Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+                    Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
+                    auto* csr = CollectionShardingRuntime::get(opCtx, nss);
+                    csr->clearFilteringMetadata(opCtx);
+                };
+                clearFilteringMetadata(fromNss());
+                clearFilteringMetadata(toNss());
+
+                // Force the refresh of the catalog cache for both source and destination
+                // collections to purge outdated information.
+                //
+                // (SERVER-58465) Note that we have to wait for the asynchronous tasks submitted to
+                // the background thread of the ShardServerCatalogCacheLoader because those tasks
+                // might conflict with the next refresh if the loader relies on UUID-based
+                // config.cache.chunks.* collections.
+                const auto catalog = Grid::get(opCtx)->catalogCache();
+                uassertStatusOK(catalog->getCollectionRoutingInfoWithRefresh(opCtx, fromNss()));
+                CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, fromNss());
+
+                uassertStatusOK(catalog->getCollectionRoutingInfoWithRefresh(opCtx, toNss()));
+                CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, toNss());
+
+                repl::ReplClientInfo::forClient(opCtx->getClient())
+                    .setLastOpToSystemLastOpTime(opCtx);
+
                 // Release source/target critical sections
                 const auto reason =
                     BSON("command"
@@ -306,9 +341,6 @@ SemiFuture<void> RenameParticipantInstance::run(
                     opCtx, fromNss(), reason, ShardingCatalogClient::kLocalWriteConcern);
                 service->releaseRecoverableCriticalSection(
                     opCtx, toNss(), reason, ShardingCatalogClient::kMajorityWriteConcern);
-
-                Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(fromNss());
-                Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(toNss());
 
                 LOGV2(5515107, "CRUD unblocked", "fromNs"_attr = fromNss(), "toNs"_attr = toNss());
             }))

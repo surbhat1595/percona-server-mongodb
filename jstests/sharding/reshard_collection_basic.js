@@ -9,6 +9,7 @@
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/uuid_util.js");
 load("jstests/sharding/libs/find_chunks_util.js");
+load("jstests/libs/discover_topology.js");
 
 (function() {
 'use strict';
@@ -21,6 +22,12 @@ const mongos = st.s0;
 const mongosConfig = mongos.getDB('config');
 const kNumInitialDocs = 500;
 
+const criticalSectionTimeoutMS = 24 * 60 * 60 * 1000; /* 1 day */
+const topology = DiscoverTopology.findConnectedNodes(mongos);
+const coordinator = new Mongo(topology.configsvr.nodes[0]);
+assert.commandWorked(coordinator.getDB("admin").adminCommand(
+    {setParameter: 1, reshardingCriticalSectionTimeoutMillis: criticalSectionTimeoutMS}));
+
 let shardToRSMap = {};
 shardToRSMap[st.shard0.shardName] = st.rs0;
 shardToRSMap[st.shard1.shardName] = st.rs1;
@@ -28,11 +35,6 @@ shardToRSMap[st.shard1.shardName] = st.rs1;
 let shardIdToShardMap = {};
 shardIdToShardMap[st.shard0.shardName] = st.shard0;
 shardIdToShardMap[st.shard1.shardName] = st.shard1;
-
-const DDLFeatureFlagParam = assert.commandWorked(st.configRS.getPrimary().adminCommand(
-    {getParameter: 1, featureFlagShardingFullDDLSupportTimestampedVersion: 1}));
-const isDDLFeatureFlagEnabled =
-    DDLFeatureFlagParam.featureFlagShardingFullDDLSupportTimestampedVersion.value;
 
 let getUUIDFromCollectionInfo = (dbName, collName, collInfo) => {
     if (collInfo) {
@@ -57,11 +59,8 @@ let getAllShardIdsFromExpectedChunks = (expectedChunks) => {
 };
 
 let verifyChunksMatchExpected = (numExpectedChunks, presetExpectedChunks) => {
-    let chunkQuery = {ns: ns};
-    if (isDDLFeatureFlagEnabled) {
-        let collEntry = mongos.getDB('config').getCollection('collections').findOne({_id: ns});
-        chunkQuery = {uuid: collEntry.uuid};
-    }
+    let collEntry = mongos.getDB('config').getCollection('collections').findOne({_id: ns});
+    let chunkQuery = {uuid: collEntry.uuid};
 
     const reshardedChunks = mongosConfig.chunks.find(chunkQuery).toArray();
 

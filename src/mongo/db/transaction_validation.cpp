@@ -50,7 +50,14 @@ const StringMap<int> retryableWriteCommands = {{"delete", 1},
                                                {"findAndModify", 1},
                                                {"insert", 1},
                                                {"update", 1},
-                                               {"_recvChunkStart", 1}};
+                                               {"_recvChunkStart", 1},
+                                               {"_configsvrRemoveChunks", 1},
+                                               {"_configsvrRemoveTags", 1},
+                                               {"_shardsvrCreateCollectionParticipant", 1},
+                                               {"_shardsvrDropCollectionParticipant", 1},
+                                               {"_shardsvrRenameCollectionParticipant", 1},
+                                               {"_shardsvrRenameCollectionParticipantUnblock", 1},
+                                               {"_configsvrRenameCollectionMetadata", 1}};
 
 // Commands that can be sent with session info but should not check out a session.
 const StringMap<int> skipSessionCheckoutList = {
@@ -96,7 +103,7 @@ void validateSessionOptions(const OperationSessionInfoFromClient& sessionOptions
     }
 
     if (!sessionOptions.getAutocommit() && sessionOptions.getTxnNumber()) {
-        uassert(50768,
+        uassert(ErrorCodes::NotARetryableWriteCommand,
                 "txnNumber may only be provided for multi-document transactions and retryable "
                 "write commands. autocommit:false was not provided, and {} is not a retryable "
                 "write command."_format(cmdName),

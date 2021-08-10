@@ -2592,11 +2592,6 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &stepdownHangBeforeRSTLEnqueue, opCtx, "stepdownHangBeforeRSTLEnqueue");
 
-    // To prevent a deadlock between session checkout and RSTL lock taking, disallow new sessions
-    // from being checked out. Existing sessions currently checked out will be killed by the
-    // killOpThread.
-    ScopedBlockSessionCheckouts blockSessions(opCtx);
-
     // Using 'force' sets the default for the wait time to zero, which means the stepdown will
     // fail if it does not acquire the lock immediately. In such a scenario, we use the
     // stepDownUntil deadline instead.
@@ -3663,11 +3658,6 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
     if (isForceReconfig && _shouldStepDownOnReconfig(lk, newConfig, myIndex)) {
         _topCoord->prepareForUnconditionalStepDown();
         lk.unlock();
-
-        // To prevent a deadlock between session checkout and RSTL lock taking, disallow new
-        // sessions from being checked out. Existing sessions currently checked out will be killed
-        // by the killOpThread.
-        ScopedBlockSessionCheckouts blockSessions(opCtx);
 
         // Primary node won't be electable or removed after the configuration change.
         // So, finish the reconfig under RSTL, so that the step down occurs safely.
@@ -4848,9 +4838,9 @@ const ReadPreference ReplicationCoordinatorImpl::_getSyncSourceReadPreference(Wi
         }
     }
     if (!parsedSyncSourceFromInitialSync && !memberState.primary() &&
-        !_rsConfig.isChainingAllowed()) {
-        // If we are not the primary and chaining is disabled in the config, we should only be
-        // syncing from the primary.
+        !_rsConfig.isChainingAllowed() && !enableOverrideClusterChainingSetting.load()) {
+        // If we are not the primary and chaining is disabled in the config (without overrides), we
+        // should only be syncing from the primary.
         readPreference = ReadPreference::PrimaryOnly;
     }
     return readPreference;
@@ -4964,8 +4954,14 @@ OpTime ReplicationCoordinatorImpl::_recalculateStableOpTime(WithLock lk) {
     auto commitPoint = _topCoord->getLastCommittedOpTime();
     auto lastApplied = _topCoord->getMyLastAppliedOpTime();
     if (_currentCommittedSnapshot) {
-        invariant(_currentCommittedSnapshot->getTimestamp() <= commitPoint.getTimestamp());
-        invariant(*_currentCommittedSnapshot <= commitPoint);
+        invariant(_currentCommittedSnapshot->getTimestamp() <= commitPoint.getTimestamp(),
+                  str::stream() << "currentCommittedSnapshot: "
+                                << _currentCommittedSnapshot->toString()
+                                << " commitPoint: " << commitPoint.toString());
+        invariant(*_currentCommittedSnapshot <= commitPoint,
+                  str::stream() << "currentCommittedSnapshot: "
+                                << _currentCommittedSnapshot->toString()
+                                << " commitPoint: " << commitPoint.toString());
     }
 
     //
@@ -5009,10 +5005,20 @@ OpTime ReplicationCoordinatorImpl::_recalculateStableOpTime(WithLock lk) {
 
     // Check that the selected stable optime does not exceed our maximum and that it does not
     // surpass the no-overlap point.
-    invariant(stableOpTime.getTimestamp() <= maximumStableOpTime.getTimestamp());
-    invariant(stableOpTime <= maximumStableOpTime);
-    invariant(stableOpTime.getTimestamp() <= noOverlap.getTimestamp());
-    invariant(stableOpTime <= noOverlap);
+    invariant(stableOpTime.getTimestamp() <= maximumStableOpTime.getTimestamp(),
+              str::stream() << "stableOpTime: " << stableOpTime.toString()
+                            << " maximumStableOpTime: " << maximumStableOpTime.toString());
+    invariant(stableOpTime <= maximumStableOpTime,
+              str::stream() << "stableOpTime: " << stableOpTime.toString()
+                            << " maximumStableOpTime: " << maximumStableOpTime.toString());
+    invariant(stableOpTime.getTimestamp() <= noOverlap.getTimestamp(),
+              str::stream() << "stableOpTime: " << stableOpTime.toString() << " noOverlap: "
+                            << noOverlap.toString() << " lastApplied: " << lastApplied.toString()
+                            << " allDurableOpTime: " << allDurableOpTime.toString());
+    invariant(stableOpTime <= noOverlap,
+              str::stream() << "stableOpTime: " << stableOpTime.toString() << " noOverlap: "
+                            << noOverlap.toString() << " lastApplied: " << lastApplied.toString()
+                            << " allDurableOpTime: " << allDurableOpTime.toString());
 
     return stableOpTime;
 }

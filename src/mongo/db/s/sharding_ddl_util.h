@@ -55,24 +55,38 @@ void sendAuthenticatedCommandToShards(OperationContext* opCtx,
                                       const std::shared_ptr<executor::TaskExecutor>& executor);
 
 /**
+ * Erase tags metadata from config server for the given namespace, using the _configsvrRemoveTags
+ * command as a retryable write to ensure idempotency.
+ */
+void removeTagsMetadataFromConfig(OperationContext* opCtx,
+                                  const NamespaceString& nss,
+                                  const OperationSessionInfo& osi);
+
+/**
  * Erase tags metadata from config server for the given namespace.
  */
-void removeTagsMetadataFromConfig(OperationContext* opCtx, const NamespaceString& nss);
+void removeTagsMetadataFromConfig_notIdempotent(OperationContext* opCtx,
+                                                const NamespaceString& nss,
+                                                const WriteConcernOptions& writeConcern);
 
 
 /**
  * Erase collection metadata from config server and invalidate the locally cached one.
- * In particular remove chunks, tags and the description associated with the given namespace.
+ * In particular remove the collection and chunks metadata associated with the given namespace.
  */
-void removeCollMetadataFromConfig(OperationContext* opCtx, const CollectionType& coll);
+void removeCollAndChunksMetadataFromConfig(OperationContext* opCtx,
+                                           const CollectionType& coll,
+                                           const WriteConcernOptions& writeConcern);
 
 /**
  * Erase collection metadata from config server and invalidate the locally cached one.
- * In particular remove chunks, tags and the description associated with the given namespace.
+ * In particular remove the collection and chunks metadata associated with the given namespace.
  *
  * Returns true if the collection existed before being removed.
  */
-bool removeCollMetadataFromConfig(OperationContext* opCtx, const NamespaceString& nss);
+bool removeCollAndChunksMetadataFromConfig_notIdempotent(OperationContext* opCtx,
+                                                         const NamespaceString& nss,
+                                                         const WriteConcernOptions& writeConcern);
 
 /**
  * Rename sharded collection metadata as part of a renameCollection operation.
@@ -84,7 +98,8 @@ bool removeCollMetadataFromConfig(OperationContext* opCtx, const NamespaceString
  */
 void shardedRenameMetadata(OperationContext* opCtx,
                            CollectionType& fromCollType,
-                           const NamespaceString& toNss);
+                           const NamespaceString& toNss,
+                           const WriteConcernOptions& writeConcern);
 
 /**
  * Ensures rename preconditions for sharded collections are met:
@@ -120,14 +135,41 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadySharded(
 
 /**
  * Stops ongoing migrations and prevents future ones to start for the given nss.
+ * If expectedCollectionUUID is set and doesn't match that of that collection, then this is a no-op.
  */
-void stopMigrations(OperationContext* opCtx, const NamespaceString& nss);
+void stopMigrations(OperationContext* opCtx,
+                    const NamespaceString& nss,
+                    const boost::optional<UUID>& expectedCollectionUUID);
 
 /*
  * Returns the UUID of the collection (if exists) using the catalog. It does not provide any locking
  *guarantees.
  **/
 boost::optional<UUID> getCollectionUUID(OperationContext* opCtx, const NamespaceString& nss);
+
+/*
+ * Performs a noop retryable write on the given shards using the session and txNumber specified in
+ * 'osi'
+ */
+void performNoopRetryableWriteOnShards(OperationContext* opCtx,
+                                       const std::vector<ShardId>& shardIds,
+                                       const OperationSessionInfo& osi,
+                                       const std::shared_ptr<executor::TaskExecutor>& executor);
+
+
+/*
+ * Performs a noop write locally with majority write concern.
+ */
+void performNoopMajorityWriteLocally(OperationContext* opCtx);
+
+/**
+ * Sends the _shardsvrDropCollectionParticipant command to the specified shards.
+ */
+void sendDropCollectionParticipantCommandToShards(OperationContext* opCtx,
+                                                  const NamespaceString& nss,
+                                                  const std::vector<ShardId>& shardIds,
+                                                  std::shared_ptr<executor::TaskExecutor> executor,
+                                                  const OperationSessionInfo& osi);
 
 }  // namespace sharding_ddl_util
 }  // namespace mongo

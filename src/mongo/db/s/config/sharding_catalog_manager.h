@@ -335,6 +335,7 @@ public:
      */
     void setAllowMigrationsAndBumpOneChunk(OperationContext* opCtx,
                                            const NamespaceString& nss,
+                                           const boost::optional<UUID>& collectionUUID,
                                            bool allowMigrations);
 
     //
@@ -471,6 +472,7 @@ public:
     void renameShardedMetadata(OperationContext* opCtx,
                                const NamespaceString& from,
                                const NamespaceString& to,
+                               const WriteConcernOptions& writeConcern,
                                boost::optional<CollectionType> optFromCollType);
 
     //

@@ -666,7 +666,6 @@ build_source_deb(){
     #
     if [ x"${DEBIAN}" = "xbullseye" ]; then
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
-        #sed -i 's:etc/:/etc/:g' ${BUILDDIR}/debian/percona-server-mongodb-server.conffiles
     fi
     #
     mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.default

@@ -242,6 +242,9 @@ install_gcc_8_deb(){
     if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xdisco -o x"${DEBIAN}" = xbuster ]; then
         apt-get -y install gcc-8 g++-8
     fi
+    if [ x"${DEBIAN}" = xbullseye ]; then
+        apt-get -y install gcc-10 g++-10
+    fi
     if [ x"${DEBIAN}" = xstretch ]; then
         wget https://jenkins.percona.com/downloads/gcc8/gcc-8.3.0_Debian-stretch-x64.tar.gz -O /tmp/gcc-8.3.0_Debian-stretch-x64.tar.gz
         tar -zxf /tmp/gcc-8.3.0_Debian-stretch-x64.tar.gz
@@ -255,6 +258,9 @@ set_compiler(){
         if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xdisco -o x"${DEBIAN}" = xbuster ]; then
             export CC=/usr/bin/gcc-8
             export CXX=/usr/bin/g++-8
+	elif [ x"${DEBIAN}" = xbullseye ]; then
+            export CC=/usr/bin/gcc-10
+            export CXX=/usr/bin/g++-10
         else
             export CC=/usr/local/gcc-8.3.0/bin/gcc-8.3
             export CXX=/usr/local/gcc-8.3.0/bin/g++-8.3
@@ -274,6 +280,9 @@ fix_rules(){
     if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xdisco -o x"${DEBIAN}" = xbuster ]; then
         sed -i 's|CC = gcc-5|CC = /usr/bin/gcc-8|' debian/rules
         sed -i 's|CXX = g++-5|CXX = /usr/bin/g++-8|' debian/rules
+    elif [ x"${DEBIAN}" = xbullseye ]; then
+        sed -i 's|CC = gcc-5|CC = /usr/bin/gcc-10|' debian/rules
+        sed -i 's|CXX = g++-5|CXX = /usr/bin/g++-10|' debian/rules
     else
         sed -i 's|CC = gcc-5|CC = /usr/local/gcc-8.3.0/bin/gcc-8.3|' debian/rules
         sed -i 's|CXX = g++-5|CXX = /usr/local/gcc-8.3.0/bin/g++-8.3|' debian/rules
@@ -321,6 +330,7 @@ install_deps() {
     fi
     CURPLACE=$(pwd)
     if [ "x$OS" = "xrpm" ]; then
+      yum -y update
       yum -y install wget
       add_percona_yum_repo
       wget http://jenkins.percona.com/yum-repo/percona-dev.repo
@@ -331,7 +341,6 @@ install_deps() {
       yum install -y patchelf
       RHEL=$(rpm --eval %rhel)
       if [ x"$RHEL" = x6 ]; then
-        yum -y update
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel git
         yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel libpcap-devel
@@ -385,7 +394,7 @@ install_deps() {
       DEBIAN_FRONTEND=noninteractive apt-get -y install curl lsb-release wget apt-transport-https software-properties-common
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-      wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb && dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
+      wget https://repo.percona.com/apt/pool/testing/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
       if [ x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
         add-apt-repository -y ppa:deadsnakes/ppa
       elif [ x"${DEBIAN}" = "xstretch" -o x"${DEBIAN}" = "xbuster" ]; then
@@ -395,9 +404,14 @@ install_deps() {
       fi
       percona-release enable tools testing
       apt-get update
-      INSTALL_LIST="git python3.7 python3.7-dev valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev dh-systemd libsasl2-dev gcc g++ cmake curl"
+      if [ x"${DEBIAN}" = "xbullseye" ]; then
+        INSTALL_LIST="python3 python3-dev python3-pip"
+      else
+        INSTALL_LIST="python3.7 python3.7-dev dh-systemd"
+      fi
+      INSTALL_LIST="${INSTALL_LIST} git valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
       INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf"
-      if [ x"${DEBIAN}" != "xstretch" ]; then
+      if [ x"${DEBIAN}" != "xstretch" -a x"${DEBIAN}" != "xbullseye" ]; then
         INSTALL_LIST="${INSTALL_LIST} python3.7-distutils"
       fi
       until apt-get -y install dirmngr; do
@@ -412,8 +426,12 @@ install_deps() {
       install_golang
       install_gcc_8_deb
       wget https://bootstrap.pypa.io/get-pip.py
-      update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
-      ln -sf /usr/bin/python3.7 /usr/bin/python3
+      if [ x"${DEBIAN}" = "xbullseye" ]; then
+        update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
+      else
+        update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
+        ln -sf /usr/bin/python3.7 /usr/bin/python3
+      fi
       python get-pip.py
       easy_install pip
       pip install setuptools
@@ -646,6 +664,10 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
+    if [ x"${DEBIAN}" = "xbullseye" ]; then
+        sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
+    fi
+    #
     mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.default
     mv ${BUILDDIR}/debian/mongod.service ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.service
     #
@@ -710,6 +732,10 @@ build_deb(){
     cp -av percona-packaging/debian/rules debian/
     set_compiler
     fix_rules
+    if [ x"${DEBIAN}" = "xbullseye" ]; then
+        sed -i 's:dh-systemd,::' debian/control
+        sed -i 's:etc/:/etc/:g' debian/percona-server-mongodb-server.conffiles
+    fi
     sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh
     sed -i 's|GitCommit="$(git rev-parse HEAD)"|GitCommit="$PSMDB_TOOLS_COMMIT_HASH"|' mongo-tools/set_goenv.sh
     sed -i 's|go build|go build -a -x|' mongo-tools/build.sh

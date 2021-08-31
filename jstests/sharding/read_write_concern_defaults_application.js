@@ -84,6 +84,7 @@ let testCases = {
     _configsvrCleanupReshardCollection: {skip: "internal command"},
     _configsvrClearJumboFlag: {skip: "internal command"},
     _configsvrCommitChunkMerge: {skip: "internal command"},
+    _configsvrCommitChunksMerge: {skip: "internal command"},
     _configsvrCommitChunkMigration: {skip: "internal command"},
     _configsvrCommitChunkSplit: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"},
@@ -120,6 +121,7 @@ let testCases = {
     _recvChunkCommit: {skip: "internal command"},
     _recvChunkStart: {skip: "internal command"},
     _recvChunkStatus: {skip: "internal command"},
+    _shardsvrAbortReshardCollection: {skip: "internal command"},
     _shardsvrCleanupReshardCollection: {skip: "internal command"},
     _shardsvrCloneCatalogData: {skip: "internal command"},
     _shardsvrCreateCollection: {skip: "internal command"},
@@ -141,7 +143,8 @@ let testCases = {
     abortReshardCollection: {skip: "does not accept read or write concern"},
     abortTransaction: {
         setUp: function(conn) {
-            assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: 1}}));
+            assert.commandWorked(
+                conn.getDB(db).runCommand({create: coll, writeConcern: {w: 'majority'}}));
             // Ensure that the dbVersion is known.
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
             assert.eq(1,
@@ -218,7 +221,8 @@ let testCases = {
     commitReshardCollection: {skip: "does not accept read or write concern"},
     commitTransaction: {
         setUp: function(conn) {
-            assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: 1}}));
+            assert.commandWorked(
+                conn.getDB(db).runCommand({create: coll, writeConcern: {w: 'majority'}}));
             // Ensure that the dbVersion is known.
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
             assert.eq(1,

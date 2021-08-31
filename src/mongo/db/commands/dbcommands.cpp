@@ -91,7 +91,7 @@
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/timeseries/timeseries_lookup.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/async_request_executor.h"
@@ -143,7 +143,8 @@ std::unique_ptr<CollMod> makeTimeseriesCollModCommand(OperationContext* opCtx,
     cmd->setViewOn(origCmd.getViewOn());
     cmd->setPipeline(origCmd.getPipeline());
     cmd->setRecordPreImages(origCmd.getRecordPreImages());
-    cmd->setClusteredIndex(origCmd.getClusteredIndex());
+    cmd->setExpireAfterSeconds(origCmd.getExpireAfterSeconds());
+    cmd->setTimeseries(origCmd.getTimeseries());
 
     return cmd;
 }
@@ -408,23 +409,24 @@ public:
                 keyPattern = Helpers::inferKeyPattern(min);
             }
 
-            const IndexDescriptor* idx =
-                collection->getIndexCatalog()->findShardKeyPrefixedIndex(opCtx,
-                                                                         keyPattern,
-                                                                         true);  // requireSingleKey
+            auto catalog = collection->getIndexCatalog();
+            auto shardKeyIdx = catalog->findShardKeyPrefixedIndex(opCtx,
+                                                                  *collection,
+                                                                  keyPattern,
+                                                                  /*requireSingleKey=*/true);
 
-            if (idx == nullptr) {
+            if (shardKeyIdx == nullptr) {
                 errmsg = "couldn't find valid index containing key pattern";
                 return false;
             }
             // If both min and max non-empty, append MinKey's to make them fit chosen index
-            KeyPattern kp(idx->keyPattern());
+            KeyPattern kp(shardKeyIdx->keyPattern());
             min = Helpers::toKeyFormat(kp.extendRangeBound(min, false));
             max = Helpers::toKeyFormat(kp.extendRangeBound(max, false));
 
             exec = InternalPlanner::indexScan(opCtx,
                                               &collection.getCollection(),
-                                              idx,
+                                              shardKeyIdx,
                                               min,
                                               max,
                                               BoundInclusion::kIncludeStartKeyOnly,

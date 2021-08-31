@@ -4,6 +4,7 @@
  * Concurrently performs DDL commands and verifies guarantees are not broken.
  *
  * @tags: [
+ *   requires_fcv_50,
  *   requires_sharding,
  *   # TODO (SERVER-56879): Support add/remove shards in new DDL paths
  *   does_not_support_add_remove_shards,
@@ -47,11 +48,16 @@ var $config = (function() {
             const srcCollName = srcColl.getFullName();
 
             // Rename collection
-            const destCollName = getRandomCollection(db).getFullName();
-            jsTestLog('Executing rename state:' + srcCollName + ' to ' + destCollName);
+            const destCollNS = getRandomCollection(db).getFullName();
+            const destCollName = destCollNS.split('.')[1];
+            jsTestLog('Executing rename state:' + srcCollName + ' to ' + destCollNS);
+
             assertAlways.commandWorkedOrFailedWithCode(
-                srcColl.renameCollection(destCollName, true /* dropTarget */),
-                [ErrorCodes.NamespaceNotFound, ErrorCodes.ConflictingOperationInProgress]);
+                srcColl.renameCollection(destCollName, true /* dropTarget */), [
+                    ErrorCodes.NamespaceNotFound,
+                    ErrorCodes.ConflictingOperationInProgress,
+                    ErrorCodes.IllegalOperation
+                ]);
         }
     };
 

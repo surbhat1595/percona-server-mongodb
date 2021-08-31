@@ -35,6 +35,7 @@ imports:
     - "mongo/db/auth/access_checks.idl"
     - "mongo/idl/basic_types.idl"
     - "mongo/db/catalog/collection_options.idl"
+    - "mongo/db/timeseries/timeseries.idl"
 
 structs:
     CollModIndex:
@@ -71,15 +72,13 @@ structs:
                 optional: true
                 type: safeBool
 
-    CollModClusteredIndex:
-        description: "A type representing the adjustable options on clustered indexes"
+    CollModTimeseries:
+        description: "A type representing the adjustable options on timeseries collections"
         strict: true
         fields:
-            expireAfterSeconds:
-                description: "The number of seconds after which old data should be deleted. This can
-                              be disabled by passing in 'off' as a value"
-                type:
-                    variant: [string, safeInt64]
+            granularity:
+                optional: true
+                type: BucketGranularity
 
 commands:
     collMod:
@@ -137,8 +136,14 @@ commands:
                               document in the oplog"
                 optional: true
                 type: safeBool
-            clusteredIndex:
-                description: "Adjusts the options on clustered indexes"
+            expireAfterSeconds:
+                description: "The number of seconds after which old data should be deleted. This can
+                              be disabled by passing in 'off' as a value"
                 optional: true
-                type: CollModClusteredIndex
+                type:
+                    variant: [string, safeInt64]
+            timeseries:
+                description: "Adjusts parameters for timeseries collections"
+                optional: true
+                type: CollModTimeseries
         reply_type: CollModReply

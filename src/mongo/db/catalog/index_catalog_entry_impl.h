@@ -57,7 +57,7 @@ class IndexCatalogEntryImpl : public IndexCatalogEntry {
 
 public:
     IndexCatalogEntryImpl(OperationContext* opCtx,
-                          RecordId catalogId,
+                          const CollectionPtr& collection,
                           const std::string& ident,
                           std::unique_ptr<IndexDescriptor> descriptor,  // ownership passes to me
                           bool isFrozen);
@@ -77,10 +77,7 @@ public:
         return _descriptor.get();
     }
 
-    IndexAccessMethod* accessMethod() final {
-        return _accessMethod.get();
-    }
-    const IndexAccessMethod* accessMethod() const final {
+    IndexAccessMethod* accessMethod() const final {
         return _accessMethod.get();
     }
 
@@ -127,7 +124,7 @@ public:
     /**
      * Returns true if this index is multikey, and returns false otherwise.
      */
-    bool isMultikey() const final;
+    bool isMultikey(OperationContext* const opCtx, const CollectionPtr& collection) const final;
 
     /**
      * Returns the path components that cause this index to be multikey if this index supports
@@ -138,7 +135,8 @@ public:
      * returns a vector with size equal to the number of elements in the index key pattern where
      * each element in the vector is an empty set.
      */
-    MultikeyPaths getMultikeyPaths(OperationContext* opCtx) const final;
+    MultikeyPaths getMultikeyPaths(OperationContext* opCtx,
+                                   const CollectionPtr& collection) const final;
 
     /**
      * Sets this index to be multikey. Information regarding which newly detected path components
@@ -158,14 +156,14 @@ public:
     void setMultikey(OperationContext* opCtx,
                      const CollectionPtr& coll,
                      const KeyStringSet& multikeyMetadataKeys,
-                     const MultikeyPaths& multikeyPaths) final;
+                     const MultikeyPaths& multikeyPaths) const final;
 
     void forceSetMultikey(OperationContext* const opCtx,
                           const CollectionPtr& coll,
                           bool isMultikey,
-                          const MultikeyPaths& multikeyPaths) final;
+                          const MultikeyPaths& multikeyPaths) const final;
 
-    bool isReady(OperationContext* opCtx) const final;
+    bool isReady(OperationContext* opCtx, const CollectionPtr& collection) const final;
 
     bool isFrozen() const final;
 
@@ -194,21 +192,23 @@ private:
      */
     Status _setMultikeyInMultiDocumentTransaction(OperationContext* opCtx,
                                                   const CollectionPtr& collection,
-                                                  const MultikeyPaths& multikeyPaths);
+                                                  const MultikeyPaths& multikeyPaths) const;
 
     /**
      * Retrieves the multikey information associated with this index from '_collection',
      *
      * See CollectionCatalogEntry::isIndexMultikey() for more details.
      */
-    bool _catalogIsMultikey(OperationContext* opCtx, MultikeyPaths* multikeyPaths) const;
+    bool _catalogIsMultikey(OperationContext* opCtx,
+                            const CollectionPtr& collection,
+                            MultikeyPaths* multikeyPaths) const;
 
     /**
      * Sets on-disk multikey flag for this index.
      */
     void _catalogSetMultikey(OperationContext* opCtx,
                              const CollectionPtr& collection,
-                             const MultikeyPaths& multikeyPaths);
+                             const MultikeyPaths& multikeyPaths) const;
 
     // -----
 
@@ -233,31 +233,6 @@ private:
     bool _isReady;              // cache of NamespaceDetails info
     bool _isFrozen;
     AtomicWord<bool> _isDropped;  // Whether the index drop is committed.
-
-    // Set to true if this index can track path-level multikey information in the catalog. This
-    // member is effectively const after IndexCatalogEntry::init() is called.
-    bool _indexTracksMultikeyPathsInCatalog = false;
-
-    // Set to true if this index may contain multikey data.
-    AtomicWord<bool> _isMultikeyForRead;
-
-    // Set to true after a transaction commit successfully updates multikey on the catalog data. At
-    // this point, future writers do not need to update the catalog.
-    AtomicWord<bool> _isMultikeyForWrite;
-
-    // Controls concurrent access to '_indexMultikeyPaths'. We acquire this mutex rather than the
-    // RESOURCE_METADATA lock as a performance optimization so that it is cheaper to detect whether
-    // there is actually any path-level multikey information to update or not.
-    mutable Mutex _indexMultikeyPathsMutex =
-        MONGO_MAKE_LATCH("IndexCatalogEntryImpl::_indexMultikeyPathsMutex");
-
-    // Non-empty only if '_indexTracksPathLevelMultikeyInfo' is true.
-    //
-    // If non-empty, '_indexMultikeyPaths' is a vector with size equal to the number of elements
-    // in the index key pattern. Each element in the vector is an ordered set of positions (starting
-    // at 0) into the corresponding indexed field that represent what prefixes of the indexed field
-    // causes the index to be multikey.
-    MultikeyPaths _indexMultikeyPaths;
 
     // The earliest snapshot that is allowed to read this index.
     boost::optional<Timestamp> _minVisibleSnapshot;

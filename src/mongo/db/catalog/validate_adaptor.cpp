@@ -102,7 +102,9 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
         auto multikeyMetadataKeys = executionCtx.multikeyMetadataKeys();
         auto documentMultikeyPaths = executionCtx.multikeyPaths();
 
-        iam->getKeys(executionCtx.pooledBufferBuilder(),
+        iam->getKeys(opCtx,
+                     coll,
+                     executionCtx.pooledBufferBuilder(),
                      recordBson,
                      IndexAccessMethod::GetKeysMode::kEnforceConstraints,
                      IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -117,7 +119,7 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
             {multikeyMetadataKeys->begin(), multikeyMetadataKeys->end()},
             *documentMultikeyPaths);
 
-        if (!index->isMultikey() && shouldBeMultikey) {
+        if (!index->isMultikey(opCtx, coll) && shouldBeMultikey) {
             if (_validateState->fixErrors()) {
                 writeConflictRetry(opCtx, "setIndexAsMultikey", coll->ns().ns(), [&] {
                     WriteUnitOfWork wuow(opCtx);
@@ -146,8 +148,8 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
             }
         }
 
-        if (index->isMultikey()) {
-            const MultikeyPaths& indexPaths = index->getMultikeyPaths(opCtx);
+        if (index->isMultikey(opCtx, coll)) {
+            const MultikeyPaths& indexPaths = index->getMultikeyPaths(opCtx, coll);
             if (!MultikeyPathTracker::covers(indexPaths, *documentMultikeyPaths.get())) {
                 if (_validateState->fixErrors()) {
                     writeConflictRetry(opCtx, "increaseMultikeyPathCoverage", coll->ns().ns(), [&] {
@@ -370,7 +372,7 @@ void ValidateAdaptor::traverseIndex(OperationContext* opCtx,
 
         // If this collection has documents that make this index multikey, then check whether those
         // multikey paths match the index's metadata.
-        auto indexPaths = index->getMultikeyPaths(opCtx);
+        auto indexPaths = index->getMultikeyPaths(opCtx, _validateState->getCollection());
         auto& documentPaths = indexInfo.docMultikeyPaths;
         if (indexInfo.multikeyDocs && documentPaths != indexPaths) {
             LOGV2(5367500,
@@ -403,7 +405,7 @@ void ValidateAdaptor::traverseIndex(OperationContext* opCtx,
         }
 
         // If this index does not need to be multikey, then unset the flag.
-        if (index->isMultikey() && !indexInfo.multikeyDocs) {
+        if (index->isMultikey(opCtx, _validateState->getCollection()) && !indexInfo.multikeyDocs) {
             invariant(!indexInfo.docMultikeyPaths.size());
 
             LOGV2(5367501,
@@ -537,6 +539,25 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
 
                 nInvalid++;
             }
+        } else {
+            // If the document is not corrupted, validate the document against this collection's
+            // schema validator. Don't treat invalid documents as errors since documents can bypass
+            // document validation when being inserted or updated.
+            status = _validateState->getCollection()->checkValidation(opCtx, record->data.toBson());
+            if (!status.isOK()) {
+                LOGV2_WARNING(5363500,
+                              "Document is not compliant with the collection's schema",
+                              logAttrs(_validateState->getCollection()->ns()),
+                              "recordId"_attr = record->id,
+                              "reason"_attr = status);
+
+                if (!_validateState->isCollectionSchemaViolated()) {
+                    _validateState->setCollectionSchemaViolated();
+                    results->warnings.push_back(
+                        "Detected one or more documents not compliant with the collection's "
+                        "schema. See logs.");
+                }
+            }
         }
 
         prevRecordId = record->id;
@@ -575,7 +596,8 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
     }
 }
 
-void ValidateAdaptor::validateIndexKeyCount(const IndexCatalogEntry* index,
+void ValidateAdaptor::validateIndexKeyCount(OperationContext* opCtx,
+                                            const IndexCatalogEntry* index,
                                             IndexValidateResults& results) {
     // Fetch the total number of index entries we previously found traversing the index.
     const IndexDescriptor* desc = index->descriptor();
@@ -601,7 +623,8 @@ void ValidateAdaptor::validateIndexKeyCount(const IndexCatalogEntry* index,
     }
 
     // Hashed indexes may never be multikey.
-    if (desc->getAccessMethodName() == IndexNames::HASHED && index->isMultikey()) {
+    if (desc->getAccessMethodName() == IndexNames::HASHED &&
+        index->isMultikey(opCtx, _validateState->getCollection())) {
         results.errors.push_back(str::stream() << "Hashed index is incorrectly marked multikey: "
                                                << desc->indexName());
         results.valid = false;
@@ -611,7 +634,7 @@ void ValidateAdaptor::validateIndexKeyCount(const IndexCatalogEntry* index,
     // collection. This check is only valid for indexes that are not multikey (indexed arrays
     // produce an index key per array entry) and not $** indexes which can produce index keys for
     // multiple paths within a single document.
-    if (results.valid && !index->isMultikey() &&
+    if (results.valid && !index->isMultikey(opCtx, _validateState->getCollection()) &&
         desc->getIndexType() != IndexType::INDEX_WILDCARD && numTotalKeys > _numRecords) {
         std::string err = str::stream()
             << "index " << desc->indexName() << " is not multi-key, but has more entries ("

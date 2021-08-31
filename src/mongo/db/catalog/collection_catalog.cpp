@@ -536,16 +536,10 @@ void CollectionCatalog::write(OperationContext* opCtx,
 }
 
 
-void CollectionCatalog::setCollectionNamespace(OperationContext* opCtx,
-                                               Collection* coll,
-                                               const NamespaceString& fromCollection,
-                                               const NamespaceString& toCollection) const {
-    // Rather than maintain, in addition to the UUID -> Collection* mapping, an auxiliary
-    // data structure with the UUID -> namespace mapping, the CollectionCatalog relies on
-    // Collection::ns() to provide UUID to namespace lookup. In addition, the CollectionCatalog
-    // does not require callers to hold locks.
+void CollectionCatalog::onCollectionRename(OperationContext* opCtx,
+                                           Collection* coll,
+                                           const NamespaceString& fromCollection) const {
     invariant(coll);
-    coll->setNs(toCollection);
 
     auto& uncommittedCatalogUpdates = getUncommittedCatalogUpdates(opCtx);
     uncommittedCatalogUpdates.rename(coll, fromCollection);
@@ -560,18 +554,6 @@ void CollectionCatalog::dropCollection(OperationContext* opCtx, Collection* coll
     // Requesting a writable collection normally ensures we have registered PublishCatalogUpdates
     // with the recovery unit. However, when the writable Collection was requested in Inplace mode
     // (or is the oplog) this is not the case. So make sure we are registered in all cases.
-    PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
-}
-
-void CollectionCatalog::dropCollection(OperationContext* opCtx, const CollectionPtr& coll) const {
-    invariant(coll);
-    invariant(opCtx->lockState()->isCollectionLockedForMode(coll->ns(), MODE_X));
-
-    auto& uncommittedCatalogUpdates = getUncommittedCatalogUpdates(opCtx);
-    uncommittedCatalogUpdates.drop(coll.get());
-
-    // Ensure we have registered publish change if this collection haven't been made writable
-    // previously
     PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
 }
 
@@ -927,11 +909,30 @@ void CollectionCatalog::clearDatabaseProfileSettings(StringData dbName) {
     _databaseProfileSettings.erase(dbName);
 }
 
+CollectionCatalog::Stats CollectionCatalog::getStats() const {
+    return _stats;
+}
+
+CollectionCatalog::ViewCatalogSet CollectionCatalog::getViewCatalogDbNames() const {
+    ViewCatalogSet results;
+    for (const auto& dbNameViewSetPair : _views) {
+        results.insert(dbNameViewSetPair.first);
+    }
+    return results;
+}
+
 void CollectionCatalog::registerCollection(OperationContext* opCtx,
                                            CollectionUUID uuid,
                                            std::shared_ptr<Collection> coll) {
     auto ns = coll->ns();
-    if (_collections.find(ns) != _collections.end()) {
+    bool conflict = _collections.find(ns) != _collections.end();
+    if (!conflict) {
+        auto it = _views.find(ns.db());
+        if (it != _views.end()) {
+            conflict = it->second.contains(ns);
+        }
+    }
+    if (conflict) {
         auto& uncommittedCatalogUpdates = getUncommittedCatalogUpdates(opCtx);
         auto [found, uncommittedPtr] = uncommittedCatalogUpdates.lookup(ns);
         // If we have an uncommitted drop of this collection we can defer the creation, the register
@@ -966,6 +967,17 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     _collections[ns] = coll;
     _orderedCollections[dbIdPair] = coll;
 
+    if (!ns.isOnInternalDb() && !ns.isSystem()) {
+        _stats.userCollections += 1;
+        if (coll->isCapped()) {
+            _stats.userCapped += 1;
+        }
+    } else {
+        _stats.internal += 1;
+    }
+
+    invariant(static_cast<size_t>(_stats.internal + _stats.userCollections) == _collections.size());
+
     auto dbRid = ResourceId(RESOURCE_DATABASE, dbName);
     addResource(dbRid, dbName);
 
@@ -992,6 +1004,17 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
     _collections.erase(ns);
     _catalog.erase(uuid);
 
+    if (!ns.isOnInternalDb() && !ns.isSystem()) {
+        _stats.userCollections -= 1;
+        if (coll->isCapped()) {
+            _stats.userCapped -= 1;
+        }
+    } else {
+        _stats.internal -= 1;
+    }
+
+    invariant(static_cast<size_t>(_stats.internal + _stats.userCollections) == _collections.size());
+
     coll->onDeregisterFromCatalog(opCtx);
 
     auto collRid = ResourceId(RESOURCE_COLLECTION, ns.ns());
@@ -1000,7 +1023,7 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
     return coll;
 }
 
-void CollectionCatalog::deregisterAllCollections() {
+void CollectionCatalog::deregisterAllCollectionsAndViews() {
     LOGV2(20282, "Deregistering all the collections");
     for (auto& entry : _catalog) {
         auto uuid = entry.first;
@@ -1017,8 +1040,40 @@ void CollectionCatalog::deregisterAllCollections() {
     _collections.clear();
     _orderedCollections.clear();
     _catalog.clear();
+    _views.clear();
+    _stats = {};
 
     _resourceInformation.clear();
+}
+
+void CollectionCatalog::registerView(const NamespaceString& ns) {
+    if (_collections.contains(ns)) {
+        LOGV2(5706100, "Conflicted creating a view", "ns"_attr = ns);
+        throw WriteConflictException();
+    }
+
+    _views[ns.db()].insert(ns);
+}
+void CollectionCatalog::deregisterView(const NamespaceString& ns) {
+    auto it = _views.find(ns.db());
+    if (it == _views.end()) {
+        return;
+    }
+
+    auto& viewsForDb = it->second;
+    viewsForDb.erase(ns);
+    if (viewsForDb.empty()) {
+        _views.erase(it);
+    }
+}
+
+void CollectionCatalog::replaceViewsForDatabase(StringData dbName,
+                                                absl::flat_hash_set<NamespaceString> views) {
+    if (views.empty())
+        _views.erase(dbName);
+    else {
+        _views[dbName] = std::move(views);
+    }
 }
 
 CollectionCatalog::iterator CollectionCatalog::begin(OperationContext* opCtx, StringData db) const {

@@ -52,26 +52,24 @@ public:
     WindowFunctionExecRemovableDocument(PartitionIterator* iter,
                                         boost::intrusive_ptr<Expression> input,
                                         std::unique_ptr<WindowFunctionState> function,
-                                        WindowBounds::DocumentBased bounds);
-
-    void reset() final {
-        _function->reset();
-        _values = std::queue<Value>();
-        _initialized = false;
-        _memUsageBytes = sizeof(*this);
-    }
+                                        WindowBounds::DocumentBased bounds,
+                                        MemoryUsageTracker::PerFunctionMemoryTracker* memTracker);
 
 private:
     void update() final;
     void initialize();
 
+    void doReset() final {
+        _initialized = false;
+        _memTracker->set(sizeof(*this));
+    }
+
+
     void removeFirstValueIfExists() {
         if (_values.size() == 0) {
             return;
         }
-        _memUsageBytes -= _values.front().getApproximateSize();
-        _function->remove(_values.front());
-        _values.pop();
+        removeValue();
     }
 
     // In one of two states: either the initial window has not been populated or we are sliding and

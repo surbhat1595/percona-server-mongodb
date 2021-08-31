@@ -80,6 +80,7 @@ namespace mongo::stage_builder {
 namespace {
 
 struct MatchExpressionVisitorContext;
+const size_t kMaxChildrenForTopLevelAndOptimization = 25;
 
 /**
  * Output of the tree can come from two places:
@@ -131,7 +132,8 @@ struct MatchExpressionVisitorContext {
 
         // If the root node is an $and, store it in 'topLevelAnd'.
         // TODO: SERVER-50673: Revisit how we implement the top-level $and optimization.
-        if (root->matchType() == MatchExpression::AND) {
+        if (root->matchType() == MatchExpression::AND &&
+            root->numChildren() <= kMaxChildrenForTopLevelAndOptimization) {
             topLevelAnd = root;
         }
     }
@@ -165,7 +167,8 @@ struct MatchExpressionVisitorContext {
 
         // If the root node is an $and, store it in 'topLevelAnd'.
         // TODO: SERVER-50673: Revisit how we implement the top-level $and optimization.
-        if (root->matchType() == MatchExpression::AND) {
+        if (root->matchType() == MatchExpression::AND &&
+            root->numChildren() <= kMaxChildrenForTopLevelAndOptimization) {
             topLevelAnd = root;
         }
     }
@@ -696,8 +699,8 @@ void generateComparison(MatchExpressionVisitorContext* context,
     auto makePredicate = [context, expr, binaryOp](sbe::value::SlotId inputSlot,
                                                    EvalStage inputStage) -> EvalExprStagePair {
         const auto& rhs = expr->getData();
-        auto [tagView, valView] = sbe::bson::convertFrom(
-            true, rhs.rawdata(), rhs.rawdata() + rhs.size(), rhs.fieldNameSize() - 1);
+        auto [tagView, valView] = sbe::bson::convertFrom<true>(
+            rhs.rawdata(), rhs.rawdata() + rhs.size(), rhs.fieldNameSize() - 1);
 
         // Most commonly the comparison does not do any kind of type conversions (i.e. 12 > "10"
         // does not evaluate to true as we do not try to convert a string to a number). Internally,
@@ -1439,10 +1442,10 @@ public:
         auto hasArray = false;
         auto hasNull = false;
         for (auto&& equality : equalities) {
-            auto [tagView, valView] = sbe::bson::convertFrom(true,
-                                                             equality.rawdata(),
-                                                             equality.rawdata() + equality.size(),
-                                                             equality.fieldNameSize() - 1);
+            auto [tagView, valView] =
+                sbe::bson::convertFrom<true>(equality.rawdata(),
+                                             equality.rawdata() + equality.size(),
+                                             equality.fieldNameSize() - 1);
 
             hasNull |= tagView == sbe::value::TypeTags::Null;
             hasArray |= sbe::value::isArray(tagView);

@@ -17,8 +17,9 @@
  * performed.
  *
  * @tags: [
- *   # SERVER-56565
- *   does_not_support_stepdowns
+ *   # SERVER-56565 avoid CS stepdowns, since  an election may trigger a  refresh of stale metadata
+ *   #              that form part of the test setup.
+ *   does_not_support_stepdowns,
  *  ]
  */
 (function() {
@@ -50,6 +51,7 @@ let testCases = {
     _configsvrBalancerStop: {skip: "primary only"},
     _configsvrClearJumboFlag: {skip: "primary only"},
     _configsvrCommitChunkMerge: {skip: "primary only"},
+    _configsvrCommitChunksMerge: {skip: "primary only"},
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
     _configsvrCommitMovePrimary: {skip: "primary only"},

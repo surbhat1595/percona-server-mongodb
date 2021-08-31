@@ -285,8 +285,9 @@ TEST(RecordStoreTestHarness, UpdateInPlace1) {
             mutablebson::DamageVector dv;
             dv.push_back(mutablebson::DamageEvent());
             dv[0].sourceOffset = 0;
+            dv[0].sourceSize = 3;
             dv[0].targetOffset = 3;
-            dv[0].size = 3;
+            dv[0].targetSize = 3;
 
             auto newRecStatus = rs->updateWithDamages(opCtx.get(), loc, s1Rec, damageSource, dv);
             ASSERT_OK(newRecStatus.getStatus());
@@ -415,7 +416,7 @@ TEST(RecordStoreTestHarness, ClusteredRecordStore) {
 
     const std::string ns = "test.system.buckets.a";
     CollectionOptions options;
-    options.clusteredIndex = ClusteredIndexOptions{};
+    options.clusteredIndex = true;
     std::unique_ptr<RecordStore> rs = harnessHelper->newNonCappedRecordStore(ns, options);
     invariant(rs->keyFormat() == KeyFormat::String);
 
@@ -526,7 +527,7 @@ TEST(RecordStoreTestHarness, ClusteredRecordStoreSeekNear) {
 
     const std::string ns = "test.system.buckets.a";
     CollectionOptions options;
-    options.clusteredIndex = ClusteredIndexOptions{};
+    options.clusteredIndex = true;
     std::unique_ptr<RecordStore> rs = harnessHelper->newNonCappedRecordStore(ns, options);
     invariant(rs->keyFormat() == KeyFormat::String);
 

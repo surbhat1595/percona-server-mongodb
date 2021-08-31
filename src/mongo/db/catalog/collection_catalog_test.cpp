@@ -37,7 +37,6 @@
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
@@ -322,7 +321,7 @@ protected:
 };
 
 TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
-    catalog.deregisterAllCollections();
+    catalog.deregisterAllCollectionsAndViews();
 
     const std::string dbName = "resourceDb";
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
@@ -444,7 +443,7 @@ TEST_F(CollectionCatalogTest, RenameCollection) {
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(&opCtx, uuid), collection);
 
     NamespaceString newNss(nss.db(), "newcol");
-    collection->setNs(newNss);
+    ASSERT_OK(collection->rename(&opCtx, newNss, false));
     ASSERT_EQ(collection->ns(), newNss);
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(&opCtx, uuid), collection);
 }
@@ -535,7 +534,7 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {
     std::vector<std::string> dbNames = {"dbA", "dbB", "dbC", "dbD", "testdb"};
     ASSERT(catalog.getAllDbNames() == dbNames);
 
-    catalog.deregisterAllCollections();
+    catalog.deregisterAllCollectionsAndViews();
 }
 
 // Test setting and fetching the profile level for a database.
@@ -619,7 +618,7 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
     std::vector<std::string> dbList = {"testdb"};
     ASSERT(catalog.getAllDbNames() == dbList);
 
-    catalog.deregisterAllCollections();
+    catalog.deregisterAllCollectionsAndViews();
 }
 
 class ForEachCollectionFromDbTest : public CatalogTestFixture {
@@ -704,9 +703,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDbWithPredicate) {
             [&](const CollectionPtr& collection) {
                 ASSERT_TRUE(
                     opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_NONE));
-                return DurableCatalog::get(opCtx)
-                    ->getCollectionOptions(opCtx, collection->getCatalogId())
-                    .temp;
+                return collection->getCollectionOptions().temp;
             });
 
         ASSERT_EQUALS(numCollectionsTraversed, 2);
@@ -728,9 +725,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDbWithPredicate) {
             [&](const CollectionPtr& collection) {
                 ASSERT_TRUE(
                     opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_NONE));
-                return !DurableCatalog::get(opCtx)
-                            ->getCollectionOptions(opCtx, collection->getCatalogId())
-                            .temp;
+                return !collection->getCollectionOptions().temp;
             });
 
         ASSERT_EQUALS(numCollectionsTraversed, 1);

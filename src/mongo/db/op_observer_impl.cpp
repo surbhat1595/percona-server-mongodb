@@ -63,7 +63,6 @@
 #include "mongo/db/s/resharding_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/transaction_participant_gen.h"
@@ -726,7 +725,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     if (inMultiDocumentTransaction) {
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid.get(), documentKey.getShardKeyAndId());
-        if (args.deletedDoc) {
+        if (args.deletedDoc && args.preImageRecordingEnabledForCollection) {
             operation.setPreImage(args.deletedDoc->getOwned());
         }
 
@@ -896,7 +895,6 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
 
     invariant(coll->uuid() == uuid);
-    invariant(DurableCatalog::get(opCtx)->isEqualToMetadataUUID(opCtx, coll->getCatalogId(), uuid));
 }
 
 void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const std::string& dbName) {
@@ -1423,8 +1421,8 @@ void OpObserverImpl::onUnpreparedTransactionCommit(OperationContext* opCtx,
     // Throw TenantMigrationConflict error if the database for the transaction statements is being
     // migrated. We only need check the namespace of the first statement since a transaction's
     // statements must all be for the same tenant.
-    tenant_migration_access_blocker::checkIfCanWriteOrThrow(opCtx,
-                                                            statements->begin()->getNss().db());
+    tenant_migration_access_blocker::checkIfCanWriteOrThrow(
+        opCtx, statements->begin()->getNss().db(), oplogSlots.back().getTimestamp());
 
     if (MONGO_unlikely(hangAndFailUnpreparedCommitAfterReservingOplogSlot.shouldFail())) {
         hangAndFailUnpreparedCommitAfterReservingOplogSlot.pauseWhileSet(opCtx);

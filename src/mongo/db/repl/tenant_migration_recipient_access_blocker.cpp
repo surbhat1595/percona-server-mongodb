@@ -65,14 +65,13 @@ TenantMigrationRecipientAccessBlocker::TenantMigrationRecipientAccessBlocker(
                                            .getOrCreateBlockedOperationsExecutor();
 }
 
-Status TenantMigrationRecipientAccessBlocker::checkIfCanWrite() {
+Status TenantMigrationRecipientAccessBlocker::checkIfCanWrite(Timestamp writeTs) {
     // This is guaranteed by the migration protocol. The recipient will not get any writes until the
     // migration is committed on the donor.
     return Status::OK();
 }
 
-Status TenantMigrationRecipientAccessBlocker::waitUntilCommittedOrAborted(
-    OperationContext* opCtx, OperationType operationType) {
+Status TenantMigrationRecipientAccessBlocker::waitUntilCommittedOrAborted(OperationContext* opCtx) {
     // Recipient nodes will not throw TenantMigrationConflict errors and so we should never need
     // to wait for a migration to commit/abort on the recipient set.
     MONGO_UNREACHABLE;
@@ -87,6 +86,16 @@ SharedSemiFuture<void> TenantMigrationRecipientAccessBlocker::getCanReadFuture(
     // Exclude internal reads decorated with 'tenantMigrationRecipientInfo' from any logic.
     if (repl::tenantMigrationRecipientInfo(opCtx).has_value()) {
         LOGV2_DEBUG(5492000,
+                    1,
+                    "Internal tenant read got excluded from the MTAB filtering",
+                    "tenantId"_attr = _tenantId,
+                    "opId"_attr = opCtx->getOpID());
+        return SharedSemiFuture<void>();
+    }
+
+    if (opCtx->getClient()->session() &&
+        (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient)) {
+        LOGV2_DEBUG(5739900,
                     1,
                     "Internal tenant read got excluded from the MTAB filtering",
                     "tenantId"_attr = _tenantId,

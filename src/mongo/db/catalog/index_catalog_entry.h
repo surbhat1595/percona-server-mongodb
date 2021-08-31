@@ -73,9 +73,7 @@ public:
 
     virtual const IndexDescriptor* descriptor() const = 0;
 
-    virtual IndexAccessMethod* accessMethod() = 0;
-
-    virtual const IndexAccessMethod* accessMethod() const = 0;
+    virtual IndexAccessMethod* accessMethod() const = 0;
 
     virtual bool isHybridBuilding() const = 0;
 
@@ -106,7 +104,8 @@ public:
     /**
      * Returns true if this index is multikey and false otherwise.
      */
-    virtual bool isMultikey() const = 0;
+    virtual bool isMultikey(OperationContext* const opCtx,
+                            const CollectionPtr& collection) const = 0;
 
     /**
      * Returns the path components that cause this index to be multikey if this index supports
@@ -117,7 +116,8 @@ public:
      * returns a vector with size equal to the number of elements in the index key pattern where
      * each element in the vector is an empty set.
      */
-    virtual MultikeyPaths getMultikeyPaths(OperationContext* const opCtx) const = 0;
+    virtual MultikeyPaths getMultikeyPaths(OperationContext* const opCtx,
+                                           const CollectionPtr& collection) const = 0;
 
     /**
      * Sets this index to be multikey. Information regarding which newly detected path components
@@ -137,7 +137,7 @@ public:
     virtual void setMultikey(OperationContext* const opCtx,
                              const CollectionPtr& coll,
                              const KeyStringSet& multikeyMetadataKeys,
-                             const MultikeyPaths& multikeyPaths) = 0;
+                             const MultikeyPaths& multikeyPaths) const = 0;
 
     /**
      * Sets the index to be multikey with the provided paths. This performs minimal validation of
@@ -150,14 +150,14 @@ public:
     virtual void forceSetMultikey(OperationContext* const opCtx,
                                   const CollectionPtr& coll,
                                   bool isMultikey,
-                                  const MultikeyPaths& multikeyPaths) = 0;
+                                  const MultikeyPaths& multikeyPaths) const = 0;
 
     /**
      * Returns whether this index is ready for queries. This is potentially unsafe in that it does
      * not consider whether the index is visible or ready in the current storage snapshot. For
      * that, use isReadyInMySnapshot() or isPresentInMySnapshot().
      */
-    virtual bool isReady(OperationContext* const opCtx) const = 0;
+    virtual bool isReady(OperationContext* opCtx, const CollectionPtr& collection) const = 0;
 
     /**
      * Safely check whether this index is visible in the durable catalog in the current storage

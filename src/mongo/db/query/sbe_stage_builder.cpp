@@ -365,6 +365,7 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
                                       sbe::value::SlotAccessor* snapshotIdAccessor,
                                       sbe::value::SlotAccessor* indexIdAccessor,
                                       sbe::value::SlotAccessor* indexKeyAccessor,
+                                      const CollectionPtr& collection,
                                       const Record& nextRecord) {
     if (snapshotIdAccessor) {
         auto currentSnapshotId = opCtx->recoveryUnit()->getSnapshotId();
@@ -414,7 +415,9 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
             KeyStringSet* multikeyMetadataKeys = nullptr;
             MultikeyPaths* multikeyPaths = nullptr;
 
-            iam->getKeys(executionCtx.pooledBufferBuilder(),
+            iam->getKeys(opCtx,
+                         collection,
+                         executionCtx.pooledBufferBuilder(),
                          nextRecord.data.toBson(),
                          IndexAccessMethod::GetKeysMode::kEnforceConstraints,
                          IndexAccessMethod::GetKeysContext::kValidatingKeys,
@@ -707,7 +710,7 @@ SlotBasedStageBuilder::makeLoopJoinForFetch(std::unique_ptr<sbe::PlanStage> inpu
     sbe::ScanCallbacks callbacks(
         _lockAcquisitionCallback,
         indexKeyCorruptionCheckCallback,
-        std::bind(indexKeyConsistencyCheckCallback, _1, std::move(iamMap), _2, _3, _4, _5));
+        std::bind(indexKeyConsistencyCheckCallback, _1, std::move(iamMap), _2, _3, _4, _5, _6));
     // Scan the collection in the range [seekKeySlot, Inf).
     auto scanStage = sbe::makeS<sbe::ScanStage>(_collection->uuid(),
                                                 resultSlot,

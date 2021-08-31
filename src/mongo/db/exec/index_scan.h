@@ -55,12 +55,14 @@ struct IndexScanParams {
           multikeyPaths(std::move(multikeyPaths)),
           isMultiKey(multikey) {}
 
-    IndexScanParams(OperationContext* opCtx, const IndexDescriptor* descriptor)
+    IndexScanParams(OperationContext* opCtx,
+                    const CollectionPtr& collection,
+                    const IndexDescriptor* descriptor)
         : IndexScanParams(descriptor,
                           descriptor->indexName(),
                           descriptor->keyPattern(),
-                          descriptor->getEntry()->getMultikeyPaths(opCtx),
-                          descriptor->getEntry()->isMultikey()) {}
+                          descriptor->getEntry()->getMultikeyPaths(opCtx, collection),
+                          descriptor->getEntry()->isMultikey(opCtx, collection)) {}
 
     const IndexDescriptor* indexDescriptor;
 

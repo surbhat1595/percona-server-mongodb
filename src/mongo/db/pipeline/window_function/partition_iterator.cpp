@@ -80,16 +80,16 @@ static optional<boost::intrusive_ptr<ExpressionFieldPath>> exprFromSort(
 
 PartitionIterator::PartitionIterator(ExpressionContext* expCtx,
                                      DocumentSource* source,
+                                     MemoryUsageTracker* tracker,
                                      optional<boost::intrusive_ptr<Expression>> partitionExpr,
-                                     const optional<SortPattern>& sortPattern,
-                                     size_t maxMem)
+                                     const optional<SortPattern>& sortPattern)
     : _expCtx(expCtx),
       _source(source),
       _partitionExpr(std::move(partitionExpr)),
       _sortExpr(exprFromSort(_expCtx, sortPattern)),
-      _state(IteratorState::kNotInitialized) {
-    _cache = std::make_unique<SpillableCache>(_expCtx, maxMem);
-}
+      _state(IteratorState::kNotInitialized),
+      _cache(std::make_unique<SpillableCache>(_expCtx, tracker)),
+      _tracker(tracker) {}
 
 optional<Document> PartitionIterator::operator[](int index) {
     auto docDesired = _indexOfCurrentInPartition + index;
@@ -471,24 +471,21 @@ void PartitionIterator::getNextDocument() {
         return;
 
     auto doc = getNextRes.releaseDocument();
+
+    // Greedily populate the internal document cache to enable easier memory tracking versus
+    // detecting the changing document size during execution of each function.
+    doc.fillCache();
+
     if (_partitionExpr) {
-        // Because partitioning is achieved by sorting in $setWindowFields, and missing fields and
-        // nulls are considered equivalent in sorting, documents with missing fields and nulls may
-        // interleave with each other, resulting in these documents processed into many separate
-        // partitions (null, missing, null, missing). However, it is still guranteed that all nulls
-        // and missing values will be grouped together after sorting. To address this issue, we
-        // coerce documents with the missing fields to null partition, which is also consistent with
-        // the approach in $group.
-        auto retValue = (*_partitionExpr)->evaluate(doc, &_expCtx->variables);
-        auto curKey = retValue.missing() ? Value(BSONNULL) : std::move(retValue);
-        uassert(ErrorCodes::TypeMismatch,
-                "Cannot 'partitionBy' an expression of type array",
-                !curKey.isArray());
         if (_state == IteratorState::kNotInitialized) {
-            _nextPartition = NextPartitionState{std::move(doc), std::move(curKey)};
+            _partitionComparator =
+                std::make_unique<PartitionKeyComparator>(_expCtx, *_partitionExpr, doc);
+            _nextPartitionDoc = std::move(doc);
+            _tracker->update(getNextPartitionStateSize());
             advanceToNextPartition();
-        } else if (_expCtx->getValueComparator().compare(curKey, _partitionKey) != 0) {
-            _nextPartition = NextPartitionState{std::move(doc), std::move(curKey)};
+        } else if (_partitionComparator->isDocumentNewPartition(doc)) {
+            _nextPartitionDoc = std::move(doc);
+            _tracker->update(getNextPartitionStateSize());
             _state = IteratorState::kAwaitingAdvanceToNext;
         } else {
             _cache->addDocument(std::move(doc));

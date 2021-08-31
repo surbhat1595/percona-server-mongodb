@@ -55,8 +55,8 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/idl/command_generic_argument.h"
@@ -106,12 +106,42 @@ struct CollModRequest {
     BSONElement clusteredIndexExpireAfterSeconds = {};
     BSONElement indexHidden = {};
     BSONElement viewPipeLine = {};
+    BSONElement timeseries = {};
     std::string viewOn = {};
     boost::optional<Collection::Validator> collValidator;
     boost::optional<ValidationActionEnum> collValidationAction;
     boost::optional<ValidationLevelEnum> collValidationLevel;
     bool recordPreImages = false;
 };
+
+bool isValidTimeseriesGranularityTransition(BucketGranularityEnum current,
+                                            BucketGranularityEnum target) {
+    bool validTransition = true;
+    if (current == target) {
+        return validTransition;
+    }
+
+    switch (current) {
+        case BucketGranularityEnum::Seconds: {
+            if (target != BucketGranularityEnum::Minutes) {
+                validTransition = false;
+            }
+            break;
+        }
+        case BucketGranularityEnum::Minutes: {
+            if (target != BucketGranularityEnum::Hours) {
+                validTransition = false;
+            }
+            break;
+        }
+        case BucketGranularityEnum::Hours: {
+            validTransition = false;
+            break;
+        }
+    }
+
+    return validTransition;
+}
 
 StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                                                const NamespaceString& nss,
@@ -307,16 +337,15 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             cmr.recordPreImages = e.trueValue();
-        } else if (fieldName == "clusteredIndex") {
+        } else if (fieldName == "expireAfterSeconds") {
             if (coll->getRecordStore()->keyFormat() != KeyFormat::String) {
-                return Status(
-                    ErrorCodes::InvalidOptions,
-                    "'clusteredIndex' option is only supported on collections clustered by _id");
+                return Status(ErrorCodes::InvalidOptions,
+                              "'expireAfterSeconds' option is only supported on collections "
+                              "clustered by _id");
             }
 
-            BSONElement elem = e.Obj()["expireAfterSeconds"];
-            if (elem.type() == mongo::String) {
-                const std::string elemStr = elem.String();
+            if (e.type() == mongo::String) {
+                const std::string elemStr = e.String();
                 if (elemStr != "off") {
                     return Status(
                         ErrorCodes::InvalidOptions,
@@ -325,12 +354,34 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                             << "option. Got: '" << elemStr << "'. Accepted value is 'off'");
                 }
             } else {
-                invariant(elem.type() == mongo::NumberLong);
-                const int64_t elemNum = elem.safeNumberLong();
+                invariant(e.type() == mongo::NumberLong);
+                const int64_t elemNum = e.safeNumberLong();
                 uassertStatusOK(index_key_validate::validateExpireAfterSeconds(elemNum));
             }
 
-            cmr.clusteredIndexExpireAfterSeconds = e.Obj()["expireAfterSeconds"];
+            cmr.clusteredIndexExpireAfterSeconds = e;
+        } else if (fieldName == "timeseries" && !isView) {
+            auto tsOptions = coll->getTimeseriesOptions();
+            if (!tsOptions) {
+                return Status(ErrorCodes::InvalidOptions,
+                              str::stream() << "option only supported on a timeseries collection: "
+                                            << fieldName);
+            }
+
+            if (e.Obj().hasField("granularity")) {
+                BSONElement elem = e.Obj().getField("granularity");
+                BucketGranularityEnum target = BucketGranularity_parse(
+                    IDLParserErrorContext("BucketGranularity"), elem.valueStringData());
+                if (!isValidTimeseriesGranularityTransition(tsOptions->getGranularity(), target)) {
+                    return Status(
+                        ErrorCodes::InvalidOptions,
+                        str::stream()
+                            << "Invalid transition for timeseries.granularity. Can only transition "
+                               "from 'seconds' to 'minutes' or 'minutes' to 'hours'.");
+                }
+            }
+
+            cmr.timeseries = e;
         } else {
             if (isView) {
                 return Status(ErrorCodes::InvalidOptions,
@@ -385,12 +436,11 @@ private:
 
 void _setClusteredExpireAfterSeconds(OperationContext* opCtx,
                                      const CollectionOptions& oldCollOptions,
-                                     const CollectionPtr& coll,
+                                     Collection* coll,
                                      const BSONElement& clusteredIndexExpireAfterSeconds) {
-    invariant(oldCollOptions.clusteredIndex.has_value());
+    invariant(oldCollOptions.clusteredIndex);
 
-    boost::optional<int64_t> oldExpireAfterSeconds =
-        oldCollOptions.clusteredIndex->getExpireAfterSeconds();
+    boost::optional<int64_t> oldExpireAfterSeconds = oldCollOptions.expireAfterSeconds;
 
     if (clusteredIndexExpireAfterSeconds.type() == mongo::String) {
         const std::string newExpireAfterSeconds = clusteredIndexExpireAfterSeconds.String();
@@ -400,8 +450,7 @@ void _setClusteredExpireAfterSeconds(OperationContext* opCtx,
             return;
         }
 
-        DurableCatalog::get(opCtx)->updateClusteredIndexTTLSetting(
-            opCtx, coll->getCatalogId(), boost::none);
+        coll->updateClusteredIndexTTLSetting(opCtx, boost::none);
         return;
     }
 
@@ -421,8 +470,7 @@ void _setClusteredExpireAfterSeconds(OperationContext* opCtx,
     }
 
     invariant(newExpireAfterSeconds >= 0);
-    DurableCatalog::get(opCtx)->updateClusteredIndexTTLSetting(
-        opCtx, coll->getCatalogId(), newExpireAfterSeconds);
+    coll->updateClusteredIndexTTLSetting(opCtx, newExpireAfterSeconds);
 }
 
 Status _collModInternal(OperationContext* opCtx,
@@ -494,6 +542,7 @@ Status _collModInternal(OperationContext* opCtx,
     // WriteConflictExceptions thrown in the writeConflictRetry loop below can cause cmrNew.idx to
     // become invalid, so save a copy to use in the loop until we can refresh it.
     auto idx = cmrNew.idx;
+    auto ts = cmrNew.timeseries;
 
     return writeConflictRetry(opCtx, "collMod", nss.ns(), [&] {
         WriteUnitOfWork wunit(opCtx);
@@ -526,15 +575,16 @@ Status _collModInternal(OperationContext* opCtx,
         // options to provide to the OpObserver. TTL index updates aren't a part of collection
         // options so we save the relevant TTL index data in a separate object.
 
-        CollectionOptions oldCollOptions =
-            DurableCatalog::get(opCtx)->getCollectionOptions(opCtx, coll->getCatalogId());
+        const CollectionOptions& oldCollOptions = coll->getCollectionOptions();
 
         boost::optional<IndexCollModInfo> indexCollModInfo;
 
         // Handle collMod operation type appropriately.
         if (clusteredIndexExpireAfterSeconds) {
-            _setClusteredExpireAfterSeconds(
-                opCtx, oldCollOptions, coll.getCollection(), clusteredIndexExpireAfterSeconds);
+            _setClusteredExpireAfterSeconds(opCtx,
+                                            oldCollOptions,
+                                            coll.getWritableCollection(),
+                                            clusteredIndexExpireAfterSeconds);
         }
 
         if (indexExpireAfterSeconds || indexHidden) {
@@ -550,10 +600,8 @@ Status _collModInternal(OperationContext* opCtx,
                 if (SimpleBSONElementComparator::kInstance.evaluate(oldExpireSecs !=
                                                                     newExpireSecs)) {
                     // Change the value of "expireAfterSeconds" on disk.
-                    DurableCatalog::get(opCtx)->updateTTLSetting(opCtx,
-                                                                 coll->getCatalogId(),
-                                                                 idx->indexName(),
-                                                                 newExpireSecs.safeNumberLong());
+                    coll.getWritableCollection()->updateTTLSetting(
+                        opCtx, idx->indexName(), newExpireSecs.safeNumberLong());
                 }
             }
 
@@ -564,8 +612,8 @@ Status _collModInternal(OperationContext* opCtx,
                 // Make sure when we set 'hidden' to false, we can remove the hidden field from
                 // catalog.
                 if (SimpleBSONElementComparator::kInstance.evaluate(oldHidden != newHidden)) {
-                    DurableCatalog::get(opCtx)->updateHiddenSetting(
-                        opCtx, coll->getCatalogId(), idx->indexName(), newHidden.booleanSafe());
+                    coll.getWritableCollection()->updateHiddenSetting(
+                        opCtx, idx->indexName(), newHidden.booleanSafe());
                 }
             }
 
@@ -581,7 +629,8 @@ Status _collModInternal(OperationContext* opCtx,
             // Notify the index catalog that the definition of this index changed. This will
             // invalidate the local idx pointer. On rollback of this WUOW, the idx pointer in
             // cmrNew will be invalidated and the local var idx pointer will be valid again.
-            cmrNew.idx = coll.getWritableCollection()->getIndexCatalog()->refreshEntry(opCtx, idx);
+            cmrNew.idx = coll.getWritableCollection()->getIndexCatalog()->refreshEntry(
+                opCtx, coll.getWritableCollection(), idx);
             opCtx->recoveryUnit()->registerChange(std::make_unique<CollModResultChange>(
                 oldExpireSecs, newExpireSecs, oldHidden, newHidden, result));
 
@@ -606,6 +655,27 @@ Status _collModInternal(OperationContext* opCtx,
 
         if (cmrNew.recordPreImages != oldCollOptions.recordPreImages) {
             coll.getWritableCollection()->setRecordPreImages(opCtx, cmrNew.recordPreImages);
+        }
+
+        if (ts.isABSONObj()) {
+            TimeseriesOptions newOptions = *oldCollOptions.timeseries;
+            bool changed = false;
+
+            if (ts.Obj().hasField("granularity")) {
+                BSONElement granularityElem = ts.Obj().getField("granularity");
+                BucketGranularityEnum target = BucketGranularity_parse(
+                    IDLParserErrorContext("BucketGranularity"), granularityElem.valueStringData());
+                if (target != oldCollOptions.timeseries->getGranularity()) {
+                    newOptions.setGranularity(target);
+                    newOptions.setBucketMaxSpanSeconds(
+                        timeseries::getMaxSpanSecondsFromGranularity(target));
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                coll.getWritableCollection()->setTimeseriesOptions(opCtx, newOptions);
+            }
         }
 
         // Only observe non-view collMods, as view operations are observed as operations on the

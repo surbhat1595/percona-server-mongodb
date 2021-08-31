@@ -19,6 +19,32 @@
 # - 'build_variant' (references the executing task's buildvariant).
 # - 'config_root' (references the root directory for the executor's configuration artifacts).
 
+
+#####################################################
+#          Setup environment in a new task          #
+#####################################################
+
+# There are several ways to setup the environment in your task.
+#
+# 1. If your task depends on 'archive_dist_test'/'archive_dist_test_debug' task you can call the function "do setup"
+# - func: "do setup"
+# Or alternatively call the functions in the sequence below, if you don't need everything else from "do setup"
+# - func: "fetch artifacts" (includes python, shell scripts, jstests etc. from the mongo and enterprise repos)
+# - func: "f_expansions_write"
+# - func: "kill processes"
+# - func: "cleanup environment"
+# - func: "set up venv"
+#
+# 2. If your task does not depend on 'archive_dist_test'/'archive_dist_test_debug' task use the following functions
+# call sequence
+# - command: manifest.load
+# - func: "git get project" (clone the entire mongo and enterprise repos)
+# - func: "f_expansions_write"
+# - func: "kill processes"
+# - func: "cleanup environment"
+# - func: "set up venv"
+
+
 stepback: true
 command_type: system
 pre_error_fails_task: true
@@ -171,12 +197,12 @@ variables:
         ${archive_file|src/archive.json}
   setup_group_can_fail_task: true
   setup_group:
-  - func: "f_expansions_write"
   - command: manifest.load
   - func: "git get project"
+  - func: "set task expansion macros"
+  - func: "f_expansions_write"
   - func: "kill processes"
   - func: "cleanup environment"
-  - func: "set task expansion macros"
   # The python virtual environment is installed in ${workdir}, which is created in
   # "set up venv".
   - func: "set up venv"
@@ -236,7 +262,7 @@ variables:
   - name: external_auth_windows
     distros:
     - windows-64-2016
-  - name: .jscore .common !.compat !.sharding
+  - name: .jscore .common !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache
   - name: replica_sets_auth_gen
@@ -250,15 +276,17 @@ variables:
   setup_task:
     - func: "apply compile expansions"
     - func: "set task expansion macros"
+    - func: "f_expansions_write"
   teardown_task:
   - func: "attach scons logs"
   setup_group_can_fail_task: true
   setup_group:
     - command: manifest.load
     - func: "git get project"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
     - func: "kill processes"
     - func: "cleanup environment"
-    - func: "set task expansion macros"
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "get buildnumber"
@@ -383,8 +411,6 @@ functions:
         binary: bash
         args:
           - "src/evergreen/functions/files_remove.sh"
-        env:
-          workdir: ${workdir}
 
   "configure evergreen api credentials": &configure_evergreen_api_credentials
     command: subprocess.exec
@@ -393,8 +419,6 @@ functions:
       binary: bash
       args:
         - "src/evergreen/functions/evergreen_api_credentials_configure.sh"
-      env:
-        workdir: ${workdir}
 
   "configure selected tests credentials": &configure_selected_tests_credentials
     command: subprocess.exec
@@ -405,15 +429,17 @@ functions:
       args:
         - "src/evergreen/functions/selected_tests_credentials_configure.sh"
       env:
-        workdir: ${workdir}
+        project: ${project}
+        selected_tests_auth_user: ${selected_tests_auth_user}
+        selected_tests_auth_token: ${selected_tests_auth_token}
 
   "git get project": &git_get_project
-    - command: git.get_project
-      params:
-        directory: ${git_project_directory|src}
-        revisions: # for each module include revision as <module_name> : ${<module_name>_rev}
-          enterprise: ${enterprise_rev}
-          wtdevelop: ${wtdevelop_rev}
+    command: git.get_project
+    params:
+      directory: ${git_project_directory|src}
+      revisions: # for each module include revision as <module_name> : ${<module_name>_rev}
+        enterprise: ${enterprise_rev}
+        wtdevelop: ${wtdevelop_rev}
 
   "fetch artifacts": &fetch_artifacts
     command: s3.get
@@ -467,8 +493,6 @@ functions:
       binary: bash
       args:
         - "src/evergreen/functions/binaries_extract.sh"
-      env:
-        workdir: ${workdir}
 
   "check binary version": &check_binary_version
     command: subprocess.exec
@@ -476,8 +500,6 @@ functions:
       binary: bash
       args:
         - "src/evergreen/functions/binary_version_check.sh"
-      env:
-        workdir: ${workdir}
 
   "fetch benchmarks": &fetch_benchmarks
     command: s3.get
@@ -566,8 +588,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/functions/system_resource_info_collect.sh"
-      env:
-        workdir: ${workdir}
 
   # Run a monitor process as a background, system task to periodically
   # display how many threads interesting processes are using.
@@ -579,8 +599,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/functions/process_threads_monitor.sh"
-      env:
-        workdir: ${workdir}
 
   "set up credentials": &set_up_credentials
     command: subprocess.exec
@@ -589,8 +607,6 @@ functions:
       silent: true
       args:
         - "./src/evergreen/functions/credentials_setup.sh"
-      env:
-        workdir: ${workdir}
 
   "set up win mount script":
     - *f_expansions_write
@@ -600,8 +616,6 @@ functions:
         silent: true
         args:
           - "./src/evergreen/functions/win_mount_script_setup.sh"
-        env:
-          workdir: ${workdir}
 
   "set up notary client credentials":
     - *f_expansions_write
@@ -611,8 +625,6 @@ functions:
         silent: true
         args:
           - "./src/evergreen/functions/notary_client_credentials_setup.sh"
-        env:
-          workdir: ${workdir}
 
   "f_remote_credentials_setup_exec": &set_up_remote_credentials
     command: subprocess.exec
@@ -621,7 +633,6 @@ functions:
       args:
         - "./src/evergreen/functions/remote_credentials_setup.sh"
       env:
-        workdir: ${workdir}
         private_key_remote_bash_var: ${private_key_remote}
 
   "set up remote credentials":
@@ -636,8 +647,6 @@ functions:
         silent: true
         args:
           - "./src/evergreen/functions/bf_suggestion_service_call.sh"
-        env:
-          workdir: ${workdir}
 
   "upload debugsymbols": &upload_debugsymbols
     command: s3.put
@@ -666,8 +675,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/functions/wiredtiger_develop_use.sh"
-        env:
-          workdir: ${workdir}
 
   "shared scons cache pruning":
     - *f_expansions_write
@@ -677,8 +684,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/functions/shared_scons_cache_pruning.sh"
-        env:
-          workdir: ${workdir}
 
   "umount shared scons directory":
     - *f_expansions_write
@@ -687,8 +692,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/functions/shared_scons_directory_umount.sh"
-        env:
-          workdir: ${workdir}
 
   "get all modified patch files":
     - *f_expansions_write
@@ -697,8 +700,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/functions/modified_patch_files_get_all.sh"
-        env:
-          workdir: ${workdir}
 
   # This function should only be called from patch-build-only tasks.
   "get added and modified patch files":
@@ -708,8 +709,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/functions/added_and_modified_patch_files_get.sh"
-        env:
-          workdir: ${workdir}
 
   "determine resmoke jobs": &determine_resmoke_jobs
     command: subprocess.exec
@@ -717,8 +716,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/functions/resmoke_jobs_determine.sh"
-      env:
-        workdir: ${workdir}
 
   "update resmoke jobs expansions": &update_resmoke_jobs_expansions
     command: expansions.update
@@ -732,8 +729,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/functions/task_timeout_determine.sh"
-      env:
-        workdir: ${workdir}
 
   "update task timeout expansions": &update_task_timeout_expansions
     command: expansions.update
@@ -747,7 +742,6 @@ functions:
       exec_timeout_secs: ${exec_timeout_secs}
 
   ### Set expansion macros used in each task.
-  ### Note that this function will override task expansions set in update_bypass_expansions
   "set task expansion macros": &set_task_expansion_macros
     command: expansions.update
     params:
@@ -782,8 +776,8 @@ functions:
       args:
         - "src/evergreen/functions/venv_setup.sh"
       env:
-        workdir: ${workdir}
         pip_dir: ${pip_dir}
+        workdir: ${workdir}
 
   "upload pip requirements": &upload_pip_requirements
     command: s3.put
@@ -803,15 +797,30 @@ functions:
       name: perf
       file: src/perf.json
 
+  "cleanup environment": &cleanup_environment
+    command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "./src/evergreen/cleanup_environment.sh"
+
+  "kill processes": &kill_processes
+    command: subprocess.exec
+    params:
+      silent: true
+      binary: bash
+      args:
+        - "./src/evergreen/kill_processes.sh"
+
   "do setup":
   - *f_expansions_write
-  - *set_up_venv
-  - *upload_pip_requirements
-  - *set_task_expansion_macros
-  - *f_expansions_write
   - *fetch_artifacts
+  - *kill_processes
+  - *cleanup_environment
   - *fetch_binaries
   - *fetch_debugsymbols_archive
+  - *set_up_venv
+  - *upload_pip_requirements
   - *extract_binaries
   - *check_binary_version
   - *get_buildnumber
@@ -822,9 +831,11 @@ functions:
   - *collect_system_resource_info
 
   "do non-compile setup":
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - *set_task_expansion_macros
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - *set_up_venv
   - *upload_pip_requirements
   - *get_buildnumber
@@ -832,9 +843,11 @@ functions:
   - *set_up_credentials
 
   "do benchmark setup":
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - *set_task_expansion_macros
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - *set_up_venv
   - *upload_pip_requirements
   - *get_buildnumber
@@ -848,8 +861,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/multiversion_setup.sh"
-      env:
-        workdir: ${workdir}
 
   "do multiversion setup":
     - *f_expansions_write
@@ -862,12 +873,13 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/compiled_binaries_get.sh"
-      env:
-        workdir: ${workdir}
 
   "generate powercycle tasks":
-    - *set_task_expansion_macros
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
     - *upload_pip_requirements
 
@@ -876,8 +888,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/powercycle_tasks_generate.sh"
-        env:
-          workdir: ${workdir}
 
     - command: archive.targz_pack
       params:
@@ -903,8 +913,11 @@ functions:
           - powercycle_tasks.json
 
   "run powercycle sentinel":
-    - *set_task_expansion_macros
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
     - *upload_pip_requirements
     - *configure_evergreen_api_credentials
@@ -915,8 +928,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/powercycle_sentinel_run.sh"
-        env:
-          workdir: ${workdir}
 
   "execute resmoke tests": &execute_resmoke_tests
     command: subprocess.exec
@@ -925,8 +936,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/resmoke_tests_execute.sh"
-      env:
-        workdir: ${workdir}
 
   "retrieve generated test configuration": &retrieve_generated_test_configuration
     command: s3.get
@@ -934,7 +943,7 @@ functions:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       bucket: mciuploads
-      remote_file: ${project}/${build_variant}/${revision}/generate_tasks/${task}_gen-${build_id}.tgz
+      remote_file: ${project}/${gen_task_config_location}
       local_file: "generate_tasks_config.tgz"
 
   "extract generated test configuration": &extract_generated_test_configuration
@@ -947,9 +956,6 @@ functions:
 
   "generate selected tests":
     - *f_expansions_write
-    - command: expansions.write
-      params:
-        file: expansions.yml
     - *configure_evergreen_api_credentials
     - *configure_selected_tests_credentials
     - command: subprocess.exec
@@ -958,12 +964,10 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/selected_tests_generate.sh"
-        env:
-          workdir: ${workdir}
     - command: archive.targz_pack
       params:
         target: generate_tasks_config.tgz
-        source_dir: src/selected_tests_config
+        source_dir: src/generated_resmoke_config
         include:
           - "*"
     - command: s3.put
@@ -981,13 +985,9 @@ functions:
       params:
         optional: true
         files:
-          - src/selected_tests_config/*.json
+          - src/generated_resmoke_config/*.json
 
   "generate burn in tags":
-    - *f_expansions_write
-    - command: expansions.write
-      params:
-        file: src/expansions.yml
     - *f_expansions_write
     - *configure_evergreen_api_credentials
     - command: subprocess.exec
@@ -996,8 +996,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/burn_in_tests_generate.sh"
-        env:
-          workdir: ${workdir}
     - command: archive.targz_pack
       params:
         target: burn_in_tags_gen.tgz
@@ -1020,9 +1018,11 @@ functions:
           - src/generated_burn_in_tags_config/burn_in_tags_gen.json
 
   "generate randomized multiversion tasks":
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - *set_task_expansion_macros
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
     - *upload_pip_requirements
     - *configure_evergreen_api_credentials
@@ -1034,8 +1034,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/randomized_multiversion_tasks_generate.sh"
-        env:
-          workdir: ${workdir}
 
     - *do_multiversion_setup
     - command: subprocess.exec
@@ -1043,8 +1041,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/randomized_multiversion_tasks_generate_exclude_tags.sh"
-        env:
-          workdir: ${workdir}
     - command: archive.targz_pack
       params:
         target: generate_tasks_config.tgz
@@ -1079,16 +1075,15 @@ functions:
           - src/generated_resmoke_config/*.json
 
   "generate resmoke tasks":
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - *set_task_expansion_macros
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
     - *upload_pip_requirements
     - *f_expansions_write
     - *configure_evergreen_api_credentials
-    - command: expansions.write
-      params:
-        file: src/expansions.yml
 
     - command: subprocess.exec
       type: test
@@ -1096,8 +1091,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/resmoke_tasks_generate.sh"
-        env:
-          workdir: ${workdir}
 
     - command: archive.targz_pack
       params:
@@ -1207,8 +1200,6 @@ functions:
         binary: bash
         args:
           - "src/evergreen/scons_lint.sh"
-        env:
-          workdir: ${workdir}
 
   "scons compile":
     - *f_expansions_write
@@ -1218,9 +1209,6 @@ functions:
         binary: bash
         args:
           - "src/evergreen/scons_compile.sh"
-        env:
-          workdir: ${workdir}
-          patch_compile_flags: ${patch_compile_flags}
 
   "generate compile expansions":
     - *f_expansions_write
@@ -1229,8 +1217,6 @@ functions:
         binary: bash
         args:
           - "src/evergreen/functions/compile_expansions_generate.sh"
-        env:
-          workdir: ${workdir}
 
   "apply compile expansions":
     - command: expansions.update
@@ -1255,8 +1241,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/do_jepsen_setup/nodes.sh"
-        env:
-          workdir: ${workdir}
     - command: subprocess.exec
       params:
         binary: bash
@@ -1272,15 +1256,11 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/jepsen_test_run.sh"
-        env:
-          workdir: ${workdir}
     - command: subprocess.exec
       params:
         binary: bash
         args:
           - "./src/evergreen/jepsen_test_fail.sh"
-        env:
-          workdir: ${workdir}
 
   "load aws test credentials":
     - *f_expansions_write
@@ -1290,18 +1270,15 @@ functions:
         silent: true
         args:
           - "./src/evergreen/functions/aws_test_credentials_load.sh"
-        env:
-          workdir: ${workdir}
 
 
   "generate explicit multiversion tasks":
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - *set_task_expansion_macros
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
-    - command: expansions.write
-      params:
-        file: expansions.yml
     - *upload_pip_requirements
     - *f_expansions_write
     - *configure_evergreen_api_credentials
@@ -1313,8 +1290,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/explicit_multiversion_tasks_generate.sh"
-        env:
-          workdir: ${workdir}
 
     - command: archive.targz_pack
       params:
@@ -1349,15 +1324,12 @@ functions:
           - src/generated_resmoke_config/*.json
 
   "generate implicit multiversion tasks":
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - *set_task_expansion_macros
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
-    - *f_expansions_write
-    - *configure_evergreen_api_credentials
-    - command: expansions.write
-      params:
-        file: expansions.yml
     - *configure_evergreen_api_credentials
     - *f_expansions_write
     - *do_multiversion_setup
@@ -1368,8 +1340,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/implicit_multiversions_tasks_generate.sh"
-        env:
-          workdir: ${workdir}
 
     - command: archive.targz_pack
       params:
@@ -1406,23 +1376,21 @@ functions:
           - src/generated_resmoke_config/*.json
 
   "generate fuzzer tasks":
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - *set_task_expansion_macros
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - *set_up_venv
-    - command: expansions.write
-      params:
-        file: expansions.yml
     - *upload_pip_requirements
 
+    - *configure_evergreen_api_credentials
     - *f_expansions_write
     - command: subprocess.exec
       params:
         binary: bash
         args:
           - "./src/evergreen/fuzzer_tasks_generate.sh"
-        env:
-          workdir: ${workdir}
 
     - command: archive.targz_pack
       params:
@@ -1441,6 +1409,7 @@ functions:
         permissions: public-read
         content_type: application/gzip
         display_name: Generated Task Config - Execution ${execution}
+        optional: true
 
     - command: timeout.update
       params:
@@ -1450,6 +1419,7 @@ functions:
 
     - command: generate.tasks
       params:
+        optional: true
         files:
           - src/generated_resmoke_config/${name}.json
 
@@ -1460,8 +1430,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/jstestfuzz_setup.sh"
-        env:
-          workdir: ${workdir}
 
   "lint fuzzer sanity patch":
     - *f_expansions_write
@@ -1471,8 +1439,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/lint_fuzzer_sanity_patch.sh"
-        env:
-          workdir: ${workdir}
 
   "lint fuzzer sanity all":
     - *f_expansions_write
@@ -1482,8 +1448,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/lint_fuzzer_sanity_all.sh"
-        env:
-          workdir: ${workdir}
 
   # Used by generator
   "run jstestfuzz":
@@ -1500,8 +1464,12 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/jstestfuzz_run.sh"
-        env:
-          workdir: ${workdir}
+    # TODO SERVER-57161 remove this touch command
+    - command: subprocess.exec
+      params:
+        binary: touch
+        args:
+          - "./src/jstestfuzz/out/placeholder.js"
     - command: archive.targz_pack
       params:
         target: "jstests.tgz"
@@ -1528,8 +1496,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/idl_tests_run.sh"
-        env:
-          workdir: ${workdir}
 
   "run powercycle test":
     - *f_expansions_write
@@ -1539,35 +1505,24 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/powercycle_run_test.sh"
-        env:
-          workdir: ${workdir}
 
     - command: expansions.update
       params:
         ignore_missing_file: true
         file: src/powercycle_exit.yml
     - *f_expansions_write
-
-    - command: expansions.write
-      params:
-        file: expansions.yml
-
-    - *f_expansions_write
     - command: subprocess.exec
+      type: setup
       params:
         binary: bash
         args:
-          - "./src/evergreen/powercycle_system_exit.sh"
-        env:
-          workdir: ${workdir}
+          - "./src/evergreen/powercycle_ssh_failure_exit.sh"
     - command: subprocess.exec
       type: test
       params:
         binary: bash
         args:
           - "./src/evergreen/powercycle_exit.sh"
-        env:
-          workdir: ${workdir}
 
   "run packager.py":
     - *f_expansions_write
@@ -1576,8 +1531,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/packager.py_run.sh"
-        env:
-          workdir: ${workdir}
 
   "do snmp setup":
     command: subprocess.exec
@@ -1593,21 +1546,6 @@ functions:
       args:
         - "./src/evergreen/do_watchdog_setup.sh"
 
-  "cleanup environment":
-    command: subprocess.exec
-    params:
-      binary: bash
-      args:
-        - "./src/evergreen/cleanup_environment.sh"
-
-  "kill processes":
-    command: subprocess.exec
-    params:
-      silent: true
-      binary: bash
-      args:
-        - "./src/evergreen/kill_processes.sh"
-
   "run kitchen":
     - *f_expansions_write
     - command: subprocess.exec
@@ -1616,14 +1554,8 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/kitchen_run.sh"
-        env:
-          workdir: ${workdir}
 
   "set up EC2 instance": &set_up_ec2_instance
-    - *f_expansions_write
-    - command: expansions.write
-      params:
-        file: src/expansions.yml
 
     - command: host.create
       params:
@@ -1646,17 +1578,10 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/powercycle_check_host.sh"
-        env:
-          workdir: ${workdir}
 
     - command: expansions.update
       params:
         file: src/powercycle_ip_address.yml
-    - *f_expansions_write
-
-    - command: expansions.write
-      params:
-        file: src/expansions.yml
 
     - *f_expansions_write
     - command: subprocess.exec
@@ -1664,8 +1589,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/powercycle_setup_host.sh"
-        env:
-          workdir: ${workdir}
 
   ### Process & archive remote EC2 artifacts ###
   "save powercycle artifacts": &save_powercycle_artifacts
@@ -1674,8 +1597,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/powercycle_save_artifacts.sh"
-      env:
-        workdir: ${workdir}
 
   "archive remote EC2 artifacts": &archive_remote_ec2_artifacts
     command: s3.put
@@ -1705,11 +1626,6 @@ functions:
 
   "save ec2 task artifacts":
     - *f_expansions_write
-    # deliberate double write. Powercyle expects the expansions.yml file to
-    # be in src
-    - command: expansions.write
-      params:
-        file: src/expansions.yml
     - *save_powercycle_artifacts
     - *archive_remote_ec2_artifacts
     - *archive_remote_ec2_monitor_files
@@ -1721,8 +1637,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/local_client_logs_tar.sh"
-      env:
-        workdir: ${workdir}
 
   "archive local client logs": &archive_local_client_logs
     command: s3.put
@@ -1876,8 +1790,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/failed_unittests_gather.sh"
-      env:
-        workdir: ${workdir}
 
   "tar failed unittests": &tar_failed_unittests
     command: archive.targz_pack
@@ -1943,8 +1855,6 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/hang_analyzer.sh"
-      env:
-        workdir: ${workdir}
 
   "wait for resmoke to shutdown":
     command: subprocess.exec
@@ -2094,8 +2004,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/scons_splunk.sh"
-        env:
-          workdir: ${workdir}
 
   "attach report":
     command: attach.results
@@ -2117,8 +2025,6 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/wiki_page.sh"
-        env:
-          workdir: ${workdir}
     - command: attach.artifacts
       params:
         files:
@@ -2127,12 +2033,6 @@ functions:
 
 # Pre task steps
 pre:
-  - func: "f_expansions_write"
-  - command: manifest.load
-  - func: "git get project"
-  - func: "kill processes"
-  - func: "cleanup environment"
-  - func: "set up venv"
   - func: "set task expansion macros"
   - func: "f_expansions_write"
 
@@ -2216,8 +2116,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/gen_feature_flags.sh"
-        env:
-          workdir: ${workdir}
 
     - command: archive.targz_pack
       params:
@@ -2226,6 +2124,7 @@ tasks:
         include:
           - "./build/**.gcno"
           - "./etc/*san.suppressions"
+          - "./etc/expansions.default.yml"
           - "./etc/pip/**"
           - "./etc/repo_config.yaml"
           - "./etc/scons/**"
@@ -2236,7 +2135,7 @@ tasks:
           - "jstests/**"
           - "library_dependency_graph.json"
           - "patch_files.txt"
-          - "pytests/**"
+          - "evergreen/**"
           - "src/mongo/client/sdam/json_tests/sdam_tests/**"
           - "src/mongo/client/sdam/json_tests/server_selection_tests/**"
           - "src/mongo/db/modules/enterprise/docs/**"
@@ -2302,8 +2201,6 @@ tasks:
         binary: bash
         args:
           - "./src/evergreen/ninja_compile.sh"
-        env:
-          workdir: ${workdir}
 
 - name: compile_ninja_next
   commands:
@@ -2323,8 +2220,6 @@ tasks:
         binary: bash
         args:
           - "./src/evergreen/ninja_compile.sh"
-        env:
-          workdir: ${workdir}
 
 - name: compile_build_tools_next
   commands:
@@ -2343,8 +2238,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/libdeps_setup.sh"
-        env:
-          workdir: ${workdir}
 
     - func: "scons compile"
       vars:
@@ -2359,8 +2252,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/libdeps_run.sh"
-        env:
-          workdir: ${workdir}
 
     - command: s3.put
       params:
@@ -2561,8 +2452,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/embedded_sdk_build_cdriver.sh"
-        env:
-          workdir: ${workdir}
 
 - name: embedded_sdk_install_dev
   depends_on:
@@ -2596,8 +2485,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/embedded_sdk_s3_tar.sh"
-        env:
-          workdir: ${workdir}
 
     # Upload it so we can download from EVG.
     - command: s3.put
@@ -2640,8 +2527,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/embedded_sdk_tests_s3_tar.sh"
-        env:
-          workdir: ${workdir}
 
     # Upload it so we can download from EVG.
     - command: s3.put
@@ -2667,15 +2552,11 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/embedded_sdk_run_tests.sh"
-        env:
-          workdir: ${workdir}
     - command: subprocess.exec
       params:
         binary: bash
         args:
           - "src/evergreen/embedded_sdk_run_tests_post.sh"
-        env:
-          workdir: ${workdir}
 
 - name: embedded_sdk_s3_put_latest
   depends_on:
@@ -2734,8 +2615,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/stitch_support_create_lib_tar.sh"
-        env:
-          workdir: ${workdir}
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -2775,15 +2654,15 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/stitch_support_run_tests.sh"
-        env:
-          workdir: ${workdir}
 
 - name: compile_benchmarks
   depends_on: []
   commands:
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - func: "set task expansion macros"
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "get buildnumber"
@@ -2823,14 +2702,16 @@ tasks:
 ## lint ##
 - name: lint_pylinters
   commands:
-    - *f_expansions_write
     - command: timeout.update
       params:
         # 40 minutes
         exec_timeout_secs: 2400
     - *f_expansions_write
-    - func: "set task expansion macros"
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "scons lint"
@@ -2839,14 +2720,16 @@ tasks:
 
 - name: lint_clang_format
   commands:
-    - *f_expansions_write
     - command: timeout.update
       params:
         # 40 minutes
         exec_timeout_secs: 2400
     - *f_expansions_write
-    - func: "set task expansion macros"
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "scons lint"
@@ -2855,14 +2738,16 @@ tasks:
 
 - name: lint_eslint
   commands:
-    - *f_expansions_write
     - command: timeout.update
       params:
         # 40 minutes
         exec_timeout_secs: 2400
     - *f_expansions_write
-    - func: "set task expansion macros"
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "scons lint"
@@ -2871,14 +2756,16 @@ tasks:
 
 - name: lint_cpplint
   commands:
-    - *f_expansions_write
     - command: timeout.update
       params:
         # 40 minutes
         exec_timeout_secs: 2400
     - *f_expansions_write
-    - func: "set task expansion macros"
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "scons lint"
@@ -2888,9 +2775,11 @@ tasks:
 - name: lint_yaml
   depends_on: []
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "f_expansions_write"
@@ -2900,12 +2789,14 @@ tasks:
       binary: bash
       args:
         - "src/evergreen/lint_yaml.sh"
-      env:
-        workdir: ${workdir}
 
 - name: lint_shellscripts
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - command: subprocess.exec
     type: test
     params:
@@ -2915,9 +2806,11 @@ tasks:
 
 - name: lint_errorcodes
   commands:
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - func: "set task expansion macros"
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "scons lint"
@@ -2928,9 +2821,11 @@ tasks:
   depends_on:
     - name: archive_dist_test_debug
   commands:
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - func: "set task expansion macros"
-    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
     - func: "upload pip requirements"
     - func: "do setup"
@@ -2941,14 +2836,14 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/check_idl_compat.sh"
-        env:
-          workdir: ${workdir}
 
 - name: burn_in_tests_gen
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "configure evergreen api credentials"
@@ -2959,8 +2854,6 @@ tasks:
       binary: bash
       args:
         - "src/evergreen/burn_in_tests.sh"
-      env:
-        workdir: ${workdir}
   - command: archive.targz_pack
     params:
       target: src/burn_in_tests_gen.tgz
@@ -2985,9 +2878,11 @@ tasks:
 
 - name: burn_in_tests_multiversion_gen
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "f_expansions_write"
@@ -2999,19 +2894,17 @@ tasks:
       binary: bash
       args:
         - "src/evergreen/burn_in_tests_multiversion.sh"
-      env:
-        workdir: ${workdir}
 
   - command: archive.targz_pack
     params:
       target: src/burn_in_tests_multiversion_gen.tgz
-      source_dir: src
+      source_dir: src/generated_resmoke_config
       include:
         - burn_in_tests_multiversion_gen.json
 
   - command: archive.targz_pack
     params:
-      target: generate_tasks_config.tgz
+      target: src/generate_tasks_config.tgz
       source_dir: src/generated_resmoke_config
       include:
         - "*"
@@ -3020,7 +2913,7 @@ tasks:
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      local_file: generate_tasks_config.tgz
+      local_file: src/generate_tasks_config.tgz
       remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen-${build_id}.tgz
       bucket: mciuploads
       permissions: public-read
@@ -3042,7 +2935,7 @@ tasks:
   - command: generate.tasks
     params:
       files:
-        - src/burn_in_tests_multiversion_gen.json
+        - src/generated_resmoke_config/burn_in_tests_multiversion_gen.json
 
 - <<: *benchmark_template
   name: benchmarks_orphaned
@@ -3193,8 +3086,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       npm_command: agg-fuzzer
@@ -3209,8 +3105,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       npm_command: agg-expr-fuzzer
@@ -3225,8 +3124,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       jstestfuzz_vars: --diffTestingMode optimization
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -3241,8 +3143,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       jstestfuzz_vars: --diffTestingMode optimization
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -3257,8 +3162,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       jstestfuzz_vars: --diffTestingMode wildcard
       npm_command: agg-fuzzer
       suite: generational_fuzzer
@@ -3273,8 +3181,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       jstestfuzz_vars: --diffTestingMode timeseries
       npm_command: agg-fuzzer
       suite: generational_fuzzer
@@ -3289,8 +3200,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       jstestfuzz_vars: --diffTestingMode standalone
       npm_command: query-fuzzer
       suite: generational_fuzzer
@@ -3305,8 +3219,11 @@ tasks:
   - func: "generate fuzzer tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
-      num_tasks: 5
+      # TODO SERVER-57161 re-enable original fuzzer settings
+      # num_files: 5
+      # num_tasks: 5
+      num_files: 0
+      num_tasks: 1
       jstestfuzz_vars: --diffTestingMode sharded
       npm_command: query-fuzzer
       suite: generational_fuzzer
@@ -3862,6 +3779,22 @@ tasks:
       resmoke_args: --storageEngine=wiredTiger
       name: resharding_fuzzer_shuffle
 
+- <<: *jstestfuzz_template
+  name: resharding_fuzzer_idempotency_gen
+  tags: ["resharding_fuzzer"]
+  commands:
+  - func: "generate fuzzer tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 10
+      num_tasks: 5
+      npm_command: resharding-fuzzer
+      jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
+      suite: resharding_fuzzer_idempotency
+      resmoke_args: >-
+        --storageEngine=wiredTiger
+      name: resharding_fuzzer_idempotency
+
 ## Tests that the multiversion test generation logic is not broken.
 - name: multiversion_sanity_check_gen
   commands:
@@ -3870,7 +3803,6 @@ tasks:
       suite: replica_sets_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger --includeWithAnyTags=multiversion_sanity_check
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 1
 
 - name: replica_sets_jscore_multiversion_passthrough_gen
   tags: ["multiversion_passthrough"]
@@ -3880,15 +3812,17 @@ tasks:
       suite: replica_sets_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
 # Check that the mutational fuzzer can parse JS files modified in a patch build.
 - name: lint_fuzzer_sanity_patch
   patch_only: true
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
   - func: "get added and modified patch files"
   - func: "setup jstestfuzz"
   - func: "lint fuzzer sanity patch"
@@ -3896,9 +3830,12 @@ tasks:
 # Check that the mutational fuzzer can parse all JS filess.
 - name: lint_fuzzer_sanity_all
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
   - func: "setup jstestfuzz"
   - func: "lint fuzzer sanity all"
 
@@ -4009,11 +3946,9 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: aggregation
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: aggregation_sharded_collections_passthrough
@@ -4038,15 +3973,6 @@ tasks:
       resmoke_args: --suites=aggregation_sharded_collections_causally_consistent_passthrough --storageEngine=wiredTiger
 
 - <<: *task_template
-  name: aggregation_slot_based_execution
-  tags: ["aggregation", "sbe"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=aggregation_sbe --storageEngine=wiredTiger
-
-- <<: *task_template
   name: audit
   commands:
   - func: "do setup"
@@ -4060,15 +3986,16 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 4
 
 - name: burn_in_tags_gen
   depends_on:
     - name: archive_dist_test_debug
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "configure evergreen api credentials"
@@ -4082,9 +4009,11 @@ tasks:
 
 - name: selected_tests_gen
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "generate selected tests"
@@ -4095,7 +4024,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 4
 
 - <<: *task_template
   name: change_streams
@@ -4115,7 +4043,6 @@ tasks:
       suite: change_streams
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
 - <<: *task_template
   name: change_streams_update_v1_oplog
@@ -4181,7 +4108,6 @@ tasks:
       suite: change_streams_sharded_collections_passthrough
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
 - <<: *task_template
   name: change_streams_whole_db_passthrough
@@ -4341,45 +4267,11 @@ tasks:
       resmoke_args: --suites=failpoints_auth --storageEngine=wiredTiger
 
 - <<: *task_template
-  name: gle_auth
-  tags: ["auth", "gle"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=gle_auth --shellWriteMode=legacy --shellReadMode=legacy --excludeWithAnyTags=requires_find_command --storageEngine=wiredTiger
-
-- <<: *task_template
-  name: gle_auth_write_cmd
-  tags: ["auth", "gle"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=gle_auth --shellWriteMode=commands --storageEngine=wiredTiger
-
-- <<: *task_template
-  name: gle_auth_basics_passthrough
-  tags: ["auth", "gle"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
-
-- <<: *task_template
-  name: gle_auth_basics_passthrough_write_cmd
-  tags: ["auth", "gle"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=gle_auth_basics_passthrough --shellWriteMode=commands --storageEngine=wiredTiger
-
-- <<: *task_template
   name: integration_tests_standalone
   tags: ["integration", "standalone"]
   commands:
+  - command: manifest.load
+  - *git_get_project
   - func: "do setup"
   - func: "set up win mount script"
   - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
@@ -4397,6 +4289,8 @@ tasks:
   name: integration_tests_standalone_audit
   tags: ["integration", "audit"]
   commands:
+  - command: manifest.load
+  - *git_get_project
   - func: "do setup"
   - func: "set up win mount script"
   - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
@@ -4414,6 +4308,8 @@ tasks:
   name: integration_tests_replset
   tags: ["integration"]
   commands:
+  - command: manifest.load
+  - *git_get_project
   - func: "do setup"
   - func: "set up win mount script"
   - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
@@ -4431,6 +4327,8 @@ tasks:
   name: integration_tests_replset_ssl_auth
   tags: ["integration"]
   commands:
+  - command: manifest.load
+  - *git_get_project
   - func: "do setup"
   - func: "set up win mount script"
   - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
@@ -4448,6 +4346,8 @@ tasks:
   name: integration_tests_sharded
   tags: ["integration", "sharded"]
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
   - func: "do setup"
   - func: "set up win mount script"
@@ -4473,8 +4373,6 @@ tasks:
       binary: bash
       args:
         - "src/evergreen/external_auth_pip.sh"
-      env:
-        workdir: ${workdir}
   - func: "run tests"
     vars:
       resmoke_args: --suites=external_auth --excludeWithAnyTags=requires_domain_controller --storageEngine=wiredTiger
@@ -4491,15 +4389,11 @@ tasks:
       silent: true
       args:
         - "src/evergreen/external_auth_aws_setup.sh"
-      env:
-        workdir: ${workdir}
   - command: subprocess.exec
     params:
       binary: bash
       args:
         - "src/evergreen/external_auth_aws_pip.sh"
-      env:
-        workdir: ${workdir}
   - func: "run tests"
     vars:
       resmoke_args: --suites=external_auth_aws --storageEngine=wiredTiger
@@ -4512,28 +4406,6 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=external_auth --includeWithAnyTags=requires_domain_controller --storageEngine=wiredTiger
-
-- <<: *task_template
-  name: sharding_gle_auth_basics_passthrough
-  tags: ["auth", "gle"]
-  depends_on:
-  - name: gle_auth_basics_passthrough
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=sharding_gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
-
-- <<: *task_template
-  name: sharding_gle_auth_basics_passthrough_write_cmd
-  tags: ["auth", "gle"]
-  depends_on:
-  - name: gle_auth_basics_passthrough_write_cmd
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=sharding_gle_auth_basics_passthrough --shellWriteMode=commands --storageEngine=wiredTiger
 
 - <<: *task_template
   name: jsCore
@@ -4599,15 +4471,6 @@ tasks:
       resmoke_args: --suites=core_ese_gcm --storageEngine=wiredTiger
 
 - <<: *task_template
-  name: jsCore_compatibility
-  tags: ["jscore", "common", "compat"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=core --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command,requires_timeseries
-
-- <<: *task_template
   name: jsCore_auth
   tags: ["jscore", "auth", "common"]
   commands:
@@ -4624,15 +4487,6 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=core_minimum_batch_size --storageEngine=wiredTiger
-
-- <<: *task_template
-  name: jsCore_op_query
-  tags: ["jscore"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=core_op_query --storageEngine=wiredTiger
 
 - <<: *task_template
   name: jsCore_txns
@@ -4653,15 +4507,6 @@ tasks:
       resmoke_args: --suites=core_txns_large_txns_format --storageEngine=wiredTiger
 
 - <<: *task_template
-  name: jsCore_slot_based_execution
-  tags: ["jscore", "common", "sbe"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=core_sbe --storageEngine=wiredTiger
-
-- <<: *task_template
   name: sharded_jscore_txns
   tags: ["sharding", "jscore", "txns"]
   commands:
@@ -4669,15 +4514,6 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=sharded_jscore_txns --storageEngine=wiredTiger
-
-- <<: *task_template
-  name: sharded_jscore_op_query_txns
-  tags: ["sharding", "jscore", "txns"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=sharded_jscore_op_query_txns --storageEngine=wiredTiger
 
 - <<: *task_template
   name: sharded_jscore_txns_without_snapshot
@@ -4729,28 +4565,22 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      dependsOn: jsCore
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 1
 
 - name: sharded_causally_consistent_jscore_txns_passthrough_without_snapshot_gen
   tags: ["sharding", "wo_snapshot", "causally_consistent", "jscore"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      dependsOn: jsCore
       suite: sharded_causally_consistent_jscore_txns_passthrough
       resmoke_args: --storageEngine=wiredTiger --excludeWithAnyTags=uses_snapshot_read_concern
-      fallback_num_sub_suites: 1
 
 - name: causally_consistent_hedged_reads_jscore_passthrough_gen
   tags: ["causally_consistent", "sharding", "jscore"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      dependsOn: jsCore
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 40
 
 - <<: *task_template
   name: sharded_collections_causally_consistent_jscore_txns_passthrough
@@ -4774,17 +4604,14 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
   commands:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - <<: *task_template
   name: replica_sets_reconfig_kill_primary_jscore_passthrough
@@ -4794,14 +4621,19 @@ tasks:
     vars:
       resmoke_args: --suites=replica_sets_reconfig_kill_primary_jscore_passthrough --storageEngine=wiredTiger
 
+- name: replica_sets_api_version_jscore_passthrough_gen
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      resmoke_args: --storageEngine=wiredTiger
+      fallback_num_sub_suites: 5
+
 - name: replica_sets_jscore_passthrough_gen
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 1
 
 - <<: *task_template
   name: replica_sets_large_txns_format_jscore_passthrough
@@ -4826,10 +4658,8 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - <<: *task_template
   name: replica_sets_multi_stmt_txn_kill_primary_jscore_passthrough
@@ -4855,7 +4685,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - name: replica_sets_initsync_jscore_passthrough_gen
   tags: ["replica_sets", "san", "large"]
@@ -4863,7 +4692,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - <<: *task_template
   name: replica_sets_initsync_static_jscore_passthrough
@@ -4917,7 +4745,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       use_multiversion: /data/multiversion
-      fallback_num_sub_suites: 1
 
 - name: multiversion_gen
   commands:
@@ -4925,7 +4752,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       use_multiversion: /data/multiversion
-      fallback_num_sub_suites: 1
 
 # Tests the runFeatureFlagMultiversionTest helper.
 # This requires the 'featureFlagToaster' and 'featureFlagSpoon' parameters to be set to true on
@@ -4936,7 +4762,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       use_multiversion: /data/multiversion
-      fallback_num_sub_suites: 1
 
 - name: unittest_shell_hang_analyzer_gen
   commands:
@@ -4944,7 +4769,6 @@ tasks:
     vars:
       suite: unittest_shell_hang_analyzer
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 1
 
 - name: noPassthrough_gen
   tags: ["misc_js"]
@@ -4954,7 +4778,6 @@ tasks:
       suite: no_passthrough
       resmoke_args: --storageEngine=wiredTiger
       use_large_distro: "true"
-      fallback_num_sub_suites: 12
 
 # Only run hot_backups tests for hot_backups variant.
 - name: noPassthroughHotBackups_gen
@@ -4964,7 +4787,6 @@ tasks:
         suite: no_passthrough
         resmoke_args: --storageEngine=wiredTiger src/mongo/db/modules/*/jstests/hot_backups/*.js
         use_large_distro: "true"
-        fallback_num_sub_suites: 12
 
 - name: noPassthroughWithMongod_gen
   tags: ["misc_js"]
@@ -4974,16 +4796,6 @@ tasks:
       suite: no_passthrough_with_mongod
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
-
-- <<: *task_template
-  name: bulk_gle_passthrough
-  tags: ["auth", "gle"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=bulk_gle_passthrough --storageEngine=wiredTiger
 
 - name: slow1_gen
   tags: ["misc_js", "non_win_dbg"]
@@ -4991,7 +4803,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 4
       resmoke_jobs_max: 1
 
 - <<: *task_template
@@ -5022,7 +4833,6 @@ tasks:
       suite: sharded_collections_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
 - <<: *task_template
   name: sharding_jscore_passthrough
@@ -5042,16 +4852,14 @@ tasks:
       suite: sharding_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
-- <<: *task_template
-  name: sharding_jscore_op_query_passthrough
+- name: sharding_api_version_jscore_passthrough_gen
   tags: ["sharding", "jscore"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=sharding_jscore_op_query_passthrough --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
+      fallback_num_sub_suites: 5
 
 - <<: *task_template
   name: sharding_update_v1_oplog_jscore_passthrough
@@ -5060,17 +4868,7 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=sharding_jscore_op_query_passthrough --storageEngine=wiredTiger
-
-- name: sharding_jscore_passthrough_wire_ops_gen
-  tags: ["sharding", "jscore"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      suite: sharding_jscore_passthrough
-      depends_on: jsCore
-      resmoke_args: --storageEngine=wiredTiger --shellReadMode=legacy --shellWriteMode=compatibility --excludeWithAnyTags=requires_find_command,requires_timeseries
-      fallback_num_sub_suites: 11
+      resmoke_args: --suites=sharding_jscore_passthrough --storageEngine=wiredTiger
 
 - <<: *task_template
   name: sharded_multi_stmt_txn_jscore_passthrough
@@ -5086,10 +4884,8 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 28
       resmoke_jobs_max: 0  # No cap on number of jobs.
 
 - name: multi_shard_local_read_write_multi_stmt_txn_jscore_passthrough_gen
@@ -5097,76 +4893,78 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 21
 
 - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   tags: ["multi_stmt"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 19
 
 - name: multi_shard_multi_stmt_txn_kill_primary_jscore_passthrough_gen
   tags: ["multi_shard"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 48
 
 - name: multi_shard_multi_stmt_txn_stepdown_primary_jscore_passthrough_gen
   tags: ["multi_shard"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 37
 
 - name: tenant_migration_jscore_passthrough_gen
   tags: ["tenant_migration"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
 
 - name: tenant_migration_causally_consistent_jscore_passthrough_gen
   tags: ["tenant_migration"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
 
 - name: tenant_migration_multi_stmt_txn_jscore_passthrough_gen
   tags: ["tenant_migration", "txn"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
 
 - name: tenant_migration_stepdown_jscore_passthrough_gen
   tags: ["tenant_migration"]
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
+      use_large_distro: "true"
+      resmoke_args: --storageEngine=wiredTiger
+
+- name: tenant_migration_terminate_primary_jscore_passthrough_gen
+  tags: ["tenant_migration"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_args: --storageEngine=wiredTiger
+      fallback_num_sub_suites: 10
+
+- name: tenant_migration_kill_primary_jscore_passthrough_gen
+  tags: ["tenant_migration"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
       fallback_num_sub_suites: 10
@@ -5176,19 +4974,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 2
-      resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: parallel_compatibility
-  tags: ["misc_js"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=parallel --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
       resmoke_jobs_max: 1
 
 - <<: *task_template
@@ -5228,7 +5014,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: concurrency_replication_multiversion_gen
@@ -5239,7 +5024,6 @@ tasks:
       suite: concurrency_replication
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
 - name: concurrency_replication_causal_consistency_gen
   tags: ["concurrency", "repl", "large", "non_live_record"]
@@ -5248,7 +5032,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: concurrency_replication_multi_stmt_txn
@@ -5298,7 +5081,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_replication_wiredtiger_eviction_debug_gen
   tags: ["concurrency", "repl", "debug_only"]
@@ -5307,7 +5089,6 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_replication_gen
   tags: ["concurrency", "common", "read_concern_maj", "large", "sharded"]
@@ -5315,7 +5096,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5327,7 +5107,6 @@ tasks:
       suite: concurrency_sharded_replication
       resmoke_args: --storageEngine=wiredTiger
       task_path_suffix: /data/multiversion
-      fallback_num_sub_suites: 4
 
 - name: concurrency_sharded_replication_with_balancer_gen
   tags: ["concurrency", "common", "read_concern_maj", "large", "sharded"]
@@ -5335,7 +5114,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5346,7 +5124,6 @@ tasks:
     vars:
       suite: concurrency_sharded_replication
       resmoke_args: "--excludeWithAnyTags=uses_transactions --storageEngine=wiredTiger"
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5357,7 +5134,6 @@ tasks:
     vars:
       suite: concurrency_sharded_replication_with_balancer
       resmoke_args: "--excludeWithAnyTags=uses_transactions --storageEngine=wiredTiger"
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5367,7 +5143,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5377,7 +5152,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5387,7 +5161,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5397,7 +5170,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5407,7 +5179,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
       use_large_distro: "true"
       resmoke_jobs_max: 1
 
@@ -5419,7 +5190,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_kill_primary_with_balancer_gen
   tags: ["concurrency", "stepdowns", "kill_terminate", "sharded"]
@@ -5429,7 +5199,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_multi_stmt_txn_gen
   tags: ["concurrency", "large", "sharded"]
@@ -5439,7 +5208,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_multi_stmt_txn_with_balancer_gen
   tags: ["concurrency", "large", "sharded"]
@@ -5449,7 +5217,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_local_read_write_multi_stmt_txn_gen
   tags: ["concurrency", "large", "sharded"]
@@ -5459,7 +5226,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_local_read_write_multi_stmt_txn_with_balancer_gen
   tags: ["concurrency", "large", "sharded"]
@@ -5469,7 +5235,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_sharded_multi_stmt_txn_with_stepdowns_gen
   tags: ["concurrency", "stepdowns", "large", "sharded"]
@@ -5479,7 +5244,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: concurrency_sharded_multi_stmt_txn_terminate_primary_gen
@@ -5490,7 +5254,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: concurrency_sharded_multi_stmt_txn_kill_primary_gen
@@ -5501,7 +5264,6 @@ tasks:
       use_large_distro: "true"
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - name: concurrency_simultaneous_gen
   tags: ["concurrency", "common"]
@@ -5510,7 +5272,6 @@ tasks:
     vars:
       resmoke_args: --storageEngine=wiredTiger
       resmoke_jobs_max: 1
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: concurrency_simultaneous_replication
@@ -5556,10 +5317,8 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
 
 - <<: *task_template
   name: write_concern_majority_passthrough
@@ -5584,10 +5343,8 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
 
 - <<: *task_template
   name: cwrwc_wc_majority_passthrough
@@ -5602,10 +5359,8 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      depends_on: jsCore
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 12
 
 - name: replica_sets_gen
   tags: ["replica_sets", "san", "large"]
@@ -5613,7 +5368,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - name: replica_sets_ese_gen
   tags: ["replica_sets", "encrypt", "san"]
@@ -5622,7 +5376,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: replica_sets_ese_gcm_gen
   tags: ["replica_sets", "encrypt", "san", "gcm"]
@@ -5631,7 +5384,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: replica_sets_auth_gen
   tags: ["replica_sets", "common", "san", "auth"]
@@ -5640,7 +5392,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 14
 
 - name: replica_sets_large_txns_format_gen
   tags: ["replica_sets", "multi_oplog", "san"]
@@ -5648,7 +5399,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: replica_sets_max_mirroring_gen
   tags: ["replica_sets", "san"]
@@ -5656,7 +5406,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: replica_sets_update_v1_oplog_gen
   tags: ["replica_sets", "san"]
@@ -5664,7 +5413,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - <<: *task_template
   name: replica_sets_multiversion_gen
@@ -5673,7 +5421,6 @@ tasks:
   - func: "generate randomized multiversion tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger --tagFile=generated_resmoke_config/multiversion_exclude_tags.yml
-      fallback_num_sub_suites: 8
       use_multiversion: /data/multiversion
       suite: replica_sets_multiversion
 
@@ -5692,7 +5439,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 32
 
 - name: sharding_multiversion_gen
   tags: ["random_multiversion_ds"]
@@ -5701,7 +5447,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger --tagFile=generated_resmoke_config/multiversion_exclude_tags.yml
-      fallback_num_sub_suites: 32
       use_multiversion: /data/multiversion
       suite: sharding_multiversion
 
@@ -5712,7 +5457,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 32
 
 - name: sharding_csrs_continuous_config_stepdown_gen
   tags: ["sharding", "common", "csrs", "non_live_record"]
@@ -5722,7 +5466,6 @@ tasks:
       suite: sharding_continuous_config_stepdown
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 25
 
 - name: sharding_ese_gen
   tags: ["sharding", "encrypt"]
@@ -5731,7 +5474,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 32
 
 - name: sharding_ese_gcm_gen
   tags: ["sharding", "encrypt", "gcm"]
@@ -5740,17 +5482,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 32
-
-- name: sharding_op_query_gen
-  tags: ["sharding", "common", "op_query"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      suite: sharding
-      use_large_distro: "true"
-      resmoke_args: --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
-      fallback_num_sub_suites: 31
 
 - name: sharding_auth_gen
   tags: ["sharding", "auth"]
@@ -5759,7 +5490,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 31
 
 - name: sharding_auth_audit_gen
   tags: ["auth", "audit", "non_live_record"]
@@ -5768,7 +5498,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 31
 
 - name: sharding_last_lts_mongos_and_mixed_shards_gen
   tags: ["sharding", "common", "multiversion"]
@@ -5778,7 +5507,6 @@ tasks:
       use_large_distro: "true"
       use_multiversion: /data/multiversion
       resmoke_args: --tagFile=generated_resmoke_config/multiversion_exclude_tags.yml
-      fallback_num_sub_suites: 24
 
 - name: sharding_update_v1_oplog_gen
   tags: ["sharding", "common"]
@@ -5787,7 +5515,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 31
 
 - <<: *task_template
   name: snmp
@@ -5806,7 +5533,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: "--storageEngine=wiredTiger --mongodSetParameters='{logComponentVerbosity: {network: 2, replication: {heartbeats: 2}}}'"
-      fallback_num_sub_suites: 5
 
 - name: sslSpecial_gen
   tags: ["encrypt", "ssl"]
@@ -5815,7 +5541,6 @@ tasks:
     vars:
       suite: ssl_special
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
 
 - name: ssl_x509_gen
   tags: ["encrypt", "ssl"]
@@ -5824,7 +5549,6 @@ tasks:
     vars:
       suite: ssl_x509
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 3
 
 - <<: *task_template
   name: jsCore_decimal
@@ -5867,7 +5591,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 14
 
 - name: causally_consistent_jscore_passthrough_auth_gen
   tags: ["causally_consistent"]
@@ -5875,7 +5598,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: causally_consistent_read_concern_snapshot_passthrough_gen
   tags: ["causally_consistent", "read_write_concern", "durable_history"]
@@ -5883,7 +5605,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: sharded_causally_consistent_read_concern_snapshot_passthrough_gen
   tags: ["causally_consistent", "read_write_concern", "durable_history"]
@@ -5891,7 +5612,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: sharded_causally_consistent_jscore_passthrough_gen
   tags: ["causally_consistent"]
@@ -5899,7 +5619,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 15
 
 - name: retryable_writes_jscore_passthrough_gen
   tags: ["retry"]
@@ -5908,7 +5627,6 @@ tasks:
     vars:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 9
 
 - name: logical_session_cache_replication_default_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "repl"]
@@ -5916,7 +5634,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 17
 
 - name: logical_session_cache_replication_100ms_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "repl"]
@@ -5924,7 +5641,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 17
 
 - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "one_sec", "repl"]
@@ -5932,7 +5648,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 16
 
 - name: logical_session_cache_replication_10sec_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "repl"]
@@ -5940,7 +5655,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 16
 
 - name: logical_session_cache_sharding_default_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache"]
@@ -5948,7 +5662,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 12
 
 - name: logical_session_cache_sharding_100ms_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache"]
@@ -5956,7 +5669,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 48
 
 - name: logical_session_cache_sharding_100ms_refresh_jscore_txns_passthrough_gen
   tags: ["logical_session_cache"]
@@ -5964,7 +5676,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
 
 - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "one_sec"]
@@ -5972,7 +5683,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 20
 
 - name: logical_session_cache_sharding_10sec_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache"]
@@ -5980,7 +5690,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 14
 
 - name: logical_session_cache_standalone_default_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache"]
@@ -5988,7 +5697,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - name: logical_session_cache_standalone_100ms_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache"]
@@ -5996,7 +5704,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "one_sec"]
@@ -6004,7 +5711,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - name: logical_session_cache_standalone_10sec_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache"]
@@ -6012,7 +5718,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 5
 
 - <<: *task_template
   name: retryable_writes_jscore_stepdown_passthrough
@@ -6097,6 +5802,17 @@ tasks:
       resmoke_args: --suites=json_schema --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
+- name: powercycle_gen
+  commands:
+    - func: "generate powercycle tasks"
+      vars:
+        task_names: >-
+          powercycle
+          powercycle_kill_mongod
+          powercycle_replication_smalloplog
+          powercycle_syncdelay
+        num_tasks: 1
+
 - name: powercycle_smoke_skip_compile_gen
   commands:
     - func: "generate powercycle tasks"
@@ -6118,6 +5834,7 @@ tasks:
 
 - name: powercycle_smoke
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6127,24 +5844,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
-
-- name: powercycle_kill_mongod_smoke
-  exec_timeout_secs: 7200 # 2 hour timeout for the task overall
-  depends_on:
-  - name: archive_dist_test_debug
-  commands:
-  - func: "do setup"
-  - func: "set up remote credentials"
-    vars:
-      <<: *powercycle_remote_credentials
-  - func: "set up EC2 instance"
-  - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6154,11 +5858,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_kill_mongod
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6168,11 +5872,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_fcv4.4
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6182,11 +5886,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_replication
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6196,11 +5900,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_replication_smalloplog
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6210,11 +5914,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_syncdelay
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6224,11 +5928,11 @@ tasks:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
   - func: "run powercycle test"
-    timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_write_concern_majority
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
+  timeout_secs: 1800 # 30 minute timeout for no output
   depends_on:
   - name: archive_dist_test_debug
   commands:
@@ -6243,9 +5947,11 @@ tasks:
   depends_on:
   - name: archive_dist_test_debug
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "run idl tests"
@@ -6262,16 +5968,12 @@ tasks:
       silent: true
       args:
         - "src/evergreen/blackduck_setup.sh"
-      env:
-        workdir: ${workdir}
   - command: subprocess.exec
     type: test
     params:
       binary: bash
       args:
         - "src/evergreen/blackduck_hub.sh"
-      env:
-        workdir: ${workdir}
 
 - name: tla_plus
   commands:
@@ -6314,6 +6016,12 @@ tasks:
   depends_on:
   - name: package
   commands:
+    - command: manifest.load
+    - *git_get_project
+    - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
+    - *set_up_venv
     - func: "fetch packages"
     - func: "set up remote credentials"
       vars:
@@ -6327,7 +6035,12 @@ tasks:
   depends_on:
     - name: compile_dist_test
   commands:
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
+    - *kill_processes
+    - *cleanup_environment
+    - *set_up_venv
     - func: "scons compile"
       vars:
         targets: >-
@@ -6346,8 +6059,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/package.sh"
-        env:
-          workdir: ${workdir}
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -6484,6 +6195,10 @@ tasks:
   - name: replica_sets_jscore_passthrough
   commands:
     - func: "fetch artifacts"
+    - func: "f_expansions_write"
+    - func: "kill processes"
+    - func: "cleanup environment"
+    - func: "set up venv"
     - func: "fetch packages"
     - func: "apply compile expansions"
     - func: "set up remote credentials"
@@ -6497,8 +6212,6 @@ tasks:
         binary: bash
         args:
           - "./src/evergreen/packages_publish.sh"
-        env:
-          workdir: ${workdir}
 
 - name: push
   tags: ["publish"]
@@ -6511,6 +6224,10 @@ tasks:
   stepback: false
   commands:
     - func: "fetch artifacts"
+    - func: "f_expansions_write"
+    - func: "kill processes"
+    - func: "cleanup environment"
+    - func: "set up venv"
     - func: "fetch packages"
     - func: "fetch dist tarball"
     # Fetch the shell
@@ -6562,8 +6279,6 @@ tasks:
         binary: bash
         args:
           - "./src/evergreen/notary_client_run.sh"
-        env:
-          workdir: ${workdir}
 
     # Put the binaries tarball/zipfile
     - command: s3.put
@@ -7089,48 +6804,59 @@ tasks:
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on: []
   commands:
+  - command: manifest.load
+  - *git_get_project
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
   - func: "shared scons cache pruning"
 
 - name: win_shared_scons_cache_pruning
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on: []
   commands:
+  - command: manifest.load
+  - *git_get_project
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
   - func: "set up win mount script"
   - func: "shared scons cache pruning"
 
 - name: validate_commit_message
   exec_timeout_secs: 600 # 10 minute timeout
   commands:
+  - command: manifest.load
+  - *git_get_project
   - *f_expansions_write
-  - func: "set task expansion macros"
-  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
   - func: "set up venv"
-  - *f_expansions_write
   - command: subprocess.exec
     type: test
     params:
       binary: bash
       args:
         - "./src/evergreen/commit_message_validate.sh"
-      env:
-        workdir: ${workdir}
 
 - name: check_for_todos
   exec_timeout_secs: 600 # 10 minute timeout
   commands:
+    - command: manifest.load
+    - *git_get_project
     - *f_expansions_write
-    - func: "set task expansion macros"
-    - *f_expansions_write
-    - func: "configure evergreen api credentials"
+    - *kill_processes
+    - *cleanup_environment
     - func: "set up venv"
+    - func: "configure evergreen api credentials"
     - command: subprocess.exec
       type: test
       params:
         binary: bash
         args:
           - "./src/evergreen/todos_check.sh"
-        env:
-          workdir: ${workdir}
 
 - <<: *task_template
   name: mqlrun
@@ -7265,12 +6991,12 @@ task_groups:
   setup_group:
     - command: manifest.load
     - func: "git get project"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
     - func: "kill processes"
     - func: "cleanup environment"
     - func: "set up venv"
     - func: "upload pip requirements"
-    - func: "set task expansion macros"
-    - func: "f_expansions_write"
     - func: "configure evergreen api credentials"
     - func: "get buildnumber"
     - func: "f_expansions_write"
@@ -7283,6 +7009,7 @@ task_groups:
   setup_task:
     - func: "apply compile expansions"
     - func: "set task expansion macros"
+    - func: "f_expansions_write"
   teardown_task:
   tasks:
   - clang_tidy
@@ -7293,11 +7020,11 @@ task_groups:
   setup_group:
     - command: manifest.load
     - func: "git get project"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
     - func: "get buildnumber"
     - func: "set up venv"
     - func: "upload pip requirements"
-    - func: "set task expansion macros"
-    - func: "f_expansions_write"
     - func: "set up credentials"
     - func: "set up win mount script"
     - func: "generate compile expansions"
@@ -7306,6 +7033,7 @@ task_groups:
   setup_task:
     - func: "set task expansion macros"
     - func: "apply compile expansions"
+    - func: "f_expansions_write"
   teardown_task:
       - func: "attach scons logs"
   tasks:
@@ -7317,11 +7045,11 @@ task_groups:
   setup_group:
     - command: manifest.load
     - func: "git get project"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
     - func: "get buildnumber"
     - func: "set up venv"
     - func: "upload pip requirements"
-    - func: "set task expansion macros"
-    - func: "f_expansions_write"
     - func: "set up credentials"
     - func: "set up win mount script"
     - func: "generate compile expansions"
@@ -7330,6 +7058,7 @@ task_groups:
   setup_task:
     - func: "set task expansion macros"
     - func: "apply compile expansions"
+    - func: "f_expansions_write"
   teardown_task:
       - func: "attach scons logs"
   tasks:
@@ -7441,8 +7170,7 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: .aggregation !.encrypt
-  - name: .auth !.audit !.gle !.multiversion
-  - name: bulk_gle_passthrough
+  - name: .auth !.audit !.multiversion
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams !.secondary_reads
   - name: .misc_js
@@ -7510,7 +7238,6 @@ buildvariants:
   - name: aggregation
   - name: aggregation_auth
   - name: auth_gen
-  - name: bulk_gle_passthrough
   - name: .misc_js !.sharded
   - name: concurrency
   - name: concurrency_simultaneous_gen
@@ -7559,6 +7286,7 @@ buildvariants:
   - name: libunwind_tests
   - name: .logical_session_cache .one_sec
   - name: multiversion_gen
+  - name: .powercycle
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough
   - name: .sharding .txns
@@ -7618,7 +7346,7 @@ buildvariants:
   - name: .jepsen
     distros:
     - ubuntu1804-build
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_auth
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -7824,7 +7552,7 @@ buildvariants:
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_auth
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -7939,6 +7667,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-amzn64
     compile_flags: --ssl MONGO_DISTMOD=amzn64 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
     multiversion_platform: amzn64
     multiversion_edition: enterprise
     has_packages: true
@@ -7954,18 +7683,17 @@ buildvariants:
     - amazon1-2018-build
   - name: .aggfuzzer .common
   - name: aggregation
-  - name: .auth !.gle !.multiversion
+  - name: .auth !.multiversion
   - name: audit
-  - name: bulk_gle_passthrough
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.aggregation
-  - name: .jscore .common !.compat
+  - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
   - name: .logical_session_cache .one_sec
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
-  - name: powercycle
+  - name: .powercycle
   - name: .replica_sets .common
   - name: sasl
   - name: serial_run
@@ -7991,6 +7719,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-amazon
     compile_flags: --ssl MONGO_DISTMOD=amazon -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
     multiversion_platform: amazon
     multiversion_edition: targeted
     has_packages: true
@@ -8022,7 +7751,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .sharding .txns
   - name: .ssl
   - name: .stitch
@@ -8042,7 +7771,7 @@ buildvariants:
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: >-
-      --excludeWithAnyTags=SERVER-34286
+      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -8063,11 +7792,10 @@ buildvariants:
   - name: .aggfuzzer .common
   - name: aggregation
   - name: audit
-  - name: .auth !.gle !.multiversion
-  - name: bulk_gle_passthrough
+  - name: .auth !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.aggregation
-  - name: .jscore .common !.compat
+  - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
   - name: .logical_session_cache .one_sec
@@ -8094,7 +7822,7 @@ buildvariants:
   - amazon2-test
   expansions:
     test_flags: >-
-      --excludeWithAnyTags=SERVER-34286
+      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux
     push_path: linux
     push_bucket: downloads.mongodb.org
     push_name: linux
@@ -8130,7 +7858,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .sharding .txns
   - name: .ssl
   - name: .stitch
@@ -8154,6 +7882,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-enterprise-amazon2
     compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: aarch64
@@ -8172,7 +7901,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -8204,6 +7933,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-amazon2
     compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
     has_packages: true
     packager_script: packager.py
     packager_arch: aarch64
@@ -8231,7 +7961,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -8278,7 +8008,8 @@ buildvariants:
   expansions:
     exe: ".exe"
     content_type: application/zip
-    compile_flags: --dbg=on --opt=on --win-version-min=win10 -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) MONGO_DISTMOD=windows
+    compile_flags: --dbg=on --opt=on --win-version-min=win10 -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") MONGO_DISTMOD=windows
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8297,7 +8028,6 @@ buildvariants:
   - name: aggregation_expression_multiversion_fuzzer_gen
   - name: aggregation_expression_optimization_fuzzer_gen
   - name: auth_gen
-  - name: bulk_gle_passthrough
   - name: .causally_consistent !.sharding
   - name: .change_streams !.secondary_reads
   - name: .misc_js !.non_win_dbg
@@ -8349,8 +8079,8 @@ buildvariants:
     exe: ".exe"
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi archive-mh archive-mh-debug
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8391,8 +8121,8 @@ buildvariants:
     exe: ".exe"
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi archive-mh archive-mh-debug
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")  --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8437,8 +8167,8 @@ buildvariants:
     exe: ".exe"
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi archive-mh archive-mh-debug
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8469,7 +8199,7 @@ buildvariants:
     - name: external_auth_windows
       distros:
         - windows-64-2016
-    - name: .jscore .common !.compat !.sharding
+    - name: .jscore .common !.sharding
     - name: jsCore_auth
     - name: jsCore_ese
     - name: jsCore_txns_large_txns_format
@@ -8477,8 +8207,6 @@ buildvariants:
     - name: mqlrun
     - name: noPassthrough_gen
     - name: noPassthroughWithMongod_gen
-    - name: powercycle_kill_mongod_smoke
-    - name: powercycle_smoke
     - name: .replica_sets .common
     - name: .replica_sets .multi_oplog
     - name: replica_sets_ese_gen
@@ -8500,8 +8228,8 @@ buildvariants:
     exe: ".exe"
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi archive-mh archive-mh-debug
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8517,7 +8245,7 @@ buildvariants:
         --runAllFeatureFlagTests
         --excludeWithAnyTags=incompatible_with_windows_tls
   tasks:
-    - name: compile_test_and_package_serial_TG
+    - name: compile_and_archive_dist_test_then_package_TG
       distros:
         - windows-vsCurrent-xlarge
     - name: audit
@@ -8531,7 +8259,7 @@ buildvariants:
     - name: external_auth_windows
       distros:
         - windows-64-2016
-    - name: .jscore .common !.compat !.sharding
+    - name: .jscore .common !.sharding
     - name: jsCore_auth
     - name: jsCore_ese
     - name: jsCore_txns_large_txns_format
@@ -8584,8 +8312,8 @@ buildvariants:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi
     exe: ".exe"
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_journaling,incompatible_with_windows_tls
     ext: zip
@@ -8606,7 +8334,7 @@ buildvariants:
     - windows-vsCurrent-large
   - name: concurrency_replication_causal_consistency_gen
   - name: initial_sync_fuzzer_gen
-  - name: .jscore .common !.decimal !.compat !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common !.flow_control  # Flow control jstestfuzz take longer.
   - name: .read_write_concern .linearize !.durable_history
   - name: replica_sets_auth_gen
@@ -8636,8 +8364,8 @@ buildvariants:
     multiversion_platform_44_or_later: windows
     multiversion_edition: base
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8650,7 +8378,6 @@ buildvariants:
   - name: .aggfuzzer
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
-  - name: .auth .gle
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
     # Some concurrency workloads require a lot of memory, so we use machines
@@ -8666,14 +8393,13 @@ buildvariants:
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
   - name: multiversion_gen
   - name: multiversion_auth_gen
-  - name: powercycle_kill_mongod
   - name: .query_fuzzer
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: .updatefuzzer
@@ -8691,8 +8417,8 @@ buildvariants:
     exe: ".exe"
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi archive-mh archive-mh-debug
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8715,7 +8441,6 @@ buildvariants:
   - name: .aggfuzzer
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
-  - name: .auth .gle
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
     # Some concurrency workloads require a lot of memory, so we use machines
@@ -8730,14 +8455,14 @@ buildvariants:
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
   - name: multiversion_gen
   - name: multiversion_auth_gen
-  - name: powercycle_kill_mongod
+  - name: powercycle_gen
   - name: .query_fuzzer
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: .updatefuzzer
@@ -8755,8 +8480,8 @@ buildvariants:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     exe: ".exe"
     content_type: application/zip
-    compile_flags: --dbg=on --opt=off --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
-    num_scons_link_jobs_available: 0.5
+    compile_flags: --dbg=on --opt=off --ssl MONGO_DISTMOD=windows CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5") --win-version-min=win10
+    num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     scons_cache_scope: shared
@@ -8795,7 +8520,6 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
   - name: .aggregation !.auth !.encrypt !.unwind
-  - name: .auth .gle
   - name: auth_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams !.secondary_reads
@@ -8882,7 +8606,7 @@ buildvariants:
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
   - name: mqlrun
@@ -9001,7 +8725,6 @@ buildvariants:
     - rhel80-medium
   - name: .jscore .common
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
@@ -9019,6 +8742,7 @@ buildvariants:
   - name: .replica_sets !.encrypt !.auth
     distros:
     - rhel80-medium
+  - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
     distros:
@@ -9039,6 +8763,7 @@ buildvariants:
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
   - name: .sharding .common
   - name: snmp
@@ -9128,7 +8853,6 @@ buildvariants:
     - rhel80-xlarge
   - name: .jscore .common !jsCore
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
@@ -9147,6 +8871,7 @@ buildvariants:
   - name: .replica_sets !.encrypt !.auth
     distros:
     - rhel80-xlarge
+  - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
     distros:
@@ -9166,6 +8891,7 @@ buildvariants:
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
   - name: .sharding .common
   - name: snmp
@@ -9242,7 +8968,6 @@ buildvariants:
     - rhel80-medium
   - name: .jscore .common
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
@@ -9251,6 +8976,7 @@ buildvariants:
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
+  - name: powercycle_smoke
   - name: .query_fuzzer
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
@@ -9260,6 +8986,7 @@ buildvariants:
   - name: .replica_sets !.encrypt !.auth
     distros:
     - rhel80-medium
+  - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
     distros:
@@ -9279,6 +9006,7 @@ buildvariants:
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
   - name: .sharding .common
   - name: sharded_multi_stmt_txn_jscore_passthrough
@@ -9318,7 +9046,7 @@ buildvariants:
     large_distro_name: rhel80-medium
     num_scons_link_jobs_available: 0.99
     test_flags: >-
-      --mongodSetParameters="{internalQueryForceClassicEngine: true, featureFlagSBE: false}"
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
       --additionalFeatureFlags=featureFlagTimeseriesCollection
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
@@ -9331,12 +9059,13 @@ buildvariants:
 #  - name: compile_test_and_package_parallel_dbtest_stream_TG
 #    distros:
 #    - rhel80-medium
+  - name: .aggfuzzer
   - name: .aggregation !.no_async !.secondary_reads !.sharded !.unwind !aggregation_disabled_optimization
-  - name: .aggfuzzer !.multiversion
   - name: .change_streams
   - name: .concurrency !.large !.ubsan !.debug_only
-  - name: .jscore !.sharding !.decimal !.compat !cst_jscore_passthrough
+  - name: .jscore !.sharding !.decimal !cst_jscore_passthrough
   - name: .jstestfuzz !.flow_control
+  - name: .query_fuzzer
   - name: .read_write_concern
   - name: .replica_sets
   - name: .rollbackfuzzer
@@ -9351,6 +9080,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
+  - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_multiversion_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: retryable_writes_jscore_passthrough_gen
@@ -9365,15 +9095,12 @@ buildvariants:
   - name: sharding_ese_gen
   - name: sharding_gen
   - name: sharding_jscore_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_jscore_op_query_passthrough
+  - name: sharding_api_version_jscore_passthrough_gen
   - name: sharding_update_v1_oplog_jscore_passthrough
   - name: sharding_last_lts_mongos_and_mixed_shards_gen
   - name: sharding_max_mirroring_gen
   - name: sharding_multiversion_gen
-  - name: sharding_op_query_gen
   - name: sharding_update_v1_oplog_gen
-  - name: jsCore_compatibility
   - name: ese
     distros:
     - rhel80-medium
@@ -9480,98 +9207,6 @@ buildvariants:
   - name: .multiversion_passthrough
   - name: .random_multiversion_ds
 
-- name: enterprise-rhel-80-64-bit-lock-free-reads
-  display_name: "Enterprise RHEL 8.0 (Lock Free Reads disabled)"
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-small
-  batchtime: 1440 # 1 day
-  expansions: &enterprise-rhel-80-64-bit-lock-free-reads-expansions
-    test_flags: >-
-      --mongodSetParameters="{featureFlagLockFreeReads: false}" --excludeWithAnyTags=incompatible_with_lockfreereads
-    compile_flags: >-
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --ssl
-      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-      MONGO_DISTMOD=rhel80
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    repo_edition: enterprise
-    scons_cache_scope: shared
-    build_mongoreplay: false
-    large_distro_name: rhel80-medium
-  tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-    distros:
-      - rhel80-large
-  - name: .aggfuzzer
-  - name: .aggregation
-  - name: audit
-  - name: .auth
-  - name: unittest_shell_hang_analyzer_gen
-  - name: .causally_consistent !.sharding
-  - name: .change_streams
-  - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
-    distros:
-    - rhel80-medium
-  - name: disk_wiredtiger
-  - name: .encrypt
-  - name: initial_sync_fuzzer_gen
-  - name: .jscore .common
-  - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
-  - name: jsCore_txns_large_txns_format
-  - name: jsonSchema
-  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
-  - name: libunwind_tests
-  - name: mqlrun
-  - name: .multi_shard
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: multiversion_gen
-  - name: .query_fuzzer
-  - name: .random_multiversion_ds
-  - name: .read_write_concern .large
-    distros:
-    - rhel80-medium
-  - name: .read_write_concern !.large
-  - name: .replica_sets !.encrypt !.auth
-    distros:
-    - rhel80-medium
-  - name: replica_sets_reconfig_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-    distros:
-    - rhel80-medium
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough
-    distros:
-    - rhel80-medium
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
-    distros:
-    - rhel80-medium
-  - name: .read_only
-  - name: .rollbackfuzzer
-  - name: sasl
-  - name: search
-  - name: search_auth
-  - name: search_ssl
-  - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .txns
-  - name: .sharding .common
-  - name: snmp
-  - name: .stitch
-  - name: .updatefuzzer
-  - name: secondary_reads_passthrough_gen
-  - name: server_discovery_and_monitoring_json_test_TG
-    distros:
-      - rhel80-large
-  - name: server_selection_json_test_TG
-    distros:
-      - rhel80-large
-
 - name: rhel-80-64-bit-nossl
   display_name: "RHEL 8.0 Shared Library (No SSL)"
   run_on:
@@ -9606,6 +9241,7 @@ buildvariants:
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    test_flags: --excludeWithAnyTags=resource_intensive
     compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -9634,7 +9270,6 @@ buildvariants:
     - name: .jscore .common
     - name: jsCore_txns_large_txns_format
     - name: jsCore_minimum_batch_size
-    - name: jsCore_op_query
     - name: libunwind_tests
     - name: .logical_session_cache .one_sec
     - name: .multi_shard .common
@@ -9746,7 +9381,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -9827,7 +9462,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -9835,8 +9470,6 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: .replica_sets .multi_oplog
-  - name: powercycle_kill_mongod_smoke
-  - name: powercycle_smoke
   - name: sasl
   - name: search
   - name: search_auth
@@ -9883,7 +9516,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -9959,7 +9592,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -10070,7 +9703,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -10120,7 +9753,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -10167,7 +9800,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -10230,7 +9863,6 @@ buildvariants:
     distros:
     - rhel81-power8-large
   - name: .jscore .common !.auth
-  - name: jsCore_op_query
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: .replica_sets .common
@@ -10311,7 +9943,6 @@ buildvariants:
     distros:
     - rhel72-zseries-build
   - name: .jscore .common !.auth
-  - name: jsCore_op_query
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: .replica_sets .common
@@ -10350,7 +9981,7 @@ buildvariants:
     test_flags: >-
         --runAllFeatureFlagTests
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_and_archive_dist_test_then_package_TG
     distros:
     - rhel72-zseries-build
   - name: jsCore
@@ -10442,7 +10073,7 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
   - name: replica_sets_auth_gen
@@ -10500,7 +10131,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: .publish
@@ -10534,7 +10165,7 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jscore .common !.decimal !.compat !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
   - name: replica_sets_auth_gen
@@ -10586,7 +10217,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.op_query !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion
   - name: .ssl
   - name: .stitch
   - name: .publish
@@ -10627,7 +10258,7 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jscore .common !.decimal !.compat !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
   - name: replica_sets_auth_gen
@@ -10683,7 +10314,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -10723,7 +10354,7 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jscore .common !.decimal !.compat !.sharding
+  - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
   - name: replica_sets_auth_gen
@@ -10779,7 +10410,7 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.op_query !.csrs
+  - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -10838,7 +10469,6 @@ buildvariants:
     distros:
     - rhel80-medium
   - name: .jscore .common !.decimal
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz !.initsync
   - name: .logical_session_cache
@@ -10899,7 +10529,6 @@ buildvariants:
   # - name: concurrency_simultaneous_replication
   - name: .integration !.audit
   - name: .jscore .common !.txns !.decimal
-  - name: jsCore_op_query
   # SERVER-50295: Investigate jstestfuzz time outs.
   # - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -10935,7 +10564,6 @@ buildvariants:
     distros:
     - rhel72-zseries-build
   - name: .jscore .common !.decimal
-  - name: jsCore_op_query
   - name: .read_write_concern !.durable_history
   - name: replica_sets_gen
   - name: .replica_sets .common
@@ -10984,7 +10612,6 @@ buildvariants:
   - name: .change_streams
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.kill_terminate
-  - name: disk_wiredtiger
   - name: .encrypt
   - name: free_monitoring
   - name: external_auth
@@ -10993,7 +10620,6 @@ buildvariants:
   - name: .integration !.standalone !.audit
   - name: .jscore .common
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .logical_session_cache
@@ -11052,7 +10678,7 @@ buildvariants:
     test_flags: >-
         --runAllFeatureFlagTests
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_and_archive_dist_test_then_package_TG
   - name: compile_benchmarks
   - name: .aggregation
 #  - name: .auth
@@ -11061,7 +10687,6 @@ buildvariants:
   - name: .change_streams
   - name: .misc_js
 #  - name: .concurrency !.ubsan !.no_txns !.kill_terminate
-#  - name: disk_wiredtiger
 #  - name: .encrypt
   - name: free_monitoring
   - name: external_auth
@@ -11070,7 +10695,6 @@ buildvariants:
   - name: .integration !.standalone !.audit
   - name: .jscore .common
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .logical_session_cache
@@ -11098,6 +10722,77 @@ buildvariants:
 #  - name: unittest_shell_hang_analyzer_gen
 #  - name: server_discovery_and_monitoring_json_test_TG
 #  - name: server_selection_json_test_TG
+
+- <<: *ubuntu1804-debug-asan-template
+  name: ubuntu1804-debug-asan-classic-engine
+  display_name: ~ ASAN Enterprise Ubuntu 18.04 DEBUG (Classic Execution Engine)
+  modules:
+  - enterprise
+  run_on:
+  - ubuntu1804-build
+  stepback: false
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    lang_environment: LANG=C
+    # If you add anything to san_options, make sure the appropriate changes are
+    # also made to SConstruct.
+    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
+    test_flags: >-
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
+      --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling
+    multiversion_platform: ubuntu1804
+    multiversion_edition: enterprise
+    resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under ASAN build.
+    hang_analyzer_dump_core: false
+    scons_cache_scope: shared
+    exec_timeout_secs: 14400 # 3 hour timeout
+  tasks:
+  - name: compile_test_and_package_serial_TG
+  - name: compile_benchmarks
+  - name: .aggregation
+  - name: .auth
+  - name: audit
+  - name: .benchmarks
+  - name: .causally_consistent !.wo_snapshot
+  - name: .change_streams
+  - name: .misc_js
+  - name: .concurrency !.ubsan !.no_txns !.kill_terminate
+  - name: .encrypt
+  - name: free_monitoring
+  - name: external_auth
+  - name: external_auth_aws
+  - name: initial_sync_fuzzer_gen
+  - name: .integration !.standalone !.audit
+  - name: .jscore .common
+  - name: jsCore_minimum_batch_size
+  - name: jsCore_txns_large_txns_format
+  - name: jsonSchema
+  - name: .logical_session_cache
+  - name: .multi_shard .common
+  - name: .query_fuzzer
+  - name: .read_write_concern
+  - name: replica_sets_large_txns_format_gen
+  - name: replica_sets_large_txns_format_jscore_passthrough
+  - name: .replica_sets !.multi_oplog
+  - name: .resharding_fuzzer
+  - name: .retry
+  - name: .read_only
+  - name: .rollbackfuzzer
+  - name: .updatefuzzer
+  - name: sasl
+  - name: secondary_reads_passthrough_gen
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot
+  - name: .sharding .common !.csrs
+  - name: snmp
+  - name: .watchdog
+  - name: .stitch
+  - name: .tenant_migration
+  - name: unittest_shell_hang_analyzer_gen
+  - name: .updatefuzzer
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_selection_json_test_TG
 
 - name: ubuntu1804-asan
   display_name: ~ ASAN Ubuntu 18.04
@@ -11158,7 +10853,6 @@ buildvariants:
   - name: .integration !.audit
   - name: .jscore .common
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .logical_session_cache .one_sec
@@ -11213,7 +10907,7 @@ buildvariants:
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
     scons_cache_scope: shared
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_and_archive_dist_test_then_package_TG
   - name: compile_benchmarks
   - name: .aggregation
   - name: .auth
@@ -11229,7 +10923,6 @@ buildvariants:
   - name: .integration !.audit
   - name: .jscore .common
   - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
   - name: jsonSchema
   - name: .logical_session_cache .one_sec
@@ -11256,6 +10949,71 @@ buildvariants:
 #  - name: .benchmarks
 #  - name: server_discovery_and_monitoring_json_test_TG
 #  - name: server_selection_json_test_TG
+
+- <<: *ubuntu1804-debug-ubsan-template
+  name: ubuntu1804-debug-ubsan-classic-engine
+  display_name: ~ UBSAN Enterprise Ubuntu 18.04 DEBUG (Classic Execution Engine)
+  modules:
+  - enterprise
+  run_on:
+  - ubuntu1804-build
+  stepback: false
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    lang_environment: LANG=C
+    # If you add anything to san_options, make sure the appropriate changes are
+    # also made to SConstruct.
+    san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
+    test_flags: >-
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
+      --excludeWithAnyTags=requires_ocsp_stapling
+    multiversion_platform: ubuntu1804
+    multiversion_edition: enterprise
+    resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
+    scons_cache_scope: shared
+  tasks:
+  - name: compile_test_and_package_serial_TG
+  - name: compile_benchmarks
+  - name: .aggregation
+  - name: .auth
+  - name: audit
+  - name: .benchmarks
+  - name: .causally_consistent !.wo_snapshot
+  - name: .change_streams
+  - name: .misc_js
+  - name: .concurrency !.no_txns !.repl !.kill_terminate
+  - name: disk_wiredtiger
+  - name: .encrypt
+  - name: free_monitoring
+  - name: initial_sync_fuzzer_gen
+  - name: .integration !.audit
+  - name: .jscore .common
+  - name: jsCore_minimum_batch_size
+  - name: jsCore_txns_large_txns_format
+  - name: jsonSchema
+  - name: .logical_session_cache .one_sec
+  - name: .multi_shard .common
+  - name: .read_write_concern
+  - name: replica_sets_large_txns_format_gen
+  - name: replica_sets_large_txns_format_jscore_passthrough
+  - name: .replica_sets !.multi_oplog
+  - name: .resharding_fuzzer
+  - name: .retry
+  - name: .rollbackfuzzer
+  - name: .read_only
+  - name: sasl
+  - name: secondary_reads_passthrough_gen
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot
+  - name: .sharding .common !.csrs
+  - name: snmp
+  - name: .stitch
+  - name: .updatefuzzer
+  - name: .tenant_migration
+  - name: watchdog_wiredtiger
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_selection_json_test_TG
 
 - &ubuntu1804-debug-aubsan-lite-required-template
   name: ubuntu1804-debug-aubsan-lite-required
@@ -11673,7 +11431,6 @@ buildvariants:
 #  - name: initial_sync_fuzzer_gen
   - name: .jscore .common
 #  - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
   - name: jsCore_txns_large_txns_format
 #  - name: jsonSchema
   - name: .jstestfuzz !.flow_control !.stepdowns !.causal

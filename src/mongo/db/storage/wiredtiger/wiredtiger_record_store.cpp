@@ -775,7 +775,15 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
         ss << "prefix_compression,";
     }
 
-    ss << "block_compressor=" << wiredTigerGlobalOptions.collectionBlockCompressor << ",";
+    ss << "block_compressor=";
+    if (options.timeseries) {
+        // Time-series collections use zstd compression by default.
+        ss << WiredTigerGlobalOptions::kDefaultTimeseriesCollectionCompressor;
+    } else {
+        // All other collections use the globally configured default.
+        ss << wiredTigerGlobalOptions.collectionBlockCompressor;
+    }
+    ss << ",";
 
     ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())->getTableCreateConfig(ns);
 
@@ -845,6 +853,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
                     getGlobalReplSettings().usingReplSets() ||
                         repl::ReplSettings::shouldRecoverFromOplogAsStandalone())),
       _isOplog(NamespaceString::oplog(params.ns)),
+      _forceUpdateWithFullDocument(params.forceUpdateWithFullDocument),
       _oplogMaxSize(params.oplogMaxSize),
       _cappedCallback(params.cappedCallback),
       _shuttingDown(false),
@@ -1473,7 +1482,8 @@ Status WiredTigerRecordStore::updateRecord(OperationContext* opCtx,
     const int kMaxDiffBytes = len / 10;
 
     bool skip_update = false;
-    if (!_isLogged && len > kMinLengthForDiff && len <= old_length + kMaxDiffBytes) {
+    if (!_forceUpdateWithFullDocument && !_isLogged && len > kMinLengthForDiff &&
+        len <= old_length + kMaxDiffBytes) {
         int nentries = kMaxEntries;
         std::vector<WT_MODIFY> entries(nentries);
 
@@ -1533,9 +1543,9 @@ StatusWith<RecordData> WiredTigerRecordStore::updateWithDamages(
     size_t modifiedDataSize = 0;
     for (u_int i = 0; where != end; ++i, ++where) {
         entries[i].data.data = damageSource + where->sourceOffset;
-        entries[i].data.size = where->size;
+        entries[i].data.size = where->sourceSize;
         entries[i].offset = where->targetOffset;
-        entries[i].size = where->size;
+        entries[i].size = where->targetSize;
         // Account for both the amount of old data we are overwriting (size) and new data we are
         // inserting (data.size).
         modifiedDataSize += entries[i].size;

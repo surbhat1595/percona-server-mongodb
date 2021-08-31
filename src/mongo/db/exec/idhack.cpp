@@ -86,7 +86,7 @@ PlanStage::StageState IDHackStage::doWork(WorkingSetID* out) {
     WorkingSetID id = WorkingSet::INVALID_ID;
     try {
         // Look up the key by going directly to the index.
-        RecordId recordId = indexAccessMethod()->findSingle(opCtx(), _key);
+        auto recordId = indexAccessMethod()->findSingle(opCtx(), collection(), _key);
 
         // Key not found.
         if (recordId.isNull()) {
@@ -103,12 +103,13 @@ PlanStage::StageState IDHackStage::doWork(WorkingSetID* out) {
         member->recordId = recordId;
         _workingSet->transitionToRecordIdAndIdx(id);
 
+        const auto& coll = collection();
         if (!_recordCursor)
-            _recordCursor = collection()->getCursor(opCtx());
+            _recordCursor = coll->getCursor(opCtx());
 
         // Find the document associated with 'id' in the collection's record store.
         if (!WorkingSetCommon::fetch(
-                opCtx(), _workingSet, id, _recordCursor.get(), collection()->ns())) {
+                opCtx(), _workingSet, id, _recordCursor.get(), coll, coll->ns())) {
             // We didn't find a document with RecordId 'id'.
             _workingSet->free(id);
             _commonStats.isEOF = true;

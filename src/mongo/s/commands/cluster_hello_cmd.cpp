@@ -45,6 +45,7 @@
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
+#include "mongo/rpc/rewrite_state_change_errors.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/s/mongos_topology_coordinator.h"
 #include "mongo/transport/message_compressor_manager.h"
@@ -78,6 +79,20 @@ public:
         return false;
     }
 
+    ReadConcernSupportResult supportsReadConcern(const BSONObj& cmdObj,
+                                                 repl::ReadConcernLevel level,
+                                                 bool isImplicitDefault) const final {
+        static const Status kReadConcernNotSupported{ErrorCodes::InvalidOptions,
+                                                     "read concern not supported"};
+        static const Status kDefaultReadConcernNotPermitted{
+            ErrorCodes::InvalidOptions, "cluster wide default read concern not permitted"};
+        static const Status kImplicitDefaultReadConcernNotPermitted{
+            ErrorCodes::InvalidOptions, "implicit default read concern not permitted"};
+        return {{level != repl::ReadConcernLevel::kLocalReadConcern, kReadConcernNotSupported},
+                {kDefaultReadConcernNotPermitted},
+                {kImplicitDefaultReadConcernNotPermitted}};
+    }
+
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return AllowedOnSecondary::kAlways;
     }
@@ -105,6 +120,9 @@ public:
         auto cmd = HelloCommand::parse({"hello", apiStrict}, cmdObj);
 
         waitInHello.pauseWhileSet(opCtx);
+
+        // "hello" is exempt from error code rewrites.
+        rpc::RewriteStateChangeErrors::setEnabled(opCtx, false);
 
         auto client = opCtx->getClient();
         if (ClientMetadata::tryFinalize(client)) {

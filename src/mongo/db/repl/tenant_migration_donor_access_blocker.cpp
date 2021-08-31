@@ -80,11 +80,14 @@ TenantMigrationDonorAccessBlocker::TenantMigrationDonorAccessBlocker(
                                            .getOrCreateBlockedOperationsExecutor();
 }
 
-Status TenantMigrationDonorAccessBlocker::checkIfCanWrite() {
+Status TenantMigrationDonorAccessBlocker::checkIfCanWrite(Timestamp writeTs) {
     stdx::lock_guard<Latch> lg(_mutex);
 
     switch (_state.getState()) {
         case BlockerState::State::kAllow:
+            // As a sanity check, we track the highest allowed write timestamp to ensure no
+            // writes are allowed with a timestamp higher than the block timestamp.
+            _highestAllowedWriteTimestamp = std::max(writeTs, _highestAllowedWriteTimestamp);
         case BlockerState::State::kAborted:
             return Status::OK();
         case BlockerState::State::kBlockWrites:
@@ -99,8 +102,7 @@ Status TenantMigrationDonorAccessBlocker::checkIfCanWrite() {
     }
 }
 
-Status TenantMigrationDonorAccessBlocker::waitUntilCommittedOrAborted(OperationContext* opCtx,
-                                                                      OperationType operationType) {
+Status TenantMigrationDonorAccessBlocker::waitUntilCommittedOrAborted(OperationContext* opCtx) {
     // Source to cancel the timeout if the operation completed in time.
     CancellationSource cancelTimeoutSource;
     auto executor = getAsyncBlockingOperationsExecutor();
@@ -200,7 +202,7 @@ Status TenantMigrationDonorAccessBlocker::checkIfCanBuildIndex() {
         case BlockerState::State::kAllow:
         case BlockerState::State::kBlockWrites:
         case BlockerState::State::kBlockWritesAndReads:
-            return {TenantMigrationConflictInfo(_tenantId, shared_from_this(), kIndexBuild),
+            return {TenantMigrationConflictInfo(_tenantId, shared_from_this()),
                     "Index build must block until tenant migration is committed or aborted."};
         case BlockerState::State::kReject:
             return {ErrorCodes::TenantMigrationCommitted,
@@ -235,6 +237,13 @@ void TenantMigrationDonorAccessBlocker::startBlockingReadsAfter(const Timestamp&
     invariant(!_commitOpTime);
     invariant(!_abortOpTime);
 
+    invariant(
+        blockTimestamp > _highestAllowedWriteTimestamp,
+        str::stream() << "The block timestamp must be higher than the timestamp of any allowed "
+                         "write, blockTimestamp: "
+                      << blockTimestamp.toString() << ", highestAllowedWriteTimestamp: "
+                      << _highestAllowedWriteTimestamp.toString());
+
     _state.transitionTo(BlockerState::State::kBlockWritesAndReads);
     _blockTimestamp = blockTimestamp;
 }
@@ -248,6 +257,19 @@ void TenantMigrationDonorAccessBlocker::rollBackStartBlocking() {
     _state.transitionTo(BlockerState::State::kAllow);
     _blockTimestamp.reset();
     _transitionOutOfBlockingPromise.setFrom(Status::OK());
+}
+
+void TenantMigrationDonorAccessBlocker::interrupt() {
+    stdx::unique_lock<Latch> lk(_mutex);
+    const Status status(
+        ErrorCodes::Interrupted,
+        "Blocked read or write interrupted while waiting for tenant migration to commit or abort");
+    if (!_transitionOutOfBlockingPromise.getFuture().isReady()) {
+        _transitionOutOfBlockingPromise.setFrom(status);
+    }
+    if (!_completionPromise.getFuture().isReady()) {
+        _completionPromise.setError(status);
+    }
 }
 
 void TenantMigrationDonorAccessBlocker::setCommitOpTime(OperationContext* opCtx,

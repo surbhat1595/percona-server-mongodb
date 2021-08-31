@@ -37,7 +37,6 @@
 #include "mongo/db/pipeline/document_source_set_window_fields_gen.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/util/visit_helper.h"
@@ -74,23 +73,19 @@ bool modifiedSortPaths(const SortPattern& pat, const DocumentSource::GetModPaths
 }
 }  // namespace
 
-REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
+REGISTER_DOCUMENT_SOURCE_WITH_MIN_VERSION(
     setWindowFields,
     LiteParsedDocumentSourceDefault::parse,
     document_source_set_window_fields::createFromBson,
     LiteParsedDocumentSource::AllowedWithApiStrict::kNeverInVersion1,
-    LiteParsedDocumentSource::AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion50,
-    ::mongo::feature_flags::gFeatureFlagWindowFunctions.isEnabledAndIgnoreFCV());
+    ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
 
-REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
+REGISTER_DOCUMENT_SOURCE_WITH_MIN_VERSION(
     _internalSetWindowFields,
     LiteParsedDocumentSourceDefault::parse,
     DocumentSourceInternalSetWindowFields::createFromBson,
     LiteParsedDocumentSource::AllowedWithApiStrict::kNeverInVersion1,
-    LiteParsedDocumentSource::AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion50,
-    ::mongo::feature_flags::gFeatureFlagWindowFunctions.isEnabledAndIgnoreFCV());
+    ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
 
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
@@ -215,20 +210,29 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
     }
 
     // $sort
-    if (simplePartitionBy || sortBy) {
-        // Generate a combined SortPattern for the partition key and sortBy.
-        std::vector<SortPatternPart> combined;
+    // Generate a combined SortPattern for the partition key and sortBy.
+    std::vector<SortPatternPart> combined;
 
-        if (simplePartitionBy) {
-            SortPatternPart part;
-            part.fieldPath = simplePartitionBy->fullPath();
-            combined.emplace_back(std::move(part));
+    if (simplePartitionBy) {
+        SortPatternPart part;
+        part.fieldPath = simplePartitionBy->fullPath();
+        combined.emplace_back(std::move(part));
+    }
+    if (sortBy) {
+        for (auto part : *sortBy) {
+            combined.push_back(part);
         }
-        if (sortBy) {
-            for (auto part : *sortBy) {
-                combined.push_back(part);
-            }
-        }
+    }
+
+    // This is for our testing framework. If this knob is set we append an _id to the translated
+    // sortBy in order to ensure deterministic output.
+    if (internalQueryAppendIdToSetWindowFieldsSort.load()) {
+        SortPatternPart part;
+        part.fieldPath = "_id"_sd;
+        combined.push_back(part);
+    }
+
+    if (!combined.empty()) {
         result.push_back(DocumentSourceSort::create(expCtx, SortPattern{combined}));
     }
 
@@ -336,8 +340,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
 void DocumentSourceInternalSetWindowFields::initialize() {
     for (auto& wfs : _outputFields) {
         _executableOutputs[wfs.fieldName] =
-            WindowFunctionExec::create(pExpCtx.get(), &_iterator, wfs, _sortBy);
-        _memoryTracker.set(wfs.fieldName, _executableOutputs[wfs.fieldName]->getApproximateSize());
+            WindowFunctionExec::create(pExpCtx.get(), &_iterator, wfs, _sortBy, &_memoryTracker);
     }
     _init = true;
 }
@@ -436,8 +439,6 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
         return DocumentSource::GetNextResult::makeEOF();
 
     auto curDoc = _iterator.current();
-    _memoryTracker.setInternal("PartitionIterator", _iterator.getApproximateSize());
-
     // The only way we hit this case is if there are no documents, since otherwise _eof will be set.
     if (!curDoc) {
         _eof = true;
@@ -456,19 +457,20 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
             throw;
         }
 
-        // Update the memory usage for this function after getNext().
-        _memoryTracker.set(fieldName, function->getApproximateSize());
-        // Account for the additional memory in the iterator cache.
-        _memoryTracker.setInternal("PartitionIterator", _iterator.getApproximateSize());
-        if (_memoryTracker.currentMemoryBytes() >= _memoryTracker._maxAllowedMemoryUsageBytes &&
+        if (_memoryTracker.currentMemoryBytes() >=
+                static_cast<long long>(_memoryTracker._maxAllowedMemoryUsageBytes) &&
             _memoryTracker._allowDiskUse) {
             // Attempt to spill where possible.
             _iterator.spillToDisk();
-            _memoryTracker.setInternal("PartitionIterator", _iterator.getApproximateSize());
         }
-        if (_memoryTracker.currentMemoryBytes() > _memoryTracker._maxAllowedMemoryUsageBytes) {
+        if (_memoryTracker.currentMemoryBytes() >
+            static_cast<long long>(_memoryTracker._maxAllowedMemoryUsageBytes)) {
             _iterator.finalize();
-            uasserted(5414201, "Exceeded memory limit in DocumentSourceSetWindowFields");
+            uasserted(5414201,
+                      str::stream()
+                          << "Exceeded memory limit in DocumentSourceSetWindowFields, used "
+                          << _memoryTracker.currentMemoryBytes() << " bytes but max allowed is "
+                          << _memoryTracker._maxAllowedMemoryUsageBytes);
         }
     }
 
@@ -483,6 +485,9 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
             for (auto&& [fieldName, function] : _executableOutputs) {
                 function->reset();
             }
+
+            // Account for the memory in the iterator for the new partition.
+            _memoryTracker.set(_iterator.getApproximateSize());
             break;
         case PartitionIterator::AdvanceResult::kEOF:
             _eof = true;

@@ -159,6 +159,8 @@ public:
     template <typename Container>
     InMemIterator(const Container& input) : _data(input.begin(), input.end()) {}
 
+    InMemIterator(std::deque<Data> data) : _data(std::move(data)) {}
+
     void openSource() {}
     void closeSource() {}
 
@@ -622,6 +624,9 @@ public:
 
         if (this->_iters.empty()) {
             sort();
+            if (this->_opts.moveSortedDataIntoIterator) {
+                return new InMemIterator<Key, Value>(std::move(_data));
+            }
             return new InMemIterator<Key, Value>(_data);
         }
 
@@ -717,6 +722,9 @@ public:
 
     Iterator* done() {
         if (_haveData) {
+            if (this->_opts.moveSortedDataIntoIterator) {
+                return new InMemIterator<Key, Value>(std::move(_best));
+            }
             return new InMemIterator<Key, Value>(_best);
         } else {
             return new InMemIterator<Key, Value>();
@@ -823,6 +831,9 @@ public:
     Iterator* done() {
         if (this->_iters.empty()) {
             sort();
+            if (this->_opts.moveSortedDataIntoIterator) {
+                return new InMemIterator<Key, Value>(std::move(_data));
+            }
             return new InMemIterator<Key, Value>(_data);
         }
 
@@ -1121,6 +1132,14 @@ void SortedFileWriter<Key, Value>::spill() {
     try {
         _file.write(reinterpret_cast<const char*>(&size), sizeof(size));
         _file.write(outBuffer, std::abs(size));
+    } catch (const std::system_error& ex) {
+        if (ex.code() == std::errc::no_space_on_device) {
+            msgasserted(ErrorCodes::OutOfDiskSpace,
+                        str::stream() << ex.what() << ": " << _fileFullPath);
+        }
+        msgasserted(5642403,
+                    str::stream() << "error writing to file \"" << _fileFullPath
+                                  << "\": " << sorter::myErrnoWithDescription());
     } catch (const std::exception&) {
         msgasserted(16821,
                     str::stream() << "error writing to file \"" << _fileFullPath

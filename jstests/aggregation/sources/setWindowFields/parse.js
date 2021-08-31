@@ -5,16 +5,9 @@
  * - Which window functions accept bounds?
  * - When something is not allowed, what error message do we expect?
  */
+
 (function() {
 "use strict";
-
-const getParam = db.adminCommand({getParameter: 1, featureFlagWindowFunctions: 1});
-jsTestLog(getParam);
-const featureEnabled = assert.commandWorked(getParam).featureFlagWindowFunctions.value;
-if (!featureEnabled) {
-    jsTestLog("Skipping test because the window function feature flag is disabled");
-    return;
-}
 
 const coll = db.setWindowFields_parse;
 coll.drop();
@@ -150,6 +143,7 @@ assert.commandFailedWithCode(
     }),
     5339902,
     'Range-based bounds require sortBy a single field');
+
 assert.commandFailedWithCode(
     run({$setWindowFields: {output: {v: {$sum: "$a", window: {range: ['unbounded', 'current']}}}}}),
     5339902,
@@ -170,6 +164,7 @@ assert.commandFailedWithCode(
             {output: {v: {$sum: "$a", window: {range: ['unbounded', 'unbounded'], unit: 'second'}}}}
     }),
     5339902);
+
 assert.commandFailedWithCode(
     run({
         $setWindowFields: {
@@ -218,10 +213,41 @@ assert.commandWorked(run({
 }));
 
 // Not every accumulator is automatically a window function.
-assert.commandFailedWithCode(run({$setWindowFields: {output: {v: {$mergeObjects: "$a"}}}}),
-                             ErrorCodes.FailedToParse,
-                             'No such window function: $mergeObjects');
-assert.commandFailedWithCode(run({$setWindowFields: {output: {v: {$accumulator: "$a"}}}}),
-                             ErrorCodes.FailedToParse,
-                             'No such window function: $accumulator');
+
+var err = assert.commandFailedWithCode(run({$setWindowFields: {output: {a: {b: {$sum: "$a"}}}}}),
+                                       ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Expected a $-prefixed window function, b');
+
+err = assert.commandFailedWithCode(
+    run({$setWindowFields: {output: {total: {sum: "$x", window: {documents: [-1, 1]}}}}}),
+    ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Expected a $-prefixed window function, sum');
+
+err = assert.commandFailedWithCode(run({$setWindowFields: {output: {total: {}}}}),
+                                   ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Expected a $-prefixed window function');
+
+err = assert.commandFailedWithCode(run({$setWindowFields: {output: {v: {$mergeObjects: "$a"}}}}),
+                                   ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Unrecognized window function, $mergeObjects');
+
+err = assert.commandFailedWithCode(run({$setWindowFields: {output: {v: {$accumulator: "$a"}}}}),
+                                   ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Unrecognized window function, $accumulator');
+
+err = assert.commandFailedWithCode(
+    run({
+        $setWindowFields:
+            {output: {total: {$summ: "$x", window: {documents: ['unbounded', 'current']}}}}
+    }),
+    ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Unrecognized window function, $summ');
+
+err = assert.commandFailedWithCode(
+    run({
+        $setWindowFields:
+            {output: {total: {$summ: "$x", windoww: {documents: ['unbounded', 'current']}}}}
+    }),
+    ErrorCodes.FailedToParse);
+assert.includes(err.errmsg, 'Unrecognized window function, $summ');
 })();

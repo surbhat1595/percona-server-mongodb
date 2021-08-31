@@ -136,6 +136,7 @@ namespace mongo {
 
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(WTPauseStableTimestamp);
 MONGO_FAIL_POINT_DEFINE(WTPreserveSnapshotHistoryIndefinitely);
 MONGO_FAIL_POINT_DEFINE(WTSetOldestTSToStableTS);
 
@@ -2388,6 +2389,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
     params.sizeStorer = _sizeStorer.get();
     params.isReadOnly = _readOnly;
     params.tracksSizeAdjustments = true;
+    params.forceUpdateWithFullDocument = options.timeseries != boost::none;
 
     if (NamespaceString::oplog(ns)) {
         // The oplog collection must have a size provided.
@@ -2530,6 +2532,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     // Temporary collections do not need to reconcile collection size/counts.
     params.tracksSizeAdjustments = false;
     params.isReadOnly = false;
+    params.forceUpdateWithFullDocument = false;
 
     std::unique_ptr<WiredTigerRecordStore> rs;
     rs = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
@@ -2788,7 +2791,6 @@ void WiredTigerKVEngine::checkpoint() {
             invariantWTOK(s->checkpoint(s, "use_timestamp=false"));
         }
     } catch (const WriteConflictException&) {
-        // TODO SERVER-50824: Check if this can be removed now that WT-3483 is done.
         LOGV2_WARNING(22346, "Checkpoint encountered a write conflict exception.");
     } catch (const AssertionException& exc) {
         invariant(ErrorCodes::isShutdownError(exc.code()), exc.what());
@@ -2892,6 +2894,10 @@ void WiredTigerKVEngine::setJournalListener(JournalListener* jl) {
 }
 
 void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp, bool force) {
+    if (MONGO_unlikely(WTPauseStableTimestamp.shouldFail())) {
+        return;
+    }
+
     if (stableTimestamp.isNull()) {
         return;
     }

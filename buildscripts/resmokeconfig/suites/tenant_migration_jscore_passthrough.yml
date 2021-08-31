@@ -32,6 +32,7 @@ selector:
   - jstests/core/top.js
   - jstests/core/profile_sampling.js
   - jstests/core/profile_hide_index.js
+  - jstests/core/index_stats.js
   # The override cannot deep copy very large or small dates.
   - jstests/core/index_large_and_small_dates.js
   # This test expects that the connection (i.e. 'threadName') does not change throughout each test
@@ -175,6 +176,9 @@ executor:
         # so. Therefore, the garbage collection delay doesn't need to be large.
         tenantMigrationGarbageCollectionDelayMS: 1
         ttlMonitorSleepSecs: 1
+        # Tenant migrations is not currently compatible with implicitly replicated retryable
+        # findAndModify images.
+        storeFindAndModifyImagesInSideCollection: false
       tlsMode: allowTLS
       tlsCAFile: jstests/libs/ca.pem
       tlsAllowInvalidHostnames: ''

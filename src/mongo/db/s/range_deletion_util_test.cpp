@@ -42,6 +42,7 @@
 #include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
+#include "mongo/db/vector_clock.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/util/fail_point.h"
 
@@ -86,7 +87,7 @@ public:
         DBDirectClient client(operationContext());
         client.dropCollection(kNss.ns());
 
-        while (migrationutil::getMigrationUtilExecutor()->hasTasks()) {
+        while (migrationutil::getMigrationUtilExecutor(getServiceContext())->hasTasks()) {
             continue;
         }
 
@@ -133,6 +134,25 @@ private:
     UUID _uuid;
 };
 
+/**
+ * Simple fixture for testing functions to rename range deletions.
+ */
+class RenameRangeDeletionsTest : public RangeDeleterTest {
+public:
+    const NamespaceString kToNss = NamespaceString(kNss.db(), "toColl");
+
+    void tearDown() override {
+        DBDirectClient client(operationContext());
+        client.dropCollection(kNss.ns());
+        client.dropCollection(kToNss.ns());
+
+        migrationutil::getMigrationUtilExecutor(getServiceContext())->shutdown();
+
+        WaitForMajorityService::get(getServiceContext()).shutDown();
+        ShardServerTestFixture::tearDown();
+    }
+};
+
 // Helper function to count number of documents in config.rangeDeletions.
 int countDocsInConfigRangeDeletions(PersistentTaskStore<RangeDeletionTask>& store,
                                     OperationContext* opCtx) {
@@ -156,6 +176,8 @@ RangeDeletionTask insertRangeDeletionTask(OperationContext* opCtx, UUID uuid, Ch
     auto migrationId = UUID::gen();
     RangeDeletionTask t(migrationId, kNss, uuid, ShardId("donor"), range, CleanWhenEnum::kDelayed);
     t.setPending(true);
+    const auto currentTime = VectorClock::get(opCtx)->getTime();
+    t.setTimestamp(currentTime.clusterTime().asTimestamp());
     store.add(opCtx, t);
 
     // Document should be in the store.
@@ -909,6 +931,105 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeDoesNotCrashWhenShardKeyIndexDoes
     client.createIndex(kNss.ns(), BSON("x" << 1));
 
     cleanupComplete.get();
+}
+
+/**
+ *  Tests that the rename range deletion flow:
+ *  - Renames range deletions from source to target collection
+ *  - Doesn't leave garbage
+ */
+TEST_F(RenameRangeDeletionsTest, BasicRenameRangeDeletionsTest) {
+    const auto numTasks = 10;
+    std::vector<RangeDeletionTask> tasks;
+
+    // Insert initial range deletions associated to the FROM collection
+    PersistentTaskStore<RangeDeletionTask> rangeDeletionsStore(
+        NamespaceString::kRangeDeletionNamespace);
+    for (int i = 0; i < numTasks; i++) {
+        const auto range = ChunkRange(BSON(kShardKey << 0), BSON(kShardKey << 1));
+        RangeDeletionTask task(
+            UUID::gen(), kNss, UUID::gen(), ShardId("donor"), range, CleanWhenEnum::kDelayed);
+        tasks.push_back(task);
+        rangeDeletionsStore.add(operationContext(), task);
+    }
+
+    // Rename range deletions
+    snapshotRangeDeletionsForRename(operationContext(), kNss, kToNss);
+    restoreRangeDeletionTasksForRename(operationContext(), kToNss);
+    deleteRangeDeletionTasksForRename(operationContext(), kNss, kToNss);
+
+    // Make sure just range deletions for the TO collection are found
+    ASSERT_EQ(10, rangeDeletionsStore.count(operationContext()));
+    int foundTasks = 0;
+    rangeDeletionsStore.forEach(
+        operationContext(), BSONObj(), [&](const RangeDeletionTask& newTask) {
+            auto task = tasks.at(foundTasks++);
+            ASSERT_EQ(newTask.getNss(), kToNss);
+            ASSERT_EQ(newTask.getCollectionUuid(), task.getCollectionUuid());
+            ASSERT_EQ(newTask.getDonorShardId(), task.getDonorShardId());
+            ASSERT(SimpleBSONObjComparator::kInstance.evaluate(newTask.getRange().toBSON() ==
+                                                               task.getRange().toBSON()));
+            ASSERT(newTask.getWhenToClean() == task.getWhenToClean());
+            return true;
+        });
+    ASSERT_EQ(foundTasks, numTasks);
+
+    // Make sure no garbage is left in intermediate collection
+    PersistentTaskStore<RangeDeletionTask> forRenameStore(
+        NamespaceString::kRangeDeletionForRenameNamespace);
+    ASSERT_EQ(0, forRenameStore.count(operationContext(), BSONObj()));
+}
+
+/**
+ *  Same as BasicRenameRangeDeletionsTest, but also tests idempotency of single utility functions
+ */
+TEST_F(RenameRangeDeletionsTest, IdempotentRenameRangeDeletionsTest) {
+    const auto numTasks = 10;
+    std::vector<RangeDeletionTask> tasks;
+
+    // Insert initial range deletions associated to the FROM collection
+    PersistentTaskStore<RangeDeletionTask> rangeDeletionsStore(
+        NamespaceString::kRangeDeletionNamespace);
+    for (int i = 0; i < numTasks; i++) {
+        const auto range = ChunkRange(BSON(kShardKey << 0), BSON(kShardKey << 1));
+        RangeDeletionTask task(
+            UUID::gen(), kNss, UUID::gen(), ShardId("donor"), range, CleanWhenEnum::kDelayed);
+        tasks.push_back(task);
+        rangeDeletionsStore.add(operationContext(), task);
+    }
+
+    // Rename range deletions, repeating idempotent steps several times
+    const auto kMaxRepeat = 10;
+    for (int i = 0; i < rand() % kMaxRepeat; i++) {
+        snapshotRangeDeletionsForRename(operationContext(), kNss, kToNss);
+    }
+    for (int i = 0; i < rand() % kMaxRepeat; i++) {
+        restoreRangeDeletionTasksForRename(operationContext(), kToNss);
+    }
+    for (int i = 0; i < rand() % kMaxRepeat; i++) {
+        deleteRangeDeletionTasksForRename(operationContext(), kNss, kToNss);
+    }
+
+    // Make sure just range deletions for the TO collection are found
+    ASSERT_EQ(10, rangeDeletionsStore.count(operationContext()));
+    int foundTasks = 0;
+    rangeDeletionsStore.forEach(
+        operationContext(), BSONObj(), [&](const RangeDeletionTask& newTask) {
+            auto task = tasks.at(foundTasks++);
+            ASSERT_EQ(newTask.getNss(), kToNss);
+            ASSERT_EQ(newTask.getCollectionUuid(), task.getCollectionUuid());
+            ASSERT_EQ(newTask.getDonorShardId(), task.getDonorShardId());
+            ASSERT(SimpleBSONObjComparator::kInstance.evaluate(newTask.getRange().toBSON() ==
+                                                               task.getRange().toBSON()));
+            ASSERT(newTask.getWhenToClean() == task.getWhenToClean());
+            return true;
+        });
+    ASSERT_EQ(foundTasks, numTasks);
+
+    // Make sure no garbage is left in intermediate collection
+    PersistentTaskStore<RangeDeletionTask> forRenameStore(
+        NamespaceString::kRangeDeletionForRenameNamespace);
+    ASSERT_EQ(0, forRenameStore.count(operationContext(), BSONObj()));
 }
 
 }  // namespace

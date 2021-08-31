@@ -46,7 +46,7 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/cursor_response.h"
-#include "mongo/db/query/getmore_request.h"
+#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/factory.h"
@@ -184,14 +184,17 @@ Message DBClientCursor::_assembleGetMore() {
     invariant(cursorId);
     if (_useFindCommand) {
         std::int64_t batchSize = nextBatchSize();
-        auto gmr = GetMoreRequest(ns,
-                                  cursorId,
-                                  boost::make_optional(batchSize != 0, batchSize),
-                                  boost::make_optional(tailableAwaitData(),
-                                                       _awaitDataTimeout),  // awaitDataTimeout
-                                  _term,
-                                  _lastKnownCommittedOpTime);
-        auto msg = assembleCommandRequest(_client, ns.db(), opts, gmr.toBSON());
+        auto getMoreRequest = GetMoreCommandRequest(cursorId, ns.coll().toString());
+        getMoreRequest.setBatchSize(boost::make_optional(batchSize != 0, batchSize));
+        getMoreRequest.setMaxTimeMS(boost::make_optional(
+            tailableAwaitData(),
+            static_cast<std::int64_t>(durationCount<Milliseconds>(_awaitDataTimeout))));
+        if (_term) {
+            getMoreRequest.setTerm(static_cast<std::int64_t>(*_term));
+        }
+        getMoreRequest.setLastKnownCommittedOpTime(_lastKnownCommittedOpTime);
+        auto msg = assembleCommandRequest(_client, ns.db(), opts, getMoreRequest.toBSON({}));
+
         // Set the exhaust flag if needed.
         if (opts & QueryOption_Exhaust && msg.operation() == dbMsg) {
             OpMsg::setFlag(&msg, OpMsg::kExhaustSupported);
@@ -541,14 +544,16 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                      queryOptions,
                      batchSize,
                      {},
-                     readConcernObj) {}
+                     readConcernObj,
+                     boost::none) {}
 
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const NamespaceStringOrUUID& nsOrUuid,
                                long long cursorId,
                                int nToReturn,
                                int queryOptions,
-                               std::vector<BSONObj> initialBatch)
+                               std::vector<BSONObj> initialBatch,
+                               boost::optional<Timestamp> operationTime)
     : DBClientCursor(client,
                      nsOrUuid,
                      BSONObj(),  // query
@@ -559,7 +564,8 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                      queryOptions,
                      0,
                      std::move(initialBatch),  // batchSize
-                     boost::none) {}
+                     boost::none,
+                     operationTime) {}
 
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const NamespaceStringOrUUID& nsOrUuid,
@@ -571,7 +577,8 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                                int queryOptions,
                                int batchSize,
                                std::vector<BSONObj> initialBatch,
-                               boost::optional<BSONObj> readConcernObj)
+                               boost::optional<BSONObj> readConcernObj,
+                               boost::optional<Timestamp> operationTime)
     : batch{std::move(initialBatch)},
       _client(client),
       _originalHost(_client->getServerAddress()),
@@ -589,7 +596,8 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
       cursorId(cursorId),
       _ownCursor(true),
       wasError(false),
-      _readConcernObj(readConcernObj) {
+      _readConcernObj(readConcernObj),
+      _operationTime(operationTime) {
     if (queryOptions & QueryOptionLocal_forceOpQuery) {
         // Legacy OP_QUERY does not support UUIDs.
         invariant(!_nsOrUuid.uuid());
@@ -617,12 +625,18 @@ StatusWith<std::unique_ptr<DBClientCursor>> DBClientCursor::fromAggregationReque
         firstBatch.emplace_back(elem.Obj().getOwned());
     }
 
+    boost::optional<Timestamp> operationTime = boost::none;
+    if (ret.hasField(LogicalTime::kOperationTimeFieldName)) {
+        operationTime = LogicalTime::fromOperationTime(ret).asTimestamp();
+    }
+
     return {std::make_unique<DBClientCursor>(client,
                                              aggRequest.getNamespace(),
                                              cursorId,
                                              0,
                                              useExhaust ? QueryOption_Exhaust : 0,
-                                             firstBatch)};
+                                             firstBatch,
+                                             operationTime)};
 }
 
 DBClientCursor::~DBClientCursor() {

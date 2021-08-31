@@ -44,15 +44,15 @@
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/pipeline/document_source_change_stream_check_invalidate.h"
+#include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
 #include "mongo/db/pipeline/document_source_change_stream_ensure_resume_token_present.h"
+#include "mongo/db/pipeline/document_source_change_stream_lookup_post_image.h"
+#include "mongo/db/pipeline/document_source_change_stream_lookup_pre_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_oplog_match.h"
 #include "mongo/db/pipeline/document_source_change_stream_transform.h"
 #include "mongo/db/pipeline/document_source_change_stream_unwind_transactions.h"
-#include "mongo/db/pipeline/document_source_check_invalidate.h"
-#include "mongo/db/pipeline/document_source_check_resume_token.h"
 #include "mongo/db/pipeline/document_source_limit.h"
-#include "mongo/db/pipeline/document_source_lookup_change_post_image.h"
-#include "mongo/db/pipeline/document_source_lookup_change_pre_image.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/document_source_sort.h"
@@ -252,12 +252,12 @@ public:
         getExpCtx()->mongoProcessInterface =
             std::make_unique<MockMongoInterface>(std::vector<FieldPath>{});
 
-        // This match stage is a DocumentSourceOplogMatch, which we explicitly disallow from
-        // executing as a safety mechanism, since it needs to use the collection-default collation,
-        // even if the rest of the pipeline is using some other collation. To avoid ever executing
-        // that stage here, we'll up-convert it from the non-executable DocumentSourceOplogMatch to
-        // a fully-executable DocumentSourceMatch. This is safe because all of the unit tests will
-        // use the 'simple' collation.
+        // This match stage is a DocumentSourceChangeStreamOplogMatch, which we explicitly disallow
+        // from executing as a safety mechanism, since it needs to use the collection-default
+        // collation, even if the rest of the pipeline is using some other collation. To avoid ever
+        // executing that stage here, we'll up-convert it from the non-executable
+        // DocumentSourceChangeStreamOplogMatch to a fully-executable DocumentSourceMatch. This is
+        // safe because all of the unit tests will use the 'simple' collation.
         auto match = dynamic_cast<DocumentSourceMatch*>(stages[0].get());
         ASSERT(match);
         auto executableMatch = DocumentSourceMatch::create(match->getQuery(), getExpCtx());
@@ -275,7 +275,7 @@ public:
 
         // Remove the DSEnsureResumeTokenPresent stage since it will swallow the result.
         auto newEnd = std::remove_if(stages.begin(), stages.end(), [](auto& stage) {
-            return dynamic_cast<DocumentSourceEnsureResumeTokenPresent*>(stage.get());
+            return dynamic_cast<DocumentSourceChangeStreamEnsureResumeTokenPresent*>(stage.get());
         });
         stages.erase(newEnd, stages.end());
 
@@ -407,7 +407,8 @@ public:
                                     preImageOpTime,  // pre-image optime
                                     boost::none,     // post-image optime
                                     boost::none,     // ShardId of resharding recipient
-                                    boost::none)};   // _id
+                                    boost::none,     // _id
+                                    boost::none)};   // needsRetryImage
     }
 
     /**
@@ -1310,7 +1311,8 @@ TEST_F(ChangeStreamStageTest, CommitCommandReturnsOperationsFromPreparedTransact
                                 boost::none,     // pre-image optime
                                 boost::none,     // post-image optime
                                 boost::none,     // ShardId of resharding recipient
-                                boost::none);    // _id
+                                boost::none,     // _id
+                                boost::none);    // needsRetryImage
 
     // When the DocumentSourceChangeStreamTransform sees the "commitTransaction" oplog entry, we
     // expect it to return the insert op within our 'preparedApplyOps' oplog entry.
@@ -1719,7 +1721,8 @@ TEST_F(ChangeStreamStageTest, PreparedTransactionWithMultipleOplogEntries) {
         boost::none,                      // pre-image optime
         boost::none,                      // post-image optime
         boost::none,                      // ShardId of resharding recipient
-        boost::none);                     // _id
+        boost::none,                      // _id
+        boost::none);                     // needsRetryImage
 
     // We do not use the checkTransformation() pattern that other tests use since we expect multiple
     // documents to be returned from one applyOps.
@@ -1854,7 +1857,8 @@ TEST_F(ChangeStreamStageTest, PreparedTransactionEndingWithEmptyApplyOps) {
         boost::none,                      // pre-image optime
         boost::none,                      // post-image optime
         boost::none,                      // ShardId of resharding recipient
-        boost::none);                     // _id
+        boost::none,                      // _id
+        boost::none);                     // needsRetryImage
 
     // We do not use the checkTransformation() pattern that other tests use since we expect multiple
     // documents to be returned from one applyOps.
@@ -2094,9 +2098,9 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest,
 TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest,
        DSCSTransformStageEmptySpecSerializeResumeAfter) {
     auto expCtx = getExpCtx();
-    const auto serializedStageName = getCSOptimizationFeatureFlagValue()
-        ? DocumentSourceChangeStreamTransform::kStageName
-        : DSChangeStream::kStageName;
+    auto featureFlag = getCSOptimizationFeatureFlagValue();
+    const auto serializedStageName =
+        featureFlag ? DocumentSourceChangeStreamTransform::kStageName : DSChangeStream::kStageName;
 
     auto originalSpec = BSON(DSChangeStream::kStageName << BSONObj());
 
@@ -2107,18 +2111,25 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest,
         expCtx->initialPostBatchResumeToken = BSONObj();
     });
 
-    auto stage =
-        DocumentSourceChangeStreamTransform::createFromBson(originalSpec.firstElement(), expCtx);
+    auto result = DSChangeStream::createFromBson(originalSpec.firstElement(), expCtx);
     ASSERT(!expCtx->initialPostBatchResumeToken.isEmpty());
 
-    // Verify that an additional 'startAtOperationTime' is populated while serializing.
+    vector<intrusive_ptr<DocumentSource>> allStages(std::begin(result), std::end(result));
+    ASSERT_EQ(allStages.size(), 5);
+    auto transformStage = allStages[2];
+    ASSERT(dynamic_cast<DocumentSourceChangeStreamTransform*>(transformStage.get()));
+
+
+    // Verify that an additional start point field is populated while serializing.
     vector<Value> serialization;
-    stage->serializeToArray(serialization);
+    transformStage->serializeToArray(serialization);
     ASSERT_EQ(serialization.size(), 1UL);
     ASSERT_EQ(serialization[0].getType(), BSONType::Object);
     ASSERT(!serialization[0]
                 .getDocument()[serializedStageName]
-                .getDocument()[DocumentSourceChangeStreamSpec::kResumeAfterFieldName]
+                .getDocument()[featureFlag
+                                   ? DocumentSourceChangeStreamSpec::kStartAtOperationTimeFieldName
+                                   : DocumentSourceChangeStreamSpec::kResumeAfterFieldName]
                 .missing());
 }
 
@@ -2176,7 +2187,7 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest, DSCSOplogMatchStageSeriali
     spec.setFilter(dummyFilter);
     auto stageSpecAsBSON = BSON("" << spec.toBSON());
 
-    validateDocumentSourceStageSerialization<DocumentSourceOplogMatch>(
+    validateDocumentSourceStageSerialization<DocumentSourceChangeStreamOplogMatch>(
         std::move(spec), stageSpecAsBSON, expCtx);
 }
 
@@ -2199,7 +2210,7 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest, DSCSCheckInvalidateStageSe
         kDefaultTs, testUuid(), Value(), ResumeTokenData::FromInvalidate::kFromInvalidate)));
     auto stageSpecAsBSON = BSON("" << spec.toBSON());
 
-    validateDocumentSourceStageSerialization<DocumentSourceCheckInvalidate>(
+    validateDocumentSourceStageSerialization<DocumentSourceChangeStreamCheckInvalidate>(
         std::move(spec), stageSpecAsBSON, expCtx);
 }
 
@@ -2210,7 +2221,7 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest, DSCSResumabilityStageSeria
     spec.setResumeToken(ResumeToken::parse(makeResumeToken(kDefaultTs, testUuid())));
     auto stageSpecAsBSON = BSON("" << spec.toBSON());
 
-    validateDocumentSourceStageSerialization<DocumentSourceCheckResumability>(
+    validateDocumentSourceStageSerialization<DocumentSourceChangeStreamCheckResumability>(
         std::move(spec), stageSpecAsBSON, expCtx);
 }
 
@@ -2220,7 +2231,7 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest, DSCSLookupChangePreImageSt
     DocumentSourceChangeStreamLookUpPreImageSpec spec(FullDocumentBeforeChangeModeEnum::kRequired);
     auto stageSpecAsBSON = BSON("" << spec.toBSON());
 
-    validateDocumentSourceStageSerialization<DocumentSourceLookupChangePreImage>(
+    validateDocumentSourceStageSerialization<DocumentSourceChangeStreamLookupPreImage>(
         std::move(spec), stageSpecAsBSON, expCtx);
 }
 
@@ -2230,7 +2241,7 @@ TEST_F(ChangeStreamStageWithDualFeatureFlagValueTest, DSCSLookupChangePostImageS
     DocumentSourceChangeStreamLookUpPostImageSpec spec(FullDocumentModeEnum::kUpdateLookup);
     auto stageSpecAsBSON = BSON("" << spec.toBSON());
 
-    validateDocumentSourceStageSerialization<DocumentSourceLookupChangePostImage>(
+    validateDocumentSourceStageSerialization<DocumentSourceChangeStreamLookupPostImage>(
         std::move(spec), stageSpecAsBSON, expCtx);
 }
 
@@ -2448,14 +2459,13 @@ TEST_F(ChangeStreamStageTest, ResumeAfterWithTokenFromInvalidateShouldFail) {
                         BSON("x" << 2 << "_id" << 1),
                         ResumeTokenData::FromInvalidate::kFromInvalidate);
 
-    ASSERT_THROWS_CODE(DSChangeStream::createFromBson(
-                           BSON(DSChangeStream::kStageName
-                                << BSON("resumeAfter" << resumeTokenInvalidate
-                                                      << "startAtOperationTime" << kDefaultTs))
-                               .firstElement(),
-                           expCtx),
-                       AssertionException,
-                       ErrorCodes::InvalidResumeToken);
+    ASSERT_THROWS_CODE(
+        DSChangeStream::createFromBson(
+            BSON(DSChangeStream::kStageName << BSON("resumeAfter" << resumeTokenInvalidate))
+                .firstElement(),
+            expCtx),
+        AssertionException,
+        ErrorCodes::InvalidResumeToken);
 }
 
 TEST_F(ChangeStreamStageTest, UsesResumeTokenAsSortKeyIfNeedsMergeIsFalse) {

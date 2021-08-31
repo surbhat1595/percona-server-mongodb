@@ -45,16 +45,18 @@ class WindowFunctionExec;
 class PartitionIterator;
 }  // namespace mongo
 
-#define REGISTER_WINDOW_FUNCTION(name, parser)                                       \
-    MONGO_INITIALIZER_GENERAL(                                                       \
-        addToWindowFunctionMap_##name, ("default"), ("windowFunctionExpressionMap")) \
-    (InitializerContext*) {                                                          \
-        ::mongo::window_function::Expression::registerParser("$" #name, parser);     \
+#define REGISTER_WINDOW_FUNCTION(name, parser)                                   \
+    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                     \
+                              ("BeginWindowFunctionRegistration"),               \
+                              ("EndWindowFunctionRegistration"))                 \
+    (InitializerContext*) {                                                      \
+        ::mongo::window_function::Expression::registerParser("$" #name, parser); \
     }
 
 #define REGISTER_REMOVABLE_WINDOW_FUNCTION(name, accumClass, wfClass)                              \
-    MONGO_INITIALIZER_GENERAL(                                                                     \
-        addToWindowFunctionMap_##name, ("default"), ("windowFunctionExpressionMap"))               \
+    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                                       \
+                              ("BeginWindowFunctionRegistration"),                                 \
+                              ("EndWindowFunctionRegistration"))                                   \
     (InitializerContext*) {                                                                        \
         ::mongo::window_function::Expression::registerParser(                                      \
             "$" #name, ::mongo::window_function::ExpressionRemovable<accumClass, wfClass>::parse); \
@@ -482,9 +484,6 @@ protected:
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << accumulatorName << " requires a non-expression sortBy",
                 !sortBy->begin()->expression);
-        uassert(ErrorCodes::FailedToParse,
-                str::stream() << accumulatorName << " requires an ascending sortBy",
-                sortBy->begin()->isAscending);
     }
 
     boost::optional<long long> convertTimeUnitToMillis(boost::optional<TimeUnit> outputUnit) const {

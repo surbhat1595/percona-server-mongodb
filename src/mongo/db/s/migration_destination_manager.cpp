@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
@@ -67,6 +68,7 @@
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/storage/remove_saver.h"
 #include "mongo/db/transaction_participant.h"
+#include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/client/shard_registry.h"
@@ -808,7 +810,7 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
         auto checkEmptyOrGetMissingIndexesFromDonor = [&](const CollectionPtr& collection) {
             auto indexCatalog = collection->getIndexCatalog();
             auto indexSpecs = indexCatalog->removeExistingIndexesNoChecks(
-                opCtx, collectionOptionsAndIndexes.indexSpecs);
+                opCtx, collection, collectionOptionsAndIndexes.indexSpecs);
             if (!indexSpecs.empty()) {
                 // Only allow indexes to be copied if the collection does not have any documents.
                 uassert(ErrorCodes::CannotCreateCollection,
@@ -1004,6 +1006,8 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
                                                 range,
                                                 CleanWhenEnum::kNow);
         recipientDeletionTask.setPending(true);
+        const auto currentTime = VectorClock::get(outerOpCtx)->getTime();
+        recipientDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
 
         // It is illegal to wait for write concern with a session checked out, so persist the range
         // deletion task with an immediately satsifiable write concern and then wait for majority
@@ -1037,7 +1041,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
     }
 
     AlternativeClientRegion acr(newClient);
-    auto newOpCtxPtr = cc().makeOperationContext();
+    auto executor =
+        Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
+    auto newOpCtxPtr = CancelableOperationContext(
+        cc().makeOperationContext(), outerOpCtx->getCancellationToken(), executor);
     auto opCtx = newOpCtxPtr.get();
 
     {

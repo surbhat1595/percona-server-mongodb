@@ -74,7 +74,7 @@ Document GroupFromFirstDocumentTransformation::applyTransformation(const Documen
 
     for (auto&& expr : _accumulatorExprs) {
         auto value = expr.second->evaluate(input, &expr.second->getExpressionContext()->variables);
-        output.addField(expr.first, value.missing() ? Value(BSONNULL) : value);
+        output.addField(expr.first, value.missing() ? Value(BSONNULL) : std::move(value));
     }
 
     return output.freeze();
@@ -135,16 +135,18 @@ const char* DocumentSourceGroup::getSourceName() const {
 
 bool DocumentSourceGroup::shouldSpillWithAttemptToSaveMemory() {
     if (!_memoryTracker._allowDiskUse &&
-        (_memoryTracker.currentMemoryBytes() > _memoryTracker._maxAllowedMemoryUsageBytes)) {
+        (_memoryTracker.currentMemoryBytes() >
+         static_cast<long long>(_memoryTracker._maxAllowedMemoryUsageBytes))) {
         freeMemory();
     }
 
-    if (_memoryTracker.currentMemoryBytes() > _memoryTracker._maxAllowedMemoryUsageBytes) {
+    if (_memoryTracker.currentMemoryBytes() >
+        static_cast<long long>(_memoryTracker._maxAllowedMemoryUsageBytes)) {
         uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
                 "Exceeded memory limit for $group, but didn't allow external sort."
                 " Pass allowDiskUse:true to opt in.",
                 _memoryTracker._allowDiskUse);
-        _memoryTracker.set(0);
+        _memoryTracker.resetCurrent();
         return true;
     }
     return false;
@@ -315,7 +317,8 @@ Value DocumentSourceGroup::serialize(boost::optional<ExplainOptions::Verbosity> 
         out["maxAccumulatorMemoryUsageBytes"] = Value(md.freezeToValue());
         out["totalOutputDataSizeBytes"] =
             Value(static_cast<long long>(_stats.totalOutputDataSizeBytes));
-        out["usedDisk"] = Value(_stats.usedDisk);
+        out["usedDisk"] = Value(_stats.spills > 0);
+        out["spills"] = Value(static_cast<long long>(_stats.spills));
     }
 
     return Value(out.freezeToValue());
@@ -378,9 +381,8 @@ intrusive_ptr<DocumentSourceGroup> DocumentSourceGroup::create(
     const boost::intrusive_ptr<Expression>& groupByExpression,
     std::vector<AccumulationStatement> accumulationStatements,
     boost::optional<size_t> maxMemoryUsageBytes) {
-    size_t memoryBytes = maxMemoryUsageBytes ? *maxMemoryUsageBytes
-                                             : internalDocumentSourceGroupMaxMemoryBytes.load();
-    intrusive_ptr<DocumentSourceGroup> groupStage(new DocumentSourceGroup(expCtx, memoryBytes));
+    intrusive_ptr<DocumentSourceGroup> groupStage(
+        new DocumentSourceGroup(expCtx, maxMemoryUsageBytes));
     groupStage->setIdExpression(groupByExpression);
     for (auto&& statement : accumulationStatements) {
         groupStage->addAccumulator(statement);
@@ -395,8 +397,9 @@ DocumentSourceGroup::DocumentSourceGroup(const intrusive_ptr<ExpressionContext>&
     : DocumentSource(kStageName, expCtx),
       _doingMerge(false),
       _memoryTracker{expCtx->allowDiskUse && !expCtx->inMongos,
-                     maxMemoryUsageBytes ? *maxMemoryUsageBytes
-                                         : internalDocumentSourceGroupMaxMemoryBytes.load()},
+                     maxMemoryUsageBytes
+                         ? *maxMemoryUsageBytes
+                         : static_cast<size_t>(internalDocumentSourceGroupMaxMemoryBytes.load())},
       _initialized(false),
       _groups(expCtx->getValueComparator().makeUnorderedValueMap<Accumulators>()),
       _spilled(false) {
@@ -646,7 +649,8 @@ DocumentSource::GetNextResult DocumentSourceGroup::initialize() {
 }
 
 shared_ptr<Sorter<Value, Value>::Iterator> DocumentSourceGroup::spill() {
-    _stats.usedDisk = true;
+    _stats.spills++;
+
     vector<const GroupsMap::value_type*> ptrs;  // using pointers to speed sorting
     ptrs.reserve(_groups->size());
     for (GroupsMap::const_iterator it = _groups->begin(), end = _groups->end(); it != end; ++it) {

@@ -448,7 +448,7 @@ private:
         // The batched request will only have WC if it was supplied by the client. Otherwise, the
         // batched request should use the WC from the opCtx.
         if (!batchedRequest.hasWriteConcern()) {
-            if (opCtx->getWriteConcern().usedDefault) {
+            if (opCtx->getWriteConcern().usedDefaultConstructedWC) {
                 // Pass writeConcern: {}, rather than {w: 1, wtimeout: 0}, so as to not override the
                 // configsvr w:majority upconvert.
                 batchedRequest.setWriteConcern(BSONObj());
@@ -613,7 +613,8 @@ private:
         return true;
     }
 
-    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level) const final {
+    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
+                                                 bool isImplicitDefault) const final {
         return ReadConcernSupportResult::allSupportedAndDefaultPermitted();
     }
 

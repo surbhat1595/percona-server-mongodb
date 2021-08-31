@@ -195,8 +195,7 @@ bool handleCursorCommand(OperationContext* opCtx,
             // to the resume token of the invalidating event, and mark the cursor response as
             // invalidated. We expect ExtraInfo to always be present for this exception.
             const auto extraInfo = ex.extraInfo<ChangeStreamInvalidationInfo>();
-            tassert(
-                5493701, "Missing ChangeStreamInvalidationInfo on exception", extraInfo != nullptr);
+            tassert(5493701, "Missing ChangeStreamInvalidationInfo on exception", extraInfo);
 
             responseBuilder.setPostBatchResumeToken(extraInfo->getInvalidateResumeToken());
             responseBuilder.setInvalidated();
@@ -473,8 +472,8 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
  */
 void _adjustChangeStreamReadConcern(OperationContext* opCtx) {
     repl::ReadConcernArgs& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    // There is already a read concern level set. Do nothing.
-    if (readConcernArgs.hasLevel()) {
+    // There is already a non-default read concern level set. Do nothing.
+    if (readConcernArgs.hasLevel() && !readConcernArgs.getProvenance().isImplicitDefault()) {
         return;
     }
     // We upconvert an empty read concern to 'majority'.

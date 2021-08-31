@@ -138,7 +138,8 @@ public:
      * Provides a ticket for actually performing the update.
      */
     virtual void prepareUpdate(OperationContext* opCtx,
-                               IndexCatalogEntry* index,
+                               const CollectionPtr& collection,
+                               const IndexCatalogEntry* index,
                                const BSONObj& from,
                                const BSONObj& to,
                                const RecordId& loc,
@@ -210,7 +211,9 @@ public:
      */
     virtual long long getFreeStorageBytes(OperationContext* opCtx) const = 0;
 
-    virtual RecordId findSingle(OperationContext* opCtx, const BSONObj& key) const = 0;
+    virtual RecordId findSingle(OperationContext* opCtx,
+                                const CollectionPtr& collection,
+                                const BSONObj& key) const = 0;
 
     /**
      * Attempt compaction to regain disk space if the indexed record store supports
@@ -240,6 +243,7 @@ public:
          * Insert into the BulkBuilder as-if inserting into an IndexAccessMethod.
          */
         virtual Status insert(OperationContext* opCtx,
+                              const CollectionPtr& collection,
                               const BSONObj& obj,
                               const RecordId& loc,
                               const InsertDeleteOptions& options) = 0;
@@ -343,7 +347,9 @@ public:
      */
     using OnSuppressedErrorFn =
         std::function<void(Status status, const BSONObj& obj, boost::optional<RecordId> loc)>;
-    virtual void getKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
+    virtual void getKeys(OperationContext* opCtx,
+                         const CollectionPtr& collection,
+                         SharedBufferFragmentBuilder& pooledBufferBuilder,
                          const BSONObj& obj,
                          GetKeysMode mode,
                          GetKeysContext context,
@@ -454,7 +460,7 @@ public:
     static std::pair<KeyStringSet, KeyStringSet> setDifference(const KeyStringSet& left,
                                                                const KeyStringSet& right);
 
-    AbstractIndexAccessMethod(IndexCatalogEntry* btreeState,
+    AbstractIndexAccessMethod(const IndexCatalogEntry* btreeState,
                               std::unique_ptr<SortedDataInterface> btree);
 
     Status insert(OperationContext* opCtx,
@@ -490,7 +496,8 @@ public:
                       int64_t* numDeleted) final;
 
     void prepareUpdate(OperationContext* opCtx,
-                       IndexCatalogEntry* index,
+                       const CollectionPtr& collection,
+                       const IndexCatalogEntry* index,
                        const BSONObj& from,
                        const BSONObj& to,
                        const RecordId& loc,
@@ -521,7 +528,9 @@ public:
 
     long long getFreeStorageBytes(OperationContext* opCtx) const final;
 
-    RecordId findSingle(OperationContext* opCtx, const BSONObj& key) const final;
+    RecordId findSingle(OperationContext* opCtx,
+                        const CollectionPtr& collection,
+                        const BSONObj& key) const final;
 
     Status compact(OperationContext* opCtx) final;
 
@@ -540,7 +549,9 @@ public:
                       const KeyHandlerFn& onDuplicateKeyInserted,
                       const RecordIdHandlerFn& onDuplicateRecord) final;
 
-    void getKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
+    void getKeys(OperationContext* opCtx,
+                 const CollectionPtr& collection,
+                 SharedBufferFragmentBuilder& pooledBufferBuilder,
                  const BSONObj& obj,
                  GetKeysMode mode,
                  GetKeysContext context,
@@ -571,7 +582,9 @@ protected:
      * keys are not associated with the document itself, but instead represent multi-key path
      * information that must be stored in a reserved keyspace within the index.
      */
-    virtual void doGetKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
+    virtual void doGetKeys(OperationContext* opCtx,
+                           const CollectionPtr& collection,
+                           SharedBufferFragmentBuilder& pooledBufferBuilder,
                            const BSONObj& obj,
                            GetKeysContext context,
                            KeyStringSet* keys,
@@ -579,7 +592,7 @@ protected:
                            MultikeyPaths* multikeyPaths,
                            boost::optional<RecordId> id) const = 0;
 
-    IndexCatalogEntry* const _indexCatalogEntry;  // owned by IndexCatalog
+    const IndexCatalogEntry* const _indexCatalogEntry;  // owned by IndexCatalog
     const IndexDescriptor* const _descriptor;
 
 private:

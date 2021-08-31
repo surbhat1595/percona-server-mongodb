@@ -48,7 +48,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/prepare_conflict_tracker.h"
 #include "mongo/db/profile_filter.h"
-#include "mongo/db/query/getmore_request.h"
+#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -143,14 +143,9 @@ BSONObj upconvertQueryEntry(const BSONObj& query,
 }
 
 BSONObj upconvertGetMoreEntry(const NamespaceString& nss, CursorId cursorId, int ntoreturn) {
-    return GetMoreRequest(nss,
-                          cursorId,
-                          ntoreturn,
-                          boost::none,  // awaitDataTimeout
-                          boost::none,  // term
-                          boost::none   // lastKnownCommittedOpTime
-                          )
-        .toBSON();
+    GetMoreCommandRequest getMoreRequest(cursorId, nss.coll().toString());
+    getMoreRequest.setBatchSize(ntoreturn);
+    return getMoreRequest.toBSON({});
 }
 
 /**
@@ -989,7 +984,7 @@ string OpDebug::report(OperationContext* opCtx, const SingleThreadedLockStats* l
         }
     }
 
-    if (writeConcern && !writeConcern->usedDefault) {
+    if (writeConcern && !writeConcern->usedDefaultConstructedWC) {
         s << " writeConcern:" << writeConcern->toBSON();
     }
 
@@ -1172,7 +1167,7 @@ void OpDebug::report(OperationContext* opCtx,
         }
     }
 
-    if (writeConcern && !writeConcern->usedDefault) {
+    if (writeConcern && !writeConcern->usedDefaultConstructedWC) {
         pAttrs->add("writeConcern", writeConcern->toBSON());
     }
 
@@ -1309,7 +1304,7 @@ void OpDebug::append(OperationContext* opCtx,
         }
     }
 
-    if (writeConcern && !writeConcern->usedDefault) {
+    if (writeConcern && !writeConcern->usedDefaultConstructedWC) {
         b.append("writeConcern", writeConcern->toBSON());
     }
 
@@ -1573,7 +1568,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
 
     addIfNeeded("writeConcern", [](auto field, auto args, auto& b) {
-        if (args.op.writeConcern && !args.op.writeConcern->usedDefault) {
+        if (args.op.writeConcern && !args.op.writeConcern->usedDefaultConstructedWC) {
             b.append(field, args.op.writeConcern->toBSON());
         }
     });

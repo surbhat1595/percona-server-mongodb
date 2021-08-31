@@ -147,6 +147,7 @@ FOREACH
 FS
 FTRUNCATE
 FULLFSYNC
+FUNCSIG
 Facebook
 FindClose
 FindFirstFile
@@ -1450,6 +1451,7 @@ variadic
 vectorized
 versa
 vfprintf
+vh
 vm
 vpack
 vpmsum

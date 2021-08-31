@@ -31,10 +31,13 @@
 
 #include "mongo/platform/basic.h"
 
+#include <fmt/format.h>
+
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/commands.h"
@@ -48,6 +51,7 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -57,6 +61,9 @@
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/resharding/coordinator_document_gen.h"
+#include "mongo/db/s/resharding/resharding_coordinator_service.h"
+#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/transaction_history_iterator.h"
@@ -69,6 +76,9 @@
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
+
+using namespace fmt::literals;
 
 namespace mongo {
 namespace {
@@ -199,6 +209,84 @@ void removeTimeseriesEntriesFromConfigTransactions(OperationContext* opCtx) {
     }
 }
 
+void abortAllReshardCollection(OperationContext* opCtx) {
+    auto reshardingCoordinatorService = checked_cast<ReshardingCoordinatorService*>(
+        repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext())
+            ->lookupServiceByName(ReshardingCoordinatorService::kServiceName));
+    reshardingCoordinatorService->abortAllReshardCollection(opCtx);
+
+    PersistentTaskStore<ReshardingCoordinatorDocument> store(
+        NamespaceString::kConfigReshardingOperationsNamespace);
+
+    std::vector<std::string> nsWithReshardColl;
+    store.forEach(opCtx, {}, [&](const ReshardingCoordinatorDocument& doc) {
+        nsWithReshardColl.push_back(doc.getSourceNss().ns());
+        return true;
+    });
+
+    if (!nsWithReshardColl.empty()) {
+        std::string nsListStr;
+        str::joinStringDelim(nsWithReshardColl, &nsListStr, ',');
+
+        uasserted(
+            ErrorCodes::ManualInterventionRequired,
+            "reshardCollection was not properly cleaned up after attempted abort for these ns: "
+            "[{}]. This is sign that the resharding operation was interrupted but not "
+            "aborted."_format(nsListStr));
+    }
+}
+
+void uassertStatusOKIgnoreNSNotFound(Status status) {
+    if (status.isOK() || status == ErrorCodes::NamespaceNotFound) {
+        return;
+    }
+
+    uassertStatusOK(status);
+}
+
+/**
+ * Drops all collections used by resharding on the config.
+ *
+ * TODO SERVER-55912: This method can be removed once 5.0 becomes last-lts.
+ */
+void dropReshardingCollectionsOnConfig(OperationContext* opCtx) {
+    DropReply unusedReply;
+    uassertStatusOKIgnoreNSNotFound(
+        dropCollection(opCtx,
+                       NamespaceString::kConfigReshardingOperationsNamespace,
+                       &unusedReply,
+                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
+}
+
+/**
+ * Drops all collections used by resharding on a shard.
+ *
+ * TODO SERVER-55912: This method can be removed once 5.0 becomes last-lts.
+ */
+void dropReshardingCollectionsOnShard(OperationContext* opCtx) {
+    DropReply unusedReply;
+    uassertStatusOKIgnoreNSNotFound(
+        dropCollection(opCtx,
+                       NamespaceString::kDonorReshardingOperationsNamespace,
+                       &unusedReply,
+                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
+    uassertStatusOKIgnoreNSNotFound(
+        dropCollection(opCtx,
+                       NamespaceString::kRecipientReshardingOperationsNamespace,
+                       &unusedReply,
+                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
+    uassertStatusOKIgnoreNSNotFound(
+        dropCollection(opCtx,
+                       NamespaceString::kReshardingApplierProgressNamespace,
+                       &unusedReply,
+                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
+    uassertStatusOKIgnoreNSNotFound(
+        dropCollection(opCtx,
+                       NamespaceString::kReshardingTxnClonerProgressNamespace,
+                       &unusedReply,
+                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
+}
+
 /**
  * Sets the minimum allowed feature compatibility version for the cluster. The cluster should not
  * use any new features introduced in binary versions that are newer than the feature compatibility
@@ -265,8 +353,9 @@ public:
         // writeConcern.
         ON_BLOCK_EXIT([&] {
             // Propagate the user's wTimeout if one was given.
-            auto timeout =
-                opCtx->getWriteConcern().usedDefault ? INT_MAX : opCtx->getWriteConcern().wTimeout;
+            auto timeout = opCtx->getWriteConcern().isImplicitDefaultWriteConcern()
+                ? INT_MAX
+                : opCtx->getWriteConcern().wTimeout;
             WriteConcernResult res;
             auto waitForWCStatus = waitForWriteConcern(
                 opCtx,
@@ -323,16 +412,20 @@ public:
                 auto fcvDoc = FeatureCompatibilityVersionDocument::parse(
                     IDLParserErrorContext("featureCompatibilityVersionDocument"), fcvObj.get());
                 changeTimestamp = fcvDoc.getChangeTimestamp();
-                invariant(changeTimestamp);
+                uassert(5722800,
+                        "The 'changeTimestamp' field is missing in the FCV document persisted by "
+                        "the Config Server. This may indicate that this document has been "
+                        "explicitly amended causing an internal data inconsistency.",
+                        changeTimestamp);
             }
         } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
                    request.getPhase()) {
             // Shards receive the timestamp from the Config Server's request.
             changeTimestamp = request.getChangeTimestamp();
             uassert(5563500,
-                    "The 'timestamp' field is missing even though the node is running as a shard. "
-                    "This may indicate that the 'setFeatureCompatibilityVersion' command was "
-                    "invoked directly against the shard or that the config server has not been "
+                    "The 'changeTimestamp' field is missing even though the node is running as a "
+                    "shard. This may indicate that the 'setFeatureCompatibilityVersion' command "
+                    "was invoked directly against the shard or that the config server has not been "
                     "upgraded to at least version 5.0.",
                     changeTimestamp);
         }
@@ -493,6 +586,11 @@ private:
             if (requestedVersion >= FeatureCompatibility::Version::kVersion50) {
                 ShardingCatalogManager::get(opCtx)->upgradeMetadataFor50Phase2(opCtx);
             }
+
+            // Always abort the reshardCollection regardless of version to ensure that it will run
+            // on a consistent version from start to finish. This will ensure that it will be able
+            // to apply the oplog entries correctly.
+            abortAllReshardCollection(opCtx);
         }
 
         hangWhileUpgrading.pauseWhileSet(opCtx);
@@ -619,9 +717,17 @@ private:
                 !failDowngrading.shouldFail());
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            // Always abort the reshardCollection regardless of version to ensure that it will run
+            // on a consistent version from start to finish. This will ensure that it will be able
+            // to apply the oplog entries correctly.
+            abortAllReshardCollection(opCtx);
+
             // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
             if (requestedVersion < FeatureCompatibility::Version::kVersion50) {
                 ShardingCatalogManager::get(opCtx)->downgradeMetadataToPre50Phase1(opCtx);
+
+                // TODO: SERVER-55912 remove after 5.0 becomes last-lts.
+                dropReshardingCollectionsOnConfig(opCtx);
             }
 
             // Tell the shards to enter phase-2 of setFCV (fully downgraded)
@@ -636,6 +742,11 @@ private:
             // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
             if (requestedVersion < FeatureCompatibility::Version::kVersion50) {
                 ShardingCatalogManager::get(opCtx)->downgradeMetadataToPre50Phase2(opCtx);
+            }
+        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+            // TODO: SERVER-55912 remove after 5.0 becomes last-lts.
+            if (requestedVersion < FeatureCompatibility::Version::kVersion50) {
+                dropReshardingCollectionsOnShard(opCtx);
             }
         }
 

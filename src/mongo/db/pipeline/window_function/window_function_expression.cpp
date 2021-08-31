@@ -47,7 +47,7 @@ using boost::intrusive_ptr;
 using boost::optional;
 
 namespace mongo::window_function {
-
+using namespace std::string_literals;
 REGISTER_WINDOW_FUNCTION(derivative, ExpressionDerivative::parse);
 REGISTER_WINDOW_FUNCTION(first, ExpressionFirst::parse);
 REGISTER_WINDOW_FUNCTION(last, ExpressionLast::parse);
@@ -57,16 +57,42 @@ StringMap<Expression::Parser> Expression::parserMap;
 intrusive_ptr<Expression> Expression::parse(BSONObj obj,
                                             const optional<SortPattern>& sortBy,
                                             ExpressionContext* expCtx) {
-    boost::optional<Expression::Parser> parser;
+
     for (const auto& field : obj) {
-        // Found one valid window function. If there are multiple window functions they will be
-        // caught as invalid arguments to the Expression parser later.
-        auto parser = parserMap.find(field.fieldNameStringData());
-        if (parser != parserMap.end()) {
-            return parser->second(obj, sortBy, expCtx);
+        // Check if window function is $-prefixed.
+        auto fieldName = field.fieldNameStringData();
+
+        if (fieldName.startsWith("$"_sd)) {
+
+            if (auto parser = parserMap.find(field.fieldNameStringData());
+                parser != parserMap.end()) {
+                // Found one valid window function. If there are multiple window functions they will
+                // be caught as invalid arguments to the Expression parser later.
+                return parser->second(obj, sortBy, expCtx);
+            }
+            // The window function provided in the window function expression is invalid.
+
+            // For example, in this window function expression:
+            //     {$setWindowFields:
+            //         {output:
+            //             {total:
+            //                 {$summ: "$x", windoww: {documents: ['unbounded', 'current']}
+            //                 }
+            //             }
+            //         }
+            //     }
+            //
+            // the window function, $summ, is invalid as it is mispelled.
+            uasserted(ErrorCodes::FailedToParse,
+                      str::stream() << "Unrecognized window function, " << fieldName);
         }
     }
-    uasserted(ErrorCodes::FailedToParse, "Unrecognized window function");
+    // The command did not contain any $-prefixed window functions.
+    uasserted(ErrorCodes::FailedToParse,
+              "Expected a $-prefixed window function"s +
+                  (obj.firstElementFieldNameStringData().empty()
+                       ? ""s
+                       : ", "s + obj.firstElementFieldNameStringData()));
 }
 
 void Expression::registerParser(std::string functionName, Parser parser) {
@@ -189,9 +215,8 @@ boost::intrusive_ptr<Expression> ExpressionFirstLast::parse(
     }
 }
 
-MONGO_INITIALIZER(windowFunctionExpressionMap)(InitializerContext*) {
-    // Nothing to do. This initializer exists to tie together all the individual initializers
-    // defined by REGISTER_WINDOW_FUNCTION and REGISTER_REMOVABLE_WINDOW_FUNCTION
-}
-
+MONGO_INITIALIZER_GROUP(BeginWindowFunctionRegistration,
+                        ("default"),
+                        ("EndWindowFunctionRegistration"))
+MONGO_INITIALIZER_GROUP(EndWindowFunctionRegistration, ("BeginWindowFunctionRegistration"), ())
 }  // namespace mongo::window_function

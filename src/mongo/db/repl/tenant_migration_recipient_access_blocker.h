@@ -81,8 +81,8 @@ public:
     // Called by all writes and reads against the database.
     //
 
-    Status checkIfCanWrite() final;
-    Status waitUntilCommittedOrAborted(OperationContext* opCtx, OperationType operationType) final;
+    Status checkIfCanWrite(Timestamp writeTs) final;
+    Status waitUntilCommittedOrAborted(OperationContext* opCtx) final;
 
     Status checkIfLinearizableReadWasAllowed(OperationContext* opCtx) final;
     SharedSemiFuture<void> getCanReadFuture(OperationContext* opCtx, StringData command) final;

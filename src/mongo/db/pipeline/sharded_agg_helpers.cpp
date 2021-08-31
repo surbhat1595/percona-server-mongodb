@@ -37,6 +37,7 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/pipeline/document_source_change_stream_handle_topology_change.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_match.h"
@@ -47,7 +48,6 @@
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_unwind.h"
-#include "mongo/db/pipeline/document_source_update_on_add_shard.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/vector_clock.h"
@@ -1240,7 +1240,7 @@ StatusWith<ChunkManager> getExecutionNsRoutingInfo(OperationContext* opCtx,
 Shard::RetryPolicy getDesiredRetryPolicy(OperationContext* opCtx) {
     // The idempotent retry policy will retry even for writeConcern failures, so only set it if the
     // pipeline does not support writeConcern.
-    if (!opCtx->getWriteConcern().usedDefault) {
+    if (!opCtx->getWriteConcern().usedDefaultConstructedWC) {
         return Shard::RetryPolicy::kNotIdempotent;
     }
     return Shard::RetryPolicy::kIdempotent;
@@ -1261,16 +1261,26 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(Pipeline* owne
     invariant(pipeline->getSources().empty() ||
               !dynamic_cast<DocumentSourceMergeCursors*>(pipeline->getSources().front().get()));
 
+    if (expCtx->ns.isConfigDotCacheDotChunks()) {
+        // We take special care to attach the local cursor stage to 'ownedPipeline' here rather than
+        // attaching it to a serialized and re-parsed copy of the pipeline to avoid optimizations
+        // such as the $sequentialCache stage from being lost. This is safe because each shard has
+        // its own complete copy of any "config.cache.chunks.*" namespace.
+        return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
+            pipeline.release());
+    }
+
     auto catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
     return shardVersionRetry(
         expCtx->opCtx, catalogCache, expCtx->ns, "targeting pipeline to attach cursors"_sd, [&]() {
             auto pipelineToTarget = pipeline->clone();
-            if (allowTargetingShards && !expCtx->ns.isConfigDotCacheDotChunks() &&
-                expCtx->ns.db() != "local") {
-                return targetShardsAndAddMergeCursors(expCtx, std::move(pipelineToTarget));
+            if (!allowTargetingShards || expCtx->ns.db() == "local") {
+                // If the db is local, this may be a change stream examining the oplog. We know the
+                // oplog (and any other local collections) will not be sharded.
+                return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
+                    pipelineToTarget.release());
             }
-            return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
-                pipelineToTarget.release());
+            return targetShardsAndAddMergeCursors(expCtx, std::move(pipelineToTarget));
         });
 }
 

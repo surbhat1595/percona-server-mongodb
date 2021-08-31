@@ -70,6 +70,7 @@ bool WorkingSetCommon::fetch(OperationContext* opCtx,
                              WorkingSet* workingSet,
                              WorkingSetID id,
                              SeekableRecordCursor* cursor,
+                             const CollectionPtr& collection,
                              const NamespaceString& ns) {
     WorkingSetMember* member = workingSet->get(id);
 
@@ -144,7 +145,9 @@ bool WorkingSetCommon::fetch(OperationContext* opCtx,
             KeyStringSet* multikeyMetadataKeys = nullptr;
             MultikeyPaths* multikeyPaths = nullptr;
             auto* iam = workingSet->retrieveIndexAccessMethod(memberKey.indexId);
-            iam->getKeys(executionCtx.pooledBufferBuilder(),
+            iam->getKeys(opCtx,
+                         collection,
+                         executionCtx.pooledBufferBuilder(),
                          member->doc.value().toBson(),
                          IndexAccessMethod::GetKeysMode::kEnforceConstraints,
                          IndexAccessMethod::GetKeysContext::kValidatingKeys,

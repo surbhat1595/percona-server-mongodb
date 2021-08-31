@@ -56,12 +56,14 @@ struct DistinctParams {
         invariant(indexDescriptor);
     }
 
-    DistinctParams(OperationContext* opCtx, const IndexDescriptor* descriptor)
+    DistinctParams(OperationContext* opCtx,
+                   const CollectionPtr& collection,
+                   const IndexDescriptor* descriptor)
         : DistinctParams(descriptor,
                          descriptor->indexName(),
                          descriptor->keyPattern(),
-                         descriptor->getEntry()->getMultikeyPaths(opCtx),
-                         descriptor->getEntry()->isMultikey()) {}
+                         descriptor->getEntry()->getMultikeyPaths(opCtx, collection),
+                         descriptor->getEntry()->isMultikey(opCtx, collection)) {}
 
     const IndexDescriptor* indexDescriptor;
     std::string name;

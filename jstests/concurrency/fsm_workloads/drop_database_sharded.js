@@ -4,8 +4,6 @@
  * @tags: [
  *   requires_sharding,
  *   featureFlagShardingFullDDLSupport,
- *   # TODO SERVER-56646 enable this test in stepdown suites
- *   does_not_support_stepdowns,
  * ]
  */
 'use strict';
@@ -63,12 +61,15 @@ var $config = (function() {
         shardCollection: {enableSharding: 0.35, dropDatabase: 0.35, shardCollection: 0.3},
     };
 
+    let teardown = function(db, collName, cluster) {};
+
     return {
         threadCount: 12,
         iterations: 64,
         startState: 'init',
         data: {},
         states: states,
-        transitions: transitions
+        transitions: transitions,
+        teardown: teardown
     };
 })();

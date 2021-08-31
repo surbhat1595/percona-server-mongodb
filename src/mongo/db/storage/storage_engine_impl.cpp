@@ -323,10 +323,10 @@ void StorageEngineImpl::_initCollection(OperationContext* opCtx,
                                         const NamespaceString& nss,
                                         bool forRepair,
                                         Timestamp minVisibleTs) {
-    BSONCollectionCatalogEntry::MetaData md = _catalog->getMetaData(opCtx, catalogId);
+    auto md = _catalog->getMetaData(opCtx, catalogId);
     uassert(ErrorCodes::MustDowngrade,
             str::stream() << "Collection does not have UUID in KVCatalog. Collection: " << nss,
-            md.options.uuid);
+            md->options.uuid);
 
     auto ident = _catalog->getEntry(catalogId).ident;
 
@@ -336,18 +336,16 @@ void StorageEngineImpl::_initCollection(OperationContext* opCtx,
         // repaired. This also ensures that if we try to use it, it will blow up.
         rs = nullptr;
     } else {
-        rs = _engine->getRecordStore(opCtx, nss.ns(), ident, md.options);
+        rs = _engine->getRecordStore(opCtx, nss.ns(), ident, md->options);
         invariant(rs);
     }
 
-    auto options = _catalog->getCollectionOptions(opCtx, catalogId);
-
     auto collectionFactory = Collection::Factory::get(getGlobalServiceContext());
-    auto collection = collectionFactory->make(opCtx, nss, catalogId, options, std::move(rs));
+    auto collection = collectionFactory->make(opCtx, nss, catalogId, md, std::move(rs));
     collection->setMinimumVisibleSnapshot(minVisibleTs);
 
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-        catalog.registerCollection(opCtx, options.uuid.get(), std::move(collection));
+        catalog.registerCollection(opCtx, md->options.uuid.get(), std::move(collection));
     });
 }
 
@@ -359,7 +357,7 @@ void StorageEngineImpl::closeCatalog(OperationContext* opCtx) {
     }
 
     CollectionCatalog::write(
-        opCtx, [&](CollectionCatalog& catalog) { catalog.deregisterAllCollections(); });
+        opCtx, [&](CollectionCatalog& catalog) { catalog.deregisterAllCollectionsAndViews(); });
 
     _catalog.reset();
     _catalogRecordStore.reset();
@@ -383,7 +381,7 @@ Status StorageEngineImpl::_recoverOrphanedCollection(OperationContext* opCtx,
     WriteUnitOfWork wuow(opCtx);
     const auto metadata = _catalog->getMetaData(opCtx, catalogId);
     Status status =
-        _engine->recoverOrphanedIdent(opCtx, collectionName, collectionIdent, metadata.options);
+        _engine->recoverOrphanedIdent(opCtx, collectionName, collectionIdent, metadata->options);
 
     bool dataModified = status.code() == ErrorCodes::DataModifiedByRepair;
     if (!status.isOK() && !dataModified) {
@@ -576,13 +574,13 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
     // Also, remove unfinished builds except those that were background index builds started on a
     // secondary.
     for (DurableCatalog::Entry entry : catalogEntries) {
-        BSONCollectionCatalogEntry::MetaData metaData =
+        std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metaData =
             _catalog->getMetaData(opCtx, entry.catalogId);
-        NamespaceString coll(metaData.ns);
+        NamespaceString coll(metaData->ns);
 
         // Batch up the indexes to remove them from `metaData` outside of the iterator.
         std::vector<std::string> indexesToDrop;
-        for (const auto& indexMetaData : metaData.indexes) {
+        for (const auto& indexMetaData : metaData->indexes) {
             const std::string& indexName = indexMetaData.name();
             std::string indexIdent = _catalog->getIndexIdent(opCtx, entry.catalogId, indexName);
 
@@ -635,7 +633,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             if (indexMetaData.buildUUID) {
                 invariant(!indexMetaData.ready);
 
-                auto collUUID = metaData.options.uuid;
+                auto collUUID = metaData->options.uuid;
                 invariant(collUUID);
                 auto buildUUID = *indexMetaData.buildUUID;
 
@@ -692,13 +690,17 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
         }
 
         for (auto&& indexName : indexesToDrop) {
-            invariant(metaData.eraseIndex(indexName),
+            invariant(metaData->eraseIndex(indexName),
                       str::stream()
                           << "Index is missing. Collection: " << coll << " Index: " << indexName);
         }
         if (indexesToDrop.size() > 0) {
             WriteUnitOfWork wuow(opCtx);
-            _catalog->putMetaData(opCtx, entry.catalogId, metaData);
+            auto collection =
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForMetadataWrite(
+                    opCtx, CollectionCatalog::LifetimeMode::kInplace, entry.nss);
+            invariant(collection->getCatalogId() == entry.catalogId);
+            collection->replaceMetadata(opCtx, std::move(metaData));
             wuow.commit();
         }
     }
@@ -728,7 +730,7 @@ void StorageEngineImpl::cleanShutdown() {
     }
 
     CollectionCatalog::write(getGlobalServiceContext(), [](CollectionCatalog& catalog) {
-        catalog.deregisterAllCollections();
+        catalog.deregisterAllCollectionsAndViews();
     });
 
     _catalog.reset();
@@ -825,7 +827,8 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
     WriteUnitOfWork untimestampedDropWuow(opCtx);
     auto collectionCatalog = CollectionCatalog::get(opCtx);
     for (auto& uuid : toDrop) {
-        auto coll = collectionCatalog->lookupCollectionByUUID(opCtx, uuid);
+        auto coll = collectionCatalog->lookupCollectionByUUIDForMetadataWrite(
+            opCtx, CollectionCatalog::LifetimeMode::kManagedInWriteUnitOfWork, uuid);
 
         // No need to remove the indexes from the IndexCatalog because eliminating the Collection
         // will have the same effect.
@@ -836,12 +839,8 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
 
             audit::logDropIndex(opCtx->getClient(), ice->descriptor()->indexName(), coll->ns());
 
-            catalog::removeIndex(opCtx,
-                                 ice->descriptor()->indexName(),
-                                 coll->getCatalogId(),
-                                 coll->uuid(),
-                                 coll->ns(),
-                                 ice->getSharedIdent());
+            catalog::removeIndex(
+                opCtx, ice->descriptor()->indexName(), coll, ice->getSharedIdent());
         }
 
         audit::logDropCollection(opCtx->getClient(), coll->ns());
@@ -1066,10 +1065,7 @@ bool StorageEngineImpl::supportsOplogStones() const {
 }
 
 bool StorageEngineImpl::supportsResumableIndexBuilds() const {
-    return enableResumableIndexBuilds && supportsReadConcernMajority() && !isEphemeral() &&
-        serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-            ServerGlobalParams::FeatureCompatibility::Version::kVersion47) &&
+    return supportsReadConcernMajority() && !isEphemeral() &&
         !repl::ReplSettings::shouldRecoverFromOplogAsStandalone();
 }
 
@@ -1272,13 +1268,9 @@ int64_t StorageEngineImpl::sizeOnDiskForDb(OperationContext* opCtx, StringData d
     catalog::forEachCollectionFromDb(opCtx, dbName, MODE_IS, [&](const CollectionPtr& collection) {
         size += collection->getRecordStore()->storageSize(opCtx);
 
-        std::vector<std::string> indexNames;
-        _catalog->getAllIndexes(opCtx, collection->getCatalogId(), &indexNames);
-
-        for (size_t i = 0; i < indexNames.size(); i++) {
-            std::string ident =
-                _catalog->getIndexIdent(opCtx, collection->getCatalogId(), indexNames[i]);
-            size += _engine->getIdentSize(opCtx, ident);
+        auto it = collection->getIndexCatalog()->getIndexIterator(opCtx, true);
+        while (it->more()) {
+            size += _engine->getIdentSize(opCtx, it->next()->getIdent());
         }
 
         return true;

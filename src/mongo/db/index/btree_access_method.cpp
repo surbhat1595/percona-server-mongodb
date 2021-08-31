@@ -65,7 +65,9 @@ BtreeAccessMethod::BtreeAccessMethod(IndexCatalogEntry* btreeState,
                                             getSortedDataInterface()->getOrdering());
 }
 
-void BtreeAccessMethod::doGetKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
+void BtreeAccessMethod::doGetKeys(OperationContext* opCtx,
+                                  const CollectionPtr& collection,
+                                  SharedBufferFragmentBuilder& pooledBufferBuilder,
                                   const BSONObj& obj,
                                   GetKeysContext context,
                                   KeyStringSet* keys,
@@ -73,7 +75,7 @@ void BtreeAccessMethod::doGetKeys(SharedBufferFragmentBuilder& pooledBufferBuild
                                   MultikeyPaths* multikeyPaths,
                                   boost::optional<RecordId> id) const {
     const auto skipMultikey = context == IndexAccessMethod::GetKeysContext::kValidatingKeys &&
-        !_descriptor->getEntry()->isMultikey();
+        !_descriptor->getEntry()->isMultikey(opCtx, collection);
     _keyGenerator->getKeys(pooledBufferBuilder, obj, skipMultikey, keys, multikeyPaths, id);
 }
 

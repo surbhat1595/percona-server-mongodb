@@ -50,7 +50,7 @@
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/find_common.h"
-#include "mongo/db/query/getmore_request.h"
+#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
@@ -804,8 +804,7 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
             // to the resume token of the invalidating event, and mark the cursor response as
             // invalidated. We always expect to have ExtraInfo for this error code.
             const auto extraInfo = ex.extraInfo<ChangeStreamInvalidationInfo>();
-            tassert(
-                5493707, "Missing ChangeStreamInvalidationInfo on exception", extraInfo != nullptr);
+            tassert(5493707, "Missing ChangeStreamInvalidationInfo on exception", extraInfo);
 
             postBatchResumeToken = extraInfo->getInvalidateResumeToken();
             cursorState = ClusterCursorManager::CursorState::Exhausted;

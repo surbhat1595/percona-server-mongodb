@@ -165,7 +165,10 @@ public:
      * @param optime an out parameter that will contain the opTime of the config server.
      *      Can be null. Note that chunks can be fetched in multiple batches and each batch
      *      can have a unique opTime. This opTime will be the one from the last batch.
+     * @param epoch epoch associated to the collection, needed to build the chunks.
+     * @param timestamp timestamp associated to the collection, needed to build the chunks.
      * @param readConcern The readConcern to use while querying for chunks.
+
      *
      * Returns a vector of ChunkTypes, or a !OK status if an error occurs.
      */
@@ -175,6 +178,8 @@ public:
         const BSONObj& sort,
         boost::optional<int> limit,
         repl::OpTime* opTime,
+        const OID& epoch,
+        const boost::optional<Timestamp>& timestamp,
         repl::ReadConcernLevel readConcern,
         const boost::optional<BSONObj>& hint = boost::none) = 0;
 
@@ -235,13 +240,14 @@ public:
      *
      * @param updateOps: documents to write to the chunks collection.
      * @param preCondition: preconditions for applying documents.
+     * @param nsOrUUID: collection name if version < 5.0, collection UUID otherwise.
      * @param nss: namespace string for the chunks collection.
      * @param lastChunkVersion: version of the last document being written to the chunks
      * collection.
      * @param writeConcern: writeConcern to use for applying documents.
      * @param readConcern: readConcern to use for verifying that documents have been applied.
      *
-     * 'nss' and 'lastChunkVersion' uniquely identify the last document being written, which is
+     * 'nsOrUUID' and 'lastChunkVersion' uniquely identify the last document being written, which is
      * expected to appear in the chunks collection on success. This is important for the
      * case where network problems cause a retry of a successful write, which then returns
      * failure because the precondition no longer matches. If a query of the chunks collection
@@ -250,6 +256,7 @@ public:
     virtual Status applyChunkOpsDeprecated(OperationContext* opCtx,
                                            const BSONArray& updateOps,
                                            const BSONArray& preCondition,
+                                           const NamespaceStringOrUUID& nsOrUUID,
                                            const NamespaceString& nss,
                                            const ChunkVersion& lastChunkVersion,
                                            const WriteConcernOptions& writeConcern,
@@ -337,7 +344,8 @@ public:
     virtual Status removeConfigDocuments(OperationContext* opCtx,
                                          const NamespaceString& nss,
                                          const BSONObj& query,
-                                         const WriteConcernOptions& writeConcern) = 0;
+                                         const WriteConcernOptions& writeConcern,
+                                         boost::optional<BSONObj> hint = boost::none) = 0;
 
 protected:
     ShardingCatalogClient() = default;

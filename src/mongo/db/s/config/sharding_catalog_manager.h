@@ -247,6 +247,23 @@ public:
                                          const boost::optional<Timestamp>& validAfter);
 
     /**
+     * Updates metadata in the config.chunks collection so the chunks within the specified key range
+     * are seen merged into a single larger chunk.
+     * If 'validAfter' is not set, this means the commit request came from an older server version,
+     * which is not history-aware.
+     *
+     * Returns a BSON object with the newly produced chunk versions after the migration:
+     *   - shardVersion - The new shard version of the source shard
+     *   - collectionVersion - The new collection version after the commit
+     */
+    StatusWith<BSONObj> commitChunksMerge(OperationContext* opCtx,
+                                          const NamespaceString& nss,
+                                          const UUID& requestCollectionUUID,
+                                          const ChunkRange& chunkRange,
+                                          const ShardId& shardId,
+                                          const boost::optional<Timestamp>& validAfter);
+
+    /**
      * Updates metadata in config.chunks collection to show the given chunk in its new shard.
      * If 'validAfter' is not set, this means the commit request came from an older server version,
      * which is not history-aware.
@@ -312,6 +329,7 @@ public:
      */
     void setAllowMigrationsAndBumpOneChunk(OperationContext* opCtx,
                                            const NamespaceString& nss,
+                                           const boost::optional<UUID>& collectionUUID,
                                            bool allowMigrations);
 
     //
@@ -467,6 +485,11 @@ private:
     Status _initConfigIndexes(OperationContext* opCtx);
 
     /**
+     * Ensure that config.collections exists upon configsvr startup
+     */
+    Status _initConfigCollections(OperationContext* opCtx);
+
+    /**
      * Used during addShard to determine if there is already an existing shard that matches the
      * shard that is currently being added.  An OK return with boost::none indicates that there
      * is no conflicting shard, and we can proceed trying to add the new shard.  An OK return
@@ -544,6 +567,8 @@ private:
      */
     StatusWith<ChunkType> _findChunkOnConfig(OperationContext* opCtx,
                                              const NamespaceStringOrUUID& nsOrUUID,
+                                             const OID& epoch,
+                                             const boost::optional<Timestamp>& timestamp,
                                              const BSONObj& key);
 
     /**

@@ -264,13 +264,13 @@ std::unique_ptr<PlanStage> InternalPlanner::_indexScan(
     invariant(collection);
     invariant(descriptor);
 
-    IndexScanParams params(expCtx->opCtx, descriptor);
+    IndexScanParams params(expCtx->opCtx, collection, descriptor);
     params.direction = direction;
     params.bounds.isSimpleRange = true;
     params.bounds.startKey = startKey;
     params.bounds.endKey = endKey;
     params.bounds.boundInclusion = boundInclusion;
-    params.shouldDedup = descriptor->getEntry()->isMultikey();
+    params.shouldDedup = descriptor->getEntry()->isMultikey(expCtx->opCtx, collection);
 
     std::unique_ptr<PlanStage> root =
         std::make_unique<IndexScan>(expCtx.get(), collection, std::move(params), ws, nullptr);

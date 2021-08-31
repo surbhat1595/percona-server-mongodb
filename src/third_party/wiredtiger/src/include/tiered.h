@@ -27,28 +27,6 @@ struct __wt_tiered_manager {
 };
 
 /*
- * WT_CURSOR_TIERED --
- *	A tiered cursor.
- */
-struct __wt_cursor_tiered {
-    WT_CURSOR iface;
-
-    WT_TIERED *tiered;
-
-    WT_CURSOR **cursors;
-    WT_CURSOR *current; /* The current cursor for iteration */
-    WT_CURSOR *primary; /* The current primary */
-
-/* AUTOMATIC FLAG VALUE GENERATION START */
-#define WT_CURTIERED_ACTIVE 0x1u       /* Incremented the session count */
-#define WT_CURTIERED_ITERATE_NEXT 0x2u /* Forward iteration */
-#define WT_CURTIERED_ITERATE_PREV 0x4u /* Backward iteration */
-#define WT_CURTIERED_MULTIPLE 0x8u     /* Multiple cursors have values */
-                                       /* AUTOMATIC FLAG VALUE GENERATION STOP */
-    uint32_t flags;
-};
-
-/*
  * Define the maximum number of tiers for convenience. We expect at most two initially. This can
  * change if more are needed. It is easier to have the array statically allocated initially than
  * worrying about the memory management. For now also assign types to slots. Local files in slot 0.
@@ -67,6 +45,44 @@ struct __wt_cursor_tiered {
 #define WT_TIERED_NAME_PREFIX 0x4u
 #define WT_TIERED_NAME_SHARED 0x8u
 /* AUTOMATIC FLAG VALUE GENERATION STOP */
+
+/* Flush tier flags */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define WT_FLUSH_TIER_FORCE 0x1u
+#define WT_FLUSH_TIER_OFF 0x2u
+#define WT_FLUSH_TIER_ON 0x4u
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
+
+/*
+ * The flush state is a simple counter we manipulate atomically.
+ */
+#define WT_FLUSH_STATE_DONE(state) ((state) == 0)
+
+/*
+ * Different types of work units for tiered trees.
+ */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define WT_TIERED_WORK_DROP_LOCAL 0x1u  /* Drop object from local storage. */
+#define WT_TIERED_WORK_DROP_SHARED 0x2u /* Drop object from tier. */
+#define WT_TIERED_WORK_FLUSH 0x4u       /* Flush object to tier. */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
+
+/*
+ * WT_TIERED_WORK_UNIT --
+ *	A definition of maintenance that a tiered tree needs done.
+ */
+struct __wt_tiered_work_unit {
+    TAILQ_ENTRY(__wt_tiered_work_unit) q; /* Worker unit queue */
+    uint32_t type;                        /* Type of operation */
+    uint64_t op_val;                      /* A value for the operation */
+    WT_TIERED *tiered;                    /* Tiered tree */
+    uint32_t id;                          /* Id of the object */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define WT_TIERED_WORK_FORCE 0x1u /* Force operation */
+#define WT_TIERED_WORK_FREE 0x2u  /* Free data after operation */
+                                  /* AUTOMATIC FLAG VALUE GENERATION STOP */
+    uint32_t flags;               /* Flags for operation */
+};
 
 /*
  * WT_TIERED_TIERS --
@@ -107,8 +123,10 @@ struct __wt_tiered {
 
     WT_TIERED_TIERS tiers[WT_TIERED_MAX_TIERS]; /* Tiers array */
 
-    uint64_t current_id; /* Current object id number */
-    uint64_t next_id;    /* Next object number */
+    WT_BLOCK_FILE_OPENER opener;
+
+    uint32_t current_id; /* Current object id number */
+    uint32_t next_id;    /* Next object number */
 
     WT_COLLATOR *collator; /* TODO: handle custom collation */
     /* TODO: What about compression, encryption, etc? Do we need to worry about that here? */
@@ -119,6 +137,7 @@ struct __wt_tiered {
     uint32_t flags;
 };
 
+/* FIXME: Currently the WT_TIERED_OBJECT data structure is not used. */
 /*
  * WT_TIERED_OBJECT --
  *     Definition of a tiered object. This is a single object in a tiered tree.
@@ -143,6 +162,7 @@ struct __wt_tiered_object {
     uint32_t flags;
 };
 
+/* FIXME: Currently the WT_TIERED_TREE data structure is not used. */
 /*
  * WT_TIERED_TREE --
  *     Definition of the shared tiered portion of a tree.

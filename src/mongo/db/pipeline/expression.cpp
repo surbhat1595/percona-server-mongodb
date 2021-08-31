@@ -3435,6 +3435,12 @@ Value ExpressionIndexOfCP::evaluate(const Document& root, Variables* variables) 
             std::min(codePointLength, static_cast<size_t>(endIndexArg.coerceToInt()));
     }
 
+    // If the start index is past the end, then always return -1 since 'token' does not exist within
+    // these invalid bounds.
+    if (endCodePointIndex < startCodePointIndex) {
+        return Value(-1);
+    }
+
     if (startByteIndex == 0 && input.empty() && token.empty()) {
         // If we are finding the index of "" in the string "", the below loop will not loop, so we
         // need a special case for this.
@@ -7462,9 +7468,6 @@ Value ExpressionSetField::serialize(const bool explain) const {
                                     {"value"_sd, _value->serialize(explain)}}}});
 }
 
-MONGO_INITIALIZER(expressionParserMap)(InitializerContext*) {
-    // Nothing to do. This initializer exists to tie together all the individual initializers
-    // defined by REGISTER_EXPRESSION / REGISTER_EXPRESSION_WITH_MIN_VERSION.
-}
-
+MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
+MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())
 }  // namespace mongo

@@ -71,11 +71,12 @@ class DocumentSource;
  *
  * An expression registered this way can be used in any featureCompatibilityVersion.
  */
-#define REGISTER_EXPRESSION(key, parser)                                      \
-    MONGO_INITIALIZER_GENERAL(                                                \
-        addToExpressionParserMap_##key, ("default"), ("expressionParserMap")) \
-    (InitializerContext*) {                                                   \
-        Expression::registerExpression("$" #key, (parser), boost::none);      \
+#define REGISTER_EXPRESSION(key, parser)                                 \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,            \
+                              ("BeginExpressionRegistration"),           \
+                              ("EndExpressionRegistration"))             \
+    (InitializerContext*) {                                              \
+        Expression::registerExpression("$" #key, (parser), boost::none); \
     }
 
 /**
@@ -89,8 +90,9 @@ class DocumentSource;
  */
 #define REGISTER_FEATURE_FLAG_GUARDED_EXPRESSION_WITH_MIN_VERSION(            \
     key, parser, featureFlag, minVersion)                                     \
-    MONGO_INITIALIZER_GENERAL(                                                \
-        addToExpressionParserMap_##key, ("default"), ("expressionParserMap")) \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                 \
+                              ("BeginExpressionRegistration"),                \
+                              ("EndExpressionRegistration"))                  \
     (InitializerContext*) {                                                   \
         if (featureFlag.isEnabledAndIgnoreFCV()) {                            \
             Expression::registerExpression("$" #key, (parser), (minVersion)); \
@@ -106,24 +108,26 @@ class DocumentSource;
  * compatibility version >= X, you would add this line:
  * REGISTER_EXPRESSION_WITH_MIN_VERSION(foo, ExpressionFoo::parse, X);
  */
-#define REGISTER_EXPRESSION_WITH_MIN_VERSION(key, parser, minVersion)         \
-    MONGO_INITIALIZER_GENERAL(                                                \
-        addToExpressionParserMap_##key, ("default"), ("expressionParserMap")) \
-    (InitializerContext*) {                                                   \
-        Expression::registerExpression("$" #key, (parser), (minVersion));     \
+#define REGISTER_EXPRESSION_WITH_MIN_VERSION(key, parser, minVersion)     \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,             \
+                              ("BeginExpressionRegistration"),            \
+                              ("EndExpressionRegistration"))              \
+    (InitializerContext*) {                                               \
+        Expression::registerExpression("$" #key, (parser), (minVersion)); \
     }
 
 /**
  * Registers a Parser only if test commands are enabled. Use this if your expression is only used
  * for testing purposes.
  */
-#define REGISTER_TEST_EXPRESSION(key, parser)                                 \
-    MONGO_INITIALIZER_GENERAL(                                                \
-        addToExpressionParserMap_##key, ("default"), ("expressionParserMap")) \
-    (InitializerContext*) {                                                   \
-        if (getTestCommandsEnabled()) {                                       \
-            Expression::registerExpression("$" #key, (parser), boost::none);  \
-        }                                                                     \
+#define REGISTER_TEST_EXPRESSION(key, parser)                                \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                \
+                              ("BeginExpressionRegistration"),               \
+                              ("EndExpressionRegistration"))                 \
+    (InitializerContext*) {                                                  \
+        if (getTestCommandsEnabled()) {                                      \
+            Expression::registerExpression("$" #key, (parser), boost::none); \
+        }                                                                    \
     }
 
 class Expression : public RefCountable {
@@ -232,7 +236,8 @@ public:
      * This allows an arbitrary class to implement logic which gets dispatched to at runtime
      * depending on the type of the Expression.
      */
-    virtual void acceptVisitor(ExpressionVisitor* visitor) = 0;
+    virtual void acceptVisitor(ExpressionMutableVisitor* visitor) = 0;
+    virtual void acceptVisitor(ExpressionConstVisitor* visitor) const = 0;
 
     /**
      * Parses a BSON Object that could represent an object literal or a functional expression like
@@ -498,7 +503,11 @@ public:
         return AccumulatorState(this->getExpressionContext()).getOpName();
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -632,7 +641,11 @@ public:
         _value = value;
     };
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -802,7 +815,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -835,7 +852,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -855,7 +876,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -881,7 +906,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -901,7 +930,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -931,7 +964,11 @@ public:
     boost::intrusive_ptr<Expression> optimize() final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -948,7 +985,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -964,7 +1005,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -977,7 +1022,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -992,7 +1041,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1010,7 +1063,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1025,7 +1082,11 @@ public:
         return "$bsonSize";
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1040,7 +1101,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1055,7 +1120,11 @@ public:
     static boost::intrusive_ptr<ExpressionCoerceToBool> create(
         ExpressionContext* const expCtx, boost::intrusive_ptr<Expression> pExpression);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1109,7 +1178,11 @@ public:
         const boost::intrusive_ptr<Expression>& exprLeft,
         const boost::intrusive_ptr<Expression>& exprRight);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1132,7 +1205,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1153,7 +1230,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1170,7 +1251,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1195,7 +1280,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1233,7 +1322,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1309,7 +1402,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1339,7 +1436,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1365,7 +1466,11 @@ public:
         return Value(timeZone.dateParts(date).dayOfMonth);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1383,7 +1488,11 @@ public:
         return Value(timeZone.dayOfWeek(date));
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1401,7 +1510,11 @@ public:
         return Value(timeZone.dayOfYear(date));
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1433,7 +1546,11 @@ public:
     static boost::intrusive_ptr<Expression> parse(ExpressionContext* const expCtx,
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1498,7 +1615,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1514,7 +1635,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1522,12 +1647,26 @@ public:
 
 class ExpressionFieldPath final : public Expression {
 public:
-    bool isRootFieldPath() const {
+    /**
+     * Checks whether this field path is exactly "$$ROOT".
+     */
+    bool isROOT() const {
         return _variable == Variables::kRootId && _fieldPath.getPathLength() == 1;
     }
 
+    /**
+     * Checks whether this field path starts with a variable besides ROOT.
+     *
+     * For example, these are variable references:
+     *   "$$NOW"
+     *   "$$NOW.x"
+     * and these are not:
+     *   "$x"
+     *   "$$ROOT"
+     *   "$$ROOT.x"
+     */
     bool isVariableReference() const {
-        return Variables::isUserDefinedVariable(_variable);
+        return _variable != Variables::kRootId;
     }
 
     boost::intrusive_ptr<Expression> optimize() final;
@@ -1591,7 +1730,11 @@ public:
     std::unique_ptr<Expression> copyWithSubstitution(
         const StringMap<std::string>& renameList) const;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1642,7 +1785,11 @@ public:
                      boost::intrusive_ptr<Expression> input,
                      boost::intrusive_ptr<Expression> filter);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1675,7 +1822,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1695,7 +1846,11 @@ public:
         return Value(timeZone.dateParts(date).hour);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1710,7 +1865,11 @@ public:
     const char* getOpName() const final;
     void validateArguments(const ExpressionVector& args) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1730,7 +1889,11 @@ public:
 
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1750,7 +1913,11 @@ public:
     boost::intrusive_ptr<Expression> optimize() final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1791,7 +1958,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1810,7 +1981,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1833,7 +2008,11 @@ public:
 
     typedef std::map<Variables::Id, NameAndExpression> VariableMap;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1873,7 +2052,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1892,7 +2075,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1907,7 +2094,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -1925,7 +2116,11 @@ public:
     ComputedPaths getComputedPaths(const std::string& exprFieldPath,
                                    Variables::Id renamingVar) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1957,7 +2152,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -1986,7 +2185,11 @@ public:
         return Value(timeZone.dateParts(date).millisecond);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2006,7 +2209,11 @@ public:
         return Value(timeZone.dateParts(date).minute);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2022,7 +2229,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2059,7 +2270,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2079,7 +2294,11 @@ public:
         return Value(timeZone.dateParts(date).month);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2096,7 +2315,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2138,7 +2361,11 @@ public:
     ComputedPaths getComputedPaths(const std::string& exprFieldPath,
                                    Variables::Id renamingVar) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2177,7 +2404,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2195,7 +2426,11 @@ public:
                                                    Value base,
                                                    Value exp);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2215,7 +2450,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2245,7 +2484,11 @@ public:
                                                   const VariablesParseState& vps);
     Value serialize(bool explain) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2304,7 +2547,11 @@ public:
         return opName;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2331,7 +2578,11 @@ public:
         return opName;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2353,7 +2604,11 @@ public:
         return Value(timeZone.dateParts(date).second);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2369,7 +2624,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2388,7 +2647,11 @@ public:
     const char* getOpName() const final;
     void validateArguments(const ExpressionVector& args) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2412,7 +2675,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2432,7 +2699,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const override;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2459,7 +2730,11 @@ public:
         return true;
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2475,7 +2750,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2491,7 +2770,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2509,7 +2792,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2526,7 +2813,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2543,7 +2834,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2558,7 +2853,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2574,7 +2873,11 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2592,7 +2895,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2610,7 +2917,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2628,7 +2939,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2647,7 +2962,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2663,7 +2982,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2681,7 +3004,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2713,7 +3040,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2738,7 +3069,11 @@ public:
                                                   const VariablesParseState& vpsIn);
     Value serialize(bool explain) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2762,7 +3097,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2779,7 +3118,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2815,7 +3158,11 @@ public:
                                                   const VariablesParseState& vpsIn);
     Value serialize(bool explain) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -2871,7 +3218,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2890,7 +3241,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2903,7 +3258,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2922,7 +3281,11 @@ public:
         return Value(timeZone.week(date));
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2942,7 +3305,11 @@ public:
         return Value(timeZone.isoYear(date));
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2963,7 +3330,11 @@ public:
         return Value(timeZone.isoDayOfWeek(date));
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -2983,7 +3354,11 @@ public:
         return Value(timeZone.isoWeek(date));
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -3003,7 +3378,11 @@ public:
         return Value(timeZone.dateParts(date).year);
     }
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 };
@@ -3030,7 +3409,11 @@ public:
                                                   const VariablesParseState& vpsIn);
     Value serialize(bool explain) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3066,7 +3449,11 @@ public:
     boost::intrusive_ptr<Expression> optimize() final;
     Value serialize(bool explain) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3221,7 +3608,11 @@ public:
 
     Value evaluate(const Document& root, Variables* variables) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3235,7 +3626,11 @@ public:
                                                   const VariablesParseState& vpsIn);
 
     Value evaluate(const Document& root, Variables* variables) const final;
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3250,7 +3645,11 @@ public:
 
     Value evaluate(const Document& root, Variables* variables) const final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3278,7 +3677,11 @@ public:
 
     const char* getOpName() const;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3303,7 +3706,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3371,7 +3778,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3390,7 +3801,11 @@ public:
                                                   BSONElement expr,
                                                   const VariablesParseState& vps);
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3442,7 +3857,11 @@ public:
     boost::intrusive_ptr<Expression> optimize() final;
     Value serialize(bool explain) const final;
     Value evaluate(const Document& root, Variables* variables) const final;
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3530,7 +3949,11 @@ public:
 
     boost::intrusive_ptr<Expression> optimize() final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 
@@ -3571,7 +3994,11 @@ public:
 
     boost::intrusive_ptr<Expression> optimize() final;
 
-    void acceptVisitor(ExpressionVisitor* visitor) final {
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
         return visitor->visit(this);
     }
 

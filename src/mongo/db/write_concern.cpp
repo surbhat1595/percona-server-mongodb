@@ -40,6 +40,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_options.h"
@@ -92,7 +93,10 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
 
     WriteConcernOptions writeConcern = wcResult.getValue();
 
-    bool clientSuppliedWriteConcern = !writeConcern.usedDefault;
+    // This is the WC extracted from the command object, so the CWWC or implicit default hasn't been
+    // applied yet, which is why "usedDefaultConstructedWC" flag can be used an indicator of whether
+    // the client supplied a WC or not.
+    bool clientSuppliedWriteConcern = !writeConcern.usedDefaultConstructedWC;
     bool customDefaultWasApplied = false;
 
     // If no write concern is specified in the command, then use the cluster-wide default WC (if
@@ -108,10 +112,20 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
                  isTransactionCommand(cmdObj.firstElementFieldName())) &&
                 !opCtx->getClient()->isInDirectClient() && !isInternalClient) {
 
-                auto wcDefault = ReadWriteConcernDefaults::get(opCtx->getServiceContext())
-                                     .getDefaultWriteConcern(opCtx);
+                const auto rwcDefaults =
+                    ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+                auto wcDefault = rwcDefaults.getDefaultWriteConcern();
                 if (wcDefault) {
-                    customDefaultWasApplied = true;
+                    if (repl::feature_flags::gDefaultWCMajority.isEnabled(
+                            serverGlobalParams.featureCompatibility)) {
+                        const auto defaultWriteConcernSource =
+                            rwcDefaults.getDefaultWriteConcernSource();
+                        customDefaultWasApplied = defaultWriteConcernSource &&
+                            defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
+                    } else {
+                        customDefaultWasApplied = true;
+                    }
+
                     LOGV2_DEBUG(22548,
                                 2,
                                 "Applying default writeConcern on {cmdObj_firstElementFieldName} "
@@ -127,7 +141,8 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
         if (writeConcern.wNumNodes == 0 && writeConcern.wMode.empty()) {
             writeConcern.wNumNodes = 1;
         }
-        writeConcern.usedDefaultW = true;
+
+        writeConcern.notExplicitWValue = true;
     }
 
     // It's fine for clients to provide any provenance value to mongod. But if they haven't, then an
@@ -145,7 +160,8 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
         }
     }
 
-    if (writeConcern.usedDefault && serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+    if (!clientSuppliedWriteConcern &&
+        serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
         !opCtx->getClient()->isInDirectClient() &&
         (opCtx->getClient()->session() &&
          (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient))) {

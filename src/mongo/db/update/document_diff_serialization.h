@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/stdx/variant.h"
+#include "mongo/util/itoa.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/visit_helper.h"
 
@@ -146,8 +147,8 @@ struct Node {
 
 /**
  * This class represents insertion of a BSONElement or mutablebson Element. Note that
- * 'DocumentInsertionNode' also repesent an insert for the cases where an object is created
- * implicity.
+ * 'DocumentInsertionNode' also represent an insert for the cases where an object is created
+ * implicitly.
  */
 struct InsertNode : public Node {
     InsertNode(mutablebson::Element el) : elt(el) {}
@@ -342,10 +343,9 @@ public:
     ArrayNode() : InternalNode(doc_diff::kSizeOfEmptyArrayDiffBuilder){};
 
     Node* addChild(size_t idx, std::unique_ptr<Node> node) {
-        sizeTracker.addEntry(
-            1 /* modification type */ + 1 +
-                (idx ? static_cast<int>(std::log10(idx)) : 0) /* Count the number of digits */,
-            node.get());
+        sizeTracker.addEntry(1 /* modification type */ +
+                                 StringData(ItoA(idx)).size() /* Count the number of digits */,
+                             node.get());
         auto itr = children.insert({idx, std::move(node)});
         invariant(itr.second);
         return itr.first->second.get();

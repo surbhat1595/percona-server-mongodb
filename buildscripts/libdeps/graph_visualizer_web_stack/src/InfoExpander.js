@@ -72,18 +72,6 @@ const InfoExpander = ({ selectedNodes, selectedEdges, loading, width }) => {
     <div className={classes.root}>
       <LoadingBar loading={loading} height={"100%"}>
         <Paper style={{ maxHeight: "82vh", overflow: "auto" }}>
-          <Accordion>
-            <AccordionSummary
-              expandIcon={<ExpandMoreIcon />}
-              aria-controls="panel1a-content"
-              id="panel1a-header"
-            >
-              <Typography className={classes.heading}>Counts</Typography>
-            </AccordionSummary>
-            <AccordionDetails>
-              <GraphInfo datawidth={width} />
-            </AccordionDetails>
-          </Accordion>
           {selectedNodes.map((node) => (
             <Accordion key={node.node}>
               <AccordionSummary

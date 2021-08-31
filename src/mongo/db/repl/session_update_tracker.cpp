@@ -70,7 +70,8 @@ OplogEntry createOplogEntryForTransactionTableUpdate(repl::OpTime opTime,
                                     boost::none,    // preImageOpTime
                                     boost::none,    // postImageOpTime
                                     boost::none,    // destinedRecipient
-                                    boost::none)};  // _id
+                                    boost::none,    // _id
+                                    boost::none)};  // needsRetryImage
 }
 
 /**
@@ -312,8 +313,6 @@ boost::optional<OplogEntry> SessionUpdateTracker::_createTransactionTableUpdateF
         newTxnRecord.setLastWriteDate(entry.getWallClockTime());
 
         if (entry.getFromTenantMigration() && entry.getOpType() == OpTypeEnum::kNoop) {
-            // For tenant migration, we don't need to set the lastWriteOpTime.
-            newTxnRecord.setLastWriteOpTime(OpTime());
             newTxnRecord.setState(DurableTxnStateEnum::kCommitted);
             return newTxnRecord.toBSON();
         }

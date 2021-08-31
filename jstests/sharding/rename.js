@@ -10,15 +10,13 @@ var s = new ShardingTest({shards: 2, mongos: 1, rs: {oplogSize: 10}});
 var db = s.getDB("test");
 
 assert.commandWorked(db.foo.insert({_id: 1}));
-db.foo.renameCollection('bar');
-assert.isnull(db.getLastError(), '1.0');
+assert.commandWorked(db.foo.renameCollection('bar'));
 assert.eq(db.bar.findOne(), {_id: 1}, '1.1');
 assert.eq(db.bar.count(), 1, '1.2');
 assert.eq(db.foo.count(), 0, '1.3');
 
 assert.commandWorked(db.foo.insert({_id: 2}));
-db.foo.renameCollection('bar', true);
-assert.isnull(db.getLastError(), '2.0');
+assert.commandWorked(db.foo.renameCollection('bar', true));
 assert.eq(db.bar.findOne(), {_id: 2}, '2.1');
 assert.eq(db.bar.count(), 1, '2.2');
 assert.eq(db.foo.count(), 0, '2.3');
@@ -75,6 +73,19 @@ jsTest.log("Testing that rename operations involving views are not allowed");
 
     let fromAView = db.view.renameCollection('target');
     assert.commandFailed(fromAView);
+}
+
+// Rename a collection to itself fails, without loosing data
+{
+    const sameCollName = 'sameColl';
+    const sameColl = db[sameCollName];
+    assert.commandWorked(sameColl.insert({a: 1}));
+
+    // TODO SERVER-54879 just check for ErrorCodes.IllegalOperation
+    assert.commandFailedWithCode(sameColl.renameCollection(sameCollName, true /* dropTarget */),
+                                 [ErrorCodes.IllegalOperation, ErrorCodes.NamespaceNotFound]);
+
+    assert.eq(1, sameColl.countDocuments({}), "Rename a collection to itself must not loose data");
 }
 
 // Ensure write concern works by shutting down 1 node in a replica set shard

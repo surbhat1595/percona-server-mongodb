@@ -111,6 +111,27 @@ public:
             updateTreeView(/*stopIfMultipleCursors=*/true);
         }
 
+        radix_iterator(const radix_iterator& originalIterator) {
+            _root = originalIterator._root;
+            _current = originalIterator._current;
+        }
+
+        radix_iterator& operator=(const radix_iterator& originalIterator) {
+            if (this != &originalIterator) {
+                _root = originalIterator._root;
+                _current = originalIterator._current;
+            }
+            return *this;
+        }
+
+        radix_iterator& operator=(radix_iterator&& originalIterator) {
+            if (this != &originalIterator) {
+                _root = std::move(originalIterator._root);
+                _current = std::move(originalIterator._current);
+            }
+            return *this;
+        }
+
         radix_iterator& operator++() {
             repositionIfChanged();
             _findNext();
@@ -310,6 +331,27 @@ public:
             updateTreeView(/*stopIfMultipleCursors=*/true);
         }
 
+        reverse_radix_iterator(const reverse_radix_iterator& originalIterator) {
+            _root = originalIterator._root;
+            _current = originalIterator._current;
+        }
+
+        reverse_radix_iterator& operator=(const reverse_radix_iterator& originalIterator) {
+            if (this != &originalIterator) {
+                _root = originalIterator._root;
+                _current = originalIterator._current;
+            }
+            return *this;
+        }
+
+        reverse_radix_iterator& operator=(reverse_radix_iterator&& originalIterator) {
+            if (this != &originalIterator) {
+                _root = std::move(originalIterator._root);
+                _current = std::move(originalIterator._current);
+            }
+            return *this;
+        }
+
         reverse_radix_iterator& operator++() {
             repositionIfChanged();
             _findNextReverse();
@@ -472,16 +514,21 @@ public:
     RadixStore(const RadixStore& other) : _root(make_intrusive_node<Head>(*(other._root))) {}
     RadixStore(const Head& other) : _root(make_intrusive_node<Head>(other)) {}
 
-    friend void swap(RadixStore& first, RadixStore& second) {
-        std::swap(first._root, second._root);
-    }
-
     RadixStore(RadixStore&& other) {
         _root = std::move(other._root);
     }
 
-    RadixStore& operator=(RadixStore other) {
-        swap(*this, other);
+    RadixStore& operator=(const RadixStore& other) {
+        if (this != &other) {
+            _root = make_intrusive_node<Head>(*(other._root));
+        }
+        return *this;
+    }
+
+    RadixStore& operator=(RadixStore&& other) {
+        if (this != &other) {
+            _root = std::move(other._root);
+        }
         return *this;
     }
 

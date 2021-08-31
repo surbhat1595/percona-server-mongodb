@@ -50,7 +50,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/timestamp_block.h"
-#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
@@ -108,7 +107,7 @@ struct BtreeExternalSortComparison {
     }
 };
 
-AbstractIndexAccessMethod::AbstractIndexAccessMethod(IndexCatalogEntry* btreeState,
+AbstractIndexAccessMethod::AbstractIndexAccessMethod(const IndexCatalogEntry* btreeState,
                                                      std::unique_ptr<SortedDataInterface> btree)
     : _indexCatalogEntry(btreeState),
       _descriptor(btreeState->descriptor()),
@@ -132,7 +131,9 @@ Status AbstractIndexAccessMethod::insert(OperationContext* opCtx,
     auto multikeyMetadataKeys = executionCtx.multikeyMetadataKeys();
     auto multikeyPaths = executionCtx.multikeyPaths();
 
-    getKeys(executionCtx.pooledBufferBuilder(),
+    getKeys(opCtx,
+            coll,
+            executionCtx.pooledBufferBuilder(),
             obj,
             options.getKeysMode,
             GetKeysContext::kAddingKeys,
@@ -266,6 +267,7 @@ Status AbstractIndexAccessMethod::initializeAsEmpty(OperationContext* opCtx) {
 }
 
 RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
+                                               const CollectionPtr& collection,
                                                const BSONObj& requestedKey) const {
     // Generate the key for this index.
     KeyString::Value actualKey = [&]() {
@@ -276,7 +278,9 @@ RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
             KeyStringSet* multikeyMetadataKeys = nullptr;
             MultikeyPaths* multikeyPaths = nullptr;
 
-            getKeys(executionCtx.pooledBufferBuilder(),
+            getKeys(opCtx,
+                    collection,
+                    executionCtx.pooledBufferBuilder(),
                     requestedKey,
                     GetKeysMode::kEnforceConstraints,
                     GetKeysContext::kAddingKeys,
@@ -377,7 +381,8 @@ pair<KeyStringSet, KeyStringSet> AbstractIndexAccessMethod::setDifference(
 }
 
 void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
-                                              IndexCatalogEntry* index,
+                                              const CollectionPtr& collection,
+                                              const IndexCatalogEntry* index,
                                               const BSONObj& from,
                                               const BSONObj& to,
                                               const RecordId& record,
@@ -395,7 +400,9 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
         // There's no need to compute the prefixes of the indexed fields that possibly caused the
         // index to be multikey when the old version of the document was written since the index
         // metadata isn't updated when keys are deleted.
-        getKeys(executionCtx.pooledBufferBuilder(),
+        getKeys(opCtx,
+                collection,
+                executionCtx.pooledBufferBuilder(),
                 from,
                 getKeysMode,
                 GetKeysContext::kRemovingKeys,
@@ -407,7 +414,9 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
     }
 
     if (!indexFilter || indexFilter->matchesBSON(to)) {
-        getKeys(executionCtx.pooledBufferBuilder(),
+        getKeys(opCtx,
+                collection,
+                executionCtx.pooledBufferBuilder(),
                 to,
                 options.getKeysMode,
                 GetKeysContext::kAddingKeys,
@@ -476,16 +485,17 @@ Status AbstractIndexAccessMethod::compact(OperationContext* opCtx) {
 
 class AbstractIndexAccessMethod::BulkBuilderImpl : public IndexAccessMethod::BulkBuilder {
 public:
-    BulkBuilderImpl(IndexCatalogEntry* indexCatalogEntry,
+    BulkBuilderImpl(const IndexCatalogEntry* indexCatalogEntry,
                     size_t maxMemoryUsageBytes,
                     StringData dbName);
 
-    BulkBuilderImpl(IndexCatalogEntry* index,
+    BulkBuilderImpl(const IndexCatalogEntry* index,
                     size_t maxMemoryUsageBytes,
                     const IndexStateInfo& stateInfo,
                     StringData dbName);
 
     Status insert(OperationContext* opCtx,
+                  const CollectionPtr& collection,
                   const BSONObj& obj,
                   const RecordId& loc,
                   const InsertDeleteOptions& options) final;
@@ -515,7 +525,7 @@ private:
 
     Sorter::Settings _makeSorterSettings() const;
 
-    IndexCatalogEntry* _indexCatalogEntry;
+    const IndexCatalogEntry* _indexCatalogEntry;
     std::unique_ptr<Sorter> _sorter;
     int64_t _keysInserted = 0;
 
@@ -542,12 +552,12 @@ std::unique_ptr<IndexAccessMethod::BulkBuilder> AbstractIndexAccessMethod::initi
         : std::make_unique<BulkBuilderImpl>(_indexCatalogEntry, maxMemoryUsageBytes, dbName);
 }
 
-AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(IndexCatalogEntry* index,
+AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEntry* index,
                                                             size_t maxMemoryUsageBytes,
                                                             StringData dbName)
     : _indexCatalogEntry(index), _sorter(_makeSorter(maxMemoryUsageBytes, dbName)) {}
 
-AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(IndexCatalogEntry* index,
+AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEntry* index,
                                                             size_t maxMemoryUsageBytes,
                                                             const IndexStateInfo& stateInfo,
                                                             StringData dbName)
@@ -559,6 +569,7 @@ AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(IndexCatalogEntry* i
       _indexMultikeyPaths(createMultikeyPaths(stateInfo.getMultikeyPaths())) {}
 
 Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(OperationContext* opCtx,
+                                                          const CollectionPtr& collection,
                                                           const BSONObj& obj,
                                                           const RecordId& loc,
                                                           const InsertDeleteOptions& options) {
@@ -569,6 +580,8 @@ Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(OperationContext* opCt
 
     try {
         _indexCatalogEntry->accessMethod()->getKeys(
+            opCtx,
+            collection,
             executionCtx.pooledBufferBuilder(),
             obj,
             options.getKeysMode,
@@ -804,7 +817,9 @@ IndexAccessMethod::OnSuppressedErrorFn IndexAccessMethod::kNoopOnSuppressedError
             "obj"_attr = redact(obj));
     };
 
-void AbstractIndexAccessMethod::getKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
+void AbstractIndexAccessMethod::getKeys(OperationContext* opCtx,
+                                        const CollectionPtr& collection,
+                                        SharedBufferFragmentBuilder& pooledBufferBuilder,
                                         const BSONObj& obj,
                                         GetKeysMode mode,
                                         GetKeysContext context,
@@ -821,7 +836,15 @@ void AbstractIndexAccessMethod::getKeys(SharedBufferFragmentBuilder& pooledBuffe
                           id->toString()));
 
     try {
-        doGetKeys(pooledBufferBuilder, obj, context, keys, multikeyMetadataKeys, multikeyPaths, id);
+        doGetKeys(opCtx,
+                  collection,
+                  pooledBufferBuilder,
+                  obj,
+                  context,
+                  keys,
+                  multikeyMetadataKeys,
+                  multikeyPaths,
+                  id);
     } catch (const AssertionException& ex) {
         // Suppress all indexing errors when mode is kRelaxConstraints.
         if (mode == GetKeysMode::kEnforceConstraints) {

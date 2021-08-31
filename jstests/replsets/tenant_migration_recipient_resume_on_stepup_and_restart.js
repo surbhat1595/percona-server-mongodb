@@ -103,7 +103,7 @@ function testRecipientForgetMigrationInterrupt(interruptFunc) {
     const donorRst = new ReplSetTest({
         nodes: 1,
         name: "donorRst",
-        nodeOptions: Object.assign(migrationX509Options.donor, {
+        nodeOptions: Object.assign({}, migrationX509Options.donor, {
             setParameter: {
                 tenantMigrationGarbageCollectionDelayMS: kGarbageCollectionDelayMS,
                 ttlMonitorSleepSecs: kTTLMonitorSleepSecs,
@@ -113,7 +113,7 @@ function testRecipientForgetMigrationInterrupt(interruptFunc) {
     const recipientRst = new ReplSetTest({
         nodes: 3,
         name: "recipientRst",
-        nodeOptions: Object.assign(migrationX509Options.recipient, {
+        nodeOptions: Object.assign({}, migrationX509Options.recipient, {
             setParameter: {
                 tenantMigrationGarbageCollectionDelayMS: kGarbageCollectionDelayMS,
                 ttlMonitorSleepSecs: kTTLMonitorSleepSecs,
@@ -190,6 +190,8 @@ function testRecipientForgetMigrationInterrupt(interruptFunc) {
     testRecipientSyncDataInterrupt((recipientRst) => {
         recipientRst.stopSet(null /* signal */, true /*forRestart */);
         recipientRst.startSet({restart: true});
+        recipientRst.awaitSecondaryNodes();
+        recipientRst.getPrimary();
     }, true);
 })();
 
@@ -209,6 +211,8 @@ function testRecipientForgetMigrationInterrupt(interruptFunc) {
     testRecipientForgetMigrationInterrupt((recipientRst) => {
         recipientRst.stopSet(null /* signal */, true /*forRestart */);
         recipientRst.startSet({restart: true});
+        recipientRst.awaitSecondaryNodes();
+        recipientRst.getPrimary();
     });
 })();
 })();

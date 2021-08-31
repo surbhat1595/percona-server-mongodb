@@ -41,6 +41,12 @@ struct ApplyDiffOutput {
     bool indexesAffected;
 };
 
+struct DamagesOutput {
+    const BSONObj preImage;
+    SharedBuffer damageSource;
+    mutablebson::DamageVector damages;
+};
+
 /**
  * Applies the diff to 'pre' and returns the post image. Throws if the diff is invalid. The
  * 'indexData' parameter is optional, if provided computes whether the indexes are affected.
@@ -53,5 +59,16 @@ ApplyDiffOutput applyDiff(const BSONObj& pre,
                           const Diff& diff,
                           const UpdateIndexData* indexData,
                           bool mustCheckExistenceForInsertOperations);
+
+/**
+ * Computes the damage events from the diff for 'pre' and return the pre-image, damage source, and
+ * damage vector. The final, 'mustCheckExistenceForInsertOperations' parameter signals whether we
+ * must check if an inserted field already exists within a (sub)document. This should generally be
+ * set to true, unless the caller has knowledge of the pre-image and the diff, and can guarantee
+ * that we will not re-insert anything.
+ */
+DamagesOutput computeDamages(const BSONObj& pre,
+                             const Diff& diff,
+                             bool mustCheckExistenceForInsertOperations);
 }  // namespace doc_diff
 }  // namespace mongo

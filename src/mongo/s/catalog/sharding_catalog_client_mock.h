@@ -67,6 +67,8 @@ public:
                                                  const BSONObj& sort,
                                                  boost::optional<int> limit,
                                                  repl::OpTime* opTime,
+                                                 const OID& epoch,
+                                                 const boost::optional<Timestamp>& timestamp,
                                                  repl::ReadConcernLevel readConcern,
                                                  const boost::optional<BSONObj>& hint) override;
 
@@ -98,6 +100,7 @@ public:
     Status applyChunkOpsDeprecated(OperationContext* opCtx,
                                    const BSONArray& updateOps,
                                    const BSONArray& preCondition,
+                                   const NamespaceStringOrUUID& nsOrUUID,
                                    const NamespaceString& nss,
                                    const ChunkVersion& lastChunkVersion,
                                    const WriteConcernOptions& writeConcern,
@@ -128,7 +131,8 @@ public:
     Status removeConfigDocuments(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  const BSONObj& query,
-                                 const WriteConcernOptions& writeConcern) override;
+                                 const WriteConcernOptions& writeConcern,
+                                 boost::optional<BSONObj> hint) override;
 
     Status createDatabase(OperationContext* opCtx, StringData dbName, ShardId primaryShard);
 

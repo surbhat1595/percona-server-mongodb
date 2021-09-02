@@ -44,6 +44,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <boost/iostreams/stream.hpp>
 #include <boost/scoped_ptr.hpp>
+#include <fmt/format.h>
 
 #include "mongo/util/debug_util.h"
 #include "mongo/util/net/socket_utils.h"
@@ -83,6 +84,8 @@ namespace mongo {
 
 namespace audit {
 
+    using namespace fmt::literals;
+
     // JsonStringFormat used by audit logs
     const JsonStringFormat auditJsonFormat = LegacyStrict;
 
@@ -118,7 +121,9 @@ namespace audit {
                 appendMatched(obj, affects_durable_state);
             }
         }
-        virtual Status rotate(bool rename, StringData renameSuffix) override {
+        virtual Status rotate(bool rename,
+                              StringData renameSuffix,
+                              std::function<void(Status)> onMinorError) override {
             // No need to override this method if there is nothing to rotate
             // like it is for 'console' and 'syslog' destinations
             return Status::OK();
@@ -199,7 +204,9 @@ namespace audit {
             invariant(_membuf.write(adapter->data(), adapter->size()));
         }
 
-        virtual Status rotate(bool rename, StringData renameSuffix) override {
+        virtual Status rotate(bool rename,
+                              StringData renameSuffix,
+                              std::function<void(Status)> onMinorError) override {
             stdx::lock_guard<SimpleMutex> lck(_mutex);
 
             // Close the current file.
@@ -213,6 +220,11 @@ namespace audit {
                 std::string s = ss.str();
                 int r = std::rename(_fileName.c_str(), s.c_str());
                 if (r != 0) {
+                    if (onMinorError) {
+                        onMinorError({ErrorCodes::FileRenameFailed,
+                                      "Failed to rename {} to {}: {}"_format(
+                                          _fileName, s, errnoWithDescription())});
+                    }
                     LOGV2_ERROR(29016,
                                 "Could not rotate audit log, but continuing normally "
                                 "(error desc: {err_desc})",
@@ -496,12 +508,14 @@ namespace audit {
         (InitializerContext *context) {
         // Sets the audit log in the general logging framework which
         // will rotate() the audit log when the server log rotates.
-        logv2::addLogRotator(logv2::kAuditLogTag, [](bool renameFiles, StringData suffix) {
-            if (_auditLog) {
-                return _auditLog->rotate(renameFiles, suffix);
-            }
-            return Status::OK();
-        });
+        logv2::addLogRotator(
+            logv2::kAuditLogTag,
+            [](bool renameFiles, StringData suffix, std::function<void(Status)> onMinorError) {
+                if (_auditLog) {
+                    return _auditLog->rotate(renameFiles, suffix, onMinorError);
+                }
+                return Status::OK();
+            });
         uassertStatusOK(initialize());
     }
 

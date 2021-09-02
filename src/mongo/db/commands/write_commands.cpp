@@ -1131,6 +1131,12 @@ public:
             transactionChecks(opCtx, ns());
 
             write_ops::UpdateCommandReply updateReply;
+
+            if (isTimeseries(opCtx, ns())) {
+                _performTimeseriesUpdates(opCtx, &updateReply);
+                return updateReply;
+            }
+
             long long nModified = 0;
 
             // Tracks the upserted information. The memory of this variable gets moved in the
@@ -1234,6 +1240,13 @@ public:
                                    &bodyBuilder);
         }
 
+        void _performTimeseriesUpdates(OperationContext* opCtx,
+                                       write_ops::UpdateCommandReply* updateReply) const {
+            uasserted(ErrorCodes::IllegalOperation,
+                      str::stream()
+                          << "Cannot perform an update on a time-series collection: " << ns());
+        }
+
         BSONObj _commandObj;
 
         // Holds a shared pointer to the first entry in `updates` array.
@@ -1291,8 +1304,12 @@ public:
 
         write_ops::DeleteCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
-
             write_ops::DeleteCommandReply deleteReply;
+
+            if (isTimeseries(opCtx, ns())) {
+                _performTimeseriesDeletes(opCtx, &deleteReply);
+                return deleteReply;
+            }
 
             auto reply = write_ops_exec::performDeletes(opCtx, request());
             populateReply(opCtx,
@@ -1355,6 +1372,13 @@ public:
                                    BSONObj(),
                                    _commandObj,
                                    &bodyBuilder);
+        }
+
+        void _performTimeseriesDeletes(OperationContext* opCtx,
+                                       write_ops::DeleteCommandReply* deleteReply) const {
+            uasserted(ErrorCodes::IllegalOperation,
+                      str::stream()
+                          << "Cannot perform a delete on a time-series collection: " << ns());
         }
 
         const BSONObj& _commandObj;

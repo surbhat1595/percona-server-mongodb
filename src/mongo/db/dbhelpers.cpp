@@ -71,6 +71,21 @@ bool Helpers::findOne(OperationContext* opCtx,
     return true;
 }
 
+BSONObj Helpers::findOneForTesting(OperationContext* opCtx,
+                                   const CollectionPtr& collection,
+                                   const BSONObj& query,
+                                   const bool invariantOnError) {
+    BSONObj ret;
+    const bool requiresIndex = true;
+    bool found = findOne(opCtx, collection, query, ret, requiresIndex);
+    if (invariantOnError) {
+        invariant(found);
+    }
+
+    return ret.getOwned();
+}
+
+
 /* fetch a single object from collection ns that matches query
    set your db SavedContext first
 */
@@ -108,7 +123,6 @@ RecordId Helpers::findOne(OperationContext* opCtx,
     unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
     size_t options = requireIndex ? QueryPlannerParams::NO_TABLE_SCAN : QueryPlannerParams::DEFAULT;
-    options = options | QueryPlannerParams::OMIT_REPL_STATE_PERMITS_READS_CHECK;
     auto exec = uassertStatusOK(getExecutor(
         opCtx, &collection, std::move(cq), PlanYieldPolicy::YieldPolicy::NO_YIELD, options));
 

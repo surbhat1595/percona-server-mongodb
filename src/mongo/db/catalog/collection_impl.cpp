@@ -1677,8 +1677,8 @@ void CollectionImpl::establishOplogCollectionForLogging(OperationContext* opCtx)
     repl::establishOplogCollectionForLogging(opCtx, this);
 }
 
-Status CollectionImpl::checkMetaDataForIndex(const std::string& indexName,
-                                             const BSONObj& spec) const {
+StatusWith<int> CollectionImpl::checkMetaDataForIndex(const std::string& indexName,
+                                                      const BSONObj& spec) const {
     int offset = _metadata->findIndexOffset(indexName);
     if (offset < 0) {
         return {ErrorCodes::IndexNotFound,
@@ -1694,7 +1694,7 @@ Status CollectionImpl::checkMetaDataForIndex(const std::string& indexName,
                               << " metadata's spec: " << _metadata->indexes[offset].spec};
     }
 
-    return Status::OK();
+    return offset;
 }
 
 void CollectionImpl::updateTTLSetting(OperationContext* opCtx,
@@ -1741,10 +1741,14 @@ Status CollectionImpl::prepareForIndexBuild(OperationContext* opCtx,
         opCtx, spec, buildUUID, isBackgroundSecondaryBuild);
 
     // Confirm that our index is not already in the current metadata.
-    invariant(-1 == _metadata->findIndexOffset(imd.name()));
+    invariant(-1 == _metadata->findIndexOffset(imd.nameStringData()),
+              str::stream() << "index " << imd.nameStringData()
+                            << " is already in current metadata: " << _metadata->toBSON());
 
     _writeMetadata(opCtx,
-                   [&](BSONCollectionCatalogEntry::MetaData& md) { md.indexes.push_back(imd); });
+                   [indexMetaData = std::move(imd)](BSONCollectionCatalogEntry::MetaData& md) {
+                       md.insertIndex(std::move(indexMetaData));
+                   });
 
     return durableCatalog->createIndex(opCtx, getCatalogId(), getCollectionOptions(), spec);
 }
@@ -1759,22 +1763,37 @@ boost::optional<UUID> CollectionImpl::getIndexBuildUUID(StringData indexName) co
 
 bool CollectionImpl::isIndexMultikey(OperationContext* opCtx,
                                      StringData indexName,
-                                     MultikeyPaths* multikeyPaths) const {
-    auto isMultikey =
-        [this, multikeyPaths, indexName](const BSONCollectionCatalogEntry::MetaData& metadata) {
-            int offset = metadata.findIndexOffset(indexName);
+                                     MultikeyPaths* multikeyPaths,
+                                     int indexOffset) const {
+    auto isMultikey = [this, multikeyPaths, indexName, indexOffset](
+                          const BSONCollectionCatalogEntry::MetaData& metadata) {
+        int offset = indexOffset;
+        if (offset < 0) {
+            offset = metadata.findIndexOffset(indexName);
             invariant(offset >= 0,
                       str::stream() << "cannot get multikey for index " << indexName << " @ "
                                     << getCatalogId() << " : " << metadata.toBSON());
+        } else {
+            invariant(offset < int(metadata.indexes.size()),
+                      str::stream()
+                          << "out of bounds index offset for multikey info " << indexName << " @ "
+                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
+                          << " ; actual : " << metadata.findIndexOffset(indexName));
+            invariant(indexName == metadata.indexes[offset].nameStringData(),
+                      str::stream()
+                          << "invalid index offset for multikey info " << indexName << " @ "
+                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
+                          << " ; actual : " << metadata.findIndexOffset(indexName));
+        }
 
-            const auto& index = metadata.indexes[offset];
-            stdx::lock_guard lock(index.multikeyMutex);
-            if (multikeyPaths && !index.multikeyPaths.empty()) {
-                *multikeyPaths = index.multikeyPaths;
-            }
+        const auto& index = metadata.indexes[offset];
+        stdx::lock_guard lock(index.multikeyMutex);
+        if (multikeyPaths && !index.multikeyPaths.empty()) {
+            *multikeyPaths = index.multikeyPaths;
+        }
 
-            return index.multikey;
-        };
+        return index.multikey;
+    };
 
     const auto& uncommittedMultikeys = UncommittedMultikey::get(opCtx).resources();
     if (uncommittedMultikeys) {
@@ -1788,62 +1807,75 @@ bool CollectionImpl::isIndexMultikey(OperationContext* opCtx,
 
 bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
                                         StringData indexName,
-                                        const MultikeyPaths& multikeyPaths) const {
+                                        const MultikeyPaths& multikeyPaths,
+                                        int indexOffset) const {
 
-    auto setMultikey = [this, name = indexName.toString(), multikeyPaths](
+    auto setMultikey = [this, indexName, multikeyPaths, indexOffset](
                            const BSONCollectionCatalogEntry::MetaData& metadata) {
-        int offset = metadata.findIndexOffset(name);
-        invariant(offset >= 0,
-                  str::stream() << "cannot set index " << name << " as multikey @ "
-                                << getCatalogId() << " : " << metadata.toBSON());
+        int offset = indexOffset;
+        if (offset < 0) {
+            offset = metadata.findIndexOffset(indexName);
+            invariant(offset >= 0,
+                      str::stream() << "cannot set multikey for index " << indexName << " @ "
+                                    << getCatalogId() << " : " << metadata.toBSON());
+        } else {
+            invariant(offset < int(metadata.indexes.size()),
+                      str::stream()
+                          << "out of bounds index offset for multikey update" << indexName << " @ "
+                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
+                          << " ; actual : " << metadata.findIndexOffset(indexName));
+            invariant(indexName == metadata.indexes[offset].nameStringData(),
+                      str::stream()
+                          << "invalid index offset for multikey update " << indexName << " @ "
+                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
+                          << " ; actual : " << metadata.findIndexOffset(indexName));
+        }
 
-        {
-            const auto& index = metadata.indexes[offset];
-            stdx::lock_guard lock(index.multikeyMutex);
+        auto* index = &metadata.indexes[offset];
+        stdx::lock_guard lock(index->multikeyMutex);
 
-            const bool tracksPathLevelMultikeyInfo =
-                !metadata.indexes[offset].multikeyPaths.empty();
-            if (tracksPathLevelMultikeyInfo) {
-                invariant(!multikeyPaths.empty());
-                invariant(multikeyPaths.size() == metadata.indexes[offset].multikeyPaths.size());
-            } else {
-                invariant(multikeyPaths.empty());
+        auto tracksPathLevelMultikeyInfo = !metadata.indexes[offset].multikeyPaths.empty();
+        if (!tracksPathLevelMultikeyInfo) {
+            invariant(multikeyPaths.empty());
 
-                if (metadata.indexes[offset].multikey) {
-                    // The index is already set as multikey and we aren't tracking path-level
-                    // multikey information for it. We return false to indicate that the index
-                    // metadata is unchanged.
-                    return false;
-                }
+            if (index->multikey) {
+                // The index is already set as multikey and we aren't tracking path-level
+                // multikey information for it. We return false to indicate that the index
+                // metadata is unchanged.
+                return false;
             }
+            index->multikey = true;
+            return true;
+        }
 
-            index.multikey = true;
+        // We are tracking path-level multikey information for this index.
+        invariant(!multikeyPaths.empty());
+        invariant(multikeyPaths.size() == metadata.indexes[offset].multikeyPaths.size());
 
-            if (tracksPathLevelMultikeyInfo) {
-                bool newPathIsMultikey = false;
-                bool somePathIsMultikey = false;
+        index->multikey = true;
 
-                // Store new path components that cause this index to be multikey in catalog's
-                // index metadata.
-                for (size_t i = 0; i < multikeyPaths.size(); ++i) {
-                    MultikeyComponents& indexMultikeyComponents = index.multikeyPaths[i];
-                    for (const auto multikeyComponent : multikeyPaths[i]) {
-                        auto result = indexMultikeyComponents.insert(multikeyComponent);
-                        newPathIsMultikey = newPathIsMultikey || result.second;
-                        somePathIsMultikey = true;
-                    }
-                }
+        bool newPathIsMultikey = false;
+        bool somePathIsMultikey = false;
 
-                // If all of the sets in the multikey paths vector were empty, then no component
-                // of any indexed field caused the index to be multikey. setIndexIsMultikey()
-                // therefore shouldn't have been called.
-                invariant(somePathIsMultikey);
-
-                if (!newPathIsMultikey) {
-                    // We return false to indicate that the index metadata is unchanged.
-                    return false;
-                }
+        // Store new path components that cause this index to be multikey in catalog's
+        // index metadata.
+        for (size_t i = 0; i < multikeyPaths.size(); ++i) {
+            auto& indexMultikeyComponents = index->multikeyPaths[i];
+            for (const auto multikeyComponent : multikeyPaths[i]) {
+                auto result = indexMultikeyComponents.insert(multikeyComponent);
+                newPathIsMultikey = newPathIsMultikey || result.second;
+                somePathIsMultikey = true;
             }
+        }
+
+        // If all of the sets in the multikey paths vector were empty, then no component
+        // of any indexed field caused the index to be multikey. setIndexIsMultikey()
+        // therefore shouldn't have been called.
+        invariant(somePathIsMultikey);
+
+        if (!newPathIsMultikey) {
+            // We return false to indicate that the index metadata is unchanged.
+            return false;
         }
         return true;
     };
@@ -1864,6 +1896,10 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
 
     if (!setMultikey(*metadata))
         return false;
+
+    opCtx->recoveryUnit()->onRollback(
+        [this, uncommittedMultikeys]() { uncommittedMultikeys->erase(this); });
+
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
 
     opCtx->recoveryUnit()->onCommit(
@@ -1874,8 +1910,7 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
             setMultikey(*_metadata);
             uncommittedMultikeys->erase(this);
         });
-    opCtx->recoveryUnit()->onRollback(
-        [this, uncommittedMultikeys]() { uncommittedMultikeys->erase(this); });
+
     return true;
 }
 
@@ -1920,7 +1955,12 @@ void CollectionImpl::forceSetIndexIsMultikey(OperationContext* opCtx,
         metadata = &uncommittedMultikeys->emplace(this, *_metadata).first->second;
     }
     forceSetMultikey(*metadata);
+
+    opCtx->recoveryUnit()->onRollback(
+        [this, uncommittedMultikeys]() { uncommittedMultikeys->erase(this); });
+
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
+
     opCtx->recoveryUnit()->onCommit(
         [this, uncommittedMultikeys, forceSetMultikey = std::move(forceSetMultikey)](auto ts) {
             // Merge in changes to this index, other indexes may have been updated since we made our
@@ -1928,12 +1968,10 @@ void CollectionImpl::forceSetIndexIsMultikey(OperationContext* opCtx,
             forceSetMultikey(*_metadata);
             uncommittedMultikeys->erase(this);
         });
-    opCtx->recoveryUnit()->onRollback(
-        [this, uncommittedMultikeys]() { uncommittedMultikeys->erase(this); });
 }
 
 int CollectionImpl::getTotalIndexCount() const {
-    return static_cast<int>(_metadata->indexes.size());
+    return _metadata->getTotalIndexCount();
 }
 
 int CollectionImpl::getCompletedIndexCount() const {
@@ -1955,8 +1993,12 @@ BSONObj CollectionImpl::getIndexSpec(StringData indexName) const {
 }
 
 void CollectionImpl::getAllIndexes(std::vector<std::string>* names) const {
-    for (unsigned i = 0; i < _metadata->indexes.size(); i++) {
-        names->push_back(_metadata->indexes[i].spec["name"].String());
+    for (const auto& index : _metadata->indexes) {
+        if (!index.isPresent()) {
+            continue;
+        }
+
+        names->push_back(index.nameStringData().toString());
     }
 }
 

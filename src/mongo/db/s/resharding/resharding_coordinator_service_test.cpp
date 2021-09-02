@@ -201,7 +201,10 @@ public:
 
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override {
         return std::make_shared<ReshardingCoordinator>(
-            this, std::move(initialState), std::make_shared<ExternalStateForTest>());
+            this,
+            ReshardingCoordinatorDocument::parse(
+                IDLParserErrorContext("ReshardingCoordinatorStateDoc"), std::move(initialState)),
+            std::make_shared<ExternalStateForTest>());
     }
 };
 
@@ -274,7 +277,8 @@ public:
             _reshardingUUID, _originalNss, UUID::gen(), _tempNss, _newShardKey.toBSON());
         ReshardingCoordinatorDocument doc(state,
                                           {DonorShardEntry(ShardId("shard0000"), {})},
-                                          {RecipientShardEntry(ShardId("shard0001"), {})});
+                                          {RecipientShardEntry(ShardId("shard0001"), {})},
+                                          ReshardingCoordinatorMetrics());
         doc.setCommonReshardingMetadata(meta);
         emplaceCloneTimestampIfExists(doc, cloneTimestamp);
         return doc;
@@ -363,8 +367,11 @@ public:
             shardKey = _oldShardKey.toBSON();
         }
 
-        CollectionType collType(
-            coordinatorDoc.getSourceNss(), std::move(epoch), lastUpdated, std::move(uuid));
+        CollectionType collType(coordinatorDoc.getSourceNss(),
+                                std::move(epoch),
+                                Timestamp(1, 2),
+                                lastUpdated,
+                                std::move(uuid));
         collType.setKeyPattern(shardKey);
         collType.setUnique(false);
         if (reshardingFields)
@@ -404,6 +411,12 @@ public:
             opCtx->getServiceContext()->getPreciseClockSource()->now());
         client.insert(CollectionType::ConfigNS.ns(), originalNssCatalogEntry.toBSON());
 
+        DatabaseType dbDoc(coordinatorDoc.getSourceNss().db().toString(),
+                           coordinatorDoc.getDonorShards().front().getId(),
+                           true,
+                           DatabaseVersion{UUID::gen()});
+        client.insert(DatabaseType::ConfigNS.ns(), dbDoc.toBSON());
+
         return coordinatorDoc;
     }
 
@@ -420,7 +433,7 @@ public:
         }
     }
 
-    std::vector<ChunkType> makeChunks(const NamespaceString& nss,
+    std::vector<ChunkType> makeChunks(const UUID& uuid,
                                       OID epoch,
                                       const ShardKeyPattern& shardKey,
                                       std::vector<OID> ids) {
@@ -429,21 +442,21 @@ public:
 
         // Create two chunks, one on each shard with the given namespace and epoch
         ChunkVersion version(1, 0, epoch, boost::none /* timestamp */);
-        ChunkType chunk1(nss, chunkRanges[0], version, ShardId("shard0000"));
+        ChunkType chunk1(uuid, chunkRanges[0], version, ShardId("shard0000"));
         chunk1.setName(ids[0]);
         version.incMinor();
-        ChunkType chunk2(nss, chunkRanges[1], version, ShardId("shard0001"));
+        ChunkType chunk2(uuid, chunkRanges[1], version, ShardId("shard0001"));
         chunk2.setName(ids[1]);
 
         return std::vector<ChunkType>{chunk1, chunk2};
     }
 
     // Returns the chunk for the donor shard.
-    ChunkType makeAndInsertChunksForDonorShard(const NamespaceString& nss,
+    ChunkType makeAndInsertChunksForDonorShard(const UUID& uuid,
                                                OID epoch,
                                                const ShardKeyPattern& shardKey,
                                                std::vector<OID> ids) {
-        auto chunks = makeChunks(nss, epoch, shardKey, ids);
+        auto chunks = makeChunks(uuid, epoch, shardKey, ids);
 
         // Only the chunk corresponding to shard0000 is stored as a donor in the coordinator state
         // document constructed.
@@ -499,10 +512,10 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorSuccessfullyTransi
     auto doc = insertStateAndCatalogEntries(CoordinatorStateEnum::kUnused, _originalEpoch);
     auto opCtx = operationContext();
     auto donorChunk = makeAndInsertChunksForDonorShard(
-        _originalNss, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+        _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
 
     auto initialChunks =
-        makeChunks(_tempNss, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
+        makeChunks(_reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
 
     std::vector<ReshardedChunk> presetReshardedChunks;
     for (const auto& chunk : initialChunks) {

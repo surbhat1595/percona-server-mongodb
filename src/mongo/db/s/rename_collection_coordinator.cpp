@@ -85,17 +85,9 @@ void RenameCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) con
             SimpleBSONObjComparator::kInstance.evaluate(selfReq == otherReq));
 }
 
-std::vector<DistLockManager::ScopedDistLock> RenameCollectionCoordinator::_acquireAdditionalLocks(
+std::vector<StringData> RenameCollectionCoordinator::_acquireAdditionalLocks(
     OperationContext* opCtx) {
-    const auto coorName = DDLCoordinatorType_serializer(_coorMetadata.getId().getOperationType());
-
-    auto distLockManager = DistLockManager::get(opCtx);
-    auto targetCollDistLock = uassertStatusOK(distLockManager->lock(
-        opCtx, _doc.getTo().ns(), coorName, DistLockManager::kDefaultLockTimeout));
-
-    std::vector<DistLockManager::ScopedDistLock> vec;
-    vec.push_back(targetCollDistLock.moveToAnotherThread());
-    return vec;
+    return {_doc.getTo().ns()};
 }
 
 boost::optional<BSONObj> RenameCollectionCoordinator::reportForCurrentOp(
@@ -119,28 +111,6 @@ boost::optional<BSONObj> RenameCollectionCoordinator::reportForCurrentOp(
     return bob.obj();
 }
 
-void RenameCollectionCoordinator::_insertStateDocument(StateDoc&& doc) {
-    auto coorMetadata = doc.getShardingDDLCoordinatorMetadata();
-    coorMetadata.setRecoveredFromDisk(true);
-    doc.setShardingDDLCoordinatorMetadata(coorMetadata);
-
-    auto opCtx = cc().makeOperationContext();
-    PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-    store.add(opCtx.get(), doc, WriteConcerns::kMajorityWriteConcern);
-    _doc = std::move(doc);
-}
-
-void RenameCollectionCoordinator::_updateStateDocument(StateDoc&& newDoc) {
-    auto opCtx = cc().makeOperationContext();
-    PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-    store.update(opCtx.get(),
-                 BSON(StateDoc::kIdFieldName << _doc.getId().toBSON()),
-                 newDoc.toBSON(),
-                 WriteConcerns::kMajorityWriteConcern);
-
-    _doc = std::move(newDoc);
-}
-
 void RenameCollectionCoordinator::_enterPhase(Phase newPhase) {
     StateDoc newDoc(_doc);
     newDoc.setPhase(newPhase);
@@ -154,10 +124,10 @@ void RenameCollectionCoordinator::_enterPhase(Phase newPhase) {
                 "oldPhase"_attr = RenameCollectionCoordinatorPhase_serializer(_doc.getPhase()));
 
     if (_doc.getPhase() == Phase::kUnset) {
-        _insertStateDocument(std::move(newDoc));
+        _doc = _insertStateDocument(std::move(newDoc));
         return;
     }
-    _updateStateDocument(std::move(newDoc));
+    _doc = _updateStateDocument(cc().makeOperationContext().get(), std::move(newDoc));
 }
 
 ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
@@ -216,7 +186,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                             uassert(ErrorCodes::CommandNotSupportedOnView,
                                     str::stream() << "Can't rename to target collection `" << toNss
                                                   << "` because it is a view.",
-                                    !ViewCatalog::get(db)->lookup(opCtx, toNss.ns()));
+                                    !ViewCatalog::get(db)->lookup(opCtx, toNss));
                         }
                     }
 
@@ -249,11 +219,11 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
 
                                 // Block migrations on involved sharded collections
                                 if (_doc.getOptShardedCollInfo()) {
-                                    sharding_ddl_util::stopMigrations(opCtx, fromNss);
+                                    sharding_ddl_util::stopMigrations(opCtx, fromNss, boost::none);
                                 }
 
                                 if (_doc.getTargetIsSharded()) {
-                                    sharding_ddl_util::stopMigrations(opCtx, toNss);
+                                    sharding_ddl_util::stopMigrations(opCtx, toNss, boost::none);
                                 }
                             }))
         .then(_executePhase(Phase::kBlockCrudAndRename,
@@ -288,23 +258,24 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                     participants,
                                     **executor);
                             }))
-        .then(_executePhase(
-            Phase::kRenameMetadata,
-            [this, anchor = shared_from_this()] {
-                auto opCtxHolder = cc().makeOperationContext();
-                auto* opCtx = opCtxHolder.get();
-                getForwardableOpMetadata().setOn(opCtx);
+        .then(_executePhase(Phase::kRenameMetadata,
+                            [this, anchor = shared_from_this()] {
+                                auto opCtxHolder = cc().makeOperationContext();
+                                auto* opCtx = opCtxHolder.get();
+                                getForwardableOpMetadata().setOn(opCtx);
 
-                const auto& optFromCollType = _doc.getOptShardedCollInfo();
-                if (optFromCollType) {
-                    // Rename CSRS metadata
-                    auto collType = *optFromCollType;
-                    sharding_ddl_util::shardedRenameMetadata(opCtx, collType, _doc.getTo());
-                } else if (_doc.getTargetIsSharded()) {
-                    // Remove stale target CSRS metadata
-                    sharding_ddl_util::removeCollMetadataFromConfig(opCtx, _doc.getTo());
-                }
-            }))
+                                ConfigsvrRenameCollectionMetadata req(nss(), _doc.getTo());
+                                req.setOptFromCollection(_doc.getOptShardedCollInfo());
+
+                                const auto& configShard =
+                                    Grid::get(opCtx)->shardRegistry()->getConfigShard();
+                                uassertStatusOK(configShard->runCommand(
+                                    opCtx,
+                                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                    "admin",
+                                    CommandHelpers::appendMajorityWriteConcern(req.toBSON({})),
+                                    Shard::RetryPolicy::kIdempotent));
+                            }))
         .then(_executePhase(
             Phase::kUnblockCRUD,
             [this, executor = executor, anchor = shared_from_this()] {

@@ -365,7 +365,7 @@ public:
         std::abort();
     }
 
-    Status checkMetaDataForIndex(const std::string& indexName, const BSONObj& spec) const {
+    StatusWith<int> checkMetaDataForIndex(const std::string& indexName, const BSONObj& spec) const {
         std::abort();
     }
 
@@ -398,13 +398,15 @@ public:
 
     bool isIndexMultikey(OperationContext* opCtx,
                          StringData indexName,
-                         MultikeyPaths* multikeyPaths) const {
+                         MultikeyPaths* multikeyPaths,
+                         int indexOffset) const {
         std::abort();
     }
 
     bool setIndexIsMultikey(OperationContext* opCtx,
                             StringData indexName,
-                            const MultikeyPaths& multikeyPaths) const {
+                            const MultikeyPaths& multikeyPaths,
+                            int indexOffset) const {
         std::abort();
     }
 

@@ -2,6 +2,7 @@
 
 Import("env")
 Import("has_option")
+Import("get_option")
 
 env = env.Clone()
 
@@ -193,6 +194,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/auth/auth_options',
         '$BUILD_DIR/mongo/db/auth/authentication_session',
+        '$BUILD_DIR/mongo/db/auth/cluster_auth_mode',
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/rpc/client_metadata',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
@@ -700,7 +702,7 @@ env.CppUnitTest(
     source=[
         "index_filter_commands_test.cpp",
         "list_collections_filter_test.cpp",
-        "mr_test.cpp",
+        "mr_test.cpp" if get_option('js-engine') != 'none' else [],
         "parse_log_component_settings_test.cpp",
         "plan_cache_commands_test.cpp",
     ],

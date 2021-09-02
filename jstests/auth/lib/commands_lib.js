@@ -2934,7 +2934,7 @@ var authCommandsLib = {
         },
         {
           testname: "_configsvrCommitChunkMerge",
-          command: {_configsvrCommitChunkMerge: "x.y"},
+          command: {_configsvrCommitChunkMerge: "x.y", shard: "shard0000", collEpoch: ObjectId(), chunkBoundaries:[{a:1}, {a:5}, {a:10}]},
           skipSharded: true,
           expectFail: true,
           testcases: [
@@ -2962,7 +2962,7 @@ var authCommandsLib = {
         },
         {
           testname: "_configsvrCommitChunksMerge",
-          command: {_configsvrCommitChunksMerge: "x.y"},
+          command: {_configsvrCommitChunksMerge: "x.y", shard: "shard0000", collUUID: {uuid: UUID()}, chunkRange: {min:{a:1}, max:{a:10}}},
           skipSharded: true,
           expectFail: true,
           testcases: [
@@ -4135,14 +4135,6 @@ var authCommandsLib = {
               roles: {clusterMonitor: 1, clusterAdmin: 1, root: 1, __system: 1},
               privileges: [{resource: {cluster: true}, actions: ["checkFreeMonitoringStatus"]}]
           }]
-        },
-        {
-          testname: "getLastError",
-          command: {getLastError: 1},
-          testcases: [
-              {runOnDb: firstDbName, roles: roles_all, privileges: []},
-              {runOnDb: secondDbName, roles: roles_all, privileges: []}
-          ]
         },
         {
           testname: "getLog",
@@ -5971,11 +5963,12 @@ var authCommandsLib = {
               }]
           },
           skipSharded: false,
-          skipTest: (conn) => true, // TODO SERVER-54877 re-enable this test case
           // Only enterprise knows of this aggregation stage.
-          //skipTest:
-          //    (conn) =>
-          //        !conn.getDB("admin").runCommand({buildInfo: 1}).modules.includes("enterprise"),
+          skipTest:
+              (conn) =>
+                  !conn.getDB("admin").runCommand({buildInfo: 1}).modules.includes("enterprise"),
+          // Instead of configuring mongot, lets make the search to return EOF early.
+          disableSearch: true,
           testcases: [
               {
                 runOnDb: firstDbName,
@@ -5988,17 +5981,7 @@ var authCommandsLib = {
                 privileges:
                     [{resource: {db: secondDbName, collection: "foo"}, actions: ["find"]}]
               }
-          ],
-          setup: function(db) {
-              // Configure the $search stage to always return EOF so we can avoid the hassle
-              // of giving mongod a host and port for mongot.
-              const cmd = {configureFailPoint: "searchReturnEofImmediately", mode: "alwaysOn"};
-              FixtureHelpers.runCommandOnEachPrimary({db: db.getSiblingDB("admin"), cmdObj: cmd});
-          },
-          teardown: function(db) {
-              const cmd = {configureFailPoint: "searchReturnEofImmediately", mode: "off"};
-              FixtureHelpers.runCommandOnEachPrimary({db: db.getSiblingDB("admin"), cmdObj: cmd});
-          }
+          ]
         },
         {
           testname: "startRecordingTraffic",
@@ -6314,7 +6297,6 @@ var authCommandsLib = {
         if (t.setup) {
             adminDb.auth("admin", "password");
             var state = t.setup(runOnDb, testcase);
-            runOnDb.getLastError();
             adminDb.logout();
             return state;
         }
@@ -6333,7 +6315,6 @@ var authCommandsLib = {
         if (t.teardown) {
             adminDb.auth("admin", "password");
             t.teardown(runOnDb, response);
-            runOnDb.getLastError();
             adminDb.logout();
         }
     },

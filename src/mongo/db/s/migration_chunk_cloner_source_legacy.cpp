@@ -307,7 +307,7 @@ Status MigrationChunkClonerSourceLegacy::startClone(OperationContext* opCtx,
                           WriteConcernOptions::kInternalWriteDefault);
     }
 
-    auto startChunkCloneResponseStatus = _callRecipient(cmdBuilder.obj());
+    auto startChunkCloneResponseStatus = _callRecipient(opCtx, cmdBuilder.obj());
     if (!startChunkCloneResponseStatus.isOK()) {
         return startChunkCloneResponseStatus.getStatus();
     }
@@ -357,8 +357,8 @@ StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::commitClone(OperationConte
         _sessionCatalogSource->onCommitCloneStarted();
     }
 
-    auto responseStatus =
-        _callRecipient(createRequestWithSessionId(kRecvChunkCommit, _args.getNss(), _sessionId));
+    auto responseStatus = _callRecipient(
+        opCtx, createRequestWithSessionId(kRecvChunkCommit, _args.getNss(), _sessionId));
 
     if (responseStatus.isOK()) {
         _cleanup(opCtx);
@@ -387,9 +387,10 @@ void MigrationChunkClonerSourceLegacy::cancelClone(OperationContext* opCtx) {
         case kDone:
             break;
         case kCloning: {
-            const auto status = _callRecipient(createRequestWithSessionId(
-                                                   kRecvChunkAbort, _args.getNss(), _sessionId))
-                                    .getStatus();
+            const auto status =
+                _callRecipient(
+                    opCtx, createRequestWithSessionId(kRecvChunkAbort, _args.getNss(), _sessionId))
+                    .getStatus();
             if (!status.isOK()) {
                 LOGV2(21991,
                       "Failed to cancel migration: {error}",
@@ -535,6 +536,7 @@ void MigrationChunkClonerSourceLegacy::_addToTransferModsQueue(
         case 'd': {
             stdx::lock_guard<Latch> sl(_mutex);
             _deleted.push_back(idObj);
+            ++_untransferredDeletesCounter;
             _memoryUsed += idObj.firstElement().size() + 5;
         } break;
 
@@ -542,6 +544,7 @@ void MigrationChunkClonerSourceLegacy::_addToTransferModsQueue(
         case 'u': {
             stdx::lock_guard<Latch> sl(_mutex);
             _reload.push_back(idObj);
+            ++_untransferredUpsertsCounter;
             _memoryUsed += idObj.firstElement().size() + 5;
         } break;
 
@@ -746,7 +749,9 @@ Status MigrationChunkClonerSourceLegacy::nextModsBatch(OperationContext* opCtx,
     // Put back remaining ids we didn't consume
     stdx::unique_lock<Latch> lk(_mutex);
     _deleted.splice(_deleted.cbegin(), deleteList);
+    _untransferredDeletesCounter = _deleted.size();
     _reload.splice(_reload.cbegin(), updateList);
+    _untransferredUpsertsCounter = _reload.size();
 
     return Status::OK();
 }
@@ -758,10 +763,13 @@ void MigrationChunkClonerSourceLegacy::_cleanup(OperationContext* opCtx) {
     _drainAllOutstandingOperationTrackRequests(lk);
 
     _reload.clear();
+    _untransferredUpsertsCounter = 0;
     _deleted.clear();
+    _untransferredDeletesCounter = 0;
 }
 
-StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::_callRecipient(const BSONObj& cmdObj) {
+StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::_callRecipient(OperationContext* opCtx,
+                                                                     const BSONObj& cmdObj) {
     executor::RemoteCommandResponse responseStatus(
         Status{ErrorCodes::InternalError, "Uninitialized value"});
 
@@ -777,7 +785,20 @@ StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::_callRecipient(const BSONO
         return scheduleStatus.getStatus();
     }
 
-    executor->wait(scheduleStatus.getValue());
+    auto cbHandle = scheduleStatus.getValue();
+
+    try {
+        executor->wait(cbHandle, opCtx);
+    } catch (const DBException& ex) {
+        // If waiting for the response is interrupted, then we still have a callback out and
+        // registered with the TaskExecutor to run when the response finally does come back.
+        // Since the callback references local state, cbResponse, it would be invalid for the
+        // callback to run after leaving the this function. Therefore, we cancel the callback
+        // and wait uninterruptably for the callback to be run.
+        executor->cancel(cbHandle);
+        executor->wait(cbHandle);
+        return ex.toStatus();
+    }
 
     if (!responseStatus.isOK()) {
         return responseStatus.status;
@@ -989,7 +1010,7 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
     int iteration = 0;
     while ((Date_t::now() - startTime) < maxTimeToWait) {
         auto responseStatus = _callRecipient(
-            createRequestWithSessionId(kRecvChunkStatus, _args.getNss(), _sessionId, true));
+            opCtx, createRequestWithSessionId(kRecvChunkStatus, _args.getNss(), _sessionId, true));
         if (!responseStatus.isOK()) {
             return responseStatus.getStatus().withContext(
                 "Failed to contact recipient shard to monitor data transfer");
@@ -1049,14 +1070,24 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
         }
 
         if (res["state"].String() == "catchup" && supportsCriticalSectionDuringCatchUp) {
-            int64_t estimatedUntransferredModsSize = _deleted.size() * _averageObjectIdSize +
-                _reload.size() * _averageObjectSizeForCloneLocs;
+            int64_t estimatedUntransferredModsSize =
+                _untransferredDeletesCounter * _averageObjectIdSize +
+                _untransferredUpsertsCounter * _averageObjectSizeForCloneLocs;
             auto estimatedUntransferredChunkPercentage =
                 (std::min(_args.getMaxChunkSizeBytes(), estimatedUntransferredModsSize) * 100) /
                 _args.getMaxChunkSizeBytes();
-            if (estimatedUntransferredChunkPercentage < minCatchUpPercentageBeforeBlockingWrites) {
+            if (estimatedUntransferredChunkPercentage < maxCatchUpPercentageBeforeBlockingWrites) {
                 // The recipient is sufficiently caught-up with the writes on the donor.
                 // Block writes, so that it can drain everything.
+                LOGV2_DEBUG(5630700,
+                            1,
+                            "moveChunk data transfer within threshold to allow write blocking",
+                            "_untransferredUpsertsCounter"_attr = _untransferredUpsertsCounter,
+                            "_untransferredDeletesCounter"_attr = _untransferredDeletesCounter,
+                            "_averageObjectSizeForCloneLocs"_attr = _averageObjectSizeForCloneLocs,
+                            "_averageObjectIdSize"_attr = _averageObjectIdSize,
+                            "maxChunksSizeBytes"_attr = _args.getMaxChunkSizeBytes(),
+                            "_sessionId"_attr = _sessionId.toString());
                 return Status::OK();
             }
         }

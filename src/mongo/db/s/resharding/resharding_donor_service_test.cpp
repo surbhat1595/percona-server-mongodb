@@ -32,6 +32,7 @@
 #include "mongo/platform/basic.h"
 
 #include <boost/optional/optional_io.hpp>
+#include <utility>
 
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbdirectclient.h"
@@ -46,11 +47,13 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_donor_service.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
 #include "mongo/db/s/resharding_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -177,6 +180,13 @@ public:
     void notifyToStartBlockingWrites(OperationContext* opCtx,
                                      DonorStateMachine& donor,
                                      const ReshardingDonorDocument& donorDoc) {
+        notifyToStartBlockingWritesNoWait(opCtx, donor, donorDoc);
+        ASSERT_OK(donor.awaitCriticalSectionAcquired().waitNoThrow(opCtx));
+    }
+
+    void notifyToStartBlockingWritesNoWait(OperationContext* opCtx,
+                                           DonorStateMachine& donor,
+                                           const ReshardingDonorDocument& donorDoc) {
         _onReshardingFieldsChanges(opCtx, donor, donorDoc, CoordinatorStateEnum::kBlockingWrites);
     }
 
@@ -184,6 +194,7 @@ public:
                                     DonorStateMachine& donor,
                                     const ReshardingDonorDocument& donorDoc) {
         _onReshardingFieldsChanges(opCtx, donor, donorDoc, CoordinatorStateEnum::kCommitting);
+        ASSERT_OK(donor.awaitCriticalSectionPromoted().waitNoThrow(opCtx));
     }
 
     void checkStateDocumentRemoved(OperationContext* opCtx) {
@@ -235,6 +246,46 @@ TEST_F(ReshardingDonorServiceTest, CanTransitionThroughEachStateToCompletion) {
         ASSERT_OK(donor->getCompletionFuture().getNoThrow());
         checkStateDocumentRemoved(opCtx.get());
     }
+}
+
+TEST_F(ReshardingDonorServiceTest, WritesNoOpOplogEntryOnReshardingBegin) {
+    boost::optional<PauseDuringStateTransitions> donatingInitialDataTransitionGuard;
+    donatingInitialDataTransitionGuard.emplace(controller(), DonorStateEnum::kDonatingInitialData);
+
+    auto doc = makeStateDocument(false /* isAlsoRecipient */);
+    auto opCtx = makeOperationContext();
+    auto rawOpCtx = opCtx.get();
+    DonorStateMachine::insertStateDocument(rawOpCtx, doc);
+    auto donor = DonorStateMachine::getOrCreate(rawOpCtx, _service, doc.toBSON());
+
+    donatingInitialDataTransitionGuard->wait(DonorStateEnum::kDonatingInitialData);
+    stepDown();
+    donatingInitialDataTransitionGuard.reset();
+    ASSERT_EQ(donor->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+
+    DBDirectClient client(opCtx.get());
+    NamespaceString sourceNss("sourcedb", "sourcecollection");
+    auto cursor = client.query(NamespaceString(NamespaceString::kRsOplogNamespace.ns()),
+                               BSON("ns" << sourceNss.toString()));
+
+    ASSERT_TRUE(cursor->more()) << "Found no oplog entries for source collection";
+    repl::OplogEntry op(cursor->next());
+    ASSERT_FALSE(cursor->more()) << "Found multiple oplog entries for source collection: "
+                                 << op.getEntry() << " and " << cursor->nextSafe();
+
+    ReshardingChangeEventO2Field expectedChangeEvent{doc.getReshardingUUID(),
+                                                     ReshardingChangeEventEnum::kReshardBegin};
+    auto receivedChangeEvent = ReshardingChangeEventO2Field::parse(
+        IDLParserErrorContext("ReshardingChangeEventO2Field"), *op.getObject2());
+
+    ASSERT_EQ(OpType_serializer(op.getOpType()), OpType_serializer(repl::OpTypeEnum::kNoop))
+        << op.getEntry();
+    ASSERT_EQ(*op.getUuid(), doc.getSourceUUID()) << op.getEntry();
+    ASSERT_EQ(op.getObject()["msg"].type(), BSONType::String) << op.getEntry();
+    ASSERT_TRUE(receivedChangeEvent == expectedChangeEvent);
+    ASSERT_FALSE(op.getFromMigrate());
+    ASSERT_FALSE(bool(op.getDestinedRecipient())) << op.getEntry();
 }
 
 TEST_F(ReshardingDonorServiceTest, WritesNoOpOplogEntryToGenerateMinFetchTimestamp) {
@@ -292,7 +343,7 @@ TEST_F(ReshardingDonorServiceTest, WritesFinalReshardOpOplogEntriesWhileWritesBl
 
     DBDirectClient client(opCtx.get());
     auto cursor = client.query(NamespaceString(NamespaceString::kRsOplogNamespace.ns()),
-                               BSON("ns" << doc.getSourceNss().toString()));
+                               BSON("o2.type" << kReshardFinalOpLogType));
 
     ASSERT_TRUE(cursor->more()) << "Found no oplog entries for source collection";
 
@@ -319,8 +370,17 @@ TEST_F(ReshardingDonorServiceTest, WritesFinalReshardOpOplogEntriesWhileWritesBl
 TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
     const std::vector<DonorStateEnum> donorStates{DonorStateEnum::kDonatingInitialData,
                                                   DonorStateEnum::kDonatingOplogEntries,
+                                                  DonorStateEnum::kPreparingToBlockWrites,
                                                   DonorStateEnum::kBlockingWrites,
                                                   DonorStateEnum::kDone};
+
+    const std::vector<std::pair<DonorStateEnum, bool>> donorStateTransitions{
+        {DonorStateEnum::kDonatingInitialData, false},
+        {DonorStateEnum::kDonatingOplogEntries, false},
+        {DonorStateEnum::kPreparingToBlockWrites, false},
+        {DonorStateEnum::kBlockingWrites, false},
+        {DonorStateEnum::kBlockingWrites, true},
+        {DonorStateEnum::kDone, true}};
 
     for (bool isAlsoRecipient : {false, true}) {
         LOGV2(5641801,
@@ -336,7 +396,10 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
         auto opCtx = makeOperationContext();
 
         auto prevState = DonorStateEnum::kUnused;
-        for (const auto state : donorStates) {
+        for (const auto& [state, critSecHeld] : donorStateTransitions) {
+            // The kBlockingWrite state is interrupted twice so we don't unset the guard until after
+            // the second time.
+            bool shouldUnsetPrevState = !(state == DonorStateEnum::kBlockingWrites && critSecHeld);
             auto donor = [&] {
                 if (prevState == DonorStateEnum::kUnused) {
                     createSourceCollection(opCtx.get(), doc);
@@ -352,7 +415,9 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
 
                     // Allow the transition to prevState to succeed on this primary-only service
                     // instance.
-                    stateTransitionsGuard.unset(prevState);
+                    if (shouldUnsetPrevState) {
+                        stateTransitionsGuard.unset(prevState);
+                    }
                     return *maybeDonor;
                 }
             }();
@@ -364,8 +429,25 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
                     notifyRecipientsDoneCloning(opCtx.get(), *donor, doc);
                     break;
                 }
+                case DonorStateEnum::kPreparingToBlockWrites: {
+                    notifyToStartBlockingWritesNoWait(opCtx.get(), *donor, doc);
+                    break;
+                }
                 case DonorStateEnum::kBlockingWrites: {
-                    notifyToStartBlockingWrites(opCtx.get(), *donor, doc);
+                    // A shard version refresh cannot be triggered once the critical section has
+                    // been acquired. We intentionally test the DonorStateEnum::kBlockingWrites
+                    // transition being triggered two different ways:
+                    //
+                    //   - The first transition would wait for the RecoverRefreshThread to
+                    //     notify the donor about the CoordinatorStateEnum::kBlockingWrites state.
+                    //
+                    //   - The second transition would rely on the donor having already written down
+                    //     DonorStateEnum::kPreparingToBlockWrites as a result of the
+                    //     RecoverRefreshThread having already been notified the donor about the
+                    //     CoordinatorStateEnum::kBlockingWrites state before.
+                    if (!critSecHeld) {
+                        notifyToStartBlockingWrites(opCtx.get(), *donor, doc);
+                    }
                     break;
                 }
                 case DonorStateEnum::kDone: {
@@ -400,6 +482,27 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
         ASSERT_OK(donor->getCompletionFuture().getNoThrow());
         checkStateDocumentRemoved(opCtx.get());
     }
+}
+
+DEATH_TEST_REGEX_F(ReshardingDonorServiceTest, CommitFn, "4457001.*tripwire") {
+    auto doc = makeStateDocument(false /* isAlsoRecipient */);
+    auto opCtx = makeOperationContext();
+
+    createSourceCollection(opCtx.get(), doc);
+
+    DonorStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    notifyRecipientsDoneCloning(opCtx.get(), *donor, doc);
+
+    ASSERT_THROWS_CODE(donor->commit(), DBException, ErrorCodes::ReshardCollectionInProgress);
+
+    notifyToStartBlockingWrites(opCtx.get(), *donor, doc);
+    donor->awaitInBlockingWritesOrError().get();
+
+    donor->commit();
+
+    ASSERT_OK(donor->getCompletionFuture().getNoThrow());
 }
 
 TEST_F(ReshardingDonorServiceTest, DropsSourceCollectionWhenDone) {

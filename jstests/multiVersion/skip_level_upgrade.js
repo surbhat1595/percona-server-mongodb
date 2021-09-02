@@ -31,7 +31,6 @@ const defaultOptions = {
 // TODO SERVER-26792: In the future, we should have a common place from which both the
 // multiversion setup procedure and this test get information about supported major releases.
 const versions = [
-    {binVersion: '3.6', testCollection: 'three_six'},
     {binVersion: '4.0', testCollection: 'four_zero'},
     {binVersion: '4.2', testCollection: 'four_two'}
 ];
@@ -60,8 +59,7 @@ for (let i = 0; i < versions.length; i++) {
     // Restart the mongod with the latest binary version on the old version's data files.
     // Should fail due to being a skip level upgrade.
     mongodOptions = Object.extend({binVersion: 'latest'}, defaultOptions);
-    conn = MongoRunner.runMongod(mongodOptions);
-    assert.eq(null, conn);
+    assert.throws(() => MongoRunner.runMongod(mongodOptions));
 
     // Restart the mongod with the latest version with --repair. Should fail due to being a
     // skip level upgrade.

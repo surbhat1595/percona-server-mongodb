@@ -410,7 +410,8 @@ public:
     void establishOplogCollectionForLogging(OperationContext* opCtx) final;
     void onDeregisterFromCatalog(OperationContext* opCtx) final;
 
-    Status checkMetaDataForIndex(const std::string& indexName, const BSONObj& spec) const final;
+    StatusWith<int> checkMetaDataForIndex(const std::string& indexName,
+                                          const BSONObj& spec) const final;
 
     void updateTTLSetting(OperationContext* opCtx,
                           StringData idxName,
@@ -431,11 +432,13 @@ public:
 
     bool isIndexMultikey(OperationContext* opCtx,
                          StringData indexName,
-                         MultikeyPaths* multikeyPaths) const final;
+                         MultikeyPaths* multikeyPaths,
+                         int indexOffset) const final;
 
     bool setIndexIsMultikey(OperationContext* opCtx,
                             StringData indexName,
-                            const MultikeyPaths& multikeyPaths) const final;
+                            const MultikeyPaths& multikeyPaths,
+                            int indexOffset) const final;
 
     void forceSetIndexIsMultikey(OperationContext* opCtx,
                                  const IndexDescriptor* desc,

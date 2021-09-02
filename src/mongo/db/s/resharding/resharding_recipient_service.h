@@ -154,7 +154,15 @@ public:
     static void insertStateDocument(OperationContext* opCtx,
                                     const ReshardingRecipientDocument& recipientDoc);
 
-    // Initiates the cancellation of the resharding operation.
+    /**
+     * Indicates that the coordinator has persisted a decision. Unblocks the
+     * _coordinatorHasDecisionPersisted promise.
+     */
+    void commit();
+
+    /**
+     * Initiates the cancellation of the resharding operation.
+     */
     void abort(bool isUserCancelled);
 
 private:
@@ -229,6 +237,9 @@ private:
 
     void _startMetrics();
 
+    // Restore metrics using the persisted metrics after stepping up.
+    void _restoreMetrics();
+
     // Initializes the _abortSource and generates a token from it to return back the caller.
     //
     // Should only be called once per lifetime.
@@ -276,6 +287,9 @@ private:
 
     // It states whether the current node has also the donor role.
     const bool _isAlsoDonor;
+
+    // It states whether or not the user has aborted the resharding operation.
+    boost::optional<bool> _userCanceled;
 
     // Each promise below corresponds to a state on the recipient state machine. They are listed in
     // ascending order, such that the first promise below will be the first promise fulfilled.

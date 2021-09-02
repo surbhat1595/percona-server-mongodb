@@ -33,8 +33,9 @@
 #include "test_harness/util/debug_utils.h"
 #include "test_harness/test.h"
 
+#include "base_test.cxx"
 #include "example_test.cxx"
-#include "poc_test.cxx"
+#include "hs_cleanup.cxx"
 
 std::string
 parse_configuration_from_file(const std::string &filename)
@@ -87,7 +88,8 @@ print_help()
     std::cout << "\t-h Output a usage message and exit." << std::endl;
     std::cout << "\t-C Configuration. Cannot be used with -f." << std::endl;
     std::cout << "\t-f File that contains the configuration. Cannot be used with -C." << std::endl;
-    std::cout << "\t-l Trace level from 0 (default) to 2." << std::endl;
+    std::cout << "\t-l Trace level from 0 to 3. "
+        "1 is the default level, all warnings and errors are logged." << std::endl;
     std::cout << "\t-t Test name to be executed." << std::endl;
 }
 
@@ -108,12 +110,14 @@ run_test(const std::string &test_name, const std::string &config)
 {
     int error_code = 0;
 
-    test_harness::debug_print("Configuration\t:" + config, DEBUG_INFO);
+    test_harness::debug_print("Configuration\t:" + config, DEBUG_TRACE);
 
-    if (test_name == "poc_test")
-        poc_test(config, test_name).run();
+    if (test_name == "base_test")
+        base_test(config, test_name).run();
     else if (test_name == "example_test")
         example_test(config, test_name).run();
+    else if (test_name == "hs_cleanup")
+        hs_cleanup(config, test_name).run();
     else {
         test_harness::debug_print("Test not found: " + test_name, DEBUG_ERROR);
         error_code = -1;
@@ -130,7 +134,7 @@ main(int argc, char *argv[])
 {
     std::string cfg, config_filename, test_name, current_test_name;
     int64_t error_code = 0;
-    const std::vector<std::string> all_tests = {"example_test", "poc_test"};
+    const std::vector<std::string> all_tests = {"example_test", "hs_cleanup", "base_test"};
 
     /* Set the program name for error messages. */
     (void)testutil_set_progname(argv);
@@ -186,7 +190,7 @@ main(int argc, char *argv[])
 
     if (error_code == 0) {
         test_harness::debug_print(
-          "Trace level\t:" + std::to_string(test_harness::_trace_level), DEBUG_INFO);
+          "Trace level: " + std::to_string(test_harness::_trace_level), DEBUG_INFO);
         if (test_name.empty()) {
             /* Run all tests. */
             test_harness::debug_print("Running all tests.", DEBUG_INFO);
@@ -196,7 +200,7 @@ main(int argc, char *argv[])
                 if (!config_filename.empty())
                     cfg = parse_configuration_from_file(config_filename);
                 else if (cfg.empty()) {
-                    config_filename = "configs/config_" + current_test_name + "_default.txt";
+                    config_filename = "configs/" + current_test_name + "_default.txt";
                     cfg = parse_configuration_from_file(config_filename);
                 }
 
@@ -210,7 +214,7 @@ main(int argc, char *argv[])
             if (!config_filename.empty())
                 cfg = parse_configuration_from_file(config_filename);
             else if (cfg.empty()) {
-                config_filename = "configs/config_" + test_name + "_default.txt";
+                config_filename = "configs/" + test_name + "_default.txt";
                 cfg = parse_configuration_from_file(config_filename);
             }
             error_code = run_test(current_test_name, cfg);

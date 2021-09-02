@@ -705,6 +705,7 @@ designator
 dest
 destSize
 destructor
+destructors
 dev
 dh
 dhandle
@@ -1259,6 +1260,7 @@ sT
 sanitizer
 sanitizers
 scalability
+scalable
 sched
 scr
 sd
@@ -1401,6 +1403,7 @@ unencrypted
 unesc
 unescape
 unescaped
+unhandled
 unicode
 uninstantiated
 unistd

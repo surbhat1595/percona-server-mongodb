@@ -8,7 +8,6 @@
  *     does_not_support_stepdowns,
  *     requires_fcv_50,
  *     requires_timeseries,
- *     requires_wiredtiger,
  * ]
  */
 

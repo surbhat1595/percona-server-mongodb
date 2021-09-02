@@ -45,6 +45,7 @@
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/db/repl/data_replicator_external_state_impl.h"
+#include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/hello_response.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -1496,8 +1497,7 @@ protected:
 
     // Makes it so enough secondaries are caught up that a stepdown command can succeed.
     void catchUpSecondaries(const OpTime& desiredOpTime, Date_t desiredWallTime = Date_t()) {
-        auto config = getReplCoord()->getConfig();
-        auto heartbeatInterval = config.getHeartbeatInterval();
+        auto heartbeatInterval = getReplCoord()->getConfigHeartbeatInterval();
         if (desiredWallTime == Date_t() && !desiredOpTime.isNull()) {
             desiredWallTime = Date_t() + Seconds(desiredOpTime.getSecs());
         }
@@ -1605,15 +1605,13 @@ TEST_F(ReplCoordTest, UpdatePositionArgsAdvancesWallTimes) {
         << 1 << UpdatePositionArgs::kUpdateArrayFieldName
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
-                    << repl->getConfig().getConfigVersion()
-                    << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName << memberOneAppliedWallTime
                     << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kDurableWallTimeFieldName << memberOneDurableWallTime)
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
-                       << repl->getConfig().getConfigVersion()
-                       << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName << memberTwoAppliedWallTime
                        << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
@@ -1890,8 +1888,7 @@ TEST_F(StepDownTest, StepDownCanCompleteBasedOnReplSetUpdatePositionAlone) {
         << 1 << UpdatePositionArgs::kUpdateArrayFieldName
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
-                    << repl->getConfig().getConfigVersion()
-                    << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -1899,8 +1896,7 @@ TEST_F(StepDownTest, StepDownCanCompleteBasedOnReplSetUpdatePositionAlone) {
                     << UpdatePositionArgs::kDurableWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
-                       << repl->getConfig().getConfigVersion()
-                       << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime1.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(opTime1.asOpTime().getSecs())
@@ -2027,8 +2023,7 @@ TEST_F(StepDownTestWithUnelectableNode,
         << 1 << UpdatePositionArgs::kUpdateArrayFieldName
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
-                    << repl->getConfig().getConfigVersion()
-                    << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -2036,8 +2031,7 @@ TEST_F(StepDownTestWithUnelectableNode,
                     << UpdatePositionArgs::kDurableWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
-                       << repl->getConfig().getConfigVersion()
-                       << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime1.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(opTime1.asOpTime().getSecs())
@@ -2059,8 +2053,7 @@ TEST_F(StepDownTestWithUnelectableNode,
         << 1 << UpdatePositionArgs::kUpdateArrayFieldName
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
-                    << repl->getConfig().getConfigVersion()
-                    << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -2068,8 +2061,7 @@ TEST_F(StepDownTestWithUnelectableNode,
                     << UpdatePositionArgs::kDurableWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
-                       << repl->getConfig().getConfigVersion()
-                       << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -3741,8 +3733,7 @@ TEST_F(ReplCoordTest, HelloReturnsErrorInQuiesceModeWhenNodeIsRemoved) {
 
     // Wait for the node to be removed. Test that we increment the topology version.
     ASSERT_OK(getReplCoord()->waitForMemberState(MemberState::RS_REMOVED, Seconds(1)));
-    ASSERT_EQUALS(removedFromConfig.getConfigVersion(),
-                  getReplCoord()->getConfig().getConfigVersion());
+    ASSERT_EQUALS(removedFromConfig.getConfigVersion(), getReplCoord()->getConfigVersion());
     auto topologyVersionAfterRemoved = getTopoCoord().getTopologyVersion();
     ASSERT_EQUALS(topologyVersionAfterQuiesceMode.getCounter() + 1,
                   topologyVersionAfterRemoved.getCounter());
@@ -4395,8 +4386,7 @@ TEST_F(ReplCoordTest, HelloOnRemovedNode) {
 
     // node1 no longer exists in the replica set config.
     ASSERT_OK(getReplCoord()->waitForMemberState(MemberState::RS_REMOVED, Seconds(1)));
-    ASSERT_EQUALS(removedFromConfig.getConfigVersion(),
-                  getReplCoord()->getConfig().getConfigVersion());
+    ASSERT_EQUALS(removedFromConfig.getConfigVersion(), getReplCoord()->getConfigVersion());
 
     const auto maxAwaitTime = Milliseconds(5000);
     auto deadline = net->now() + maxAwaitTime;
@@ -4557,8 +4547,7 @@ TEST_F(ReplCoordTest, AwaitHelloRespondsCorrectlyWhenNodeRemovedAndReadded) {
 
     // node1 no longer exists in the replica set config.
     ASSERT_OK(getReplCoord()->waitForMemberState(MemberState::RS_REMOVED, Seconds(1)));
-    ASSERT_EQUALS(removedFromConfig.getConfigVersion(),
-                  getReplCoord()->getConfig().getConfigVersion());
+    ASSERT_EQUALS(removedFromConfig.getConfigVersion(), getReplCoord()->getConfigVersion());
     getHelloWaitingForRemovedNodeThread.join();
     const std::string newHorizonSniName = "newhorizon.com";
     auto newHorizon = SplitHorizon::Parameters(newHorizonSniName);
@@ -4643,7 +4632,7 @@ TEST_F(ReplCoordTest, AwaitHelloResponseReturnsOnElectionTimeout) {
     ASSERT(getReplCoord()->getMemberState().primary());
 
     // Wait for a hello with deadline past the election timeout.
-    auto electionTimeout = getReplCoord()->getConfig().getElectionTimeoutPeriod();
+    auto electionTimeout = getReplCoord()->getConfigElectionTimeoutPeriod();
     auto maxAwaitTime = electionTimeout + Milliseconds(5000);
     auto deadline = getNet()->now() + maxAwaitTime;
     auto electionTimeoutDate = getNet()->now() + electionTimeout;
@@ -6512,7 +6501,7 @@ TEST_F(ReplCoordTest,
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
 
-    ASSERT_LESS_THAN_OR_EQUALS(until + replCoord->getConfig().getElectionTimeoutPeriod(),
+    ASSERT_LESS_THAN_OR_EQUALS(until + replCoord->getConfigElectionTimeoutPeriod(),
                                replCoord->getElectionTimeout_forTest());
 }
 
@@ -6610,7 +6599,7 @@ TEST_F(ReplCoordTest,
     net->exitNetwork();
 
     ASSERT_OK(getReplCoord()->waitForMemberState(MemberState::RS_REMOVED, Seconds(1)));
-    ASSERT_EQUALS(config.getConfigVersion(), getReplCoord()->getConfig().getConfigVersion());
+    ASSERT_EQUALS(config.getConfigVersion(), getReplCoord()->getConfigVersion());
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
 
@@ -6664,7 +6653,7 @@ TEST_F(ReplCoordTest,
     net->runReadyNetworkOperations();
     net->exitNetwork();
 
-    ASSERT_LESS_THAN_OR_EQUALS(heartbeatWhen + replCoord->getConfig().getElectionTimeoutPeriod(),
+    ASSERT_LESS_THAN_OR_EQUALS(heartbeatWhen + replCoord->getConfigElectionTimeoutPeriod(),
                                replCoord->getElectionTimeout_forTest());
 }
 
@@ -6714,7 +6703,7 @@ TEST_F(ReplCoordTest,
     net->runReadyNetworkOperations();
     net->exitNetwork();
 
-    ASSERT_GREATER_THAN(heartbeatWhen + replCoord->getConfig().getElectionTimeoutPeriod(),
+    ASSERT_GREATER_THAN(heartbeatWhen + replCoord->getConfigElectionTimeoutPeriod(),
                         replCoord->getElectionTimeout_forTest());
 }
 
@@ -8065,6 +8054,161 @@ TEST_F(ReplCoordTest, ShouldChooseNearestNodeAsSyncSourceWhenPrimaryAndChainingA
     // We expect to sync from the closest node, since our read preference should be set to
     // ReadPreference::Nearest.
     ASSERT_EQ(HostAndPort("node3:12345"), replCoord->chooseNewSyncSource(OpTime()));
+}
+
+TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromReplSetUpdatePosition) {
+    init("mySet/node1:12345,node2:12345,node3:12345");
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 2 << "members"
+                            << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                     << "node1:12345")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "node2:12345")
+                                          << BSON("_id" << 3 << "host"
+                                                        << "node3:12345"
+                                                        << "arbiterOnly" << true))),
+                       HostAndPort("node1", 12345));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    const auto repl = getReplCoord();
+
+    OpTimeWithTermOne opTime1(100, 1);
+    OpTimeWithTermOne opTime2(200, 2);
+    Date_t wallTime1 = Date_t() + Seconds(10);
+    Date_t wallTime2 = Date_t() + Seconds(20);
+
+    // Node 1 is ahead, nodes 2 and 3 a bit behind.
+    // Node 3 should not have a durable optime/walltime as they are an arbiter.
+    repl->setMyLastAppliedOpTimeAndWallTime({opTime2, wallTime2});
+    repl->setMyLastDurableOpTimeAndWallTime({opTime2, wallTime2});
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1, wallTime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 3, opTime1, wallTime1));
+    ASSERT_OK(repl->setLastDurableOptime_forTest(1, 2, opTime1, wallTime1));
+    ASSERT_OK(repl->setLastDurableOptime_forTest(1, 3, OpTime(), Date_t()));
+
+    simulateSuccessfulV1Election();
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    // Receive updates on behalf of nodes 2 and 3 from node 2.
+    // Node 3 will be reported as caught up both in lastApplied and lastDurable, but we
+    // must ignore the lastDurable part as null is the only valid value for arbiters.
+    UpdatePositionArgs updatePositionArgs;
+
+    ASSERT_OK(updatePositionArgs.initialize(BSON(
+        UpdatePositionArgs::kCommandFieldName
+        << 1 << UpdatePositionArgs::kUpdateArrayFieldName
+        << BSON_ARRAY(
+               BSON(UpdatePositionArgs::kConfigVersionFieldName
+                    << repl->getConfig().getConfigVersion()
+                    << UpdatePositionArgs::kMemberIdFieldName << 2
+                    << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kAppliedWallTimeFieldName << wallTime2
+                    << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kDurableWallTimeFieldName << wallTime2)
+               << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                       << repl->getConfig().getConfigVersion()
+                       << UpdatePositionArgs::kMemberIdFieldName << 3
+                       << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
+                       << UpdatePositionArgs::kAppliedWallTimeFieldName << wallTime2
+                       << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
+                       << UpdatePositionArgs::kDurableWallTimeFieldName << wallTime2)))));
+
+    startCapturingLogMessages();
+    ASSERT_OK(repl->processReplSetUpdatePosition(updatePositionArgs));
+
+    // Make sure node 2 is fully caught up but node 3 has null durable optime/walltime.
+    auto memberDataVector = repl->getMemberData();
+    for (auto member : memberDataVector) {
+        auto memberId = member.getMemberId();
+        if (memberId == MemberId(1) || memberId == MemberId(2)) {
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastAppliedWallTime(), wallTime2);
+            ASSERT_EQ(member.getLastDurableOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastDurableWallTime(), wallTime2);
+            continue;
+        } else if (member.getMemberId() == MemberId(3)) {
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastAppliedWallTime(), wallTime2);
+            ASSERT_EQ(member.getLastDurableOpTime(), OpTime());
+            ASSERT_EQ(member.getLastDurableWallTime(), Date_t());
+            continue;
+        }
+        MONGO_UNREACHABLE;
+    }
+    stopCapturingLogMessages();
+    ASSERT_EQUALS(
+        1,
+        countTextFormatLogLinesContaining(
+            "Received non-null durable optime/walltime for arbiter from replSetUpdatePosition"));
+}
+
+TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromHeartbeat) {
+    unittest::MinimumLoggedSeverityGuard severityGuard{logv2::LogComponent::kReplication,
+                                                       logv2::LogSeverity::Debug(1)};
+    init("mySet/node1:12345,node2:12345");
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 2 << "members"
+                            << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                     << "node1:12345")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "node2:12345"
+                                                        << "arbiterOnly" << true))),
+                       HostAndPort("node1", 12345));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    const auto repl = getReplCoord();
+
+    OpTimeWithTermOne opTime1(100, 1);
+    OpTimeWithTermOne opTime2(200, 2);
+    Date_t wallTime1 = Date_t() + Seconds(10);
+    Date_t wallTime2 = Date_t() + Seconds(20);
+
+    // Node 1 is ahead, nodes 2 is a bit behind.
+    // Node 2 should not have a durable optime/walltime as they are an arbiter.
+    repl->setMyLastAppliedOpTimeAndWallTime({opTime2, wallTime2});
+    repl->setMyLastDurableOpTimeAndWallTime({opTime2, wallTime2});
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1, wallTime1));
+    ASSERT_OK(repl->setLastDurableOptime_forTest(1, 2, OpTime(), Date_t()));
+
+    simulateSuccessfulV1Election();
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    ReplSetHeartbeatResponse hbResp;
+    hbResp.setSetName("mySet");
+    hbResp.setTerm(1);
+    hbResp.setConfigVersion(2);
+    hbResp.setConfigTerm(1);
+    hbResp.setState(MemberState::RS_ARBITER);
+    hbResp.setAppliedOpTimeAndWallTime({opTime2, wallTime2});
+    hbResp.setDurableOpTimeAndWallTime({opTime2, wallTime2});
+
+    startCapturingLogMessages();
+    repl->handleHeartbeatResponse_forTest(
+        hbResp.toBSON(), 1 /* targetIndex */, Milliseconds(5) /* ping */);
+
+    auto memberDataVector = repl->getMemberData();
+    for (auto member : memberDataVector) {
+        auto memberId = member.getMemberId();
+        if (memberId == MemberId(1)) {
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastAppliedWallTime(), wallTime2);
+            ASSERT_EQ(member.getLastDurableOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastDurableWallTime(), wallTime2);
+            continue;
+        } else if (member.getMemberId() == MemberId(2)) {
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastAppliedWallTime(), wallTime2);
+            ASSERT_EQ(member.getLastDurableOpTime(), OpTime());
+            ASSERT_EQ(member.getLastDurableWallTime(), Date_t());
+            continue;
+        }
+        MONGO_UNREACHABLE;
+    }
+
+    stopCapturingLogMessages();
+    ASSERT_EQUALS(1,
+                  countTextFormatLogLinesContaining(
+                      "Received non-null durable optime/walltime for arbiter from heartbeat"));
 }
 
 // TODO(schwerin): Unit test election id updating

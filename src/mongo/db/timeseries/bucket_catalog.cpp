@@ -46,6 +46,10 @@
 
 namespace mongo {
 namespace {
+
+void normalizeArray(BSONArrayBuilder* builder, const BSONObj& obj);
+void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj);
+
 const auto getBucketCatalog = ServiceContext::declareDecoration<BucketCatalog>();
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeWriteConflict);
 
@@ -56,6 +60,20 @@ uint8_t numDigits(uint32_t num) {
         ++numDigits;
     }
     return numDigits;
+}
+
+void normalizeArray(BSONArrayBuilder* builder, const BSONObj& obj) {
+    for (auto& arrayElem : obj) {
+        if (arrayElem.type() == BSONType::Array) {
+            BSONArrayBuilder subArray = builder->subarrayStart();
+            normalizeArray(&subArray, arrayElem.Obj());
+        } else if (arrayElem.type() == BSONType::Object) {
+            BSONObjBuilder subObject = builder->subobjStart();
+            normalizeObject(&subObject, arrayElem.Obj());
+        } else {
+            builder->append(arrayElem);
+        }
+    }
 }
 
 void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
@@ -96,31 +114,38 @@ void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
     std::sort(it, end);
     for (; it != end; ++it) {
         auto elem = it->element();
-        if (elem.type() != BSONType::Object) {
-            builder->append(elem);
-        } else {
+        if (elem.type() == BSONType::Array) {
+            BSONArrayBuilder subArray(builder->subarrayStart(elem.fieldNameStringData()));
+            normalizeArray(&subArray, elem.Obj());
+        } else if (elem.type() == BSONType::Object) {
             BSONObjBuilder subObject(builder->subobjStart(elem.fieldNameStringData()));
             normalizeObject(&subObject, elem.Obj());
+        } else {
+            builder->append(elem);
         }
     }
 }
 
 void normalizeTopLevel(BSONObjBuilder* builder, const BSONElement& elem) {
-    if (elem.type() != BSONType::Object) {
-        builder->append(elem);
-    } else {
+    if (elem.type() == BSONType::Array) {
+        BSONArrayBuilder subArray(builder->subarrayStart(elem.fieldNameStringData()));
+        normalizeArray(&subArray, elem.Obj());
+    } else if (elem.type() == BSONType::Object) {
         BSONObjBuilder subObject(builder->subobjStart(elem.fieldNameStringData()));
         normalizeObject(&subObject, elem.Obj());
+    } else {
+        builder->append(elem);
     }
 }
 
-UUID getLsid(OperationContext* opCtx, BucketCatalog::CombineWithInsertsFromOtherClients combine) {
-    static const UUID common{UUID::gen()};
+OperationId getOpId(OperationContext* opCtx,
+                    BucketCatalog::CombineWithInsertsFromOtherClients combine) {
     switch (combine) {
         case BucketCatalog::CombineWithInsertsFromOtherClients::kAllow:
-            return common;
+            return 0;
         case BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow:
-            return opCtx->getLogicalSessionId()->getId();
+            invariant(opCtx->getOpID());
+            return opCtx->getOpID();
     }
     MONGO_UNREACHABLE;
 }
@@ -229,7 +254,7 @@ StatusWith<std::shared_ptr<BucketCatalog::WriteBatch>> BucketCatalog::insert(
                                                     &sizeToBeAdded);
     }
 
-    auto batch = bucket->_activeBatch(getLsid(opCtx, combine), stats);
+    auto batch = bucket->_activeBatch(getOpId(opCtx, combine), stats);
     batch->_addMeasurement(doc);
     batch->_recordNewFields(std::move(newFieldNamesToBeInserted));
 
@@ -279,7 +304,7 @@ bool BucketCatalog::prepareCommit(std::shared_ptr<WriteBatch> batch) {
     batch->_prepareCommit();
     _memoryUsage.fetchAndAdd(bucket->_memoryUsage - prevMemoryUsage);
 
-    bucket->_batches.erase(batch->_lsid);
+    bucket->_batches.erase(batch->_opId);
 
     return true;
 }
@@ -782,10 +807,10 @@ bool BucketCatalog::Bucket::allCommitted() const {
 }
 
 std::shared_ptr<BucketCatalog::WriteBatch> BucketCatalog::Bucket::_activeBatch(
-    const UUID& lsid, const std::shared_ptr<ExecutionStats>& stats) {
-    auto it = _batches.find(lsid);
+    OperationId opId, const std::shared_ptr<ExecutionStats>& stats) {
+    auto it = _batches.find(opId);
     if (it == _batches.end()) {
-        it = _batches.try_emplace(lsid, std::make_shared<WriteBatch>(this, lsid, stats)).first;
+        it = _batches.try_emplace(opId, std::make_shared<WriteBatch>(this, opId, stats)).first;
     }
     return it->second;
 }
@@ -1069,9 +1094,9 @@ Date_t BucketCatalog::BucketAccess::getTime() const {
 }
 
 BucketCatalog::WriteBatch::WriteBatch(Bucket* bucket,
-                                      const UUID& lsid,
+                                      OperationId opId,
                                       const std::shared_ptr<ExecutionStats>& stats)
-    : _bucket{bucket}, _lsid(lsid), _stats{stats} {}
+    : _bucket{bucket}, _opId(opId), _stats{stats} {}
 
 bool BucketCatalog::WriteBatch::claimCommitRights() {
     return !_commitRights.swap(true);

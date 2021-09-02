@@ -215,10 +215,11 @@ void assertPlanCacheKeysUnequalDueToDiscriminators(const PlanCacheKey& a, const 
 }
 
 /**
- * Check that the stable keys of 'a' and 'b' are equal, but the 'forceClassicEngine' values are not.
+ * Check that the stable keys of 'a' and 'b' are equal, but the 'enableSlotBasedExecutionEngine'
+ * values are not.
  */
-void assertPlanCacheKeysUnequalDueToForceClassicEngineValue(const PlanCacheKey& a,
-                                                            const PlanCacheKey& b) {
+void assertPlanCacheKeysUnequalDueToEnableSlotBasedExecutionEngineValue(const PlanCacheKey& a,
+                                                                        const PlanCacheKey& b) {
     ASSERT_EQ(a.getStableKeyStringData(), b.getStableKeyStringData());
     auto aUnstablePart = a.getUnstablePart();
     auto bUnstablePart = b.getUnstablePart();
@@ -316,7 +317,7 @@ std::pair<CoreIndexInfo, std::unique_ptr<WildcardProjection>> makeWildcardUpdate
  */
 struct GenerateQuerySolution {
     QuerySolution* operator()() const {
-        unique_ptr<QuerySolution> qs(new QuerySolution(QueryPlannerParams::Options::DEFAULT));
+        auto qs = std::make_unique<QuerySolution>();
         qs->cacheData.reset(new SolutionCacheData());
         qs->cacheData->solnType = SolutionCacheData::COLLSCAN_SOLN;
         qs->cacheData->tree.reset(new PlanCacheIndexTree());
@@ -379,8 +380,7 @@ void assertShouldNotCacheQuery(const char* queryStr) {
 }
 
 std::unique_ptr<QuerySolution> getQuerySolutionForCaching() {
-    std::unique_ptr<QuerySolution> qs =
-        std::make_unique<QuerySolution>(QueryPlannerParams::Options::DEFAULT);
+    std::unique_ptr<QuerySolution> qs = std::make_unique<QuerySolution>();
     qs->cacheData = std::make_unique<SolutionCacheData>();
     qs->cacheData->tree = std::make_unique<PlanCacheIndexTree>();
     return qs;
@@ -1176,7 +1176,7 @@ protected:
 
         // Create a CachedSolution the long way..
         // QuerySolution -> PlanCacheEntry -> CachedSolution
-        QuerySolution qs{QueryPlannerParams::Options::DEFAULT};
+        QuerySolution qs{};
         qs.cacheData = soln.cacheData->clone();
         std::vector<QuerySolution*> solutions;
         solutions.push_back(&qs);
@@ -1287,7 +1287,9 @@ protected:
 };
 
 const std::string mockKey("mock_cache_key");
-const PlanCacheKey CachePlanSelectionTest::ck(mockKey, "", internalQueryForceClassicEngine.load());
+const PlanCacheKey CachePlanSelectionTest::ck(mockKey,
+                                              "",
+                                              internalQueryEnableSlotBasedExecutionEngine.load());
 
 //
 // Equality
@@ -2530,10 +2532,11 @@ TEST(PlanCacheTest, PlanCacheSizeWithMultiplePlanCaches) {
 }
 
 TEST(PlanCacheTest, DifferentQueryEngines) {
-    // Helper to construct a plan cache key given 'forceClassicEngine'.
-    auto constructPlanCacheKey = [](const PlanCache& pc, bool forceClassicEngine) -> PlanCacheKey {
-        RAIIServerParameterControllerForTest controller{"internalQueryForceClassicEngine",
-                                                        forceClassicEngine};
+    // Helper to construct a plan cache key given the 'enableSlotBasedExecutionEngine' flag.
+    auto constructPlanCacheKey = [](const PlanCache& pc,
+                                    bool enableSlotBasedExecutionEngine) -> PlanCacheKey {
+        RAIIServerParameterControllerForTest controller{
+            "internalQueryEnableSlotBasedExecutionEngine", enableSlotBasedExecutionEngine};
         const auto queryStr = "{a: 0}";
         unique_ptr<CanonicalQuery> cq(canonicalize(queryStr));
         return pc.computeKey(*cq);
@@ -2549,11 +2552,12 @@ TEST(PlanCacheTest, DifferentQueryEngines) {
                        false,                          // sparse
                        IndexEntry::Identifier{""})});  // name
 
-    const auto classicEngineKey = constructPlanCacheKey(planCache, true);
-    const auto noClassicEngineKey = constructPlanCacheKey(planCache, false);
+    const auto classicEngineKey = constructPlanCacheKey(planCache, false);
+    const auto slotBasedExecutionEngineKey = constructPlanCacheKey(planCache, true);
 
     // Check that the two plan cache keys are not equal because the plans were created under
     // different engines.
-    assertPlanCacheKeysUnequalDueToForceClassicEngineValue(classicEngineKey, noClassicEngineKey);
+    assertPlanCacheKeysUnequalDueToEnableSlotBasedExecutionEngineValue(classicEngineKey,
+                                                                       slotBasedExecutionEngineKey);
 }
 }  // namespace

@@ -1405,6 +1405,24 @@ StatusWith<bool> TopologyCoordinator::setLastOptime(const UpdatePositionArgs::Up
 
     invariant(memberId == memberData->getMemberId());
 
+    auto durableOpTime = args.durableOpTime;
+    auto durableWallTime = args.durableWallTime;
+
+    // Arbiters are always expected to report null durable optimes (and wall times).
+    // If that is not the case here, make sure to correct these times before ingesting them.
+    auto& memberInConfig = _rsConfig.getMemberAt(memberData->getConfigIndex());
+    if ((memberData->getState().arbiter() || memberInConfig.isArbiter()) &&
+        (!args.durableOpTime.isNull() || args.durableWallTime != Date_t())) {
+        LOGV2(5662001,
+              "Received non-null durable optime/walltime for arbiter from "
+              "replSetUpdatePosition. Ignoring value(s).",
+              "memberId"_attr = memberId,
+              "durableOpTime"_attr = args.durableOpTime,
+              "durableWallTime"_attr = args.durableWallTime);
+        durableOpTime = OpTime();
+        durableWallTime = Date_t();
+    }
+
     LOGV2_DEBUG(21815,
                 3,
                 "Node with memberID {memberId} currently has optime {oldLastAppliedOpTime} "
@@ -1415,12 +1433,12 @@ StatusWith<bool> TopologyCoordinator::setLastOptime(const UpdatePositionArgs::Up
                 "oldLastAppliedOpTime"_attr = memberData->getLastAppliedOpTime(),
                 "oldLastDurableOpTime"_attr = memberData->getLastDurableOpTime(),
                 "newAppliedOpTime"_attr = args.appliedOpTime,
-                "newDurableOpTime"_attr = args.durableOpTime);
+                "newDurableOpTime"_attr = durableOpTime);
 
     bool advancedOpTime = memberData->advanceLastAppliedOpTimeAndWallTime(
         {args.appliedOpTime, args.appliedWallTime}, now);
-    advancedOpTime = memberData->advanceLastDurableOpTimeAndWallTime(
-                         {args.durableOpTime, args.durableWallTime}, now) ||
+    advancedOpTime =
+        memberData->advanceLastDurableOpTimeAndWallTime({durableOpTime, durableWallTime}, now) ||
         advancedOpTime;
     return advancedOpTime;
 }
@@ -1496,14 +1514,22 @@ HeartbeatResponseAction TopologyCoordinator::_shouldTakeOverPrimary(int updatedC
     }
 
     // Don't schedule catchup takeover if catchup takeover or primary catchup is disabled.
-    bool catchupTakeoverDisabled =
+    const bool catchupTakeoverDisabled =
         ReplSetConfig::kCatchUpDisabled == _rsConfig.getCatchUpTimeoutPeriod() ||
         ReplSetConfig::kCatchUpTakeoverDisabled == _rsConfig.getCatchUpTakeoverDelay();
 
     bool scheduleCatchupTakeover = false;
     bool schedulePriorityTakeover = false;
 
-    if (!catchupTakeoverDisabled &&
+    // If we have a stale view of the new primary's opTime and believe its opTime to be
+    // less than our own, we may end up scheduling an unecessary takeover. Primaries
+    // increment the term as soon as they start a real election, but they do not write
+    // anything in that new term until they have finished their full state transition.
+    // Thus, if we have applied anything in the new term, it means that the primary is
+    // already past the catchup phase and we should not be attempting a catchup takeover.
+    const bool primaryAlreadyCaughtUp = (getMyLastAppliedOpTime().getTerm() == getTerm());
+
+    if (!catchupTakeoverDisabled && !primaryAlreadyCaughtUp &&
         (_memberData.at(primaryIndex).getLastAppliedOpTime() <
          _memberData.at(_selfIndex).getLastAppliedOpTime())) {
         LOGV2_FOR_ELECTION(23975,
@@ -1532,7 +1558,7 @@ HeartbeatResponseAction TopologyCoordinator::_shouldTakeOverPrimary(int updatedC
     }
 
     // Calculate rank of current node. A rank of 0 indicates that it has the highest priority.
-    auto currentNodePriority = _rsConfig.getMemberAt(_selfIndex).getPriority();
+    const auto currentNodePriority = _rsConfig.getMemberAt(_selfIndex).getPriority();
 
     // Schedule a priority takeover early only if we know that the current node has the highest
     // priority in the replica set, has a higher priority than the primary, and is the most

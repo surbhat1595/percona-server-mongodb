@@ -1,6 +1,7 @@
 # -*- mode: python -*-
 
 Import('env')
+Import("get_option")
 
 env = env.Clone()
 
@@ -48,7 +49,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/query/command_request_response',
-        '$BUILD_DIR/mongo/db/query/explain_options',
+        '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/db/repl/read_concern_args',
         '$BUILD_DIR/mongo/db/storage/storage_options',
@@ -197,6 +198,7 @@ env.Library(
         'lite_parsed_pipeline.cpp',
         ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
         '$BUILD_DIR/mongo/db/stats/counters',
         'aggregation_request_helper',
     ]
@@ -403,7 +405,7 @@ env.Library(
 env.CppUnitTest(
     target='db_pipeline_test',
     source=[
-        'accumulator_js_test.cpp',
+        'accumulator_js_test.cpp' if get_option('js-engine') != 'none' else [],
         'accumulator_test.cpp',
         'aggregation_request_test.cpp',
         'dependencies_test.cpp',
@@ -462,7 +464,7 @@ env.CppUnitTest(
         'expression_date_test.cpp',
         'expression_field_path_test.cpp',
         'expression_find_internal_test.cpp',
-        'expression_javascript_test.cpp',
+        'expression_javascript_test.cpp' if get_option('js-engine') != 'none' else [],
         'expression_nary_test.cpp',
         'expression_object_test.cpp',
         'expression_or_test.cpp',

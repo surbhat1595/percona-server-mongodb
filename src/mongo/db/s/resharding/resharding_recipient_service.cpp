@@ -38,6 +38,8 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collation_spec.h"
@@ -340,8 +342,6 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_runMand
     Status status, const CancellationToken& stepdownToken) {
     if (stepdownToken.isCanceled()) {
         // Interrupt occured, ensure the metrics get shut down.
-        // TODO SERVER-56500: Don't use ReshardingOperationStatusEnum::kCanceled here if it
-        // is not meant for failover cases.
         _metrics()->onStepDown(ReshardingMetrics::Role::kRecipient);
     }
 
@@ -441,7 +441,6 @@ void ReshardingRecipientService::RecipientStateMachine::onReshardingFieldsChange
 
     stdx::lock_guard<Latch> lk(_mutex);
     auto coordinatorState = reshardingFields.getState();
-
     if (coordinatorState >= CoordinatorStateEnum::kCloning) {
         auto recipientFields = *reshardingFields.getRecipientFields();
         invariant(recipientFields.getCloneTimestamp());
@@ -849,6 +848,17 @@ void ReshardingRecipientService::RecipientStateMachine::insertStateDocument(
     store.add(opCtx, recipientDoc, kNoWaitWriteConcern);
 }
 
+void ReshardingRecipientService::RecipientStateMachine::commit() {
+    stdx::lock_guard<Latch> lk(_mutex);
+    tassert(ErrorCodes::ReshardCollectionInProgress,
+            "Attempted to commit the resharding operation in an incorrect state",
+            _recipientCtx.getState() >= RecipientStateEnum::kStrictConsistency);
+
+    if (!_coordinatorHasDecisionPersisted.getFuture().isReady()) {
+        _coordinatorHasDecisionPersisted.emplaceValue();
+    }
+}
+
 void ReshardingRecipientService::RecipientStateMachine::_updateRecipientDocument(
     RecipientShardContext&& newRecipientCtx,
     boost::optional<ReshardingRecipientService::RecipientStateMachine::CloneDetails>&& cloneDetails,
@@ -890,7 +900,10 @@ void ReshardingRecipientService::RecipientStateMachine::_updateRecipientDocument
                  updateBuilder.done(),
                  kNoWaitWriteConcern);
 
-    _recipientCtx = newRecipientCtx;
+    {
+        stdx::lock_guard<Latch> lk(_mutex);
+        _recipientCtx = newRecipientCtx;
+    }
 
     if (cloneDetails) {
         _cloneTimestamp = cloneDetails->cloneTimestamp;
@@ -921,7 +934,9 @@ void ReshardingRecipientService::RecipientStateMachine::_removeRecipientDocument
                     stdx::lock_guard<Latch> lk(_mutex);
                     if (aborted) {
                         _metrics()->onCompletion(ReshardingMetrics::Role::kRecipient,
-                                                 ReshardingOperationStatusEnum::kFailure,
+                                                 _userCanceled.get() == true
+                                                     ? ReshardingOperationStatusEnum::kCanceled
+                                                     : ReshardingOperationStatusEnum::kFailure,
                                                  getCurrentTime());
                     } else {
                         _metrics()->onCompletion(ReshardingMetrics::Role::kRecipient,
@@ -950,8 +965,61 @@ ReshardingMetrics* ReshardingRecipientService::RecipientStateMachine::_metrics()
 void ReshardingRecipientService::RecipientStateMachine::_startMetrics() {
     if (_recipientCtx.getState() > RecipientStateEnum::kAwaitingFetchTimestamp) {
         _metrics()->onStepUp(ReshardingMetrics::Role::kRecipient);
+        _restoreMetrics();
     } else {
         _metrics()->onStart(ReshardingMetrics::Role::kRecipient, getCurrentTime());
+    }
+}
+
+void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics() {
+    _metrics()->setRecipientState(_recipientCtx.getState());
+
+    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+    {
+        AutoGetCollection tempReshardingColl(
+            opCtx.get(), _metadata.getTempReshardingNss(), MODE_IS);
+        if (tempReshardingColl) {
+            int64_t bytesCopied = tempReshardingColl->dataSize(opCtx.get());
+            int64_t documentsCopied = tempReshardingColl->numRecords(opCtx.get());
+            if (bytesCopied > 0) {
+                _metrics()->onDocumentsCopiedForCurrentOp(documentsCopied, bytesCopied);
+            }
+        }
+    }
+
+    for (const auto& donor : _donorShards) {
+        {
+            AutoGetCollection oplogBufferColl(
+                opCtx.get(),
+                getLocalOplogBufferNamespace(_metadata.getSourceUUID(), donor.getShardId()),
+                MODE_IS);
+            if (oplogBufferColl) {
+                int64_t recordsFetched = oplogBufferColl->numRecords(opCtx.get());
+                if (recordsFetched > 0)
+                    _metrics()->onOplogEntriesFetchedForCurrentOp(recordsFetched);
+            }
+        }
+
+        {
+            AutoGetCollection progressApplierColl(
+                opCtx.get(), NamespaceString::kReshardingApplierProgressNamespace, MODE_IS);
+            if (progressApplierColl) {
+                BSONObj result;
+                Helpers::findOne(
+                    opCtx.get(),
+                    progressApplierColl.getCollection(),
+                    BSON(ReshardingOplogApplierProgress::kOplogSourceIdFieldName
+                         << (ReshardingSourceId{_metadata.getReshardingUUID(), donor.getShardId()})
+                                .toBSON()),
+                    result);
+
+                if (!result.isEmpty()) {
+                    _metrics()->onOplogEntriesAppliedForCurrentOp(
+                        result.getField(ReshardingOplogApplierProgress::kNumEntriesAppliedFieldName)
+                            .Long());
+                }
+            }
+        }
     }
 }
 
@@ -979,7 +1047,7 @@ CancellationToken ReshardingRecipientService::RecipientStateMachine::_initAbortS
 void ReshardingRecipientService::RecipientStateMachine::abort(bool isUserCancelled) {
     auto abortSource = [&]() -> boost::optional<CancellationSource> {
         stdx::lock_guard<Latch> lk(_mutex);
-
+        _userCanceled.emplace(isUserCancelled);
         if (_dataReplication) {
             _dataReplication->shutdown();
         }

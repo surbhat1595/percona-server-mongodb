@@ -31,7 +31,6 @@
 
 #include "mongo/db/s/drop_collection_coordinator.h"
 
-#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
@@ -43,6 +42,31 @@
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 
 namespace mongo {
+namespace {
+
+void sendDropCollectionParticipantCommandToShards(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const std::vector<ShardId>& shardIds,
+    const std::shared_ptr<executor::TaskExecutor>& executor,
+    const OperationSessionInfo& osi) {
+    const ShardsvrDropCollectionParticipant dropCollectionParticipant(nss);
+    const auto cmdObj =
+        CommandHelpers::appendMajorityWriteConcern(dropCollectionParticipant.toBSON({}));
+
+    try {
+        sharding_ddl_util::sendAuthenticatedCommandToShards(
+            opCtx, nss.db(), cmdObj.addFields(osi.toBSON()), shardIds, executor);
+    } catch (const ExceptionFor<ErrorCodes::NotARetryableWriteCommand>&) {
+        // Older 5.0 binaries don't support running the _shardsvrDropCollectionParticipant
+        // command as a retryable write yet. In that case, retry without attaching session
+        // info.
+        sharding_ddl_util::sendAuthenticatedCommandToShards(
+            opCtx, nss.db(), cmdObj, shardIds, executor);
+    }
+}
+
+}  // namespace
 
 DropCollectionCoordinator::DropCollectionCoordinator(ShardingDDLCoordinatorService* service,
                                                      const BSONObj& initialState)
@@ -69,28 +93,6 @@ boost::optional<BSONObj> DropCollectionCoordinator::reportForCurrentOp(
     return bob.obj();
 }
 
-void DropCollectionCoordinator::_insertStateDocument(StateDoc&& doc) {
-    auto coorMetadata = doc.getShardingDDLCoordinatorMetadata();
-    coorMetadata.setRecoveredFromDisk(true);
-    doc.setShardingDDLCoordinatorMetadata(coorMetadata);
-
-    auto opCtx = cc().makeOperationContext();
-    PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-    store.add(opCtx.get(), doc, WriteConcerns::kMajorityWriteConcern);
-    _doc = std::move(doc);
-}
-
-void DropCollectionCoordinator::_updateStateDocument(StateDoc&& newDoc) {
-    auto opCtx = cc().makeOperationContext();
-    PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-    store.update(opCtx.get(),
-                 BSON(StateDoc::kIdFieldName << _doc.getId().toBSON()),
-                 newDoc.toBSON(),
-                 WriteConcerns::kMajorityWriteConcern);
-
-    _doc = std::move(newDoc);
-}
-
 void DropCollectionCoordinator::_enterPhase(Phase newPhase) {
     StateDoc newDoc(_doc);
     newDoc.setPhase(newPhase);
@@ -103,10 +105,24 @@ void DropCollectionCoordinator::_enterPhase(Phase newPhase) {
                 "oldPhase"_attr = DropCollectionCoordinatorPhase_serializer(_doc.getPhase()));
 
     if (_doc.getPhase() == Phase::kUnset) {
-        _insertStateDocument(std::move(newDoc));
+        _doc = _insertStateDocument(std::move(newDoc));
         return;
     }
-    _updateStateDocument(std::move(newDoc));
+    _doc = _updateStateDocument(cc().makeOperationContext().get(), std::move(newDoc));
+}
+
+void DropCollectionCoordinator::_performNoopRetryableWriteOnParticipants(
+    OperationContext* opCtx, const std::shared_ptr<executor::TaskExecutor>& executor) {
+    auto shardsAndConfigsvr = [&] {
+        const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+        auto participants = shardRegistry->getAllShardIds(opCtx);
+        participants.emplace_back(shardRegistry->getConfigShard()->getId());
+        return participants;
+    }();
+
+    _doc = _updateSession(opCtx, _doc);
+    sharding_ddl_util::performNoopRetryableWriteOnShards(
+        opCtx, shardsAndConfigsvr, getCurrentSession(_doc), executor);
 }
 
 ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
@@ -120,15 +136,30 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
 
-                ShardingLogging::get(opCtx)->logChange(opCtx, "dropCollection.start", nss().ns());
-
                 try {
-                    sharding_ddl_util::stopMigrations(opCtx, nss());
                     auto coll = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss());
                     _doc.setCollInfo(std::move(coll));
-                } catch (ExceptionFor<ErrorCodes::NamespaceNotSharded>&) {
+                } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                     // The collection is not sharded or doesn't exist.
                     _doc.setCollInfo(boost::none);
+                }
+
+                BSONObjBuilder logChangeDetail;
+                if (_doc.getCollInfo()) {
+                    logChangeDetail.append("collectionUUID",
+                                           _doc.getCollInfo()->getUuid().toBSON());
+                }
+
+                ShardingLogging::get(opCtx)->logChange(
+                    opCtx, "dropCollection.start", nss().ns(), logChangeDetail.obj());
+
+                // Persist the collection info before sticking to using it's uuid. This ensures this
+                // node is still the RS primary, so it was also the primary at the moment we read
+                // the collection metadata.
+                _doc = _updateStateDocument(opCtx, StateDoc(_doc));
+
+                if (_doc.getCollInfo()) {
+                    sharding_ddl_util::stopMigrations(opCtx, nss(), _doc.getCollInfo()->getUuid());
                 }
             }))
         .then(_executePhase(
@@ -137,6 +168,10 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
+
+                if (_recoveredFromDisk) {
+                    _performNoopRetryableWriteOnParticipants(opCtx, **executor);
+                }
 
                 const auto collIsSharded = bool(_doc.getCollInfo());
 
@@ -149,21 +184,20 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 if (collIsSharded) {
                     invariant(_doc.getCollInfo());
                     const auto& coll = _doc.getCollInfo().get();
-                    sharding_ddl_util::removeCollMetadataFromConfig(opCtx, coll);
-                } else {
-                    // The collection is not sharded or didn't exist, just remove tags
-                    sharding_ddl_util::removeTagsMetadataFromConfig(opCtx, nss());
+                    sharding_ddl_util::removeCollAndChunksMetadataFromConfig(opCtx, coll);
                 }
 
+                // Remove tags even if the collection is not sharded or didn't exist
+                _doc = _updateSession(opCtx, _doc);
+                sharding_ddl_util::removeTagsMetadataFromConfig(
+                    opCtx, nss(), getCurrentSession(_doc));
+
+                // get a Lsid and an incremented txnNumber. Ensures we are the primary
+                _doc = _updateSession(opCtx, _doc);
+
                 const auto primaryShardId = ShardingState::get(opCtx)->shardId();
-                const ShardsvrDropCollectionParticipant dropCollectionParticipant(nss());
-                sharding_ddl_util::sendAuthenticatedCommandToShards(
-                    opCtx,
-                    nss().db(),
-                    CommandHelpers::appendMajorityWriteConcern(
-                        dropCollectionParticipant.toBSON({})),
-                    {primaryShardId},
-                    **executor);
+                sendDropCollectionParticipantCommandToShards(
+                    opCtx, nss(), {primaryShardId}, **executor, getCurrentSession(_doc));
 
                 // We need to send the drop to all the shards because both movePrimary and
                 // moveChunk leave garbage behind for sharded collections.
@@ -172,13 +206,9 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 participants.erase(
                     std::remove(participants.begin(), participants.end(), primaryShardId),
                     participants.end());
-                sharding_ddl_util::sendAuthenticatedCommandToShards(
-                    opCtx,
-                    nss().db(),
-                    CommandHelpers::appendMajorityWriteConcern(
-                        dropCollectionParticipant.toBSON({})),
-                    participants,
-                    **executor);
+
+                sendDropCollectionParticipantCommandToShards(
+                    opCtx, nss(), participants, **executor, getCurrentSession(_doc));
 
                 ShardingLogging::get(opCtx)->logChange(opCtx, "dropCollection", nss().ns());
                 LOGV2(5390503, "Collection dropped", "namespace"_attr = nss());

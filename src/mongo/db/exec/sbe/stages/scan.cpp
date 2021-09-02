@@ -136,8 +136,8 @@ void ScanStage::prepare(CompileCtx& ctx) {
         _oplogTsAccessor = ctx.getRuntimeEnvAccessor(*_oplogTsSlot);
     }
 
-    std::tie(_collName, _catalogEpoch) =
-        acquireCollection(_opCtx, _collUuid, _scanCallbacks.lockAcquisitionCallback, _coll);
+    tassert(5709600, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
+    std::tie(_coll, _collName, _catalogEpoch) = acquireCollection(_opCtx, _collUuid);
 }
 
 value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -184,13 +184,13 @@ void ScanStage::doRestoreState() {
     invariant(_opCtx);
     invariant(!_coll);
 
-    // If this stage is not currently open, then there is nothing to restore.
-    if (!_open) {
+    // If this stage has not been prepared, then yield recovery is a no-op.
+    if (!_collName) {
         return;
     }
 
-    restoreCollection(
-        _opCtx, _collName, _collUuid, _catalogEpoch, _scanCallbacks.lockAcquisitionCallback, _coll);
+    tassert(5777408, "Catalog epoch should be initialized", _catalogEpoch);
+    _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
 
     if (_cursor) {
         const bool couldRestore = _cursor->restore();
@@ -229,7 +229,7 @@ void ScanStage::open(bool reOpen) {
 
     if (_open) {
         tassert(5071001, "reopened ScanStage but reOpen=false", reOpen);
-        tassert(5071002, "ScanStage is open but _coll is not held", _coll);
+        tassert(5071002, "ScanStage is open but _coll is not null", _coll);
         tassert(5071003, "ScanStage is open but don't have _cursor", _cursor);
     } else {
         tassert(5071004, "first open to ScanStage but reOpen=true", !reOpen);
@@ -237,20 +237,17 @@ void ScanStage::open(bool reOpen) {
             // We're being opened after 'close()'. We need to re-acquire '_coll' in this case and
             // make some validity checks (the collection has not been dropped, renamed, etc.).
             tassert(5071005, "ScanStage is not open but have _cursor", !_cursor);
-            restoreCollection(_opCtx,
-                              _collName,
-                              _collUuid,
-                              _catalogEpoch,
-                              _scanCallbacks.lockAcquisitionCallback,
-                              _coll);
+            tassert(5777401, "Collection name should be initialized", _collName);
+            tassert(5777402, "Catalog epoch should be initialized", _catalogEpoch);
+            _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
         }
     }
 
     if (_scanCallbacks.scanOpenCallback) {
-        _scanCallbacks.scanOpenCallback(_opCtx, _coll->getCollection(), reOpen);
+        _scanCallbacks.scanOpenCallback(_opCtx, _coll, reOpen);
     }
 
-    if (const auto& collection = _coll->getCollection()) {
+    if (_coll) {
         if (_seekKeyAccessor) {
             auto [tag, val] = _seekKeyAccessor->getViewOfValue();
             const auto msgTag = tag;
@@ -262,7 +259,7 @@ void ScanStage::open(bool reOpen) {
         }
 
         if (!_cursor || !_seekKeyAccessor) {
-            _cursor = collection->getCursor(_opCtx, _forward);
+            _cursor = _coll->getCursor(_opCtx, _forward);
         }
     } else {
         _cursor.reset();
@@ -297,24 +294,21 @@ PlanState ScanStage::getNext() {
                     "Index key corruption check can only be performed on the first call "
                     "to getNext() during a seek",
                     res);
+            tassert(5777400, "Collection name should be initialized", _collName);
             _scanCallbacks.indexKeyCorruptionCheckCallback(_opCtx,
                                                            _snapshotIdAccessor,
                                                            _indexKeyAccessor,
                                                            _indexKeyPatternAccessor,
                                                            _key,
-                                                           _collName);
+                                                           *_collName);
         }
         return trackPlanState(PlanState::IS_EOF);
     }
 
     // Return EOF if the index key is found to be inconsistent.
     if (_scanCallbacks.indexKeyConsistencyCheckCallBack &&
-        !_scanCallbacks.indexKeyConsistencyCheckCallBack(_opCtx,
-                                                         _snapshotIdAccessor,
-                                                         _indexIdAccessor,
-                                                         _indexKeyAccessor,
-                                                         _coll->getCollection(),
-                                                         *nextRecord)) {
+        !_scanCallbacks.indexKeyConsistencyCheckCallBack(
+            _opCtx, _snapshotIdAccessor, _indexIdAccessor, _indexKeyAccessor, _coll, *nextRecord)) {
         return trackPlanState(PlanState::IS_EOF);
     }
 
@@ -594,7 +588,8 @@ void ParallelScanStage::prepare(CompileCtx& ctx) {
         _indexKeyPatternAccessor = ctx.getAccessor(*_indexKeyPatternSlot);
     }
 
-    std::tie(_collName, _catalogEpoch) = acquireCollection(_opCtx, _collUuid, nullptr, _coll);
+    tassert(5709601, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
+    std::tie(_coll, _collName, _catalogEpoch) = acquireCollection(_opCtx, _collUuid);
 }
 
 value::SlotAccessor* ParallelScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -637,12 +632,13 @@ void ParallelScanStage::doRestoreState() {
     invariant(_opCtx);
     invariant(!_coll);
 
-    // If this stage is not currently open, then there is nothing to restore.
-    if (!_open) {
+    // If this stage has not been prepared, then yield recovery is a no-op.
+    if (!_collName) {
         return;
     }
 
-    restoreCollection(_opCtx, _collName, _collUuid, _catalogEpoch, nullptr, _coll);
+    tassert(5777409, "Catalog epoch should be initialized", _catalogEpoch);
+    _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
 
     if (_cursor) {
         const bool couldRestore = _cursor->restore();
@@ -675,23 +671,23 @@ void ParallelScanStage::open(bool reOpen) {
         // we're being opened after 'close()'. we need to re-acquire '_coll' in this case and
         // make some validity checks (the collection has not been dropped, renamed, etc.).
         tassert(5071013, "ParallelScanStage is not open but have _cursor", !_cursor);
-        restoreCollection(_opCtx, _collName, _collUuid, _catalogEpoch, nullptr, _coll);
+        tassert(5777403, "Collection name should be initialized", _collName);
+        tassert(5777404, "Catalog epoch should be initialized", _catalogEpoch);
+        _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
     }
 
-    const auto& collection = _coll->getCollection();
-
-    if (collection) {
+    if (_coll) {
         {
             stdx::unique_lock lock(_state->mutex);
             if (_state->ranges.empty()) {
-                auto ranges = collection->getRecordStore()->numRecords(_opCtx) / 10240;
+                auto ranges = _coll->getRecordStore()->numRecords(_opCtx) / 10240;
                 if (ranges < 2) {
                     _state->ranges.emplace_back(Range{RecordId{}, RecordId{}});
                 } else {
                     if (ranges > 1024) {
                         ranges = 1024;
                     }
-                    auto randomCursor = collection->getRecordStore()->getRandomCursor(_opCtx);
+                    auto randomCursor = _coll->getRecordStore()->getRandomCursor(_opCtx);
                     invariant(randomCursor);
                     std::set<RecordId> rids;
                     while (ranges--) {
@@ -710,7 +706,7 @@ void ParallelScanStage::open(bool reOpen) {
             }
         }
 
-        _cursor = collection->getCursor(_opCtx);
+        _cursor = _coll->getCursor(_opCtx);
     }
 
     _open = true;
@@ -753,12 +749,13 @@ PlanState ParallelScanStage::getNext() {
                         "Index key corruption check can only performed when inspecting the first "
                         "recordId in a range",
                         needRange);
+                tassert(5777405, "Collection name should be initialized", _collName);
                 _scanCallbacks.indexKeyCorruptionCheckCallback(_opCtx,
                                                                _snapshotIdAccessor,
                                                                _indexKeyAccessor,
                                                                _indexKeyPatternAccessor,
                                                                _range.begin,
-                                                               _collName);
+                                                               *_collName);
             }
             return trackPlanState(PlanState::IS_EOF);
         }
@@ -775,7 +772,7 @@ PlanState ParallelScanStage::getNext() {
                                                              _snapshotIdAccessor,
                                                              _indexIdAccessor,
                                                              _indexKeyAccessor,
-                                                             _coll->getCollection(),
+                                                             _coll,
                                                              *nextRecord)) {
             return trackPlanState(PlanState::IS_EOF);
         }

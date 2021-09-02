@@ -647,6 +647,12 @@ class RunPlugin(PluginInterface):
                   " only tests which have at least one of the specified tags will be"
                   " run."))
 
+        parser.add_argument(
+            "--includeWithAllTags", action="append", dest="include_with_all_tags",
+            metavar="TAG1,TAG2",
+            help=("Comma separated list of tags. For the jstest portion of the suite(s),"
+                  "tests that have all of the specified tags will be run."))
+
         parser.add_argument("-n", action="store_const", const="tests", dest="dry_run",
                             help="Outputs the tests that would be run.")
 
@@ -763,6 +769,11 @@ class RunPlugin(PluginInterface):
             " binary version configuration. Specify 'old-new' to configure a replica set with a"
             " 'last-lts' version primary and 'latest' version secondary. For a sharded cluster"
             " with two shards and two replica set nodes each, specify 'old-new-old-new'.")
+
+        parser.add_argument(
+            "--multiversionBinVersion", type=str, dest="multiversion_bin_version",
+            choices=config.MultiversionOptions.all_options(),
+            help="Chose the multiverion binary version as last-lts or last-continous.")
 
         parser.add_argument(
             "--linearChain", action="store", dest="linear_chain", choices=("on", "off"),
@@ -1009,8 +1020,9 @@ class RunPlugin(PluginInterface):
                                        metavar="REVISION_ORDER_ID",
                                        help="Sets the chronological order number of this commit.")
 
-        evergreen_options.add_argument("--tagFile", dest="tag_file", metavar="OPTIONS",
-                                       help="A YAML file that associates tests and tags.")
+        evergreen_options.add_argument("--tagFile", action="append", dest="tag_files",
+                                       metavar="TAG_FILES",
+                                       help="One or more YAML files that associate tests and tags.")
 
         evergreen_options.add_argument(
             "--taskName", dest="task_name", metavar="TASK_NAME",

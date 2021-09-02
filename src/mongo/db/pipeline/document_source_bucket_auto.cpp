@@ -45,7 +45,7 @@ using std::vector;
 REGISTER_DOCUMENT_SOURCE(bucketAuto,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceBucketAuto::createFromBson,
-                         LiteParsedDocumentSource::AllowedWithApiStrict::kAlways);
+                         AllowedWithApiStrict::kAlways);
 
 namespace {
 
@@ -99,6 +99,11 @@ DocumentSource::GetNextResult DocumentSourceBucketAuto::doGetNext() {
 
         initalizeBucketIteration();
         _populated = true;
+    }
+
+    if (!_sortedInput) {
+        // We have been disposed. Return EOF.
+        return GetNextResult::makeEOF();
     }
 
     if (_currentBucketDetails.currentBucketNum++ < _nBuckets) {

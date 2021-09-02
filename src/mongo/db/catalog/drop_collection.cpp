@@ -77,8 +77,7 @@ Status _dropView(OperationContext* opCtx,
         audit::logDropView(opCtx->getClient(), collectionName, "", {}, status.code());
         return status;
     }
-    auto view =
-        ViewCatalog::get(db)->lookupWithoutValidatingDurableViews(opCtx, collectionName.ns());
+    auto view = ViewCatalog::get(db)->lookupWithoutValidatingDurableViews(opCtx, collectionName);
     if (!view) {
         Status status = Status(ErrorCodes::NamespaceNotFound, "ns not found");
         audit::logDropView(opCtx->getClient(), collectionName, "", {}, status.code());
@@ -86,7 +85,7 @@ Status _dropView(OperationContext* opCtx,
     }
 
     // Validates the view or throws an "invalid view" error.
-    ViewCatalog::get(db)->lookup(opCtx, collectionName.ns());
+    ViewCatalog::get(db)->lookup(opCtx, collectionName);
 
     Lock::CollectionLock collLock(opCtx, collectionName, MODE_IX);
     // Operations all lock system.views in the end to prevent deadlock.
@@ -334,6 +333,13 @@ Status dropCollection(OperationContext* opCtx,
                     [opCtx, dropView, &collectionName, &reply](Database* db,
                                                                const NamespaceString& bucketsNs) {
                         if (dropView) {
+                            // Take a MODE_X lock when dropping timeseries view. This is to prevent
+                            // a concurrent create collection on the same namespace that will
+                            // reserve an OpTime before this drop. We already hold a MODE_X lock on
+                            // the bucket collection inside '_abortIndexBuildsAndDrop' above. When
+                            // taking both these locks it needs to happen in this order to prevent a
+                            // deadlock.
+                            Lock::CollectionLock viewLock(opCtx, collectionName, MODE_X);
                             auto status = _dropView(opCtx, db, collectionName, reply);
                             if (!status.isOK()) {
                                 return status;
@@ -354,8 +360,8 @@ Status dropCollection(OperationContext* opCtx,
                     false /* appendNs */);
             };
 
-            auto view = ViewCatalog::get(db)->lookupWithoutValidatingDurableViews(
-                opCtx, collectionName.ns());
+            auto view =
+                ViewCatalog::get(db)->lookupWithoutValidatingDurableViews(opCtx, collectionName);
             if (!view) {
                 // Timeseries bucket collection may exist even without the view. If that is the case
                 // delete it.

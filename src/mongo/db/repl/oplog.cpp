@@ -1168,7 +1168,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
     const bool haveWrappingWriteUnitOfWork = opCtx->lockState()->inAWriteUnitOfWork();
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "applyOps not supported on view: " << requestNss.ns(),
-            collection || !ViewCatalog::get(db)->lookup(opCtx, requestNss.ns()));
+            collection || !ViewCatalog::get(db)->lookup(opCtx, requestNss));
 
     // Decide whether to timestamp the write with the 'ts' field found in the operation. In general,
     // we do this for secondary oplog application, but there are some exceptions.
@@ -1430,10 +1430,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
             if (updateMod.type() == write_ops::UpdateModification::Type::kDelta) {
                 // If we are validating features as primary, only allow $v:2 delta entries if we are
                 // at FCV 4.7 or newer to prevent them from being written to the oplog.
-                //
-                // TODO SERVER-57176: Remove the check on 'kRecovering'.
-                if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
-                    mode != OplogApplication::Mode::kRecovering) {
+                if (serverGlobalParams.validateFeaturesAsPrimary.load()) {
                     uassert(4773100,
                             "Delta oplog entries may not be used in FCV below 4.7",
                             serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
@@ -1733,7 +1730,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
         auto databaseHolder = DatabaseHolder::get(opCtx);
         auto db = databaseHolder->getDb(opCtx, nss.ns());
         if (db && !CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss) &&
-            ViewCatalog::get(db)->lookup(opCtx, nss.ns())) {
+            ViewCatalog::get(db)->lookup(opCtx, nss)) {
             return {ErrorCodes::CommandNotSupportedOnView,
                     str::stream() << "applyOps not supported on view:" << nss.ns()};
         }

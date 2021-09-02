@@ -57,6 +57,18 @@ namespace mongo::sbe {
  * The 'indexKeysToInclude' bitset determines which values are included in the projection based
  * on their order in the index pattern. The number of bits set in 'indexKeysToInclude' must be
  * the same as the number of slots in the 'vars' SlotVector.
+ *
+ * The 'forward' flag indicates the direction of the index scan, which can be either forwards or
+ * backwards.
+ *
+ * Debug string representation:
+ *
+ *   ixscan recordSlot? recordIdSlot? snapshotIdSlot? [slot_1 = fieldNo_1, ..., slot2 = fieldNo_n]
+ *                      collectionUuid indexName forward
+ *
+ *   ixseek lowKey highKey recordSlot? recordIdSlot? snapshotIdSlot?
+ *          [slot_1 = fieldNo_1, ..., slot2 = fieldNo_n]
+ *          collectionUuid indexName forward
  */
 class IndexScanStage final : public PlanStage {
 public:
@@ -71,8 +83,7 @@ public:
                    boost::optional<value::SlotId> seekKeySlotLow,
                    boost::optional<value::SlotId> seekKeySlotHigh,
                    PlanYieldPolicy* yieldPolicy,
-                   PlanNodeId nodeId,
-                   LockAcquisitionCallback lockAcquisitionCallback);
+                   PlanNodeId nodeId);
 
     std::unique_ptr<PlanStage> clone() const final;
 
@@ -116,10 +127,12 @@ private:
     const boost::optional<value::SlotId> _seekKeySlotLow;
     const boost::optional<value::SlotId> _seekKeySlotHigh;
 
-    NamespaceString _collName;
-    uint64_t _catalogEpoch;
+    // These members are default constructed to boost::none and are initialized when 'prepare()'
+    // is called. Once they are set, they are never modified again.
+    boost::optional<NamespaceString> _collName;
+    boost::optional<uint64_t> _catalogEpoch;
 
-    LockAcquisitionCallback _lockAcquisitionCallback;
+    CollectionPtr _coll;
 
     std::unique_ptr<value::OwnedValueAccessor> _recordAccessor;
     std::unique_ptr<value::OwnedValueAccessor> _recordIdAccessor;
@@ -139,7 +152,6 @@ private:
     std::unique_ptr<SortedDataInterface::Cursor> _cursor;
     std::weak_ptr<const IndexCatalogEntry> _weakIndexCatalogEntry;
     boost::optional<Ordering> _ordering{boost::none};
-    boost::optional<AutoGetCollectionForReadMaybeLockFree> _coll;
     boost::optional<KeyStringEntry> _nextRecord;
 
     // This buffer stores values that are projected out of the index entry. Values in the

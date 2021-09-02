@@ -101,9 +101,6 @@ void parseMultikeyPathsFromBytes(BSONObj multikeyPathsObj, MultikeyPaths* multik
 
 }  // namespace
 
-const StringData BSONCollectionCatalogEntry::kIndexBuildScanning = "scanning"_sd;
-const StringData BSONCollectionCatalogEntry::kIndexBuildDraining = "draining"_sd;
-
 // --------------------------
 
 void BSONCollectionCatalogEntry::IndexMetaData::updateTTLSetting(long long newExpireSeconds) {
@@ -142,11 +139,29 @@ void BSONCollectionCatalogEntry::IndexMetaData::updateHiddenSetting(bool hidden)
 
 // --------------------------
 
+int BSONCollectionCatalogEntry::MetaData::getTotalIndexCount() const {
+    return std::count_if(
+        indexes.cbegin(), indexes.cend(), [](const auto& index) { return index.isPresent(); });
+}
+
 int BSONCollectionCatalogEntry::MetaData::findIndexOffset(StringData name) const {
     for (unsigned i = 0; i < indexes.size(); i++)
-        if (indexes[i].name() == name)
+        if (indexes[i].nameStringData() == name)
             return i;
     return -1;
+}
+
+void BSONCollectionCatalogEntry::MetaData::insertIndex(IndexMetaData indexMetaData) {
+    int indexOffset = findIndexOffset(indexMetaData.nameStringData());
+
+    if (indexOffset < 0) {
+        indexes.push_back(std::move(indexMetaData));
+        return;
+    }
+
+    // We have an unused element, was invalidated due to an index drop, that can be reused
+    // for this new index.
+    indexes[indexOffset] = std::move(indexMetaData);
 }
 
 bool BSONCollectionCatalogEntry::MetaData::eraseIndex(StringData name) {
@@ -156,7 +171,10 @@ bool BSONCollectionCatalogEntry::MetaData::eraseIndex(StringData name) {
         return false;
     }
 
-    indexes.erase(indexes.begin() + indexOffset);
+    // Zero out the index metadata to be reused later and to keep the indexes of other indexes
+    // stable.
+    indexes[indexOffset] = {};
+
     return true;
 }
 
@@ -167,6 +185,10 @@ BSONObj BSONCollectionCatalogEntry::MetaData::toBSON(bool hasExclusiveAccess) co
     {
         BSONArrayBuilder arr(b.subarrayStart("indexes"));
         for (unsigned i = 0; i < indexes.size(); i++) {
+            if (!indexes[i].isPresent()) {
+                continue;
+            }
+
             BSONObjBuilder sub(arr.subobjStart());
             sub.append("spec", indexes[i].spec);
             sub.appendBool("ready", indexes[i].ready);
@@ -228,6 +250,14 @@ void BSONCollectionCatalogEntry::MetaData::parse(const BSONObj& obj) {
             if (idx["buildUUID"]) {
                 imd.buildUUID = fassert(31353, UUID::parse(idx["buildUUID"]));
             }
+
+            if (!imd.isPresent()) {
+                fassertFailedWithStatus(
+                    5738500,
+                    Status(ErrorCodes::FailedToParse,
+                           str::stream() << "invalid index in collection metadata: " << obj));
+            }
+
             indexes.push_back(imd);
         }
     }

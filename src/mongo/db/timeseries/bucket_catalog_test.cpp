@@ -58,6 +58,10 @@ protected:
     };
 
     void setUp() override;
+
+    std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>
+    _makeOperationContext();
+
     virtual BSONObj _makeTimeseriesOptionsForCreate() const;
 
     TimeseriesOptions _getTimeseriesOptions(const NamespaceString& ns) const;
@@ -118,6 +122,13 @@ void BucketCatalogTest::setUp() {
             ns.db().toString(),
             BSON("create" << ns.coll() << "timeseries" << _makeTimeseriesOptionsForCreate())));
     }
+}
+
+std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>
+BucketCatalogTest::_makeOperationContext() {
+    auto client = getServiceContext()->makeClient("BucketCatalogTest");
+    auto opCtx = client->makeOperationContext();
+    return {std::move(client), std::move(opCtx)};
 }
 
 BSONObj BucketCatalogTest::_makeTimeseriesOptionsForCreate() const {
@@ -269,6 +280,100 @@ TEST_F(BucketCatalogTest, InsertIntoDifferentBuckets) {
     for (const auto& batch : {result1.getValue(), result2.getValue(), result3.getValue()}) {
         _commit(batch, 0);
     }
+}
+
+TEST_F(BucketCatalogTest, InsertIntoSameBucketArray) {
+    auto result1 = _bucketCatalog->insert(
+        _opCtx,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        BSON(_timeField << Date_t::now() << _metaField << BSON_ARRAY(BSON("a" << 0 << "b" << 1))),
+        BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
+    auto result2 = _bucketCatalog->insert(
+        _opCtx,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        BSON(_timeField << Date_t::now() << _metaField << BSON_ARRAY(BSON("b" << 1 << "a" << 0))),
+        BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
+
+    ASSERT_EQ(result1.getValue(), result2.getValue());
+
+    // Check metadata in buckets.
+    ASSERT_BSONOBJ_EQ(BSON(_metaField << BSON_ARRAY(BSON("a" << 0 << "b" << 1))),
+                      _bucketCatalog->getMetadata(result1.getValue()->bucket()));
+    ASSERT_BSONOBJ_EQ(BSON(_metaField << BSON_ARRAY(BSON("a" << 0 << "b" << 1))),
+                      _bucketCatalog->getMetadata(result2.getValue()->bucket()));
+}
+
+TEST_F(BucketCatalogTest, InsertIntoSameBucketObjArray) {
+    auto result1 = _bucketCatalog->insert(
+        _opCtx,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        BSON(_timeField << Date_t::now() << _metaField
+                        << BSONObj(BSON("c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1)
+                                                          << BSON("f" << 1 << "g" << 0))))),
+        BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
+    auto result2 = _bucketCatalog->insert(
+        _opCtx,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        BSON(_timeField << Date_t::now() << _metaField
+                        << BSONObj(BSON("c" << BSON_ARRAY(BSON("b" << 1 << "a" << 0)
+                                                          << BSON("g" << 0 << "f" << 1))))),
+        BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
+
+    ASSERT_EQ(result1.getValue(), result2.getValue());
+
+    // Check metadata in buckets.
+    ASSERT_BSONOBJ_EQ(
+        BSON(_metaField << BSONObj(BSON(
+                 "c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1) << BSON("f" << 1 << "g" << 0))))),
+        _bucketCatalog->getMetadata(result1.getValue()->bucket()));
+    ASSERT_BSONOBJ_EQ(
+        BSON(_metaField << BSONObj(BSON(
+                 "c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1) << BSON("f" << 1 << "g" << 0))))),
+        _bucketCatalog->getMetadata(result2.getValue()->bucket()));
+}
+
+
+TEST_F(BucketCatalogTest, InsertIntoSameBucketNestedArray) {
+    auto result1 = _bucketCatalog->insert(
+        _opCtx,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        BSON(_timeField << Date_t::now() << _metaField
+                        << BSONObj(BSON("c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1)
+                                                          << BSON_ARRAY("123"
+                                                                        << "456"))))),
+        BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
+    auto result2 = _bucketCatalog->insert(
+        _opCtx,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        BSON(_timeField << Date_t::now() << _metaField
+                        << BSONObj(BSON("c" << BSON_ARRAY(BSON("b" << 1 << "a" << 0)
+                                                          << BSON_ARRAY("123"
+                                                                        << "456"))))),
+        BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
+
+    ASSERT_EQ(result1.getValue(), result2.getValue());
+
+    // Check metadata in buckets.
+    ASSERT_BSONOBJ_EQ(BSON(_metaField << BSONObj(BSON("c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1)
+                                                                        << BSON_ARRAY("123"
+                                                                                      << "456"))))),
+                      _bucketCatalog->getMetadata(result1.getValue()->bucket()));
+    ASSERT_BSONOBJ_EQ(BSON(_metaField << BSONObj(BSON("c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1)
+                                                                        << BSON_ARRAY("123"
+                                                                                      << "456"))))),
+                      _bucketCatalog->getMetadata(result2.getValue()->bucket()));
 }
 
 TEST_F(BucketCatalogTest, InsertNullAndMissingMetaFieldIntoDifferentBuckets) {
@@ -657,7 +762,6 @@ TEST_F(BucketCatalogTest, PrepareCommitOnAlreadyAbortedBatch) {
 }
 
 TEST_F(BucketCatalogTest, CombiningWithInsertsFromOtherClients) {
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch1 = _bucketCatalog
                       ->insert(_opCtx,
                                _ns1,
@@ -667,9 +771,8 @@ TEST_F(BucketCatalogTest, CombiningWithInsertsFromOtherClients) {
                                BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
                       .getValue();
 
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch2 = _bucketCatalog
-                      ->insert(_opCtx,
+                      ->insert(_makeOperationContext().second.get(),
                                _ns1,
                                _getCollator(_ns1),
                                _getTimeseriesOptions(_ns1),
@@ -677,9 +780,8 @@ TEST_F(BucketCatalogTest, CombiningWithInsertsFromOtherClients) {
                                BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
                       .getValue();
 
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch3 = _bucketCatalog
-                      ->insert(_opCtx,
+                      ->insert(_makeOperationContext().second.get(),
                                _ns1,
                                _getCollator(_ns1),
                                _getTimeseriesOptions(_ns1),
@@ -687,9 +789,8 @@ TEST_F(BucketCatalogTest, CombiningWithInsertsFromOtherClients) {
                                BucketCatalog::CombineWithInsertsFromOtherClients::kAllow)
                       .getValue();
 
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch4 = _bucketCatalog
-                      ->insert(_opCtx,
+                      ->insert(_makeOperationContext().second.get(),
                                _ns1,
                                _getCollator(_ns1),
                                _getTimeseriesOptions(_ns1),
@@ -708,7 +809,6 @@ TEST_F(BucketCatalogTest, CombiningWithInsertsFromOtherClients) {
 }
 
 TEST_F(BucketCatalogTest, CannotConcurrentlyCommitBatchesForSameBucket) {
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch1 = _bucketCatalog
                       ->insert(_opCtx,
                                _ns1,
@@ -718,9 +818,8 @@ TEST_F(BucketCatalogTest, CannotConcurrentlyCommitBatchesForSameBucket) {
                                BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
                       .getValue();
 
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch2 = _bucketCatalog
-                      ->insert(_opCtx,
+                      ->insert(_makeOperationContext().second.get(),
                                _ns1,
                                _getCollator(_ns1),
                                _getTimeseriesOptions(_ns1),
@@ -746,7 +845,6 @@ TEST_F(BucketCatalogTest, CannotConcurrentlyCommitBatchesForSameBucket) {
 }
 
 TEST_F(BucketCatalogTest, DuplicateNewFieldNamesAcrossConcurrentBatches) {
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch1 = _bucketCatalog
                       ->insert(_opCtx,
                                _ns1,
@@ -756,9 +854,8 @@ TEST_F(BucketCatalogTest, DuplicateNewFieldNamesAcrossConcurrentBatches) {
                                BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
                       .getValue();
 
-    _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     auto batch2 = _bucketCatalog
-                      ->insert(_opCtx,
+                      ->insert(_makeOperationContext().second.get(),
                                _ns1,
                                _getCollator(_ns1),
                                _getTimeseriesOptions(_ns1),

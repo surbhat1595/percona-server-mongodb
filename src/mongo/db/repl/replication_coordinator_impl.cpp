@@ -929,7 +929,7 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         return;
     }
 
-    LOGV2_DEBUG(5074000, 1, "Shutting down the replica set aware services.");
+    LOGV2(5074000, "Shutting down the replica set aware services.");
     ReplicaSetAwareServiceRegistry::get(_service).onShutdown();
 
     LOGV2(21328, "Shutting down replication subsystems");
@@ -3041,6 +3041,67 @@ ReplSetConfig ReplicationCoordinatorImpl::getConfig() const {
     return _rsConfig;
 }
 
+ConnectionString ReplicationCoordinatorImpl::getConfigConnectionString() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getConnectionString();
+}
+
+Milliseconds ReplicationCoordinatorImpl::getConfigElectionTimeoutPeriod() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getElectionTimeoutPeriod();
+}
+
+std::vector<MemberConfig> ReplicationCoordinatorImpl::getConfigVotingMembers() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.votingMembers();
+}
+
+std::int64_t ReplicationCoordinatorImpl::getConfigTerm() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getConfigTerm();
+}
+
+std::int64_t ReplicationCoordinatorImpl::getConfigVersion() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getConfigVersion();
+}
+
+ConfigVersionAndTerm ReplicationCoordinatorImpl::getConfigVersionAndTerm() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getConfigVersionAndTerm();
+}
+
+int ReplicationCoordinatorImpl::getConfigNumMembers() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getNumMembers();
+}
+
+Milliseconds ReplicationCoordinatorImpl::getConfigHeartbeatTimeoutPeriodMillis() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getHeartbeatTimeoutPeriodMillis();
+}
+
+BSONObj ReplicationCoordinatorImpl::getConfigBSON() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.toBSON();
+}
+
+const MemberConfig* ReplicationCoordinatorImpl::findConfigMemberByHostAndPort(
+    const HostAndPort& hap) const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.findMemberByHostAndPort(hap);
+}
+
+bool ReplicationCoordinatorImpl::isConfigLocalHostAllowed() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.isLocalHostAllowed();
+}
+
+Milliseconds ReplicationCoordinatorImpl::getConfigHeartbeatInterval() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.getHeartbeatInterval();
+}
+
 WriteConcernOptions ReplicationCoordinatorImpl::_getOplogCommitmentWriteConcern(WithLock lk) {
     auto syncMode = getWriteConcernMajorityShouldJournal_inlock()
         ? WriteConcernOptions::SyncMode::JOURNAL
@@ -3425,7 +3486,13 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     // So, acquire FCV mutex lock in shared mode to block writers from modifying the fcv document
     // to make sure fcv is not changed between getNewConfig() and storing the new config
     // document locally.
-    boost::optional<FixedFCVRegion> fixedFcvRegion(opCtx);
+    // Since 'skipSafetyChecks' is only true when this reconfig is invoked as part of
+    // 'signalDrainComplete', we can skip taking the FCV lock here because:
+    // 1. 'signalDrainComplete' acquires the RSTL in X mode prior to this reconfig, which will block
+    //    all external writers. This is also important because we must not acquire the FCV lock
+    //    while holding the RSTL to avoid deadlocking.
+    // 2. We are not able to accept replicated writes as primary until we fully exit drain mode.
+    auto fixedFcvRegion = skipSafetyChecks ? nullptr : std::make_unique<FixedFCVRegion>(opCtx);
 
     // Call the callback to get the new config given the old one.
     auto newConfigStatus = getNewConfig(oldConfig, topCoordTerm);
@@ -3519,7 +3586,7 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     // 1) For fcv 4.4, addition of new voter nodes.
     // 2) For fcv 4.7+, only if the current config doesn't contain the 'newlyAdded' field but the
     // new config got mutated to append 'newlyAdded' field.
-    if (force || !needsFcvLock()) {
+    if (fixedFcvRegion && (force || !needsFcvLock())) {
         fixedFcvRegion.reset();
     }
 

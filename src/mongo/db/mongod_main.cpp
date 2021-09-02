@@ -90,7 +90,6 @@
 #include "mongo/db/index_builds_coordinator_mongod.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/initialize_server_global_state.h"
-#include "mongo/db/initialize_server_security_state.h"
 #include "mongo/db/initialize_snmp.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/json.h"
@@ -409,8 +408,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // initialized, a noop recovery unit is used until the initialization is complete.
     auto startupOpCtx = serviceContext->makeOperationContext(&cc());
 
-    auto lastShutdownState =
-        initializeStorageEngine(startupOpCtx.get(), StorageEngineInitFlags::kNone);
+    auto lastShutdownState = initializeStorageEngine(startupOpCtx.get(), StorageEngineInitFlags{});
     StorageControl::startStorageControls(serviceContext);
 
 #ifdef MONGO_CONFIG_WIREDTIGER_ENABLED
@@ -724,7 +722,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         if (replSettings.usingReplSets()) {
             Lock::GlobalWrite lk(startupOpCtx.get());
             OldClientContext ctx(startupOpCtx.get(), NamespaceString::kRsOplogNamespace.ns());
-            createSlimOplogView(startupOpCtx.get(), ctx.db());
             tenant_migration_util::createOplogViewForTenantMigrations(startupOpCtx.get(), ctx.db());
         }
     }
@@ -1485,9 +1482,6 @@ int mongod_main(int argc, char* argv[]) {
     cmdline_utils::censorArgvArray(argc, argv);
 
     if (!initializeServerGlobalState(service))
-        quickExit(EXIT_FAILURE);
-
-    if (!initializeServerSecurityGlobalState(service))
         quickExit(EXIT_FAILURE);
 
     // There is no single-threaded guarantee beyond this point.

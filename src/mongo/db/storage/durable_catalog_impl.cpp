@@ -184,9 +184,6 @@ bool requiresTimestampForCatalogWrite(OperationContext* opCtx, const NamespaceSt
 
 }  // namespace
 
-using std::string;
-using std::unique_ptr;
-
 class DurableCatalogImpl::AddIdentChange : public RecoveryUnit::Change {
 public:
     AddIdentChange(DurableCatalogImpl* catalog, RecordId catalogId)
@@ -478,8 +475,8 @@ void DurableCatalogImpl::init(OperationContext* opCtx) {
         }
 
         // No rollback since this is just loading already committed data.
-        string ident = obj["ident"].String();
-        string ns = obj["ns"].String();
+        auto ident = obj["ident"].String();
+        auto ns = obj["ns"].String();
         _catalogIdToEntryMap[record->id] = Entry(record->id, ident, NamespaceString(ns));
     }
 
@@ -511,8 +508,8 @@ std::vector<DurableCatalog::Entry> DurableCatalogImpl::getAllCatalogEntries(
             // Skip over the version document because it doesn't correspond to a collection.
             continue;
         }
-        string ident = obj["ident"].String();
-        string collName = obj["ns"].String();
+        auto ident = obj["ident"].String();
+        auto collName = obj["ns"].String();
 
         ret.emplace_back(record->id, ident, NamespaceString(collName));
     }
@@ -532,7 +529,7 @@ StatusWith<DurableCatalog::Entry> DurableCatalogImpl::_addEntry(OperationContext
                                                                 const CollectionOptions& options) {
     invariant(opCtx->lockState()->isDbLockedForMode(nss.db(), MODE_IX));
 
-    const string ident = _newUniqueIdent(nss, "collection");
+    auto ident = _newUniqueIdent(nss, "collection");
 
     BSONObj obj;
     {
@@ -567,7 +564,7 @@ StatusWith<DurableCatalog::Entry> DurableCatalogImpl::_importEntry(OperationCont
                                                                    const BSONObj& metadata) {
     invariant(opCtx->lockState()->isDbLockedForMode(nss.db(), MODE_IX));
 
-    const string ident = metadata["ident"].String();
+    auto ident = metadata["ident"].String();
     StatusWith<RecordId> res =
         _rs->insertRecord(opCtx, metadata.objdata(), metadata.objsize(), Timestamp());
     if (!res.isOK())
@@ -635,8 +632,12 @@ void DurableCatalogImpl::putMetaData(OperationContext* opCtx,
             oldIdentMap = obj["idxIdent"].Obj();
 
         for (size_t i = 0; i < md.indexes.size(); i++) {
-            const auto index = md.indexes[i];
-            string name = index.name();
+            const auto& index = md.indexes[i];
+            if (!index.isPresent()) {
+                continue;
+            }
+
+            auto name = index.nameStringData();
 
             // All indexes with buildUUIDs must be ready:false.
             invariant(!(index.buildUUID && index.ready), str::stream() << md.toBSON(true));
@@ -1073,7 +1074,7 @@ int DurableCatalogImpl::getTotalIndexCount(OperationContext* opCtx, RecordId cat
     if (!md)
         return 0;
 
-    return static_cast<int>(md->indexes.size());
+    return md->getTotalIndexCount();
 }
 
 bool DurableCatalogImpl::isIndexPresent(OperationContext* opCtx,

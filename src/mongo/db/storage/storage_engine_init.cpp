@@ -67,7 +67,7 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     // This should be set once.
     invariant(!service->getStorageEngine());
 
-    if (0 == (initFlags & StorageEngineInitFlags::kAllowNoLockFile)) {
+    if ((initFlags & StorageEngineInitFlags::kAllowNoLockFile) == StorageEngineInitFlags{}) {
         createLockFile(service);
     }
 
@@ -136,7 +136,7 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     }
 
     std::unique_ptr<StorageEngineMetadata> metadata;
-    if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) == 0) {
+    if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) == StorageEngineInitFlags{}) {
         metadata = StorageEngineMetadata::forPath(dbpath);
     }
 
@@ -169,7 +169,8 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     }
 
     // Write a new metadata file if it is not present.
-    if (!metadata.get() && (initFlags & StorageEngineInitFlags::kSkipMetadataFile) == 0) {
+    if (!metadata.get() &&
+        (initFlags & StorageEngineInitFlags::kSkipMetadataFile) == StorageEngineInitFlags{}) {
         invariant(!storageGlobalParams.readOnly);
         metadata.reset(new StorageEngineMetadata(storageGlobalParams.dbpath));
         metadata->setStorageEngine(factory->getCanonicalName().toString());

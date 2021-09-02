@@ -56,6 +56,7 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/util/intrusive_counter.h"
 
@@ -86,13 +87,13 @@ class Document;
  *                          LiteParsedDocumentSourceDefault::parse,
  *                          DocumentSourceFoo::createFromBson);
  */
-#define REGISTER_DOCUMENT_SOURCE(key, liteParser, fullParser, allowedWithApiStrict)               \
-    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(key,                                                   \
-                                           liteParser,                                            \
-                                           fullParser,                                            \
-                                           allowedWithApiStrict,                                  \
-                                           LiteParsedDocumentSource::AllowedWithClientType::kAny, \
-                                           boost::none,                                           \
+#define REGISTER_DOCUMENT_SOURCE(key, liteParser, fullParser, allowedWithApiStrict) \
+    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(key,                                     \
+                                           liteParser,                              \
+                                           fullParser,                              \
+                                           allowedWithApiStrict,                    \
+                                           AllowedWithClientType::kAny,             \
+                                           boost::none,                             \
                                            true)
 
 /**
@@ -100,28 +101,27 @@ class Document;
  * We store minVersion in the parserMap, so that changing FCV at runtime correctly enables/disables
  * the parser.
  */
-#define REGISTER_DOCUMENT_SOURCE_WITH_MIN_VERSION(                                                \
-    key, liteParser, fullParser, allowedWithApiStrict, minVersion)                                \
-    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(key,                                                   \
-                                           liteParser,                                            \
-                                           fullParser,                                            \
-                                           allowedWithApiStrict,                                  \
-                                           LiteParsedDocumentSource::AllowedWithClientType::kAny, \
-                                           minVersion,                                            \
+#define REGISTER_DOCUMENT_SOURCE_WITH_MIN_VERSION(                      \
+    key, liteParser, fullParser, allowedWithApiStrict, minVersion)      \
+    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(key,                         \
+                                           liteParser,                  \
+                                           fullParser,                  \
+                                           allowedWithApiStrict,        \
+                                           AllowedWithClientType::kAny, \
+                                           minVersion,                  \
                                            true)
 
 /**
  * Registers a DocumentSource which cannot be exposed to the users.
  */
 #define REGISTER_INTERNAL_DOCUMENT_SOURCE(key, liteParser, fullParser, condition) \
-    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(                                       \
-        key,                                                                      \
-        liteParser,                                                               \
-        fullParser,                                                               \
-        LiteParsedDocumentSource::AllowedWithApiStrict::kInternal,                \
-        LiteParsedDocumentSource::AllowedWithClientType::kInternal,               \
-        boost::none,                                                              \
-        condition)
+    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(key,                                   \
+                                           liteParser,                            \
+                                           fullParser,                            \
+                                           AllowedWithApiStrict::kInternal,       \
+                                           AllowedWithClientType::kInternal,      \
+                                           boost::none,                           \
+                                           condition)
 
 /**
  * Like REGISTER_DOCUMENT_SOURCE_WITH_MIN_VERSION, except you can also specify a condition,
@@ -152,15 +152,14 @@ class Document;
 /**
  * Like REGISTER_DOCUMENT_SOURCE, except the parser is only enabled when test-commands are enabled.
  */
-#define REGISTER_TEST_DOCUMENT_SOURCE(key, liteParser, fullParser)        \
-    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(                               \
-        key,                                                              \
-        liteParser,                                                       \
-        fullParser,                                                       \
-        LiteParsedDocumentSource::AllowedWithApiStrict::kNeverInVersion1, \
-        LiteParsedDocumentSource::AllowedWithClientType::kAny,            \
-        boost::none,                                                      \
-        ::mongo::getTestCommandsEnabled())
+#define REGISTER_TEST_DOCUMENT_SOURCE(key, liteParser, fullParser)                 \
+    REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(key,                                    \
+                                           liteParser,                             \
+                                           fullParser,                             \
+                                           AllowedWithApiStrict::kNeverInVersion1, \
+                                           AllowedWithClientType::kAny,            \
+                                           boost::none,                            \
+                                           ::mongo::getTestCommandsEnabled())
 
 class DocumentSource : public RefCountable {
 public:
@@ -441,6 +440,31 @@ private:
      */
     bool pushSampleBefore(Pipeline::SourceContainer::iterator itr,
                           Pipeline::SourceContainer* container);
+
+    /**
+     * Attempts to push any kind of 'DocumentSourceSingleDocumentTransformation' stage directly
+     * ahead of the stage present at the 'itr' position if matches the constraints. Returns true if
+     * optimization was performed, false otherwise.
+     *
+     * Note that this optimization is oblivious to the transform function. The only stages that are
+     * eligible to swap are those that can safely swap with any transform.
+     */
+    bool pushSingleDocumentTransformBefore(Pipeline::SourceContainer::iterator itr,
+                                           Pipeline::SourceContainer* container);
+
+    /**
+     * Wraps various optimization methods and returns the call immediately if any one of them
+     * returns true.
+     */
+    bool attemptToPushStageBefore(Pipeline::SourceContainer::iterator itr,
+                                  Pipeline::SourceContainer* container) {
+        if (std::next(itr) == container->end()) {
+            return false;
+        }
+
+        return pushMatchBefore(itr, container) || pushSampleBefore(itr, container) ||
+            pushSingleDocumentTransformBefore(itr, container);
+    }
 
 public:
     /**

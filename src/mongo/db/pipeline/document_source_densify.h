@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/util/time_support.h"
@@ -41,13 +42,15 @@ namespace document_source_densify {
 // TODO SERVER-57334 Translation logic goes here.
 }
 
-// TODO SERVER-57332 This should inherit from DocumentSource.
-class DocumentSourceInternalDensify {
+class DocumentSourceInternalDensify final : public DocumentSource {
 public:
+    static constexpr StringData kStageName = "$_internalDensify"_sd;
+
     using DensifyValueType = stdx::variant<double, Date_t>;
     struct StepSpec {
-        DensifyValueType step;
+        double step;
         boost::optional<TimeUnit> unit;
+        boost::optional<TimeZone> tz;
     };
     class DocGenerator {
     public:
@@ -62,8 +65,7 @@ public:
 
     private:
         StepSpec _step;
-        // The field to add to 'includeFields' to generate a document. Store as a string since we
-        // don't need to manipulate it at all.
+        // The field to add to 'includeFields' to generate a document.
         FieldPath _path;
         Document _includeFields;
         // The document that is equal to or larger than '_max' that prompted the creation of this
@@ -85,5 +87,38 @@ public:
 
         GeneratorState _state = GeneratorState::kGeneratingDocuments;
     };
+
+    static boost::intrusive_ptr<DocumentSourceInternalDensify> create(
+        const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
+    static boost::intrusive_ptr<DocumentSource> createFromBson(
+        BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed,
+                LookupRequirement::kAllowed,
+                UnionRequirement::kAllowed};
+    }
+
+    const char* getSourceName() const final {
+        return kStageName.rawData();
+    }
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+
+    DepsTracker::State getDependencies(DepsTracker* deps) const final {
+        return DepsTracker::State::SEE_NEXT;
+    }
+
+    boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
+        return DistributedPlanLogic{nullptr, this, boost::none};
+    }
+
+    DocumentSourceInternalDensify(const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+    GetNextResult doGetNext() final;
 };
 }  // namespace mongo

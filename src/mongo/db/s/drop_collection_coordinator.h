@@ -29,8 +29,11 @@
 
 #pragma once
 
+#include "mongo/db/catalog/drop_collection.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/drop_collection_coordinator_document_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
+#include "mongo/s/grid.h"
 
 namespace mongo {
 
@@ -48,7 +51,37 @@ public:
         MongoProcessInterface::CurrentOpConnectionsMode connMode,
         MongoProcessInterface::CurrentOpSessionsMode sessionMode) noexcept override;
 
+    /**
+     * Locally drops a collection and cleans its CollectionShardingRuntime metadata
+     */
+    static DropReply dropCollectionLocally(OperationContext* opCtx, const NamespaceString& nss) {
+        DropReply result;
+        uassertStatusOK(
+            dropCollection(opCtx,
+                           nss,
+                           &result,
+                           DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops));
+
+        {
+            // Clear CollectionShardingRuntime entry
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+            Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
+            auto* csr = CollectionShardingRuntime::get(opCtx, nss);
+            csr->clearFilteringMetadata(opCtx);
+        }
+
+        // Evict cache entry for memory optimization
+        Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(nss);
+
+        return result;
+    }
+
 private:
+    ShardingDDLCoordinatorMetadata const& metadata() const override {
+        return _doc.getShardingDDLCoordinatorMetadata();
+    }
+
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
 
@@ -69,9 +102,10 @@ private:
         };
     }
 
-    void _insertStateDocument(StateDoc&& doc);
-    void _updateStateDocument(StateDoc&& newStateDoc);
     void _enterPhase(Phase newPhase);
+
+    void _performNoopRetryableWriteOnParticipants(
+        OperationContext* opCtx, const std::shared_ptr<executor::TaskExecutor>& executor);
 
     DropCollectionCoordinatorDocument _doc;
 };

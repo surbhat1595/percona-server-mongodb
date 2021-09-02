@@ -199,6 +199,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.FLOW_CONTROL_TICKETS = config.pop("flow_control_tickets")
 
     _config.INCLUDE_WITH_ANY_TAGS = _tags_from_list(config.pop("include_with_any_tags"))
+    _config.INCLUDE_TAGS = _tags_from_list(config.pop("include_with_all_tags"))
 
     _config.GENNY_EXECUTABLE = _expand_user(config.pop("genny_executable"))
     _config.JOBS = config.pop("jobs")
@@ -207,6 +208,8 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.MIXED_BIN_VERSIONS = config.pop("mixed_bin_versions")
     if _config.MIXED_BIN_VERSIONS is not None:
         _config.MIXED_BIN_VERSIONS = _config.MIXED_BIN_VERSIONS.split("-")
+
+    _config.MULTIVERSION_BIN_VERSION = config.pop("multiversion_bin_version")
 
     _config.INSTALL_DIR = config.pop("install_dir")
     if _config.INSTALL_DIR is not None:
@@ -284,7 +287,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.SUITE_FILES = config.pop("suite_files")
     if _config.SUITE_FILES is not None:
         _config.SUITE_FILES = _config.SUITE_FILES.split(",")
-    _config.TAG_FILE = config.pop("tag_file")
+    _config.TAG_FILES = config.pop("tag_files")
     _config.TRANSPORT_LAYER = config.pop("transport_layer")
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
 

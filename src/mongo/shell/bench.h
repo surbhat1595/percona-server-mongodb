@@ -63,6 +63,14 @@ enum class OpType {
     CPULOAD
 };
 
+inline bool isReadOp(OpType opType) {
+    return opType == OpType::FINDONE || opType == OpType::FIND;
+}
+
+inline bool isWriteOp(OpType opType) {
+    return opType == OpType::UPDATE || opType == OpType::INSERT || opType == OpType::REMOVE;
+}
+
 class BenchRunConfig;
 struct BenchRunStats;
 class BsonTemplateEvaluator;
@@ -138,6 +146,9 @@ struct BenchRunOp {
     // for keeping a snapshot read open for a longer time duration, say to simulate the basic
     // resources that a snapshot transaction would hold for a time.
     int maxRandomMillisecondDelayBeforeGetMore{0};
+
+    // Format: {$readPreference: {mode: modeStr}}.  Only mode field is allowed.
+    BSONObj readPrefObj;
 
     // This is an owned copy of the raw operation. All unowned members point into this.
     BSONObj myBsonOp;

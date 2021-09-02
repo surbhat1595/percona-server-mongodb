@@ -96,7 +96,7 @@ modules:
     repo: git@github.com:mongodb-labs/py-tpcc.git
     prefix: ../../src
     branch: master
-    ref: 2d19705337a40e24831a904266a648b85df5be84
+    ref: 46f8f42a71626fc2057d2604ab9359ccf0395ba0
 
   ###
 #  - name: mongo
@@ -175,6 +175,14 @@ functions:
     - command: shell.exec
       params:
         script: ./src/dsi/run-dsi post_run
+    - command: perf.send
+      params:
+        file: ./build/CedarReports/cedar_report.json
+        aws_key: ${terraform_key}
+        aws_secret: ${terraform_secret}
+        bucket: genny-metrics
+        region: us-east-1
+        prefix: ${task_id}_${execution}
     - command: attach.results
       params:
         file_location: ./build/EvergreenResultsJson/results.json
@@ -705,7 +713,7 @@ tasks:
 buildvariants:
   - name: linux-wt-standalone
     display_name: Standalone Linux inMemory
-    batchtime: 90  # 1.5 hours
+    batchtime: 240  # 4 hours
     modules: *modules
     expansions:
       # We are explicitly tracking the rhel62 variant compile options from evergreen.yml for
@@ -752,7 +760,7 @@ buildvariants:
 
   - name: linux-wt-repl
     display_name: 1-Node ReplSet Linux inMemory
-    batchtime: 90  # 1.5 hours
+    batchtime: 240  # 4 hours
     modules: *modules
     expansions:
       mongod_exec_wrapper: *exec_wrapper

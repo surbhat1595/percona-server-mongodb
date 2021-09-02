@@ -43,9 +43,6 @@ namespace mongo {
  */
 class BSONCollectionCatalogEntry {
 public:
-    static const StringData kIndexBuildScanning;
-    static const StringData kIndexBuildDraining;
-
     /**
      * Incremented when breaking changes are made to the index build procedure so that other servers
      * know whether or not to resume or discard unfinished index builds.
@@ -72,6 +69,15 @@ public:
             multikeyPaths = other.multikeyPaths;
         }
 
+        /**
+         * An index is considered present if it has a non-empty 'spec'.
+         * Invalid indexes by this definition include default constructed instances and
+         * and structs zeroed out due to index drops.
+         */
+        bool isPresent() const {
+            return !spec.isEmpty();
+        }
+
         IndexMetaData& operator=(IndexMetaData&& rhs) {
             if (&rhs != this) {
                 spec = std::move(rhs.spec);
@@ -91,8 +97,8 @@ public:
 
         void updateHiddenSetting(bool hidden);
 
-        std::string name() const {
-            return spec["name"].String();
+        StringData nameStringData() const {
+            return spec["name"].valueStringDataSafe();
         }
 
         BSONObj spec;
@@ -121,7 +127,17 @@ public:
          */
         BSONObj toBSON(bool hasExclusiveAccess = false) const;
 
+        /**
+         * Returns number of valid indexes.
+         */
+        int getTotalIndexCount() const;
+
         int findIndexOffset(StringData name) const;
+
+        /**
+         * Inserts information about an index into the MetaData.
+         */
+        void insertIndex(IndexMetaData indexMetaData);
 
         /**
          * Removes information about an index from the MetaData. Returns true if an index

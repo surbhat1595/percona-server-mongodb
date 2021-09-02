@@ -15,7 +15,14 @@ load('jstests/sharding/libs/shard_versioning_util.js');
 load('jstests/sharding/libs/sharded_transactions_helpers.js');
 load("jstests/sharding/libs/find_chunks_util.js");
 
-const st = new ShardingTest({mongos: 2, shards: 2, rs: {nodes: 3}});
+const st = new ShardingTest({
+    mongos: 2,
+    shards: 2,
+    rs: {nodes: 3},
+    configOptions:
+        {setParameter: {maxTransactionLockRequestTimeoutMillis: ReplSetTest.kDefaultTimeoutMS}}
+});
+
 const mongos = st.s0;
 const staleMongos = st.s1;
 const primaryShard = st.shard0.shardName;
@@ -194,7 +201,7 @@ function validateConfigChunksAfterRefine(oldEpoch) {
     assert.eq({a: MaxKey, b: MaxKey, c: MaxKey, d: MaxKey}, chunkArr[2].max);
     assert.eq(chunkArr[0].lastmodEpoch, chunkArr[1].lastmodEpoch);
     assert.eq(chunkArr[1].lastmodEpoch, chunkArr[2].lastmodEpoch);
-    assert.neq(oldEpoch, chunkArr[0].lastmodEpoch);
+    assert(!oldEpoch && !chunkArr[0].lastmodEpoch || oldEpoch != chunkArr[0].lastmodEpoch);
 }
 
 function setupConfigTagsBeforeRefine() {

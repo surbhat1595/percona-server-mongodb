@@ -96,6 +96,10 @@ public:
     void onReshardingFieldsChanges(OperationContext* opCtx,
                                    const TypeCollectionReshardingFields& reshardingFields);
 
+    SharedSemiFuture<void> awaitCriticalSectionAcquired();
+
+    SharedSemiFuture<void> awaitCriticalSectionPromoted();
+
     SharedSemiFuture<void> awaitFinalOplogEntriesWritten();
 
     /**
@@ -110,7 +114,15 @@ public:
     static void insertStateDocument(OperationContext* opCtx,
                                     const ReshardingDonorDocument& donorDoc);
 
-    // Initiates the cancellation of the resharding operation.
+    /**
+     * Indicates that the coordinator has persisted a decision. Unblocks the
+     * _coordinatorHasDecisionPersisted promise.
+     */
+    void commit();
+
+    /**
+     * Initiates the cancellation of the resharding operation.
+     */
     void abort(bool isUserCancelled);
 
 private:
@@ -154,7 +166,7 @@ private:
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const CancellationToken& abortToken);
 
-    ExecutorFuture<void> _awaitAllRecipientsDoneApplying(
+    ExecutorFuture<void> _awaitAllRecipientsDoneApplyingThenTransitionToPreparingToBlockWrites(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const CancellationToken& abortToken);
 

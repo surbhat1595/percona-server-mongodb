@@ -40,21 +40,56 @@ namespace sbe {
 using ScanOpenCallback = std::function<void(OperationContext*, const CollectionPtr&, bool)>;
 
 struct ScanCallbacks {
-    ScanCallbacks(LockAcquisitionCallback lockAcquisition,
-                  IndexKeyCorruptionCheckCallback indexKeyCorruptionCheck = {},
+    ScanCallbacks(IndexKeyCorruptionCheckCallback indexKeyCorruptionCheck = {},
                   IndexKeyConsistencyCheckCallback indexKeyConsistencyCheck = {},
                   ScanOpenCallback scanOpen = {})
-        : lockAcquisitionCallback(std::move(lockAcquisition)),
-          indexKeyCorruptionCheckCallback(std::move(indexKeyCorruptionCheck)),
+        : indexKeyCorruptionCheckCallback(std::move(indexKeyCorruptionCheck)),
           indexKeyConsistencyCheckCallBack(std::move(indexKeyConsistencyCheck)),
           scanOpenCallback(std::move(scanOpen)) {}
 
-    LockAcquisitionCallback lockAcquisitionCallback;
     IndexKeyCorruptionCheckCallback indexKeyCorruptionCheckCallback;
     IndexKeyConsistencyCheckCallback indexKeyConsistencyCheckCallBack;
     ScanOpenCallback scanOpenCallback;
 };
 
+/**
+ * Retrieves documents from the collection with the given 'collectionUuid' using the storage API.
+ * Can be used as either a full scan of the collection, or as a seek. In the latter case, this stage
+ * is given a 'seekKeySlot' from which to read a 'RecordId'. We seek to this 'RecordId' and then
+ * scan from that point to the end of the collection.
+ *
+ * If the 'recordSlot' is provided, then each of the records returned from the scan is placed into
+ * an output slot with this slot id. Similarly, if 'recordIdSlot' is provided, then this slot is
+ * populated with the record id on each advance.
+ *
+ * In addition, the scan/seek can extract a set of top-level fields from each document. The caller
+ * asks for this by passing a vector of 'fields', along with a corresponding slot vector 'vars' into
+ * which the resulting values should be stored. These vectors must have the same length.
+ *
+ * The direction of the scan is controlled by the 'forward' parameter.
+ *
+ * If this scan is acting as a seek used to obtain the record assocated with a particular record id,
+ * then a set of special slots will be provided. In this scenario, we need to detect whether a yield
+ * has caused the storage snapshot to advance since the index key was obtained from storage. When
+ * the snapshot has indeed advanced, the key may no longer be consistent with the 'RecordStore' and
+ * we must verify at runtime that no such inconsistency exists. This requires the scan to know the
+ * value of the index key, the identity of the index from which it was obtained, and the id of the
+ * storage snapshot from which it was obtained. This information is made available to the seek stage
+ * via 'snapshotIdSlot', 'indexIdSlot', 'indexKeySlot', and 'indexKeyPatternSlot'.
+ *
+ * If this is an oplog scan, then the 'oplogTsSlot' will be populated with the "ts" field from each
+ * oplog entry.
+ *
+ * Debug string representations:
+ *
+ *  scan recordSlot|none recordIdSlot|none snapshotIdSlot|none indexIdSlot|none indexKeySlot|none
+ *       indexKeyPatternSlot|none [slot1 = fieldName1, ... slot_n = fieldName_n] collectionUuid
+ *       forward needOplogSlotForTs
+ *
+ *  seek seekKeySlot recordSlot|none recordIdSlot|none snapshotIdSlot|none indexIdSlot|none
+ *       indexKeySlot|none indexKeyPatternSlot|none [slot1 = fieldName1, ... slot_n = fieldName_n]
+ *       collectionUuid forward needOplogSlotForTs
+ */
 class ScanStage final : public PlanStage {
 public:
     ScanStage(CollectionUUID collectionUuid,
@@ -109,8 +144,12 @@ private:
     const boost::optional<value::SlotId> _seekKeySlot;
     const bool _forward;
 
-    NamespaceString _collName;
-    uint64_t _catalogEpoch;
+    // These members are default constructed to boost::none and are initialized when 'prepare()'
+    // is called. Once they are set, they are never modified again.
+    boost::optional<NamespaceString> _collName;
+    boost::optional<uint64_t> _catalogEpoch;
+
+    CollectionPtr _coll;
 
     // If provided, used during a trial run to accumulate certain execution stats. Once the trial
     // run is complete, this pointer is reset to nullptr.
@@ -133,7 +172,6 @@ private:
     bool _open{false};
 
     std::unique_ptr<SeekableRecordCursor> _cursor;
-    boost::optional<AutoGetCollectionForReadMaybeLockFree> _coll;
     RecordId _key;
     bool _firstGetNext{false};
 
@@ -216,8 +254,12 @@ private:
     const std::vector<std::string> _fields;
     const value::SlotVector _vars;
 
-    NamespaceString _collName;
-    uint64_t _catalogEpoch;
+    // These members are default constructed to boost::none and are initialized when 'prepare()'
+    // is called. Once they are set, they are never modified again.
+    boost::optional<NamespaceString> _collName;
+    boost::optional<uint64_t> _catalogEpoch;
+
+    CollectionPtr _coll;
 
     std::shared_ptr<ParallelState> _state;
 
@@ -239,7 +281,6 @@ private:
     bool _open{false};
 
     std::unique_ptr<SeekableRecordCursor> _cursor;
-    boost::optional<AutoGetCollectionForReadMaybeLockFree> _coll;
 };
 }  // namespace sbe
 }  // namespace mongo

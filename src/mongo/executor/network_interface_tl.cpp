@@ -120,7 +120,9 @@ NetworkInterfaceTL::NetworkInterfaceTL(std::string instanceName,
 
     // Even if you have a service context, it may not have a transport layer (mostly for unittests).
     if (!_tl) {
-        LOGV2_WARNING(22601, "No TransportLayer configured during NetworkInterface startup");
+        if (TestingProctor::instance().isEnabled()) {
+            LOGV2_WARNING(22601, "No TransportLayer configured during NetworkInterface startup");
+        }
         _ownedTransportLayer =
             transport::TransportLayerManager::makeAndStartDefaultEgressTransportLayer();
         _tl = _ownedTransportLayer.get();
@@ -900,7 +902,7 @@ auto NetworkInterfaceTL::ExhaustCommandState::make(NetworkInterfaceTL* interface
 }
 
 Future<RemoteCommandResponse> NetworkInterfaceTL::ExhaustCommandState::sendRequest(
-    std::shared_ptr<RequestState> requestState) {
+    std::shared_ptr<RequestState> requestState) try {
     auto [promise, future] = makePromiseFuture<RemoteCommandResponse>();
     finalResponsePromise = std::move(promise);
 
@@ -912,20 +914,20 @@ Future<RemoteCommandResponse> NetworkInterfaceTL::ExhaustCommandState::sendReque
             continueExhaustRequest(std::move(requestState), swResponse);
         });
     return std::move(future).then([this](const auto& finalResponse) { return finalResponse; });
+} catch (const DBException& ex) {
+    return ex.toStatus();
 }
 
 void NetworkInterfaceTL::ExhaustCommandState::fulfillFinalPromise(
-    StatusWith<RemoteCommandOnAnyResponse> response) {
-    auto status = !response.getStatus().isOK()
-        ? response.getStatus()
-        : getStatusFromCommandResult(response.getValue().data);
-
-    if (!status.isOK()) {
-        promise.setError(status);
-        return;
-    }
-
-    promise.emplaceValue();
+    StatusWith<RemoteCommandOnAnyResponse> swr) {
+    promise.setFrom([&] {
+        if (!swr.isOK())
+            return swr.getStatus();
+        auto response = swr.getValue();
+        if (!response.isOK())
+            return response.status;
+        return getStatusFromCommandResult(response.data);
+    }());
 }
 
 void NetworkInterfaceTL::ExhaustCommandState::continueExhaustRequest(

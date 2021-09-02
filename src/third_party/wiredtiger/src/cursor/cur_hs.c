@@ -939,8 +939,7 @@ __curhs_insert(WT_CURSOR *cursor)
 
     /* Insert doesn't maintain a position across calls, clear resources. */
 err:
-    __wt_free(session, hs_tombstone);
-    __wt_free(session, hs_upd);
+    __wt_free_update_list(session, &hs_upd);
     WT_TRET(cursor->reset(cursor));
     API_END_RET(session, ret);
 }
@@ -1118,7 +1117,9 @@ __wt_curhs_open(WT_SESSION_IMPL *session, WT_CURSOR *owner, WT_CURSOR **cursorp)
     /* Open the file cursor for operations on the regular history store .*/
     WT_ERR(__curhs_file_cursor_open(session, &hs_cursor->file_cursor));
 
-    WT_ERR(__wt_cursor_init(cursor, WT_HS_URI, owner, NULL, cursorp));
+    WT_WITH_BTREE(session, CUR2BT(hs_cursor->file_cursor),
+      ret = __wt_cursor_init(cursor, WT_HS_URI, owner, NULL, cursorp));
+    WT_ERR(ret);
     WT_TIME_WINDOW_INIT(&hs_cursor->time_window);
     hs_cursor->btree_id = 0;
     WT_ERR(__wt_scr_alloc(session, 0, &hs_cursor->datastore_key));

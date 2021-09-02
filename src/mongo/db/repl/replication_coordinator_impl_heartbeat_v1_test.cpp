@@ -471,8 +471,8 @@ TEST_F(ReplCoordHBV1ReconfigTest,
     getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(origResObj));
     getNet()->runReadyNetworkOperations();
 
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigVersion(), initConfigVersion + 1);
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigTerm(), initConfigTerm);
+    ASSERT_EQ(getReplCoord()->getConfigVersion(), initConfigVersion + 1);
+    ASSERT_EQ(getReplCoord()->getConfigTerm(), initConfigTerm);
 }
 
 TEST_F(ReplCoordHBV1ReconfigTest,
@@ -515,7 +515,7 @@ TEST_F(ReplCoordHBV1ReconfigTest,
     getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(origResObj));
     getNet()->runReadyNetworkOperations();
 
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigTerm(), initConfigTerm + 1);
+    ASSERT_EQ(getReplCoord()->getConfigTerm(), initConfigTerm + 1);
 }
 
 TEST_F(ReplCoordHBV1ReconfigTest,
@@ -568,8 +568,8 @@ TEST_F(
     getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(origResObj));
     getNet()->runReadyNetworkOperations();
 
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigVersion(), (initConfigVersion - 1));
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigTerm(), (initConfigTerm + 1));
+    ASSERT_EQ(getReplCoord()->getConfigVersion(), (initConfigVersion - 1));
+    ASSERT_EQ(getReplCoord()->getConfigTerm(), (initConfigTerm + 1));
 }
 
 TEST_F(
@@ -614,8 +614,8 @@ TEST_F(
     getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(origResObj));
     getNet()->runReadyNetworkOperations();
 
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigVersion(), (initConfigVersion + 1));
-    ASSERT_EQ(getReplCoord()->getConfig().getConfigTerm(), UninitializedTerm);
+    ASSERT_EQ(getReplCoord()->getConfigVersion(), (initConfigVersion + 1));
+    ASSERT_EQ(getReplCoord()->getConfigTerm(), UninitializedTerm);
 }
 
 TEST_F(ReplCoordHBV1ReconfigTest,
@@ -1280,6 +1280,59 @@ TEST_F(ReplCoordHBV1Test, LastCommittedOpTimeOnlyUpdatesFromHeartbeatIfNotInStar
     }
 }
 
+TEST_F(ReplCoordHBV1Test, handleHeartbeatResponseForTestEnqueuesValidHandle) {
+    init();
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 2 << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id" << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id" << 1))),
+                       HostAndPort("node1", 12345));
+
+    OpTime opTime1(Timestamp(100, 1), 0);
+    Date_t wallTime1 = Date_t() + Seconds(100);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+
+    // Become primary.
+    replCoordSetMyLastAppliedAndDurableOpTime(opTime1, wallTime1);
+    simulateSuccessfulV1Election();
+    ASSERT(getReplCoord()->getMemberState().primary());
+
+    auto failpoint = globalFailPointRegistry().find(
+        "hangAfterTrackingNewHandleInHandleHeartbeatResponseForTest");
+    auto timesEntered = failpoint->setMode(FailPoint::alwaysOn);
+
+    // Prepare the test heartbeat response.
+    ReplSetHeartbeatResponse hbResp;
+    hbResp.setSetName("mySet");
+    hbResp.setState(MemberState::RS_SECONDARY);
+    hbResp.setTerm(1);
+    hbResp.setConfigVersion(2);
+    hbResp.setConfigTerm(1);
+    hbResp.setAppliedOpTimeAndWallTime({opTime1, wallTime1});
+    hbResp.setDurableOpTimeAndWallTime({opTime1, wallTime1});
+    auto hbRespObj = (BSONObjBuilder(hbResp.toBSON()) << "ok" << 1).obj();
+
+    stdx::thread heartbeatReponseThread([&] {
+        Client::initThread("handleHeartbeatResponseForTest");
+        getReplCoord()->handleHeartbeatResponse_forTest(hbRespObj, 1 /* targetIndex */);
+    });
+
+    failpoint->waitForTimesEntered(timesEntered + 1);
+
+    // Restarting all heartbeats includes canceling them first.
+    // Canceling the dummy handle we just enqueued should *not* result in a crash.
+    getReplCoord()->restartScheduledHeartbeats_forTest();
+
+    failpoint->setMode(FailPoint::off, 0);
+    heartbeatReponseThread.join();
+}
+
+
 /**
  * Test a concurrent stepdown and reconfig. The stepdown is triggered by a heartbeat response with
  * a higher term, the reconfig is triggered either by a heartbeat with a new config, or by a user
@@ -1474,11 +1527,10 @@ void HBStepdownAndReconfigTest::assertSteppedDown() {
 void HBStepdownAndReconfigTest::assertConfigStored() {
     LOGV2(463812, "Waiting for config to be stored");
     // Wait for new config since it may be installed asynchronously.
-    while (getReplCoord()->getConfig().getConfigVersionAndTerm() < ConfigVersionAndTerm(3, 1)) {
+    while (getReplCoord()->getConfigVersionAndTerm() < ConfigVersionAndTerm(3, 1)) {
         sleepFor(Milliseconds(10));
     }
-    ASSERT_EQUALS(ConfigVersionAndTerm(3, 1),
-                  getReplCoord()->getConfig().getConfigVersionAndTerm());
+    ASSERT_EQUALS(ConfigVersionAndTerm(3, 1), getReplCoord()->getConfigVersionAndTerm());
 }
 
 TEST_F(HBStepdownAndReconfigTest, HBStepdownThenHBReconfig) {

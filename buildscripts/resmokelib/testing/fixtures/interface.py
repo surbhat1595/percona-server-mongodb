@@ -76,10 +76,6 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
     # is defined for all subclasses of Fixture.
     REGISTERED_NAME = "Fixture"
 
-    _LAST_LTS_FCV = multiversion.LAST_LTS_FCV
-    _LATEST_FCV = multiversion.LATEST_FCV
-    _LAST_LTS_BIN_VERSION = multiversion.LAST_LTS_BIN_VERSION
-
     AWAIT_READY_TIMEOUT_SECS = 300
 
     def __init__(self, logger, job_num, fixturelib, dbpath_prefix=None):
@@ -154,6 +150,14 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
 
     def get_dbpath_prefix(self):
         """Return dbpath prefix."""
+        return self._dbpath_prefix
+
+    def get_path_for_archival(self):
+        """
+        Return the dbpath for archival that includes all possible directories.
+
+        This includes directories for resmoke fixtures and fixtures spawned by the shell.
+        """
         return self._dbpath_prefix
 
     def get_internal_connection_string(self):

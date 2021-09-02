@@ -40,6 +40,7 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/delete.h"
@@ -47,6 +48,7 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/recoverable_critical_section_service.h"
+#include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
@@ -150,13 +152,23 @@ public:
                                    const BSONObj& query,
                                    const BSONObj& update) override {
         auto catalogClient = Grid::get(opCtx)->catalogClient();
-        uassertStatusOK(catalogClient->updateConfigDocument(
+        auto docWasModified = uassertStatusOK(catalogClient->updateConfigDocument(
             opCtx,
             NamespaceString::kConfigReshardingOperationsNamespace,
             query,
             update,
             false, /* upsert */
             ShardingCatalogClient::kMajorityWriteConcern));
+
+        if (!docWasModified) {
+            LOGV2_DEBUG(
+                5543400,
+                1,
+                "Resharding coordinator document was not modified by the donor's update; this is "
+                "expected when the update had previously been interrupted due to a stepdown",
+                "query"_attr = query,
+                "update"_attr = update);
+        }
     }
 };
 
@@ -217,7 +229,8 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_runUntilBlockin
                            executor, abortToken);
                    })
                    .then([this, executor, abortToken] {
-                       return _awaitAllRecipientsDoneApplying(executor, abortToken);
+                       return _awaitAllRecipientsDoneApplyingThenTransitionToPreparingToBlockWrites(
+                           executor, abortToken);
                    })
                    .then([this] { _writeTransactionOplogEntryThenTransitionToBlockingWrites(); });
            })
@@ -471,14 +484,14 @@ void ReshardingDonorService::DonorStateMachine::onReshardingFieldsChanges(
             ensureFulfilledPromise(lk, _coordinatorHasDecisionPersisted);
         }
     }
+}
 
-    if (coordinatorState >= CoordinatorStateEnum::kBlockingWrites) {
-        _critSecWasAcquired.getFuture().wait(opCtx);
-    }
+SharedSemiFuture<void> ReshardingDonorService::DonorStateMachine::awaitCriticalSectionAcquired() {
+    return _critSecWasAcquired.getFuture();
+}
 
-    if (coordinatorState >= CoordinatorStateEnum::kCommitting) {
-        _critSecWasPromoted.getFuture().wait(opCtx);
-    }
+SharedSemiFuture<void> ReshardingDonorService::DonorStateMachine::awaitCriticalSectionPromoted() {
+    return _critSecWasPromoted.getFuture();
 }
 
 void ReshardingDonorService::DonorStateMachine::
@@ -529,6 +542,41 @@ void ReshardingDonorService::DonorStateMachine::
         return generateMinFetchTimestamp(opCtx.get(), _metadata.getSourceNss());
     }();
 
+    {
+        auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+        auto rawOpCtx = opCtx.get();
+
+        auto generateOplogEntry = [&]() {
+            ReshardingChangeEventO2Field changeEvent{_metadata.getReshardingUUID(),
+                                                     ReshardingChangeEventEnum::kReshardBegin};
+
+            repl::MutableOplogEntry oplog;
+            oplog.setNss(_metadata.getSourceNss());
+            oplog.setOpType(repl::OpTypeEnum::kNoop);
+            oplog.setUuid(_metadata.getSourceUUID());
+            oplog.setObject(BSON("msg"
+                                 << "Created temporary resharding collection"));
+            oplog.setObject2(changeEvent.toBSON());
+            oplog.setOpTime(OplogSlot());
+            oplog.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+            return oplog;
+        };
+
+        auto oplog = generateOplogEntry();
+        writeConflictRetry(
+            rawOpCtx, "ReshardingBeginOplog", NamespaceString::kRsOplogNamespace.ns(), [&] {
+                AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+                WriteUnitOfWork wunit(rawOpCtx);
+                const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
+                uassert(5052101,
+                        str::stream()
+                            << "Failed to create new oplog entry for oplog with opTime: "
+                            << oplog.getOpTime().toString() << ": " << redact(oplog.toBSON()),
+                        !oplogOpTime.isNull());
+                wunit.commit();
+            });
+    }
+
     LOGV2_DEBUG(5390702,
                 2,
                 "Collection being resharded now ready for recipients to begin cloning",
@@ -567,20 +615,22 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::
         });
 }
 
-ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_awaitAllRecipientsDoneApplying(
-    const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-    const CancellationToken& abortToken) {
+ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::
+    _awaitAllRecipientsDoneApplyingThenTransitionToPreparingToBlockWrites(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& abortToken) {
     if (_donorCtx.getState() > DonorStateEnum::kDonatingOplogEntries) {
         return ExecutorFuture<void>(**executor, Status::OK());
     }
 
     return future_util::withCancellation(_allRecipientsDoneApplying.getFuture(), abortToken)
-        .thenRunOn(**executor);
+        .thenRunOn(**executor)
+        .then([this] { _transitionState(DonorStateEnum::kPreparingToBlockWrites); });
 }
 
 void ReshardingDonorService::DonorStateMachine::
     _writeTransactionOplogEntryThenTransitionToBlockingWrites() {
-    if (_donorCtx.getState() > DonorStateEnum::kDonatingOplogEntries) {
+    if (_donorCtx.getState() > DonorStateEnum::kPreparingToBlockWrites) {
         stdx::lock_guard<Latch> lk(_mutex);
         ensureFulfilledPromise(lk, _critSecWasAcquired);
         return;
@@ -854,18 +904,40 @@ void ReshardingDonorService::DonorStateMachine::insertStateDocument(
     store.add(opCtx, donorDoc, kNoWaitWriteConcern);
 }
 
+void ReshardingDonorService::DonorStateMachine::commit() {
+    stdx::lock_guard<Latch> lk(_mutex);
+    tassert(ErrorCodes::ReshardCollectionInProgress,
+            "Attempted to commit the resharding operation in an incorrect state",
+            _donorCtx.getState() >= DonorStateEnum::kBlockingWrites);
+
+    if (!_coordinatorHasDecisionPersisted.getFuture().isReady()) {
+        _coordinatorHasDecisionPersisted.emplaceValue();
+    }
+}
+
 void ReshardingDonorService::DonorStateMachine::_updateDonorDocument(
     DonorShardContext&& newDonorCtx) {
     auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-    PersistentTaskStore<ReshardingDonorDocument> store(
-        NamespaceString::kDonorReshardingOperationsNamespace);
-    store.update(
-        opCtx.get(),
-        BSON(ReshardingDonorDocument::kReshardingUUIDFieldName << _metadata.getReshardingUUID()),
-        BSON("$set" << BSON(ReshardingDonorDocument::kMutableStateFieldName
-                            << newDonorCtx.toBSON())),
-        kNoWaitWriteConcern);
+    const auto& nss = NamespaceString::kDonorReshardingOperationsNamespace;
 
+    writeConflictRetry(opCtx.get(), "DonorStateMachine::_updateDonorDocument", nss.toString(), [&] {
+        AutoGetCollection coll(opCtx.get(), nss, MODE_X);
+
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << nss.toString() << " does not exist",
+                coll);
+
+        WriteUnitOfWork wuow(opCtx.get());
+        Helpers::update(opCtx.get(),
+                        nss.toString(),
+                        BSON(ReshardingDonorDocument::kReshardingUUIDFieldName
+                             << _metadata.getReshardingUUID()),
+                        BSON("$set" << BSON(ReshardingDonorDocument::kMutableStateFieldName
+                                            << newDonorCtx.toBSON())));
+        wuow.commit();
+    });
+
+    stdx::lock_guard<Latch> lk(_mutex);
     _donorCtx = newDonorCtx;
 }
 
@@ -875,7 +947,7 @@ void ReshardingDonorService::DonorStateMachine::_removeDonorDocument(
 
     const auto& nss = NamespaceString::kDonorReshardingOperationsNamespace;
     writeConflictRetry(opCtx.get(), "DonorStateMachine::_removeDonorDocument", nss.toString(), [&] {
-        AutoGetCollection coll(opCtx.get(), nss, MODE_IX);
+        AutoGetCollection coll(opCtx.get(), nss, MODE_X);
 
         if (!coll) {
             return;

@@ -15,6 +15,31 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
   # activate the virtualenv if it has been set up
   activate_venv
 
+  if [[ -f "patch_test_tags.tgz" ]]; then
+    tags_build_variant="${build_variant}"
+
+    # TODO SERVER-56382: create a more robust mapping between query builders and existing required builders.
+    if [[ "${build_variant}" =~ .*"-query-patch-only" ]]; then
+      # Use the RHEL 8 all feature flags variant for the classic engine variant. The original
+      # classic engine variant is not a required builder and therefore not captured in patch
+      # test failure history.
+      tags_build_variant="enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required"
+    fi
+
+    $python buildscripts/testmatrix/getdisplaytaskname.py "${task_name}" "${build_variant}" >display_task_name.txt
+    display_task_name=$(cat display_task_name.txt)
+
+    tar -xzf patch_test_tags.tgz
+
+    calculated_tags_file_path="failedtesttags/${tags_build_variant}/${display_task_name}.yml"
+
+    if [[ -f $calculated_tags_file_path ]]; then
+      extra_args="$extra_args --tagFile=failedtesttags/${tags_build_variant}/${display_task_name}.yml --includeWithAllTags=recent_failure"
+    else
+      echo "calculated tags file does not exist: $calculated_tags_file_path"
+    fi
+  fi
+
   # on *SAN builds, extract the debug symbols so they're available
   # to the symbolizer
   if [[ -n "${san_options}" ]]; then
@@ -92,13 +117,7 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     extra_args="$extra_args --mongodSetParameter \"{'jsHeapLimitMB':10}\""
   fi
 
-  path_value="$PATH"
-  if [ ${variant_path_suffix} ]; then
-    path_value="$path_value:${variant_path_suffix}"
-  fi
-  if [ ${task_path_suffix} ]; then
-    path_value="$path_value:${task_path_suffix}"
-  fi
+  path_value="$PATH:/data/multiversion"
 
   # The "resmoke_wrapper" expansion is used by the 'burn_in_tests' task to wrap the resmoke.py
   # invocation. It doesn't set any environment variables and should therefore come last in
@@ -136,10 +155,11 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
   set -o errexit
 
   if [[ -n "${record_with}" ]]; then
-    recording_size=$(du -ch *.undo | grep total)
+    recording_size=$( (du -ch ./*.undo ./*.undo.tokeep || true) | grep total)
     echo "UndoDB produced recordings that were $recording_size (uncompressed) on disk"
-    if [[ $resmoke_exit_code = 0 ]]; then
-      echo "Resmoke exited successfully. UndoDB recordings will not be saved."
+    # Unittests recordings are renamed so there's never a need to store any .undo files.
+    if [[ $resmoke_exit_code = 0 || "${task_name}" == "run_unittests_with_recording" ]]; then
+      echo "Removing UndoDB recordings of successful tests."
       rm *.undo || true
     fi
   fi
@@ -160,5 +180,6 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     core_files=$(/usr/bin/find -H .. \( -name "*.core" -o -name "*.mdmp" \) 2>/dev/null)
     rm -rf $core_files
   fi
+
   exit $resmoke_exit_code
 fi # end if [[ ${disable_unit_tests} && ! -f ${skip_tests|/dev/null} ]]

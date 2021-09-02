@@ -71,7 +71,9 @@ IndexCatalogEntryImpl::IndexCatalogEntryImpl(OperationContext* const opCtx,
       _ordering(Ordering::make(_descriptor->keyPattern())),
       _isReady(false),
       _isFrozen(isFrozen),
-      _isDropped(false) {
+      _isDropped(false),
+      _indexOffset(invariantStatusOK(
+          collection->checkMetaDataForIndex(_descriptor->indexName(), _descriptor->infoObj()))) {
 
     _descriptor->_entry = this;
     _isReady = collection->isIndexReady(_descriptor->indexName());
@@ -356,7 +358,8 @@ bool IndexCatalogEntryImpl::isPresentInMySnapshot(OperationContext* opCtx) const
 bool IndexCatalogEntryImpl::_catalogIsMultikey(OperationContext* opCtx,
                                                const CollectionPtr& collection,
                                                MultikeyPaths* multikeyPaths) const {
-    return collection->isIndexMultikey(opCtx, _descriptor->indexName(), multikeyPaths);
+    return collection->isIndexMultikey(
+        opCtx, _descriptor->indexName(), multikeyPaths, _indexOffset);
 }
 
 void IndexCatalogEntryImpl::_catalogSetMultikey(OperationContext* opCtx,
@@ -367,8 +370,8 @@ void IndexCatalogEntryImpl::_catalogSetMultikey(OperationContext* opCtx,
     // CollectionCatalogEntry::setIndexIsMultikey() requires that we discard the path-level
     // multikey information in order to avoid unintentionally setting path-level multikey
     // information on an index created before 3.4.
-    auto indexMetadataHasChanged =
-        collection->setIndexIsMultikey(opCtx, _descriptor->indexName(), multikeyPaths);
+    auto indexMetadataHasChanged = collection->setIndexIsMultikey(
+        opCtx, _descriptor->indexName(), multikeyPaths, _indexOffset);
 
     if (indexMetadataHasChanged) {
         LOGV2_DEBUG(4718705,

@@ -38,6 +38,7 @@
 #include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/catalog/index_build_entry_gen.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/index_build_entry_helpers.h"
 #include "mongo/db/service_context.h"
@@ -87,6 +88,11 @@ void checkIfEqual(IndexBuildEntry lhs, IndexBuildEntry rhs) {
         ASSERT_FALSE(lhs.getCommitReadyMembers());
         ASSERT_FALSE(rhs.getCommitReadyMembers());
     }
+}
+
+Status removeIndexBuildEntry(OperationContext* opCtx, UUID indexBuildUUID) {
+    AutoGetCollection autoColl(opCtx, NamespaceString::kIndexBuildEntryNamespace, MODE_IX);
+    return indexbuildentryhelpers::removeIndexBuildEntry(opCtx, *autoColl, indexBuildUUID);
 }
 
 class IndexBuildEntryHelpersTest : public CatalogTestFixture {

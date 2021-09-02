@@ -75,6 +75,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(blockHeartbeatStepdown);
 MONGO_FAIL_POINT_DEFINE(blockHeartbeatReconfigFinish);
+MONGO_FAIL_POINT_DEFINE(hangAfterTrackingNewHandleInHandleHeartbeatResponseForTest);
 MONGO_FAIL_POINT_DEFINE(waitForPostActionCompleteInHbReconfig);
 
 }  // namespace
@@ -149,7 +150,9 @@ void ReplicationCoordinatorImpl::_scheduleHeartbeatToTarget_inlock(const HostAnd
 void ReplicationCoordinatorImpl::handleHeartbeatResponse_forTest(BSONObj response,
                                                                  int targetIndex,
                                                                  Milliseconds ping) {
-    CallbackHandle handle;
+    // Make a handle to a valid no-op.
+    CallbackHandle handle = uassertStatusOK(
+        _replExecutor->scheduleWork([=](const executor::TaskExecutor::CallbackArgs& args) {}));
     RemoteCommandRequest request;
     request.target = _rsConfig.getMemberAt(targetIndex).getHostAndPort();
     executor::TaskExecutor::ResponseStatus status(response, ping);
@@ -166,6 +169,8 @@ void ReplicationCoordinatorImpl::handleHeartbeatResponse_forTest(BSONObj respons
         // Pretend we sent a request so that _untrackHeartbeatHandle_inlock succeeds.
         _trackHeartbeatHandle_inlock(handle, HeartbeatState::kSent, request.target);
     }
+
+    hangAfterTrackingNewHandleInHandleHeartbeatResponseForTest.pauseWhileSet();
 
     _handleHeartbeatResponse(cbData);
 }
@@ -242,6 +247,25 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
             // Asynchronous stepdown could happen, but it will wait for _mutex and execute
             // after this function, so we cannot and don't need to wait for it to finish.
             _processReplSetMetadata_inlock(replMetadata.getValue());
+        }
+
+        // Arbiters are always expected to report null durable optimes (and wall times).
+        // If that is not the case here, make sure to correct these times before ingesting them.
+        auto memberInConfig = _rsConfig.findMemberByHostAndPort(target);
+        if ((hbResponse.hasState() && hbResponse.getState().arbiter()) ||
+            (_rsConfig.isInitialized() && memberInConfig && memberInConfig->isArbiter())) {
+            if (hbResponse.hasDurableOpTime() &&
+                (!hbResponse.getDurableOpTime().isNull() ||
+                 hbResponse.getDurableOpTimeAndWallTime().wallTime != Date_t())) {
+                LOGV2_FOR_HEARTBEATS(
+                    5662000,
+                    1,
+                    "Received non-null durable optime/walltime for arbiter from heartbeat. "
+                    "Ignoring value(s).",
+                    "target"_attr = target,
+                    "durableOpTimeAndWallTime"_attr = hbResponse.getDurableOpTimeAndWallTime());
+                hbResponse.unsetDurableOpTimeAndWallTime();
+            }
         }
     }
     const Date_t now = _replExecutor->now();

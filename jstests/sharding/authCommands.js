@@ -93,7 +93,7 @@ assert.soon(function() {
     var x = st.chunkDiff("foo", "test");
     print("chunk diff: " + x);
     return x < 2 && configDB.locks.findOne({_id: 'test.foo'}).state == 0;
-}, "no balance happened", 5 * 60 * 1000);
+}, "no balance happened", 15 * 60 * 1000);
 
 var map = function() {
     emit(this.i, this.j);
@@ -127,9 +127,6 @@ var checkReadOps = function(hasReadAuth) {
         assert.eq(expectedDocs, testDB.foo.find().itcount());
         assert.eq(expectedDocs, testDB.foo.count());
 
-        // NOTE: This is an explicit check that GLE can be run with read prefs, not the result
-        // of above.
-        assert.eq(null, testDB.runCommand({getlasterror: 1}).err);
         checkCommandSucceeded(testDB, {dbstats: 1});
         checkCommandSucceeded(testDB, {collstats: 'foo'});
 

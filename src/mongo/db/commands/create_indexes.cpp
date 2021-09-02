@@ -295,7 +295,7 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
     auto db = databaseHolder->getDb(opCtx, ns.db());
     uassert(ErrorCodes::CommandNotSupportedOnView,
             "Cannot create indexes on a view",
-            !db || !ViewCatalog::get(db)->lookup(opCtx, ns.ns()));
+            !db || !ViewCatalog::get(db)->lookup(opCtx, ns));
 
     if (createCollImplicitly) {
         // We need to create the collection.
@@ -337,7 +337,7 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
     uassert(ErrorCodes::OperationNotSupportedInTransaction,
             str::stream() << "Cannot create new indexes on non-empty collection " << ns
                           << " in a multi-document transaction.",
-            collection->numRecords(opCtx) == 0);
+            collection->isEmpty(opCtx));
 
     const int numIndexesBefore =
         IndexBuildsCoordinator::getNumIndexesTotal(opCtx, collection.get());

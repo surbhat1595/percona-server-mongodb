@@ -50,7 +50,7 @@ class configuration {
         std::string default_config = std::string(config_entry->base);
         /* Merge in the default configuration. */
         _config = merge_default_config(default_config, config);
-        debug_print("Running with enriched config: " + _config, DEBUG_INFO);
+        debug_print("Full config: " + _config, DEBUG_INFO);
 
         int ret = wiredtiger_test_config_validate(
           nullptr, nullptr, test_config_name.c_str(), _config.c_str());
@@ -133,6 +133,13 @@ class configuration {
     get_subconfig(const std::string &key)
     {
         return get<configuration *>(key, false, types::STRUCT, nullptr,
+          [](WT_CONFIG_ITEM item) { return new configuration(item); });
+    }
+
+    configuration *
+    get_optional_subconfig(const std::string &key)
+    {
+        return get<configuration *>(key, true, types::STRUCT, nullptr,
           [](WT_CONFIG_ITEM item) { return new configuration(item); });
     }
 

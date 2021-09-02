@@ -33,6 +33,7 @@
 
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
@@ -48,7 +49,8 @@ namespace {
 void dropShardedCollection(OperationContext* opCtx,
                            const CollectionType& coll,
                            std::shared_ptr<executor::ScopedTaskExecutor> executor) {
-    sharding_ddl_util::removeCollMetadataFromConfig(opCtx, coll);
+    sharding_ddl_util::removeCollAndChunksMetadataFromConfig(opCtx, coll);
+    sharding_ddl_util::removeTagsMetadataFromConfig_notIdempotent(opCtx, coll.getNss());
 
     const auto primaryShardId = ShardingState::get(opCtx)->shardId();
     const ShardsvrDropCollectionParticipant dropCollectionParticipant(coll.getNss());
@@ -117,26 +119,6 @@ boost::optional<BSONObj> DropDatabaseCoordinator::reportForCurrentOp(
     return bob.obj();
 }
 
-void DropDatabaseCoordinator::_insertStateDocument(OperationContext* opCtx, StateDoc&& doc) {
-    auto coorMetadata = doc.getShardingDDLCoordinatorMetadata();
-    coorMetadata.setRecoveredFromDisk(true);
-    doc.setShardingDDLCoordinatorMetadata(coorMetadata);
-
-    PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-    store.add(opCtx, doc, WriteConcerns::kMajorityWriteConcern);
-    _doc = std::move(doc);
-}
-
-void DropDatabaseCoordinator::_updateStateDocument(OperationContext* opCtx, StateDoc&& newDoc) {
-    PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-    store.update(opCtx,
-                 BSON(StateDoc::kIdFieldName << _doc.getId().toBSON()),
-                 newDoc.toBSON(),
-                 WriteConcerns::kMajorityWriteConcern);
-
-    _doc = std::move(newDoc);
-}
-
 void DropDatabaseCoordinator::_enterPhase(Phase newPhase) {
     StateDoc newDoc(_doc);
     newDoc.setPhase(newPhase);
@@ -148,12 +130,11 @@ void DropDatabaseCoordinator::_enterPhase(Phase newPhase) {
                 "newPhase"_attr = DropDatabaseCoordinatorPhase_serializer(newDoc.getPhase()),
                 "oldPhase"_attr = DropDatabaseCoordinatorPhase_serializer(_doc.getPhase()));
 
-    auto opCtx = cc().makeOperationContext();
     if (_doc.getPhase() == Phase::kUnset) {
-        _insertStateDocument(opCtx.get(), std::move(newDoc));
+        _doc = _insertStateDocument(std::move(newDoc));
         return;
     }
-    _updateStateDocument(opCtx.get(), std::move(newDoc));
+    _doc = _updateStateDocument(cc().makeOperationContext().get(), std::move(newDoc));
 }
 
 ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
@@ -166,6 +147,16 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
+
+                const auto critSecReason = BSON("dropDatabase" << _dbName);
+
+                {
+                    Lock::DBLock dbLock(opCtx, _dbName, MODE_X);
+                    auto dss = DatabaseShardingState::get(opCtx, _dbName);
+                    auto dssLock = DatabaseShardingState::DSSLock::lockExclusive(opCtx, dss);
+                    dss->enterCriticalSectionCatchUpPhase(opCtx, dssLock, critSecReason);
+                    dss->enterCriticalSectionCommitPhase(opCtx, dssLock, critSecReason);
+                }
 
                 if (_doc.getCollInfo()) {
                     const auto& coll = _doc.getCollInfo().get();
@@ -187,11 +178,11 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     const auto& nss = coll.getNss();
                     LOGV2_DEBUG(5494505, 2, "Dropping collection", "namespace"_attr = nss);
 
-                    sharding_ddl_util::stopMigrations(opCtx, nss);
+                    sharding_ddl_util::stopMigrations(opCtx, nss, boost::none);
 
                     auto newStateDoc = _doc;
                     newStateDoc.setCollInfo(coll);
-                    _updateStateDocument(opCtx, std::move(newStateDoc));
+                    _doc = _updateStateDocument(opCtx, std::move(newStateDoc));
 
                     dropShardedCollection(opCtx, coll, executor);
                 }
@@ -218,6 +209,12 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     opCtx, _dbName, cmdObj, participants, **executor);
 
                 removeDatabaseMetadataFromConfig(opCtx, _dbName);
+
+                {
+                    Lock::DBLock dbLock(opCtx, _dbName, MODE_X);
+                    auto dss = DatabaseShardingState::get(opCtx, _dbName);
+                    dss->exitCriticalSection(opCtx, critSecReason);
+                }
 
                 {
                     // Send _flushDatabaseCacheUpdates to all shards

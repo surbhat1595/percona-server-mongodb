@@ -3,8 +3,13 @@
  * connection errors between the recipient primary and the sync source at various stages in the
  * process. (Replica set members close connections as part of rollback.)
  *
- * @tags: [requires_fcv_49, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -53,11 +58,6 @@ function runTest({failPointName, failPointData = {}, batchSize = 10 * 1000}) {
         donorRst: donorRst,
         sharedOptions: {setParameter: {collectionClonerBatchSize: batchSize}}
     });
-
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const tenantId = "testTenantId";
     const dbName = tenantMigrationTest.tenantDB(tenantId, "testDB");

@@ -38,3 +38,13 @@ types:
     cpp_type: Value
     serializer: Value::serializeForIDL
     deserializer: Value::deserializeForIDL
+  numeric:
+    bson_serialization_type:
+    - int
+    - decimal
+    - double
+    - long
+    description: A value with any numeric BSON type.
+    cpp_type: Value
+    serializer: Value::serializeForIDL
+    deserializer: Value::deserializeForIDL

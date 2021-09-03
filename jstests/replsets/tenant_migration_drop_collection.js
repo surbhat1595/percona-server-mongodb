@@ -2,8 +2,13 @@
  * Tests that TenantCollectionCloner completes without error when a collection is dropped during
  * cloning as part of a tenant migration.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -15,14 +20,6 @@ load("jstests/libs/uuid_util.js");
 load("jstests/replsets/libs/tenant_migration_test.js");
 load("jstests/replsets/libs/tenant_migration_util.js");
 load('jstests/replsets/libs/two_phase_drops.js');
-
-const checkFlagOnly = new TenantMigrationTest({});
-const flagEnabled = checkFlagOnly.isFeatureFlagEnabled();
-checkFlagOnly.stop();
-if (!flagEnabled) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 function runDropTest({failPointName, failPointData, expectedLog, createNew}) {
     // Configure batch size for recipient clone.

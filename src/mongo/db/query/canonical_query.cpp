@@ -68,6 +68,10 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     MatchExpressionParser::AllowedFeatureSet allowedFeatures,
     const ProjectionPolicies& projectionPolicies,
     std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline) {
+    tassert(5746107,
+            "ntoreturn should not be set on the findCommand",
+            findCommand->getNtoreturn() == boost::none);
+
     auto status = query_request_helper::validateFindCommandRequest(*findCommand);
     if (!status.isOK()) {
         return status;
@@ -122,6 +126,11 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     if (!statusWithMatcher.isOK()) {
         return statusWithMatcher.getStatus();
     }
+
+    // Stop counting match expressions after they have been parsed to exclude expressions created
+    // during optimization and other processing steps.
+    newExpCtx->stopExpressionCounters();
+
     std::unique_ptr<MatchExpression> me = std::move(statusWithMatcher.getValue());
 
     Status initStatus =
@@ -204,11 +213,12 @@ Status CanonicalQuery::init(OperationContext* opCtx,
     // Validate the projection if there is one.
     if (!_findCommand->getProjection().isEmpty()) {
         try {
-            _proj.emplace(projection_ast::parse(expCtx,
-                                                _findCommand->getProjection(),
-                                                _root.get(),
-                                                _findCommand->getFilter(),
-                                                projectionPolicies));
+            _proj.emplace(projection_ast::parseAndAnalyze(expCtx,
+                                                          _findCommand->getProjection(),
+                                                          _root.get(),
+                                                          _findCommand->getFilter(),
+                                                          projectionPolicies,
+                                                          true /* Should optimize? */));
 
             // Fail if any of the projection's dependencies are unavailable.
             DepsTracker{unavailableMetadata}.requestMetadata(_proj->metadataDeps());
@@ -498,10 +508,6 @@ std::string CanonicalQuery::toString() const {
         ss << " skip=" << *_findCommand->getSkip();
     }
 
-    if (_findCommand->getNtoreturn()) {
-        ss << " ntoreturn=" << *_findCommand->getNtoreturn() << '\n';
-    }
-
     // The expression tree puts an endl on for us.
     ss << "Tree: " << _root->debugString();
     ss << "Sort: " << _findCommand->getSort().toString() << '\n';
@@ -533,10 +539,6 @@ std::string CanonicalQuery::toStringShort() const {
 
     if (_findCommand->getSkip()) {
         ss << " skip: " << *_findCommand->getSkip();
-    }
-
-    if (_findCommand->getNtoreturn()) {
-        ss << " ntoreturn=" << *_findCommand->getNtoreturn();
     }
 
     return ss;

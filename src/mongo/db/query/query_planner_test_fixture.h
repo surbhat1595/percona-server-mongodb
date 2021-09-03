@@ -89,17 +89,21 @@ protected:
 
     void runQuery(BSONObj query);
 
+    void runQueryWithPipeline(
+        BSONObj query,
+        std::vector<std::unique_ptr<InnerPipelineStageInterface>> queryLayerPipeline);
+
     void runQuerySortProj(const BSONObj& query, const BSONObj& sort, const BSONObj& proj);
 
-    void runQuerySkipNToReturn(const BSONObj& query, long long skip, long long ntoreturn);
+    void runQuerySkipLimit(const BSONObj& query, long long skip, long long limit);
 
     void runQueryHint(const BSONObj& query, const BSONObj& hint);
 
-    void runQuerySortProjSkipNToReturn(const BSONObj& query,
-                                       const BSONObj& sort,
-                                       const BSONObj& proj,
-                                       long long skip,
-                                       long long ntoreturn);
+    void runQuerySortProjSkipLimit(const BSONObj& query,
+                                   const BSONObj& sort,
+                                   const BSONObj& proj,
+                                   long long skip,
+                                   long long limit);
 
     void runQuerySortHint(const BSONObj& query, const BSONObj& sort, const BSONObj& hint);
 
@@ -108,21 +112,23 @@ protected:
                             const BSONObj& minObj,
                             const BSONObj& maxObj);
 
-    void runQuerySortProjSkipNToReturnHint(const BSONObj& query,
-                                           const BSONObj& sort,
-                                           const BSONObj& proj,
-                                           long long skip,
-                                           long long ntoreturn,
-                                           const BSONObj& hint);
+    void runQuerySortProjSkipLimitHint(const BSONObj& query,
+                                       const BSONObj& sort,
+                                       const BSONObj& proj,
+                                       long long skip,
+                                       long long limit,
+                                       const BSONObj& hint);
 
-    void runQueryFull(const BSONObj& query,
-                      const BSONObj& sort,
-                      const BSONObj& proj,
-                      long long skip,
-                      long long ntoreturn,
-                      const BSONObj& hint,
-                      const BSONObj& minObj,
-                      const BSONObj& maxObj);
+    void runQueryFull(
+        const BSONObj& query,
+        const BSONObj& sort,
+        const BSONObj& proj,
+        long long skip,
+        long long limit,
+        const BSONObj& hint,
+        const BSONObj& minObj,
+        const BSONObj& maxObj,
+        std::vector<std::unique_ptr<InnerPipelineStageInterface>> queryLayerPipeline = {});
 
     //
     // Same as runQuery* functions except we expect a failed status from the planning stage.
@@ -132,11 +138,11 @@ protected:
 
     void runInvalidQuerySortProj(const BSONObj& query, const BSONObj& sort, const BSONObj& proj);
 
-    void runInvalidQuerySortProjSkipNToReturn(const BSONObj& query,
-                                              const BSONObj& sort,
-                                              const BSONObj& proj,
-                                              long long skip,
-                                              long long ntoreturn);
+    void runInvalidQuerySortProjSkipLimit(const BSONObj& query,
+                                          const BSONObj& sort,
+                                          const BSONObj& proj,
+                                          long long skip,
+                                          long long limit);
 
     void runInvalidQueryHint(const BSONObj& query, const BSONObj& hint);
 
@@ -145,18 +151,18 @@ protected:
                                    const BSONObj& minObj,
                                    const BSONObj& maxObj);
 
-    void runInvalidQuerySortProjSkipNToReturnHint(const BSONObj& query,
-                                                  const BSONObj& sort,
-                                                  const BSONObj& proj,
-                                                  long long skip,
-                                                  long long ntoreturn,
-                                                  const BSONObj& hint);
+    void runInvalidQuerySortProjSkipLimitHint(const BSONObj& query,
+                                              const BSONObj& sort,
+                                              const BSONObj& proj,
+                                              long long skip,
+                                              long long limit,
+                                              const BSONObj& hint);
 
     void runInvalidQueryFull(const BSONObj& query,
                              const BSONObj& sort,
                              const BSONObj& proj,
                              long long skip,
-                             long long ntoreturn,
+                             long long limit,
                              const BSONObj& hint,
                              const BSONObj& minObj,
                              const BSONObj& maxObj);
@@ -178,6 +184,8 @@ protected:
     void dumpSolutions() const;
 
     void dumpSolutions(str::stream& ost) const;
+
+    void dumpPostMultiplanSolutions(str::stream& ost) const;
 
     /**
      * Will use a relaxed bounds check for the remaining assert* calls. Subsequent calls to assert*
@@ -206,6 +214,12 @@ protected:
      * 1 if solutions differ only by the pattern of index tags on a filter.
      */
     void assertSolutionExists(const std::string& solnJson, size_t numMatches = 1) const;
+
+    /**
+     * Verifies that the solution tree represented in json by 'solnJson' is
+     * one of the solutions generated by QueryPlanner for the post-multi-plan solution.
+     */
+    void assertPostMultiPlanSolutionMatches(const std::string& solnJson) const;
 
     /**
      * Given a vector of string-based solution tree representations 'solnStrs',
@@ -251,6 +265,7 @@ protected:
     QueryPlannerParams params;
     Status plannerStatus = Status::OK();
     std::vector<std::unique_ptr<QuerySolution>> solns;
+    std::unique_ptr<QuerySolutionNode> postMultiPlanSoln;
 
     bool relaxBoundsCheck = false;
 };

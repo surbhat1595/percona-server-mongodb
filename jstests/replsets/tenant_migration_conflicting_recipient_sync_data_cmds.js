@@ -1,8 +1,13 @@
 /**
  * Test that tenant migration recipient rejects conflicting recipientSyncData commands.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 (function() {
 
@@ -16,12 +21,6 @@ var rst =
     new ReplSetTest({nodes: 1, nodeOptions: TenantMigrationUtil.makeX509OptionsForTest().donor});
 rst.startSet();
 rst.initiate();
-if (!TenantMigrationUtil.isFeatureFlagEnabled(rst.getPrimary())) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    rst.stopSet();
-    return;
-}
-
 const primary = rst.getPrimary();
 const configDB = primary.getDB("config");
 const configRecipientsColl = configDB["tenantMigrationRecipients"];

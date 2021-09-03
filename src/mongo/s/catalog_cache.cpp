@@ -44,7 +44,6 @@
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
 #include "mongo/s/mongod_and_mongos_server_parameters_gen.h"
@@ -74,6 +73,8 @@ const OperationContext::Decoration<bool> operationBlockedBehindCatalogCacheRefre
 
 }  // namespace
 
+AtomicWord<uint64_t> ComparableDatabaseVersion::_forcedRefreshSequenceNumSource{1ULL};
+
 CachedDatabaseInfo::CachedDatabaseInfo(DatabaseTypeValueHandle&& dbt) : _dbt(std::move(dbt)){};
 
 DatabaseType CachedDatabaseInfo::getDatabaseType() const {
@@ -90,6 +91,58 @@ bool CachedDatabaseInfo::shardingEnabled() const {
 
 DatabaseVersion CachedDatabaseInfo::databaseVersion() const {
     return _dbt->getVersion();
+}
+
+ComparableDatabaseVersion ComparableDatabaseVersion::makeComparableDatabaseVersion(
+    const boost::optional<DatabaseVersion>& version) {
+    return ComparableDatabaseVersion(version, _forcedRefreshSequenceNumSource.load());
+}
+
+ComparableDatabaseVersion
+ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh() {
+    return ComparableDatabaseVersion(boost::none /* version */,
+                                     _forcedRefreshSequenceNumSource.addAndFetch(2) - 1);
+}
+
+void ComparableDatabaseVersion::setDatabaseVersion(const DatabaseVersion& version) {
+    _dbVersion = version;
+}
+
+BSONObj ComparableDatabaseVersion::toBSONForLogging() const {
+    BSONObjBuilder builder;
+    if (_dbVersion)
+        builder.append("dbVersion"_sd, _dbVersion->toBSON());
+    else
+        builder.append("dbVersion"_sd, "None");
+
+    builder.append("forcedRefreshSequenceNum"_sd, static_cast<int64_t>(_forcedRefreshSequenceNum));
+
+    return builder.obj();
+}
+
+bool ComparableDatabaseVersion::operator==(const ComparableDatabaseVersion& other) const {
+    if (_forcedRefreshSequenceNum != other._forcedRefreshSequenceNum)
+        return false;  // Values created on two sides of a forced refresh sequence number are always
+                       // considered different
+    if (_forcedRefreshSequenceNum == 0)
+        return true;  // Only default constructed values have _forcedRefreshSequenceNum == 0 and
+                      // they are always equal
+
+    // Relying on the boost::optional<DatabaseVersion>::operator== comparison
+    return _dbVersion == other._dbVersion;
+}
+
+bool ComparableDatabaseVersion::operator<(const ComparableDatabaseVersion& other) const {
+    if (_forcedRefreshSequenceNum < other._forcedRefreshSequenceNum)
+        return true;  // Values created on two sides of a forced refresh sequence number are always
+                      // considered different
+    if (_forcedRefreshSequenceNum > other._forcedRefreshSequenceNum)
+        return false;  // Values created on two sides of a forced refresh sequence number are always
+                       // considered different
+    if (_forcedRefreshSequenceNum == 0)
+        return false;  // Only default constructed values have _forcedRefreshSequenceNum == 0 and
+                       // they are always equal
+    return _dbVersion < other._dbVersion;
 }
 
 CatalogCache::CatalogCache(ServiceContext* const service, CatalogCacheLoader& cacheLoader)
@@ -210,20 +263,6 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionRoutingInfoAt(
                                     atClusterTime);
             } catch (ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& ex) {
                 LOGV2_FOR_CATALOG_REFRESH(5310501,
-                                          0,
-                                          "Collection refresh failed",
-                                          "namespace"_attr = nss,
-                                          "exception"_attr = redact(ex));
-                _stats.totalRefreshWaitTimeMicros.addAndFetch(t.micros());
-                acquireTries++;
-                if (acquireTries == kMaxInconsistentRoutingInfoRefreshAttempts) {
-                    return ex.toStatus();
-                }
-            } catch (ExceptionFor<ErrorCodes::QueryPlanKilled>& ex) {
-                // TODO SERVER-53283: Remove once 5.0 has branched out.
-                // This would happen when the query to config.chunks is killed because the index it
-                // relied on has been dropped while the query was ongoing.
-                LOGV2_FOR_CATALOG_REFRESH(5310503,
                                           0,
                                           "Collection refresh failed",
                                           "namespace"_attr = nss,
@@ -606,6 +645,19 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
 
         auto collectionAndChunks = _catalogCacheLoader.getChunksSince(nss, lookupVersion).get();
 
+        const auto maxChunkSize = [&]() -> boost::optional<uint64_t> {
+            if (!collectionAndChunks.allowAutoSplit) {
+                // maxChunkSize = 0 is an invalid chunkSize so we use it to detect noAutoSplit
+                // on the steady-state path in incrementChunkOnInsertOrUpdate(...)
+                return 0;
+            }
+            if (collectionAndChunks.maxChunkSizeBytes) {
+                invariant(collectionAndChunks.maxChunkSizeBytes.get() > 0);
+                return uint64_t(*collectionAndChunks.maxChunkSizeBytes);
+            }
+            return boost::none;
+        }();
+
         auto newRoutingHistory = [&] {
             // If we have routing info already and it's for the same collection epoch, we're
             // updating. Otherwise, we're making a whole new routing table.
@@ -616,10 +668,12 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
                     return existingHistory->optRt
                         ->makeUpdatedReplacingTimestamp(collectionAndChunks.creationTime)
                         .makeUpdated(collectionAndChunks.reshardingFields,
+                                     maxChunkSize,
                                      collectionAndChunks.allowMigrations,
                                      collectionAndChunks.changedChunks);
                 } else {
                     return existingHistory->optRt->makeUpdated(collectionAndChunks.reshardingFields,
+                                                               maxChunkSize,
                                                                collectionAndChunks.allowMigrations,
                                                                collectionAndChunks.changedChunks);
                 }
@@ -644,6 +698,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
                                                 collectionAndChunks.creationTime,
                                                 collectionAndChunks.timeseriesFields,
                                                 std::move(collectionAndChunks.reshardingFields),
+                                                maxChunkSize,
                                                 collectionAndChunks.allowMigrations,
                                                 collectionAndChunks.changedChunks);
         }();

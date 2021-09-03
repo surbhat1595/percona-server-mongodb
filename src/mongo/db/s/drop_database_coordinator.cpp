@@ -236,7 +236,7 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                 if (!_firstExecution && _doc.getDatabaseVersion()) {
                     try {
                         const auto db = catalogClient->getDatabase(
-                            opCtx, _dbName, repl::ReadConcernLevel::kLocalReadConcern);
+                            opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern);
                         if (_doc.getDatabaseVersion()->getUuid() != db.getVersion().getUuid()) {
                             return;  // skip to _flushDatabaseCacheUpdates
                         }

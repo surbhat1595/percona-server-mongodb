@@ -26,7 +26,6 @@
  *   requires_majority_read_concern,
  *   requires_profiling,
  *   uses_transactions,
- *   disabled_due_to_server_58295,
  * ]
  */
 (function() {
@@ -88,15 +87,19 @@ let testCases = {
     _configsvrCommitChunksMerge: {skip: "internal command"},
     _configsvrCommitChunkMigration: {skip: "internal command"},
     _configsvrCommitChunkSplit: {skip: "internal command"},
-    _configsvrCommitMovePrimary: {skip: "internal command"},
+    _configsvrCommitMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: "internal command"},
+    _configsvrConfigureAutoSplit: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
-    _configsvrDropCollection: {skip: "internal command"},
-    _configsvrDropDatabase: {skip: "internal command"},
-    _configsvrEnableSharding: {skip: "internal command"},
+    _configsvrDropCollection:
+        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrDropDatabase:
+        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrEnableSharding:
+        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: "internal command"},
     _configsvrMoveChunk: {skip: "internal command"},
-    _configsvrMovePrimary: {skip: "internal command"},
+    _configsvrMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrRefineCollectionShardKey: {skip: "internal command"},
     _configsvrRemoveChunks: {skip: "internal command"},
     _configsvrRemoveShard: {skip: "internal command"},
@@ -106,7 +109,8 @@ let testCases = {
     _configsvrRenameCollectionMetadata: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
     _configsvrSetAllowMigrations: {skip: "internal command"},
-    _configsvrShardCollection: {skip: "internal command"},
+    _configsvrShardCollection:
+        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
     _flushDatabaseCacheUpdates: {skip: "internal command"},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: "internal command"},
@@ -142,7 +146,8 @@ let testCases = {
     _shardsvrRenameCollectionParticipantUnblock: {skip: "internal command"},
     _shardsvrReshardCollection: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
-    _shardsvrShardCollection: {skip: "internal command"},
+    _shardsvrShardCollection:
+        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
@@ -251,6 +256,7 @@ let testCases = {
         useLogs: true,
     },
     compact: {skip: "does not accept read or write concern"},
+    configureCollectionAutoSplitter: {skip: "does not accept read or write concern"},
     configureFailPoint: {skip: "does not accept read or write concern"},
     connPoolStats: {skip: "does not accept read or write concern"},
     connPoolSync: {skip: "internal command"},

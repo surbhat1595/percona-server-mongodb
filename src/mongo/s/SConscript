@@ -34,7 +34,8 @@ env.Library(
         'cluster_write.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/lasterror',
+        '$BUILD_DIR/mongo/db/not_primary_error_tracker',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         'query/cluster_query',
         'write_ops/cluster_write_ops',
     ],
@@ -147,6 +148,7 @@ env.Library(
         'chunk_version.idl',
         'database_version.cpp',
         'database_version.idl',
+        'load_balancer_feature_flag.idl',
         'mongod_and_mongos_server_parameters.idl',
         'request_types/abort_reshard_collection.idl',
         'request_types/add_shard_request_type.cpp',
@@ -159,6 +161,7 @@ env.Library(
         'request_types/clone_collection_options_from_primary_shard.idl',
         'request_types/commit_chunk_migration_request_type.cpp',
         'request_types/commit_reshard_collection.idl',
+        'request_types/configure_collection_auto_split.idl',
         'request_types/ensure_chunk_version_is_greater_than.idl',
         'request_types/flush_database_cache_updates.idl',
         'request_types/flush_resharding_state_change.idl',
@@ -175,7 +178,6 @@ env.Library(
         'request_types/resharding_operation_time.idl',
         'request_types/set_allow_migrations.idl',
         'request_types/set_shard_version_request.cpp',
-        'request_types/shard_collection.idl',
         'request_types/sharded_ddl_commands.idl',
         'request_types/split_chunk_request_type.cpp',
         'request_types/update_zone_key_range_request_type.cpp',
@@ -187,9 +189,8 @@ env.Library(
         'shard_cannot_refresh_due_to_locks_held_exception.cpp',
         'shard_id.cpp',
         'shard_invalidated_for_targeting_exception.cpp',
-        'sharding_ddl_50_upgrade_downgrade.idl',
         'stale_exception.cpp',
-        'type_collection_timeseries_fields.idl',
+        'type_collection_common_types.idl',
         'would_change_owning_shard_exception.cpp',
     ],
     LIBDEPS=[
@@ -235,7 +236,6 @@ env.Library(
         'catalog/sharding_catalog_client_impl',
         'committed_optime_metadata_hook',
         'coreshard',
-        'sharding_egress_metadata_hook_for_mongos',
         'sharding_task_executor',
         'sharding_test_fixture_common',
     ],
@@ -285,7 +285,6 @@ env.Library(
         'config_server_catalog_cache_loader.cpp',
         'config_server_client.cpp',
         'shard_util.cpp',
-        'sharding_egress_metadata_hook.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/client_metadata_propagation_egress_hook',
@@ -313,17 +312,6 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
     ],
-)
-
-env.Library(
-    target='sharding_egress_metadata_hook_for_mongos',
-    source=[
-        'sharding_egress_metadata_hook_for_mongos.cpp'
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/rpc/metadata',
-        'coreshard',
-    ]
 )
 
 env.Library(
@@ -457,7 +445,6 @@ env.Library(
         'mongos_server_parameters',
         'mongos_topology_coordinator',
         'query/cluster_cursor_cleanup_job',
-        'sharding_egress_metadata_hook_for_mongos',
         'sharding_initialization',
         'sharding_router_api',
     ],
@@ -491,8 +478,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands/rwc_defaults_commands',
         '$BUILD_DIR/mongo/db/commands/servers',
         '$BUILD_DIR/mongo/db/ftdc/ftdc_mongos',
-        '$BUILD_DIR/mongo/db/lasterror',
         '$BUILD_DIR/mongo/db/log_process_details',
+        '$BUILD_DIR/mongo/db/not_primary_error_tracker',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/serverinit',
         '$BUILD_DIR/mongo/db/service_liaison_mongos',
@@ -511,7 +498,6 @@ env.Library(
         'mongos_topology_coordinator',
         'query/cluster_cursor_cleanup_job',
         'sessions_collection_sharded',
-        'sharding_egress_metadata_hook_for_mongos',
         'sharding_initialization',
         'sharding_router_api',
     ],

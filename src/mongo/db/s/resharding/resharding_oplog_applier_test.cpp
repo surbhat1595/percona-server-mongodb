@@ -192,11 +192,12 @@ public:
                                                boost::none /* timestamp */,
                                                boost::none /* timeseriesFields */,
                                                boost::none,
+                                               boost::none /* chunkSizeBytes */,
                                                false,
                                                chunks);
 
         return ChunkManager(_sourceId.getShardId(),
-                            DatabaseVersion(UUID::gen()),
+                            DatabaseVersion(UUID::gen(), Timestamp()),
                             makeStandaloneRoutingTableHistory(std::move(rt)),
                             boost::none);
     }

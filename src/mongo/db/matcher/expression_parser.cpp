@@ -44,6 +44,7 @@
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
 #include "mongo/db/matcher/expression_internal_expr_comparison.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
@@ -69,6 +70,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/dbref.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
@@ -173,6 +175,7 @@ StatusWithMatchExpression parseRegexElement(StringData name,
     if (e.type() != BSONType::RegEx)
         return {Status(ErrorCodes::BadValue, "not a regex")};
 
+    expCtx->incrementMatchExprCounter("$regex");
     return {std::make_unique<RegexMatchExpression>(
         name,
         e.regex(),
@@ -296,7 +299,7 @@ StatusWithMatchExpression parse(const BSONObj& obj,
                 const auto dotsAndDollarsHint =
                     serverGlobalParams.featureCompatibility.isVersionInitialized() &&
                         serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-                            FeatureCompatibilityParams::Version::kVersion50)
+                            FeatureCompatibilityParams::Version::kFullyDowngradedTo50)
                     ? ". If you have a field name that starts with a '$' symbol, consider using "
                       "$getField or $setField."
                     : "";
@@ -319,8 +322,15 @@ StatusWithMatchExpression parse(const BSONObj& obj,
             if (auto&& expr = parsedExpression.getValue())
                 root->add(std::move(expr));
 
+            expCtx->incrementMatchExprCounter(e.fieldNameStringData());
             continue;
         }
+
+        // Ensure the path length does not exceed the maximum allowed depth.
+        auto path = e.fieldNameStringData();
+        unsigned int pathLength = std::count(path.begin(), path.end(), '.') + 1;
+        uassert(
+            5729100, "FieldPath is too long", pathLength <= BSONDepth::getMaxDepthForUserStorage());
 
         if (isExpressionDocument(e, false)) {
             auto s = parseSub(e.fieldNameStringData(),
@@ -339,7 +349,6 @@ StatusWithMatchExpression parse(const BSONObj& obj,
             auto result = parseRegexElement(e.fieldNameStringData(), e, expCtx);
             if (!result.isOK())
                 return result;
-
             addExpressionToRoot(expCtx, root.get(), std::move(result.getValue()));
             continue;
         }
@@ -355,7 +364,7 @@ StatusWithMatchExpression parse(const BSONObj& obj,
                             allowedFeatures);
         if (!eq.isOK())
             return eq;
-
+        expCtx->incrementMatchExprCounter("$eq");
         addExpressionToRoot(expCtx, root.get(), std::move(eq.getValue()));
     }
 
@@ -417,7 +426,9 @@ StatusWithMatchExpression parseSampleRate(StringData name,
         // DeMorgan's law here you will be suprised that $sampleRate will accept NaN as a valid
         // argument.
         return {Status(ErrorCodes::BadValue, "numeric argument to $sampleRate must be in [0, 1]")};
-    } else if (x == kRandomMinValue) {
+    }
+
+    if (x == kRandomMinValue) {
         return std::make_unique<ExprMatchExpression>(
             ExpressionConstant::create(expCtx.get(), Value(false)),
             expCtx,
@@ -1049,6 +1060,45 @@ StatusWith<StringDataSet> parseProperties(BSONElement propertiesElem) {
     return std::move(properties);
 }
 
+StatusWithMatchExpression parseInternalBucketGeoWithinMatchExpression(
+    StringData name,
+    BSONElement elem,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ExtensionsCallback* extensionsCallback,
+    MatchExpressionParser::AllowedFeatureSet allowedFeatures,
+    DocumentParseLevel currentLevel) {
+    if (elem.type() != BSONType::Object) {
+        return {ErrorCodes::TypeMismatch,
+                str::stream() << InternalBucketGeoWithinMatchExpression::kName
+                              << " must be an object"};
+    }
+
+    auto subobj = elem.embeddedObject();
+
+    // Parse the region field, 'withinRegion', to a GeometryContainer.
+    std::shared_ptr<GeometryContainer> geoContainer = std::make_shared<GeometryContainer>();
+    tassert(5776200,
+            "$_internalBucketGeoWithin expression must contain 'withinRegion' field",
+            subobj.hasField("withinRegion"));
+    BSONObjIterator geoIt(subobj["withinRegion"].embeddedObject());
+    while (geoIt.more()) {
+        BSONElement elt = geoIt.next();
+        // The element must be a geo specifier. "$box", "$center", "$geometry", etc.
+        Status status = geoContainer->parseFromQuery(elt);
+        if (!status.isOK())
+            return status;
+    }
+
+    // Parse the field.
+    tassert(5776201,
+            "$_internalBucketGeoWithin expression must contain 'field' field with a string value",
+            subobj.hasField("field") && subobj["field"].type() == BSONType::String);
+    std::string field = subobj["field"].String();
+
+    expCtx->sbeCompatible = false;
+    return {std::make_unique<InternalBucketGeoWithinMatchExpression>(geoContainer, field)};
+}
+
 StatusWithMatchExpression parseInternalSchemaAllowedProperties(
     StringData name,
     BSONElement elem,
@@ -1196,6 +1246,7 @@ StatusWithMatchExpression parseGeo(StringData name,
             return status;
         }
         expCtx->sbeCompatible = false;
+        expCtx->incrementMatchExprCounter(section.firstElementFieldName());
         return {std::make_unique<GeoNearMatchExpression>(name, nq.release(), section)};
     }
 }
@@ -2011,6 +2062,7 @@ Status parseSub(StringData name,
         if (!s.isOK())
             return s.getStatus();
 
+        expCtx->incrementMatchExprCounter(deep.fieldNameStringData());
         if (s.getValue()) {
             addExpressionToRoot(expCtx, root, std::move(s.getValue()));
         }
@@ -2070,6 +2122,7 @@ MONGO_INITIALIZER(PathlessOperatorMap)(InitializerContext* context) {
                                                     const ExtensionsCallback*,
                                                     MatchExpressionParser::AllowedFeatureSet,
                                                     DocumentParseLevel)>>{
+            {"_internalBucketGeoWithin", &parseInternalBucketGeoWithinMatchExpression},
             {"_internalSchemaAllowedProperties", &parseInternalSchemaAllowedProperties},
             {"_internalSchemaCond",
              &parseInternalSchemaFixedArityArgument<InternalSchemaCondMatchExpression>},
@@ -2173,6 +2226,33 @@ retrievePathlessParser(StringData name) {
     }
     return func->second;
 }
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(MatchExpressionCounters,
+                                     ("PathlessOperatorMap", "MatchExpressionParser"))
+(InitializerContext* context) {
+    static const std::set<std::string> exceptionsSet{"within",   // deprecated
+                                                     "geoNear",  // aggregation stage
+                                                     "db",       // $-prefixed field names
+                                                     "id",
+                                                     "ref",
+                                                     "options"};
+
+    for (auto&& [name, keyword] : *queryOperatorMap) {
+        if (name[0] == '_' || exceptionsSet.count(name) > 0) {
+            continue;
+        }
+        operatorCountersMatchExpressions.addMatchExprCounter("$" + name);
+    }
+    for (auto&& [name, fn] : *pathlessOperatorMap) {
+        if (name[0] == '_' || exceptionsSet.count(name) > 0) {
+            continue;
+        }
+        operatorCountersMatchExpressions.addMatchExprCounter("$" + name);
+    }
+    operatorCountersMatchExpressions.addMatchExprCounter("$not");
+}
+
+
 }  // namespace
 
 boost::optional<PathAcceptingKeyword> MatchExpressionParser::parsePathAcceptingKeyword(

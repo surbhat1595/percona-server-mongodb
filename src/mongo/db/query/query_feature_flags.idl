@@ -33,7 +33,8 @@ feature_flags:
     featureFlagChangeStreamsOptimization:
       description: "Feature flag for enabling change streams optimization"
       cpp_varname: gFeatureFlagChangeStreamsOptimization
-      default: false
+      default: true
+      version: 5.1
 
     featureFlagChangeStreamsRewrite:
       description: "Feature flag for enabling change streams oplog rewrites"
@@ -48,6 +49,11 @@ feature_flags:
     featureFlagShardedTimeSeries:
       description: "Feature flag for allowing sharding a Time Series collection"
       cpp_varname: gFeatureFlagShardedTimeSeries
+      default: false
+
+    featureFlagShardedTimeSeriesUpdateDelete:
+      description: "Feature flag for allowing update and delete operations on a sharded Time Series collection"
+      cpp_varname: gFeatureFlagShardedTimeSeriesUpdateDelete
       default: false
 
     featureFlagSBEGroupAndLookup:
@@ -73,4 +79,9 @@ feature_flags:
     featureFlagSearchMeta:
       description: "Feature flag for allowing use of search collectors alongside search results"
       cpp_varname: gFeatureFlagSearchMeta
+      default: false
+
+    featureFlagSbePlanCache:
+      description: "Feature flag for enabling use of the SBE plan cache"
+      cpp_varname: gFeatureFlagSbePlanCache
       default: false

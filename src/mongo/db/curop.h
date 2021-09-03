@@ -30,9 +30,11 @@
 
 #pragma once
 
+#include <memory>
+
 #include "mongo/config.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/user_cache_acquisition_stats.h"
+#include "mongo/db/auth/user_acquisition_stats.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
@@ -46,6 +48,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/progress_meter.h"
+#include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
 
 #ifndef MONGO_CONFIG_USE_RAW_LATCHES
@@ -224,8 +227,6 @@ public:
 
     // detailed options
     long long cursorid{-1};
-    long long ntoreturn{-1};
-    long long ntoskip{-1};
     bool exhaust{false};
 
     // For search using mongot.
@@ -437,22 +438,18 @@ public:
     }
 
     /**
-     * Returns a const pointer to the authorization user cache statistics for the current operation.
+     * Returns a const pointer to the UserAcquisitionStats for the current operation.
      * This can only be used for reading (i.e., when logging or profiling).
      */
-    const UserCacheAcquisitionStats* getReadOnlyUserCacheAcquisitionStats() const {
-        return &_userCacheAcquisitionStats;
+    const UserAcquisitionStats* getReadOnlyUserAcquisitionStats() const {
+        return &_userAcquisitionStats;
     }
 
     /**
-     * Returns an instance of UserCacheAcquisitionStatsHandle. By doing so, it automatically records
-     * the start of the user cache access attempt upon creation. If the cache access is not
-     * completed and recorded normally before it is about to be destroyed (i.e., due to an
-     * exception), it will be automatically recorded as complete then.
+     * Returns a non-const raw pointers to UserAcquisitionStats member.
      */
-    UserCacheAcquisitionStatsHandle getMutableUserCacheAcquisitionStats(Client* client,
-                                                                        TickSource* tickSource) {
-        return UserCacheAcquisitionStatsHandle(&_userCacheAcquisitionStats, client, tickSource);
+    UserAcquisitionStats* getMutableUserAcquisitionStats() {
+        return &_userAcquisitionStats;
     }
 
     /**
@@ -778,6 +775,16 @@ public:
         _tickSource = tickSource;
     }
 
+    /**
+     * Merge match counters from the current operation into the global map and stop counting.
+     */
+    void stopMatchExprCounter();
+
+    /**
+     * Increment the counter for the match expression with given name in the current operation.
+     */
+    void incrementMatchExprCounter(StringData name);
+
 private:
     class CurOpStack;
 
@@ -858,8 +865,9 @@ private:
     // is why boost::optional is used and value is generated on demand
     boost::optional<const bool> _rateLimitSample;
 
-    UserCacheAcquisitionStats _userCacheAcquisitionStats;
+    UserAcquisitionStats _userAcquisitionStats;
 
     TickSource* _tickSource = nullptr;
 };
+
 }  // namespace mongo

@@ -2,8 +2,13 @@
  * Tests that tenant migrations correctly set the TTL values for keys in the
  * config.external_validation_keys collection.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -93,12 +98,6 @@ function makeTestParams() {
 (() => {
     const tmt = new TenantMigrationTest(
         {name: jsTestName(), sharedOptions: {setParameter: ttlMonitorOptions}});
-
-    if (!tmt.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        tmt.stop();
-        return;
-    }
 
     // Verify the external keys TTL index is created on both replica sets on stepup.
     waitForExternalKeysTTLIndex(tmt.getDonorPrimary());
@@ -217,13 +216,6 @@ function makeTestParams() {
     recipientRst.initiate();
 
     const tmt = new TenantMigrationTest({name: jsTestName(), donorRst, recipientRst});
-    if (!tmt.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        recipientRst.stopSet();
-        tmt.stop();
-        return;
-    }
 
     jsTestLog("Donor failover before receiving forgetMigration");
     {

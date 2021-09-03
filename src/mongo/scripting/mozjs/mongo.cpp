@@ -72,15 +72,14 @@ const JSFunctionSpec MongoBase::methods[] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isReplicaSetConnection, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_markNodeAsFailed, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(logout, MongoExternalInfo),
-    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(runCommand, MongoExternalInfo),
-    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(runCommandWithMetadata, MongoExternalInfo),
-    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(setClientRPCProtocols, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getMinWireVersion, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getMaxWireVersion, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isReplicaSetMember, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isMongos, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isTLS, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getApiParameters, MongoExternalInfo),
+    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_runCommandImpl, MongoExternalInfo),
+    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_runCommandWithMetadataImpl, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_startSession, MongoExternalInfo),
     JS_FS_END,
 };
@@ -117,14 +116,6 @@ bool isUnacknowledged(const BSONObj& cmdObj) {
 
 void returnOk(JSContext* cx, JS::CallArgs& args) {
     ValueReader(cx, args.rval()).fromBSON(BSON("ok" << 1), nullptr, false);
-}
-
-void runFireAndForgetCommand(const std::shared_ptr<DBClientBase>& conn,
-                             const std::string& database,
-                             BSONObj body,
-                             const BSONObj& extraFields = {}) {
-    auto request = OpMsgRequest::fromDBAndBody(database, body, extraFields);
-    conn->runFireAndForgetCommand(request);
 }
 
 void setCursor(MozJSImplScope* scope,
@@ -241,41 +232,65 @@ void MongoBase::Functions::close::call(JSContext* cx, JS::CallArgs args) {
     args.rval().setUndefined();
 }
 
-void MongoBase::Functions::runCommand::call(JSContext* cx, JS::CallArgs args) {
-    if (args.length() != 3)
-        uasserted(ErrorCodes::BadValue, "runCommand needs 3 args");
+namespace {
 
-    if (!args.get(0).isString())
-        uasserted(ErrorCodes::BadValue, "the database parameter to runCommand must be a string");
+/**
+ * Common implementation for:
+ *   object Mongo._runCommandImpl(string dbname, object cmd, int options, object token)
+ *   object Mongo._runCommandWithMetadataImpl(string dbname, object metadata, object commandArgs,
+ * object token)
+ *
+ * Extra is for connection-wide metadata to pass with any given runCommand.
+ */
+template <typename Params, typename MakeRequest>
+void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
+    uassert(ErrorCodes::BadValue,
+            str::stream() << Params::kCommandName << " needs 4 args",
+            args.length() <= 4);
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "The database parameter to " << Params::kCommandName
+                          << " must be a string",
+            args.get(0).isString());
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "The " << Params::kArg1Name << " parameter to " << Params::kCommandName
+                          << " must be an object",
+            args.get(1).isObject());
 
-    if (!args.get(1).isObject())
-        uasserted(ErrorCodes::BadValue, "the cmdObj parameter to runCommand must be an object");
+    // Arg2 is specialization defined, see makeRequest().
 
-    if (!args.get(2).isNumber())
-        uasserted(ErrorCodes::BadValue, "the options parameter to runCommand must be a number");
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "The token parameter to " << Params::kCommandName
+                          << " must be an object",
+            args.get(3).isObject());
+
+    auto database = ValueWriter(cx, args.get(0)).toString();
+    auto arg = ValueWriter(cx, args.get(1)).toBSON();
+
+    auto request = makeRequest(database, arg);
+    request.securityToken = ValueWriter(cx, args.get(3)).toBSON();
 
     const auto& conn = getConnectionRef(args);
-
-    std::string database = ValueWriter(cx, args.get(0)).toString();
-
-    BSONObj cmdObj = ValueWriter(cx, args.get(1)).toBSON();
-
-    if (isUnacknowledged(cmdObj)) {
-        runFireAndForgetCommand(conn, database, cmdObj);
+    if (isUnacknowledged(request.body)) {
+        conn->runFireAndForgetCommand(request);
         setHiddenMongo(cx, args);
         returnOk(cx, args);
         return;
     }
 
-    int queryOptions = ValueWriter(cx, args.get(2)).toInt32();
-    BSONObj cmdRes;
-    auto resTuple = conn->runCommandWithTarget(database, cmdObj, cmdRes, conn, queryOptions);
+    auto res = conn->runCommandWithTarget(request, conn);
 
-    // the returned object is not read only as some of our tests depend on modifying it.
-    //
-    // Also, we make a copy here because we want a copy after we dump cmdRes
-    ValueReader(cx, args.rval()).fromBSON(cmdRes.getOwned(), nullptr, false /* read only */);
-    setHiddenMongo(cx, std::get<1>(resTuple), conn.get(), args);
+    auto reply = std::get<0>(res)->getCommandReply();
+    if constexpr (Params::kHoistReply) {
+        constexpr auto kCommandReplyField = "commandReply"_sd;
+        reply = BSON(kCommandReplyField << reply);
+    } else {
+        // The returned object is not read only as some of our tests depend on modifying it.
+        // Make a copy here because we want a copy after we dump cmdRes
+        reply = reply.getOwned();
+    }
+
+    ValueReader(cx, args.rval()).fromBSON(reply, nullptr, false /* read only */);
+    setHiddenMongo(cx, std::get<1>(res), conn.get(), args);
 
     ObjectWrapper o(cx, args.rval());
     if (!o.hasField(InternedString::_commandObj)) {
@@ -284,44 +299,37 @@ void MongoBase::Functions::runCommand::call(JSContext* cx, JS::CallArgs args) {
     }
 }
 
-void MongoBase::Functions::runCommandWithMetadata::call(JSContext* cx, JS::CallArgs args) {
-    if (args.length() != 3)
-        uasserted(ErrorCodes::BadValue, "runCommandWithMetadata needs 3 args");
+}  // namespace
 
-    if (!args.get(0).isString())
-        uasserted(ErrorCodes::BadValue,
-                  "the database parameter to runCommandWithMetadata must be a string");
+struct RunCommandParams {
+    static constexpr bool kHoistReply = false;
+    static constexpr auto kCommandName = "runCommand"_sd;
+    static constexpr auto kArg1Name = "cmdObj"_sd;
+};
 
-    if (!args.get(1).isObject())
-        uasserted(ErrorCodes::BadValue,
-                  "the metadata argument to runCommandWithMetadata must be an object");
+void MongoBase::Functions::_runCommandImpl::call(JSContext* cx, JS::CallArgs args) {
+    doRunCommand<RunCommandParams>(cx, args, [&](StringData database, BSONObj cmd) {
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "The options parameter to runCommand must be a number",
+                args.get(2).isNumber());
+        auto options = ValueWriter(cx, args.get(2)).toInt32();
+        return rpc::upconvertRequest(database, cmd, options);
+    });
+}
 
-    if (!args.get(2).isObject())
-        uasserted(ErrorCodes::BadValue,
-                  "the commandArgs argument to runCommandWithMetadata must be an object");
+struct RunCommandWithMetadataParams {
+    static constexpr bool kHoistReply = true;
+    static constexpr auto kCommandName = "runCommandWithMetadata"_sd;
+    static constexpr auto kArg1Name = "commandArgs"_sd;
+};
 
-    std::string database = ValueWriter(cx, args.get(0)).toString();
-    BSONObj metadata = ValueWriter(cx, args.get(1)).toBSON();
-    BSONObj commandArgs = ValueWriter(cx, args.get(2)).toBSON();
-
-    const auto& conn = getConnectionRef(args);
-
-    if (isUnacknowledged(commandArgs)) {
-        runFireAndForgetCommand(conn, database, commandArgs, metadata);
-        setHiddenMongo(cx, args);
-        returnOk(cx, args);
-        return;
-    }
-
-    auto resTuple = conn->runCommandWithTarget(
-        OpMsgRequest::fromDBAndBody(database, commandArgs, metadata), conn);
-    auto res = std::move(std::get<0>(resTuple));
-
-    BSONObjBuilder mergedResultBob;
-    mergedResultBob.append("commandReply", res->getCommandReply());
-
-    ValueReader(cx, args.rval()).fromBSON(mergedResultBob.obj(), nullptr, false);
-    setHiddenMongo(cx, std::get<1>(resTuple), conn.get(), args);
+void MongoBase::Functions::_runCommandWithMetadataImpl::call(JSContext* cx, JS::CallArgs args) {
+    doRunCommand<RunCommandWithMetadataParams>(cx, args, [&](StringData db, BSONObj metadata) {
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "The metadata parameter to runCommand must be an object",
+                args.get(2).isObject());
+        return OpMsgRequest::fromDBAndBody(db, ValueWriter(cx, args.get(2)).toBSON(), metadata);
+    });
 }
 
 void MongoBase::Functions::find::call(JSContext* cx, JS::CallArgs args) {
@@ -354,14 +362,14 @@ void MongoBase::Functions::find::call(JSContext* cx, JS::CallArgs args) {
     if (haveFields)
         fields = ValueWriter(cx, args.get(2)).toBSON();
 
-    int nToReturn = ValueWriter(cx, args.get(3)).toInt32();
+    int limit = ValueWriter(cx, args.get(3)).toInt32();
     int nToSkip = ValueWriter(cx, args.get(4)).toInt32();
     int batchSize = ValueWriter(cx, args.get(5)).toInt32();
     int options = ValueWriter(cx, args.get(6)).toInt32();
 
     std::unique_ptr<DBClientCursor> cursor(conn->query(NamespaceString(ns),
                                                        q,
-                                                       nToReturn,
+                                                       limit,
                                                        nToSkip,
                                                        haveFields ? &fields : nullptr,
                                                        options,
@@ -469,24 +477,6 @@ void MongoBase::Functions::getClientRPCProtocols::call(JSContext* cx, JS::CallAr
     auto protoStr = clientRPCProtocols.getValue().toString();
 
     ValueReader(cx, args.rval()).fromStringData(protoStr);
-}
-
-void MongoBase::Functions::setClientRPCProtocols::call(JSContext* cx, JS::CallArgs args) {
-    auto conn = getConnection(args);
-
-    if (args.length() != 1)
-        uasserted(ErrorCodes::BadValue, "setClientRPCProtocols needs 1 arg");
-    if (!args.get(0).isString())
-        uasserted(ErrorCodes::BadValue, "first argument to setClientRPCProtocols must be a string");
-
-    std::string rpcProtosStr = ValueWriter(cx, args.get(0)).toString();
-
-    auto clientRPCProtocols = rpc::parseProtocolSet(rpcProtosStr);
-    uassertStatusOK(clientRPCProtocols);
-
-    conn->setClientRPCProtocols(clientRPCProtocols.getValue());
-
-    args.rval().setUndefined();
 }
 
 void MongoBase::Functions::getServerRPCProtocols::call(JSContext* cx, JS::CallArgs args) {

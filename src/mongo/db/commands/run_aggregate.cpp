@@ -764,7 +764,9 @@ Status runAggregate(OperationContext* opCtx,
         expCtx = makeExpressionContext(
             opCtx, request, std::move(*collatorToUse), uuid, collatorToUseMatchesDefault);
 
+        expCtx->startExpressionCounters();
         auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
+        expCtx->stopExpressionCounters();
 
         // Check that the view's collation matches the collation of any views involved in the
         // pipeline.
@@ -777,6 +779,9 @@ Status runAggregate(OperationContext* opCtx,
         }
 
         pipeline->optimizePipeline();
+
+        constexpr bool alreadyOptimized = true;
+        pipeline->validateCommon(alreadyOptimized);
 
         // Check if the pipeline has a $geoNear stage, as it will be ripped away during the build
         // query executor phase below (to be replaced with a $geoNearCursorStage later during the

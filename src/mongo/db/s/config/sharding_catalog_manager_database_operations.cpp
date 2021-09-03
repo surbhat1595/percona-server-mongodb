@@ -34,13 +34,11 @@
 #include <pcrecpp.h>
 
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/dist_lock_manager.h"
-#include "mongo/db/s/sharding_ddl_50_upgrade_downgrade.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/write_concern.h"
@@ -199,13 +197,8 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
                 optPrimaryShard ? *optPrimaryShard
                                 : selectShardForNewDatabase(opCtx, shardRegistry)));
 
-            FixedFCVRegion fcvRegion(opCtx);
-
-            boost::optional<Timestamp> clusterTime;
-            if (DatabaseEntryFormat::get(fcvRegion) == DatabaseEntryFormat::kUUIDandTimestamp) {
-                const auto now = VectorClock::get(opCtx)->getTime();
-                clusterTime = now.clusterTime().asTimestamp();
-            }
+            const auto now = VectorClock::get(opCtx)->getTime();
+            const auto clusterTime = now.clusterTime().asTimestamp();
 
             // Pick a primary shard for the new database.
             DatabaseType db(dbName.toString(),
@@ -258,83 +251,6 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
     uassertStatusOK(cmdResponse.commandStatus);
 
     return database;
-}
-
-Status ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
-                                                 const StringData dbname,
-                                                 const ShardId& toShard) {
-
-    auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-
-    // TODO (SERVER-53283): Remove once version 5.0 has been released.
-    Lock::SharedLock lock(opCtx->lockState(), _kDatabaseOpLock);
-
-    // Must use local read concern because we will perform subsequent writes.
-    auto findResponse = uassertStatusOK(
-        configShard->exhaustiveFindOnConfig(opCtx,
-                                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                            repl::ReadConcernLevel::kLocalReadConcern,
-                                            DatabaseType::ConfigNS,
-                                            BSON(DatabaseType::name << dbname),
-                                            BSON(DatabaseType::name << -1),
-                                            1));
-
-    const auto databasesVector = std::move(findResponse.docs);
-    uassert(ErrorCodes::IncompatibleShardingMetadata,
-            str::stream() << "Tried to find max database version for database '" << dbname
-                          << "', but found no databases",
-            !databasesVector.empty());
-
-    const auto dbType = uassertStatusOK(DatabaseType::fromBSON(databasesVector.front()));
-
-    if (dbType.getPrimary() == toShard) {
-        // The primary has already been set to the destination shard. It's likely that there was a
-        // network error and the shard resent the command.
-        repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
-        return Status::OK();
-    }
-
-    auto newDbType = dbType;
-    newDbType.setPrimary(toShard);
-
-    auto const currentDatabaseVersion = dbType.getVersion();
-
-    newDbType.setVersion(currentDatabaseVersion.makeUpdated());
-
-    auto updateQueryBuilder = BSONObjBuilder(BSON(DatabaseType::name << dbname));
-    updateQueryBuilder.append(DatabaseType::version.name(), currentDatabaseVersion.toBSON());
-
-    auto updateStatus = Grid::get(opCtx)->catalogClient()->updateConfigDocument(
-        opCtx,
-        DatabaseType::ConfigNS,
-        updateQueryBuilder.obj(),
-        newDbType.toBSON(),
-        false,
-        ShardingCatalogClient::kLocalWriteConcern);
-
-    if (!updateStatus.isOK()) {
-        LOGV2(21940,
-              "Error committing movePrimary for {db}: {error}",
-              "Error committing movePrimary",
-              "db"_attr = dbname,
-              "error"_attr = redact(updateStatus.getStatus()));
-        return updateStatus.getStatus();
-    }
-
-    // If this assertion is tripped, it means that the request sent fine, but no documents were
-    // updated. This is likely because the database version was changed in between the query and
-    // the update, so no documents were found to change. This shouldn't happen however, because we
-    // are holding the dist lock during the movePrimary operation.
-    uassert(ErrorCodes::IncompatibleShardingMetadata,
-            str::stream() << "Tried to update primary shard for database '" << dbname
-                          << " with version " << currentDatabaseVersion.getLastMod(),
-            updateStatus.getValue());
-
-    // Ensure the next attempt to retrieve the database or any of its collections will do a full
-    // reload
-    Grid::get(opCtx)->catalogCache()->purgeDatabase(dbname);
-
-    return Status::OK();
 }
 
 }  // namespace mongo

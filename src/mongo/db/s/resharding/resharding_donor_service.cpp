@@ -159,7 +159,8 @@ public:
             query,
             update,
             false, /* upsert */
-            ShardingCatalogClient::kMajorityWriteConcern));
+            ShardingCatalogClient::kMajorityWriteConcern,
+            Milliseconds::max()));
 
         if (!docWasModified) {
             LOGV2_DEBUG(
@@ -345,6 +346,17 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 
                    _dropOriginalCollectionThenTransitionToDone();
                } else if (_donorCtx.getState() != DonorStateEnum::kDone) {
+                   {
+                       // Unblock the RecoverRefreshThread as quickly as possible when aborting.
+                       stdx::lock_guard<Latch> lk(_mutex);
+                       ensureFulfilledPromise(lk,
+                                              _critSecWasAcquired,
+                                              {ErrorCodes::ReshardCollectionAborted, "aborted"});
+                       ensureFulfilledPromise(lk,
+                                              _critSecWasPromoted,
+                                              {ErrorCodes::ReshardCollectionAborted, "aborted"});
+                   }
+
                    // If aborted, the donor must be allowed to transition to done from any state.
                    _transitionState(DonorStateEnum::kDone);
                }

@@ -228,6 +228,12 @@ if (typeof _threadInject != "undefined") {
             "bench_test1.js",
             "bench_test2.js",
             "bench_test3.js",
+
+            // These tests cause deletes and updates to hang, which may affect other tests running
+            // concurrently.
+            "timeseries/timeseries_delete_hint.js",
+            "timeseries/timeseries_delete_concurrent.js",
+            "timeseries/timeseries_update_concurrent.js"
         ]);
 
         // Get files, including files in subdirectories.

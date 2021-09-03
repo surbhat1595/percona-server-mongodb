@@ -33,12 +33,12 @@
 
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/security_token.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/rpc/metadata/config_server_metadata.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/util/string_map.h"
@@ -51,23 +51,18 @@ BSONObj makeEmptyMetadata() {
     return BSONObj();
 }
 
-void readRequestMetadata(OperationContext* opCtx,
-                         const BSONObj& metadataObj,
-                         bool cmdRequiresAuth) {
+void readRequestMetadata(OperationContext* opCtx, const OpMsg& opMsg, bool cmdRequiresAuth) {
     BSONElement readPreferenceElem;
-    BSONElement configSvrElem;
     BSONElement trackingElem;
     BSONElement clientElem;
     BSONElement helloClientElem;
     BSONElement impersonationElem;
     BSONElement clientOperationKeyElem;
 
-    for (const auto& metadataElem : metadataObj) {
+    for (const auto& metadataElem : opMsg.body) {
         auto fieldName = metadataElem.fieldNameStringData();
         if (fieldName == "$readPreference") {
             readPreferenceElem = metadataElem;
-        } else if (fieldName == ConfigServerMetadata::fieldName()) {
-            configSvrElem = metadataElem;
         } else if (fieldName == ClientMetadata::fieldName()) {
             clientElem = metadataElem;
         } else if (fieldName == TrackingMetadata::fieldName()) {
@@ -95,6 +90,7 @@ void readRequestMetadata(OperationContext* opCtx,
     }
 
     readImpersonatedUserMetadata(impersonationElem, opCtx);
+    auth::readSecurityTokenMetadata(opCtx, opMsg.securityToken);
 
     // We check for "$client" but not "client" here, because currentOp can filter on "client" as
     // a top-level field.
@@ -104,13 +100,10 @@ void readRequestMetadata(OperationContext* opCtx,
         ClientMetadata::setFromMetadataForOperation(opCtx, clientElem);
     }
 
-    ConfigServerMetadata::get(opCtx) =
-        uassertStatusOK(ConfigServerMetadata::readFromMetadata(configSvrElem));
-
     TrackingMetadata::get(opCtx) =
         uassertStatusOK(TrackingMetadata::readFromMetadata(trackingElem));
 
-    VectorClock::get(opCtx)->gossipIn(opCtx, metadataObj, !cmdRequiresAuth);
+    VectorClock::get(opCtx)->gossipIn(opCtx, opMsg.body, !cmdRequiresAuth);
 }
 
 namespace {

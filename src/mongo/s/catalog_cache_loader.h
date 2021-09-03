@@ -38,7 +38,7 @@
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/chunk_version.h"
-#include "mongo/s/type_collection_timeseries_fields_gen.h"
+#include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/util/concurrency/notification.h"
 #include "mongo/util/uuid.h"
 
@@ -75,7 +75,10 @@ public:
             bool collShardKeyIsUnique,
             boost::optional<TypeCollectionTimeseriesFields> collTimeseriesFields,
             boost::optional<TypeCollectionReshardingFields> collReshardingFields,
+            boost::optional<int64_t> maxChunkSizeBytes,
+            bool allowAutoSplit,
             bool allowMigrations,
+            SupportingLongNameStatusEnum supportingLongName,
             std::vector<ChunkType> chunks);
 
         // Information about the entire collection
@@ -94,7 +97,13 @@ public:
         // populated.
         boost::optional<TypeCollectionReshardingFields> reshardingFields;
 
+        boost::optional<int64_t> maxChunkSizeBytes;
+
+        bool allowAutoSplit;
+
         bool allowMigrations;
+
+        SupportingLongNameStatusEnum supportingLongName;
 
         // The chunks which have changed sorted by their chunkVersion. This list might potentially
         // contain all the chunks in the collection.

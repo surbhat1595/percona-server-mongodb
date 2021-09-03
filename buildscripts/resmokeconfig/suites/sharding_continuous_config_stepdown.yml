@@ -136,6 +136,7 @@ selector:
   - jstests/sharding/mongos_no_replica_set_refresh.js
   - jstests/sharding/movechunk_interrupt_at_primary_stepdown.js
   - jstests/sharding/primary_config_server_blackholed_from_mongos.js
+  - jstests/sharding/reconfig_fails_no_cwwc_set_sharding.js
   # Nothing is affected by config server step down
   - jstests/sharding/basic_sharding_params.js
   # ShardingTest is never used, so continuous step down thread never starts
@@ -178,6 +179,7 @@ selector:
   - jstests/sharding/auth_add_shard.js
   - jstests/sharding/remove3.js
   - jstests/sharding/authCommands.js
+  - jstests/sharding/cwwc_conflict_add_shard.js
   #  - jstests/sharding/addshard2.js
   #  - jstests/sharding/configsvr_metadata_commands_require_majority_write_concern.js
   #  - jstests/sharding/convert_to_and_from_sharded.js
@@ -232,9 +234,6 @@ selector:
 
   # SERVER-51805 splitChunk op is not idempotent
   - jstests/sharding/mongos_get_shard_version.js
-
-  # TODO SERVER-58696: Re-enable the below test.
-  - jstests/sharding/implicit_default_write_concern_add_shard.js
 
   exclude_with_any_tags:
   - does_not_support_stepdowns

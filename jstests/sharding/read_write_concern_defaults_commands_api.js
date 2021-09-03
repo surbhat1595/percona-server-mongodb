@@ -1,11 +1,11 @@
 // Tests the basic API of the getDefaultRWConcern and setDefaultRWConcern commands and their
 // associated persisted state against different topologies.
-// @tags: [requires_fcv_50]
+// @tags: [
+// ]
 (function() {
 "use strict";
 
-load("jstests/libs/write_concern_util.js");  // For isDefaultWriteConcernMajorityFlagEnabled.
-load('jstests/replsets/rslib.js');           // For isDefaultReadConcernLocalFlagEnabled.
+load('jstests/replsets/rslib.js');  // For isDefaultReadConcernLocalFlagEnabled.
 
 // Asserts a set/get default RWC command response or persisted document contains the expected
 // fields. Assumes a default read or write concern has been set previously and the response was not
@@ -13,7 +13,6 @@ load('jstests/replsets/rslib.js');           // For isDefaultReadConcernLocalFla
 function verifyFields(res,
                       {expectRC, expectWC, isPersistedDocument},
                       isDefaultReadConcernLocalFlagEnabled,
-                      isDefaultWCMajorityFlagEnabled,
                       isImplicitDefaultWCMajority) {
     // These fields are always set once a read or write concern has been set at least once.
     let expectedFields = ["updateOpTime", "updateWallClockTime", "localUpdateWallClockTime"];
@@ -37,7 +36,7 @@ function verifyFields(res,
         unexpectedFields.push("defaultWriteConcern");
     }
 
-    if (isDefaultWCMajorityFlagEnabled && !isPersistedDocument) {
+    if (!isPersistedDocument) {
         expectedFields.push("defaultWriteConcernSource");
     } else {
         unexpectedFields.push("defaultWriteConcernSource");
@@ -55,7 +54,7 @@ function verifyFields(res,
         assert(!res.hasOwnProperty(field),
                `response unexpectedly had field '${field}', res: ${tojson(res)}`);
     });
-    if (isDefaultWCMajorityFlagEnabled && !isPersistedDocument) {
+    if (!isPersistedDocument) {
         if (expectWC) {
             assert.eq(res.defaultWriteConcernSource, "global", tojson(res));
         } else {
@@ -93,15 +92,9 @@ function verifyDefaultRWCommandsInvalidInput(conn) {
                                  ErrorCodes.BadValue);
 
     // Empty write concern is not allowed if write concern has already been set.
-    const featureEnabled = assert
-                               .commandWorked(conn.adminCommand(
-                                   {getParameter: 1, featureFlagDefaultWriteConcernMajority: 1}))
-                               .featureFlagDefaultWriteConcernMajority.value;
-    if (featureEnabled) {
-        assert.commandFailedWithCode(
-            conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {}}),
-            ErrorCodes.IllegalOperation);
-    }
+    assert.commandFailedWithCode(
+        conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {}}),
+        ErrorCodes.IllegalOperation);
 
     // Invalid read concern.
     assert.commandFailedWithCode(conn.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: 1}),
@@ -139,10 +132,7 @@ function verifyDefaultRWCommandsInvalidInput(conn) {
 }
 
 // Verifies the default responses for the default RWC commands and the default persisted state.
-function verifyDefaultState(conn,
-                            isDefaultRCLocalFlagEnabled,
-                            isDefaultWCMajorityFlagEnabled,
-                            isImplicitDefaultWCMajority) {
+function verifyDefaultState(conn, isDefaultRCLocalFlagEnabled, isImplicitDefaultWCMajority) {
     const res = assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1}));
     const inMemoryRes =
         assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1, inMemory: true}));
@@ -152,10 +142,8 @@ function verifyDefaultState(conn,
     if (isImplicitDefaultWCMajority) {
         expectedFields.push("defaultWriteConcern");
     }
-    if (isDefaultWCMajorityFlagEnabled) {
-        expectedFields.push("defaultWriteConcernSource");
-    }
 
+    expectedFields.push("defaultWriteConcernSource");
     if (isDefaultRCLocalFlagEnabled) {
         expectedFields.push("defaultReadConcern");
         expectedFields.push("defaultReadConcernSource");
@@ -169,18 +157,13 @@ function verifyDefaultState(conn,
     });
     assert.eq(inMemoryRes.inMemory, true, tojson(inMemoryRes));
 
-    if (isDefaultWCMajorityFlagEnabled) {
-        assert.eq(res.defaultWriteConcernSource, "implicit", tojson(res));
-        assert.eq(inMemoryRes.defaultWriteConcernSource, "implicit", tojson(inMemoryRes));
-    }
+    assert.eq(res.defaultWriteConcernSource, "implicit", tojson(res));
+    assert.eq(inMemoryRes.defaultWriteConcernSource, "implicit", tojson(inMemoryRes));
 
     // No other fields should be returned if neither a default read nor write concern has been set.
     const unexpectedFields = ["updateOpTime", "updateWallClockTime"];
     if (!isImplicitDefaultWCMajority) {
         unexpectedFields.push("defaultWriteConcern");
-    }
-    if (!isDefaultWCMajorityFlagEnabled) {
-        unexpectedFields.push("defaultWriteConcernSource");
     }
 
     if (!isDefaultRCLocalFlagEnabled) {
@@ -200,10 +183,8 @@ function verifyDefaultState(conn,
     assert.eq(null, getPersistedRWCDocument(conn));
 }
 
-function verifyDefaultRWCommandsValidInputOnSuccess(conn,
-                                                    isDefaultReadConcernLocalFlagEnabled,
-                                                    isDefaultWCMajorityFlagEnabled,
-                                                    isImplicitDefaultWCMajority) {
+function verifyDefaultRWCommandsValidInputOnSuccess(
+    conn, isDefaultReadConcernLocalFlagEnabled, isImplicitDefaultWCMajority) {
     //
     // Test getDefaultRWConcern when neither read nor write concern are set.
     //
@@ -229,19 +210,16 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn,
                      {setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}})),
                  {expectRC: true, expectWC: false},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
     verifyFields(getPersistedRWCDocument(conn),
                  {expectRC: true, expectWC: false, isPersistedDocument: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     // Test getDefaultRWConcern when only read concern is set.
     verifyFields(assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1})),
                  {expectRC: true, expectWC: false},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     // Test unsetting read concern.
@@ -249,17 +227,14 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn,
         assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {}})),
         {expectRC: false, expectWC: false},
         isDefaultReadConcernLocalFlagEnabled,
-        isDefaultWCMajorityFlagEnabled,
         isImplicitDefaultWCMajority);
     verifyFields(getPersistedRWCDocument(conn),
                  {expectRC: false, expectWC: false, isPersistedDocument: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
     verifyFields(assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1})),
                  {expectRC: false, expectWC: false},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     //
@@ -271,12 +246,10 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn,
         assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {}})),
         {expectRC: false, expectWC: false},
         isDefaultReadConcernLocalFlagEnabled,
-        isDefaultWCMajorityFlagEnabled,
         isImplicitDefaultWCMajority);
     verifyFields(getPersistedRWCDocument(conn),
                  {expectRC: false, expectWC: false, isPersistedDocument: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     // Test setRWConcern when only write concern is set.
@@ -290,19 +263,16 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn,
                      conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}})),
                  {expectRC: false, expectWC: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
     verifyFields(getPersistedRWCDocument(conn),
                  {expectRC: false, expectWC: true, isPersistedDocument: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     // Test getRWConcern when only write concern is set.
     verifyFields(assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1})),
                  {expectRC: false, expectWC: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     //
@@ -315,19 +285,16 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn,
     })),
                  {expectRC: true, expectWC: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
     verifyFields(getPersistedRWCDocument(conn),
                  {expectRC: true, expectWC: true, isPersistedDocument: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 
     // Test getRWConcern when both read and write concern are set.
     verifyFields(assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1})),
                  {expectRC: true, expectWC: true},
                  isDefaultReadConcernLocalFlagEnabled,
-                 isDefaultWCMajorityFlagEnabled,
                  isImplicitDefaultWCMajority);
 }
 
@@ -364,16 +331,10 @@ jsTestLog("Testing standalone replica set with implicit default write concern ma
     const primary = rst.getPrimary();
 
     const isDefaultRCLocalFlagEnabled = isDefaultReadConcernLocalFlagEnabled(primary);
-    const isDefaultWCMajorityFlagEnabled = isDefaultWriteConcernMajorityFlagEnabled(primary);
-    const isImplicitDefaultWCMajority = isDefaultWCMajorityFlagEnabled;
-    verifyDefaultState(primary,
-                       isDefaultRCLocalFlagEnabled,
-                       isDefaultWCMajorityFlagEnabled,
-                       isImplicitDefaultWCMajority);
-    verifyDefaultRWCommandsValidInputOnSuccess(primary,
-                                               isDefaultRCLocalFlagEnabled,
-                                               isDefaultWCMajorityFlagEnabled,
-                                               isImplicitDefaultWCMajority);
+    verifyDefaultState(
+        primary, isDefaultRCLocalFlagEnabled, true /* isImplicitDefaultWCMajority */);
+    verifyDefaultRWCommandsValidInputOnSuccess(
+        primary, isDefaultRCLocalFlagEnabled, true /* isImplicitDefaultWCMajority */);
     verifyDefaultRWCommandsInvalidInput(primary);
 
     // Secondary can run getDefaultRWConcern, but not setDefaultRWConcern.
@@ -396,15 +357,10 @@ jsTestLog("Testing standalone replica set with implicit default write concern {w
     const primary = rst.getPrimary();
 
     const isDefaultRCLocalFlagEnabled = isDefaultReadConcernLocalFlagEnabled(primary);
-    const isDefaultWCMajorityFlagEnabled = isDefaultWriteConcernMajorityFlagEnabled(primary);
-    verifyDefaultState(primary,
-                       isDefaultRCLocalFlagEnabled,
-                       isDefaultWCMajorityFlagEnabled,
-                       false /* isImplicitDefaultWCMajority */);
-    verifyDefaultRWCommandsValidInputOnSuccess(primary,
-                                               isDefaultRCLocalFlagEnabled,
-                                               isDefaultWCMajorityFlagEnabled,
-                                               false /* isImplicitDefaultWCMajority */);
+    verifyDefaultState(
+        primary, isDefaultRCLocalFlagEnabled, false /* isImplicitDefaultWCMajority */);
+    verifyDefaultRWCommandsValidInputOnSuccess(
+        primary, isDefaultRCLocalFlagEnabled, false /* isImplicitDefaultWCMajority */);
     verifyDefaultRWCommandsInvalidInput(primary);
 
     // Secondary can run getDefaultRWConcern, but not setDefaultRWConcern.
@@ -423,16 +379,9 @@ jsTestLog("Testing sharded cluster with implicit default write concern majority.
 
     // Mongos succeeds.
     let isDefaultRCLocalFlagEnabled = isDefaultReadConcernLocalFlagEnabled(st.s);
-    let isDefaultWCMajorityFlagEnabled = isDefaultWriteConcernMajorityFlagEnabled(st.s);
-    let isImplicitDefaultWCMajority = isDefaultWCMajorityFlagEnabled;
-    verifyDefaultState(st.s,
-                       isDefaultRCLocalFlagEnabled,
-                       isDefaultWCMajorityFlagEnabled,
-                       isImplicitDefaultWCMajority);
-    verifyDefaultRWCommandsValidInputOnSuccess(st.s,
-                                               isDefaultRCLocalFlagEnabled,
-                                               isDefaultWCMajorityFlagEnabled,
-                                               isImplicitDefaultWCMajority);
+    verifyDefaultState(st.s, isDefaultRCLocalFlagEnabled, true /* isImplicitDefaultWCMajority */);
+    verifyDefaultRWCommandsValidInputOnSuccess(
+        st.s, isDefaultRCLocalFlagEnabled, true /* isImplicitDefaultWCMajority */);
     verifyDefaultRWCommandsInvalidInput(st.s);
 
     // Shard node fails.
@@ -449,17 +398,12 @@ jsTestLog("Testing sharded cluster with implicit default write concern majority.
     st = new ShardingTest({shards: 1, rs: {nodes: 2}});
     // Config server primary succeeds.
     isDefaultRCLocalFlagEnabled = isDefaultReadConcernLocalFlagEnabled(st.configRS.getPrimary());
-    isDefaultWCMajorityFlagEnabled =
-        isDefaultWriteConcernMajorityFlagEnabled(st.configRS.getPrimary());
-    isImplicitDefaultWCMajority = isDefaultWCMajorityFlagEnabled;
     verifyDefaultState(st.configRS.getPrimary(),
                        isDefaultRCLocalFlagEnabled,
-                       isDefaultWCMajorityFlagEnabled,
-                       isImplicitDefaultWCMajority);
+                       true /* isImplicitDefaultWCMajority */);
     verifyDefaultRWCommandsValidInputOnSuccess(st.configRS.getPrimary(),
                                                isDefaultRCLocalFlagEnabled,
-                                               isDefaultWCMajorityFlagEnabled,
-                                               isImplicitDefaultWCMajority);
+                                               true /* isImplicitDefaultWCMajority */);
     verifyDefaultRWCommandsInvalidInput(st.configRS.getPrimary());
 
     // Config server secondary can run getDefaultRWConcern, but not setDefaultRWConcern.

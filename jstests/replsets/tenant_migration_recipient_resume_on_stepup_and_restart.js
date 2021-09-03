@@ -1,8 +1,13 @@
 /**
  * Tests that tenant migrations resume successfully on recipient stepup and restart.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, requires_persistence,
- * incompatible_with_eft, incompatible_with_windows_tls, incompatible_with_macos]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -39,11 +44,7 @@ function testRecipientSyncDataInterrupt(interruptFunc, recipientRestarted) {
     recipientRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        recipientRst.stopSet();
-        return;
-    }
+
     const donorRst = tenantMigrationTest.getDonorRst();
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
     let recipientPrimary = tenantMigrationTest.getRecipientPrimary();
@@ -129,12 +130,6 @@ function testRecipientForgetMigrationInterrupt(interruptFunc) {
 
     const tenantMigrationTest =
         new TenantMigrationTest({name: jsTestName(), donorRst, recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        recipientRst.stopSet();
-        return;
-    }
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 
     const migrationId = UUID();

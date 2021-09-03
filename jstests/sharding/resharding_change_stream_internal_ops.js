@@ -6,9 +6,9 @@
 // @tags: [
 //   requires_majority_read_concern,
 //   uses_change_streams,
-//   requires_fcv_49,
 //   uses_atclustertime,
-//   disabled_due_to_server_58295
+//   requires_fcv_51
+//
 // ]
 (function() {
 "use strict";

@@ -31,6 +31,7 @@
 
 #include <string>
 
+#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/geo/shapes.h"
 #include "third_party/s2/s2regionunion.h"
 
@@ -65,6 +66,11 @@ public:
      * Whether this geometry is a point
      */
     bool isPoint() const;
+
+    /**
+     * Returns the point data, if this geometry is a point.
+     */
+    PointWithCRS getPoint() const;
 
     /**
      * Reports the CRS of the contained geometry.
@@ -124,10 +130,14 @@ public:
     // TODO: Remove these hacks
     const CapWithCRS* getCapGeometryHack() const;
 
+    const BSONElement getGeoElement() const {
+        return _geoElm;
+    }
+
 private:
     class R2BoxRegion;
 
-    Status parseFromGeoJSON(const BSONObj& obj, bool skipValidation = false);
+    Status parseFromGeoJSON(bool skipValidation = false);
 
     // Does 'this' intersect with the provided type?
     bool intersects(const S2Cell& otherPoint) const;
@@ -161,6 +171,28 @@ private:
     // TODO: _s2Region is currently generated immediately - don't necessarily need to do this
     std::unique_ptr<S2RegionUnion> _s2Region;
     std::unique_ptr<R2Region> _r2Region;
+
+    BSONElement _geoElm;
+};
+
+/**
+ * Structure that holds BSON addresses (BSONElements) and the corresponding geometry parsed
+ * at those locations.
+ * Used to separate the parsing of geometries from a BSONObj (which must stay in scope) from
+ * the computation over those geometries.
+ * TODO: Merge with 2D/2DSphere key extraction?
+ */
+class StoredGeometry {
+public:
+    static StoredGeometry* parseFrom(const BSONElement& element, bool skipValidation);
+
+    static void extractGeometries(const BSONObj& doc,
+                                  const string& path,
+                                  std::vector<std::unique_ptr<StoredGeometry>>* geometries,
+                                  bool skipValidation);
+
+    BSONElement element;
+    GeometryContainer geometry;
 };
 
 }  // namespace mongo

@@ -71,8 +71,6 @@ enum StageType {
     // scan stage is an ixscan with some key-skipping behvaior that only distinct uses.
     STAGE_DISTINCT_SCAN,
 
-    STAGE_ENSURE_SORTED,
-
     STAGE_EOF,
 
     STAGE_FETCH,
@@ -125,6 +123,10 @@ enum StageType {
     STAGE_UNPACK_TIMESERIES_BUCKET,
 
     STAGE_UPDATE,
+
+    // Stages for DocumentSources.
+    STAGE_GROUP,
+    STAGE_SENTINEL,
 };
 
 inline bool isProjectionStageType(StageType stageType) {

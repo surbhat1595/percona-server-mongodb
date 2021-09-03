@@ -130,23 +130,15 @@ let st = new ShardingTest({shards: 1});
 
 // enableSharding
 checkCommandMongos({enableSharding: dbName}, setupFuncs.noop, cleanupFuncs.dropDatabase);
-checkCommandConfigSvr(
-    {_configsvrEnableSharding: dbName}, setupFuncs.noop, cleanupFuncs.dropDatabase);
 
 // movePrimary
 checkCommandMongos({movePrimary: dbName, to: st.shard0.name},
                    setupFuncs.createDatabase,
                    cleanupFuncs.dropDatabase);
-checkCommandConfigSvr({_configsvrMovePrimary: dbName, to: st.shard0.name},
-                      setupFuncs.createDatabase,
-                      cleanupFuncs.dropDatabase);
 
 // shardCollection
 checkCommandMongos(
     {shardCollection: ns, key: {_id: 1}}, setupFuncs.enableSharding, cleanupFuncs.dropDatabase);
-checkCommandConfigSvr({_configsvrShardCollection: ns, key: {_id: 1}},
-                      setupFuncs.enableSharding,
-                      cleanupFuncs.dropDatabase);
 
 // createDatabase
 // Don't check createDatabase against mongos: there is no createDatabase command exposed on

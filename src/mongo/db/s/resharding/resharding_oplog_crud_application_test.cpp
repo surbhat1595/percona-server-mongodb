@@ -263,11 +263,12 @@ private:
                                                boost::none /* timestamp */,
                                                boost::none /* timeseriesFields */,
                                                boost::none /* reshardingFields */,
+                                               boost::none /* chunkSizeBytes */,
                                                true /* allowMigrations */,
                                                chunks);
 
         return ChunkManager(_myDonorId,
-                            DatabaseVersion(UUID::gen()),
+                            DatabaseVersion(UUID::gen(), Timestamp()),
                             makeStandaloneRoutingTableHistory(std::move(rt)),
                             boost::none /* clusterTime */);
     }

@@ -41,10 +41,10 @@ namespace mongo {
 namespace tenant_migration_access_blocker {
 
 std::shared_ptr<TenantMigrationDonorAccessBlocker> getTenantMigrationDonorAccessBlocker(
-    ServiceContext* const serviceContext, StringData tenantId);
+    ServiceContext* serviceContext, StringData tenantId);
 
 std::shared_ptr<TenantMigrationRecipientAccessBlocker> getTenantMigrationRecipientAccessBlocker(
-    ServiceContext* const serviceContext, StringData tenantId);
+    ServiceContext* serviceContext, StringData tenantId);
 
 /**
  * Returns a TenantMigrationDonorDocument constructed from the given bson doc and validate the
@@ -93,9 +93,10 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx);
 
 /**
  * Blocks until the migration commits or aborts, then returns TenantMigrationCommitted or
- * TenantMigrationAborted.
+ * TenantMigrationAborted, or a non-retryable error if the given status is
+ * NonRetryableTenantMigrationConflict.
  */
-void handleTenantMigrationConflict(OperationContext* opCtx, Status status);
+Status handleTenantMigrationConflict(OperationContext* opCtx, Status status);
 
 /**
  * Appends a no-op to the oplog.

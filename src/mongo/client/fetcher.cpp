@@ -58,6 +58,7 @@ const char* kNamespaceFieldName = "ns";
 
 const char* kFirstBatchFieldName = "firstBatch";
 const char* kNextBatchFieldName = "nextBatch";
+const char* kPostBatchResumeTokenFieldName = "postBatchResumeToken";
 
 /**
  * Parses cursor response in command result for cursor ID, namespace and documents.
@@ -143,6 +144,19 @@ Status parseCursorResponse(const BSONObj& obj,
     for (auto& doc : batchData->documents) {
         doc.shareOwnershipWith(obj);
     }
+
+    BSONElement postBatchResumeToken = cursorObj.getField(kPostBatchResumeTokenFieldName);
+    if (!postBatchResumeToken.eoo()) {
+        if (postBatchResumeToken.type() != BSONType::Object) {
+            return Status(ErrorCodes::FailedToParse,
+                          str::stream()
+                              << "'" << kCursorFieldName << "." << kPostBatchResumeTokenFieldName
+                              << "' field must be of type object " << obj);
+        }
+
+        batchData->otherFields.postBatchResumeToken.emplace(postBatchResumeToken.Obj().getOwned());
+    }
+
 
     return Status::OK();
 }
@@ -262,6 +276,7 @@ void Fetcher::shutdown() {
         case State::kPreStart:
             // Transition directly from PreStart to Complete if not started yet.
             _state = State::kComplete;
+            _completionPromise.emplaceValue();
             return;
         case State::kRunning:
             _state = State::kShuttingDown;
@@ -442,6 +457,8 @@ void Fetcher::_finishCallback() {
     _state = State::kComplete;
     _first = false;
     _condition.notify_all();
+
+    _completionPromise.emplaceValue();
 
     invariant(_work);
     std::swap(_work, tempWork);

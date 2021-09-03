@@ -37,34 +37,16 @@ namespace mongo {
 namespace {
 
 TEST(ComparableDatabaseVersionTest, VersionsEqual) {
-    auto versionsEqual = [](const DatabaseVersion& v) {
-        const auto version = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
-        ASSERT(version == version);
-    };
-
-    versionsEqual(DatabaseVersion(UUID::gen()));
-    versionsEqual(DatabaseVersion(UUID::gen(), Timestamp(1)));
+    const DatabaseVersion v(UUID::gen(), Timestamp(1));
+    const auto version = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
+    ASSERT(version == version);
 }
 
 TEST(ComparableDatabaseVersionTest, VersionsEqualAfterCopy) {
-    auto versionsEqualAfterCopy = [](const DatabaseVersion& v) {
-        const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
-        const auto version2 = version1;
-        ASSERT(version1 == version2);
-    };
-
-    versionsEqualAfterCopy(DatabaseVersion(UUID::gen()));
-    versionsEqualAfterCopy(DatabaseVersion(UUID::gen(), Timestamp(1)));
-}
-
-TEST(ComparableDatabaseVersionTest, CompareVersionDifferentUuids) {
-    const auto version1 =
-        ComparableDatabaseVersion::makeComparableDatabaseVersion(DatabaseVersion(UUID::gen()));
-    const auto version2 =
-        ComparableDatabaseVersion::makeComparableDatabaseVersion(DatabaseVersion(UUID::gen()));
-    ASSERT(version2 != version1);
-    ASSERT(version2 > version1);
-    ASSERT_FALSE(version2 < version1);
+    const DatabaseVersion v(UUID::gen(), Timestamp(1));
+    const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
+    const auto version2 = version1;
+    ASSERT(version1 == version2);
 }
 
 TEST(ComparableDatabaseVersionTest, CompareVersionDifferentTimestamps) {
@@ -77,83 +59,24 @@ TEST(ComparableDatabaseVersionTest, CompareVersionDifferentTimestamps) {
     ASSERT_FALSE(version2 > version1);
 }
 
-TEST(ComparableDatabaseVersionTest, CompareEpochBasedVersionAgainstEpochAndTimestampBasedVersion) {
-    {
-        auto equalVersions = [](const DatabaseVersion& v1, const DatabaseVersion& v2) {
-            const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
-            const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
-            ASSERT(version1 == version2);
-            ASSERT_FALSE(version1 < version2);
-            ASSERT_FALSE(version1 > version2);
-        };
-
-        const auto epoch = UUID::gen();
-        const DatabaseVersion v1(epoch);
-        const DatabaseVersion v2(epoch, Timestamp(1));
-        equalVersions(v1, v2);
-        equalVersions(v2, v1);
-    }
-
-    {
-        auto diffVersionsMoreRecentByLastMod = [](const DatabaseVersion& v1,
-                                                  const DatabaseVersion& v2) {
-            const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
-            const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
-            ASSERT(version1 != version2);
-            ASSERT(version1 > version2);
-            ASSERT_FALSE(version1 < version2);
-        };
-
-        const auto epoch = UUID::gen();
-        const DatabaseVersion v1(epoch);
-        const DatabaseVersion v2(epoch, Timestamp(1));
-        diffVersionsMoreRecentByLastMod(v1.makeUpdated(), v2);
-        diffVersionsMoreRecentByLastMod(v2.makeUpdated(), v1);
-    }
-
-    {
-        auto diffVersionsMoreRecentByDisambigSeqNum = [](const DatabaseVersion& v1,
-                                                         const DatabaseVersion& v2) {
-            const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
-            const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
-            ASSERT(version1 != version2);
-            ASSERT(version1 < version2);
-            ASSERT_FALSE(version1 > version2);
-        };
-
-        const DatabaseVersion v1(UUID::gen());
-        const DatabaseVersion v2(UUID::gen(), Timestamp(1));
-        diffVersionsMoreRecentByDisambigSeqNum(v1, v2);
-        diffVersionsMoreRecentByDisambigSeqNum(v2, v1);
-    }
+TEST(ComparableDatabaseVersionTest, VersionGreaterSameTimestamp) {
+    const DatabaseVersion v1(UUID::gen(), Timestamp(0));
+    const DatabaseVersion v2 = v1.makeUpdated();
+    const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
+    const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
+    ASSERT(version2 != version1);
+    ASSERT(version2 > version1);
+    ASSERT_FALSE(version2 < version1);
 }
 
-TEST(ComparableDatabaseVersionTest, VersionGreaterSameUuidOrTimestamp) {
-    auto versionGreaterSameUuidOrTimestamp = [](const DatabaseVersion& v1) {
-        const DatabaseVersion v2 = v1.makeUpdated();
-        const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
-        const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
-        ASSERT(version2 != version1);
-        ASSERT(version2 > version1);
-        ASSERT_FALSE(version2 < version1);
-    };
-
-    versionGreaterSameUuidOrTimestamp(DatabaseVersion(UUID::gen()));
-    versionGreaterSameUuidOrTimestamp(DatabaseVersion(UUID::gen(), Timestamp(1)));
-}
-
-TEST(ComparableDatabaseVersionTest, VersionLessSameUuidOrTimestamp) {
-    auto versionLessSameUuidOrTimestamp = [](const DatabaseVersion& v1) {
-        const DatabaseVersion v2 = v1.makeUpdated();
-        const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
-        const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
-        ASSERT(version1 != version2);
-        ASSERT(version1 < version2);
-        ASSERT_FALSE(version1 > version2);
-    };
-
-    versionLessSameUuidOrTimestamp(DatabaseVersion(UUID::gen()));
-    versionLessSameUuidOrTimestamp(DatabaseVersion(UUID::gen(), Timestamp(1)));
+TEST(ComparableDatabaseVersionTest, VersionLessSameTimestamp) {
+    const DatabaseVersion v1(UUID::gen(), Timestamp(1));
+    const DatabaseVersion v2 = v1.makeUpdated();
+    const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v1);
+    const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v2);
+    ASSERT(version1 != version2);
+    ASSERT(version1 < version2);
+    ASSERT_FALSE(version1 > version2);
 }
 
 TEST(ComparableDatabaseVersionTest, DefaultConstructedVersionsAreEqual) {
@@ -164,44 +87,34 @@ TEST(ComparableDatabaseVersionTest, DefaultConstructedVersionsAreEqual) {
 }
 
 TEST(ComparableDatabaseVersionTest, DefaultConstructedVersionIsAlwaysLess) {
-
-    auto defaultConstructedVersionIsAlwaysLess = [](const DatabaseVersion& v) {
-        const ComparableDatabaseVersion defaultVersion{};
-        const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
-        ASSERT(defaultVersion != version1);
-        ASSERT(defaultVersion < version1);
-        ASSERT_FALSE(defaultVersion > version1);
-    };
-
-    defaultConstructedVersionIsAlwaysLess(DatabaseVersion(UUID::gen()));
-    defaultConstructedVersionIsAlwaysLess(DatabaseVersion(UUID::gen(), Timestamp(1)));
+    DatabaseVersion v(UUID::gen(), Timestamp());
+    const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
+    const ComparableDatabaseVersion defaultVersion{};
+    ASSERT(defaultVersion != version1);
+    ASSERT(defaultVersion < version1);
+    ASSERT_FALSE(defaultVersion > version1);
 }
 
 TEST(ComparableDatabaseVersionTest, CompareForcedRefreshVersionVersusValidDatabaseVersion) {
-    auto compareForcedRefreshVersionVersusValidDatabaseVersion = [](const DatabaseVersion& v) {
-        const ComparableDatabaseVersion defaultVersionBeforeForce;
-        const auto versionBeforeForce = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
-        const auto forcedRefreshVersion =
-            ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh();
-        const auto versionAfterForce = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
-        const ComparableDatabaseVersion defaultVersionAfterForce;
+    const DatabaseVersion v(UUID::gen(), Timestamp());
+    const ComparableDatabaseVersion defaultVersionBeforeForce;
+    const auto versionBeforeForce = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
+    const auto forcedRefreshVersion =
+        ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh();
+    const auto versionAfterForce = ComparableDatabaseVersion::makeComparableDatabaseVersion(v);
+    const ComparableDatabaseVersion defaultVersionAfterForce;
 
-        ASSERT(defaultVersionBeforeForce != forcedRefreshVersion);
-        ASSERT(defaultVersionBeforeForce < forcedRefreshVersion);
+    ASSERT(defaultVersionBeforeForce != forcedRefreshVersion);
+    ASSERT(defaultVersionBeforeForce < forcedRefreshVersion);
 
-        ASSERT(versionBeforeForce != forcedRefreshVersion);
-        ASSERT(versionBeforeForce < forcedRefreshVersion);
+    ASSERT(versionBeforeForce != forcedRefreshVersion);
+    ASSERT(versionBeforeForce < forcedRefreshVersion);
 
-        ASSERT(versionAfterForce != forcedRefreshVersion);
-        ASSERT(versionAfterForce > forcedRefreshVersion);
+    ASSERT(versionAfterForce != forcedRefreshVersion);
+    ASSERT(versionAfterForce > forcedRefreshVersion);
 
-        ASSERT(defaultVersionAfterForce != forcedRefreshVersion);
-        ASSERT(defaultVersionAfterForce < forcedRefreshVersion);
-    };
-
-    compareForcedRefreshVersionVersusValidDatabaseVersion(DatabaseVersion(UUID::gen()));
-    compareForcedRefreshVersionVersusValidDatabaseVersion(
-        DatabaseVersion(UUID::gen(), Timestamp(1)));
+    ASSERT(defaultVersionAfterForce != forcedRefreshVersion);
+    ASSERT(defaultVersionAfterForce < forcedRefreshVersion);
 }
 
 TEST(ComparableDatabaseVersionTest, CompareTwoForcedRefreshVersions) {
@@ -222,8 +135,7 @@ TEST(ComparableDatabaseVersionTest, CompareTwoComparableChunkVersionsWithBoostNo
     const auto version1 = ComparableDatabaseVersion::makeComparableDatabaseVersion(boost::none);
     const auto version2 = ComparableDatabaseVersion::makeComparableDatabaseVersion(boost::none);
 
-    ASSERT_TRUE(version1 < version2);
-    ASSERT_FALSE(version1 > version2);
+    ASSERT_TRUE(version1 == version2);
 }
 
 }  // namespace

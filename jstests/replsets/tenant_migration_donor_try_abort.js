@@ -1,8 +1,13 @@
 /**
  * Tests the donorAbortMigration command during a tenant migration.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -26,10 +31,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration before an instance's future chain begins.");
 
     const tmt = new TenantMigrationTest({name: jsTestName()});
-    if (!tmt.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const donorPrimary = tmt.getDonorPrimary();
     let fp = configureFailPoint(donorPrimary, "pauseTenantMigrationBeforeEnteringFutureChain");
@@ -79,10 +80,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
         "command repeatedly fails with retryable errors.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
     let fp = configureFailPoint(recipientPrimary, "failCommand", {
@@ -118,10 +115,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
               "against admin.system.keys repeatedly fails with retryable errors.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
     let fp = configureFailPoint(recipientPrimary, "failCommand", {
@@ -158,10 +151,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
               "response of recipientSyncData.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
     configureFailPoint(recipientPrimary, "failCommand", {
@@ -216,10 +205,7 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration during a tenant migration while waiting for the " +
               "response of find against admin.system.keys.");
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
+
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
     configureFailPoint(recipientPrimary, "failCommand", {
         failInternalCommands: true,
@@ -254,10 +240,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration before fetching keys from admin.system.keys.");
 
     const tmt = new TenantMigrationTest({name: jsTestName()});
-    if (!tmt.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const barrierBeforeFetchingKeys =
         configureFailPoint(tmt.getDonorPrimary(), "pauseTenantMigrationBeforeFetchingKeys");
@@ -317,11 +299,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     donorRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst: donorRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        return;
-    }
 
     const tenantId = kTenantId;
     const migrationId = UUID();
@@ -369,10 +346,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration during a tenant migration while in data sync.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
     let fp = configureFailPoint(donorPrimary, "pauseTenantMigrationBeforeLeavingDataSyncState");
@@ -416,10 +389,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration during a tenant migration while in blocking.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
     let fp = configureFailPoint(donorPrimary, "pauseTenantMigrationBeforeLeavingBlockingState");
@@ -463,10 +432,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration during a tenant migration after abort decision.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
     let fp = configureFailPoint(donorPrimary, "abortTenantMigrationBeforeLeavingBlockingState");
@@ -494,10 +459,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     jsTestLog("Test sending donorAbortMigration during a tenant migration after commit decision.");
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const tenantId = kTenantId;
     const migrationId = extractUUIDFromObject(UUID());
@@ -526,11 +487,6 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     donorRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst: donorRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        return;
-    }
 
     const tenantId = kTenantId;
     const migrationId = extractUUIDFromObject(UUID());

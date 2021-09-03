@@ -12,10 +12,6 @@ load("jstests/libs/fail_point_util.js");
 
 function runAwaitableHelloBeforeFCVChange(
     topologyVersionField, targetFCV, isPrimary, prevMinWireVersion, serverMaxWireVersion) {
-    const isUseSecondaryDelaySecsEnabled = db.adminCommand({
-                                                 getParameter: 1,
-                                                 featureFlagUseSecondaryDelaySecs: 1
-                                             }).featureFlagUseSecondaryDelaySecs.value;
     db.getMongo().setSecondaryOk();
     let response = assert.commandWorked(db.runCommand({
         hello: 1,
@@ -24,22 +20,6 @@ function runAwaitableHelloBeforeFCVChange(
         internalClient:
             {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(serverMaxWireVersion)},
     }));
-    // If 'featureFlagUseSecondaryDelaySecs' is enabled, the primary will reconfig the replica
-    // set on dowgrade. This reconfig will increment the 'topologyVersion'
-    // before the 'minWireVersion' is updated. Therefore, we send another 'hello'
-    // command to wait for the downgrade to complete before validating the
-    // 'minWireVersion'.
-    if (isUseSecondaryDelaySecsEnabled && prevMinWireVersion === response.minWireVersion) {
-        jsTestLog("Min wire version didn't change: " + prevMinWireVersion + ". Retrying hello.");
-        topologyVersionField = response.topologyVersion;
-        response = assert.commandWorked(db.runCommand({
-            hello: 1,
-            topologyVersion: topologyVersionField,
-            maxAwaitTimeMS: 99999999,
-            internalClient:
-                {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(serverMaxWireVersion)},
-        }));
-    }
 
     // We only expect to increment the server TopologyVersion when the minWireVersion has changed.
     // This can only happen in two scenarios:
@@ -175,6 +155,9 @@ function runTest(downgradeFCV) {
     rst.awaitReplication();
     checkFCV(primaryAdminDB, downgradeFCV);
     checkFCV(secondaryAdminDB, downgradeFCV);
+    // The new configuration may not have been installed on the secondary yet, though it has reached
+    // the secondary.
+    rst.waitForConfigReplication(primary);
 
     // All hello requests should have been responded to after the FCV change.
     numAwaitingTopologyChangeOnPrimary =
@@ -260,6 +243,9 @@ function runTest(downgradeFCV) {
         rst.awaitReplication();
         checkFCV(primaryAdminDB, lastLTSFCV);
         checkFCV(secondaryAdminDB, lastLTSFCV);
+        // The new configuration may not have been installed on the secondary yet, though it has
+        // reached the secondary.
+        rst.waitForConfigReplication(primary);
 
         primaryResponseAfterDowngrade = helloAsInternalClient();
         assert(primaryResponseAfterDowngrade.hasOwnProperty("topologyVersion"),

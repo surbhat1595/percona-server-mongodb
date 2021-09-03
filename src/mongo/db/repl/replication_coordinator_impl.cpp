@@ -69,6 +69,7 @@
 #include "mongo/db/repl/check_quorum_for_config_change.h"
 #include "mongo/db/repl/data_replicator_external_state_initial_sync.h"
 #include "mongo/db/repl/hello_response.h"
+#include "mongo/db/repl/initial_syncer_factory.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -132,7 +133,9 @@ MONGO_FAIL_POINT_DEFINE(skipDurableTimestampUpdates);
 MONGO_FAIL_POINT_DEFINE(omitConfigQuorumCheck);
 // Will cause signal drain complete to hang right before acquiring the RSTL.
 MONGO_FAIL_POINT_DEFINE(hangBeforeRSTLOnDrainComplete);
-// Will cause signal drain complete to hang after reconfig
+// Will cause signal drain complete to hang before reconfig.
+MONGO_FAIL_POINT_DEFINE(hangBeforeReconfigOnDrainComplete);
+// Will cause signal drain complete to hang after reconfig.
 MONGO_FAIL_POINT_DEFINE(hangAfterReconfigOnDrainComplete);
 MONGO_FAIL_POINT_DEFINE(doNotRemoveNewlyAddedOnHeartbeats);
 // Will hang right after setting the currentOp info associated with an automatic reconfig.
@@ -773,7 +776,7 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
         LOGV2_DEBUG(4853000, 1, "initial sync complete.");
     };
 
-    std::shared_ptr<InitialSyncer> initialSyncerCopy;
+    std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
     try {
         {
             // Must take the lock to set _initialSyncer, but not call it.
@@ -782,14 +785,36 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
                 LOGV2(21326, "Initial Sync not starting because replication is shutting down");
                 return;
             }
-            initialSyncerCopy = std::make_shared<InitialSyncer>(
-                createInitialSyncerOptions(this, _externalState.get()),
-                std::make_unique<DataReplicatorExternalStateInitialSync>(this,
-                                                                         _externalState.get()),
-                _externalState->getDbWorkThreadPool(),
-                _storage,
-                _replicationProcess,
-                onCompletion);
+
+            auto initialSyncerFactory = InitialSyncerFactory::get(opCtx->getServiceContext());
+            auto createInitialSyncer = [&](const std::string& method) {
+                return initialSyncerFactory->makeInitialSyncer(
+                    method,
+                    createInitialSyncerOptions(this, _externalState.get()),
+                    std::make_unique<DataReplicatorExternalStateInitialSync>(this,
+                                                                             _externalState.get()),
+                    _externalState->getDbWorkThreadPool(),
+                    _storage,
+                    _replicationProcess,
+                    onCompletion);
+            };
+
+            if (repl::feature_flags::gFileCopyBasedInitialSync.isEnabledAndIgnoreFCV()) {
+                auto swInitialSyncer = createInitialSyncer(initialSyncMethod);
+                if (swInitialSyncer.getStatus().code() == ErrorCodes::NotImplemented &&
+                    initialSyncMethod != "logical") {
+                    LOGV2_WARNING(58154,
+                                  "No such initial sync method was available. Falling back to "
+                                  "logical initial sync.",
+                                  "initialSyncMethod"_attr = initialSyncMethod,
+                                  "error"_attr = swInitialSyncer.getStatus().reason());
+                    swInitialSyncer = createInitialSyncer(std::string("logical"));
+                }
+                initialSyncerCopy = uassertStatusOK(swInitialSyncer);
+            } else {
+                auto swInitialSyncer = createInitialSyncer(std::string("logical"));
+                initialSyncerCopy = uassertStatusOK(swInitialSyncer);
+            }
             _initialSyncer = initialSyncerCopy;
         }
         // InitialSyncer::startup() must be called outside lock because it uses features (eg.
@@ -932,7 +957,7 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
     LOGV2(21328, "Shutting down replication subsystems");
 
     // Used to shut down outside of the lock.
-    std::shared_ptr<InitialSyncer> initialSyncerCopy;
+    std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
     {
         stdx::unique_lock<Latch> lk(_mutex);
         fassert(28533, !_inShutdown);
@@ -1160,6 +1185,10 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
         lk.unlock();
 
         if (needBumpConfigTerm) {
+            if (MONGO_unlikely(hangBeforeReconfigOnDrainComplete.shouldFail())) {
+                LOGV2(5726200, "Hanging due to hangBeforeReconfigOnDrainComplete failpoint");
+                hangBeforeReconfigOnDrainComplete.pauseWhileSet(opCtx);
+            }
             // We re-write the term but keep version the same. This conceptually a no-op
             // in the config consensus group, analogous to writing a new oplog entry
             // in Raft log state machine on step up.
@@ -2983,7 +3012,7 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
 
     BSONObj initialSyncProgress;
     if (responseStyle == ReplSetGetStatusResponseStyle::kInitialSync) {
-        std::shared_ptr<InitialSyncer> initialSyncerCopy;
+        std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
         {
             stdx::lock_guard<Latch> lk(_mutex);
             initialSyncerCopy = _initialSyncer;
@@ -3217,7 +3246,7 @@ Status ReplicationCoordinatorImpl::processReplSetSyncFrom(OperationContext* opCt
                                                           const HostAndPort& target,
                                                           BSONObjBuilder* resultObj) {
     Status result(ErrorCodes::InternalError, "didn't set status in prepareSyncFromResponse");
-    std::shared_ptr<InitialSyncer> initialSyncerCopy;
+    std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
     {
         stdx::lock_guard<Latch> lk(_mutex);
         _topCoord->prepareSyncFromResponse(target, resultObj, &result);
@@ -3249,12 +3278,6 @@ Status ReplicationCoordinatorImpl::processReplSetFreeze(int secs, BSONObjBuilder
     }
 
     return Status::OK();
-}
-
-bool ReplicationCoordinatorImpl::_supportsAutomaticReconfig() const {
-    // TODO SERVER-48545: Remove this when 5.0 becomes last-lts.
-    return serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-        ServerGlobalParams::FeatureCompatibility::Version::kVersion47);
 }
 
 Status ReplicationCoordinatorImpl::processReplSetReconfig(OperationContext* opCtx,
@@ -3327,9 +3350,8 @@ Status ReplicationCoordinatorImpl::processReplSetReconfig(OperationContext* opCt
                 return Status(ErrorCodes::InvalidReplicaSetConfig, errmsg);
             }
 
-            // We should never set the 'newlyAdded' field for arbiters, or when automatic reconfig
-            // is disabled, or during force reconfigs.
-            if (newMem.isArbiter() || !_supportsAutomaticReconfig() || args.force) {
+            // We should never set the 'newlyAdded' field for arbiters or during force reconfigs.
+            if (newMem.isArbiter() || args.force) {
                 continue;
             }
 
@@ -3476,19 +3498,6 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     int myIndex = _selfIndex;
     lk.unlock();
 
-    // TODO SERVER-48545: Remove this when 5.0 becomes last-lts.
-    // Automatic reconfig ("newlyAdded" field in repl config) is supported only from FCV4.7+.
-    // So, acquire FCV mutex lock in shared mode to block writers from modifying the fcv document
-    // to make sure fcv is not changed between getNewConfig() and storing the new config
-    // document locally.
-    // Since 'skipSafetyChecks' is only true when this reconfig is invoked as part of
-    // 'signalDrainComplete', we can skip taking the FCV lock here because:
-    // 1. 'signalDrainComplete' acquires the RSTL in X mode prior to this reconfig, which will block
-    //    all external writers. This is also important because we must not acquire the FCV lock
-    //    while holding the RSTL to avoid deadlocking.
-    // 2. We are not able to accept replicated writes as primary until we fully exit drain mode.
-    auto fixedFcvRegion = skipSafetyChecks ? nullptr : std::make_unique<FixedFCVRegion>(opCtx);
-
     // Call the callback to get the new config given the old one.
     auto newConfigStatus = getNewConfig(oldConfig, topCoordTerm);
     Status status = newConfigStatus.getStatus();
@@ -3496,26 +3505,55 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
         return status;
     ReplSetConfig newConfig = newConfigStatus.getValue();
 
-    // If the new config changes the replica set's implicit default write concern, we fail the
-    // reconfig command. This includes force reconfigs, but excludes reconfigs that bump the config
-    // term during step-up. The user should set a cluster-wide write concern and attempt the
-    // reconfig command again. We also need to exclude shard servers from this validation, as shard
-    // servers don't store the cluster-wide write concern.
-    if (!skipSafetyChecks /* skipping step-up reconfig */ &&
-        repl::feature_flags::gDefaultWCMajority.isEnabled(
-            serverGlobalParams.featureCompatibility) &&
-        serverGlobalParams.clusterRole != ClusterRole::ShardServer &&
-        !repl::enableDefaultWriteConcernUpdatesForInitiate.load()) {
+    // Excluding reconfigs that bump the config term during step-up from checking against changing
+    // the implicit default write concern, as it is not needed.
+    if (!skipSafetyChecks /* skipping step-up reconfig */) {
         bool currIDWC = oldConfig.isImplicitDefaultWriteConcernMajority();
         bool newIDWC = newConfig.isImplicitDefaultWriteConcernMajority();
-        bool isCWWCSet = ReadWriteConcernDefaults::get(opCtx).isCWWCSet(opCtx);
-        if (!isCWWCSet && currIDWC != newIDWC) {
-            return Status(
-                ErrorCodes::NewReplicaSetConfigurationIncompatible,
-                str::stream()
-                    << "Reconfig attempted to install a config that would change the "
-                       "implicit default write concern. Use the setDefaultRWConcern command to "
-                       "set a cluster-wide write concern and try the reconfig again.");
+
+        // If the new config changes the replica set's implicit default write concern, we fail the
+        // reconfig command. This includes force reconfigs.
+        // The user should set a cluster-wide write concern and attempt the reconfig command again.
+        if (serverGlobalParams.clusterRole != ClusterRole::ShardServer) {
+            if (!repl::enableDefaultWriteConcernUpdatesForInitiate.load() && currIDWC != newIDWC &&
+                !ReadWriteConcernDefaults::get(opCtx).isCWWCSet(opCtx)) {
+                return Status(
+                    ErrorCodes::NewReplicaSetConfigurationIncompatible,
+                    str::stream()
+                        << "Reconfig attempted to install a config that would change the implicit "
+                           "default write concern. Use the setDefaultRWConcern command to set a "
+                           "cluster-wide write concern and try the reconfig again.");
+            }
+        } else {
+            // Allow all reconfigs if the shard is not part of a sharded cluster yet, however
+            // prevent changing the implicit default write concern to (w: 1) after it becomes part
+            // of a sharded cluster and CWWC is not set on the cluster.
+            // Remote call to the configServer should be done to check if CWWC is set on the
+            // cluster.
+            if (_externalState->isShardPartOfShardedCluster(opCtx) && currIDWC != newIDWC &&
+                !newIDWC) {
+                try {
+                    // Initiates a remote call to the config server.
+                    if (!_externalState->isCWWCSetOnConfigShard(opCtx)) {
+                        return Status(
+                            ErrorCodes::NewReplicaSetConfigurationIncompatible,
+                            str::stream()
+                                << "Reconfig attempted to install a config that would change the "
+                                   "implicit default write concern on the shard to {w: 1}. Use the "
+                                   "setDefaultRWConcern command to set a cluster-wide write "
+                                   "concern on the cluster and try the reconfig again.");
+                    }
+                } catch (const DBException& ex) {
+                    return Status(
+                        ErrorCodes::ConfigServerUnreachable,
+                        str::stream()
+                            << "Reconfig attempted to install a config that would change the "
+                               "implicit default write concern on the shard to {w: 1}, but the "
+                               "shard can not check if CWWC is set on the cluster, as the request "
+                               "to the config server is failing with error: " +
+                                ex.toString());
+                }
+            }
         }
     }
 
@@ -3523,24 +3561,10 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     BSONObj newConfigObj = newConfig.toBSON();
     audit::logReplSetReconfig(opCtx->getClient(), &oldConfigObj, &newConfigObj);
 
-    // Stepdown can interrupt the setFeatureCompatibilityVersion command after we've transitioned
-    // to the intermediary kUpgrading/kDowngrading state but before the reconfig to change the
-    // 'secondaryDelaySecs' field name. During a subsequent stepup's automatic reconfig, the config
-    // could have an incompatible field name based on the intermediate FCV, but since we must retry
-    // setFeatureCompatibilityVersion until we complete the upgrade/downgrade procedure, the
-    // reconfig to change the delay field name to the correct value will eventually succeed.
-    // Therefore, it is safe for us to skip the FCV compatibility check during the stepup reconfig
-    // to avoid crashing.
-    //
-    // (Generic FCV reference): feature flag support
-    // TODO (SERVER-53354): Remove this check once 5.0 becomes 'lastLTS'.
-    bool skipFCVCompatibilityCheck =
-        serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading() && skipSafetyChecks;
-
     bool allowSplitHorizonIP = !opCtx->getClient()->hasRemote();
 
-    Status validateStatus = validateConfigForReconfig(
-        oldConfig, newConfig, force, allowSplitHorizonIP, skipFCVCompatibilityCheck);
+    Status validateStatus =
+        validateConfigForReconfig(oldConfig, newConfig, force, allowSplitHorizonIP);
     if (!validateStatus.isOK()) {
         LOGV2_ERROR(21420,
                     "replSetReconfig got {error} while validating {newConfig}",
@@ -3549,40 +3573,6 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
                     "newConfig"_attr = newConfigObj,
                     "oldConfig"_attr = oldConfigObj);
         return Status(ErrorCodes::NewReplicaSetConfigurationIncompatible, validateStatus.reason());
-    }
-
-    // Since at this point, we have validated the new config, we are assuming the new config follows
-    // the safe reconfig rules.
-    auto needsFcvLock = [&]() -> bool {
-        int oldVoters = 0, newVoters = 0;
-        bool oldHasNewlyAdded = false, newHasNewlyAdded = false;
-
-        std::for_each(oldConfig.membersBegin(), oldConfig.membersEnd(), [&](const MemberConfig& m) {
-            if (m.isVoter())
-                oldVoters++;
-            oldHasNewlyAdded = oldHasNewlyAdded || m.isNewlyAdded();
-        });
-        std::for_each(newConfig.membersBegin(), newConfig.membersEnd(), [&](const MemberConfig& m) {
-            if (m.isVoter())
-                newVoters++;
-            newHasNewlyAdded = newHasNewlyAdded || m.isNewlyAdded();
-        });
-
-        // It's illegal for the new config to contain "newlyAdded" field when automatic reconfig is
-        // disabled. If the primary receives a new config with 'newlyAdded' field via
-        // replSetReconfig command, then the primary should have already uasserted earlier in
-        // getNewConfig().
-        invariant(_supportsAutomaticReconfig() || !newHasNewlyAdded);
-
-        return (!oldHasNewlyAdded && newHasNewlyAdded) || (newVoters > oldVoters);
-    };
-
-    // We need to take fcv lock only for 2 cases:
-    // 1) For fcv 4.4, addition of new voter nodes.
-    // 2) For fcv 4.7+, only if the current config doesn't contain the 'newlyAdded' field but the
-    // new config got mutated to append 'newlyAdded' field.
-    if (fixedFcvRegion && (force || !needsFcvLock())) {
-        fixedFcvRegion.reset();
     }
 
     if (MONGO_unlikely(ReconfigHangBeforeConfigValidationCheck.shouldFail())) {
@@ -5765,11 +5755,6 @@ int64_t ReplicationCoordinatorImpl::_nextRandomInt64_inlock(int64_t limit) {
 bool ReplicationCoordinatorImpl::setContainsArbiter() const {
     stdx::lock_guard<Latch> lock(_mutex);
     return _rsConfig.containsArbiter();
-}
-
-bool ReplicationCoordinatorImpl::replSetContainsNewlyAddedMembers() const {
-    stdx::lock_guard<Latch> lock(_mutex);
-    return _rsConfig.containsNewlyAddedMembers();
 }
 
 void ReplicationCoordinatorImpl::ReadWriteAbility::setCanAcceptNonLocalWrites(

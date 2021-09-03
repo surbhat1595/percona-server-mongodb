@@ -8,8 +8,13 @@
  * - if the migration aborts after rejectReadsBeforeTimestamp is set, the recipient keeps rejecting
  *   reads with atClusterTime < rejectReadsBeforeTimestamp until the state doc is garbage collected.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -23,10 +28,6 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 load("jstests/replsets/rslib.js");
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 const kCollName = "testColl";
 const kTenantDefinedDbName = "0";

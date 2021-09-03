@@ -30,6 +30,7 @@ error_categories:
     # Codes for internal use only that must never be returned in a network response.
     - InternalOnly
     - TenantMigrationError
+    - TenantMigrationConflictError
     - CursorInvalidatedError
 
 error_codes:
@@ -384,7 +385,7 @@ error_codes:
     - {code: 318,name: ForTestingOptionalErrorExtraInfo,extra: OptionalErrorExtraInfoExample,extraIsOptional: True}
     - {code: 319,name: MovePrimaryInProgress}
 
-    - {code: 320, name: TenantMigrationConflict,extra: TenantMigrationConflictInfo,categories: [TenantMigrationError]}
+    - {code: 320, name: TenantMigrationConflict,extra: TenantMigrationConflictInfo,categories: [TenantMigrationError, TenantMigrationConflictError]}
     - {code: 321, name: TenantMigrationCommitted, categories: [TenantMigrationError]}
 
     - {code: 322, name: APIVersionError, categories: [VersionedAPIError]}
@@ -442,7 +443,14 @@ error_codes:
     - {code: 350, name: ReshardCollectionTruncatedError}
 
     - {code: 351, name: ChangeStreamStartAfterInvalidate, extra: ChangeStreamStartAfterInvalidateInfo}
-    
+    - {code: 352, name: UnsupportedOpQueryCommand}
+
+    - {code: 353, name: NonRetryableTenantMigrationConflict, extra: NonRetryableTenantMigrationConflictInfo, categories: [TenantMigrationError, TenantMigrationConflictError]}
+
+    - {code: 354, name: LoadBalancerSupportMismatch, categories: [CloseConnectionError]}
+
+    - {code: 355, name: InterruptedDueToStorageChange,categories: [Interruption,CancellationError]}
+
     # Error codes 4000-8999 are reserved.
 
     # Non-sequential error codes for compatibility only)
@@ -470,6 +478,7 @@ error_codes:
     - {code: 17280,name: OBSOLETE_KeyTooLong}
     - {code: 46841,name: ClientMarkedKilled,categories: [Interruption,CancellationError]}
     - {code: 50768,name: NotARetryableWriteCommand}
+    - {code: 56846,name: ConfigServerUnreachable}
 
     # Percona Server for MongoDB error codes
     - {code: 9390,name: LDAPLibraryError}

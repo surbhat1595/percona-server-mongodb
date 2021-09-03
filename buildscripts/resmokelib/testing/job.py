@@ -3,14 +3,13 @@
 import sys
 import time
 from collections import namedtuple
-from collections import defaultdict
 
 from buildscripts.resmokelib import config
 from buildscripts.resmokelib import errors
 from buildscripts.resmokelib.testing import testcases
+from buildscripts.resmokelib.testing.fixtures.interface import create_fixture_table
 from buildscripts.resmokelib.testing.hooks import stepdown
 from buildscripts.resmokelib.testing.testcases import fixture as _fixture
-from buildscripts.resmokelib.testing.fixtures.interface import create_fixture_table
 from buildscripts.resmokelib.utils import queue as _queue
 
 
@@ -82,7 +81,7 @@ class Job(object):  # pylint: disable=too-many-instance-attributes
 
         if setup_succeeded:
             try:
-                self._run(queue, interrupt_flag)
+                self._run(queue, interrupt_flag, teardown_flag)
             except errors.StopExecution as err:
                 # Stop running tests immediately.
                 self.logger.error("Received a StopExecution exception: %s.", err)
@@ -118,7 +117,7 @@ class Job(object):  # pylint: disable=too-many-instance-attributes
         """Get current time to aid in the unit testing of the _run method."""
         return time.time()
 
-    def _run(self, queue, interrupt_flag):
+    def _run(self, queue, interrupt_flag, teardown_flag=None):
         """Call the before/after suite hooks and continuously execute tests from 'queue'."""
 
         for hook in self.hooks:
@@ -137,7 +136,7 @@ class Job(object):  # pylint: disable=too-many-instance-attributes
             self._requeue_test(queue, queue_elem, interrupt_flag)
 
         for hook in self.hooks:
-            hook.after_suite(self.report)
+            hook.after_suite(self.report, teardown_flag)
 
     def _log_requeue_test(self, queue_elem):
         """Log the requeue of a test."""
@@ -197,11 +196,16 @@ class Job(object):  # pylint: disable=too-many-instance-attributes
                     "%s not running after %s" % (self.fixture, test.short_description()))
         finally:
             success = self.report.find_test_info(test).status == "pass"
+
+            # Stop background hooks first since they can interfere with fixture startup and teardown
+            # done as part of archival.
+            self._run_hooks_after_tests(test, background=True)
+
             if self.archival:
                 result = TestResult(test=test, hook=None, success=success)
                 self.archival.archive(self.logger, result, self.manager)
 
-        self._run_hooks_after_tests(test)
+            self._run_hooks_after_tests(test, background=False)
 
     def _run_hook(self, hook, hook_function, test):
         """Provide helper to run hook and archival."""
@@ -247,15 +251,19 @@ class Job(object):  # pylint: disable=too-many-instance-attributes
             self.report.stopTest(test)
             raise
 
-    def _run_hooks_after_tests(self, test):
+    def _run_hooks_after_tests(self, test, background=False):
         """Run the after_test method on each of the hooks.
 
         Swallows any TestFailure exceptions if set to continue on
         failure, and reraises any other exceptions.
+
+        @param test: the test after which we run the hooks.
+        @param background: whether to run background hooks.
         """
         try:
             for hook in self.hooks:
-                self._run_hook(hook, hook.after_test, test)
+                if hook.IS_BACKGROUND == background:
+                    self._run_hook(hook, hook.after_test, test)
 
         except errors.StopExecution:
             raise

@@ -57,10 +57,10 @@
 #include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/logical_time_validator.h"
+#include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/query/find.h"
@@ -225,7 +225,7 @@ struct HandleRequest {
 };
 
 void registerError(OperationContext* opCtx, const Status& status) {
-    LastError::get(opCtx->getClient()).setLastError(status.code(), status.reason());
+    NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(status.code());
     CurOp::get(opCtx)->debug().errInfo = status;
 }
 
@@ -768,9 +768,9 @@ Future<void> InvokeCommand::run() {
                    .get(execContext->getOpCtx());
                return runCommandInvocation(_ecd->getExecutionContext(), _ecd->getInvocation());
            })
-        .onError<ErrorCodes::TenantMigrationConflict>([this](Status status) {
-            tenant_migration_access_blocker::handleTenantMigrationConflict(
-                _ecd->getExecutionContext()->getOpCtx(), std::move(status));
+        .onErrorCategory<ErrorCategory::TenantMigrationConflictError>([this](Status status) {
+            uassertStatusOK(tenant_migration_access_blocker::handleTenantMigrationConflict(
+                _ecd->getExecutionContext()->getOpCtx(), std::move(status)));
             return Status::OK();
         });
 }
@@ -786,13 +786,13 @@ Future<void> CheckoutSessionAndInvokeCommand::run() {
                    .get(execContext->getOpCtx());
                return runCommandInvocation(_ecd->getExecutionContext(), _ecd->getInvocation());
            })
-        .onError<ErrorCodes::TenantMigrationConflict>([this](Status status) {
+        .onErrorCategory<ErrorCategory::TenantMigrationConflictError>([this](Status status) {
             // Abort transaction and clean up transaction resources before blocking the
             // command to allow the stable timestamp on the node to advance.
             _cleanupTransaction();
 
-            tenant_migration_access_blocker::handleTenantMigrationConflict(
-                _ecd->getExecutionContext()->getOpCtx(), std::move(status));
+            uassertStatusOK(tenant_migration_access_blocker::handleTenantMigrationConflict(
+                _ecd->getExecutionContext()->getOpCtx(), std::move(status)));
         })
         .tapError([this](Status status) { _tapError(status); })
         .then([this] { return _commitInvocation(); });
@@ -1284,7 +1284,7 @@ void ExecCommandDatabase::_initiateCommand() {
         }
     });
 
-    rpc::readRequestMetadata(opCtx, request.body, command->requiresAuth());
+    rpc::readRequestMetadata(opCtx, request, command->requiresAuth());
     rpc::TrackingMetadata::get(opCtx).initWithOperName(command->getName());
 
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -1337,6 +1337,7 @@ void ExecCommandDatabase::_initiateCommand() {
         } else if (fieldName == CommandHelpers::kHelpFieldName) {
             helpField = element;
         } else if (fieldName == "comment") {
+            stdx::lock_guard<Client> lk(*client);
             opCtx->setComment(element.wrap());
         } else if (fieldName == query_request_helper::queryOptionMaxTimeMS) {
             uasserted(ErrorCodes::InvalidOptions,
@@ -1351,10 +1352,10 @@ void ExecCommandDatabase::_initiateCommand() {
 
     if (CommandHelpers::isHelpRequest(helpField)) {
         CurOp::get(opCtx)->ensureStarted();
-        // We disable last-error for help requests due to SERVER-11492, because config servers use
-        // help requests to determine which commands are database writes, and so must be forwarded
-        // to all config servers.
-        LastError::get(opCtx->getClient()).disable();
+        // We disable not-primary-error tracker for help requests due to SERVER-11492, because
+        // config servers use help requests to determine which commands are database writes, and so
+        // must be forwarded to all config servers.
+        NotPrimaryErrorTracker::get(opCtx->getClient()).disable();
         Command::generateHelpResponse(opCtx, replyBuilder, *command);
         iassert(Status(ErrorCodes::SkipCommandExecution,
                        "Skipping command execution for help request"));
@@ -1429,11 +1430,6 @@ void ExecCommandDatabase::_initiateCommand() {
 
     if (command->shouldAffectCommandCounter()) {
         globalOpCounters.gotCommand();
-    }
-
-    if (!isHello() && _execContext->getMessage().operation() == dbQuery) {
-        warnDeprecation(*client, networkOpToString(dbQuery));
-        globalOpCounters.gotQueryDeprecated();
     }
 
     // Parse the 'maxTimeMS' command option, and use it to set a deadline for the operation on the
@@ -1518,8 +1514,6 @@ void ExecCommandDatabase::_initiateCommand() {
         if (OperationShardingState::isOperationVersioned(opCtx) || oss.hasDbVersion()) {
             uassertStatusOK(shardingState->canAcceptShardedCommands());
         }
-
-        _execContext->behaviors->advanceConfigOpTimeFromRequestMetadata(opCtx);
     }
 
     _scoped = _execContext->behaviors->scopedOperationCompletionShardingActions(opCtx);
@@ -1582,14 +1576,14 @@ Future<void> ExecCommandDatabase::_commandExec() {
                 !_refreshedDatabase) {
                 auto sce = s.extraInfo<StaleDbRoutingVersion>();
                 invariant(sce);
-                // TODO SERVER-52784 refresh only if wantedVersion is empty or less then
-                // received
-                const auto refreshed = _execContext->behaviors->refreshDatabase(opCtx, *sce);
-                if (refreshed) {
-                    _refreshedDatabase = true;
-                    if (!opCtx->isContinuingMultiDocumentTransaction()) {
-                        _resetLockerStateAfterShardingUpdate(opCtx);
-                        return _commandExec();
+                if (sce->getVersionWanted() < sce->getVersionReceived()) {
+                    const auto refreshed = _execContext->behaviors->refreshDatabase(opCtx, *sce);
+                    if (refreshed) {
+                        _refreshedDatabase = true;
+                        if (!opCtx->isContinuingMultiDocumentTransaction()) {
+                            _resetLockerStateAfterShardingUpdate(opCtx);
+                            return _commandExec();
+                        }
                     }
                 }
             }
@@ -1603,8 +1597,13 @@ Future<void> ExecCommandDatabase::_commandExec() {
                 serverGlobalParams.clusterRole != ClusterRole::ConfigServer &&
                 !_refreshedCollection) {
                 if (auto sce = s.extraInfo<StaleConfigInfo>()) {
-                    // TODO SERVER-52784 refresh only if wantedVersion is empty or less then
-                    // received
+                    if (sce->getVersionWanted() &&
+                        sce->getVersionReceived().isOlderThan(sce->getVersionWanted().get())) {
+                        // If the local shard version is newer than the received one return the
+                        // error to the router without retrying locally.
+                        return s;
+                    }
+
                     const auto refreshed = _execContext->behaviors->refreshCollection(opCtx, *sce);
                     if (refreshed) {
                         _refreshedCollection = true;
@@ -1730,7 +1729,13 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
 }
 
 Future<void> parseCommand(std::shared_ptr<HandleRequest::ExecutionContext> execContext) try {
-    execContext->setRequest(rpc::opMsgRequestFromAnyProtocol(execContext->getMessage()));
+    const auto& msg = execContext->getMessage();
+    auto opMsgReq = rpc::opMsgRequestFromAnyProtocol(msg);
+    if (msg.operation() == dbQuery) {
+        checkAllowedOpQueryCommand(*(execContext->getOpCtx()->getClient()),
+                                   opMsgReq.getCommandName());
+    }
+    execContext->setRequest(opMsgReq);
     return Status::OK();
 } catch (const DBException& ex) {
     // Need to set request as `makeCommandResponse` expects an empty request on failure.
@@ -1826,7 +1831,7 @@ DbResponse makeCommandResponse(std::shared_ptr<HandleRequest::ExecutionContext> 
 
     if (OpMsg::isFlagSet(message, OpMsg::kMoreToCome)) {
         // Close the connection to get client to go through server selection again.
-        if (LastError::get(opCtx->getClient()).hadNotPrimaryError()) {
+        if (NotPrimaryErrorTracker::get(opCtx->getClient()).hadError()) {
             if (c && c->getReadWriteType() == Command::ReadWriteType::kWrite)
                 notPrimaryUnackWrites.increment();
 
@@ -1928,7 +1933,7 @@ struct GetMoreOpRunner : SynchronousOpRunner {
  * Fire and forget network operations don't produce a `DbResponse`.
  * They override `runAndForget` instead of `run`, and this base
  * class provides a `run` that calls it and handles error reporting
- * via the `LastError` slot.
+ * via the `NotPrimaryErrorTracker` slot.
  */
 struct FireAndForgetOpRunner : SynchronousOpRunner {
     using SynchronousOpRunner::SynchronousOpRunner;
@@ -2027,7 +2032,7 @@ void HandleRequest::startOperation() {
                       !opCtx->lockState()->inAWriteUnitOfWork());
         }
     } else {
-        LastError::get(client).startRequest();
+        NotPrimaryErrorTracker::get(client).startRequest();
         AuthorizationSession::get(client)->startRequest(opCtx);
 
         // We should not be holding any locks at this point

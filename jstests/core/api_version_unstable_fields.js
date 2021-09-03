@@ -2,7 +2,6 @@
  * Checks that APIStrictError is thrown if unstable fields are used with 'apiStrict: true'.
  *
  * @tags: [
- *   requires_fcv_50,
  *   uses_api_parameters,
  *   # 'explain' does not support stepdowns.
  *   does_not_support_stepdowns,
@@ -21,12 +20,9 @@ const unstableFieldsForAggregate = {
     explain: true,
     runtimeConstants: {a: 1},
     collectionUUID: UUID(),
-    use44SortKeys: false,
-    useNewUpsert: false,
 };
 
 const unstableFieldsForFind = {
-    ntoreturn: 10,
     min: {"a": 1},
     max: {"a": 1},
     returnKey: false,
@@ -40,7 +36,6 @@ const unstableFieldsForFind = {
     allowSpeculativeMajorityRead: false,
     $_requestResumeToken: false,
     $_resumeAfter: {},
-    _use44SortKeys: false,
 };
 
 // Test that command with unstable fields and 'apiStrict: true' throws.

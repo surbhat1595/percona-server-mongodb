@@ -59,6 +59,7 @@
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/two_phase_index_build_knobs_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
@@ -471,7 +472,8 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
           "namespace"_attr = ns,
           "collectionUUID"_attr = *collectionUUID,
           "indexes"_attr = specs.size(),
-          "firstIndex"_attr = specs[0][IndexDescriptor::kIndexNameFieldName]);
+          "firstIndex"_attr = specs[0][IndexDescriptor::kIndexNameFieldName],
+          "command"_attr = cmd.toBSON({}));
     hangCreateIndexesBeforeStartingIndexBuild.pauseWhileSet(opCtx);
 
     bool shouldContinueInBackground = false;
@@ -635,6 +637,7 @@ std::unique_ptr<CreateIndexesCommand> makeTimeseriesCreateIndexesCommand(
     std::vector<mongo::BSONObj> indexes;
     for (const auto& origIndex : origIndexes) {
         BSONObjBuilder builder;
+        bool isBucketsIndexSpecCompatibleForDowngrade = false;
         for (const auto& elem : origIndex) {
             if (elem.fieldNameStringData() == NewIndexSpec::kKeyFieldName) {
                 auto pluginName = IndexNames::findPluginName(elem.Obj());
@@ -649,6 +652,11 @@ std::unique_ptr<CreateIndexesCommand> makeTimeseriesCreateIndexesCommand(
                         str::stream() << bucketsIndexSpecWithStatus.getStatus().toString()
                                       << " Command request: " << redact(origCmd.toBSON({})),
                         bucketsIndexSpecWithStatus.isOK());
+
+                isBucketsIndexSpecCompatibleForDowngrade =
+                    timeseries::isBucketsIndexSpecCompatibleForDowngrade(
+                        *timeseriesOptions,
+                        BSON(NewIndexSpec::kKeyFieldName << bucketsIndexSpecWithStatus.getValue()));
 
                 builder.append(NewIndexSpec::kKeyFieldName,
                                std::move(bucketsIndexSpecWithStatus.getValue()));
@@ -665,6 +673,16 @@ std::unique_ptr<CreateIndexesCommand> makeTimeseriesCreateIndexesCommand(
                           "TTL indexes are not supported on time-series collections");
             }
         }
+
+        if (feature_flags::gTimeseriesMetricIndexes.isEnabledAndIgnoreFCV() &&
+            !isBucketsIndexSpecCompatibleForDowngrade) {
+            // Store the original user index definition on the transformed index definition for the
+            // time-series buckets collection if this is a newly supported index type on time-series
+            // collections. This is to avoid any additional downgrade steps for index types already
+            // supported in 5.0.
+            builder.appendObject(IndexDescriptor::kOriginalSpecFieldName, origIndex.objdata());
+        }
+
         indexes.push_back(builder.obj());
     }
 

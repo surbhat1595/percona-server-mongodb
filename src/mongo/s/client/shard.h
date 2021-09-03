@@ -210,15 +210,16 @@ public:
 
     /**
      * Synchronously run the aggregation request, with a best effort honoring of request
-     * options. `callback` will be called with the batch contained in each response. `callback`
-     * should return `true` to execute another getmore. Returning `false` will send a
-     * `killCursors`. If the aggregation results are exhausted, there will be no additional calls to
-     * `callback`.
+     * options. `callback` will be called with the batch and resume token contained in each
+     * response. `callback` should return `true` to execute another getmore. Returning `false` will
+     * send a `killCursors`. If the aggregation results are exhausted, there will be no additional
+     * calls to `callback`.
      */
     virtual Status runAggregation(
         OperationContext* opCtx,
         const AggregateCommandRequest& aggRequest,
-        std::function<bool(const std::vector<BSONObj>& batch)> callback) = 0;
+        std::function<bool(const std::vector<BSONObj>& batch,
+                           const boost::optional<BSONObj>& postBatchResumeToken)> callback) = 0;
 
     /**
      * Runs a write command against a shard. This is separate from runCommand, because write
@@ -226,7 +227,7 @@ public:
      * retriable errors must be done differently.
      */
     BatchedCommandResponse runBatchWriteCommand(OperationContext* opCtx,
-                                                const Milliseconds maxTimeMS,
+                                                Milliseconds maxTimeMS,
                                                 const BatchedCommandRequest& batchRequest,
                                                 RetryPolicy retryPolicy);
 
@@ -245,7 +246,7 @@ public:
         const NamespaceString& nss,
         const BSONObj& query,
         const BSONObj& sort,
-        const boost::optional<long long> limit,
+        boost::optional<long long> limit,
         const boost::optional<BSONObj>& hint = boost::none);
 
     /**

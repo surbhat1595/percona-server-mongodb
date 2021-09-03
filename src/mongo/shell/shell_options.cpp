@@ -70,6 +70,7 @@ const std::set<std::string> kSetShellParameterAllowlist = {
     "disabledSecureAllocatorDomains",
     "newLineAfterPasswordPromptForTest",
     "skipShellCursorFinalize",
+    "tlsOCSPSlowResponderWarningSecs",
 };
 
 std::string getMongoShellHelp(StringData name, const moe::OptionSection& options) {
@@ -129,6 +130,12 @@ Status storeMongoShellOptions(const moe::Environment& params,
         serverGlobalParams.objcheck = false;
     } else {
         serverGlobalParams.objcheck = false;
+    }
+
+    // Similar to 'objcheck' above, 'crashOnInvalidBSONError' must be common to both the server
+    // and shell for linking reasons.
+    if (params.count("crashOnInvalidBSONError")) {
+        serverGlobalParams.crashOnInvalidBSONError = true;
     }
 
     if (params.count("port")) {

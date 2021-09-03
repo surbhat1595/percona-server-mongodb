@@ -1,6 +1,8 @@
 /**
  * Test that the server errors when given an invalid regex.
- * @tags: [requires_fcv_50]
+ * @tags: [
+ *   requires_fcv_51,
+ * ]
  */
 (function() {
 const coll = db.regex_error;

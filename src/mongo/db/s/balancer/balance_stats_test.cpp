@@ -61,6 +61,7 @@ public:
                                                                 boost::none,  // timestamp
                                                                 boost::none,  // time series fields
                                                                 boost::none,  // resharding fields
+                                                                boost::none,  // chunk size bytes
                                                                 true,         // allowMigration
                                                                 chunks);
 
@@ -74,7 +75,7 @@ private:
     const NamespaceString _nss{"foo.bar"};
     const OID _epoch{OID::gen()};
     const ShardId _shardPrimary{"dummyShardPrimary"};
-    const DatabaseVersion _dbVersion{UUID::gen()};
+    const DatabaseVersion _dbVersion{UUID::gen(), Timestamp()};
     ChunkVersion _nextVersion{1, 0, _epoch, boost::none};
 };
 

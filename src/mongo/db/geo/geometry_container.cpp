@@ -27,10 +27,13 @@
  *    it in the license file.
  */
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 #include "mongo/db/geo/geometry_container.h"
 
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geoparser.h"
+#include "mongo/logv2/log.h"
 #include "mongo/util/str.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
@@ -42,6 +45,11 @@ bool GeometryContainer::isSimpleContainer() const {
 
 bool GeometryContainer::isPoint() const {
     return nullptr != _point;
+}
+
+PointWithCRS GeometryContainer::getPoint() const {
+    invariant(isPoint());
+    return *_point;
 }
 
 bool GeometryContainer::supportsContains() const {
@@ -887,7 +895,8 @@ bool GeometryContainer::intersects(const S2Polygon& otherPolygon) const {
     return false;
 }
 
-Status GeometryContainer::parseFromGeoJSON(const BSONObj& obj, bool skipValidation) {
+Status GeometryContainer::parseFromGeoJSON(bool skipValidation) {
+    auto obj = _geoElm.Obj();
     GeoParser::GeoJSONType type = GeoParser::parseGeoJSONType(obj);
 
     if (GeoParser::GEOJSON_UNKNOWN == type) {
@@ -994,7 +1003,8 @@ Status GeometryContainer::parseFromQuery(const BSONElement& elem) {
     }
 
     Status status = Status::OK();
-    BSONObj obj = elem.Obj();
+    _geoElm = elem;
+    auto obj = elem.Obj();
     if (GeoParser::BOX == specifier) {
         _box.reset(new BoxWithCRS());
         status = GeoParser::parseLegacyBox(obj, _box.get());
@@ -1015,7 +1025,7 @@ Status GeometryContainer::parseFromQuery(const BSONElement& elem) {
             status = GeoParser::parseQueryPoint(elem, _point.get());
         } else {
             // GeoJSON geometry
-            status = parseFromGeoJSON(obj);
+            status = parseFromGeoJSON();
         }
     }
     if (!status.isOK())
@@ -1043,9 +1053,9 @@ Status GeometryContainer::parseFromStorage(const BSONElement& elem, bool skipVal
                       str::stream() << "geo element must be an array or object: " << elem);
     }
 
-    BSONObj geoObj = elem.Obj();
+    _geoElm = elem;
     Status status = Status::OK();
-    if (Array == elem.type() || geoObj.firstElement().isNumber()) {
+    if (Array == elem.type() || elem.Obj().firstElement().isNumber()) {
         // Legacy point
         // { location: [1, 2] }
         // { location: [1, 2, 3] }
@@ -1057,7 +1067,7 @@ Status GeometryContainer::parseFromStorage(const BSONElement& elem, bool skipVal
     } else {
         // GeoJSON
         // { location: { type: "Point", coordinates: [...] } }
-        status = parseFromGeoJSON(elem.Obj(), skipValidation);
+        status = parseFromGeoJSON(skipValidation);
     }
     if (!status.isOK())
         return status;
@@ -1322,6 +1332,64 @@ double GeometryContainer::minDistance(const PointWithCRS& otherPoint) const {
 
 const CapWithCRS* GeometryContainer::getCapGeometryHack() const {
     return _cap.get();
+}
+
+StoredGeometry* StoredGeometry::parseFrom(const BSONElement& element, bool skipValidation) {
+    if (!element.isABSONObj())
+        return nullptr;
+
+    std::unique_ptr<StoredGeometry> stored(new StoredGeometry);
+
+    // GeoNear stage can only be run with an existing index
+    // Therefore, it is always safe to skip geometry validation
+    if (!stored->geometry.parseFromStorage(element, skipValidation).isOK())
+        return nullptr;
+    stored->element = element;
+    return stored.release();
+}
+
+/**
+ * Find and parse all geometry elements on the appropriate field path from the document.
+ */
+void StoredGeometry::extractGeometries(const BSONObj& doc,
+                                       const string& path,
+                                       std::vector<std::unique_ptr<StoredGeometry>>* geometries,
+                                       bool skipValidation) {
+    BSONElementSet geomElements;
+    // NOTE: Annoyingly, we cannot just expand arrays b/c single 2d points are arrays, we need
+    // to manually expand all results to check if they are geometries
+    ::mongo::dotted_path_support::extractAllElementsAlongPath(
+        doc, path, geomElements, false /* expand arrays */);
+
+    for (BSONElementSet::iterator it = geomElements.begin(); it != geomElements.end(); ++it) {
+        const BSONElement& el = *it;
+        std::unique_ptr<StoredGeometry> stored(StoredGeometry::parseFrom(el, skipValidation));
+
+        if (stored.get()) {
+            // Valid geometry element
+            geometries->push_back(std::move(stored));
+        } else if (el.type() == Array) {
+            // Many geometries may be in an array
+            BSONObjIterator arrIt(el.Obj());
+            while (arrIt.more()) {
+                const BSONElement nextEl = arrIt.next();
+                stored.reset(StoredGeometry::parseFrom(nextEl, skipValidation));
+
+                if (stored.get()) {
+                    // Valid geometry element
+                    geometries->push_back(std::move(stored));
+                } else {
+                    LOGV2_WARNING(23760,
+                                  "geoNear stage read non-geometry element in array",
+                                  "nextElement"_attr = redact(nextEl),
+                                  "element"_attr = redact(el));
+                }
+            }
+        } else {
+            LOGV2_WARNING(
+                23761, "geoNear stage read non-geometry element", "element"_attr = redact(el));
+        }
+    }
 }
 
 }  // namespace mongo

@@ -10,7 +10,6 @@
  *   does_not_support_add_remove_shards,
  *   # Requires all nodes to be running the latest binary.
  *   multiversion_incompatible,
- *   featureFlagShardingFullDDLSupport,
  *  ]
  */
 
@@ -35,36 +34,6 @@ var $config = extendWorkload($config, function($config, $super) {
             throw e;
         }
         jsTestLog('setFCV state finished');
-    };
-
-    $config.states.create = function(db, collName, connCache) {
-        assert.soon(() => {
-            try {
-                $super.states.create.apply(this, arguments);
-                return true;
-            } catch (e) {
-                if (e.code === ErrorCodes.ConflictingOperationInProgress) {
-                    // Legacy dropCollection interferes with catalog cache refreshes. Retry.
-                    // TODO SERVER-54879: No longer needed after 5.0 has branched out
-                    return false;
-                }
-                throw e;
-            }
-        });
-    };
-
-    $config.states.rename = function(db, collName, connCache) {
-        try {
-            $super.states.rename.apply(this, arguments);
-        } catch (e) {
-            if (e.code === ErrorCodes.IllegalOperation) {
-                // This is expected when attempting to rename a sharded collection in FCV prior to
-                // 5.0
-                // TODO SERVER-54879: No longer needed after 5.0 has branched out
-                return;
-            }
-            throw e;
-        }
     };
 
     $config.transitions = {

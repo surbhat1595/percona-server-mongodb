@@ -18,7 +18,6 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
   if [[ -f "patch_test_tags.tgz" ]]; then
     tags_build_variant="${build_variant}"
 
-    # TODO SERVER-56382: create a more robust mapping between query builders and existing required builders.
     if [[ "${build_variant}" =~ .*"-query-patch-only" ]]; then
       # Use the RHEL 8 all feature flags variant for the classic engine variant. The original
       # classic engine variant is not a required builder and therefore not captured in patch
@@ -37,18 +36,6 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
       extra_args="$extra_args --tagFile=failedtesttags/${tags_build_variant}/${display_task_name}.yml --includeWithAllTags=recent_failure"
     else
       echo "calculated tags file does not exist: $calculated_tags_file_path"
-    fi
-  fi
-
-  # on *SAN builds, extract the debug symbols so they're available
-  # to the symbolizer
-  if [[ -n "${san_options}" ]]; then
-    # the debug symbols archive isn't always available (not every *SAN
-    # task requires compile)
-    if [[ -f "mongo-debugsymbols.tgz" ]]; then
-      tar xf mongo-debugsymbols.tgz
-    else
-      echo "mongo-debugsymbols.tgz is not available. If you're seeing this message in a task that uses mongod or mongos binaries, please ensure debug symbols have been generated, otherwise the llvm-symbolizer may not correctly symbolize the sanitizer output."
     fi
   fi
 
@@ -117,6 +104,11 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     extra_args="$extra_args --mongodSetParameter \"{'jsHeapLimitMB':10}\""
   fi
 
+  spawn_using=${spawn_resmoke_using}
+  if [[ -z "$spawn_using" ]]; then
+    spawn_using="python"
+  fi
+
   path_value="$PATH:/data/multiversion"
 
   # The "resmoke_wrapper" expansion is used by the 'burn_in_tests' task to wrap the resmoke.py
@@ -149,6 +141,7 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     --taskName=${task_name} \
     --variantName=${build_variant} \
     --versionId=${version_id} \
+    --spawnUsing=$spawn_using \
     --reportFile=report.json \
     --perfReportFile=perf.json
   resmoke_exit_code=$?

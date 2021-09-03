@@ -50,6 +50,7 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/config.h"
 #include "mongo/db/api_parameters_gen.h"
+#include "mongo/db/auth/security_token.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/json.h"
 #include "mongo/db/namespace_string.h"
@@ -70,7 +71,6 @@
 #include "mongo/util/debug_util.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
-#include "mongo/util/password_digest.h"
 
 namespace mongo {
 
@@ -118,15 +118,11 @@ enum QueryOptions DBClientBase::_lookupAvailableOptions() {
 }
 
 rpc::ProtocolSet DBClientBase::getClientRPCProtocols() const {
-    return _clientRPCProtocols;
+    return rpc::supports::kOpMsgOnly;
 }
 
 rpc::ProtocolSet DBClientBase::getServerRPCProtocols() const {
     return _serverRPCProtocols;
-}
-
-void DBClientBase::setClientRPCProtocols(rpc::ProtocolSet protocols) {
-    _clientRPCProtocols = std::move(protocols);
 }
 
 void DBClientBase::_setServerRPCProtocols(rpc::ProtocolSet protocols) {
@@ -218,6 +214,9 @@ void appendMetadata(OperationContext* opCtx,
     }
 
     request.body = bob.obj();
+    if (auto securityToken = auth::getSecurityToken(opCtx)) {
+        request.securityToken = securityToken->toBSON();
+    }
 }
 }  // namespace
 
@@ -252,8 +251,10 @@ std::pair<rpc::UniqueReply, DBClientBase*> DBClientBase::runCommandWithTarget(
 
     auto opCtx = haveClient() ? cc().getOperationContext() : nullptr;
     appendMetadata(opCtx, _metadataWriter, _apiParameters, request);
-    auto requestMsg =
-        rpc::messageFromOpMsgRequest(getClientRPCProtocols(), getServerRPCProtocols(), request);
+    rpc::Protocol protocol =
+        uassertStatusOK(rpc::negotiate(getClientRPCProtocols(), getServerRPCProtocols()));
+    invariant(protocol == rpc::Protocol::kOpMsg);
+    auto requestMsg = request.serialize();
 
     Message replyMsg;
 
@@ -315,51 +316,6 @@ bool DBClientBase::runCommand(const string& dbname, BSONObj cmd, BSONObj& info, 
     return std::get<0>(res);
 }
 
-
-/* note - we build a bson obj here -- for something that is super common like getlasterror you
-          should have that object prebuilt as that would be faster.
-*/
-bool DBClientBase::simpleCommand(const string& dbname, BSONObj* info, const string& command) {
-    BSONObj o;
-    if (info == nullptr)
-        info = &o;
-    BSONObjBuilder b;
-    b.append(command, 1);
-    return runCommand(dbname, b.done(), *info);
-}
-
-bool DBClientBase::runPseudoCommand(StringData db,
-                                    StringData realCommandName,
-                                    StringData pseudoCommandCol,
-                                    const BSONObj& cmdArgs,
-                                    BSONObj& info,
-                                    int options) {
-    BSONObjBuilder bob;
-    bob.append(realCommandName, 1);
-    bob.appendElements(cmdArgs);
-    auto cmdObj = bob.done();
-
-    bool success = false;
-
-    if (!(success = runCommand(db.toString(), cmdObj, info, options))) {
-        auto status = getStatusFromCommandResult(info);
-        verify(!status.isOK());
-
-        if (status == ErrorCodes::CommandResultSchemaViolation) {
-            msgasserted(28624,
-                        str::stream() << "Received bad " << realCommandName
-                                      << " response from server: " << info);
-        } else if (status == ErrorCodes::CommandNotFound) {
-            NamespaceString pseudoCommandNss(db, pseudoCommandCol);
-            // if this throws we just let it escape as that's how runCommand works.
-            info = findOne(pseudoCommandNss.ns(), cmdArgs, nullptr, options);
-            return true;
-        }
-    }
-
-    return success;
-}
-
 long long DBClientBase::count(const NamespaceStringOrUUID nsOrUuid,
                               const BSONObj& query,
                               int options,
@@ -399,10 +355,6 @@ BSONObj DBClientBase::_countCmd(const NamespaceStringOrUUID nsOrUuid,
         b.append(repl::ReadConcernArgs::kReadConcernFieldName, *readConcernObj);
     }
     return b.obj();
-}
-
-string DBClientBase::createPasswordDigest(const string& username, const string& clearTextPassword) {
-    return mongo::createPasswordDigest(username, clearTextPassword);
 }
 
 namespace {
@@ -586,7 +538,7 @@ list<BSONObj> DBClientBase::getCollectionInfos(const string& db, const BSONObj& 
 
         if (id != 0) {
             const std::string ns = cursorObj["ns"].String();
-            unique_ptr<DBClientCursor> cursor = getMore(ns, id, 0, 0);
+            unique_ptr<DBClientCursor> cursor = getMore(ns, id);
             while (cursor->more()) {
                 infos.push_back(cursor->nextSafe().getOwned());
             }
@@ -650,23 +602,15 @@ bool DBClientBase::exists(const string& ns) {
     return !results.empty();
 }
 
-/** query N objects from the database into an array.  makes sense mostly when you want a small
- * number of results.  if a huge number, use query() and iterate the cursor.
- */
-void DBClientBase::findN(vector<BSONObj>& out,
-                         const string& ns,
-                         Query query,
-                         int nToReturn,
-                         int nToSkip,
-                         const BSONObj* fieldsToReturn,
-                         int queryOptions,
-                         boost::optional<BSONObj> readConcernObj) {
-    out.reserve(nToReturn);
-
+BSONObj DBClientBase::findOne(const string& ns,
+                              const Query& query,
+                              const BSONObj* fieldsToReturn,
+                              int queryOptions,
+                              boost::optional<BSONObj> readConcernObj) {
     unique_ptr<DBClientCursor> c = this->query(NamespaceString(ns),
                                                query,
-                                               nToReturn,
-                                               nToSkip,
+                                               1 /*limit*/,
+                                               0 /*nToSkip*/,
                                                fieldsToReturn,
                                                queryOptions,
                                                0 /* batchSize */,
@@ -678,25 +622,7 @@ void DBClientBase::findN(vector<BSONObj>& out,
                           << " ns: " << ns << " query: " << query.toString(),
             c.get());
 
-    tassert(5262100,
-            "Deprecated ShardConfigStale flag encountered in query result",
-            !c->hasResultFlag(ResultFlag_ShardConfigStaleDeprecated));
-
-    for (int i = 0; i < nToReturn; i++) {
-        if (!c->more())
-            break;
-        out.push_back(c->nextSafe());
-    }
-}
-
-BSONObj DBClientBase::findOne(const string& ns,
-                              const Query& query,
-                              const BSONObj* fieldsToReturn,
-                              int queryOptions,
-                              boost::optional<BSONObj> readConcernObj) {
-    vector<BSONObj> v;
-    findN(v, ns, query, 1, 0, fieldsToReturn, queryOptions, readConcernObj);
-    return v.empty() ? BSONObj() : v[0];
+    return c->more() ? c->nextSafe() : BSONObj();
 }
 
 std::pair<BSONObj, NamespaceString> DBClientBase::findOneByUUID(
@@ -743,7 +669,7 @@ const uint64_t DBClientBase::INVALID_SOCK_CREATION_TIME = std::numeric_limits<ui
 
 unique_ptr<DBClientCursor> DBClientBase::query(const NamespaceStringOrUUID& nsOrUuid,
                                                Query query,
-                                               int nToReturn,
+                                               int limit,
                                                int nToSkip,
                                                const BSONObj* fieldsToReturn,
                                                int queryOptions,
@@ -752,7 +678,7 @@ unique_ptr<DBClientCursor> DBClientBase::query(const NamespaceStringOrUUID& nsOr
     unique_ptr<DBClientCursor> c(new DBClientCursor(this,
                                                     nsOrUuid,
                                                     query.obj,
-                                                    nToReturn,
+                                                    limit,
                                                     nToSkip,
                                                     fieldsToReturn,
                                                     queryOptions,
@@ -763,12 +689,9 @@ unique_ptr<DBClientCursor> DBClientBase::query(const NamespaceStringOrUUID& nsOr
     return nullptr;
 }
 
-unique_ptr<DBClientCursor> DBClientBase::getMore(const string& ns,
-                                                 long long cursorId,
-                                                 int nToReturn,
-                                                 int options) {
+unique_ptr<DBClientCursor> DBClientBase::getMore(const string& ns, long long cursorId) {
     unique_ptr<DBClientCursor> c(
-        new DBClientCursor(this, NamespaceString(ns), cursorId, nToReturn, options));
+        new DBClientCursor(this, NamespaceString(ns), cursorId, 0 /* limit */, 0 /* options */));
     if (c->init())
         return c;
     return nullptr;
@@ -794,7 +717,7 @@ unsigned long long DBClientBase::query(std::function<void(const BSONObj&)> f,
     fun._f = f;
     std::function<void(DBClientCursorBatchIterator&)> ptr(fun);
     return this->query(
-        ptr, nsOrUuid, query, fieldsToReturn, queryOptions, batchSize, readConcernObj);
+        ptr, nsOrUuid, std::move(query), fieldsToReturn, queryOptions, batchSize, readConcernObj);
 }
 
 unsigned long long DBClientBase::query(std::function<void(DBClientCursorBatchIterator&)> f,
@@ -825,9 +748,8 @@ unsigned long long DBClientBase::query(std::function<void(DBClientCursorBatchIte
 namespace {
 OpMsgRequest createInsertRequest(const string& ns,
                                  const vector<BSONObj>& v,
-                                 int flags,
+                                 bool ordered,
                                  boost::optional<BSONObj> writeConcernObj) {
-    bool ordered = !(flags & InsertOption_ContinueOnError);
     auto nss = NamespaceString(ns);
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append("insert", nss.coll());
@@ -864,9 +786,9 @@ OpMsgRequest createUpdateRequest(const string& ns,
 
 OpMsgRequest createRemoveRequest(const string& ns,
                                  Query obj,
-                                 int flags,
+                                 bool removeMany,
                                  boost::optional<BSONObj> writeConcernObj) {
-    int limit = (flags & RemoveOption_JustOne) ? 1 : 0;
+    const int limit = removeMany ? 0 : 1;
     auto nss = NamespaceString(ns);
 
     BSONObjBuilder cmdBuilder;
@@ -883,42 +805,42 @@ OpMsgRequest createRemoveRequest(const string& ns,
 
 BSONObj DBClientBase::insertAcknowledged(const string& ns,
                                          const vector<BSONObj>& v,
-                                         int flags,
+                                         bool ordered,
                                          boost::optional<BSONObj> writeConcernObj) {
-    OpMsgRequest request = createInsertRequest(ns, v, flags, writeConcernObj);
+    OpMsgRequest request = createInsertRequest(ns, v, ordered, writeConcernObj);
     rpc::UniqueReply reply = runCommand(std::move(request));
     return reply->getCommandReply();
 }
 
 void DBClientBase::insert(const string& ns,
                           BSONObj obj,
-                          int flags,
+                          bool ordered,
                           boost::optional<BSONObj> writeConcernObj) {
-    insert(ns, std::vector<BSONObj>{obj}, flags, writeConcernObj);
+    insert(ns, std::vector<BSONObj>{obj}, ordered, writeConcernObj);
 }
 
 void DBClientBase::insert(const string& ns,
                           const vector<BSONObj>& v,
-                          int flags,
+                          bool ordered,
                           boost::optional<BSONObj> writeConcernObj) {
-    auto request = createInsertRequest(ns, v, flags, writeConcernObj);
+    auto request = createInsertRequest(ns, v, ordered, writeConcernObj);
     runFireAndForgetCommand(std::move(request));
 }
 
 BSONObj DBClientBase::removeAcknowledged(const string& ns,
                                          Query obj,
-                                         int flags,
+                                         bool removeMany,
                                          boost::optional<BSONObj> writeConcernObj) {
-    OpMsgRequest request = createRemoveRequest(ns, obj, flags, writeConcernObj);
+    OpMsgRequest request = createRemoveRequest(ns, obj, removeMany, writeConcernObj);
     rpc::UniqueReply reply = runCommand(std::move(request));
     return reply->getCommandReply();
 }
 
 void DBClientBase::remove(const string& ns,
                           Query obj,
-                          int flags,
+                          bool removeMany,
                           boost::optional<BSONObj> writeConcernObj) {
-    auto request = createRemoveRequest(ns, obj, flags, writeConcernObj);
+    auto request = createRemoveRequest(ns, obj, removeMany, writeConcernObj);
     runFireAndForgetCommand(std::move(request));
 }
 
@@ -941,19 +863,6 @@ void DBClientBase::update(const string& ns,
                           boost::optional<BSONObj> writeConcernObj) {
     auto request = createUpdateRequest(ns, query, obj, upsert, multi, writeConcernObj);
     runFireAndForgetCommand(std::move(request));
-}
-
-void DBClientBase::update(const string& ns,
-                          Query query,
-                          BSONObj obj,
-                          int flags,
-                          boost::optional<BSONObj> writeConcernObj) {
-    update(ns,
-           std::move(query),
-           std::move(obj),
-           flags & UpdateOption_Upsert,
-           flags & UpdateOption_Multi,
-           writeConcernObj);
 }
 
 void DBClientBase::killCursor(const NamespaceString& ns, long long cursorId) {
@@ -1014,7 +923,7 @@ std::list<BSONObj> DBClientBase::_getIndexSpecs(const NamespaceStringOrUUID& nsO
             if (nsOrUuid.nss()) {
                 invariant((*nsOrUuid.nss()).toString() == cursorNs);
             }
-            unique_ptr<DBClientCursor> cursor = getMore(cursorNs, id, 0, 0);
+            unique_ptr<DBClientCursor> cursor = getMore(cursorNs, id);
             while (cursor->more()) {
                 specs.push_back(cursor->nextSafe().getOwned());
             }

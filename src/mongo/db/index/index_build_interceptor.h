@@ -75,7 +75,7 @@ public:
     /**
      * Finds the temporary table associated with storing writes during this index build. Only used
      * Only used when resuming an index build and the temporary table already exists on disk.
-     * Additionally will find the tmeporary table associated with storing duplicate key constraint
+     * Additionally will find the temporary table associated with storing duplicate key constraint
      * violations found during the build, if the index being built has uniqueness constraints.
      *
      * finalizeTemporaryTable() must be called before destruction.
@@ -106,7 +106,7 @@ public:
                      const MultikeyPaths& multikeyPaths,
                      RecordId loc,
                      Op op,
-                     int64_t* const numKeysOut);
+                     int64_t* numKeysOut);
 
     /**
      * Given a duplicate key, record the key for later verification by a call to
@@ -187,8 +187,8 @@ private:
                        const BSONObj& doc,
                        const InsertDeleteOptions& options,
                        TrackDuplicates trackDups,
-                       int64_t* const keysInserted,
-                       int64_t* const keysDeleted);
+                       int64_t* keysInserted,
+                       int64_t* keysDeleted);
 
     bool _checkAllWritesApplied(OperationContext* opCtx, bool fatal) const;
 

@@ -53,6 +53,9 @@ namespace mongo {
 // Failpoint that will cause recoverTenantMigrationAccessBlockers to return early.
 MONGO_FAIL_POINT_DEFINE(skipRecoverTenantMigrationAccessBlockers);
 
+// Signals that we have checked that we can build an index.
+MONGO_FAIL_POINT_DEFINE(haveCheckedIfIndexBuildableDuringTenantMigration);
+
 namespace tenant_migration_access_blocker {
 
 namespace {
@@ -220,12 +223,12 @@ SemiFuture<void> checkIfCanReadOrBlock(OperationContext* opCtx, const OpMsgReque
                 }
 
                 if (isCanceledDueToTimeout) {
-                    return Status(
-                        timeoutError,
-                        "Blocked read timed out waiting for tenant migration to commit or abort");
+                    return Status(timeoutError,
+                                  "Blocked read timed out waiting for an internal data migration "
+                                  "to commit or abort");
                 }
 
-                return status.withContext("Canceled read blocked by tenant migration");
+                return status.withContext("Canceled read blocked by internal data migration");
             })
         .semi();  // To require continuation in the user executor.
 }
@@ -265,11 +268,14 @@ Status checkIfCanBuildIndex(OperationContext* opCtx, StringData dbName) {
         // This log is included for synchronization of the tenant migration buildindex jstests.
         auto status = mtab->checkIfCanBuildIndex();
         mtab->recordTenantMigrationError(status);
-        LOGV2_DEBUG(4886202,
-                    1,
-                    "Checked if tenant migration on database prevents index builds",
-                    "db"_attr = dbName,
-                    "error"_attr = status);
+
+        if (MONGO_unlikely(haveCheckedIfIndexBuildableDuringTenantMigration.shouldFail())) {
+            LOGV2(5835300,
+                  "haveCheckedIfIndexBuildableDuringTenantMigration failpoint enabled",
+                  "db"_attr = dbName,
+                  "status"_attr = status);
+        }
+
         return status;
     }
     return Status::OK();
@@ -378,14 +384,33 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
     });
 }
 
-void handleTenantMigrationConflict(OperationContext* opCtx, Status status) {
-    auto migrationConflictInfo = status.extraInfo<TenantMigrationConflictInfo>();
+template <typename MigrationConflictInfoType>
+Status _handleTenantMigrationConflict(OperationContext* opCtx, Status status) {
+    auto migrationConflictInfo = status.extraInfo<MigrationConflictInfoType>();
     invariant(migrationConflictInfo);
     auto mtab = migrationConflictInfo->getTenantMigrationAccessBlocker();
     invariant(mtab);
     auto migrationStatus = mtab->waitUntilCommittedOrAborted(opCtx);
     mtab->recordTenantMigrationError(migrationStatus);
-    uassertStatusOK(migrationStatus);
+    return migrationStatus;
+}
+
+Status handleTenantMigrationConflict(OperationContext* opCtx, Status status) {
+    if (status.code() == ErrorCodes::NonRetryableTenantMigrationConflict) {
+        auto migrationStatus =
+            _handleTenantMigrationConflict<NonRetryableTenantMigrationConflictInfo>(opCtx, status);
+
+        // Some operations, like multi updates, can't safely be automatically retried so we return a
+        // non retryable error instead of TenantMigrationCommitted/TenantMigrationAborted. If
+        // waiting failed for a different reason, e.g. MaxTimeMS expiring, propagate that to the
+        // user unchanged.
+        if (ErrorCodes::isTenantMigrationError(migrationStatus)) {
+            return kNonRetryableTenantMigrationStatus;
+        }
+        return migrationStatus;
+    }
+
+    return _handleTenantMigrationConflict<TenantMigrationConflictInfo>(opCtx, status);
 }
 
 void performNoopWrite(OperationContext* opCtx, StringData msg) {

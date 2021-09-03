@@ -1,8 +1,13 @@
 /**
  * Tests running 50 concurrent migrations against the same recipient.
- * @tags: [requires_majority_read_concern, requires_fcv_49, incompatible_with_windows_tls,
- * incompatible_with_eft, incompatible_with_macos, requires_persistence,
- * incompatible_with_amazon_linux]
+ * @tags: [
+ *   incompatible_with_amazon_linux,
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -17,10 +22,6 @@ TestData.logComponentVerbosity = {
     accessControl: {verbosity: 3}
 };
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 

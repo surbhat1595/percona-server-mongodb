@@ -3,7 +3,6 @@
  * of chunks.
  *
  * @tags: [
- *   requires_fcv_49,
  *   uses_atclustertime,
  *   resource_intensive,
  *   exclude_from_large_txns
@@ -31,7 +30,7 @@ assert.commandWorked(mongos.adminCommand({shardCollection: ns, key: {oldKey: 1}}
 
 // In debug builds, the resharding operation takes significantly longer when there's a large number
 // of chunks and zones. We reduce nZones so the test completes in a reasonable amount of time.
-let nZones = buildInfo().debug ? 10000 : 175000;
+let nZones = 10000;
 let zones = [];
 let shard0Zones = [];
 let shard1Zones = [];

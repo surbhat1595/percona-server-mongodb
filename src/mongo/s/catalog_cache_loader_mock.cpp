@@ -97,7 +97,10 @@ CollectionAndChangedChunks getCollectionRefresh(
                                       swCollectionReturnValue.getValue().getUnique(),
                                       swCollectionReturnValue.getValue().getTimeseriesFields(),
                                       reshardingFields,
+                                      swCollectionReturnValue.getValue().getMaxChunkSizeBytes(),
+                                      swCollectionReturnValue.getValue().getAllowAutoSplit(),
                                       swCollectionReturnValue.getValue().getAllowMigrations(),
+                                      swCollectionReturnValue.getValue().getSupportingLongName(),
                                       std::move(chunks)};
 }
 

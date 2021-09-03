@@ -59,7 +59,8 @@ protected:
 
     void expectGetDatabase() {
         expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
-            DatabaseType db(kNss.db().toString(), {"0"}, true, DatabaseVersion(UUID::gen()));
+            DatabaseType db(
+                kNss.db().toString(), {"0"}, true, DatabaseVersion(UUID::gen(), Timestamp()));
             return std::vector<BSONObj>{db.toBSON()};
         }());
     }
@@ -633,10 +634,10 @@ TEST_F(CatalogCacheRefreshTest, ChunkEpochChangeDuringIncrementalLoadRecoveryAft
         const auto& pipeline = aggRequest.getPipeline();
 
         ASSERT_BSONOBJ_EQ(
-            pipeline[1]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[1]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$eq" << oldVersion.epoch()));
         ASSERT_BSONOBJ_EQ(
-            pipeline[3]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[2]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$ne" << oldVersion.epoch()));
 
         const auto collBSON =
@@ -671,10 +672,10 @@ TEST_F(CatalogCacheRefreshTest, ChunkEpochChangeDuringIncrementalLoadRecoveryAft
         const auto& pipeline = aggRequest.getPipeline();
 
         ASSERT_BSONOBJ_EQ(
-            pipeline[1]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[1]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$eq" << oldVersion.epoch()));
         ASSERT_BSONOBJ_EQ(
-            pipeline[3]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[2]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$ne" << oldVersion.epoch()));
 
         const auto collBSON = getDefaultCollectionType(newEpoch, shardKeyPattern).toBSON();
@@ -733,10 +734,10 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadAfterCollectionEpochChange) {
         const auto& pipeline = aggRequest.getPipeline();
 
         ASSERT_BSONOBJ_EQ(
-            pipeline[1]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[1]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$eq" << oldVersion.epoch()));
         ASSERT_BSONOBJ_EQ(
-            pipeline[3]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[2]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$ne" << oldVersion.epoch()));
 
         const auto collBSON =
@@ -789,13 +790,13 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadAfterSplit) {
 
         ASSERT_BSONOBJ_EQ(
             pipeline[1]["$unionWith"]["pipeline"]
-                .Array()[3]["$lookup"]["pipeline"]
+                .Array()[2]["$lookup"]["pipeline"]
                 .Array()[1]["$match"]["lastmod"]
                 .Obj(),
             BSON("$gte" << Timestamp(version.majorVersion(), version.minorVersion())));
 
         ASSERT_BSONOBJ_EQ(
-            pipeline[1]["$unionWith"]["pipeline"].Array()[2]["$match"]["lastmodEpoch"].Obj(),
+            pipeline[1]["$unionWith"]["pipeline"].Array()[1]["$match"]["lastmodEpoch"].Obj(),
             BSON("$eq" << version.epoch()));
 
         const auto collBSON = getDefaultCollectionType(version.epoch(), shardKeyPattern).toBSON();

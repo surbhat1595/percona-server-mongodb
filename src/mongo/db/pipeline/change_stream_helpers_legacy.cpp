@@ -31,17 +31,17 @@
 
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 
+#include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_invalidate.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_topology_change.h"
 #include "mongo/db/pipeline/document_source_change_stream_close_cursor.h"
 #include "mongo/db/pipeline/document_source_change_stream_ensure_resume_token_present.h"
 #include "mongo/db/pipeline/document_source_change_stream_handle_topology_change.h"
-#include "mongo/db/pipeline/document_source_change_stream_lookup_post_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_lookup_pre_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_oplog_match.h"
 #include "mongo/db/pipeline/document_source_change_stream_transform.h"
-#include "mongo/db/pipeline/document_source_change_stream_unwind_transactions.h"
+#include "mongo/db/pipeline/document_source_change_stream_unwind_transaction.h"
 #include "mongo/db/pipeline/expression.h"
 
 namespace mongo {
@@ -112,10 +112,10 @@ std::list<boost::intrusive_ptr<DocumentSource>> buildPipeline(
             stages.push_back(DocumentSourceChangeStreamAddPreImage::create(expCtx, spec));
         }
 
-        // There should be only one post-image lookup stage.  If we're on the shards and producing
+        // There should be only one post-image lookup stage. If we're on the shards and producing
         // input to be merged, the lookup is done on the mongos.
-        if (spec.getFullDocument() == FullDocumentModeEnum::kUpdateLookup) {
-            stages.push_back(DocumentSourceChangeStreamAddPostImage::create(expCtx));
+        if (spec.getFullDocument() != FullDocumentModeEnum::kDefault) {
+            stages.push_back(DocumentSourceChangeStreamAddPostImage::create(expCtx, spec));
         }
     }
 
@@ -158,8 +158,11 @@ Value DocumentSourceChangeStreamCheckResumability::serializeLegacy(
 Value DocumentSourceChangeStreamUnwindTransaction::serializeLegacy(
     boost::optional<ExplainOptions::Verbosity> explain) const {
     if (explain) {
-        tassert(5543800, "nsRegex has not been initialized", _nsRegex != boost::none);
-        return Value(Document{{kStageName, Value(Document{{"nsRegex", _nsRegex->pattern()}})}});
+        return Value(
+            Document{{kStageName,
+                      Value(Document{
+                          {"nsRegex",
+                           DocumentSourceChangeStream::getNsRegexForChangeStream(pExpCtx->ns)}})}});
     }
 
     return Value();

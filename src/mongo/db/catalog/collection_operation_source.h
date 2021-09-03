@@ -29,18 +29,21 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+
 namespace mongo {
 
 /**
- * Enum used to differentiate between types of insert/update operations based on how they were
- * issued.
+ * Enum used to differentiate between types of insert/update/delete operations based on how they
+ * were issued.
  */
-
-enum OperationSource {
+enum class OperationSource {
     kStandard,     // Default case, use this if none of the others applies.
     kFromMigrate,  // From a chunk migration.
-    kTimeseries    // From an internal operation on the BucketCatalog, not a direct operation on
-                   // the underlying bucket collection.
+    kTimeseriesInsert,
+    kTimeseriesUpdate,
+    kTimeseriesDelete,
 };
 
+StringData toString(OperationSource source);
 }  // namespace mongo

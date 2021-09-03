@@ -79,7 +79,7 @@ MockRemoteDBServer::MockRemoteDBServer(const string& hostAndPort)
       _cmdCount(0),
       _queryCount(0),
       _instanceID(0) {
-    insert(IdentityNS, BSON(HostField(hostAndPort)), 0);
+    insert(IdentityNS, BSON(HostField(hostAndPort)));
     setCommandReply("dbStats", BSON(HostField(hostAndPort)));
 }
 
@@ -124,14 +124,14 @@ void MockRemoteDBServer::setCommandReply(const string& cmdName,
     _cmdMap[cmdName].reset(new CircularBSONIterator(replySequence));
 }
 
-void MockRemoteDBServer::insert(const string& ns, BSONObj obj, int flags) {
+void MockRemoteDBServer::insert(const string& ns, BSONObj obj) {
     scoped_spinlock sLock(_lock);
 
     vector<BSONObj>& mockCollection = _dataMgr[ns];
     mockCollection.push_back(obj.copy());
 }
 
-void MockRemoteDBServer::remove(const string& ns, Query query, int flags) {
+void MockRemoteDBServer::remove(const string& ns, Query) {
     scoped_spinlock sLock(_lock);
     if (_dataMgr.count(ns) == 0) {
         return;
@@ -181,7 +181,7 @@ std::unique_ptr<projection_executor::ProjectionExecutor>
 MockRemoteDBServer::createProjectionExecutor(const BSONObj& projectionSpec) {
     const boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ProjectionPolicies defaultPolicies;
-    auto projection = projection_ast::parse(expCtx, projectionSpec, defaultPolicies);
+    auto projection = projection_ast::parseAndAnalyze(expCtx, projectionSpec, defaultPolicies);
     return projection_executor::buildProjectionExecutor(
         expCtx, &projection, defaultPolicies, projection_executor::kDefaultBuilderParams);
 }
@@ -198,7 +198,7 @@ BSONObj MockRemoteDBServer::project(projection_executor::ProjectionExecutor* pro
 mongo::BSONArray MockRemoteDBServer::query(MockRemoteDBServer::InstanceID id,
                                            const NamespaceStringOrUUID& nsOrUuid,
                                            mongo::Query query,
-                                           int nToReturn,
+                                           int limit,
                                            int nToSkip,
                                            const BSONObj* fieldsToReturn,
                                            int queryOptions,

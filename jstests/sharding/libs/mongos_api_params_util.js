@@ -1173,6 +1173,8 @@ let MongosAPIParametersUtil = (function() {
                 inAPIVersion1: false,
                 shardCommandName: "setIndexCommitQuorum",
                 permittedInTxn: false,
+                // The command should fail if there is no active index build on the collection.
+                expectedFailureCode: ErrorCodes.IndexNotFound,
                 command: () => ({
                     setIndexCommitQuorum: "collection",
                     indexNames: ["index"],
@@ -1522,6 +1524,10 @@ let MongosAPIParametersUtil = (function() {
         for (let i = 0; i < testInstances.length; ++i) {
             const {apiParameters, commandName, runOrExplain} = testInstances[i];
 
+            // Creating a new db implicitly should succeed with 'apiStrict: true'.
+            assert.commandWorked(st.s.getDB("db").runCommand(
+                {create: 'collection', apiVersion: '1', apiStrict: true}));
+
             if (shardedCollection) {
                 jsTestLog("Sharded setup");
                 assert.commandWorked(st.s.getDB("db")["collection"].insert(
@@ -1590,7 +1596,11 @@ let MongosAPIParametersUtil = (function() {
 
             const res = context.db.runCommand(commandWithAPIParams);
             jsTestLog(`Command result: ${tojson(res)}`);
-            assert.commandWorked(res);
+            if (runOrExplain.expectedFailureCode) {
+                assert.commandFailedWithCode(res, runOrExplain.expectedFailureCode);
+            } else {
+                assert.commandWorked(res);
+            }
 
             if (inTransaction) {
                 const commitCmd = {

@@ -5,10 +5,6 @@ selector:
   - jstests/replsets/*.js
   exclude_with_any_tags:
   - multiversion_incompatible
-  - requires_fcv_47
-  - requires_fcv_48
-  - requires_fcv_49
-  - requires_fcv_50
   - requires_fcv_51
   - backport_required_multiversion
   - replica_sets_multiversion_backport_required_multiversion
@@ -20,7 +16,7 @@ selector:
   - jstests/replsets/invalidate_sessions_on_stepdown.js
   - jstests/replsets/initial_sync_fails_unclean_restart.js
 
-  # This tag file can be created using ./buildscripts/evergreen_gen_multiversion_tests.py
+  # This tag file can be created using ./buildscripts/resmoke.py generate-multiversion-exclude-tags
   # or downloaded from the evergreen task.
   tag_file: multiversion_exclude_tags.yml
 

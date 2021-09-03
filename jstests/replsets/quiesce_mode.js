@@ -3,7 +3,6 @@
  * operations are allowed to continue and new operations are accepted, but hello requests return
  * a ShutdownInProgress error, so that clients begin routing operations elsewhere.
  * @tags: [
- *   requires_fcv_47,
  *   live_record_incompatible,
  * ]
  */
@@ -63,7 +62,10 @@ assert.eq(2, res.cursor.firstBatch.length, res);
 let cursorId = res.cursor.id;
 
 jsTestLog("Create a hanging operation on the secondary.");
-let findCmdFailPoint = configureFailPoint(secondary, "waitInFindBeforeMakingBatch");
+const fpData = {
+    nss: dbName + "." + collName
+};
+let findCmdFailPoint = configureFailPoint(secondary, "waitInFindBeforeMakingBatch", fpData);
 let findCmd = startParallelShell(runFind, secondary.port);
 findCmdFailPoint.wait();
 

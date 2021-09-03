@@ -88,12 +88,13 @@ protected:
             boost::none /* timestamp */,
             boost::none /* timeseriesFields */,
             boost::none,
+            boost::none /* chunkSizeBytes */,
             true,
             {ChunkType{
                 kNss, range, ChunkVersion(1, 0, epoch, boost::none /* timestamp */), kOtherShard}});
 
         return CollectionMetadata(ChunkManager(kThisShard,
-                                               DatabaseVersion(UUID::gen()),
+                                               DatabaseVersion(UUID::gen(), Timestamp()),
                                                makeStandaloneRoutingTableHistory(std::move(rt)),
                                                boost::none),
                                   kThisShard);
@@ -136,7 +137,8 @@ protected:
         splitChunks.emplace_back(
             kNss, ChunkRange(maxKey, chunkToSplit.getMax()), chunkVersion, kOtherShard);
 
-        auto rt = cm->getRoutingTableHistory_ForTest().makeUpdated(boost::none, true, splitChunks);
+        auto rt = cm->getRoutingTableHistory_ForTest().makeUpdated(
+            boost::none, boost::none, true, splitChunks);
 
         return CollectionMetadata(ChunkManager(cm->dbPrimary(),
                                                cm->dbVersion(),
@@ -161,6 +163,7 @@ protected:
         chunkVersion.incMajor();
 
         auto rt = cm->getRoutingTableHistory_ForTest().makeUpdated(
+            boost::none,
             boost::none,
             true,
             {ChunkType(kNss, ChunkRange(minKey, maxKey), chunkVersion, kOtherShard)});

@@ -1,15 +1,11 @@
 /**
  * Basic test from the drop collection command on a sharded cluster that verifies collections are
  * cleaned up properly.
- *
- * @tags: [
- *   disabled_due_to_server_58295
- * ]
  */
 (function() {
 "use strict";
 
-load("jstests/libs/uuid_util.js");
+load("jstests/sharding/libs/catalog_cache_loader_helpers.js");
 load("jstests/sharding/libs/find_chunks_util.js");
 
 var st = new ShardingTest({shards: 2});
@@ -46,24 +42,7 @@ function assertCollectionDropped(ns, uuid = null) {
 
     // No more coll entry
     assert.eq(null, st.s.getCollection(ns).exists());
-
-    // Check for the collection with majority RC to verify that the write to remove the collection
-    // document from the catalog has propagated to the majority snapshot. Note that here we
-    // explicitly use a command instead of going through the driver's 'find' helper, in order to be
-    // able to specify a 'majority' read concern.
-    //
-    // assert.eq(0, configDB.chunks.countDocuments({_id: ns{));
-    //
-    // TODO (SERVER-51881): Remove this check after 5.0 is released
-    var collEntry =
-        assert
-            .commandWorked(configDB.runCommand(
-                {find: 'collections', filter: {_id: ns}, readConcern: {'level': 'majority'}}))
-            .cursor.firstBatch;
-    if (collEntry.length > 0) {
-        assert.eq(1, collEntry.length);
-        assert.eq(true, collEntry[0].dropped);
-    }
+    assert.eq(0, configDB.collections.countDocuments({_id: ns}));
 }
 
 jsTest.log("Drop unsharded collection.");
@@ -349,7 +328,7 @@ jsTest.log("Test that dropping a sharded collection, the cached metadata on shar
 
     // Get the chunks cache collection name
     const configCollDoc = st.s0.getDB('config').collections.findOne({_id: coll.getFullName()});
-    const chunksCollName = 'cache.chunks.' + coll.getFullName();
+    const chunksCollName = getCachedChunksCollectionName(configCollDoc);
 
     // Drop the collection
     assert.commandWorked(db.runCommand({drop: coll.getName()}));

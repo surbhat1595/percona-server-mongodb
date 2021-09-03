@@ -81,21 +81,13 @@ Message assembleCommandRequest(DBClientBase* cli,
         request.body = bodyBob.obj();
     }
 
-    return rpc::messageFromOpMsgRequest(
-        cli->getClientRPCProtocols(), cli->getServerRPCProtocols(), std::move(request));
+    rpc::Protocol protocol =
+        uassertStatusOK(rpc::negotiate(cli->getClientRPCProtocols(), cli->getServerRPCProtocols()));
+    invariant(protocol == rpc::Protocol::kOpMsg);
+    return request.serialize();
 }
 
 }  // namespace
-
-int DBClientCursor::nextBatchSize() {
-    if (nToReturn == 0)
-        return batchSize;
-
-    if (batchSize == 0)
-        return nToReturn;
-
-    return batchSize < nToReturn ? batchSize : nToReturn;
-}
 
 Message DBClientCursor::_assembleInit() {
     if (cursorId) {
@@ -107,16 +99,21 @@ Message DBClientCursor::_assembleInit() {
     // expected for a legacy OP_QUERY. Therefore, we use the legacy parsing code supplied by
     // query_request_helper. When actually issuing the request to the remote node, we will
     // assemble a find command.
-    auto findCommand =
-        query_request_helper::fromLegacyQuery(_nsOrUuid,
-                                              query,
-                                              fieldsToReturn ? *fieldsToReturn : BSONObj(),
-                                              nToSkip,
-                                              nextBatchSize(),
-                                              opts);
+    auto findCommand = query_request_helper::fromLegacyQuery(
+        _nsOrUuid, query, fieldsToReturn ? *fieldsToReturn : BSONObj(), nToSkip, opts);
     // If there was a problem building the query request, report that.
     uassertStatusOK(findCommand.getStatus());
 
+    // Despite the request being generated using the legacy OP_QUERY format above, we will never set
+    // the 'ntoreturn' parameter on the find command request, since this is an OP_QUERY-specific
+    // concept. Instead, we always use 'batchSize' and 'limit', which are provided separately to us
+    // by the client.
+    if (limit) {
+        findCommand.getValue()->setLimit(limit);
+    }
+    if (batchSize) {
+        findCommand.getValue()->setBatchSize(batchSize);
+    }
     if (query.getBoolField("$readOnce")) {
         // Legacy queries don't handle readOnce.
         findCommand.getValue()->setReadOnce(true);
@@ -152,9 +149,9 @@ Message DBClientCursor::_assembleInit() {
 
 Message DBClientCursor::_assembleGetMore() {
     invariant(cursorId);
-    std::int64_t batchSize = nextBatchSize();
     auto getMoreRequest = GetMoreCommandRequest(cursorId, ns.coll().toString());
-    getMoreRequest.setBatchSize(boost::make_optional(batchSize != 0, batchSize));
+    getMoreRequest.setBatchSize(
+        boost::make_optional(batchSize != 0, static_cast<int64_t>(batchSize)));
     getMoreRequest.setMaxTimeMS(boost::make_optional(
         tailableAwaitData(),
         static_cast<std::int64_t>(durationCount<Milliseconds>(_awaitDataTimeout))));
@@ -193,42 +190,6 @@ bool DBClientCursor::init() {
     return true;
 }
 
-void DBClientCursor::initLazy(bool isRetry) {
-    massert(15875,
-            "DBClientCursor::initLazy called on a client that doesn't support lazy",
-            _client->lazySupported());
-    Message toSend = _assembleInit();
-    _client->say(toSend, isRetry, &_originalHost);
-    _lastRequestId = toSend.header().getId();
-    _connectionHasPendingReplies = true;
-}
-
-bool DBClientCursor::initLazyFinish(bool& retry) {
-    invariant(_connectionHasPendingReplies);
-    Message reply;
-    Status recvStatus = _client->recv(reply, _lastRequestId);
-    _connectionHasPendingReplies = false;
-
-    // If we get a bad response, return false
-    if (!recvStatus.isOK() || reply.empty()) {
-        if (!recvStatus.isOK())
-            LOGV2(20129,
-                  "DBClientCursor::init lazy say() failed: {error}",
-                  "DBClientCursor::init lazy say() failed",
-                  "error"_attr = redact(recvStatus));
-        if (reply.empty())
-            LOGV2(20130, "DBClientCursor::init message from say() was empty");
-
-        _client->checkResponse({}, true, &retry, &_lazyHost);
-
-        return false;
-    }
-
-    dataReceived(reply, retry, _lazyHost);
-
-    return !retry;
-}
-
 void DBClientCursor::requestMore() {
     // For exhaust queries, once the stream has been initiated we get data blasted to us
     // from the remote server, without a need to send any more 'getMore' requests.
@@ -239,11 +200,6 @@ void DBClientCursor::requestMore() {
 
     invariant(!_connectionHasPendingReplies);
     verify(cursorId && batch.pos == batch.objs.size());
-
-    if (haveLimit) {
-        nToReturn -= batch.objs.size();
-        verify(nToReturn > 0);
-    }
 
     auto doRequestMore = [&] {
         Message toSend = _assembleGetMore();
@@ -269,7 +225,7 @@ void DBClientCursor::requestMore() {
 void DBClientCursor::exhaustReceiveMore() {
     verify(cursorId);
     verify(batch.pos == batch.objs.size());
-    uassert(40675, "Cannot have limit for exhaust query", !haveLimit);
+    uassert(40675, "Cannot have limit for exhaust query", limit == 0);
     Message response;
     verify(_client);
     uassertStatusOK(
@@ -327,9 +283,6 @@ void DBClientCursor::dataReceived(const Message& reply, bool& retry, string& hos
 bool DBClientCursor::more() {
     if (!_putBack.empty())
         return true;
-
-    if (haveLimit && static_cast<int>(batch.pos) >= nToReturn)
-        return false;
 
     if (batch.pos < batch.objs.size())
         return true;
@@ -408,27 +361,22 @@ void DBClientCursor::attach(AScopedConnection* conn) {
     verify(conn->get());
 
     if (conn->get()->type() == ConnectionString::ConnectionType::kReplicaSet) {
-        if (_lazyHost.size() > 0)
-            _scopedHost = _lazyHost;
-        else if (_client)
+        if (_client)
             _scopedHost = _client->getServerAddress();
         else
-            massert(14821,
-                    "No client or lazy client specified, cannot store multi-host connection.",
-                    false);
+            massert(14821, "No client specified, cannot store multi-host connection.", false);
     } else {
         _scopedHost = conn->getHost();
     }
 
     conn->done();
     _client = nullptr;
-    _lazyHost = "";
 }
 
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const NamespaceStringOrUUID& nsOrUuid,
                                const BSONObj& query,
-                               int nToReturn,
+                               int limit,
                                int nToSkip,
                                const BSONObj* fieldsToReturn,
                                int queryOptions,
@@ -438,7 +386,7 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                      nsOrUuid,
                      query,
                      0,  // cursorId
-                     nToReturn,
+                     limit,
                      nToSkip,
                      fieldsToReturn,
                      queryOptions,
@@ -450,53 +398,57 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const NamespaceStringOrUUID& nsOrUuid,
                                long long cursorId,
-                               int nToReturn,
+                               int limit,
                                int queryOptions,
                                std::vector<BSONObj> initialBatch,
-                               boost::optional<Timestamp> operationTime)
+                               boost::optional<Timestamp> operationTime,
+                               boost::optional<BSONObj> postBatchResumeToken)
     : DBClientCursor(client,
                      nsOrUuid,
                      BSONObj(),  // query
                      cursorId,
-                     nToReturn,
+                     limit,
                      0,        // nToSkip
                      nullptr,  // fieldsToReturn
                      queryOptions,
                      0,
                      std::move(initialBatch),  // batchSize
                      boost::none,
-                     operationTime) {}
+                     operationTime,
+                     postBatchResumeToken) {}
 
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const NamespaceStringOrUUID& nsOrUuid,
                                const BSONObj& query,
                                long long cursorId,
-                               int nToReturn,
+                               int limit,
                                int nToSkip,
                                const BSONObj* fieldsToReturn,
                                int queryOptions,
                                int batchSize,
                                std::vector<BSONObj> initialBatch,
                                boost::optional<BSONObj> readConcernObj,
-                               boost::optional<Timestamp> operationTime)
+                               boost::optional<Timestamp> operationTime,
+                               boost::optional<BSONObj> postBatchResumeToken)
     : batch{std::move(initialBatch)},
       _client(client),
       _originalHost(_client->getServerAddress()),
       _nsOrUuid(nsOrUuid),
       ns(nsOrUuid.nss() ? *nsOrUuid.nss() : NamespaceString(nsOrUuid.dbname())),
       query(query),
-      nToReturn(nToReturn),
-      haveLimit(nToReturn > 0 && !(queryOptions & QueryOption_CursorTailable)),
+      limit(limit),
       nToSkip(nToSkip),
       fieldsToReturn(fieldsToReturn),
       opts(queryOptions),
       batchSize(batchSize == 1 ? 2 : batchSize),
-      resultFlags(0),
       cursorId(cursorId),
       _ownCursor(true),
       wasError(false),
       _readConcernObj(readConcernObj),
-      _operationTime(operationTime) {}
+      _operationTime(operationTime),
+      _postBatchResumeToken(postBatchResumeToken) {
+    tassert(5746103, "DBClientCursor limit must be non-negative", limit >= 0);
+}
 
 /* static */
 StatusWith<std::unique_ptr<DBClientCursor>> DBClientCursor::fromAggregationRequest(
@@ -517,6 +469,14 @@ StatusWith<std::unique_ptr<DBClientCursor>> DBClientCursor::fromAggregationReque
     for (BSONElement elem : ret["cursor"].Obj()["firstBatch"].Array()) {
         firstBatch.emplace_back(elem.Obj().getOwned());
     }
+    boost::optional<BSONObj> postBatchResumeToken;
+    if (auto postBatchResumeTokenElem = ret["cursor"].Obj()["postBatchResumeToken"];
+        postBatchResumeTokenElem.type() == BSONType::Object) {
+        postBatchResumeToken = postBatchResumeTokenElem.Obj().getOwned();
+    } else if (ret["cursor"].Obj().hasField("postBatchResumeToken")) {
+        return Status(ErrorCodes::Error(5761702),
+                      "Expected field 'postbatchResumeToken' to be of object type");
+    }
 
     boost::optional<Timestamp> operationTime = boost::none;
     if (ret.hasField(LogicalTime::kOperationTimeFieldName)) {
@@ -529,7 +489,8 @@ StatusWith<std::unique_ptr<DBClientCursor>> DBClientCursor::fromAggregationReque
                                              0,
                                              useExhaust ? QueryOption_Exhaust : 0,
                                              firstBatch,
-                                             operationTime)};
+                                             operationTime,
+                                             postBatchResumeToken)};
 }
 
 DBClientCursor::~DBClientCursor() {

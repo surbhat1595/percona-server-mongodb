@@ -34,7 +34,7 @@
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/type_collection_timeseries_fields_gen.h"
+#include "mongo/s/type_collection_common_types_gen.h"
 
 namespace mongo {
 namespace {
@@ -75,6 +75,7 @@ protected:
             boost::none /* timestamp */,
             timeseriesFields,
             boost::none,
+            boost::none,
             true,
             [&] {
                 ChunkVersion version(1, 0, epoch, boost::none /* timestamp */);
@@ -109,7 +110,7 @@ protected:
             }());
 
         ChunkManager cm(ShardId("0"),
-                        DatabaseVersion(UUID::gen()),
+                        DatabaseVersion(UUID::gen(), Timestamp()),
                         makeStandaloneRoutingTableHistory(std::move(rt)),
                         boost::none);
         ASSERT_EQ(4, cm.numChunks());

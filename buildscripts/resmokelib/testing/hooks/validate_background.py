@@ -15,6 +15,8 @@ from buildscripts.resmokelib.testing.hooks.background_job import _BackgroundJob,
 class ValidateCollectionsInBackground(jsfile.JSHook):
     """A hook to run background collection validation against test servers while a test is running."""
 
+    IS_BACKGROUND = True
+
     def __init__(self, hook_logger, fixture, shell_options=None):
         """Initialize ValidateCollectionsInBackground."""
         description = "Run background collection validation against all mongods while a test is running"
@@ -30,7 +32,7 @@ class ValidateCollectionsInBackground(jsfile.JSHook):
         self.logger.info("Starting the background collection validation thread.")
         self._background_job.start()
 
-    def after_suite(self, test_report):
+    def after_suite(self, test_report, teardown_flag=None):
         """Signal the background collection validation thread to exit, and wait until it does."""
         if self._background_job is None:
             return

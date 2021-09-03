@@ -47,7 +47,6 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/authenticate.h"
-#include "mongo/client/constants.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/sasl_client_authenticate.h"
@@ -92,25 +91,6 @@ using std::unique_ptr;
 MONGO_FAIL_POINT_DEFINE(dbClientConnectionDisableChecksum);
 
 namespace {
-
-/**
- * RAII class to force usage of OP_QUERY on a connection.
- */
-class ScopedForceOpQuery {
-public:
-    ScopedForceOpQuery(DBClientBase* conn)
-        : _conn(conn), _oldProtos(conn->getClientRPCProtocols()) {
-        _conn->setClientRPCProtocols(rpc::supports::kOpQueryOnly);
-    }
-
-    ~ScopedForceOpQuery() {
-        _conn->setClientRPCProtocols(_oldProtos);
-    }
-
-private:
-    DBClientBase* const _conn;
-    const rpc::ProtocolSet _oldProtos;
-};
 
 StatusWith<bool> completeSpeculativeAuth(DBClientConnection* conn,
                                          auth::SpeculativeAuthType speculativeAuthType,
@@ -180,10 +160,6 @@ executor::RemoteCommandResponse initWireVersion(
     std::vector<std::string>* saslMechsForAuth,
     auth::SpeculativeAuthType* speculativeAuthType,
     std::shared_ptr<SaslClientSession>* saslClientSession) try {
-    // We need to force the usage of OP_QUERY on this command, even if we have previously
-    // detected support for OP_MSG on a connection. This is necessary to handle the case
-    // where we reconnect to an older version of MongoDB running at the same host/port.
-    ScopedForceOpQuery forceOpQuery{conn};
 
     BSONObjBuilder bob;
     bob.append(conn->getApiParameters().getVersion() ? "hello" : "isMaster", 1);
@@ -294,7 +270,7 @@ Status DBClientConnection::connect(const HostAndPort& serverAddress,
     }
 
     // Clear the auto-detected protocols from any previous connection.
-    _setServerRPCProtocols(rpc::supports::kOpQueryOnly);
+    _setServerRPCProtocols(rpc::supports::kOpMsgOnly);
 
     // NOTE: If the 'applicationName' parameter is a view of the '_applicationName' member, as
     // happens, for instance, in the call to DBClientConnection::connect from
@@ -310,6 +286,8 @@ Status DBClientConnection::connect(const HostAndPort& serverAddress,
         this, _applicationName, _uri, &_saslMechsForAuth, &speculativeAuthType, &saslClientSession);
     if (!swIsMasterReply.isOK()) {
         _markFailed(kSetFlag);
+        swIsMasterReply.status.addContext(
+            "Connection handshake failed. Is your mongod/mongos 3.4 or older?"_sd);
         return swIsMasterReply.status;
     }
 
@@ -806,22 +784,6 @@ bool DBClientConnection::call(Message& toSend,
 
     killSessionOnError.dismiss();
     return true;
-}
-
-void DBClientConnection::checkResponse(const std::vector<BSONObj>& batch,
-                                       bool networkError,
-                                       bool* retry,
-                                       string* host) {
-    /* check for errors.  the only one we really care about at
-     * this stage is "not master"
-     */
-
-    *retry = false;
-    *host = _serverAddress.toString();
-
-    if (!_parentReplSetName.empty() && !batch.empty()) {
-        handleNotPrimaryResponse(batch[0], "$err");
-    }
 }
 
 void DBClientConnection::setParentReplSetName(const string& replSetName) {

@@ -5,6 +5,7 @@ var reconnect;
 var getLatestOp;
 var waitForAllMembers;
 var reconfig;
+var safeReconfigShouldFail;
 var awaitOpTime;
 var waitUntilAllNodesCaughtUp;
 var waitForState;
@@ -18,12 +19,10 @@ var isConfigCommitted;
 var assertSameConfigContent;
 var getConfigWithNewlyAdded;
 var isMemberNewlyAdded;
-var replConfigHasNewlyAddedMembers;
 var waitForNewlyAddedRemovalForNodeToBeCommitted;
 var assertVoteCount;
 var disconnectSecondaries;
 var reconnectSecondaries;
-var selectDelayFieldName;
 var isDefaultReadConcernLocalFlagEnabled;
 
 (function() {
@@ -194,8 +193,9 @@ waitForAllMembers = function(master, timeout) {
  * Run a 'replSetReconfig' command with one retry on NodeNotFound and multiple retries on
  * ConfigurationInProgress, CurrentConfigNotCommittedYet, and
  * NewReplicaSetConfigurationIncompatible.
+ * Expect the reconfig to fail if shouldFail is set to true.
  */
-function reconfigWithRetry(primary, config, force) {
+function reconfigWithRetry(primary, config, force, shouldFail = false, errCode, errMsg) {
     const admin = primary.getDB("admin");
     force = force || false;
     let reconfigCommand = {
@@ -241,7 +241,19 @@ function reconfigWithRetry(primary, config, force) {
             }
         }
 
-        assert.commandWorked(res);
+        if (!shouldFail) {
+            assert.commandWorked(res);
+        } else {
+            assert.commandFailed(res);
+            if (errCode) {
+                assert.eq(res.code, errCode);
+            }
+
+            if (errMsg) {
+                assert(res.errmsg.includes(errMsg));
+            }
+        }
+
         return true;
     });
 }
@@ -405,6 +417,20 @@ reconfig = function(rst, config, force, doNotWaitForMembers) {
         waitForAllMembers(primaryAdminDB);
     }
     return primaryAdminDB;
+};
+
+/**
+ * Tests that a replica set safe reconfiguration on the given ReplSetTest instance should fail.
+ *
+ * @param rst - a ReplSetTest instance.
+ * @param config - the desired target config.
+ * @param force - should this be a 'force' reconfig or not.
+ * @param errCode - if exists, we verify that the reconfig fails with this errCode.
+ * @param errMsg - if exists, we verify that the reconfig fails with error message containing this
+ * errMsg.
+ */
+safeReconfigShouldFail = function(rst, config, force, errCode, errMsg) {
+    reconfigWithRetry(rst.getPrimary(), config, force, true /* shouldFail */, errCode, errMsg);
 };
 
 awaitOpTime = function(catchingUpNode, latestOpTimeNode) {
@@ -765,11 +791,6 @@ isMemberNewlyAdded = function(node, memberIndex) {
     return hasNewlyAdded(memberIndex);
 };
 
-// Returns true if at least one member in the repl set config contains "newlyAdded" field.
-replConfigHasNewlyAddedMembers = function(conn) {
-    return isMemberNewlyAdded(conn);
-};
-
 waitForNewlyAddedRemovalForNodeToBeCommitted = function(node, memberIndex, force = false) {
     jsTestLog("Waiting for member " + memberIndex + " to no longer be 'newlyAdded'");
     assert.soonNoExcept(function() {
@@ -810,19 +831,6 @@ reconnectSecondaries = function(rst) {
             }
         }
     }
-};
-
-/**
- * If featureFlagUseSecondaryDelaySecs is enabled, we must use the 'secondaryDelaySecs' field name
- * in our config. Otherwise, we use 'slaveDelay'. This helper implements the logic to determine
- * which field to use.
- */
-selectDelayFieldName = function(rst) {
-    const useSecondaryDelaySecs =
-        rst.nodes[0]
-            .adminCommand({getParameter: 1, featureFlagUseSecondaryDelaySecs: 1})
-            .featureFlagUseSecondaryDelaySecs.value;
-    return useSecondaryDelaySecs ? "secondaryDelaySecs" : "slaveDelay";
 };
 
 /**

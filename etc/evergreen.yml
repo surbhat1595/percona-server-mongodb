@@ -1,4 +1,4 @@
-#####################################################
+####################################################
 #                  YAML Conventions                 #
 #####################################################
 # Please see our conventions document at
@@ -272,6 +272,7 @@ variables:
     multiversion_edition: enterprise
     jstestfuzz_num_generated_files: 35
     large_distro_name: windows-vsCurrent-large
+    test_flags: --excludeWithAnyTags=incompatible_with_windows_tls
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -518,15 +519,6 @@ functions:
       bucket: mciuploads
       local_file: src/mongo-binaries.tgz
 
-  "fetch dist debugsymbols": &fetch_dist_debugsymbols
-    command: s3.get
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      remote_file: ${project}/${build_variant}/${revision}/dist/mongo-${build_id}-debugsymbols.${ext|tgz}
-      bucket: mciuploads
-      local_file: src/mongo-debugsymbols.tgz
-
   "fetch binaries": &fetch_binaries
     command: s3.get
     params:
@@ -708,15 +700,6 @@ functions:
       permissions: public-read
       content_type: ${content_type|application/gzip}
 
-  "fetch debugsymbols archive": &fetch_debugsymbols_archive
-    command: s3.get
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      remote_file: ${mongo_debugsymbols}
-      bucket: mciuploads
-      local_file: src/mongo-debugsymbols.tgz
-
   "use WiredTiger develop":
     - *f_expansions_write
     - command: subprocess.exec
@@ -866,7 +849,6 @@ functions:
   - *kill_processes
   - *cleanup_environment
   - *fetch_binaries
-  - *fetch_debugsymbols_archive
   - *set_up_venv
   - *upload_pip_requirements
   - *extract_binaries
@@ -1104,7 +1086,6 @@ functions:
   "generate resmoke tasks":
     - *fetch_artifacts
     - *f_expansions_write
-    - *add_git_tag
     - *kill_processes
     - *cleanup_environment
     - *set_up_venv
@@ -1140,6 +1121,7 @@ functions:
   - *determine_resmoke_jobs
   - *update_resmoke_jobs_expansions
   - *f_expansions_write
+  - *configure_evergreen_api_credentials
   - command: subprocess.exec
     params:
       binary: bash
@@ -1934,7 +1916,6 @@ tasks:
           install-dist-test
           ${additional_compile_targets|}
         task_compile_flags: >-
-          --separate-debug
           PREFIX=dist-test
 
 - name: determine_patch_tests
@@ -1958,7 +1939,6 @@ tasks:
         targets: >-
           archive-dist-test
         task_compile_flags: >-
-          --separate-debug
           PREFIX=dist-test
 
     - command: s3.put
@@ -2035,6 +2015,11 @@ tasks:
         files:
           - src/artifacts.json
 
+# Dummy task to activate `archive_dist_test_debug` since it can't be activated directly (not a generated task).
+- name: activate_archive_dist_test_debug
+  tags: []
+  depends_on:
+    - name: archive_dist_test_debug
 
 - name: archive_dist_test_debug
   tags: []
@@ -2046,7 +2031,6 @@ tasks:
         targets: >-
           archive-dist-test-debug
         task_compile_flags: >-
-          --separate-debug
           PREFIX=dist-test
 
     - func: "upload debugsymbols"
@@ -2156,8 +2140,6 @@ tasks:
       vars:
         targets: install-all-meta
         compiling_for_test: true
-        task_compile_flags: >-
-          --separate-debug
 
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
@@ -2186,8 +2168,6 @@ tasks:
     - func: "scons compile"
       vars:
         targets: install-unittests install-unittests-debug
-        task_compile_flags: >-
-          --separate-debug
         compiling_for_test: true
 
 ## A copy of the compile_unittests task for the recorded unittest taskgroup ##
@@ -2299,8 +2279,6 @@ tasks:
     - func: "scons compile"
       vars:
         targets: install-dbtest install-dbtest-debug
-        task_compile_flags: >-
-          --separate-debug
         compiling_for_test: true
 
 ## run_dbtest ##
@@ -2327,8 +2305,6 @@ tasks:
     - func: "scons compile"
       vars:
         targets: archive-dbtest archive-dbtest-debug
-        task_compile_flags: >-
-          --separate-debug
         compiling_for_test: true
 
 - name: compile_visibility_test
@@ -2341,7 +2317,6 @@ tasks:
           --ssl
           --dbg=on
           --opt=on
-          --separate-debug
           --link-model=dynamic
           --visibility-support=on
 
@@ -2384,7 +2359,6 @@ tasks:
           --enable-http-client=off
           --js-engine=none
           --opt=size
-          --separate-debug
           --ssl=off
           --use-system-mongo-c=on
           DESTDIR='$BUILD_ROOT/mongo-embedded-sdk-$MONGO_VERSION'
@@ -2531,7 +2505,6 @@ tasks:
           --ssl=off
           --enable-http-client=off
           --modules=
-          --separate-debug
           DESTDIR='$BUILD_ROOT/stitch-support-lib-$MONGO_VERSION'
     - *f_expansions_write
     - command: subprocess.exec
@@ -2565,7 +2538,6 @@ tasks:
           --ssl=off
           --enable-http-client=off
           --modules=
-          --separate-debug
           DESTDIR='$BUILD_ROOT/stitch-support-lib-$MONGO_VERSION'
 
 - name: stitch_support_run_tests
@@ -2628,7 +2600,7 @@ tasks:
 
 ## lint ##
 - name: lint_pylinters
-  tags: []
+  tags: ["lint"]
   commands:
     - command: timeout.update
       params:
@@ -2647,7 +2619,7 @@ tasks:
         targets: lint-pylinters
 
 - name: lint_clang_format
-  tags: []
+  tags: ["lint"]
   commands:
     - command: timeout.update
       params:
@@ -2666,7 +2638,7 @@ tasks:
         targets: lint-clang-format
 
 - name: lint_eslint
-  tags: []
+  tags: ["lint"]
   commands:
     - command: timeout.update
       params:
@@ -2685,7 +2657,7 @@ tasks:
         targets: lint-eslint
 
 - name: lint_cpplint
-  tags: []
+  tags: ["lint"]
   commands:
     - command: timeout.update
       params:
@@ -2704,7 +2676,7 @@ tasks:
         targets: lint-lint.py
 
 - name: lint_yaml
-  tags: []
+  tags: ["lint"]
   depends_on: []
   commands:
   - command: manifest.load
@@ -2723,7 +2695,7 @@ tasks:
         - "src/evergreen/lint_yaml.sh"
 
 - name: lint_shellscripts
-  tags: []
+  tags: ["lint"]
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -2738,7 +2710,7 @@ tasks:
         - "src/evergreen/lint_shellscripts.sh"
 
 - name: lint_errorcodes
-  tags: []
+  tags: ["lint"]
   commands:
     - command: manifest.load
     - func: "git get project and add git tag"
@@ -2754,7 +2726,7 @@ tasks:
 - name: test_api_version_compatibility
   tags: []
   depends_on:
-    - name: archive_dist_test_debug
+    - name: archive_dist_test
   commands:
     - command: manifest.load
     - func: "git get project and add git tag"
@@ -3113,6 +3085,22 @@ tasks:
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       name: aggregation_timeseries_fuzzer
+
+## Standalone generational fuzzer for checking optimized and unoptimized change stream pipelines ##
+- <<: *jstestfuzz_template
+  name: change_stream_optimization_fuzzer_gen
+  tags: ["change_stream_fuzzer"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 5
+      num_tasks: 5
+      jstestfuzz_vars: --diffTestingMode optimization
+      npm_command: change-stream-fuzzer
+      suite: generational_fuzzer
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+      name: change_stream_optimization_fuzzer
 
 ## jstestfuzz standalone fuzzer for checking find and aggregate equivalence ##
 - <<: *jstestfuzz_template
@@ -3914,7 +3902,7 @@ tasks:
 - name: burn_in_tags_gen
   tags: []
   depends_on:
-    - name: archive_dist_test_debug
+    - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -3937,6 +3925,7 @@ tasks:
     - command: manifest.load
     - *git_get_project
     - *f_expansions_write
+    - *add_git_tag
     - *kill_processes
     - *cleanup_environment
     - func: "set up venv"
@@ -3979,6 +3968,17 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       suite: change_streams
+      resmoke_args: --storageEngine=wiredTiger
+      require_multiversion: true
+      implicit_multiversion: true
+
+- <<: *gen_task_template
+  name: change_streams_multiversion_downgrade_passthrough_gen
+  tags: ["multiversion_passthrough"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: change_streams_multiversion_downgrade_passthrough
       resmoke_args: --storageEngine=wiredTiger
       require_multiversion: true
       implicit_multiversion: true
@@ -5018,6 +5018,7 @@ tasks:
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
+      use_large_distro: "true"
 
 - <<: *gen_task_template
   name: concurrency_replication_multi_stmt_txn_gen
@@ -5677,6 +5678,17 @@ tasks:
       resmoke_args: --storageEngine=wiredTiger
 
 - <<: *gen_task_template
+  name: retryable_writes_downgrade_passthrough_gen
+  tags: ["multiversion_passthrough"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: retryable_writes_downgrade_passthrough
+      resmoke_args: --storageEngine=wiredTiger
+      require_multiversion: true
+      implicit_multiversion: true
+
+- <<: *gen_task_template
   name: logical_session_cache_replication_default_refresh_jscore_passthrough_gen
   tags: ["logical_session_cache", "repl"]
   commands:
@@ -5887,8 +5899,8 @@ tasks:
         num_tasks: 20
         exec_timeout_secs: 604800 # 7 days
         timeout_secs: 604800 # 7 days
-        set_up_retry_count: 1000000
-        run_powercycle_args: --sshAccessRetryCount=1000000
+        set_up_retry_count: 450
+        run_powercycle_args: --sshAccessRetryCount=450
 
 - name: powercycle_sentinel
   tags: []
@@ -5940,7 +5952,7 @@ tasks:
   - func: "run powercycle test"
     timeout_secs: 1800 # 30 minute timeout for no output
 
-- name: powercycle_fcv4.4
+- name: powercycle_last_lts_fcv
   tags: ["powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
@@ -6013,7 +6025,7 @@ tasks:
 - name: idl_tests
   tags: []
   depends_on:
-  - name: archive_dist_test_debug
+  - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -6125,7 +6137,6 @@ tasks:
           archive-shell-debug
           ${additional_package_targets|}
         task_compile_flags: >-
-          --separate-debug
           --legacy-tarball
     - func: "f_expansions_write"
     - command: subprocess.exec
@@ -6344,7 +6355,6 @@ tasks:
         build_variants: [rhel70, windows]
     - func: "generate compile expansions"
     - func: "apply compile expansions"
-    - func: "fetch dist debugsymbols"
     - func: "set up remote credentials"
       vars:
         aws_key_remote: ${repo_aws_key}
@@ -7801,6 +7811,54 @@ buildvariants:
     distros:
     - ubuntu2004-test
 
+- &enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
+  name: enterprise-ubuntu2104-dynamic-gcc11-debug-experimental
+  display_name: "~ Shared Library Enterprise Ubuntu 21.04 GCC11 DEBUG"
+  batchtime: 1440 # 1 day
+  modules:
+  - enterprise
+  run_on:
+  - ubuntu2104-small
+  expansions: &enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11 --disable-warnings-as-errors
+    has_packages: false
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    large_distro_name: ubuntu2104-large
+    num_scons_link_jobs_available: 0.99
+  tasks: &enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-tasks
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+      - ubuntu2104-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+      - ubuntu2104-large
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
+    distros:
+      - ubuntu2104-large
+
+- <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
+  name: enterprise-ubuntu2104-dynamic-clang12-debug-experimental
+  display_name: "~ Shared Library Enterprise Ubuntu 21.04 clang12 DEBUG"
+  expansions:
+    <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/clang-12 CXX=/usr/bin/clang++-12 --disable-warnings-as-errors
+
+- <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
+  name: enterprise-ubuntu2104-dynamic-gcc11-cxx20-debug-experimental
+  display_name: "~ Shared Library Enterprise Ubuntu 21.04 GCC11 C++20 DEBUG"
+  expansions:
+    <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11 --disable-warnings-as-errors --cxx-std=20
+
+- <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
+  name: enterprise-ubuntu2104-dynamic-clang12-cxx20-debug-experimental
+  display_name: "~ Shared Library Enterprise Ubuntu 21.04 clang12 C++20 DEBUG"
+  expansions:
+    <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/clang-12 CXX=/usr/bin/clang++-12 --disable-warnings-as-errors --cxx-std=20
+
 - name: enterprise-linux-64-amazon-ami
   display_name: "Enterprise Amazon Linux"
   modules:
@@ -8804,7 +8862,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --disable-warnings-as-errors --variables-files=etc/scons/xcode_macosx.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8819,7 +8877,7 @@ buildvariants:
   - name: .logical_session_cache .one_sec
   - name: mqlrun
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
 
 - name: enterprise-macos-rosetta-2
@@ -8831,7 +8889,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --disable-warnings-as-errors --variables-files=etc/scons/xcode_macosx.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8857,7 +8915,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --link-model=dynamic --libc++ --disable-warnings-as-errors --variables-files=etc/scons/xcode_macosx_arm.vars
+    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8946,6 +9004,7 @@ buildvariants:
     target_resmoke_time: 10
     max_sub_suites: 3
     large_distro_name: rhel80-medium
+    spawn_resmoke_using: jasper
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -8958,6 +9017,7 @@ buildvariants:
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
+  - name: .change_stream_fuzzer
   - name: .misc_js
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
@@ -9065,14 +9125,8 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: build_variant_gen
-  - name: lint_pylinters
-  - name: lint_clang_format
-  - name: lint_eslint
-  - name: lint_cpplint
+  - name: .lint
   - name: lint_fuzzer_sanity_patch
-  - name: lint_yaml
-  - name: lint_shellscripts
-  - name: lint_errorcodes
   - name: test_api_version_compatibility
   - name: burn_in_tests_gen
   - name: burn_in_tests_multiversion_gen
@@ -9088,6 +9142,7 @@ buildvariants:
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
+  - name: .change_stream_fuzzer
   - name: .misc_js
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
@@ -9183,7 +9238,10 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
-    test_flags: --runAllFeatureFlagTests
+    test_flags: >-
+      --runAllFeatureFlagTests
+      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
+      --additionalFeatureFlags=featureFlagSbePlanCache
   tasks: &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-tasks
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
@@ -9207,6 +9265,7 @@ buildvariants:
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
+  - name: .change_stream_fuzzer
   - name: .misc_js
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
@@ -9302,9 +9361,9 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
     test_flags: >-
       --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
-      --additionalFeatureFlags=featureFlagTimeseriesCollection
+      --additionalFeatureFlags=featureFlagTimeseriesCollection,featureFlagSbePlanCache
   tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
+  - name: compile_and_archive_dist_test_TG
     distros:
       - rhel80-large
 # Disable the following tests as they are not aware of feature flags.
@@ -9318,7 +9377,9 @@ buildvariants:
   - name: .aggfuzzer
   - name: .aggregation !.no_async !.secondary_reads !.sharded !.unwind !aggregation_disabled_optimization
   - name: .change_streams
+  - name: .change_stream_fuzzer
   - name: .concurrency !.large !.ubsan !.debug_only
+  - name: .lint
   - name: .jscore !.sharding !.decimal !cst_jscore_passthrough
   - name: .jstestfuzz !.flow_control
   - name: .query_fuzzer
@@ -9442,7 +9503,7 @@ buildvariants:
   - rhel80-small
   expansions: &enterprise-rhel-80-64-bit-multiversion
     test_flags: >-
-      --excludeWithAnyTags=requires_fcv_47,requires_fcv_48,requires_fcv_49,requires_fcv_50,multiversion_incompatible,disabled_due_to_server_58295
+      --excludeWithAnyTags=requires_fcv_51,multiversion_incompatible,disabled_due_to_server_58295
     compile_flags: >-
       -j$(grep -c ^processor /proc/cpuinfo)
       --ssl
@@ -10734,7 +10795,7 @@ buildvariants:
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     scons_cache_scope: shared
-    large_distro_name: rhel80-medium
+    large_distro_name: rhel80-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -10746,6 +10807,7 @@ buildvariants:
   - name: .auth !.multiversion
   - name: .causally_consistent !.wo_snapshot !.durable_history
   - name: .change_streams !.secondary_reads
+  - name: .change_stream_fuzzer
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
     distros:
@@ -10820,7 +10882,10 @@ buildvariants:
   - name: .jscore .common !.txns !.decimal
   # SERVER-50295: Investigate jstestfuzz time outs.
   # - name: .jstestfuzz .common
-  - name: .logical_session_cache .one_sec
+  # SERVER-59095: Investigate the EFT failure and re-enable the failing jstest suite on evergreen.
+  # - name: .logical_session_cache .one_sec
+  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
   - name: .read_write_concern .linearize
   - name: replica_sets_gen
   - name: .replica_sets .common
@@ -10891,6 +10956,7 @@ buildvariants:
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
     exec_timeout_secs: 14400 # 3 hour timeout
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_benchmarks
@@ -10968,6 +11034,7 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
         --runAllFeatureFlagTests
+    separate_debug: off
   tasks:
   - name: compile_and_archive_dist_test_then_package_TG
   - name: compile_benchmarks
@@ -11032,6 +11099,7 @@ buildvariants:
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
       --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
+      --additionalFeatureFlags=featureFlagSbePlanCache
       --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
@@ -11039,6 +11107,7 @@ buildvariants:
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
     exec_timeout_secs: 14400 # 3 hour timeout
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_benchmarks
@@ -11102,6 +11171,7 @@ buildvariants:
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
     test_flags: --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: build_variant_gen
@@ -11129,6 +11199,7 @@ buildvariants:
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
     scons_cache_scope: shared
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_benchmarks
@@ -11201,6 +11272,7 @@ buildvariants:
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
     scons_cache_scope: shared
+    separate_debug: off
   tasks:
   - name: compile_and_archive_dist_test_then_package_TG
   - name: compile_benchmarks
@@ -11263,11 +11335,13 @@ buildvariants:
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
       --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
+      --additionalFeatureFlags=featureFlagSbePlanCache
       --excludeWithAnyTags=requires_ocsp_stapling
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
     scons_cache_scope: shared
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_benchmarks
@@ -11335,6 +11409,7 @@ buildvariants:
     scons_cache_mode: all
     max_sub_suites: 3
     num_scons_link_jobs_available: 0.99
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
@@ -11372,6 +11447,7 @@ buildvariants:
     scons_cache_mode: all
     max_sub_suites: 3
     num_scons_link_jobs_available: 0.99
+    separate_debug: off
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
@@ -11406,6 +11482,7 @@ buildvariants:
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
+    separate_debug: off
   display_tasks:
   - *libfuzzertests
   tasks:
@@ -11428,7 +11505,7 @@ buildvariants:
     # allow tests to continue while we figure out why we're running
     # afoul of it.
     #
-    # TODO SERVER-48490: report_thread_leaks=0 suppresses reporting
+    # TODO SERVER-52413: report_thread_leaks=0 suppresses reporting
     # thread leaks, which we have because we don't do a clean shutdown
     # of the ServiceContext.
     #
@@ -11440,6 +11517,7 @@ buildvariants:
     # Avoid starting too many mongod's under TSAN build.
     resmoke_jobs_factor: 0.3
     scons_cache_scope: shared
+    separate_debug: off
   tasks:
     - name: compile_test_and_package_serial_TG
     - name: jsCore
@@ -11687,17 +11765,28 @@ buildvariants:
   tasks:
   - name: selected_tests_gen
 
-- name: commit-queue
+- <<: *enterprise-rhel-80-64-bit-dynamic-required-template
+  name: commit-queue
   display_name: "~ Commit Queue"
-  modules:
-  - enterprise
-  run_on:
-    - rhel80-small
   batchtime: 10080 # 7 days
   stepback: false
   tasks:
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+      - rhel80-xlarge-commitqueue
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+      - rhel80-xlarge-commitqueue
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
+    distros:
+      - rhel80-xlarge-commitqueue
+  - name: jsCore
+    distros:
+      - rhel80-xlarge-commitqueue
+  - name: .lint
+  - name: test_api_version_compatibility
   - name: validate_commit_message
-  - name: check_for_todos
+  - name: check_feature_flag_tags
 
 - name: live-record
   display_name: "~ RHEL 8.0 Shared Library (with UndoDB live-record)"
@@ -11781,22 +11870,27 @@ buildvariants:
 - <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine
   name: enterprise-rhel-80-64-bit-dynamic-sbe-engine-query-patch-only
   display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (SBE Execution Engine)"
-  batchtime: 7776000 # 90 days. This is a patch-only variant.
+  batchtime: 10080 # 7 days. This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
     <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine-expansions
     jstestfuzz_num_generated_files: 20
     jstestfuzz_concurrent_num_files: 5
     target_resmoke_time: 30
     max_sub_suites: 3
+    test_flags: >-
+      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
+      --additionalFeatureFlags=featureFlagTimeseriesCollection,featureFlagSbePlanCache
+      --excludeWithAnyTags=resource_intensive
 
 # Intentionally derive from SBE to run the SBE tests with all feature flags.
-- <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine
+- <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-query-patch-only
   display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (all feature flags)"
-  batchtime: 7776000 # 90 days. This is a patch-only variant.
+  batchtime: 10080 # 7 days. This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
     <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     jstestfuzz_num_generated_files: 20
     jstestfuzz_concurrent_num_files: 5
     target_resmoke_time: 30
     max_sub_suites: 3
+    test_flags: --runAllFeatureFlagTests --excludeWithAnyTags=resource_intensive

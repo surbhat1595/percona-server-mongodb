@@ -33,6 +33,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/catalog_impl',
         '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/index/index_access_method_factory',
         '$BUILD_DIR/mongo/db/index/index_access_methods',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
         '$BUILD_DIR/mongo/db/op_observer',
@@ -108,7 +109,6 @@ env.Program(
         'query_stage_count_scan.cpp',
         'query_stage_delete.cpp',
         'query_stage_distinct.cpp',
-        'query_stage_ensure_sorted.cpp',
         'query_stage_fetch.cpp',
         'query_stage_ixscan.cpp',
         'query_stage_limit_skip.cpp',
@@ -149,6 +149,7 @@ env.Program(
         "$BUILD_DIR/mongo/db/exec/document_value/document_value_test_util",
         "$BUILD_DIR/mongo/db/index/index_access_methods",
         "$BUILD_DIR/mongo/db/index/index_build_interceptor",
+        "$BUILD_DIR/mongo/db/index/skipped_record_tracker",
         "$BUILD_DIR/mongo/db/logical_time_metadata_hook",
         "$BUILD_DIR/mongo/db/mongohasher",
         "$BUILD_DIR/mongo/db/op_observer_impl",

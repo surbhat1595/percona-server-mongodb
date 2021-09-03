@@ -462,6 +462,13 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         exitCleanly(EXIT_BADOPTIONS);
     }
 
+    if (storageGlobalParams.repair && replSettings.usingReplSets()) {
+        LOGV2_ERROR(5019200,
+                    "Cannot specify both repair and replSet at the same time (remove --replSet to "
+                    "be able to --repair)");
+        exitCleanly(EXIT_BADOPTIONS);
+    }
+
     logMongodStartupWarnings(storageGlobalParams, serverGlobalParams, serviceContext);
 
     {
@@ -665,10 +672,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
         auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
         invariant(replCoord);
-        if (replCoord->isReplEnabled()) {
-            storageEngine->setOldestActiveTransactionTimestampCallback(
-                TransactionParticipant::getOldestActiveTimestamp);
-        }
 
         if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
             // Note: For replica sets, ShardingStateRecovery happens on transition to primary.
@@ -701,6 +704,17 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         }
 
         replCoord->startup(startupOpCtx.get(), lastShutdownState);
+        // 'getOldestActiveTimestamp', which is called in the background by the checkpoint thread,
+        // requires a read on 'config.transactions' at the stableTimestamp. If this read occurs
+        // while applying prepared transactions at the end of replication recovery, it's possible to
+        // prepare a transaction at timestamp earlier than the stableTimestamp. This will result in
+        // a WiredTiger invariant. Register the callback after the call to 'startup' to ensure we've
+        // finished applying prepared transactions.
+        if (replCoord->isReplEnabled()) {
+            storageEngine->setOldestActiveTransactionTimestampCallback(
+                TransactionParticipant::getOldestActiveTimestamp);
+        }
+
         if (getReplSetMemberInStandaloneMode(serviceContext)) {
             LOGV2_WARNING_OPTIONS(
                 20547,
@@ -1157,35 +1171,26 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                 (opCtx->getServiceContext()->getPreciseClockSource()->now() - stepDownStartTime));
     }
 
-    // TODO SERVER-49138: Remove this FCV check when 5.0 becomes last-lts.
-    // We must FCV gate the Quiesce mode feature so that a 4.7+ node entering Quiesce mode in a
-    // mixed 4.4/4.7+ replica set does not delay a 4.4 node from finding a valid sync source.
-    if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-            ServerGlobalParams::FeatureCompatibility::Version::kVersion47)) {
-        if (auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
-            replCoord && replCoord->enterQuiesceModeIfSecondary(shutdownTimeout)) {
-            ServiceContext::UniqueOperationContext uniqueOpCtx;
-            OperationContext* opCtx = client->getOperationContext();
-            if (!opCtx) {
-                uniqueOpCtx = client->makeOperationContext();
-                opCtx = uniqueOpCtx.get();
-            }
-            if (MONGO_unlikely(hangDuringQuiesceMode.shouldFail())) {
-                LOGV2_OPTIONS(4695101,
-                              {LogComponent::kReplication},
-                              "hangDuringQuiesceMode failpoint enabled");
-                hangDuringQuiesceMode.pauseWhileSet(opCtx);
-            }
-
-            LOGV2_OPTIONS(4695102,
-                          {LogComponent::kReplication},
-                          "Entering quiesce mode for shutdown",
-                          "quiesceTime"_attr = shutdownTimeout);
-            opCtx->sleepFor(shutdownTimeout);
-            LOGV2_OPTIONS(
-                4695103, {LogComponent::kReplication}, "Exiting quiesce mode for shutdown");
+    if (auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
+        replCoord && replCoord->enterQuiesceModeIfSecondary(shutdownTimeout)) {
+        ServiceContext::UniqueOperationContext uniqueOpCtx;
+        OperationContext* opCtx = client->getOperationContext();
+        if (!opCtx) {
+            uniqueOpCtx = client->makeOperationContext();
+            opCtx = uniqueOpCtx.get();
         }
+        if (MONGO_unlikely(hangDuringQuiesceMode.shouldFail())) {
+            LOGV2_OPTIONS(
+                4695101, {LogComponent::kReplication}, "hangDuringQuiesceMode failpoint enabled");
+            hangDuringQuiesceMode.pauseWhileSet(opCtx);
+        }
+
+        LOGV2_OPTIONS(4695102,
+                      {LogComponent::kReplication},
+                      "Entering quiesce mode for shutdown",
+                      "quiesceTime"_attr = shutdownTimeout);
+        opCtx->sleepFor(shutdownTimeout);
+        LOGV2_OPTIONS(4695103, {LogComponent::kReplication}, "Exiting quiesce mode for shutdown");
     }
 
     LOGV2_OPTIONS(4784901, {LogComponent::kCommand}, "Shutting down the MirrorMaestro");
@@ -1331,6 +1336,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     if (auto sr = Grid::get(serviceContext)->shardRegistry()) {
         LOGV2_OPTIONS(4784919, {LogComponent::kSharding}, "Shutting down the shard registry");
         sr->shutdown();
+    }
+
+    if (ShardingState::get(serviceContext)->enabled()) {
+        TransactionCoordinatorService::get(serviceContext)->shutdown();
     }
 
     // Validator shutdown must be called after setKillAllOperations is called. Otherwise, this can

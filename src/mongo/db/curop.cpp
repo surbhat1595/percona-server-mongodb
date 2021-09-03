@@ -852,8 +852,6 @@ void OpDebug::report(OperationContext* opCtx,
     if (mongotCursorId) {
         pAttrs->add("mongot", makeMongotDebugStatsObject());
     }
-    OPDEBUG_TOATTR_HELP(ntoreturn);
-    OPDEBUG_TOATTR_HELP(ntoskip);
     OPDEBUG_TOATTR_HELP_BOOL(exhaust);
 
     OPDEBUG_TOATTR_HELP_OPTIONAL("keysExamined", additiveMetrics.keysExamined);
@@ -907,12 +905,19 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("locks", locks.obj());
     }
 
-    auto userCacheAcquisitionStats = curop.getReadOnlyUserCacheAcquisitionStats();
-    if (userCacheAcquisitionStats->shouldReport()) {
+    auto userAcquisitionStats = curop.getReadOnlyUserAcquisitionStats();
+    if (userAcquisitionStats->shouldUserCacheAcquisitionStatsReport()) {
         BSONObjBuilder userCacheAcquisitionStatsBuilder;
-        userCacheAcquisitionStats->report(&userCacheAcquisitionStatsBuilder,
-                                          opCtx->getServiceContext()->getTickSource());
+        userAcquisitionStats->userCacheAcquisitionStatsReport(
+            &userCacheAcquisitionStatsBuilder, opCtx->getServiceContext()->getTickSource());
         pAttrs->add("authorization", userCacheAcquisitionStatsBuilder.obj());
+    }
+
+    if (userAcquisitionStats->shouldLDAPOperationStatsReport()) {
+        BSONObjBuilder ldapOperationStatsBuilder;
+        userAcquisitionStats->ldapOperationStatsReport(&ldapOperationStatsBuilder,
+                                                       opCtx->getServiceContext()->getTickSource());
+        pAttrs->add("LDAPOperations", ldapOperationStatsBuilder.obj());
     }
 
     BSONObj flowControlObj = makeFlowControlObject(flowControlStats);
@@ -1044,11 +1049,17 @@ void OpDebug::append(OperationContext* opCtx,
     }
 
     {
-        auto userCacheAcquisitionStats = curop.getReadOnlyUserCacheAcquisitionStats();
-        if (userCacheAcquisitionStats->shouldReport()) {
+        auto userAcquisitionStats = curop.getReadOnlyUserAcquisitionStats();
+        if (userAcquisitionStats->shouldUserCacheAcquisitionStatsReport()) {
             BSONObjBuilder userCacheAcquisitionStatsBuilder(b.subobjStart("authorization"));
-            userCacheAcquisitionStats->report(&userCacheAcquisitionStatsBuilder,
-                                              opCtx->getServiceContext()->getTickSource());
+            userAcquisitionStats->userCacheAcquisitionStatsReport(
+                &userCacheAcquisitionStatsBuilder, opCtx->getServiceContext()->getTickSource());
+        }
+
+        if (userAcquisitionStats->shouldLDAPOperationStatsReport()) {
+            BSONObjBuilder ldapOperationStatsBuilder;
+            userAcquisitionStats->ldapOperationStatsReport(
+                &ldapOperationStatsBuilder, opCtx->getServiceContext()->getTickSource());
         }
     }
 
@@ -1313,11 +1324,18 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
 
     addIfNeeded("authorization", [](auto field, auto args, auto& b) {
-        auto userCacheAcquisitionStats = args.curop.getReadOnlyUserCacheAcquisitionStats();
-        if (userCacheAcquisitionStats->shouldReport()) {
+        auto userAcquisitionStats = args.curop.getReadOnlyUserAcquisitionStats();
+        if (userAcquisitionStats->shouldUserCacheAcquisitionStatsReport()) {
             BSONObjBuilder userCacheAcquisitionStatsBuilder(b.subobjStart(field));
-            userCacheAcquisitionStats->report(&userCacheAcquisitionStatsBuilder,
-                                              args.opCtx->getServiceContext()->getTickSource());
+            userAcquisitionStats->userCacheAcquisitionStatsReport(
+                &userCacheAcquisitionStatsBuilder,
+                args.opCtx->getServiceContext()->getTickSource());
+        }
+
+        if (userAcquisitionStats->shouldLDAPOperationStatsReport()) {
+            BSONObjBuilder ldapOperationStatsBuilder(b.subobjStart(field));
+            userAcquisitionStats->ldapOperationStatsReport(
+                &ldapOperationStatsBuilder, args.opCtx->getServiceContext()->getTickSource());
         }
     });
 

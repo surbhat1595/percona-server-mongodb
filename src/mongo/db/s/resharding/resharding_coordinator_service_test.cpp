@@ -42,6 +42,7 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
+#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
@@ -53,6 +54,7 @@
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 namespace {
@@ -350,8 +352,6 @@ public:
         if (reshardingFields)
             collType.setReshardingFields(std::move(reshardingFields.get()));
 
-        // TODO SERVER-53330: Evaluate whether or not we can include
-        // CoordinatorStateEnum::kInitializing in this if statement.
         if (coordinatorDoc.getState() == CoordinatorStateEnum::kDone ||
             coordinatorDoc.getState() == CoordinatorStateEnum::kAborting) {
             collType.setAllowMigrations(true);
@@ -387,7 +387,7 @@ public:
         DatabaseType dbDoc(coordinatorDoc.getSourceNss().db().toString(),
                            coordinatorDoc.getDonorShards().front().getId(),
                            true,
-                           DatabaseVersion{UUID::gen()});
+                           DatabaseVersion{UUID::gen(), Timestamp()});
         client.insert(DatabaseType::ConfigNS.ns(), dbDoc.toBSON());
 
         return coordinatorDoc;
@@ -578,6 +578,63 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorSuccessfullyTransi
     coordinator->getCompletionFuture().get(opCtx);
 }
 
+TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpDuringInitializing) {
+    PauseDuringStateTransitions stateTransitionsGuard{controller(),
+                                                      CoordinatorStateEnum::kPreparingToDonate};
+
+    auto opCtx = operationContext();
+    auto pauseBeforeInsertCoordinatorDoc =
+        globalFailPointRegistry().find("pauseBeforeInsertCoordinatorDoc");
+    auto timesEnteredFailPoint = pauseBeforeInsertCoordinatorDoc->setMode(FailPoint::alwaysOn, 0);
+
+    auto doc = insertStateAndCatalogEntries(CoordinatorStateEnum::kUnused, _originalEpoch);
+    doc.setRecipientShards({});
+    doc.setDonorShards({});
+
+    auto donorChunk = makeAndInsertChunksForDonorShard(
+        _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+
+    auto initialChunks =
+        makeChunks(_reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
+
+    std::vector<ReshardedChunk> presetReshardedChunks;
+    for (const auto& chunk : initialChunks) {
+        presetReshardedChunks.emplace_back(chunk.getShard(), chunk.getMin(), chunk.getMax());
+    }
+
+    doc.setPresetReshardedChunks(presetReshardedChunks);
+
+    (void)ReshardingCoordinator::getOrCreate(opCtx, _service, doc.toBSON());
+    auto instanceId =
+        BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
+
+    pauseBeforeInsertCoordinatorDoc->waitForTimesEntered(timesEnteredFailPoint + 1);
+
+    auto coordinator = getCoordinator(opCtx, instanceId);
+    stepDown(opCtx);
+    pauseBeforeInsertCoordinatorDoc->setMode(FailPoint::off, 0);
+    ASSERT_EQ(coordinator->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+
+    coordinator.reset();
+    stepUp(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kPreparingToDonate);
+
+    // Ensure that promises are not fulfilled on the new coordinator.
+    auto newCoordinator = getCoordinator(opCtx, instanceId);
+    auto newObserver = newCoordinator->getObserver();
+    ASSERT_FALSE(newObserver->awaitAllDonorsReadyToDonate().isReady());
+    ASSERT_FALSE(newObserver->awaitAllRecipientsFinishedCloning().isReady());
+    ASSERT_FALSE(newObserver->awaitAllRecipientsInStrictConsistency().isReady());
+    ASSERT_FALSE(newObserver->awaitAllDonorsDone().isReady());
+    ASSERT_FALSE(newObserver->awaitAllRecipientsDone().isReady());
+
+    stepDown(opCtx);
+    ASSERT_EQ(newCoordinator->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+}
+
 /**
  * Test stepping down right when coordinator doc is being updated. Causing the change to be
  * rolled back and redo the work again on step up.
@@ -662,6 +719,16 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
                   ErrorCodes::InterruptedDueToReplStateChange);
 
         coordinator.reset();
+
+        // Metrics should be cleared after step down.
+        {
+            auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
+            BSONObjBuilder metricsBuilder;
+            metrics->serializeCurrentOpMetrics(&metricsBuilder,
+                                               ReshardingMetrics::Role::kCoordinator);
+            ASSERT_BSONOBJ_EQ(BSONObj(), metricsBuilder.done());
+        }
+
         stepUp(opCtx);
 
         stateTransitionsGuard.unset(state);
@@ -675,12 +742,27 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
         if (state != CoordinatorStateEnum::kDone) {
             // 'done' state is never written to storage so don't wait for it.
             waitUntilCommittedCoordinatorDocReach(opCtx, state);
+
+            // Metrics should not be empty after step up.
+            auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
+            BSONObjBuilder metricsBuilder;
+            metrics->serializeCurrentOpMetrics(&metricsBuilder,
+                                               ReshardingMetrics::Role::kCoordinator);
+            ASSERT_BSONOBJ_NE(BSONObj(), metricsBuilder.done());
         }
     }
 
     // Join the coordinator if it has not yet been cleaned up.
     if (auto coordinator = getCoordinatorIfExists(opCtx, instanceId)) {
         coordinator->getCompletionFuture().get(opCtx);
+    }
+
+    // Metrics should be cleared after commit.
+    {
+        auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
+        BSONObjBuilder metricsBuilder;
+        metrics->serializeCurrentOpMetrics(&metricsBuilder, ReshardingMetrics::Role::kCoordinator);
+        ASSERT_BSONOBJ_EQ(BSONObj(), metricsBuilder.done());
     }
 }
 

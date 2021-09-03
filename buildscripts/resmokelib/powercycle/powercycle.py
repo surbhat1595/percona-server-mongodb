@@ -36,6 +36,7 @@ from buildscripts.resmokelib.powercycle import powercycle_config, powercycle_con
 
 # See https://docs.python.org/2/library/sys.html#sys.platform
 from buildscripts.resmokelib.powercycle.lib.services import WindowsService, PosixService
+from buildscripts.resmokelib.utils.filesystem import build_hygienic_bin_path
 
 _IS_WINDOWS = sys.platform == "win32" or sys.platform == "cygwin"
 _IS_LINUX = sys.platform.startswith("linux")
@@ -565,6 +566,8 @@ def call_remote_operation(local_ops, remote_python, script_name, client_args, op
     """Call the remote operation and return tuple (ret, ouput)."""
     client_call = f"{remote_python} {script_name} {client_args} {operation}"
     ret, output = local_ops.shell(client_call)
+    if local_ops.ssh_error(output):
+        ssh_failure_exit(ret, output)
     return ret, output
 
 
@@ -792,7 +795,8 @@ def remote_handler(options, task_config, root_dir):
     # Perform the sequence of operations specified. If any operation fails then return immediately.
     for operation in options.remote_operations:
         ret = 0
-        if operation == "noop":
+
+        def noop():
             pass
 
         # This is the internal "crash" mechanism, which is executed on the remote host.
@@ -945,10 +949,10 @@ def remote_handler(options, task_config, root_dir):
             return ret
 
         op_map = {
-            "crash_server": crash_server, "kill_mongod": kill_mongod, "install_mongod":
-                install_mongod, "start_mongod": start_mongod, "stop_mongod": stop_mongod,
-            "shutdown_mongod": shutdown_mongod, "rsync_data": rsync_data, "seed_docs": seed_docs,
-            "set_fcv": set_fcv, "check_disk": check_disk
+            "noop": noop, "crash_server": crash_server, "kill_mongod": kill_mongod,
+            "install_mongod": install_mongod, "start_mongod": start_mongod, "stop_mongod":
+                stop_mongod, "shutdown_mongod": shutdown_mongod, "rsync_data": rsync_data,
+            "seed_docs": seed_docs, "set_fcv": set_fcv, "check_disk": check_disk
         }
 
         if operation not in op_map:
@@ -1540,7 +1544,6 @@ def main(parser_actions, options):  # pylint: disable=too-many-branches,too-many
 
         setup_ssh_tunnel(mongod_host, secret_port, standard_port, ssh_connection_options,
                          ssh_options, ssh_user_host)
-        verify_remote_access(local_ops)
 
         # Optionally validate canary document locally.
         if validate_canary_local:
@@ -1557,15 +1560,16 @@ def main(parser_actions, options):  # pylint: disable=too-many-branches,too-many
         host_port = f"localhost:{secret_port}"
         new_config_file = NamedTempFile.create(suffix=".yml", directory="tmp")
         temp_client_files.append(new_config_file)
-        validation_test_data = {"skipValidationOnNamespaceNotFound": True}
+        validation_test_data = {
+            "skipValidationOnNamespaceNotFound": True, "allowUncleanShutdowns": True
+        }
         new_resmoke_config(with_external_server, new_config_file, validation_test_data)
         ret, output = resmoke_client(mongo_repo_root_dir, mongo_path, host_port,
                                      "jstests/hooks/run_validate_collections.js", new_config_file)
         LOGGER.info("Local collection validation: %d %s", ret, output)
         if ret:
             network_error = (
-                f"[js_test:run_validate_collections] Error: network error while attempting "
-                f"to run command 'isMaster' on host '{host_port}'")
+                f"network error while attempting to run command 'isMaster' on host '{host_port}'")
             # Mark this error as ssh failure, since it happens during the first test loop before
             # the first server crash and likely related to port forwarding not working, which
             # uses ssh tunnel command.

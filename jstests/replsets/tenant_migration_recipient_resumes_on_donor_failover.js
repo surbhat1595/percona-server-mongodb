@@ -1,4 +1,4 @@
-/*
+/**
  * Tests that the recipient will retry a migration on donor sync source failure in the following
  * scenarios:
  * - donor shuts down when the recipient oplog fetcher is created but cloning has yet to start
@@ -6,8 +6,13 @@
  * - donor shuts down after cloning is finished but the recipient has yet to declare that the data
  *   is consistent
  *
- * @tags: [requires_majority_read_concern, requires_fcv_49, incompatible_with_windows_tls,
- * incompatible_with_eft, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -39,11 +44,7 @@ function runTest(failPoint) {
 
     const tenantMigrationTest =
         new TenantMigrationTest({name: jsTestName(), recipientRst, sharedOptions: {nodes: 3}});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        recipientRst.stopSet();
-        return false;
-    }
+
     jsTestLog("Running test with failpoint: " + failPoint);
     const tenantId = "testTenantId";
     const tenantDB = tenantMigrationTest.tenantDB(tenantId, "DB");

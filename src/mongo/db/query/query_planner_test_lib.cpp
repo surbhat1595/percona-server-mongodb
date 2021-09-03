@@ -41,6 +41,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_factory_mock.h"
 #include "mongo/db/query/projection_ast_util.h"
@@ -874,8 +875,8 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         // collator. This should be sufficient to parse a projection.
         auto expCtx =
             make_intrusive<ExpressionContext>(nullptr, nullptr, NamespaceString("test.dummy"));
-        auto projection =
-            projection_ast::parse(expCtx, spec.Obj(), ProjectionPolicies::findProjectionPolicies());
+        auto projection = projection_ast::parseAndAnalyze(
+            expCtx, spec.Obj(), ProjectionPolicies::findProjectionPolicies());
         auto specProjObj = projection_ast::astToDebugBSON(projection.root());
         auto solnProjObj = projection_ast::astToDebugBSON(pn->proj.root());
         if (!SimpleBSONObjComparator::kInstance.evaluate(specProjObj == solnProjObj)) {
@@ -1088,41 +1089,86 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
 
         return solutionMatches(child.Obj(), fn->children[0], relaxBoundsCheck)
             .withContext("mismatch below shard filter stage");
-    } else if (STAGE_ENSURE_SORTED == trueSoln->getType()) {
-        const EnsureSortedNode* esn = static_cast<const EnsureSortedNode*>(trueSoln);
-
-        BSONElement el = testSoln["ensureSorted"];
-        if (el.eoo() || !el.isABSONObj()) {
-            return {ErrorCodes::Error{5619208},
-                    "found a ensureSorted stage in the solution but no "
-                    "corresponding 'ensureSorted' object in the provided JSON"};
+    } else if (STAGE_GROUP == trueSoln->getType()) {
+        const auto* actualGroupNode = static_cast<const GroupNode*>(trueSoln);
+        auto expectedGroupElem = testSoln["group"];
+        if (expectedGroupElem.eoo() || !expectedGroupElem.isABSONObj()) {
+            return {ErrorCodes::Error{5842401},
+                    "found a 'group' object in the test solution but no corresponding 'group' "
+                    "object "
+                    "in the expected JSON"};
         }
-        BSONObj esObj = el.Obj();
-        invariant(bsonObjFieldsAreInSet(esObj, {"node", "pattern"}));
 
-        BSONElement patternEl = esObj["pattern"];
-        if (patternEl.eoo() || !patternEl.isABSONObj()) {
-            return {ErrorCodes::Error{5676407},
-                    "found an ensureSorted stage in the solution but no 'pattern' object in the "
-                    "provided JSON"};
+        auto expectedGroupObj = expectedGroupElem.Obj();
+        invariant(bsonObjFieldsAreInSet(expectedGroupObj, {"key", "accs", "node"}));
+
+        auto expectedGroupByElem = expectedGroupObj["key"];
+        if (expectedGroupByElem.eoo() || !expectedGroupByElem.isABSONObj()) {
+            return {ErrorCodes::Error{5842402},
+                    "found a 'key' object in the test solution but no corresponding 'key' "
+                    "object "
+                    "in the expected JSON"};
         }
-        BSONElement child = esObj["node"];
+
+        BSONObjBuilder bob;
+        for (auto&& [groupName, expr] : actualGroupNode->groupByExpressions) {
+            expr->serialize(true).addToBsonObj(&bob, groupName);
+        }
+        auto actualGroupByObj = bob.done();
+        if (!SimpleBSONObjComparator::kInstance.evaluate(actualGroupByObj ==
+                                                         expectedGroupByElem.Obj())) {
+            return {ErrorCodes::Error{5842403},
+                    str::stream() << "found a group stage in the solution with "
+                                     "mismatching 'key' expressions. Expected: "
+                                  << expectedGroupByElem.Obj() << " Found: " << actualGroupByObj};
+        }
+
+        BSONArrayBuilder actualAccs;
+        for (auto& acc : actualGroupNode->accumulators) {
+            BSONObjBuilder bob;
+            acc.expr.argument->serialize(true).addToBsonObj(&bob, acc.expr.name);
+            actualAccs.append(BSON(acc.fieldName << bob.done()));
+        }
+        auto expectedAccsObj = expectedGroupObj["accs"].Obj();
+        auto actualAccsObj = actualAccs.done();
+        if (!SimpleBSONObjComparator::kInstance.evaluate(expectedAccsObj == actualAccsObj)) {
+            return {ErrorCodes::Error{5842404},
+                    str::stream() << "found a group stage in the solution with "
+                                     "mismatching 'accs' expressions. Expected: "
+                                  << expectedAccsObj << " Found: " << actualAccsObj};
+        }
+
+        auto child = expectedGroupObj["node"];
         if (child.eoo() || !child.isABSONObj()) {
-            return {ErrorCodes::Error{5676406},
-                    "found an ensureSorted stage in the solution but no 'node' sub-object in "
+            return {ErrorCodes::Error{5842405},
+                    "found a group stage in the solution but no 'node' sub-object in "
                     "the provided JSON"};
         }
-
-        if (!SimpleBSONObjComparator::kInstance.evaluate(patternEl.Obj() == esn->pattern)) {
-            return {ErrorCodes::Error{5698302},
-                    str::stream() << "found an ensureSorted stage in the solution with "
-                                     "mismatching 'pattern'. Expected: "
-                                  << patternEl << " Found: " << esn->pattern};
+        return solutionMatches(child.Obj(), actualGroupNode->children[0], relaxBoundsCheck)
+            .withContext("mismatch below group stage");
+    } else if (STAGE_SENTINEL == trueSoln->getType()) {
+        const auto* actualSentinelNode = static_cast<const SentinelNode*>(trueSoln);
+        auto expectedSentinelElem = testSoln["sentinel"];
+        if (expectedSentinelElem.eoo() || !expectedSentinelElem.isABSONObj()) {
+            return {
+                ErrorCodes::Error{5842406},
+                "found a 'sentinel' object in the test solution but no corresponding 'sentinel' "
+                "object "
+                "in the expected JSON"};
         }
-        return solutionMatches(child.Obj(), esn->children[0], relaxBoundsCheck)
-            .withContext("mismatch below ensureSorted stage");
+        // The sentinel node is just an empty QSN node.
+        if (!expectedSentinelElem.Obj().isEmpty()) {
+            return {ErrorCodes::Error{5842407},
+                    str::stream() << "found a non-empty sentinel stage in the solution"};
+        }
+        if (!actualSentinelNode->children.empty()) {
+            return {ErrorCodes::Error{5842408},
+                    str::stream() << "found a sentinel stage with more than zero children in the "
+                                     "actual solution. Expected: "
+                                  << testSoln << " Found: " << actualSentinelNode};
+        }
+        return Status::OK();
     }
-
     return {ErrorCodes::Error{5698301},
             str::stream() << "Unknown query solution node found: " << trueSoln->toString()};
 }  // namespace mongo

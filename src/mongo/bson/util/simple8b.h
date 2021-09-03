@@ -29,83 +29,161 @@
 
 #pragma once
 
+#include <array>
 #include <deque>
 #include <vector>
 
 #include "mongo/bson/util/builder.h"
+#include "mongo/platform/int128.h"
 
 namespace mongo {
 
 /**
- * Simple8b compresses a series of integers into chains of 64 bit Simple8b word.
+ * Callback type to implement writing of 64 bit Simple8b words.
  */
-class Simple8b {
+using Simple8bWriteFn = std::function<void(uint64_t)>;
+
+/**
+ * Simple8bBuilder compresses a series of integers into chains of 64 bit Simple8b blocks.
+ *
+ * T may be uint64_t and uint128_t only.
+ */
+template <typename T>
+class Simple8bBuilder {
+private:
+    struct PendingValue;
+
 public:
-    struct Value {
-        uint32_t index;
-        uint64_t val;
-    };
-
-    // TODO (SERVER-57808): Remove temporary error code.
-    static constexpr uint64_t errCode = 0x0000000000000000;
+    // Callback to handle writing of finalized Simple-8b blocks. Machine Endian byte order, the
+    // value need to be converted to Little Endian before persisting.
+    Simple8bBuilder(Simple8bWriteFn writeFunc);
+    ~Simple8bBuilder();
 
     /**
-     * Retrieves all integers in the order it was appended.
+     * Appends val to Simple8b. Returns true if the append was successful and false if the value was
+     * outside the range of possible values we can store in Simple8b.
+     *
+     * A call to append may result in multiple Simple8b blocks being finalized.
      */
-    std::vector<Value> getAllInts();
+    bool append(T val);
 
     /**
-     * Checks if we can append val to an existing RLE and handles the ending of a RLE.
-     * The default RLE value at the beginning is 0.
-     * Otherwise, appends a value to the Simple8b chain of words.
-     * Return true if successfully appended and false otherwise.
-     */
-    bool append(uint64_t val);
-
-    /**
-     * Appends an empty bucket to handle missing values. This works by incrementing an underlying
-     * simple8b index by one and encoding a "missing value" in the simple8b block as all 1s.
+     * Appends a missing value to Simple8b.
+     *
+     * May result in a single Simple8b being finalized.
      */
     void skip();
 
     /**
-     * Stores all values for RLE or in _pendingValues into _buffered even if the Simple8b word
-     * will not be optimal and use a larger selector than necessary because we don't have
-     * enough integers to use one with more slots.
+     * Flushes all buffered values into finalized Simple8b blocks.
+     *
+     * It is allowed to continue to append values after this call.
      */
     void flush();
 
     /**
-     * Returns the underlying binary encoding in _buffered.
+     * Iterator for reading pending values in Simple8bBuilder that has not yet been written to
+     * Simple-8b blocks.
+     *
+     * Provides forward iteration
      */
-    char* data();
+    class PendingIterator {
+    public:
+        friend class Simple8bBuilder;
+        // typedefs expected in iterators
+        using iterator_category = std::forward_iterator_tag;
+        using difference_type = ptrdiff_t;
+        using value_type = boost::optional<T>;
+        using pointer = const boost::optional<T>*;
+        using reference = const boost::optional<T>&;
+
+        pointer operator->() const;
+        reference operator*() const;
+
+        PendingIterator& operator++();
+        PendingIterator operator++(int);
+        bool operator==(const PendingIterator& rhs) const;
+        bool operator!=(const PendingIterator& rhs) const;
+
+    private:
+        PendingIterator(typename std::deque<PendingValue>::const_iterator it,
+                        reference rleValue,
+                        uint32_t rleCount);
+
+        typename std::deque<PendingValue>::const_iterator _it;
+
+        const boost::optional<T>& _rleValue;
+        uint32_t _rleCount;
+    };
 
     /**
-     * Returns the number of bytes in the binary buffer returned by the function, data().
+     * Forward iterators to read pending values
      */
-    size_t len();
+    PendingIterator begin() const;
+    PendingIterator end() const;
+
+    /**
+     * Set write callback
+     */
+    void setWriteCallback(Simple8bWriteFn writer);
 
 private:
-    /**
-     * Tests if a value with numBits would fit inside the current simple8b word.
-     * Returns true if adding the value fits in the current simple8b word and false otherwise.
-     */
-    bool _doesIntegerFitInCurrentWord(uint8_t numBits) const;
+    // Number of different type of selectors and their extensions available
+    static constexpr uint8_t kNumOfSelectorTypes = 4;
 
     /**
-     * Encodes the largest possible simple8b word from _pendingValues without unused buckets.
-     * Assumes is always called right after _doesIntegerFitInCurrentWord fails for the first time.
-     * It removes the integers used to form the simple8b word from _pendingValues permanently
-     * and updates _currMaxBitLen.
+     * This stores a value that has yet to be added to the buffer. It also stores the number of bits
+     * required to store the value for each selector extension type. Furthermore, it stores the
+     * number of trailing zeros that would be stored if this value was stored according to the
+     * respective selector type. The arrays are indexed using the same selector indexes as defined
+     * in the cpp file.
      */
-    int64_t _encodeLargestPossibleWord();
+    struct PendingValue {
+        PendingValue(boost::optional<T> val,
+                     std::array<uint8_t, kNumOfSelectorTypes> bitCount,
+                     std::array<uint8_t, kNumOfSelectorTypes> trailingZerosCount);
+
+        bool isSkip() const {
+            return !val.has_value();
+        }
+
+        T value() const {
+            return val.value();
+        }
+
+        boost::optional<T> val;
+        std::array<uint8_t, kNumOfSelectorTypes> bitCount = {0, 0, 0, 0};
+        // This is not the total number of trailing zeros, but the trailing zeros that will be
+        // stored given the selector chosen.
+        std::array<uint8_t, kNumOfSelectorTypes> trailingZerosCount = {0, 0, 0, 0};
+    };
+
+    // The min number of meaningful bits each selector can store
+    static constexpr std::array<uint8_t, 4> kMinDataBits = {1, 2, 4, 4};
+    /**
+     * Function objects to encode Simple8b blocks for the different extension types.
+     *
+     * See .cpp file for more information.
+     */
+    struct BaseSelectorEncodeFunctor;
+    struct SevenSelectorEncodeFunctor;
+
+    template <uint8_t ExtensionType>
+    struct EightSelectorEncodeFunctor;
+
+    struct EightSelectorSmallEncodeFunctor;
+    struct EightSelectorLargeEncodeFunctor;
 
     /**
-     * Decodes a simple8b word into a vector of integers and their indices. It appends directly
-     * into the passed in vector and the index values starts from the passed in index variable.
-     * When the selector is invalid, nothing will be appended.
+     * Appends a value to the Simple8b chain of words.
+     * Return true if successfully appended and false otherwise.
      */
-    void _decode(uint64_t simple8bWord, uint32_t* index, std::vector<Value>* decodedValues);
+    bool _appendValue(T value, bool tryRle);
+
+    /**
+     * Appends a skip to _pendingValues and forms a new Simple8b word if there is no space.
+     */
+    void _appendSkip();
 
     /**
      * When an RLE ends because of inconsecutive values, check if there are enough
@@ -119,49 +197,196 @@ private:
      */
     void _appendRleEncoding();
 
-    /**
-     * Appends a value to the Simple8b chain of words.
-     * Return true if successfully appended and false otherwise.
+    /*
+     * Checks to see if RLE is possible and/or ongoing
      */
-    bool _appendValue(uint64_t value, bool tryRle);
+    bool _rlePossible() const;
 
     /**
-     * Appends a skip to _pendingValues and forms a new Simple8b word if there is no space.
+     * Tests if a value would fit inside the current simple8b word using any of the selectors
+     * selector. Returns true if adding the value fits in the current simple8b word and false
+     * otherwise.
      */
-    void _appendSkip();
+    bool _doesIntegerFitInCurrentWord(const PendingValue& value);
+
+    /*
+     * This is a helper method for testing if a given selector will allow an integer to fit in a
+     * simple8b word. Takes in a value to be stored and an extensionType representing the selector
+     * compression method to check. Returns true if the word fits and updates the global
+     * _lastValidExtensionType with the extensionType passed. If false, updates
+     * isSelectorPossible[extensionType] to false so we do not need to recheck that extension if we
+     * find a valid type and more values are added into the current word.
+     */
+    bool _doesIntegerFitInCurrentWordWithGivenSelectorType(const PendingValue& value,
+                                                           uint8_t extensionType);
 
     /**
-     * Takes a vector of integers to be compressed into a 64 bit word.
+     * Encodes the largest possible simple8b word from _pendingValues without unused buckets using
+     * the selector compression method passed in extensionType. Assumes is always called right after
+     * _doesIntegerFitInCurrentWord fails for the first time. It removes the integers used to form
+     * the simple8b word from _pendingValues permanently and updates our global state with any
+     * remaining integers in _pendingValues.
+     */
+    int64_t _encodeLargestPossibleWord(uint8_t extensionType);
+
+    /**
+     * Takes a vector of integers to be compressed into a 64 bit word via the selector type given.
      * The values will be stored from right to left in little endian order.
-     * If there are wasted bits, they will be placed at the very left.
      * For now, we will assume that all ints in the vector are greater or equal to zero.
      * We will also assume that the selector and all values will fit into the 64 bit word.
      * Returns the encoded Simple8b word if the inputs are valid and errCode otherwise.
      */
-    uint64_t _encode(uint8_t selector, uint8_t endIdx);
+    template <typename Func>
+    uint64_t _encode(Func func, uint8_t selectorIdx, uint8_t extensionType);
 
-    /*
-     * Checks to see if RLE is possible and/or ongoing.
+    /**
+     * Updates the simple8b current state with the passed parameters. The maximum is always taken
+     * between the current state and the new value passed. This is used to keep track of the size of
+     * the simple8b word that we will need to encode.
      */
-    bool _rlePossible();
+    void _updateSimple8bCurrentState(const PendingValue& val);
 
-    struct PendingValue {
-        bool skip;
-        uint64_t val;
-    };
-
-    // The number of bits used by the largest integer in _pendingValues.
-    uint8_t _currMaxBitLen = 0;
-
-    // If RLE is ongoing, the number of consecutive repeats of lastValueInPrevWord.
+    // If RLE is ongoing, the number of consecutive repeats fo lastValueInPrevWord.
     uint32_t _rleCount = 0;
     // If RLE is ongoing, the last value in the previous Simple8b word.
-    PendingValue _lastValueInPrevWord = {false, 0};
+    PendingValue _lastValueInPrevWord = {boost::optional<T>(0), {0, 0, 0, 0}, {0, 0, 0, 0}};
 
-    // The binary buffer storing all completed Simple8b words.
-    BufBuilder _buffer;
-    // A buffer of values that have not been added to _buffer yet.
+    // These variables hold the max amount of bits for each value in _pendingValues. They are
+    // updated whenever values are added or removed from _pendingValues to always reflect the max
+    // value in the deque.
+    std::array<uint8_t, kNumOfSelectorTypes> _currMaxBitLen = kMinDataBits;
+    std::array<uint8_t, kNumOfSelectorTypes> _currTrailingZerosCount = {0, 0, 0, 0};
+
+    // This holds the last valid selector compression method that succeded for
+    // doesIntegerFitInCurrentWord and is used to designate the compression type when we need to
+    // write a simple8b word to buffer.
+    uint8_t _lastValidExtensionType = 0;
+
+    // Holds whether the selector compression method is possible. This is updated in
+    // doesIntegerFitInCurrentWordWithSelector to avoid unnecessary calls when a selector is already
+    // invalid for the current set of words in _pendingValues.
+    std::array<bool, kNumOfSelectorTypes> isSelectorPossible = {true, true, true, true};
+
+    // This holds values that have not be encoded to the simple8b buffer, but are waiting for a full
+    // simple8b word to be filled before writing to buffer.
     std::deque<PendingValue> _pendingValues;
+
+    // User-defined callback to handle writing of finalized Simple-8b blocks
+    Simple8bWriteFn _writeFn;
+};
+
+/**
+ * Simple8b provides an interface to read Simple8b encoded data built by Simple8bBuilder above
+ */
+template <typename T>
+class Simple8b {
+public:
+    class Iterator {
+    public:
+        friend class Simple8b;
+
+        // typedefs expected in iterators
+        using iterator_category = std::input_iterator_tag;
+        using difference_type = ptrdiff_t;
+        using value_type = boost::optional<T>;
+        using pointer = const boost::optional<T>*;
+        using reference = const boost::optional<T>&;
+
+        /**
+         * Returns the number of values in the current Simple8b block that the iterator is
+         * positioned on.
+         */
+        size_t blockSize() const;
+
+        /**
+         * Returns the value in at the current iterator position.
+         */
+        pointer operator->() const {
+            return &_value;
+        }
+        reference operator*() const {
+            return _value;
+        }
+
+        /**
+         * Advance the iterator one step.
+         */
+        Iterator& operator++();
+
+        /**
+         * Advance the iterator to the next Simple8b block.
+         */
+        Iterator& advanceBlock();
+
+        bool operator==(const Iterator& rhs) const;
+        bool operator!=(const Iterator& rhs) const;
+
+    private:
+        Iterator(const uint64_t* pos, const uint64_t* end);
+
+        /**
+         * Loads the current Simple8b block into the iterator
+         */
+        void _loadBlock();
+        void _loadValue();
+
+        /**
+         * RLE count, may only be called if iterator is positioned on an RLE block
+         */
+        uint16_t _rleCountInCurrent(uint8_t selectorExtension) const;
+
+        const uint64_t* _pos;
+        const uint64_t* _end;
+
+        // Current Simple8b block in native endian
+        uint64_t _current;
+
+        boost::optional<T> _value;
+
+        // Mask for getting a single Simple-8b slot
+        uint64_t _mask;
+
+        // Remaining RLE count for repeating previous value
+        uint16_t _rleRemaining;
+
+        // Number of positions to shift the mask to get slot for current iterator position
+        uint8_t _shift;
+
+        // Number of bits in single Simple-8b slot, used to increment _shift when updating iterator
+        // position
+        uint8_t _bitsPerValue;
+
+        // Variables for the extended Selectors 7 and 8 with embedded count in Simple-8b slot
+        // Mask to extract count
+        uint8_t _countMask;
+
+        // Number of bits for the count
+        uint8_t _countBits;
+
+        // Multiplier of the value in count to get number of zeros
+        uint8_t _countMultiplier;
+
+        // Holds the current simple8b block's selector
+        uint8_t _selector;
+
+        // Holds the current simple8b blocks's extension type
+        uint8_t _extensionType;
+    };
+
+    /**
+     * Does not take ownership of buffer, must remain valid during the lifetime of this class.
+     */
+    Simple8b(const char* buffer, int size);
+
+    /**
+     * Forward iterators to read decompressed values
+     */
+    Iterator begin() const;
+    Iterator end() const;
+
+private:
+    const char* _buffer;
+    int _size;
 };
 
 }  // namespace mongo

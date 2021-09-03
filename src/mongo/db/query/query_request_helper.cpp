@@ -186,11 +186,9 @@ Status initFullQuery(const BSONObj& top, FindCommandRequest* findCommand) {
 }
 
 Status initFindCommandRequest(int ntoskip,
-                              int ntoreturn,
                               int queryOptions,
                               const BSONObj& queryObj,
                               const BSONObj& proj,
-                              bool fromQueryMessage,
                               FindCommandRequest* findCommand) {
     if (!proj.isEmpty()) {
         findCommand->setProjection(proj.getOwned());
@@ -199,49 +197,26 @@ Status initFindCommandRequest(int ntoskip,
         findCommand->setSkip(ntoskip);
     }
 
-    if (ntoreturn) {
-        if (ntoreturn < 0) {
-            if (ntoreturn == std::numeric_limits<int>::min()) {
-                // ntoreturn is negative but can't be negated.
-                return Status(ErrorCodes::BadValue, "bad ntoreturn value in query");
-            }
-            findCommand->setNtoreturn(-ntoreturn);
-            findCommand->setSingleBatch(true);
-        } else {
-            findCommand->setNtoreturn(ntoreturn);
-        }
-    }
-
-    // An ntoreturn of 1 is special because it also means to return at most one batch.
-    if (findCommand->getNtoreturn().value_or(0) == 1) {
-        findCommand->setSingleBatch(true);
-    }
-
     // Initialize flags passed as 'queryOptions' bit vector.
     initFromInt(queryOptions, findCommand);
 
-    if (fromQueryMessage) {
-        BSONElement queryField = queryObj["query"];
-        if (!queryField.isABSONObj()) {
-            queryField = queryObj["$query"];
+    BSONElement queryField = queryObj["query"];
+    if (!queryField.isABSONObj()) {
+        queryField = queryObj["$query"];
+    }
+    if (queryField.isABSONObj()) {
+        findCommand->setFilter(queryField.embeddedObject().getOwned());
+        Status status = initFullQuery(queryObj, findCommand);
+        if (!status.isOK()) {
+            return status;
         }
-        if (queryField.isABSONObj()) {
-            findCommand->setFilter(queryField.embeddedObject().getOwned());
-            Status status = initFullQuery(queryObj, findCommand);
-            if (!status.isOK()) {
-                return status;
-            }
-        } else {
-            findCommand->setFilter(queryObj.getOwned());
-        }
-        // It's not possible to specify readConcern in a legacy query message, so initialize it to
-        // an empty readConcern object, ie. equivalent to `readConcern: {}`.  This ensures that
-        // mongos passes this empty readConcern to shards.
-        findCommand->setReadConcern(BSONObj());
     } else {
-        // This is the debugging code path.
         findCommand->setFilter(queryObj.getOwned());
     }
+    // It's not possible to specify readConcern in a legacy query message, so initialize it to
+    // an empty readConcern object, ie. equivalent to `readConcern: {}`.  This ensures that
+    // mongos passes this empty readConcern to shards.
+    findCommand->setReadConcern(BSONObj());
 
     return validateFindCommandRequest(*findCommand);
 }
@@ -421,12 +396,11 @@ StatusWith<std::unique_ptr<FindCommandRequest>> fromLegacyQuery(NamespaceStringO
                                                                 const BSONObj& queryObj,
                                                                 const BSONObj& proj,
                                                                 int ntoskip,
-                                                                int ntoreturn,
                                                                 int queryOptions) {
     auto findCommand = std::make_unique<FindCommandRequest>(std::move(nssOrUuid));
 
-    Status status = initFindCommandRequest(
-        ntoskip, ntoreturn, queryOptions, queryObj, proj, true, findCommand.get());
+    Status status =
+        initFindCommandRequest(ntoskip, queryOptions, queryObj, proj, findCommand.get());
     if (!status.isOK()) {
         return status;
     }
@@ -436,6 +410,9 @@ StatusWith<std::unique_ptr<FindCommandRequest>> fromLegacyQuery(NamespaceStringO
 
 StatusWith<BSONObj> asAggregationCommand(const FindCommandRequest& findCommand) {
     BSONObjBuilder aggregationBuilder;
+
+    // The find command will translate away ntoreturn above this layer.
+    tassert(5746106, "ntoreturn should not be set in the findCommand", !findCommand.getNtoreturn());
 
     // First, check if this query has options that are not supported in aggregation.
     if (!findCommand.getMin().isEmpty()) {
@@ -471,10 +448,6 @@ StatusWith<BSONObj> asAggregationCommand(const FindCommandRequest& findCommand) 
         return {ErrorCodes::InvalidPipelineOperator,
                 str::stream() << "Option " << FindCommandRequest::kAllowPartialResultsFieldName
                               << " not supported in aggregation."};
-    }
-    if (findCommand.getNtoreturn()) {
-        return {ErrorCodes::BadValue,
-                str::stream() << "Cannot convert to an aggregation if ntoreturn is set."};
     }
     if (findCommand.getSort()[query_request_helper::kNaturalSortField]) {
         return {ErrorCodes::InvalidPipelineOperator,

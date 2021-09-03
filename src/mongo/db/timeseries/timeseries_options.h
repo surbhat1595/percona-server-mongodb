@@ -53,16 +53,16 @@ boost::optional<TimeseriesOptions> getTimeseriesOptions(OperationContext* opCtx,
  */
 int getMaxSpanSecondsFromGranularity(BucketGranularityEnum granularity);
 
-/**
- * Returns the number of seconds used to round down the bucket ID and control.min timestamp.
- */
-int getBucketRoundingSecondsFromGranularity(BucketGranularityEnum granularity);
-
 StatusWith<std::pair<TimeseriesOptions, bool>> applyTimeseriesOptionsModifications(
     const TimeseriesOptions& current, const BSONObj& mod);
 
 BSONObj generateViewPipeline(const TimeseriesOptions& options, bool asArray);
 
 bool optionsAreEqual(const TimeseriesOptions& option1, const TimeseriesOptions& option2);
+
+/**
+ * Rounds down timestamp to the specified granularity.
+ */
+Date_t roundTimestampToGranularity(const Date_t& time, BucketGranularityEnum granularity);
 }  // namespace timeseries
 }  // namespace mongo

@@ -5,7 +5,7 @@
  *   assumes_no_implicit_collection_creation_after_drop,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
- *   requires_fcv_49,
+ *   requires_fcv_51,
  *   requires_getmore,
  * ]
  */
@@ -23,7 +23,12 @@ TimeseriesTest.run((insert) => {
     const controlMinTimeFieldName = "control.min." + timeFieldName;
     const controlMaxTimeFieldName = "control.max." + timeFieldName;
 
-    const doc = {_id: 0, [timeFieldName]: ISODate(), [metaFieldName]: {tag1: 'a', tag2: 'b'}};
+    const doc = {
+        _id: 0,
+        [timeFieldName]: ISODate(),
+        [metaFieldName]: {tag1: 'a', tag2: 'b', location: [1.0, 2.0]},
+        loc: [0, 0]
+    };
 
     const roundDown = (date) => {
         // Round down to nearest minute.
@@ -77,10 +82,17 @@ TimeseriesTest.run((insert) => {
         //
         // Note: call the listIndexes command directly, rather than use a helper, so that we can
         // inspect the result's namespace in addition to the result's index key pattern.
-        const cursorDoc = assert.commandWorked(db.runCommand({listIndexes: coll.getName()})).cursor;
+        let cursorDoc = assert.commandWorked(db.runCommand({listIndexes: coll.getName()})).cursor;
         assert.eq(coll.getFullName(), cursorDoc.ns, tojson(cursorDoc));
         assert.eq(1, cursorDoc.firstBatch.length, tojson(cursorDoc));
         assert.docEq(keyForCreate, cursorDoc.firstBatch[0].key, tojson(cursorDoc));
+
+        // Check that listIndexes against the buckets collection returns the index as hinted
+        cursorDoc =
+            assert.commandWorked(db.runCommand({listIndexes: bucketsColl.getName()})).cursor;
+        assert.eq(bucketsColl.getFullName(), cursorDoc.ns, tojson(cursorDoc));
+        assert.eq(1, cursorDoc.firstBatch.length, tojson(cursorDoc));
+        assert.docEq(hint, cursorDoc.firstBatch[0].key, tojson(cursorDoc));
 
         // Drop the index on the time-series collection and then check that the underlying buckets
         // collection index was dropped properly.
@@ -197,6 +209,23 @@ TimeseriesTest.run((insert) => {
     // metaField hashed index.
     runTest({[metaFieldName]: "hashed"}, {'meta': "hashed"});
 
+    // metaField geo-type indexes.
+    runTest({[metaFieldName + '.location']: "2dsphere"}, {'meta.location': "2dsphere"});
+    runTest({[metaFieldName + '.location']: "2d"}, {'meta.location': "2d"});
+
+    // compound geo-type indexes on metaField
+    runTest({[metaFieldName + '.location']: "2dsphere", [metaFieldName + '.tag1']: -1},
+            {'meta.location': "2dsphere", 'meta.tag1': -1});
+    runTest({[metaFieldName + '.tag1']: -1, [metaFieldName + '.location']: "2dsphere"},
+            {'meta.tag1': -1, 'meta.location': "2dsphere"});
+    runTest({[metaFieldName + '.location']: "2d", [metaFieldName + '.tag1']: -1},
+            {'meta.location': "2d", 'meta.tag1': -1});
+
+    if (TimeseriesTest.timeseriesMetricIndexesEnabled(db.getMongo())) {
+        // Measurement 2dsphere index
+        runTest({'loc': '2dsphere'}, {'data.loc': '2dsphere_bucket'});
+    }
+
     /*
      * Test time-series index creation error handling.
      */
@@ -209,10 +238,17 @@ TimeseriesTest.run((insert) => {
         coll.getName(), {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}));
     assert.commandWorked(insert(coll, doc), 'failed to insert doc: ' + tojson(doc));
 
-    // Reject index keys that do not include the metadata field.
-    assert.commandFailedWithCode(coll.createIndex({not_metadata: 1}), ErrorCodes.CannotCreateIndex);
-    assert.commandFailedWithCode(coll.dropIndex({not_metadata: 1}), ErrorCodes.IndexNotFound);
-    assert.commandFailedWithCode(coll.hideIndex({not_metadata: 1}), ErrorCodes.IndexNotFound);
+    if (!TimeseriesTest.timeseriesMetricIndexesEnabled(db.getMongo())) {
+        // Reject index keys that do not include the metadata field.
+        assert.commandFailedWithCode(coll.createIndex({not_metadata: 1}),
+                                     ErrorCodes.CannotCreateIndex);
+        assert.commandFailedWithCode(coll.hideIndex({not_metadata: 1}), ErrorCodes.IndexNotFound);
+        assert.commandFailedWithCode(coll.dropIndex({not_metadata: 1}), ErrorCodes.IndexNotFound);
+    } else {
+        assert.commandWorked(coll.createIndex({not_metadata: 1}));
+        assert.commandWorked(coll.hideIndex({not_metadata: 1}));
+        assert.commandWorked(coll.dropIndex({not_metadata: 1}));
+    }
 
     // Index names are not transformed. dropIndexes passes the request along to the buckets
     // collection, which in this case does not possess the index by that name.
@@ -221,7 +257,8 @@ TimeseriesTest.run((insert) => {
     const testCreateIndexFailed = function(spec, options = {}) {
         const indexName = 'testCreateIndex';
         const res = coll.createIndex(spec, Object.extend({name: indexName}, options));
-        assert.commandFailedWithCode(res, ErrorCodes.InvalidOptions);
+        assert.commandFailedWithCode(res,
+                                     [ErrorCodes.CannotCreateIndex, ErrorCodes.InvalidOptions]);
     };
 
     // Partial indexes are not supported on time-series collections.
@@ -245,5 +282,8 @@ TimeseriesTest.run((insert) => {
                          'failed to create index: ' + tojson({not_metadata: 1}));
     assert.eq(1, bucketsColl.getIndexes().length, tojson(bucketsColl.getIndexes()));
     assert.eq(0, coll.getIndexes().length, tojson(coll.getIndexes()));
+
+    // Cannot directly create a "2dsphere_bucket" index.
+    testCreateIndexFailed({"loc": "2dsphere_bucket"});
 });
 })();

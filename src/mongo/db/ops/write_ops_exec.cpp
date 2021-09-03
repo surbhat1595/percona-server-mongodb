@@ -50,8 +50,8 @@
 #include "mongo/db/exec/delete.h"
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/introspect.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/ops/parsed_delete.h"
@@ -66,6 +66,7 @@
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -75,6 +76,7 @@
 #include "mongo/db/stats/server_write_concern_metrics.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/update/document_diff_applier.h"
@@ -253,7 +255,7 @@ bool handleError(OperationContext* opCtx,
                  const write_ops::WriteCommandRequestBase& wholeOp,
                  bool isMultiUpdate,
                  WriteResult* out) {
-    LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+    NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
     auto& curOp = *CurOp::get(opCtx);
     curOp.debug().errInfo = ex.toStatus();
 
@@ -292,17 +294,24 @@ bool handleError(OperationContext* opCtx,
     }
 
     if (ErrorCodes::isTenantMigrationError(ex)) {
+        // Multiple not-idempotent updates are not safe to retry at the cloud level. We treat these
+        // the same as an interruption due to a repl state change and fail the whole batch.
         if (isMultiUpdate) {
-            BSONObjBuilder builder;
-            ex.serialize(&builder);
-            // Multiple not-idempotent updates are not safe to retry at the cloud level. To indicate
-            // this, we replace the original error.
-            out->results.emplace_back(
-                Status(ErrorCodes::Interrupted,
-                       str::stream() << "Multi update was interrupted by error: " << ex.reason(),
-                       builder.obj()));
-            return false;
+            if (ex.code() != ErrorCodes::TenantMigrationConflict) {
+                uassertStatusOK(kNonRetryableTenantMigrationStatus);
+            }
+
+            // If the migration is active, we throw a different code that will be caught higher up
+            // and replaced with a non-retryable code after the migration finishes to avoid wasted
+            // retries.
+            auto migrationConflictInfo = ex.toStatus().extraInfo<TenantMigrationConflictInfo>();
+            uassertStatusOK(
+                Status(NonRetryableTenantMigrationConflictInfo(
+                           migrationConflictInfo->getTenantId(),
+                           migrationConflictInfo->getTenantMigrationAccessBlocker()),
+                       "Multi update must block until this tenant migration commits or aborts"));
         }
+
         // If an op fails due to a TenantMigrationError then subsequent ops will also fail due to a
         // migration blocking, committing, or aborting.
         out->results.emplace_back(ex.toStatus());
@@ -431,7 +440,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
             if (*collection)
                 break;
 
-            if (source == OperationSource::kTimeseries) {
+            if (source == OperationSource::kTimeseriesInsert) {
                 assertTimeseriesBucketsCollectionNotFound(wholeOp.getNamespace());
             }
 
@@ -491,7 +500,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                 result.setN(1);
 
                 std::fill_n(std::back_inserter(out->results), batch.size(), std::move(result));
-                if (source != OperationSource::kTimeseries) {
+                if (source != OperationSource::kTimeseriesInsert) {
                     curOp.debug().additiveMetrics.incrementNinserted(batch.size());
                 }
                 return true;
@@ -527,7 +536,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     SingleWriteResult result;
                     result.setN(1);
                     out->results.emplace_back(std::move(result));
-                    if (source != OperationSource::kTimeseries) {
+                    if (source != OperationSource::kTimeseriesInsert) {
                         curOp.debug().additiveMetrics.incrementNinserted(1);
                     }
                 } catch (...) {
@@ -570,34 +579,11 @@ SingleWriteResult makeWriteResultForInsertOrDeleteRetry() {
     res.setNModified(0);
     return res;
 }
-
-// TODO: SERVER-58394 Remove this function and combine it with
-// timeseries::queryOnlyDependsOnMetaField.
-// TODO: SERVER-58382 Handle time-series collections without a metaField.
-template <typename OpEntry, typename WholeOp>
-bool isTimeseriesMetaFieldOnlyQuery(OperationContext* opCtx,
-                                    const NamespaceString& ns,
-                                    const OpEntry& opEntry,
-                                    const WholeOp& wholeOp) {
-
-    boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContext(
-        opCtx, nullptr, ns, wholeOp.getLegacyRuntimeConstants(), wholeOp.getLet()));
-
-    std::vector<BSONObj> rawPipeline{BSON("$match" << opEntry.getQ())};
-    DepsTracker dependencies = Pipeline::parse(rawPipeline, expCtx)->getDependencies({});
-    return std::all_of(
-        dependencies.fields.begin(), dependencies.fields.end(), [](const auto& dependency) {
-            StringData queryField(dependency);
-            StringData querySubStr = queryField.substr(0, queryField.find('.'));
-            return querySubStr == "meta" || querySubStr == "$meta";
-        });
-}
-
 }  // namespace
 
 WriteResult performInserts(OperationContext* opCtx,
                            const write_ops::InsertCommandRequest& wholeOp,
-                           const OperationSource& source) {
+                           OperationSource source) {
     // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -618,7 +604,7 @@ WriteResult performInserts(OperationContext* opCtx,
                     curOp.getReadWriteType());
     });
 
-    if (source != OperationSource::kTimeseries) {
+    if (source != OperationSource::kTimeseriesInsert) {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         curOp.setNS_inlock(wholeOp.getNamespace().ns());
         curOp.setLogicalOp_inlock(LogicalOp::opInsert);
@@ -673,7 +659,7 @@ WriteResult performInserts(OperationContext* opCtx,
 
             // A time-series insert can combine multiple writes into a single operation, and thus
             // can have multiple statement ids associated with it if it is retryable.
-            batch.emplace_back(source == OperationSource::kTimeseries && wholeOp.getStmtIds()
+            batch.emplace_back(source == OperationSource::kTimeseriesInsert && wholeOp.getStmtIds()
                                    ? *wholeOp.getStmtIds()
                                    : std::vector<StmtId>{stmtId},
                                toInsert);
@@ -728,13 +714,9 @@ WriteResult performInserts(OperationContext* opCtx,
 
 static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                                                const NamespaceString& ns,
-                                               const UpdateRequest& updateRequest,
+                                               UpdateRequest* updateRequest,
                                                OperationSource source,
                                                bool* containsDotsAndDollarsField) {
-    const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest.getNamespaceString());
-    ParsedUpdate parsedUpdate(opCtx, &updateRequest, extensionsCallback);
-    uassertStatusOK(parsedUpdate.parseRequest());
-
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchUpdate,
         opCtx,
@@ -760,23 +742,81 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
             break;
         }
 
-        if (source == OperationSource::kTimeseries) {
+        if (source == OperationSource::kTimeseriesInsert ||
+            source == OperationSource::kTimeseriesUpdate) {
             assertTimeseriesBucketsCollectionNotFound(ns);
         }
 
         // If this is an upsert, which is an insert, we must have a collection.
-        // An update on a non-existant collection is okay and handled later.
-        if (!updateRequest.isUpsert())
+        // An update on a non-existent collection is okay and handled later.
+        if (!updateRequest->isUpsert())
             break;
 
         collection.reset();  // unlock.
         makeCollection(opCtx, ns);
     }
 
+    if (source == OperationSource::kTimeseriesUpdate) {
+        uassert(ErrorCodes::NamespaceNotFound,
+                "Could not find time-series buckets collection for update",
+                collection);
+
+        auto timeseriesOptions = collection->getCollection()->getTimeseriesOptions();
+        uassert(ErrorCodes::InvalidOptions,
+                "Time-series buckets collection is missing time-series options",
+                timeseriesOptions);
+
+        auto metaField = timeseriesOptions->getMetaField();
+        uassert(ErrorCodes::InvalidOptions,
+                "Cannot perform an update on a time-series collection with no metaField",
+                metaField);
+
+        uassert(
+            ErrorCodes::InvalidOptions,
+            str::stream() << "multi:false updates are not supported for time-series collections: "
+                          << ns,
+            updateRequest->isMulti());
+
+        uassert(
+            ErrorCodes::InvalidOptions,
+            str::stream() << "upsert:true updates are not supported for time-series collections: "
+                          << ns,
+            !updateRequest->isUpsert());
+
+        // Get the original update query and check that it only depends on the metaField.
+        const auto& updateQuery = updateRequest->getQuery();
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Cannot perform an update on a time-series collection "
+                                 "when querying on a field that is not the metaField "
+                              << *metaField << ": " << ns,
+                timeseries::queryOnlyDependsOnMetaField(opCtx,
+                                                        ns,
+                                                        updateQuery,
+                                                        *metaField,
+                                                        *updateRequest->getLegacyRuntimeConstants(),
+                                                        updateRequest->getLetParameters()));
+
+        // Get the original set of modifications to apply and check that they only
+        // modify the metaField.
+        const auto& updateMod = updateRequest->getUpdateModification();
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Update on a time-series collection must only "
+                                 "modify the metaField "
+                              << *metaField << ": " << ns,
+                timeseries::updateOnlyModifiesMetaField(opCtx, ns, updateMod, *metaField));
+
+        updateRequest->setQuery(timeseries::translateQuery(updateQuery, *metaField));
+        updateRequest->setUpdateModification(timeseries::translateUpdate(updateMod, *metaField));
+    }
+
     if (const auto& coll = collection->getCollection()) {
         // Transactions are not allowed to operate on capped collections.
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
+
+    const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest->getNamespaceString());
+    ParsedUpdate parsedUpdate(opCtx, updateRequest, extensionsCallback);
+    uassertStatusOK(parsedUpdate.parseRequest());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangWithLockDuringBatchUpdate, opCtx, "hangWithLockDuringBatchUpdate");
@@ -814,16 +854,14 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         curOp.debug().execStats = std::move(stats);
     }
 
-    if (source != OperationSource::kTimeseries) {
+    if (source != OperationSource::kTimeseriesInsert &&
+        source != OperationSource::kTimeseriesUpdate) {
         recordUpdateResultInOpDebug(updateResult, &curOp.debug());
     }
     curOp.debug().setPlanSummaryMetrics(summary);
 
     const bool didInsert = !updateResult.upsertedId.isEmpty();
     const long long nMatchedOrInserted = didInsert ? 1 : updateResult.numMatched;
-    LastError::get(opCtx->getClient())
-        .recordUpdate(updateResult.existing, nMatchedOrInserted, updateResult.upsertedId);
-
     SingleWriteResult result;
     result.setN(nMatchedOrInserted);
     result.setNModified(updateResult.numDocsModified);
@@ -850,9 +888,11 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     globalOpCounters.gotUpdate();
     ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForUpdate(opCtx->getWriteConcern());
     auto& curOp = *CurOp::get(opCtx);
-    if (source != OperationSource::kTimeseries) {
+    if (source != OperationSource::kTimeseriesInsert) {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp.setNS_inlock(ns.ns());
+        curOp.setNS_inlock(source == OperationSource::kTimeseriesUpdate
+                               ? ns.getTimeseriesViewNamespace().ns()
+                               : ns.ns());
         curOp.setNetworkOp_inlock(dbUpdate);
         curOp.setLogicalOp_inlock(LogicalOp::opUpdate);
         curOp.setOpDescription_inlock(op.toBSON());
@@ -882,7 +922,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
         try {
             bool containsDotsAndDollarsField = false;
             const auto ret =
-                performSingleUpdateOp(opCtx, ns, request, source, &containsDotsAndDollarsField);
+                performSingleUpdateOp(opCtx, ns, &request, source, &containsDotsAndDollarsField);
 
             if (containsDotsAndDollarsField) {
                 // If it's an upsert, increment 'inserts' metric, otherwise increment 'updates'.
@@ -918,7 +958,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 
 WriteResult performUpdates(OperationContext* opCtx,
                            const write_ops::UpdateCommandRequest& wholeOp,
-                           const OperationSource& source) {
+                           OperationSource source) {
     // Update performs its own retries, so we should not be in a WriteUnitOfWork unless run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -960,7 +1000,7 @@ WriteResult performUpdates(OperationContext* opCtx,
         auto& parentCurOp = *CurOp::get(opCtx);
         const Command* cmd = parentCurOp.getCommand();
         boost::optional<CurOp> curOp;
-        if (source != OperationSource::kTimeseries) {
+        if (source != OperationSource::kTimeseriesInsert) {
             curOp.emplace(opCtx);
 
             stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -976,17 +1016,20 @@ WriteResult performUpdates(OperationContext* opCtx,
 
             // A time-series insert can combine multiple writes into a single operation, and thus
             // can have multiple statement ids associated with it if it is retryable.
-            auto stmtIds = source == OperationSource::kTimeseries && wholeOp.getStmtIds()
+            auto stmtIds = source == OperationSource::kTimeseriesInsert && wholeOp.getStmtIds()
                 ? *wholeOp.getStmtIds()
                 : std::vector<StmtId>{stmtId};
 
-            out.results.emplace_back(performSingleUpdateOpWithDupKeyRetry(opCtx,
-                                                                          wholeOp.getNamespace(),
-                                                                          stmtIds,
-                                                                          singleOp,
-                                                                          runtimeConstants,
-                                                                          wholeOp.getLet(),
-                                                                          source));
+            out.results.emplace_back(performSingleUpdateOpWithDupKeyRetry(
+                opCtx,
+                source == OperationSource::kTimeseriesUpdate
+                    ? wholeOp.getNamespace().makeTimeseriesBucketsNamespace()
+                    : wholeOp.getNamespace(),
+                stmtIds,
+                singleOp,
+                runtimeConstants,
+                wholeOp.getLet(),
+                source));
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
             const bool canContinue = handleError(opCtx,
@@ -1008,7 +1051,8 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                                                StmtId stmtId,
                                                const write_ops::DeleteOpEntry& op,
                                                const LegacyRuntimeConstants& runtimeConstants,
-                                               const boost::optional<BSONObj>& letParams) {
+                                               const boost::optional<BSONObj>& letParams,
+                                               OperationSource source) {
     uassert(ErrorCodes::InvalidOptions,
             "Cannot use (or request) retryable writes with limit=0",
             opCtx->inMultiDocumentTransaction() || !opCtx->getTxnNumber() || !op.getMulti());
@@ -1018,7 +1062,9 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     auto& curOp = *CurOp::get(opCtx);
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp.setNS_inlock(ns.ns());
+        curOp.setNS_inlock(source == OperationSource::kTimeseriesDelete
+                               ? ns.getTimeseriesViewNamespace().ns()
+                               : ns.ns());
         curOp.setNetworkOp_inlock(dbDelete);
         curOp.setLogicalOp_inlock(LogicalOp::opDelete);
         curOp.setOpDescription_inlock(op.toBSON());
@@ -1039,9 +1085,6 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     request.setStmtId(stmtId);
     request.setHint(op.getHint());
 
-    ParsedDelete parsedDelete(opCtx, &request);
-    uassertStatusOK(parsedDelete.parseRequest());
-
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchRemove, opCtx, "hangDuringBatchRemove", []() {
             LOGV2(20891,
@@ -1053,6 +1096,46 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     }
 
     AutoGetCollection collection(opCtx, ns, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
+
+    if (source == OperationSource::kTimeseriesDelete) {
+        uassert(ErrorCodes::NamespaceNotFound,
+                "Could not find time-series buckets collection for write",
+                *collection);
+        auto timeseriesOptions = collection->getTimeseriesOptions();
+        uassert(ErrorCodes::InvalidOptions,
+                "Time-series buckets collection is missing time-series options",
+                timeseriesOptions);
+
+        // Only translate the hint if it is specified by index spec.
+        if (request.getHint().firstElement().fieldNameStringData() != "$hint"_sd ||
+            request.getHint().firstElement().type() != BSONType::String) {
+            request.setHint(
+                uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+                    *timeseriesOptions, request.getHint())));
+        }
+
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Cannot perform a delete on a time-series collection "
+                                 "when querying on a field that is not the metaField: "
+                              << ns,
+                timeseries::queryOnlyDependsOnMetaField(opCtx,
+                                                        ns,
+                                                        request.getQuery(),
+                                                        timeseriesOptions->getMetaField(),
+                                                        runtimeConstants,
+                                                        letParams));
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "Cannot perform a delete with limit: 1 on a "
+                                 "time-series collection: "
+                              << ns,
+                request.getMulti());
+        if (auto metaField = timeseriesOptions->getMetaField()) {
+            request.setQuery(timeseries::translateQuery(request.getQuery(), *metaField));
+        }
+    }
+
+    ParsedDelete parsedDelete(opCtx, &request);
+    uassertStatusOK(parsedDelete.parseRequest());
 
     if (collection.getDb()) {
         curOp.raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.db()));
@@ -1087,8 +1170,6 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         curOp.debug().execStats = std::move(stats);
     }
 
-    LastError::get(opCtx->getClient()).recordDelete(nDeleted);
-
     SingleWriteResult result;
     result.setN(nDeleted);
     return result;
@@ -1096,7 +1177,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 
 WriteResult performDeletes(OperationContext* opCtx,
                            const write_ops::DeleteCommandRequest& wholeOp,
-                           const OperationSource& source) {
+                           OperationSource source) {
     // Delete performs its own retries, so we should not be in a WriteUnitOfWork unless we are in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1154,27 +1235,16 @@ WriteResult performDeletes(OperationContext* opCtx,
         });
         try {
             lastOpFixer.startingOp();
-
-            if (source == OperationSource::kTimeseries) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "Cannot perform a delete on a time-series collection "
-                                         "when querying on a field that is not the metaField: "
-                                      << wholeOp.getNamespace(),
-                        isTimeseriesMetaFieldOnlyQuery(
-                            opCtx, wholeOp.getNamespace(), singleOp, wholeOp));
-                uassert(ErrorCodes::IllegalOperation,
-                        str::stream() << "Cannot perform a delete with limit: 1 on a "
-                                         "time-series collection: "
-                                      << wholeOp.getNamespace(),
-                        singleOp.getMulti());
-            }
-
-            out.results.emplace_back(performSingleDeleteOp(opCtx,
-                                                           wholeOp.getNamespace(),
-                                                           stmtId,
-                                                           singleOp,
-                                                           runtimeConstants,
-                                                           wholeOp.getLet()));
+            out.results.push_back(
+                performSingleDeleteOp(opCtx,
+                                      source == OperationSource::kTimeseriesDelete
+                                          ? wholeOp.getNamespace().makeTimeseriesBucketsNamespace()
+                                          : wholeOp.getNamespace(),
+                                      stmtId,
+                                      singleOp,
+                                      runtimeConstants,
+                                      wholeOp.getLet(),
+                                      source));
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
             const bool canContinue = handleError(opCtx,
@@ -1285,7 +1355,7 @@ Status performAtomicTimeseriesWrites(
         args.preImageDoc = original.value();
         args.update = update_oplog_entry::makeDeltaOplogEntry(update.getU().getDiff());
         args.criteria = update.getQ();
-        args.source = OperationSource::kTimeseries;
+        args.source = OperationSource::kTimeseriesInsert;
         if (slot) {
             args.oplogSlot = **slot;
             fassert(5481600, opCtx->recoveryUnit()->setTimestamp(args.oplogSlot->getTimestamp()));

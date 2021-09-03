@@ -43,12 +43,10 @@
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/scoped_operation_completion_sharding_actions.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
-#include "mongo/db/s/sharding_config_optime_gossip.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_entry_point_common.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/metadata/config_server_metadata.h"
 #include "mongo/rpc/metadata/sharding_metadata.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
@@ -114,6 +112,13 @@ public:
                              const CommandInvocation* invocation,
                              const repl::OpTime& lastOpBeforeRun,
                              BSONObjBuilder& commandResponseBuilder) const override {
+
+        // Prevent waiting for writeConcern if the command is changing an unreplicated namespace.
+        invariant(invocation);
+        if (!invocation->ns().isReplicated()) {
+            return;
+        }
+
         auto lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
 
         auto waitForWriteConcernAndAppendStatus = [&]() {
@@ -215,12 +220,6 @@ public:
                                     lastCommittedOpTime.getTimestamp());
             }
         }
-
-        // If we're a shard other than the config shard, attach the last configOpTime we know about.
-        if (isShardingAware && !isConfig) {
-            auto opTime = Grid::get(opCtx)->configOpTime();
-            rpc::ConfigServerMetadata(opTime).writeToMetadata(metadataBob);
-        }
     }
 
     bool refreshDatabase(OperationContext* opCtx, const StaleDbRoutingVersion& se) const
@@ -254,11 +253,6 @@ public:
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         invariant(!opCtx->lockState()->isLocked());
         opCtx->swapLockState(std::make_unique<LockerImpl>(), lk);
-    }
-
-    void advanceConfigOpTimeFromRequestMetadata(OperationContext* opCtx) const override {
-        // Handle config optime information that may have been sent along with the command.
-        rpc::advanceConfigOpTimeFromRequestMetadata(opCtx);
     }
 
     std::unique_ptr<PolymorphicScoped> scopedOperationCompletionShardingActions(

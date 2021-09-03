@@ -30,21 +30,24 @@ def make_process(*args, **kwargs):
 
     # Add the current working directory and /data/multiversion to the PATH.
     env_vars = kwargs.get("env_vars", {}).copy()
-    path = [
-        os.getcwd(),
-        config.DEFAULT_MULTIVERSION_DIR,
-    ]
+    path = get_path_env_var(env_vars)
 
-    # If installDir is provided, add it early to the path
     if config.INSTALL_DIR is not None:
-        path.append(config.INSTALL_DIR)
         env_vars["INSTALL_DIR"] = config.INSTALL_DIR
-
-    path.append(env_vars.get("PATH", os.environ.get("PATH", "")))
 
     env_vars["PATH"] = os.pathsep.join(path)
     kwargs["env_vars"] = env_vars
     return process_cls(*args, **kwargs)
+
+
+def get_path_env_var(env_vars):
+    """Return the path base on provided environment variable."""
+    path = [os.getcwd()] + config.DEFAULT_MULTIVERSION_DIRS
+    # If installDir is provided, add it early to the path
+    if config.INSTALL_DIR is not None:
+        path.append(config.INSTALL_DIR)
+    path.append(env_vars.get("PATH", os.environ.get("PATH", "")))
+    return path
 
 
 def mongod_program(logger, job_num, executable, process_kwargs, mongod_options):
@@ -145,9 +148,6 @@ def mongo_shell_program(  # pylint: disable=too-many-arguments,too-many-branches
         "wiredTigerCollectionConfigString": (config.WT_COLL_CONFIG, ""),
         "wiredTigerEngineConfigString": (config.WT_ENGINE_CONFIG, ""),
         "wiredTigerIndexConfigString": (config.WT_INDEX_CONFIG, ""),
-
-        # Evergreen variables.
-        "evergreenDebugSymbolsUrl": (config.DEBUG_SYMBOLS_URL, ""),
     }
 
     test_data = global_vars.get("TestData", {}).copy()
@@ -163,6 +163,7 @@ def mongo_shell_program(  # pylint: disable=too-many-arguments,too-many-branches
 
     if config.EVERGREEN_TASK_ID is not None:
         test_data["inEvergreen"] = True
+        test_data["evergreenTaskId"] = config.EVERGREEN_TASK_ID
 
     # Initialize setParameters for mongod and mongos, to be passed to the shell via TestData. Since
     # they are dictionaries, they will be converted to JavaScript objects when passed to the shell

@@ -19,6 +19,8 @@ class CombineBenchmarkResults(interface.Hook):
 
     DESCRIPTION = "Combine JSON results from individual benchmarks"
 
+    IS_BACKGROUND = False
+
     def __init__(self, hook_logger, fixture):
         """Initialize CombineBenchmarkResults."""
         interface.Hook.__init__(self, hook_logger, fixture, CombineBenchmarkResults.DESCRIPTION)
@@ -49,7 +51,7 @@ class CombineBenchmarkResults(interface.Hook):
         """Set suite start time."""
         self.create_time = datetime.datetime.now()
 
-    def after_suite(self, test_report):
+    def after_suite(self, test_report, teardown_flag=None):
         """Update test report."""
         if self.report_file is None:
             return

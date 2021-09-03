@@ -13,6 +13,7 @@ env.CppUnitTest(
         'atomic_word_test.cpp',
         'bits_test.cpp',
         'endian_test.cpp',
+        'int128_test.cpp',
         'mutex_test.cpp',
         'process_id_test.cpp',
         'random_test.cpp',
@@ -43,8 +44,6 @@ env.Library(
     ],
     LIBDEPS_NO_INHERIT=[
         '$BUILD_DIR/third_party/shim_allocator',
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
     ],
     LIBDEPS=[],
     MONGO_API_NAME="visibility_test_libcommon",
@@ -57,8 +56,6 @@ env.Library(
     ],
     LIBDEPS_NO_INHERIT=[
         '$BUILD_DIR/third_party/shim_allocator',
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
     ],
     LIBDEPS=[],
     LIBDEPS_PRIVATE=[
@@ -74,8 +71,6 @@ env.Library(
     ],
     LIBDEPS_NO_INHERIT=[
         '$BUILD_DIR/third_party/shim_allocator',
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
     ],
     LIBDEPS=[
         "visibility_test_lib1",
@@ -93,8 +88,6 @@ visibility_test1 = env.Program(
     ],
     LIBDEPS_NO_INHERIT=[
         '$BUILD_DIR/third_party/shim_allocator',
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
     ],
     LIBDEPS=[
         "visibility_test_lib1",
@@ -114,8 +107,6 @@ visibility_test2 = env.Program(
     ],
     LIBDEPS_NO_INHERIT=[
         '$BUILD_DIR/third_party/shim_allocator',
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
     ],
     LIBDEPS=[
         "visibility_test_lib2",

@@ -1,8 +1,13 @@
 /**
  * Tests tenant migration timeout scenarios.
  *
- * @tags: [requires_fcv_47, incompatible_with_eft, requires_majority_read_concern,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -17,10 +22,6 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 const kTenantIdPrefix = "testTenantId";
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 function testTimeoutBlockingState() {
     const donorRst = tenantMigrationTest.getDonorRst();

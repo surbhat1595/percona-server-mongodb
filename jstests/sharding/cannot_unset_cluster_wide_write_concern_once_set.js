@@ -1,17 +1,12 @@
 /**
  * Tests that CWWC cannot be unset once it is set.
- * @tags: [requires_fcv_50]
+ * @tags: [
+ * ]
  */
 (function() {
 "use strict";
-load("jstests/libs/write_concern_util.js");  // For isDefaultWriteConcernMajorityFlagEnabled.
 
 function runTest(conn) {
-    if (!isDefaultWriteConcernMajorityFlagEnabled(conn)) {
-        jsTestLog("Skipping test because the default WC majority feature flag is disabled");
-        return;
-    }
-
     let expectedDefaultWC = {w: "majority", wtimeout: 0};
     let res = conn.adminCommand({getDefaultRWConcern: 1});
     assert(res.hasOwnProperty("defaultWriteConcern"));

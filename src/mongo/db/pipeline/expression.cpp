@@ -1032,6 +1032,18 @@ Value ExpressionCond::evaluate(const Document& root, Variables* variables) const
     return _children[idx]->evaluate(root, variables);
 }
 
+boost::intrusive_ptr<Expression> ExpressionCond::optimize() {
+    for (auto&& child : _children) {
+        child = child->optimize();
+    }
+
+    if (auto ifOperand = dynamic_cast<ExpressionConstant*>(_children[0].get()); ifOperand) {
+        return ifOperand->getValue().coerceToBool() ? _children[1] : _children[2];
+    }
+
+    return this;
+}
+
 intrusive_ptr<Expression> ExpressionCond::parse(ExpressionContext* const expCtx,
                                                 BSONElement expr,
                                                 const VariablesParseState& vps) {
@@ -2303,6 +2315,14 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::parse(ExpressionContext*
         const StringData varName = fieldPath.substr(0, fieldPath.find('.'));
         variableValidation::validateNameForUserRead(varName);
         auto varId = vps.getVariable(varName);
+        if (varName.compare(Variables::getBuiltinVariableName(Variables::kSearchMetaId)) == 0) {
+            return new ExpressionFieldPathNonSharded(
+                expCtx,
+                fieldPath.toString(),
+                varId,
+                std::string("Search queries accessing $$SEARCH_META are not supported in sharded "
+                            "pipelines"));
+        }
         return new ExpressionFieldPath(expCtx, fieldPath.toString(), varId);
     } else {
         return new ExpressionFieldPath(expCtx,
@@ -2430,6 +2450,12 @@ Value ExpressionFieldPath::serialize(bool explain) const {
     } else {
         return Value("$$" + _fieldPath.fullPath());
     }
+}
+
+Value ExpressionFieldPathNonSharded::evaluate(const Document& root, Variables* variables) const {
+    uassert(
+        5858100, _errMsg, !getExpressionContext()->needsMerge && !getExpressionContext()->inMongos);
+    return ExpressionFieldPath::evaluate(root, variables);
 }
 
 Expression::ComputedPaths ExpressionFieldPath::getComputedPaths(const std::string& exprFieldPath,
@@ -2583,6 +2609,22 @@ void ExpressionFilter::_doAddDependencies(DepsTracker* deps) const {
 }
 
 /* ------------------------- ExpressionFloor -------------------------- */
+
+StatusWith<Value> ExpressionFloor::apply(Value arg) {
+    if (!arg.numeric()) {
+        return Status{ErrorCodes::Error(5733411), "Floor must take a numeric argument"};
+    }
+    switch (arg.getType()) {
+        case NumberDouble:
+            return Value(std::floor(arg.getDouble()));
+        case NumberDecimal:
+            // Round toward the nearest decimal with a zero exponent in the negative direction.
+            return Value(arg.getDecimal().quantize(Decimal128::kNormalizedZero,
+                                                   Decimal128::kRoundTowardNegative));
+        default:
+            return arg;
+    }
+}
 
 Value ExpressionFloor::evaluateNumericArg(const Value& numericArg) const {
     // There's no point in taking the floor of integers or longs, it will have no effect.
@@ -2982,28 +3024,28 @@ void ExpressionMeta::_doAddDependencies(DepsTracker* deps) const {
 
 /* ----------------------- ExpressionMod ---------------------------- */
 
-Value ExpressionMod::evaluate(const Document& root, Variables* variables) const {
-    Value lhs = _children[0]->evaluate(root, variables);
-    Value rhs = _children[1]->evaluate(root, variables);
-
+StatusWith<Value> ExpressionMod::apply(Value lhs, Value rhs) {
     BSONType leftType = lhs.getType();
     BSONType rightType = rhs.getType();
 
     if (lhs.numeric() && rhs.numeric()) {
-        auto assertNonZero = [](bool isZero) { uassert(16610, "can't $mod by zero", !isZero); };
 
         // If either side is decimal, perform the operation in decimal.
         if (leftType == NumberDecimal || rightType == NumberDecimal) {
             Decimal128 left = lhs.coerceToDecimal();
             Decimal128 right = rhs.coerceToDecimal();
-            assertNonZero(right.isZero());
+            if (right.isZero()) {
+                return Status(ErrorCodes::Error(5733415), str::stream() << "can't $mod by zero");
+            }
 
             return Value(left.modulo(right));
         }
 
         // ensure we aren't modding by 0
         double right = rhs.coerceToDouble();
-        assertNonZero(right == 0);
+        if (right == 0) {
+            return Status(ErrorCodes::Error(16610), str::stream() << "can't $mod by zero");
+        };
 
         if (leftType == NumberDouble || (rightType == NumberDouble && !rhs.integral())) {
             // Need to do fmod. Integer-valued double case is handled below.
@@ -3026,10 +3068,16 @@ Value ExpressionMod::evaluate(const Document& root, Variables* variables) const 
     } else if (lhs.nullish() || rhs.nullish()) {
         return Value(BSONNULL);
     } else {
-        uasserted(16611,
-                  str::stream() << "$mod only supports numeric types, not "
-                                << typeName(lhs.getType()) << " and " << typeName(rhs.getType()));
+        return Status(ErrorCodes::Error(16611),
+                      str::stream()
+                          << "$mod only supports numeric types, not " << typeName(lhs.getType())
+                          << " and " << typeName(rhs.getType()));
     }
+}
+Value ExpressionMod::evaluate(const Document& root, Variables* variables) const {
+    Value lhs = _children[0]->evaluate(root, variables);
+    Value rhs = _children[1]->evaluate(root, variables);
+    return uassertStatusOK(apply(lhs, rhs));
 }
 
 REGISTER_STABLE_EXPRESSION(mod, ExpressionMod::parse);
@@ -4388,6 +4436,13 @@ ValueSet arrayToSet(const Value& val, const ValueComparator& valueComparator) {
     valueSet.insert(array.begin(), array.end());
     return valueSet;
 }
+
+ValueUnorderedSet arrayToUnorderedSet(const Value& val, const ValueComparator& valueComparator) {
+    const vector<Value>& array = val.getArray();
+    ValueUnorderedSet valueSet = valueComparator.makeUnorderedValueSet();
+    valueSet.insert(array.begin(), array.end());
+    return valueSet;
+}
 }  // namespace
 
 /* ----------------------- ExpressionSetDifference ---------------------------- */
@@ -4517,7 +4572,7 @@ const char* ExpressionSetIntersection::getOpName() const {
 /* ----------------------- ExpressionSetIsSubset ---------------------------- */
 
 namespace {
-Value setIsSubsetHelper(const vector<Value>& lhs, const ValueSet& rhs) {
+Value setIsSubsetHelper(const vector<Value>& lhs, const ValueUnorderedSet& rhs) {
     // do not shortcircuit when lhs.size() > rhs.size()
     // because lhs can have redundant entries
     for (vector<Value>::const_iterator it = lhs.begin(); it != lhs.end(); ++it) {
@@ -4542,8 +4597,8 @@ Value ExpressionSetIsSubset::evaluate(const Document& root, Variables* variables
                           << "argument is of type: " << typeName(rhs.getType()),
             rhs.isArray());
 
-    return setIsSubsetHelper(lhs.getArray(),
-                             arrayToSet(rhs, getExpressionContext()->getValueComparator()));
+    return setIsSubsetHelper(
+        lhs.getArray(), arrayToUnorderedSet(rhs, getExpressionContext()->getValueComparator()));
 }
 
 /**
@@ -4556,7 +4611,7 @@ Value ExpressionSetIsSubset::evaluate(const Document& root, Variables* variables
 class ExpressionSetIsSubset::Optimized : public ExpressionSetIsSubset {
 public:
     Optimized(ExpressionContext* const expCtx,
-              const ValueSet& cachedRhsSet,
+              const ValueUnorderedSet& cachedRhsSet,
               const ExpressionVector& operands)
         : ExpressionSetIsSubset(expCtx), _cachedRhsSet(cachedRhsSet) {
         _children = operands;
@@ -4574,7 +4629,7 @@ public:
     }
 
 private:
-    const ValueSet _cachedRhsSet;
+    const ValueUnorderedSet _cachedRhsSet;
 };
 
 intrusive_ptr<Expression> ExpressionSetIsSubset::optimize() {
@@ -4594,7 +4649,7 @@ intrusive_ptr<Expression> ExpressionSetIsSubset::optimize() {
 
         intrusive_ptr<Expression> optimizedWithConstant(
             new Optimized(this->getExpressionContext(),
-                          arrayToSet(rhs, getExpressionContext()->getValueComparator()),
+                          arrayToUnorderedSet(rhs, getExpressionContext()->getValueComparator()),
                           _children));
         return optimizedWithConstant;
     }
@@ -7328,11 +7383,12 @@ void ExpressionDateTrunc::_doAddDependencies(DepsTracker* deps) const {
 }
 
 /* -------------------------- ExpressionGetField ------------------------------ */
-REGISTER_EXPRESSION_WITH_MIN_VERSION(getField,
-                                     ExpressionGetField::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(
+    getField,
+    ExpressionGetField::parse,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
 
 intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const expCtx,
                                                     BSONElement expr,
@@ -7439,18 +7495,20 @@ Value ExpressionGetField::serialize(const bool explain) const {
 }
 
 /* -------------------------- ExpressionSetField ------------------------------ */
-REGISTER_EXPRESSION_WITH_MIN_VERSION(setField,
-                                     ExpressionSetField::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(
+    setField,
+    ExpressionSetField::parse,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
 
 // $unsetField is syntactic sugar for $setField where value is set to $$REMOVE.
-REGISTER_EXPRESSION_WITH_MIN_VERSION(unsetField,
-                                     ExpressionSetField::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(
+    unsetField,
+    ExpressionSetField::parse,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
 
 intrusive_ptr<Expression> ExpressionSetField::parse(ExpressionContext* const expCtx,
                                                     BSONElement expr,
@@ -7581,11 +7639,12 @@ Value ExpressionTsSecond::evaluate(const Document& root, Variables* variables) c
     return Value(static_cast<long long>(operand.getTimestamp().getSecs()));
 }
 
-REGISTER_EXPRESSION_WITH_MIN_VERSION(tsSecond,
-                                     ExpressionTsSecond::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(
+    tsSecond,
+    ExpressionTsSecond::parse,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
 
 /* ------------------------- ExpressionTsIncrement ----------------------------- */
 
@@ -7604,11 +7663,12 @@ Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables
     return Value(static_cast<long long>(operand.getTimestamp().getInc()));
 }
 
-REGISTER_EXPRESSION_WITH_MIN_VERSION(tsIncrement,
-                                     ExpressionTsIncrement::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(
+    tsIncrement,
+    ExpressionTsIncrement::parse,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

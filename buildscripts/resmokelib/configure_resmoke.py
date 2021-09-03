@@ -171,7 +171,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
 
         # Specify additional feature flags from the command line.
         # Set running all feature flag tests to True if this options is specified.
-        additional_feature_flags = config.pop("additional_feature_flags")
+        additional_feature_flags = _tags_from_list(config.pop("additional_feature_flags"))
         if additional_feature_flags is not None:
             enabled_feature_flags.extend(additional_feature_flags)
 
@@ -312,23 +312,6 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.CEDAR_URL = config.pop("cedar_url")
     _config.CEDAR_RPC_PORT = config.pop("cedar_rpc_port")
 
-    def calculate_debug_symbol_url():
-        url = "https://mciuploads.s3.amazonaws.com"
-        project_name = _config.EVERGREEN_PROJECT_NAME
-        variant_name = _config.EVERGREEN_VARIANT_NAME
-        revision = _config.EVERGREEN_REVISION
-        task_id = _config.EVERGREEN_TASK_ID
-        if (variant_name is not None) and (revision is not None) and (task_id is not None):
-            url = "/".join([
-                url, project_name, variant_name, revision,
-                f"debugsymbols/debugsymbols-{_config.EVERGREEN_BUILD_ID}"
-            ])
-            url = url + (".zip" if sys.platform == "win32" else ".tgz")
-            return url
-        return None
-
-    _config.DEBUG_SYMBOLS_URL = calculate_debug_symbol_url()
-
     # Archival options. Archival is enabled only when running on evergreen.
     if not _config.EVERGREEN_TASK_ID:
         _config.ARCHIVE_FILE = None
@@ -371,6 +354,8 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
                 _config.EVERGREEN_TASK_DOC = evg_task_doc[task_name]
 
     _config.UNDO_RECORDER_PATH = config.pop("undo_recorder_path")
+
+    _config.EXCLUDE_TAGS_FILE_PATH = config.pop("exclude_tags_file_path")
 
     def configure_tests(test_files, replay_file):
         # `_validate_options` has asserted that at most one of `test_files` and `replay_file` contains input.

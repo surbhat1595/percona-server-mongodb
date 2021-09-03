@@ -3,9 +3,7 @@
  * responds to statistical increments in an expected way.
  *
  * @tags: [
- *   requires_fcv_49,
- *   uses_atclustertime,
- *   disabled_due_to_server_58295
+ *   uses_atclustertime
  * ]
  */
 
@@ -27,6 +25,11 @@ function verifyDict(dict, expected) {
         if (expected[key] === undefined) {
             jsTest.log(`${key}: ${tojson(dict[key])}`);
             continue;
+        } else if (key === "oplogEntriesFetched" || key === "oplogEntriesApplied") {
+            // The fetcher writes no-op entries for each getMore that returns an empty batch. We
+            // won't know how many getMores it called however, so we can only check that the metrics
+            // are gte the number of writes we're aware of.
+            assert.gte(dict[key], expected[key]);
         } else {
             assert.eq(dict[key],
                       expected[key],
@@ -127,11 +130,13 @@ const topology = DiscoverTopology.findConnectedNodes(mongos);
         "oplogEntriesApplied": e.applied,
     });
 
-    verifyDict(sub.opcounters, {
-        "insert": e.opcounters.insert,
-        "update": e.opcounters.update,
-        "delete": e.opcounters.delete,
-    });
+    if (!reshardingTest.isMixedVersionCluster()) {
+        verifyDict(sub.opcounters, {
+            "insert": e.opcounters.insert,
+            "update": e.opcounters.update,
+            "delete": e.opcounters.delete,
+        });
+    }
 
     // bytesCopied is harder to pin down but it should be >0.
     assert.betweenIn(1, sub['bytesCopied'], 1024, 'bytesCopied');

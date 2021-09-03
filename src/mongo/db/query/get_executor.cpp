@@ -351,8 +351,6 @@ void fillOutPlannerParams(OperationContext* opCtx,
         plannerParams->options |= QueryPlannerParams::GENERATE_COVERED_IXSCANS;
     }
 
-    plannerParams->options |= QueryPlannerParams::SPLIT_LIMITED_SORT;
-
     if (shouldWaitForOplogVisibility(
             opCtx, collection, canonicalQuery->getFindCommandRequest().getTailable())) {
         plannerParams->options |= QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
@@ -611,13 +609,15 @@ public:
                                         << " tailable cursor requested on non capped collection");
         }
 
+        // Fill in some opDebug information.
+        const auto planCacheKey =
+            CollectionQueryInfo::get(_collection).getPlanCache()->computeKey(*_cq);
+        CurOp::get(_opCtx)->debug().queryHash =
+            canonical_query_encoder::computeHash(planCacheKey.getStableKeyStringData());
+
         // Check that the query should be cached.
         if (CollectionQueryInfo::get(_collection).getPlanCache()->shouldCacheQuery(*_cq)) {
-            // Fill in opDebug information.
-            const auto planCacheKey =
-                CollectionQueryInfo::get(_collection).getPlanCache()->computeKey(*_cq);
-            CurOp::get(_opCtx)->debug().queryHash =
-                canonical_query_encoder::computeHash(planCacheKey.getStableKeyStringData());
+            // Fill in the 'planCacheKey' too if the query is actually being cached.
             CurOp::get(_opCtx)->debug().planCacheKey =
                 canonical_query_encoder::computeHash(planCacheKey.toString());
 
@@ -654,13 +654,15 @@ public:
             return buildSubPlan(plannerParams);
         }
 
-        auto statusWithSolutions = QueryPlanner::plan(*_cq, plannerParams);
-        if (!statusWithSolutions.isOK()) {
-            return statusWithSolutions.getStatus().withContext(
+        // We discard the post-multi-planned solution, but it will eventually be used to support
+        // '$group' pushdown.
+        auto&& [statusWithMultiPlanSolns, _] = QueryPlanner::plan(*_cq, plannerParams);
+        if (!statusWithMultiPlanSolns.isOK()) {
+            return statusWithMultiPlanSolns.getStatus().withContext(
                 str::stream() << "error processing query: " << _cq->toString()
                               << " planner returned error");
         }
-        auto solutions = std::move(statusWithSolutions.getValue());
+        auto solutions = std::move(statusWithMultiPlanSolns.getValue());
         // The planner should have returned an error status if there are no solutions.
         invariant(solutions.size() > 0);
 
@@ -1182,15 +1184,12 @@ inline bool isQuerySbeCompatible(OperationContext* opCtx,
             return part.fieldPath &&
                 !FieldRef(part.fieldPath->fullPath()).hasNumericPathComponents();
         });
-    // A find command with 'ntoreturn' is not supported in SBE due to the possibility of an
-    // ENSURE_SORTED stage.
-    const bool doesNotNeedEnsureSorted = !cq->getFindCommandRequest().getNtoreturn();
 
     // Queries against a time-series collection are not currently supported by SBE.
     const bool isQueryNotAgainstTimeseriesCollection = !(cq->nss().isTimeseriesBucketsCollection());
     return allExpressionsSupported && isNotCount && doesNotContainMetadataRequirements &&
-        doesNotNeedEnsureSorted && isQueryNotAgainstTimeseriesCollection &&
-        doesNotSortOnMetaOrPathWithNumericComponents && isNotOplog;
+        isQueryNotAgainstTimeseriesCollection && doesNotSortOnMetaOrPathWithNumericComponents &&
+        isNotOplog;
 }
 }  // namespace
 
@@ -1259,11 +1258,11 @@ StatusWith<std::unique_ptr<projection_ast::Projection>> makeProjection(const BSO
     invariant(!projObj.isEmpty());
 
     projection_ast::Projection proj =
-        projection_ast::parse(cq->getExpCtx(),
-                              projObj.getOwned(),
-                              cq->root(),
-                              cq->getQueryObj(),
-                              ProjectionPolicies::findProjectionPolicies());
+        projection_ast::parseAndAnalyze(cq->getExpCtx(),
+                                        projObj.getOwned(),
+                                        cq->root(),
+                                        cq->getQueryObj(),
+                                        ProjectionPolicies::findProjectionPolicies());
 
     // ProjectionExec requires the MatchDetails from the query expression when the projection
     // uses the positional operator. Since the query may no longer match the newly-updated
@@ -2428,8 +2427,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
 
     // Ask the QueryPlanner for a list of solutions that scan one of the indexes from
     // fillOutPlannerParamsForDistinct() (i.e., the indexes that include the distinct field).
-    auto statusWithSolutions = QueryPlanner::plan(*parsedDistinct->getQuery(), plannerParams);
-    if (!statusWithSolutions.isOK()) {
+    auto statusWithMultiPlanSolns =
+        QueryPlanner::planForMultiPlanner(*parsedDistinct->getQuery(), plannerParams);
+    if (!statusWithMultiPlanSolns.isOK()) {
         if (plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY) {
             return {nullptr};
         } else {
@@ -2437,7 +2437,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
                 opCtx, coll, parsedDistinct->releaseQuery(), yieldPolicy, plannerOptions);
         }
     }
-    auto solutions = std::move(statusWithSolutions.getValue());
+    auto solutions = std::move(statusWithMultiPlanSolns.getValue());
 
     // See if any of the solutions can be rewritten using a DISTINCT_SCAN. Note that, if the
     // STRICT_DISTINCT_ONLY flag is not set, we may get a DISTINCT_SCAN plan that filters out some

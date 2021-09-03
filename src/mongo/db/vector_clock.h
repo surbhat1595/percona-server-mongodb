@@ -142,7 +142,7 @@ public:
      */
     bool gossipOut(OperationContext* opCtx,
                    BSONObjBuilder* outMessage,
-                   const transport::Session::TagMask defaultClientSessionTags = 0) const;
+                   transport::Session::TagMask defaultClientSessionTags = 0) const;
 
     /**
      * Read the necessary fields from inMessage in order to update the current time, based on this
@@ -152,20 +152,12 @@ public:
     void gossipIn(OperationContext* opCtx,
                   const BSONObj& inMessage,
                   bool couldBeUnauthenticated,
-                  const transport::Session::TagMask defaultClientSessionTags = 0);
+                  transport::Session::TagMask defaultClientSessionTags = 0);
 
     /**
      * Returns true if the clock is enabled and can be used. Defaults to true.
      */
     bool isEnabled() const;
-
-    /**
-     * Advances, if necessary, the clusterTime and configTime components of the vector clock up to
-     * the configOpTime received from another node. Necessary to ensure that the Grid's configOpTime
-     * won't be greater than the VectorClock's clusterTime.
-     * TODO SERVER-54252: Remove this after 5.0 has branched out.
-     */
-    void gossipInConfigOpTime(const repl::OpTime& configOpTime);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////
     // The group of methods below is only used for unit-testing
@@ -307,8 +299,6 @@ protected:
 private:
     class PlainComponentFormat;
     class SignedComponentFormat;
-    template <class ActualFormat>
-    class OnlyOutOnNewFCVComponentFormat;
 
     /**
      * Called to determine if the cluster time component should be gossiped in and out to external

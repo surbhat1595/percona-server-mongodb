@@ -15,9 +15,6 @@
  *                 *when the range has been deleted on the donor.*
  * - behavior: Must be one of "unshardedOnly", "targetsPrimaryUsesConnectionVersioning" or
  * "versioned". Determines what system profiler checks are performed.
- * @tags: [
- *   disabled_due_to_server_58295
- * ]
  */
 (function() {
 "use strict";
@@ -53,17 +50,23 @@ let testCases = {
     _configsvrCommitChunksMerge: {skip: "primary only"},
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
-    _configsvrCommitMovePrimary: {skip: "primary only"},
-    _configsvrDropCollection: {skip: "primary only"},
-    _configsvrDropDatabase: {skip: "primary only"},
+    _configsvrCommitMovePrimary:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrConfigureAutoSplit: {skip: "primary only"},
+    _configsvrDropCollection:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrDropDatabase:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrMoveChunk: {skip: "primary only"},
-    _configsvrMovePrimary: {skip: "primary only"},
+    _configsvrMovePrimary:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrRemoveChunks: {skip: "primary only"},
     _configsvrRemoveShardFromZone: {skip: "primary only"},
     _configsvrRemoveTags: {skip: "primary only"},
     _configsvrReshardCollection: {skip: "primary only"},
     _configsvrSetAllowMigrations: {skip: "primary only"},
-    _configsvrShardCollection: {skip: "primary only"},
+    _configsvrShardCollection:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "primary only"},
     _flushReshardingStateChange: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdates: {skip: "does not return user data"},
@@ -120,6 +123,7 @@ let testCases = {
     commitReshardCollection: {skip: "primary only"},
     commitTransaction: {skip: "primary only"},
     compact: {skip: "does not return user data"},
+    configureCollectionAutoSplitter: {skip: "does not return user data"},
     configureFailPoint: {skip: "does not return user data"},
     connPoolStats: {skip: "does not return user data"},
     connPoolSync: {skip: "does not return user data"},

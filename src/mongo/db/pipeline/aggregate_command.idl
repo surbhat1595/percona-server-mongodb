@@ -212,21 +212,3 @@ commands:
                 type: uuid
                 optional: true
                 unstable: true
-            use44SortKeys:
-                # TODO SERVER-47065: A 5.0 node still has to accept the 'use44SortKeys' field, since it
-                # could be included in a command sent from a 4.4 mongos or 4.4 mongod. In 5.1, this
-                # code to tolerate the 'use44SortKeys' field can be deleted.
-                description: "If true, this aggregation will use the 4.4 sort key format."
-                type: bool
-                ignore: true
-                unstable: true
-            useNewUpsert:
-                # TODO SERVER-46751: we must retain the ability to ingest the 'useNewUpsert' field for
-                # 5.0 upgrade purposes, since a 4.4 mongoS will always send {useNewUpsert:true} to the
-                # shards. We do nothing with it because useNewUpsert will be automatically used in 5.0
-                # when appropriate. Remove this final vestige of useNewUpsert when 5.0 becomes
-                # last-lts.
-                description: "A flag to indicate wether or not to use new upsert option."
-                type: bool
-                ignore: true
-                unstable: true

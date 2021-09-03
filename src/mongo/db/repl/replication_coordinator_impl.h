@@ -39,6 +39,7 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/repl/initial_syncer.h"
+#include "mongo/db/repl/initial_syncer_interface.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_set_config.h"
@@ -373,16 +374,14 @@ public:
 
     virtual bool setContainsArbiter() const override;
 
-    virtual bool replSetContainsNewlyAddedMembers() const override;
-
     virtual void attemptToAdvanceStableTimestamp() override;
 
     virtual void finishRecoveryIfEligible(OperationContext* opCtx) override;
 
     virtual void updateAndLogStateTransitionMetrics(
-        const ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
-        const size_t numOpsKilled,
-        const size_t numOpsRunning) const override;
+        ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
+        size_t numOpsKilled,
+        size_t numOpsRunning) const override;
 
     virtual TopologyVersion getTopologyVersion() const override;
 
@@ -1265,7 +1264,7 @@ private:
      */
     std::shared_ptr<HelloResponse> _makeHelloResponse(boost::optional<StringData> horizonString,
                                                       WithLock,
-                                                      const bool hasValidConfig) const;
+                                                      bool hasValidConfig) const;
 
     /**
      * Creates a semi-future for HelloResponse. horizonString should be passed in if and only if
@@ -1501,11 +1500,6 @@ private:
      */
     void _setImplicitDefaultWriteConcern(OperationContext* opCtx, WithLock lk);
 
-    /**
-     * Checks whether replication coordinator supports automatic reconfig.
-     */
-    bool _supportsAutomaticReconfig() const;
-
     /*
      * Calculates and returns the read preference for the node.
      */
@@ -1632,7 +1626,7 @@ private:
     // Storage interface used by initial syncer.
     StorageInterface* _storage;  // (PS)
     // InitialSyncer used for initial sync.
-    std::shared_ptr<InitialSyncer>
+    std::shared_ptr<InitialSyncerInterface>
         _initialSyncer;  // (I) pointer set under mutex, copied by callers.
 
     // The non-null OpTime used for committed reads, if there is one.

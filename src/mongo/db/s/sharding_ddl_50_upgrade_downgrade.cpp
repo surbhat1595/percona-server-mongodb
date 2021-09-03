@@ -36,19 +36,6 @@ namespace mongo {
 using FeatureCompatibility = ServerGlobalParams::FeatureCompatibility;
 using FCVersion = FeatureCompatibility::Version;
 
-DatabaseEntryFormat::Format DatabaseEntryFormat::get(const FixedFCVRegion& fcvRegion) {
-    switch (fcvRegion->getVersion()) {
-        case FCVersion::kUpgradingFrom44To50:
-        case FCVersion::kUpgradingFrom49To50:
-        case FCVersion::kVersion50:
-            return feature_flags::gShardingFullDDLSupportTimestampedVersion.isEnabledAndIgnoreFCV()
-                ? Format::kUUIDandTimestamp
-                : Format::kUUIDOnly;
-        default:
-            return Format::kUUIDOnly;
-    }
-}
-
 ChunkEntryFormat::Format ChunkEntryFormat::get(const FixedFCVRegion& fcvRegion) {
     return getForVersionCallerGuaranteesFCVStability(fcvRegion->getVersion());
 }
@@ -58,18 +45,17 @@ ChunkEntryFormat::Format ChunkEntryFormat::getForVersionCallerGuaranteesFCVStabi
     switch (version) {
         case FCVersion::kUpgradingFrom44To50:
         case FCVersion::kUpgradingFrom49To50:
-            return feature_flags::gShardingFullDDLSupportTimestampedVersion.isEnabledAndIgnoreFCV()
-                ? Format::kNamespaceAndUUIDWithTimestamps
-                : Format::kNamespaceOnlyNoTimestamps;
-        case FCVersion::kVersion50:
-            return feature_flags::gShardingFullDDLSupportTimestampedVersion.isEnabledAndIgnoreFCV()
-                ? Format::kUUIDOnlyWithTimestamps
-                : Format::kNamespaceOnlyNoTimestamps;
+            return Format::kNamespaceAndUUIDWithTimestamps;
+        case FCVersion::kFullyDowngradedTo50:
+        case FCVersion::kVersion51:
+        case FCVersion::kUpgradingFrom50To51:
+        case FCVersion::kDowngradingFrom51To50:
+            return Format::kUUIDOnlyWithTimestamps;
+
         case FCVersion::kDowngradingFrom50To49:
         case FCVersion::kDowngradingFrom50To44:
-            return feature_flags::gShardingFullDDLSupportTimestampedVersion.isEnabledAndIgnoreFCV()
-                ? Format::kNamespaceAndUUIDNoTimestamps
-                : Format::kNamespaceOnlyNoTimestamps;
+            return Format::kNamespaceAndUUIDNoTimestamps;
+
         case FCVersion::kVersion49:
         case FCVersion::kVersion48:
         case FCVersion::kVersion47:

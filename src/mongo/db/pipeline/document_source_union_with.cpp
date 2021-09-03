@@ -33,6 +33,7 @@
 #include <iterator>
 
 #include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/db/pipeline/document_source_documents.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
@@ -80,6 +81,16 @@ DocumentSourceUnionWith::~DocumentSourceUnionWith() {
         _pipeline.reset();
     }
 }
+
+void validateUnionWithCollectionlessPipeline(
+    const boost::optional<std::vector<mongo::BSONObj>>& pipeline) {
+    uassert(ErrorCodes::FailedToParse,
+            "$unionWith stage without explicit collection must have a pipeline with $documents as "
+            "first stage",
+            pipeline && pipeline->size() > 0 &&
+                !(*pipeline)[0].getField(DocumentSourceDocuments::kStageName).eoo());
+}
+
 std::unique_ptr<DocumentSourceUnionWith::LiteParsed> DocumentSourceUnionWith::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec) {
     uassert(ErrorCodes::FailedToParse,
@@ -95,7 +106,13 @@ std::unique_ptr<DocumentSourceUnionWith::LiteParsed> DocumentSourceUnionWith::Li
     } else {
         auto unionWithSpec =
             UnionWithSpec::parse(IDLParserErrorContext(kStageName), spec.embeddedObject());
-        unionNss = NamespaceString(nss.db(), unionWithSpec.getColl());
+        if (unionWithSpec.getColl()) {
+            unionNss = NamespaceString(nss.db(), *unionWithSpec.getColl());
+        } else {
+            // If no collection specified, it must have $documents as first field in pipeline.
+            validateUnionWithCollectionlessPipeline(unionWithSpec.getPipeline());
+            unionNss = NamespaceString::makeCollectionlessAggregateNSS(nss.db());
+        }
 
         // Recursively lite parse the nested pipeline, if one exists.
         if (unionWithSpec.getPipeline()) {
@@ -147,7 +164,13 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::createFromBson(
     } else {
         auto unionWithSpec =
             UnionWithSpec::parse(IDLParserErrorContext(kStageName), elem.embeddedObject());
-        unionNss = NamespaceString(expCtx->ns.db().toString(), unionWithSpec.getColl());
+        if (unionWithSpec.getColl()) {
+            unionNss = NamespaceString(expCtx->ns.db().toString(), *unionWithSpec.getColl());
+        } else {
+            // if no collection specified, it must have $documents as first field in pipeline
+            validateUnionWithCollectionlessPipeline(unionWithSpec.getPipeline());
+            unionNss = NamespaceString::makeCollectionlessAggregateNSS(expCtx->ns.db());
+        }
         pipeline = unionWithSpec.getPipeline().value_or(std::vector<BSONObj>{});
     }
     return make_intrusive<DocumentSourceUnionWith>(
@@ -174,10 +197,7 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
 
     if (_executionState == ExecutionProgress::kStartingSubPipeline) {
         auto serializedPipe = _pipeline->serializeToBson();
-        LOGV2_DEBUG(23869,
-                    1,
-                    "$unionWith attaching cursor to pipeline {pipeline}",
-                    "pipeline"_attr = serializedPipe);
+        logStartingSubPipeline(serializedPipe);
         try {
             _pipeline =
                 pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(_pipeline.release());
@@ -187,13 +207,7 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
                 pExpCtx,
                 ExpressionContext::ResolvedNamespace{e->getNamespace(), e->getPipeline()},
                 serializedPipe);
-            LOGV2_DEBUG(4556300,
-                        3,
-                        "$unionWith found view definition. ns: {ns}, pipeline: {pipeline}. New "
-                        "$unionWith sub-pipeline: {new_pipe}",
-                        "ns"_attr = e->getNamespace(),
-                        "pipeline"_attr = Value(e->getPipeline()),
-                        "new_pipe"_attr = _pipeline->serializeToBson());
+            logShardedViewFound(e);
             return doGetNext();
         }
     }
@@ -209,10 +223,39 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
     return GetNextResult::makeEOF();
 }
 
+// The use of these logging macros is done in separate NOINLINE functions to reduce the stack space
+// used on the hot getNext() path. This is done to avoid stack overflows.
+MONGO_COMPILER_NOINLINE void DocumentSourceUnionWith::logStartingSubPipeline(
+    const std::vector<BSONObj>& serializedPipe) {
+    LOGV2_DEBUG(23869,
+                1,
+                "$unionWith attaching cursor to pipeline {pipeline}",
+                "pipeline"_attr = serializedPipe);
+}
+
+MONGO_COMPILER_NOINLINE void DocumentSourceUnionWith::logShardedViewFound(
+    const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
+    LOGV2_DEBUG(4556300,
+                3,
+                "$unionWith found view definition. ns: {ns}, pipeline: {pipeline}. New "
+                "$unionWith sub-pipeline: {new_pipe}",
+                "ns"_attr = e->getNamespace(),
+                "pipeline"_attr = Value(e->getPipeline()),
+                "new_pipe"_attr = _pipeline->serializeToBson());
+}
+
 Pipeline::SourceContainer::iterator DocumentSourceUnionWith::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     auto duplicateAcrossUnion = [&](auto&& nextStage) {
         _pipeline->addFinalSource(nextStage->clone());
+        // Apply the same rewrite to the cached pipeline if available.
+        if (pExpCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
+            auto cloneForExplain = nextStage->clone();
+            if (!_cachedPipeline.empty()) {
+                cloneForExplain->setSource(_cachedPipeline.back().get());
+            }
+            _cachedPipeline.push_back(std::move(cloneForExplain));
+        }
         auto newStageItr = container->insert(itr, std::move(nextStage));
         container->erase(std::next(itr));
         return newStageItr == container->begin() ? newStageItr : std::prev(newStageItr);
@@ -249,6 +292,7 @@ void DocumentSourceUnionWith::doDispose() {
 }
 
 Value DocumentSourceUnionWith::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
+    auto collectionless = _pipeline->getContext()->ns.isCollectionlessAggregateNS();
     if (explain) {
         // There are several different possible states depending on the explain verbosity as well as
         // the other stages in the pipeline:
@@ -273,8 +317,10 @@ Value DocumentSourceUnionWith::serialize(boost::optional<ExplainOptions::Verbosi
             BSONArrayBuilder bab;
             for (auto&& stage : _pipeline->serialize())
                 bab << stage;
-            return Value(DOC(getSourceName() << DOC("coll" << _pipeline->getContext()->ns.coll()
-                                                           << "pipeline" << bab.arr())));
+            auto spec = collectionless
+                ? DOC("pipeline" << bab.arr())
+                : DOC("coll" << _pipeline->getContext()->ns.coll() << "pipeline" << bab.arr());
+            return Value(DOC(getSourceName() << spec));
         }
 
         invariant(pipeCopy);
@@ -284,15 +330,18 @@ Value DocumentSourceUnionWith::serialize(boost::optional<ExplainOptions::Verbosi
         // We expect this to be an explanation of a pipeline -- there should only be one field.
         invariant(explainLocal.nFields() == 1);
 
-        return Value(
-            DOC(getSourceName() << DOC("coll" << _pipeline->getContext()->ns.coll() << "pipeline"
-                                              << explainLocal.firstElement())));
+        auto spec = collectionless ? DOC("pipeline" << explainLocal.firstElement())
+                                   : DOC("coll" << _pipeline->getContext()->ns.coll() << "pipeline"
+                                                << explainLocal.firstElement());
+        return Value(DOC(getSourceName() << spec));
     } else {
         BSONArrayBuilder bab;
         for (auto&& stage : _pipeline->serialize())
             bab << stage;
-        return Value(DOC(getSourceName() << DOC("coll" << _pipeline->getContext()->ns.coll()
-                                                       << "pipeline" << bab.arr())));
+        auto spec = collectionless
+            ? DOC("pipeline" << bab.arr())
+            : DOC("coll" << _pipeline->getContext()->ns.coll() << "pipeline" << bab.arr());
+        return Value(DOC(getSourceName() << spec));
     }
 }
 

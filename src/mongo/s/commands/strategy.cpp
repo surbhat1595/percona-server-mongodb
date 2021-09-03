@@ -49,11 +49,11 @@
 #include "mongo/db/error_labels.h"
 #include "mongo/db/initialize_api_parameters.h"
 #include "mongo/db/initialize_operation_session_info.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_time_tracker.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/find_common.h"
@@ -500,7 +500,8 @@ void ParseAndRunCommand::_parseCommand() {
     _isHello.emplace(command->getName() == "hello"_sd || command->getName() == "isMaster"_sd);
 
     opCtx->setExhaust(OpMsg::isFlagSet(m, OpMsg::kExhaustSupported));
-    const auto session = opCtx->getClient()->session();
+    Client* client = opCtx->getClient();
+    const auto session = client->session();
     if (session) {
         if (!opCtx->isExhaust() || !_isHello.get()) {
             InExhaustHello::get(session.get())->setInExhaust(false, _commandName);
@@ -529,10 +530,10 @@ void ParseAndRunCommand::_parseCommand() {
 
     // If the command includes a 'comment' field, set it on the current OpCtx.
     if (auto commentField = request.body["comment"]) {
+        stdx::lock_guard<Client> lk(*client);
         opCtx->setComment(commentField.wrap());
     }
 
-    Client* client = opCtx->getClient();
     auto const apiParamsFromClient = initializeAPIParameters(request.body, command);
 
     {
@@ -613,7 +614,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         apiVersionMetrics.update(appName, apiParams);
     }
 
-    rpc::readRequestMetadata(opCtx, request.body, command->requiresAuth());
+    rpc::readRequestMetadata(opCtx, request, command->requiresAuth());
 
     CommandHelpers::evaluateFailCommandFailPoint(opCtx, invocation.get());
     bool startTransaction = false;
@@ -675,15 +676,9 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
                 ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
             if (const auto wcDefault = rwcDefaults.getDefaultWriteConcern()) {
                 _parc->_wc = *wcDefault;
-                if (repl::feature_flags::gDefaultWCMajority.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
-                    const auto defaultWriteConcernSource =
-                        rwcDefaults.getDefaultWriteConcernSource();
-                    customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
-                        defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
-                } else {
-                    customDefaultWriteConcernWasApplied = true;
-                }
+                const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
+                customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
+                    defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
                 LOGV2_DEBUG(22766,
                             2,
                             "Applying default writeConcern on {command} of {writeConcern}",
@@ -861,11 +856,6 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     if (command->shouldAffectCommandCounter()) {
         globalOpCounters.gotCommand();
         _shouldAffectCommandCounter = true;
-    }
-
-    if (_parc->_opType == dbQuery && !_parc->_isHello.get()) {
-        warnDeprecation(*opCtx->getClient(), networkOpToString(dbQuery));
-        globalOpCounters.gotQueryDeprecated();
     }
 
     return Status::OK();
@@ -1056,7 +1046,7 @@ void ParseAndRunCommand::RunInvocation::_tapOnError(const Status& status) {
     const auto command = _parc->_rec->getCommand();
 
     command->incrementCommandsFailed();
-    LastError::get(opCtx->getClient()).setLastError(status.code(), status.reason());
+    NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(status.code());
     // WriteConcern error (wcCode) is set to boost::none because:
     // 1. TransientTransaction error label handling for commitTransaction command in mongos is
     //    delegated to the shards. Mongos simply propagates the shard's response up to the client.
@@ -1157,7 +1147,11 @@ private:
 void ClientCommand::_parseMessage() try {
     const auto& msg = _rec->getMessage();
     _rec->setReplyBuilder(rpc::makeReplyBuilder(rpc::protocolForMessage(msg)));
-    _rec->setRequest(rpc::opMsgRequestFromAnyProtocol(msg));
+    auto opMsgReq = rpc::opMsgRequestFromAnyProtocol(msg);
+    if (msg.operation() == dbQuery) {
+        checkAllowedOpQueryCommand(*(_rec->getOpCtx()->getClient()), opMsgReq.getCommandName());
+    }
+    _rec->setRequest(opMsgReq);
 } catch (const DBException& ex) {
     // If this error needs to fail the connection, propagate it out.
     if (ErrorCodes::isConnectionFatalMessageParseError(ex.code()))

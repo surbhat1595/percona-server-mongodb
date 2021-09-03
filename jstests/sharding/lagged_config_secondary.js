@@ -1,9 +1,6 @@
 /**
  * Test that mongos times out when the config server replica set only contains nodes that
  * are behind the majority opTime.
- * @tags: [
- *   disabled_due_to_server_58295
- * ]
  */
 
 load("jstests/libs/logv2_helpers.js");
@@ -23,13 +20,13 @@ TestData.skipCheckOrphans = true;
  * concern. For more deterministic testing of no-op writes to the oplog, disable uptime reporter
  * threads from reaching out to the config server.
  */
-const shardingUptimeFailpointName = jsTestOptions().mongosBinVersion == 'last-lts'
-    ? "failpoint.disableShardingUptimeReporterPeriodicThread"
-    : "failpoint.disableShardingUptimeReporting";
 var st = new ShardingTest({
     shards: 1,
     configReplSetTestOptions: {settings: {chainingAllowed: false}},
-    other: {mongosOptions: {setParameter: {[shardingUptimeFailpointName]: "{mode: 'alwaysOn'}"}}}
+    other: {
+        mongosOptions:
+            {setParameter: {["failpoint.disableShardingUptimeReporting"]: "{mode: 'alwaysOn'}"}}
+    }
 });
 
 var testDB = st.s.getDB('test');

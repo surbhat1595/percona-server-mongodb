@@ -44,7 +44,6 @@
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/count_scan.h"
 #include "mongo/db/exec/distinct_scan.h"
-#include "mongo/db/exec/ensure_sorted.h"
 #include "mongo/db/exec/eof.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/geo_near.h"
@@ -370,12 +369,6 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
             params.endKeyInclusive = csn->endKeyInclusive;
             return std::make_unique<CountScan>(expCtx, _collection, std::move(params), _ws);
         }
-        case STAGE_ENSURE_SORTED: {
-            const EnsureSortedNode* esn = static_cast<const EnsureSortedNode*>(root);
-            auto childStage = build(esn->children[0]);
-            return std::make_unique<EnsureSortedStage>(
-                expCtx, esn->pattern, _ws, std::move(childStage));
-        }
         case STAGE_EOF: {
             return std::make_unique<EOFStage>(expCtx);
         }
@@ -420,6 +413,8 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
         case STAGE_TRIAL:
         case STAGE_UNKNOWN:
         case STAGE_UNPACK_TIMESERIES_BUCKET:
+        case STAGE_GROUP:
+        case STAGE_SENTINEL:
         case STAGE_UPDATE: {
             LOGV2_WARNING(4615604, "Can't build exec tree for node", "node"_attr = *root);
         }

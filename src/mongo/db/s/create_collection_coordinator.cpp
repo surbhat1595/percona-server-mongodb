@@ -51,7 +51,6 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/cluster_write.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/request_types/shard_collection_gen.h"
 
 namespace mongo {
 namespace {
@@ -481,8 +480,8 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
 
                 audit::logShardCollection(opCtx->getClient(),
                                           nss().ns(),
-                                          *_doc.getCreateCollectionRequest().getShardKey(),
-                                          *_doc.getCreateCollectionRequest().getUnique());
+                                          *_doc.getShardKey(),
+                                          _doc.getUnique().value_or(false));
 
                 if (_splitPolicy->isOptimized()) {
                     // Block reads/writes from here on if we need to create
@@ -554,11 +553,11 @@ void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx
         auto catalogCache = Grid::get(opCtx)->catalogCache();
 
         auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss().db()));
-        if (dbInfo.shardingEnabled()) {
-            return true;
+        if (!dbInfo.shardingEnabled()) {
+            sharding_ddl_util::linearizeCSRSReads(opCtx);
+            dbInfo = uassertStatusOK(catalogCache->getDatabaseWithRefresh(opCtx, nss().db()));
         }
 
-        dbInfo = uassertStatusOK(catalogCache->getDatabaseWithRefresh(opCtx, nss().db()));
         return dbInfo.shardingEnabled();
     }();
 
@@ -679,7 +678,7 @@ void CreateCollectionCoordinator::_createPolicyAndChunks(OperationContext* opCtx
          *_collectionUUID,
          ShardingState::get(opCtx)->shardId(),
          ChunkEntryFormat::getForVersionCallerGuaranteesFCVStability(
-             ServerGlobalParams::FeatureCompatibility::Version::kVersion50)});
+             ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50)});
 
     // There must be at least one chunk.
     invariant(!_initialChunks.chunks.empty());
@@ -764,6 +763,12 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx) {
                         *_collectionUUID);
 
     coll.setKeyPattern(_shardKeyPattern->getKeyPattern());
+
+    const auto& currentFCV = serverGlobalParams.featureCompatibility;
+    if (currentFCV.isGreaterThanOrEqualTo(
+            ServerGlobalParams::FeatureCompatibility::Version::kVersion51)) {
+        coll.setSupportingLongName(SupportingLongNameStatusEnum::kImplicitlyEnabled);
+    }
 
     if (_doc.getCreateCollectionRequest().getTimeseries()) {
         TypeCollectionTimeseriesFields timeseriesFields;

@@ -47,13 +47,13 @@ CandidatePlans CachedSolutionPlanner::plan(
     invariant(solutions.size() == 1);
     invariant(solutions.size() == roots.size());
 
+    const double evictionRatio = internalQueryCacheEvictionRatio;
+    const size_t maxReadsBeforeReplan = evictionRatio * _decisionReads;
     auto candidate = [&]() {
         // In cached solution planning we collect execution stats with an upper bound on reads
         // allowed per trial run computed based on previous decision reads.
-        auto candidates = collectExecutionStats(
-            std::move(solutions),
-            std::move(roots),
-            static_cast<size_t>(internalQueryCacheEvictionRatio * _decisionReads));
+        auto candidates =
+            collectExecutionStats(std::move(solutions), std::move(roots), maxReadsBeforeReplan);
         invariant(candidates.size() == 1);
         return std::move(candidates[0]);
     }();
@@ -73,9 +73,10 @@ CandidatePlans CachedSolutionPlanner::plan(
 
     auto stats{candidate.root->getStats(false /* includeDebugInfo  */)};
     auto numReads{calculateNumberOfReads(stats.get())};
+
     // If the cached plan hit EOF quickly enough, or still as efficient as before, then no need to
     // replan. Finalize the cached plan and return it.
-    if (stats->common.isEOF || numReads <= _decisionReads) {
+    if (stats->common.isEOF || numReads <= maxReadsBeforeReplan) {
         return {makeVector(finalizeExecutionPlan(std::move(stats), std::move(candidate))), 0};
     }
 
@@ -86,7 +87,7 @@ CandidatePlans CachedSolutionPlanner::plan(
         1,
         "Evicting cache entry for a query and replanning it since the number of required reads "
         "mismatch the number of cached reads",
-        "maxReadsBeforeReplan"_attr = numReads,
+        "maxReadsBeforeReplan"_attr = maxReadsBeforeReplan,
         "decisionReads"_attr = _decisionReads,
         "query"_attr = redact(_cq.toStringShort()),
         "planSummary"_attr = explainer->getPlanSummary());
@@ -103,6 +104,12 @@ plan_ranker::CandidatePlan CachedSolutionPlanner::finalizeExecutionPlan(
     // tree, as we cannot resume such execution tree from where the trial run has stopped, and, as
     // a result, we cannot stash the results returned so far in the plan executor.
     if (!stats->common.isEOF && candidate.exitedEarly) {
+        if (_cq.getExplain()) {
+            // We save the stats on early exit if it's either an explain operation, as closing and
+            // re-opening the winning plan (below) changes the stats.
+            candidate.data.savedStatsOnEarlyExit =
+                candidate.root->getStats(true /* includeDebugInfo  */);
+        }
         candidate.root->close();
         candidate.root->open(false);
         // Clear the results queue.
@@ -136,7 +143,8 @@ CandidatePlans CachedSolutionPlanner::replan(bool shouldCache, std::string reaso
     };
 
     // Use the query planning module to plan the whole query.
-    auto solutions = uassertStatusOK(QueryPlanner::plan(_cq, _queryParams));
+    auto statusWithMultiPlanSolns = QueryPlanner::planForMultiPlanner(_cq, _queryParams);
+    auto solutions = uassertStatusOK(std::move(statusWithMultiPlanSolns));
     if (solutions.size() == 1) {
         // Only one possible plan. Build the stages from the solution.
         auto [root, data] = buildExecutableTree(*solutions[0]);

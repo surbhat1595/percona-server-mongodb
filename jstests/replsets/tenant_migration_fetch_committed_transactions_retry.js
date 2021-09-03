@@ -6,8 +6,13 @@
  * 3) Retrying while the migration is updating, and the donor starts a new transaction on an
  *    existing session.
  *
- * @tags: [requires_fcv_49, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -19,10 +24,6 @@ load("jstests/replsets/libs/tenant_migration_test.js");
 load("jstests/libs/uuid_util.js");
 
 let tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), sharedOptions: {nodes: 1}});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 const tenantId = "testTenantId";
 const collName = "testColl";
@@ -141,6 +142,10 @@ const assertTransactionEntries = (donorTxnEntries, recipientTxnEntries) => {
     const donorTxnEntries = runTransaction(donorPrimary, tenantDB, collName2);
     assert.eq(2, donorTxnEntries.length);
 
+    // Remove wait to recreate aggregation cursors to eliminate race conditions when waiting for
+    // the recipient to retry.
+    configureFailPoint(recipientPrimary, "skipWaitingToRecreateCursor");
+
     // Hang the recipient after it updates the first transaction entry.
     const hangAfterUpdatingTransactionEntry =
         configureFailPoint(recipientPrimary, "hangAfterUpdatingTransactionEntry");
@@ -209,6 +214,10 @@ const assertTransactionEntries = (donorTxnEntries, recipientTxnEntries) => {
     const session = donorPrimary.startSession({causalConsistency: false});
     const initialDonorTxnEntries = runTransaction(donorPrimary, tenantDB, collName2, session);
     assert.eq(2, initialDonorTxnEntries.length);
+
+    // Remove wait to recreate aggregation cursors to eliminate race conditions when waiting for
+    // the recipient to retry.
+    configureFailPoint(recipientPrimary, "skipWaitingToRecreateCursor");
 
     // Hang the recipient after it updates the first transaction entry.
     const hangAfterUpdatingTransactionEntry =

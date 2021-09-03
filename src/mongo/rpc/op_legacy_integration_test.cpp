@@ -54,6 +54,46 @@ long getDeprecatedOpCount(BSONObj serverStatus, const char* opName) {
     return deprecatedOpcounters ? deprecatedOpcounters[opName].Long() : 0;
 }
 
+Message makeDeprecatedUpdateMessage(StringData ns, BSONObj query, BSONObj update, int flags) {
+    return makeMessage(dbUpdate, [&](BufBuilder& b) {
+        const int reservedFlags = 0;
+        b.appendNum(reservedFlags);
+        b.appendStr(ns);
+        b.appendNum(flags);
+
+        query.appendSelfToBufBuilder(b);
+        update.appendSelfToBufBuilder(b);
+    });
+}
+
+Message makeDeprecatedRemoveMessage(StringData ns, BSONObj query, int flags) {
+    return makeMessage(dbDelete, [&](BufBuilder& b) {
+        const int reservedFlags = 0;
+        b.appendNum(reservedFlags);
+        b.appendStr(ns);
+        b.appendNum(flags);
+
+        query.appendSelfToBufBuilder(b);
+    });
+}
+
+Message makeDeprecatedKillCursorsMessage(long long cursorId) {
+    return makeMessage(dbKillCursors, [&](BufBuilder& b) {
+        b.appendNum((int)0);  // reserved
+        b.appendNum((int)1);  // number
+        b.appendNum(cursorId);
+    });
+}
+
+Message makeDeprecatedGetMoreMessage(StringData ns, long long cursorId, int nToReturn, int flags) {
+    return makeMessage(dbGetMore, [&](BufBuilder& b) {
+        b.appendNum(flags);
+        b.appendStr(ns);
+        b.appendNum(nToReturn);
+        b.appendNum(cursorId);
+    });
+}
+
 // Issue a find command request so we can use cursor id from it to test the deprecated getMore
 // and killCursors ops.
 int64_t getValidCursorIdFromFindCmd(DBClientBase* conn, const char* collName) {
@@ -184,6 +224,9 @@ TEST(OpLegacy, DeprecatedReadOpsCounters) {
               getDeprecatedOpCount(serverStatusReply, "total"));
 }
 
+// The dochub link for deprecation warning messages.
+static constexpr auto docLink = "https://dochub.mongodb.org/core/legacy-opcode-compatibility";
+
 // Check whether the most recent "deprecation" entry in the log matches the given opName and
 // severity (if the 'severity' string isn't empty). Return 'false' if no deprecation entries found.
 bool wasLogged(DBClientBase* conn, const std::string& opName, const std::string& severity) {
@@ -194,6 +237,7 @@ bool wasLogged(DBClientBase* conn, const std::string& opName, const std::string&
     for (auto it = logEntries.rbegin(); it != logEntries.rend(); ++it) {
         auto entry = it->String();
         if (entry.find("\"id\":5578800") != std::string::npos) {
+            ASSERT_TRUE(entry.find(docLink) != std::string::npos);
             const bool severityMatches = severity.empty() ||
                 (entry.find(std::string("\"s\":\"") + severity + "\"") != std::string::npos);
             const bool opNameMatches =
@@ -343,7 +387,8 @@ TEST(OpLegacy, GenericCommandViaOpQuery) {
     QueryResult::ConstView qr = replyQuery.singleData().view2ptr();
     BufReader data(qr.data(), qr.dataLen());
     BSONObj obj = data.read<BSONObj>();
-    ASSERT_OK(getStatusFromCommandResult(obj));  // will fail after we remove the support for $cmd
+    auto status = getStatusFromCommandResult(obj);
+    ASSERT_EQ(status.code(), ErrorCodes::UnsupportedOpQueryCommand);
 
     // The logic around log severity for the deprecation logging is tested elsewhere. Here we check
     // that it gets logged at all.
@@ -356,7 +401,7 @@ TEST(OpLegacy, GenericCommandViaOpQuery) {
 }
 
 // 'hello' and 'isMaster' commands, issued via OP_QUERY protocol, are still fully supported.
-void testAllowedCommand(const char* command) {
+void testAllowedCommand(const char* command, ErrorCodes::Error code = ErrorCodes::OK) {
     auto conn = getIntegrationTestConnection();
 
     auto serverStatusCmd = fromjson("{serverStatus: 1}");
@@ -379,7 +424,8 @@ void testAllowedCommand(const char* command) {
     QueryResult::ConstView qr = replyQuery.singleData().view2ptr();
     BufReader data(qr.data(), qr.dataLen());
     BSONObj obj = data.read<BSONObj>();
-    ASSERT_OK(getStatusFromCommandResult(obj));
+    auto status = getStatusFromCommandResult(obj);
+    ASSERT_EQ(status.code(), code);
 
     ASSERT_FALSE(wasLogged(conn.get(), "query", ""));
 
@@ -389,12 +435,63 @@ void testAllowedCommand(const char* command) {
               getDeprecatedOpCount(serverStatusReply, "query"));
 }
 
+TEST(OpLegacy, IsSelfCommandViaOpQuery) {
+    testAllowedCommand("{_isSelf: 1}");
+}
+
+TEST(OpLegacy, BuildinfoCommandViaOpQuery) {
+    testAllowedCommand("{buildinfo: 1}");
+}
+
+TEST(OpLegacy, BuildInfoCommandViaOpQuery) {
+    testAllowedCommand("{buildInfo: 1}");
+}
+
 TEST(OpLegacy, HelloCommandViaOpQuery) {
     testAllowedCommand("{hello: 1}");
 }
 
 TEST(OpLegacy, IsMasterCommandViaOpQuery) {
     testAllowedCommand("{isMaster: 1}");
+}
+
+TEST(OpLegacy, IsmasterCommandViaOpQuery) {
+    testAllowedCommand("{ismaster: 1}");
+}
+
+TEST(OpLegacy, SaslStartCommandViaOpQuery) {
+    // Here we verify that "saslStart" command passes parsing since the request is actually
+    // an invalid authentication request which is capture from a log. The AuthenticationFailed error
+    // code means that it passes request parsing.
+    testAllowedCommand(R"({
+                           saslStart: 1,
+                           "mechanism":"SCRAM-SHA-256",
+                           "options":{"skipEmptyExchange":true},
+                           "payload":{
+                               "$binary":{
+                                   "base64":"biwsbj1fX3N5c3RlbSxyPUlyNDVmQm1WNWNuUXJSS3FhdU9JUERCTUhkV2NrK01i",
+                                   "subType":"0"
+                               }
+                           }
+                       })",
+                       ErrorCodes::AuthenticationFailed);
+}
+
+TEST(OpLegacy, SaslContinueCommandViaOpQuery) {
+    // Here we verify that "saslContinue" command passes parsing since the request is actually
+    // an invalid authentication request which is captured from a log. The ProtocolError error code
+    // means that it passes request parsing.
+    testAllowedCommand(R"({
+                           saslContinue: 1,
+                           "payload":{
+                               "$binary":{
+                                   "base64":"Yz1iaXdzLHI9SXI0NWZCbVY1Y25RclJLcWF1T0lQREJNSGRXY2srTWJSNE81SnJrcnV4anorRDl2WXkrKzlnNlhBVHFCV0pMbSxwPUJTV3puZnNjcG8rYVhnc1YyT2xEa2NFSjF5NW9rM2xWSWQybjc4NlJ5MTQ9",
+                                   "subType":"0"
+                               }
+                           },
+                           "conversationId":1
+                       })",
+                       ErrorCodes::ProtocolError);
 }
 
 }  // namespace

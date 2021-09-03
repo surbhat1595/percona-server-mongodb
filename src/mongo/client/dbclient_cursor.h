@@ -130,14 +130,6 @@ public:
         return tailable() && (opts & QueryOption_AwaitData);
     }
 
-    /** see ResultFlagType (constants.h) for flag values
-        mostly these flags are for internal purposes -
-        ResultFlag_ErrSet is the possible exception to that
-    */
-    bool hasResultFlag(int flag) {
-        return (resultFlags & flag) != 0;
-    }
-
     /// Change batchSize after construction. Can change after requesting first batch.
     void setBatchSize(int newBatchSize) {
         batchSize = newBatchSize;
@@ -146,7 +138,7 @@ public:
     DBClientCursor(DBClientBase* client,
                    const NamespaceStringOrUUID& nsOrUuid,
                    const BSONObj& query,
-                   int nToReturn,
+                   int limit,
                    int nToSkip,
                    const BSONObj* fieldsToReturn,
                    int queryOptions,
@@ -156,10 +148,11 @@ public:
     DBClientCursor(DBClientBase* client,
                    const NamespaceStringOrUUID& nsOrUuid,
                    long long cursorId,
-                   int nToReturn,
+                   int limit,
                    int options,
                    std::vector<BSONObj> initialBatch = {},
-                   boost::optional<Timestamp> operationTime = boost::none);
+                   boost::optional<Timestamp> operationTime = boost::none,
+                   boost::optional<BSONObj> postBatchResumeToken = boost::none);
 
     static StatusWith<std::unique_ptr<DBClientCursor>> fromAggregationRequest(
         DBClientBase* client,
@@ -198,9 +191,6 @@ public:
      */
     bool init();
 
-    void initLazy(bool isRetry = false);
-    bool initLazyFinish(bool& retry);
-
     /**
      * For exhaust. Used in DBClientConnection.
      */
@@ -224,8 +214,7 @@ public:
      * If true, you should not try to use the connection for any other purpose or return it to a
      * pool.
      *
-     * This can happen if either initLazy() was called without initLazyFinish() or an exhaust query
-     * was started but not completed.
+     * This can happen if an exhaust query was started but not completed.
      */
     bool connectionHasPendingReplies() const {
         return _connectionHasPendingReplies;
@@ -281,16 +270,15 @@ private:
                    const NamespaceStringOrUUID& nsOrUuid,
                    const BSONObj& query,
                    long long cursorId,
-                   int nToReturn,
+                   int limit,
                    int nToSkip,
                    const BSONObj* fieldsToReturn,
                    int queryOptions,
                    int bs,
                    std::vector<BSONObj> initialBatch,
                    boost::optional<BSONObj> readConcernObj,
-                   boost::optional<Timestamp> operationTime);
-
-    int nextBatchSize();
+                   boost::optional<Timestamp> operationTime,
+                   boost::optional<BSONObj> postBatchResumeToken = boost::none);
 
     DBClientBase* _client;
     std::string _originalHost;
@@ -300,27 +288,24 @@ private:
     // command.
     NamespaceString ns;
     BSONObj query;
-    int nToReturn;
-    bool haveLimit;
+    int limit;
     int nToSkip;
     const BSONObj* fieldsToReturn;
     int opts;
     int batchSize;
     std::stack<BSONObj> _putBack;
-    int resultFlags;
     long long cursorId;
     bool _ownCursor;  // see decouple()
     std::string _scopedHost;
-    std::string _lazyHost;
     bool wasError;
     bool _connectionHasPendingReplies = false;
     int _lastRequestId = 0;
     Milliseconds _awaitDataTimeout = Milliseconds{0};
     boost::optional<long long> _term;
     boost::optional<repl::OpTime> _lastKnownCommittedOpTime;
-    boost::optional<BSONObj> _postBatchResumeToken;
     boost::optional<BSONObj> _readConcernObj;
     boost::optional<Timestamp> _operationTime;
+    boost::optional<BSONObj> _postBatchResumeToken;
 
     void dataReceived(const Message& reply) {
         bool retry;

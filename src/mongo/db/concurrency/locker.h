@@ -345,16 +345,15 @@ public:
      * The precise lock stats of a sub-operation would be the stats from the locker info minus the
      * lockStatsBase.
      */
-    virtual void getLockerInfo(
-        LockerInfo* lockerInfo,
-        const boost::optional<SingleThreadedLockStats> lockStatsBase) const = 0;
+    virtual void getLockerInfo(LockerInfo* lockerInfo,
+                               boost::optional<SingleThreadedLockStats> lockStatsBase) const = 0;
 
     /**
      * Returns boost::none if this is an instance of LockerNoop, or a populated LockerInfo
      * otherwise.
      */
     virtual boost::optional<LockerInfo> getLockerInfo(
-        const boost::optional<SingleThreadedLockStats> lockStatsBase) const = 0;
+        boost::optional<SingleThreadedLockStats> lockStatsBase) const = 0;
 
     /**
      * LockSnapshot captures the state of all resources that are locked, what modes they're
@@ -489,13 +488,18 @@ public:
     }
 
     /**
-     * This will opt out of the ticket mechanism. This should be used sparingly for special purpose
-     * threads, such as FTDC and committing or aborting prepared transactions.
+     * This will opt in or out of the ticket mechanism. This should be used sparingly for special
+     * purpose threads, such as FTDC and committing or aborting prepared transactions.
      */
     void skipAcquireTicket() {
         // Should not hold or wait for the ticket.
         invariant(isNoop() || getClientState() == Locker::ClientState::kInactive);
         _shouldAcquireTicket = false;
+    }
+    void setAcquireTicket() {
+        // Should hold or wait for the ticket.
+        invariant(isNoop() || getClientState() == Locker::ClientState::kInactive);
+        _shouldAcquireTicket = true;
     }
 
     bool shouldAcquireTicket() const {

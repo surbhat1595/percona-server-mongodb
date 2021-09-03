@@ -3,9 +3,7 @@
  * or insert state documents for resharding.
  *
  * @tags: [
- *   requires_fcv_49,
- *   uses_atclustertime,
- *   disabled_due_to_server_58295
+ *   uses_atclustertime
  * ]
  */
 (function() {

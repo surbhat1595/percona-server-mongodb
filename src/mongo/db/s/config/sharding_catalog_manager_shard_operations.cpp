@@ -59,7 +59,6 @@
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/s/add_shard_cmd_gen.h"
 #include "mongo/db/s/add_shard_util.h"
-#include "mongo/db/s/sharding_ddl_50_upgrade_downgrade.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/vector_clock_mutable.h"
@@ -698,12 +697,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
 
         SetFeatureCompatibilityVersion setFcvCmd(fcvRegion->getVersion());
         setFcvCmd.setDbName(NamespaceString::kAdminDb);
-        // TODO (SERVER-50954): Remove this FCV check once 4.4 is no longer the last LTS version.
-        if (fcvRegion->isGreaterThanOrEqualTo(FeatureCompatibility::Version::kVersion47)) {
-            // fromConfigServer is a new parameter added to 4.8 with intention to be backported
-            // to 4.7.
-            setFcvCmd.setFromConfigServer(true);
-        }
+        setFcvCmd.setFromConfigServer(true);
 
         auto versionResponse =
             _runCommandForAddShard(opCtx,
@@ -745,11 +739,8 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
 
         // Add all databases which were discovered on the new shard
         for (const auto& dbName : dbNamesStatus.getValue()) {
-            boost::optional<Timestamp> clusterTime;
-            if (DatabaseEntryFormat::get(fcvRegion) == DatabaseEntryFormat::kUUIDandTimestamp) {
-                const auto now = VectorClock::get(opCtx)->getTime();
-                clusterTime = now.clusterTime().asTimestamp();
-            }
+            const auto now = VectorClock::get(opCtx)->getTime();
+            const auto clusterTime = now.clusterTime().asTimestamp();
 
             DatabaseType dbt(
                 dbName, shardType.getName(), false, DatabaseVersion(UUID::gen(), clusterTime));

@@ -3,7 +3,6 @@
 import sys
 
 from buildscripts.resmokelib import errors
-from buildscripts.resmokelib.logging import loggers
 from buildscripts.resmokelib.testing.testcases import interface as testcase
 from buildscripts.resmokelib.utils import registry
 
@@ -24,6 +23,10 @@ class Hook(object, metaclass=registry.make_registry_metaclass(_HOOKS)):  # pylin
 
     REGISTERED_NAME = registry.LEAVE_UNREGISTERED
 
+    # Whether the hook runs in the background of a test. Typically background jobs start their own threads,
+    # except for Server-side background activity like initial sync, which is also considered background.
+    IS_BACKGROUND = None
+
     def __init__(self, hook_logger, fixture, description):
         """Initialize the Hook with the specified fixture."""
 
@@ -31,14 +34,19 @@ class Hook(object, metaclass=registry.make_registry_metaclass(_HOOKS)):  # pylin
         self.fixture = fixture
         self.description = description
 
+        if self.IS_BACKGROUND is None:
+            raise ValueError(
+                "Concrete Hook subclasses must override the IS_BACKGROUND class property")
+
     def before_suite(self, test_report):
         """Test runner calls this exactly once before they start running the suite."""
         pass
 
-    def after_suite(self, test_report):
+    def after_suite(self, test_report, teardown_flag=None):
         """Invoke by test runner calls this exactly once after all tests have finished executing.
 
         Be sure to reset the behavior back to its original state so that it can be run again.
+        Hook failures in this function should set 'teardown_flag' since there is no testcase available.
         """
         pass
 

@@ -230,6 +230,40 @@ env.AddMethod(injectThirdParty, 'InjectThirdParty')
 
 env = env.Clone()
 
+# Construct an empty object file that we can use to produce the
+# library for every shim. This avoids the need to create and name a
+# different empty source file for every third-party library, as we did
+# in the past.
+
+empty_source=env.Textfile(
+    target='third_party_shim.cpp',
+    source=str(),
+)
+env.Alias('generated-sources', empty_source)
+
+empty_object = env.LibraryObject(
+    target='third_party_shim',
+    source=empty_source,
+)
+
+def shim_library(env, name, **kwargs):
+    # Add the 'virtual-libdep' tag, which will prevent shim libraries
+    # from actually being linked to. They don't provide any symbols,
+    # so there is no need to do so. Instead, they just act as a node
+    # in the library dependency graph to reach other libraries.
+    libdeps_tags = kwargs.get('LIBDEPS_TAGS', env.get('LIBDEPS_TAGS', [])).copy()
+    libdeps_tags.append('virtual-libdep')
+    kwargs['LIBDEPS_TAGS'] = libdeps_tags
+    return env.Library(
+        target=f'shim_{name}',
+        source=empty_object[0],
+        # Since nothing will link to this library per the
+        # `virtual-libdep` tag above, we can also skip installing it.
+        AIB_IGNORE=True,
+        **kwargs,
+    )
+env.AddMethod(shim_library, 'ShimLibrary')
+
 murmurEnv = env.Clone()
 murmurEnv.InjectThirdParty(libraries=['fmt'])
 murmurEnv.SConscript('murmurhash3/SConscript', exports={ 'env' : murmurEnv })
@@ -250,8 +284,6 @@ s2Env.SConscript('s2/SConscript', exports={'env' : s2Env})
 if use_libunwind:
     unwindEnv = env.Clone(
         LIBDEPS_NO_INHERIT=[
-            '$BUILD_DIR/shim_crt',
-            '$BUILD_DIR/shim_cxx',
             '$BUILD_DIR/third_party/shim_allocator',
         ],
     )
@@ -357,6 +389,7 @@ if use_system_version_of_library("abseil-cpp"):
         SYSLIBDEPS=[
             env['LIBDEPS_ABSL_CONTAINER_SYSLIBDEP'],
             env['LIBDEPS_ABSL_HASH_SYSLIBDEP'],
+            env['LIBDEPS_ABSL_NUMERIC_SYSLIBDEP'],
         ])
 else:
     abseilDirectory = 'abseil-cpp-master'
@@ -367,6 +400,7 @@ else:
         LIBDEPS_INTERFACE=[
             abseilDirectory + '/absl_container',
             abseilDirectory + '/absl_hash',
+            abseilDirectory + '/absl_numeric', 
         ])
 
 abseilEnv.ShimLibrary(name="abseil")
@@ -472,8 +506,6 @@ if "tom" in env["MONGO_CRYPTO"]:
 
 gperftoolsEnv = env.Clone(
     LIBDEPS_NO_INHERIT=[
-        '$BUILD_DIR/shim_crt',
-        '$BUILD_DIR/shim_cxx',
         '$BUILD_DIR/third_party/shim_allocator',
     ],
 )

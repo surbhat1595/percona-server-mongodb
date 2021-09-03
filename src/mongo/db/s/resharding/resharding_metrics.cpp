@@ -36,6 +36,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/integer_histogram.h"
 #include "mongo/util/with_alignment.h"
 
 namespace mongo {
@@ -68,6 +69,9 @@ constexpr auto kLastOpEndingChunkImbalance = "lastOpEndingChunkImbalance";
 constexpr auto kOpCounters = "opcounters";
 constexpr auto kMinRemainingOperationTime = "minShardRemainingOperationTimeEstimatedMillis";
 constexpr auto kMaxRemainingOperationTime = "maxShardRemainingOperationTimeEstimatedMillis";
+constexpr auto kOplogApplierApplyBatchLatencyMillis = "oplogApplierApplyBatchLatencyMillis";
+constexpr auto kCollClonerFillBatchForInsertLatencyMillis =
+    "collClonerFillBatchForInsertLatencyMillis";
 
 using MetricsPtr = std::unique_ptr<ReshardingMetrics>;
 
@@ -89,6 +93,13 @@ Milliseconds remainingTime(Milliseconds elapsedTime, double elapsedWork, double 
     elapsedWork = std::min(elapsedWork, totalWork);
     double remainingMsec = 1.0 * elapsedTime.count() * (totalWork / elapsedWork - 1);
     return Milliseconds(Milliseconds::rep(remainingMsec));
+}
+
+void appendHistogram(BSONObjBuilder* bob,
+                     const IntegerHistogram<kLatencyHistogramBucketsCount>& hist) {
+    BSONObjBuilder histogramBuilder;
+    hist.append(histogramBuilder, false);
+    bob->appendElements(histogramBuilder.obj());
 }
 
 static StringData serializeState(boost::optional<RecipientStateEnum> e) {
@@ -155,13 +166,19 @@ private:
 class TimeInterval {
 public:
     void start(Date_t d) noexcept {
-        invariant(!_start, "Already started");
+        if (_start) {
+            LOGV2_WARNING(5892600, "Resharding metrics already started, start() is a no-op");
+            return;
+        }
         _start = d;
     }
 
     void end(Date_t d) noexcept {
         invariant(_start, "Not started");
-        invariant(!_end, "Already stopped");
+        if (_end) {
+            LOGV2_WARNING(5892601, "Resharding metrics already ended, end() is a no-op");
+            return;
+        }
         _end = d;
     }
 
@@ -211,6 +228,13 @@ public:
     int64_t writesDuringCriticalSection = 0;
 
     int64_t chunkImbalanceCount = 0;
+
+    IntegerHistogram<kLatencyHistogramBucketsCount> oplogApplierApplyBatchLatencyMillis =
+        IntegerHistogram<kLatencyHistogramBucketsCount>(kOplogApplierApplyBatchLatencyMillis,
+                                                        latencyHistogramBuckets);
+    IntegerHistogram<kLatencyHistogramBucketsCount> collClonerFillBatchForInsertLatencyMillis =
+        IntegerHistogram<kLatencyHistogramBucketsCount>(kCollClonerFillBatchForInsertLatencyMillis,
+                                                        latencyHistogramBuckets);
 
     // The ops done by resharding to keep up with the client writes.
     ReshardingOpCounters opCounters;
@@ -293,6 +317,9 @@ void ReshardingMetrics::OperationMetrics::appendCurrentOpMetrics(BSONObjBuilder*
             bob->append(kRecipientState,
                         serializeState(recipientState.get_value_or(RecipientStateEnum::kUnused)));
             bob->append(kOpStatus, ReshardingOperationStatus_serializer(opStatus));
+
+            appendHistogram(bob, oplogApplierApplyBatchLatencyMillis);
+            appendHistogram(bob, collClonerFillBatchForInsertLatencyMillis);
             break;
         case Role::kCoordinator:
             bob->append(kCoordinatorState, serializeState(coordinatorState));
@@ -516,15 +543,17 @@ void ReshardingMetrics::setLastReshardChunkImbalanceCount(int64_t newCount) noex
 }
 
 void ReshardingMetrics::setMinRemainingOperationTime(Milliseconds minTime) noexcept {
-    invariant(_currentOp, kNoOperationInProgress);
-
-    _cumulativeOp->minRemainingOperationTime = minTime;
+    stdx::lock_guard<Latch> lk(_mutex);
+    if (_currentOp) {
+        _cumulativeOp->minRemainingOperationTime = minTime;
+    }
 }
 
 void ReshardingMetrics::setMaxRemainingOperationTime(Milliseconds maxTime) noexcept {
-    invariant(_currentOp, kNoOperationInProgress);
-
-    _cumulativeOp->maxRemainingOperationTime = maxTime;
+    stdx::lock_guard<Latch> lk(_mutex);
+    if (_currentOp) {
+        _cumulativeOp->maxRemainingOperationTime = maxTime;
+    }
 }
 
 void ReshardingMetrics::onDocumentsCopied(int64_t documents, int64_t bytes) noexcept {
@@ -549,6 +578,29 @@ void ReshardingMetrics::onDocumentsCopiedForCurrentOp(int64_t documents, int64_t
 
 void ReshardingMetrics::gotInserts(int n) noexcept {
     _cumulativeOp->gotInserts(n);
+}
+
+void ReshardingMetrics::onOplogApplierApplyBatch(Milliseconds latency) {
+    stdx::lock_guard<Latch> lk(_mutex);
+    invariant(_currentOp, kNoOperationInProgress);
+    invariant(checkState(*_currentOp->recipientState,
+                         {RecipientStateEnum::kApplying, RecipientStateEnum::kError}));
+
+    _currentOp->oplogApplierApplyBatchLatencyMillis.increment(durationCount<Milliseconds>(latency));
+    _cumulativeOp->oplogApplierApplyBatchLatencyMillis.increment(
+        durationCount<Milliseconds>(latency));
+}
+
+void ReshardingMetrics::onCollClonerFillBatchForInsert(Milliseconds latency) {
+    stdx::lock_guard<Latch> lk(_mutex);
+    invariant(_currentOp, kNoOperationInProgress);
+    invariant(checkState(*_currentOp->recipientState,
+                         {RecipientStateEnum::kCloning, RecipientStateEnum::kError}));
+
+    _currentOp->collClonerFillBatchForInsertLatencyMillis.increment(
+        durationCount<Milliseconds>(latency));
+    _cumulativeOp->collClonerFillBatchForInsertLatencyMillis.increment(
+        durationCount<Milliseconds>(latency));
 }
 
 void ReshardingMetrics::gotInsert() noexcept {
@@ -728,6 +780,9 @@ void ReshardingMetrics::serializeCumulativeOpMetrics(BSONObjBuilder* bob) const 
                 getRemainingOperationTime(ops.minRemainingOperationTime));
     bob->append(kMaxRemainingOperationTime,
                 getRemainingOperationTime(ops.maxRemainingOperationTime));
+
+    appendHistogram(bob, ops.oplogApplierApplyBatchLatencyMillis);
+    appendHistogram(bob, ops.collClonerFillBatchForInsertLatencyMillis);
 }
 
 Date_t ReshardingMetrics::_now() const {

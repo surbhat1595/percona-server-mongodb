@@ -34,7 +34,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/timer.h"
@@ -66,7 +65,7 @@ public:
 
         client.dropCollection(ns);
 
-        response = client.insertAcknowledged(ns, objs, InsertOption_ContinueOnError);
+        response = client.insertAcknowledged(ns, objs, false /*ordered*/);
         ASSERT_EQUALS(ErrorCodes::DuplicateKey, getStatusFromWriteCommandReply(response));
         ASSERT_EQUALS((int)client.count(NamespaceString(ns)), 2);
     }
@@ -108,7 +107,7 @@ public:
         DBDirectClient client(&opCtx);
 
         ASSERT_THROWS_CODE(
-            client.getMore("", 1, 1)->nextSafe(), AssertionException, ErrorCodes::InvalidNamespace);
+            client.getMore("", 1)->nextSafe(), AssertionException, ErrorCodes::InvalidNamespace);
     }
 };
 
@@ -119,7 +118,7 @@ public:
         OperationContext& opCtx = *opCtxPtr;
         DBDirectClient client(&opCtx);
 
-        auto response = client.insertAcknowledged("", {BSONObj()}, 0);
+        auto response = client.insertAcknowledged("", {BSONObj()});
         ASSERT_EQ(ErrorCodes::InvalidNamespace, getStatusFromCommandResult(response));
     }
 };

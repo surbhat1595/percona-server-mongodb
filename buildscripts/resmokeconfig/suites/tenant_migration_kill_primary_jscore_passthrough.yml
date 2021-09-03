@@ -96,6 +96,9 @@ selector:
   - jstests/core/views/invalid_system_views.js
   - jstests/core/views/views_all_commands.js
   - jstests/core/rename_collection_staytemp.js
+  # This test runs createIndexes commands without asserting they succeed and depends on a particular
+  # index to exist.
+  - jstests/core/index_many2.js
 
   #
   # From retryable writes jscore stepdown passthrough
@@ -286,6 +289,10 @@ executor:
       global_vars:
         TestData: *TestData
   - class: ValidateCollections
+    shell_options:
+      global_vars:
+        TestData:
+          skipEnforceFastCountOnValidate: true
   - class: CleanEveryN
     n: 1
   fixture:

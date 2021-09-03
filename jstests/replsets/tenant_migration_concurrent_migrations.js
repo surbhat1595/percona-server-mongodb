@@ -6,8 +6,13 @@
  * migration state to "committed" and "aborted" to be majority committed but it cannot do that on
  * ephemeralForTest.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -41,10 +46,6 @@ const kTenantIdPrefix = "testTenantId";
 // Test concurrent outgoing migrations to different recipients.
 (() => {
     const tenantMigrationTest0 = new TenantMigrationTest({donorRst: rst0, recipientRst: rst1});
-    if (!tenantMigrationTest0.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
     const tenantMigrationTest1 = new TenantMigrationTest({donorRst: rst0, recipientRst: rst2});
     const tenantId0 = `${kTenantIdPrefix}-ConcurrentOutgoingMigrationsToDifferentRecipient0`;
     const tenantId1 = `${kTenantIdPrefix}-ConcurrentOutgoingMigrationsToDifferentRecipient1`;
@@ -92,10 +93,6 @@ const kTenantIdPrefix = "testTenantId";
 // Test concurrent incoming migrations from different donors.
 (() => {
     const tenantMigrationTest0 = new TenantMigrationTest({donorRst: rst0, recipientRst: rst2});
-    if (!tenantMigrationTest0.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
     const tenantMigrationTest1 = new TenantMigrationTest({donorRst: rst1, recipientRst: rst2});
     const tenantId0 = `${kTenantIdPrefix}-ConcurrentIncomingMigrations0`;
     const tenantId1 = `${kTenantIdPrefix}-ConcurrentIncomingMigrations1`;
@@ -136,10 +133,6 @@ const kTenantIdPrefix = "testTenantId";
 // migration to that recipient completes.
 (() => {
     const tenantMigrationTest0 = new TenantMigrationTest({donorRst: rst0, recipientRst: rst1});
-    if (!tenantMigrationTest0.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
     const tenantMigrationTest1 = new TenantMigrationTest({donorRst: rst0, recipientRst: rst1});
 
     const tenantId0 = `${kTenantIdPrefix}-ConcurrentOutgoingMigrationsToSameRecipient0`;

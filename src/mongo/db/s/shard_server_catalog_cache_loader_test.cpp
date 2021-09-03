@@ -37,7 +37,7 @@
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
-#include "mongo/s/type_collection_timeseries_fields_gen.h"
+#include "mongo/s/type_collection_common_types_gen.h"
 
 namespace mongo {
 namespace {
@@ -440,7 +440,7 @@ TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindMixedChun
 
 TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindDbMetadataFormatChanged) {
     const std::string dbName("dbName");
-    DatabaseVersion version(UUID::gen());
+    DatabaseVersion version(UUID::gen(), Timestamp());
     DatabaseType dbType(dbName, kShardId, true /* sharded */, version);
 
     _remoteLoaderMock->setDatabaseRefreshReturnValue(dbType);
@@ -500,6 +500,21 @@ TEST_F(ShardServerCatalogCacheLoaderTest, CollAndChunkTasksConsistency) {
     // updates on metadata
     refreshCollectionEpochOnRemoteLoader();
     _shardLoader->getChunksSince(kNss, ChunkVersion::UNSHARDED()).get();
+}
+
+TEST_F(ShardServerCatalogCacheLoaderTest, SupportingLongNameFieldsAreProperlyPropagatedOnSSCCL) {
+    ChunkVersion collectionVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+
+    CollectionType collectionType = makeCollectionType(collectionVersion);
+    collectionType.setSupportingLongName(SupportingLongNameStatusEnum::kExplicitlyEnabled);
+
+    vector<ChunkType> chunks = makeFiveChunks(collectionVersion);
+
+    _remoteLoaderMock->setCollectionRefreshReturnValue(collectionType);
+    _remoteLoaderMock->setChunkRefreshReturnValue(chunks);
+
+    auto collAndChunksRes = _shardLoader->getChunksSince(kNss, ChunkVersion::UNSHARDED()).get();
+    ASSERT(collAndChunksRes.supportingLongName == SupportingLongNameStatusEnum::kExplicitlyEnabled);
 }
 
 }  // namespace

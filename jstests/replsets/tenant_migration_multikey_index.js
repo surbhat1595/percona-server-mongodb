@@ -2,8 +2,13 @@
  * Test that during tenant migration, multi-key indexes on donor collections can be
  * correctly rebuilt on recipient collections, with the right multi-key paths.
  *
- * @tags: [requires_majority_read_concern, requires_fcv_49, incompatible_with_windows_tls,
- * incompatible_with_eft, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -41,12 +46,6 @@ const recipientRst = new ReplSetTest({
 recipientRst.startSet();
 recipientRst.initiateWithHighElectionTimeout();
 const recipientPrimary = recipientRst.getPrimary();
-
-if (!TenantMigrationUtil.isFeatureFlagEnabled(recipientPrimary)) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    recipientRst.stopSet();
-    return;
-}
 
 const tenantMigrationTest =
     new TenantMigrationTest({name: jsTestName(), recipientRst: recipientRst});

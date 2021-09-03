@@ -2,8 +2,7 @@
  * Tests that time-series collections can be sharded with different configurations.
  *
  * @tags: [
- *   requires_fcv_49,
- *   disabled_due_to_server_58295
+ *   requires_fcv_51
  * ]
  */
 

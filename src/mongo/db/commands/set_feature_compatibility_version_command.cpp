@@ -35,6 +35,7 @@
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/coll_mod.h"
+#include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
@@ -55,24 +56,20 @@
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
-#include "mongo/db/s/balancer/balancer.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
-#include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
@@ -89,9 +86,9 @@ using FeatureCompatibility = ServerGlobalParams::FeatureCompatibility;
 
 MONGO_FAIL_POINT_DEFINE(failUpgrading);
 MONGO_FAIL_POINT_DEFINE(hangWhileUpgrading);
-MONGO_FAIL_POINT_DEFINE(hangAfterStartingFCVTransition);
 MONGO_FAIL_POINT_DEFINE(failDowngrading);
 MONGO_FAIL_POINT_DEFINE(hangWhileDowngrading);
+MONGO_FAIL_POINT_DEFINE(hangBeforeUpdatingFcvDoc);
 
 /**
  * Ensures that only one instance of setFeatureCompatibilityVersion can run at a given time.
@@ -116,33 +113,6 @@ void deletePersistedDefaultRWConcernDocument(OperationContext* opCtx) {
     uassertStatusOK(getStatusFromWriteCommandReply(commandResponse->getCommandReply()));
 }
 
-void checkInitialSyncFinished(OperationContext* opCtx) {
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet =
-        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
-
-    uassert(ErrorCodes::ConflictingOperationInProgress,
-            str::stream() << "Cannot upgrade/downgrade the cluster when the replica set config "
-                          << "contains 'newlyAdded' members; wait for those members to "
-                          << "finish its initial sync procedure",
-            !(isReplSet && replCoord->replSetContainsNewlyAddedMembers()));
-
-
-    // We should make sure the current config w/o 'newlyAdded' members got replicated
-    // to all nodes.
-    LOGV2(4637904, "Waiting for the current replica set config to propagate to all nodes.");
-    // If a write concern is given, we'll use its wTimeout. It's kNoTimeout by default.
-    WriteConcernOptions writeConcern(repl::ReplSetConfig::kConfigAllWriteConcernName,
-                                     WriteConcernOptions::SyncMode::NONE,
-                                     opCtx->getWriteConcern().wTimeout);
-    writeConcern.checkCondition = WriteConcernOptions::CheckCondition::Config;
-    repl::OpTime fakeOpTime(Timestamp(1, 1), replCoord->getTerm());
-    uassertStatusOKWithContext(
-        replCoord->awaitReplication(opCtx, fakeOpTime, writeConcern).status,
-        "Failed to wait for the current replica set config to propagate to all nodes");
-    LOGV2(4637905, "The current replica set config has been propagated to all nodes.");
-}
-
 void waitForCurrentConfigCommitment(OperationContext* opCtx) {
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
 
@@ -155,59 +125,6 @@ void waitForCurrentConfigCommitment(OperationContext* opCtx) {
         uasserted(ErrorCodes::CurrentConfigNotCommittedYet, status.reason());
     }
     uassertStatusOK(status);
-}
-
-void removeTimeseriesEntriesFromConfigTransactions(OperationContext* opCtx,
-                                                   const std::vector<LogicalSessionId>& sessions) {
-    DBDirectClient dbClient(opCtx);
-    for (const auto& session : sessions) {
-        dbClient.remove(NamespaceString::kSessionTransactionsTableNamespace.ns(),
-                        QUERY(LogicalSessionRecord::kIdFieldName << session.toBSON()));
-    }
-}
-
-void removeTimeseriesEntriesFromConfigTransactions(OperationContext* opCtx) {
-    DBDirectClient dbClient(opCtx);
-
-    std::vector<LogicalSessionId> sessions;
-
-    static constexpr StringData kLastWriteOpFieldName = "lastWriteOpTime"_sd;
-    auto cursor = dbClient.query(NamespaceString::kSessionTransactionsTableNamespace, Query{});
-    while (cursor->more()) {
-        try {
-            auto entry =
-                TransactionHistoryIterator{
-                    repl::OpTime::parse(cursor->next()[kLastWriteOpFieldName].Obj())}
-                    .next(opCtx);
-            if (entry.getNss().isTimeseriesBucketsCollection()) {
-                sessions.push_back(*entry.getSessionId());
-            }
-        } catch (const DBException& ex) {
-            // IncompleteTransactionHistory can be thrown if the oplog entry referenced by this
-            // config.transactions entry no longer exists.
-            if (ex.code() != ErrorCodes::IncompleteTransactionHistory) {
-                throw;
-            }
-        }
-    }
-
-    if (sessions.empty()) {
-        return;
-    }
-
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet &&
-        opCtx->getLogicalSessionId()) {
-        // Perform the deletes using a separate client because direct writes to config.transactions
-        // are not allowed in sessions.
-        auto client =
-            getGlobalServiceContext()->makeClient("removeTimeseriesEntriesFromConfigTransactions");
-        AlternativeClientRegion acr(client);
-
-        removeTimeseriesEntriesFromConfigTransactions(cc().makeOperationContext().get(), sessions);
-    } else {
-        removeTimeseriesEntriesFromConfigTransactions(opCtx, sessions);
-    }
 }
 
 void abortAllReshardCollection(OperationContext* opCtx) {
@@ -243,49 +160,6 @@ void uassertStatusOKIgnoreNSNotFound(Status status) {
     }
 
     uassertStatusOK(status);
-}
-
-/**
- * Drops all collections used by resharding on the config.
- *
- * TODO SERVER-55912: This method can be removed once 5.0 becomes last-lts.
- */
-void dropReshardingCollectionsOnConfig(OperationContext* opCtx) {
-    DropReply unusedReply;
-    uassertStatusOKIgnoreNSNotFound(
-        dropCollection(opCtx,
-                       NamespaceString::kConfigReshardingOperationsNamespace,
-                       &unusedReply,
-                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
-}
-
-/**
- * Drops all collections used by resharding on a shard.
- *
- * TODO SERVER-55912: This method can be removed once 5.0 becomes last-lts.
- */
-void dropReshardingCollectionsOnShard(OperationContext* opCtx) {
-    DropReply unusedReply;
-    uassertStatusOKIgnoreNSNotFound(
-        dropCollection(opCtx,
-                       NamespaceString::kDonorReshardingOperationsNamespace,
-                       &unusedReply,
-                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
-    uassertStatusOKIgnoreNSNotFound(
-        dropCollection(opCtx,
-                       NamespaceString::kRecipientReshardingOperationsNamespace,
-                       &unusedReply,
-                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
-    uassertStatusOKIgnoreNSNotFound(
-        dropCollection(opCtx,
-                       NamespaceString::kReshardingApplierProgressNamespace,
-                       &unusedReply,
-                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
-    uassertStatusOKIgnoreNSNotFound(
-        dropCollection(opCtx,
-                       NamespaceString::kReshardingTxnClonerProgressNamespace,
-                       &unusedReply,
-                       DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops));
 }
 
 /**
@@ -400,10 +274,6 @@ public:
 
         boost::optional<Timestamp> changeTimestamp;
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            // TODO(SERVER-53283): Remove the call to requestPause()
-            // to allow the execution of balancer rounds during setFCV().
-            auto scopedBalancerPauseRequest = Balancer::get(opCtx)->requestPause();
-
             // The Config Server creates a new ID (i.e., timestamp) when it receives an upgrade or
             // downgrade request. Alternatively, the request refers to a previously aborted
             // operation for which the local FCV document must contain the ID to be reused.
@@ -450,8 +320,6 @@ public:
                 const auto fcvChangeRegion(
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
 
-                checkInitialSyncFinished(opCtx);
-
                 FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
                     opCtx,
                     actualVersion,
@@ -463,13 +331,6 @@ public:
 
             if (request.getPhase() == SetFCVPhaseEnum::kStart) {
                 invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
-                if (actualVersion > requestedVersion) {
-                    // No more ShardingDDLCoordinators will start because we have already switched
-                    // the FCV value to kDowngrading. Wait for the ongoing ones to finish.
-                    setFCVCommandLock.unlock();
-                    ShardingDDLCoordinatorService::getService(opCtx)
-                        ->waitForAllCoordinatorsToComplete(opCtx);
-                }
                 // If we are only running phase-1, then we are done
                 return true;
             }
@@ -477,8 +338,6 @@ public:
 
         invariant(serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading());
         invariant(!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kComplete);
-
-        hangAfterStartingFCVTransition.pauseWhileSet(opCtx);
 
         if (requestedVersion > actualVersion) {
             _runUpgrade(opCtx, request, changeTimestamp);
@@ -490,6 +349,8 @@ public:
             // Complete transition by updating the local FCV document to the fully upgraded or
             // downgraded requestedVersion.
             const auto fcvChangeRegion(FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+
+            hangBeforeUpdatingFcvDoc.pauseWhileSet();
 
             FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
                 opCtx,
@@ -507,7 +368,6 @@ private:
     void _runUpgrade(OperationContext* opCtx,
                      const SetFeatureCompatibilityVersion& request,
                      boost::optional<Timestamp> changeTimestamp) {
-        const auto requestedVersion = request.getCommandParameter();
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-1 of setFCV
@@ -521,34 +381,6 @@ private:
         }
 
         _cancelTenantMigrations(opCtx);
-
-        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        const bool isReplSet =
-            replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
-
-        // If the 'useSecondaryDelaySecs' feature flag is enabled in the upgraded FCV, issue a
-        // reconfig to change the 'slaveDelay' field to 'secondaryDelaySecs'.
-        if (repl::feature_flags::gUseSecondaryDelaySecs.isEnabledAndIgnoreFCV() && isReplSet &&
-            requestedVersion >= repl::feature_flags::gUseSecondaryDelaySecs.getVersion()) {
-            // Wait for the current config to be committed before starting a new reconfig.
-            waitForCurrentConfigCommitment(opCtx);
-
-            auto getNewConfig = [&](const repl::ReplSetConfig& oldConfig, long long term) {
-                auto newConfig = oldConfig.getMutable();
-                newConfig.setConfigVersion(newConfig.getConfigVersion() + 1);
-                for (auto mem = oldConfig.membersBegin(); mem != oldConfig.membersEnd(); mem++) {
-                    newConfig.useSecondaryDelaySecsFieldName(mem->getId());
-                }
-                return repl::ReplSetConfig(std::move(newConfig));
-            };
-            auto status = replCoord->doReplSetReconfig(opCtx, getNewConfig, false /* force */);
-            uassertStatusOKWithContext(status, "Failed to upgrade the replica set config");
-
-            uassertStatusOKWithContext(
-                replCoord->awaitConfigCommitment(opCtx, true /* waitForOplogCommitment */),
-                "The upgraded replica set config failed to propagate to a majority");
-            LOGV2(5042302, "The upgraded replica set config has been propagated to a majority");
-        }
 
         {
             // Take the global lock in S mode to create a barrier for operations taking the global
@@ -565,10 +397,6 @@ private:
                 !failUpgrading.shouldFail());
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
-            if (requestedVersion >= FeatureCompatibility::Version::kVersion50) {
-                ShardingCatalogManager::get(opCtx)->upgradeMetadataFor50Phase1(opCtx);
-            }
 
             // Tell the shards to enter phase-2 of setFCV (fully upgraded)
             auto requestPhase2 = request;
@@ -578,11 +406,6 @@ private:
             uassertStatusOK(
                 ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
-
-            // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
-            if (requestedVersion >= FeatureCompatibility::Version::kVersion50) {
-                ShardingCatalogManager::get(opCtx)->upgradeMetadataFor50Phase2(opCtx);
-            }
 
             // Always abort the reshardCollection regardless of version to ensure that it will run
             // on a consistent version from start to finish. This will ensure that it will be able
@@ -611,57 +434,45 @@ private:
 
         _cancelTenantMigrations(opCtx);
 
-        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        const bool isReplSet =
-            replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+        // Secondary indexes on time-series measurements are only supported in 5.1 and up. If the
+        // user tries to downgrade the cluster to an earlier version, they must first remove all
+        // incompatible secondary indexes on time-series measurements.
+        if (requestedVersion < FeatureCompatibility::Version::kVersion51) {
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_IS,
+                    [&](const CollectionPtr& collection) {
+                        invariant(collection->getTimeseriesOptions());
 
-        // Time-series collections are only supported in 5.0. If the user tries to downgrade the
-        // cluster to an earlier version, they must first remove all time-series collections.
-        // TODO (SERVER-56171): Remove once 5.0 is last-lts.
-        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-            auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, dbName);
-            if (!viewCatalog) {
-                continue;
+                        auto indexCatalog = collection->getIndexCatalog();
+                        auto indexIt = indexCatalog->getIndexIterator(
+                            opCtx, /*includeUnfinishedIndexes=*/true);
+
+                        while (indexIt->more()) {
+                            auto indexEntry = indexIt->next();
+                            uassert(ErrorCodes::CannotDowngrade,
+                                    str::stream()
+                                        << "Cannot downgrade the cluster when there are secondary "
+                                           "indexes on time-series measurements present. Drop all "
+                                           "secondary indexes on time-series measurements before "
+                                           "downgrading. First detected incompatible index name: '"
+                                        << indexEntry->descriptor()->indexName()
+                                        << "' on collection: '"
+                                        << collection->ns().getTimeseriesViewNamespace() << "'",
+                                    timeseries::isBucketsIndexSpecCompatibleForDowngrade(
+                                        *collection->getTimeseriesOptions(),
+                                        indexEntry->descriptor()->infoObj()));
+                        }
+
+                        return true;
+                    },
+                    [&](const CollectionPtr& collection) {
+                        return collection->getTimeseriesOptions() != boost::none;
+                    });
             }
-            viewCatalog->iterate([](const ViewDefinition& view) {
-                uassert(ErrorCodes::CannotDowngrade,
-                        str::stream()
-                            << "Cannot downgrade the cluster when there are time-series "
-                               "collections present; drop all time-series collections before "
-                               "downgrading. First detected time-series collection: "
-                            << view.name(),
-                        !view.timeseries());
-                return true;
-            });
-        }
-
-        // TODO (SERVER-56171): Remove once 5.0 is last-lts.
-        removeTimeseriesEntriesFromConfigTransactions(opCtx);
-
-        // If the 'useSecondaryDelaySecs' feature flag is disabled in the downgraded FCV, issue a
-        // reconfig to change the 'secondaryDelaySecs' field to 'slaveDelay'.
-        if (isReplSet && repl::feature_flags::gUseSecondaryDelaySecs.isEnabledAndIgnoreFCV() &&
-            requestedVersion < repl::feature_flags::gUseSecondaryDelaySecs.getVersion()) {
-            // Wait for the current config to be committed before starting a new reconfig.
-            waitForCurrentConfigCommitment(opCtx);
-
-            auto getNewConfig = [&](const repl::ReplSetConfig& oldConfig, long long term) {
-                auto newConfig = oldConfig.getMutable();
-                newConfig.setConfigVersion(newConfig.getConfigVersion() + 1);
-                for (auto mem = oldConfig.membersBegin(); mem != oldConfig.membersEnd(); mem++) {
-                    newConfig.useSlaveDelayFieldName(mem->getId());
-                }
-
-                return repl::ReplSetConfig(std::move(newConfig));
-            };
-
-            auto status = replCoord->doReplSetReconfig(opCtx, getNewConfig, false /* force */);
-            uassertStatusOKWithContext(status, "Failed to downgrade the replica set config");
-
-            uassertStatusOKWithContext(
-                replCoord->awaitConfigCommitment(opCtx, true /* waitForOplogCommitment */),
-                "The downgraded replica set config failed to propagate to a majority");
-            LOGV2(5042304, "The downgraded replica set config has been propagated to a majority");
         }
 
         {
@@ -684,14 +495,6 @@ private:
             // to apply the oplog entries correctly.
             abortAllReshardCollection(opCtx);
 
-            // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
-            if (requestedVersion < FeatureCompatibility::Version::kVersion50) {
-                ShardingCatalogManager::get(opCtx)->downgradeMetadataToPre50Phase1(opCtx);
-
-                // TODO: SERVER-55912 remove after 5.0 becomes last-lts.
-                dropReshardingCollectionsOnConfig(opCtx);
-            }
-
             // Tell the shards to enter phase-2 of setFCV (fully downgraded)
             auto requestPhase2 = request;
             requestPhase2.setFromConfigServer(true);
@@ -700,16 +503,6 @@ private:
             uassertStatusOK(
                 ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
-
-            // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
-            if (requestedVersion < FeatureCompatibility::Version::kVersion50) {
-                ShardingCatalogManager::get(opCtx)->downgradeMetadataToPre50Phase2(opCtx);
-            }
-        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
-            // TODO: SERVER-55912 remove after 5.0 becomes last-lts.
-            if (requestedVersion < FeatureCompatibility::Version::kVersion50) {
-                dropReshardingCollectionsOnShard(opCtx);
-            }
         }
 
         hangWhileDowngrading.pauseWhileSet(opCtx);

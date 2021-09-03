@@ -2,8 +2,13 @@
  * Verifies that nodes can trigger noop writes to satisfy cluster time reads after a tenant
  * migration.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_windows_tls,
- * incompatible_with_eft, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -89,10 +94,6 @@ recipientRst.startSet();
 recipientRst.initiate();
 
 const tmt = new TenantMigrationTest({name: jsTestName(), donorRst, recipientRst});
-if (!tmt.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 const donorPrimary = tmt.getDonorPrimary();
 const recipientPrimary = tmt.getRecipientPrimary();

@@ -50,6 +50,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/vector_clock.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -71,14 +72,11 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
-
-MONGO_FAIL_POINT_DEFINE(failApplyChunkOps);
 
 using repl::OpTime;
 using std::set;
@@ -160,16 +158,12 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     stages.emplace_back(DocumentSourceMatch::create(
         Doc{{CollectionType::kNssFieldName, nss.toString()}}.toBson(), expCtx));
 
-    // 2. Four $unionWith stages, each one of them guarded by a mutually exclusive condition on
-    // metadata format ('timestamp' exists) and whether the refresh is incremental ('lastmodEpoch'
-    // matches sinceVersion.epoch), so that only a single one of them will possibly execute their
-    // $lookup stage. This is necessary because the query optimizer is not able to use indexes when
-    // a $match inside a $lookup includes a $cond operator. Also note that depending on the metadata
-    // format (indicated by the presence of 'timestamp'), we have different guarantees about what
-    // indexes are present (ns_1_lastmod_1 or uuid_1_lastmod_1), so we must avoid possibly executing
-    // a $lookup that would need an inexistent index, even if it was to return empty results.
+    // 2. Two $unionWith stages guarded by a mutually exclusive condition on whether the refresh is
+    // incremental ('lastmodEpoch' matches sinceVersion.epoch), so that only a single one of them
+    // will possibly execute their $lookup stage. This is necessary because the query optimizer is
+    // not able to use indexes when a $match inside a $lookup includes a $cond operator.
     //
-    // The $lookup stages get the config.chunks documents according to the metadata format and the
+    // The $lookup stages get the config.chunks documents according to the
     // type of refresh (incremental or full), sorted by ascending 'lastmod'. The $lookup is
     // immediately followed by $unwind to take advantage of the $lookup + $unwind coalescence
     // optimization which avoids creating large intermediate documents.
@@ -186,47 +180,6 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     //         coll: "collections",
     //         pipeline: [
     //             { $match: { _id: <nss> } },
-    //             { $match: { timestamp: { $exists: 0 } } },
-    //             { $match: { lastmodEpoch: <sinceVersion.epoch> } },
-    //             {
-    //                 $lookup: {
-    //                     from: "chunks",
-    //                     as: "chunks",
-    //                     let: { local_ns: "$_id" },
-    //                     pipeline: [
-    //                         {
-    //                             $match: {
-    //                                 $expr: {
-    //                                     $eq: ["$ns", "$$local_ns"],
-    //                                 },
-    //                             }
-    //                         },
-    //                         { $match: { lastmod: { $gte: <sinceVersion> } } },
-    //                         {
-    //                             $sort: {
-    //                                 lastmod: 1
-    //                             }
-    //                         }
-    //                     ]
-    //                 }
-    //             },
-    //             {
-    //                 $unwind: {
-    //                     path: "$chunks"
-    //                 }
-    //             },
-    //             {
-    //                 $project: { _id: false, chunks: true }
-    //             }
-    //         ]
-    //     }
-    // },
-    // {
-    //     $unionWith: {
-    //         coll: "collections",
-    //         pipeline: [
-    //             { $match: { _id: <nss> } },
-    //             { $match: { timestamp: { $exists: 1 } } },
     //             { $match: { lastmodEpoch: <sinceVersion.epoch> } },
     //             {
     //                 $lookup: {
@@ -266,46 +219,6 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     //         coll: "collections",
     //         pipeline: [
     //             { $match: { _id: <nss> } },
-    //             { $match: { timestamp: { $exists: 0 } } },
-    //             { $match: { lastmodEpoch: { $ne: <sinceVersion.epoch> } } },
-    //             {
-    //                 $lookup: {
-    //                     from: "chunks",
-    //                     as: "chunks",
-    //                     let: { local_ns: "$_id" },
-    //                     pipeline: [
-    //                         {
-    //                             $match: {
-    //                                 $expr: {
-    //                                     $eq: ["$ns", "$$local_ns"],
-    //                                 },
-    //                             }
-    //                         },
-    //                         {
-    //                             $sort: {
-    //                                 lastmod: 1
-    //                             }
-    //                         }
-    //                     ]
-    //                 }
-    //             },
-    //             {
-    //                 $unwind: {
-    //                     path: "$chunks"
-    //                 }
-    //             },
-    //             {
-    //                 $project: { _id: false, chunks: true }
-    //             },
-    //         ]
-    //     }
-    // },
-    // {
-    //     $unionWith: {
-    //         coll: "collections",
-    //         pipeline: [
-    //             { $match: { _id: <nss> } },
-    //             { $match: { timestamp: { $exists: 1 } } },
     //             { $match: { lastmodEpoch: { $ne: <sinceVersion.epoch> } } },
     //             {
     //                 $lookup: {
@@ -339,15 +252,13 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     //         ]
     //     }
     // }
-    const auto buildUnionWithFn = [&](bool withUUID, bool incremental) {
+    const auto buildUnionWithFn = [&](bool incremental) {
         const auto lastmodEpochMatch = Doc{{incremental ? "$eq" : "$ne", sinceVersion.epoch()}};
 
-        const auto letExpr = withUUID ? Doc{{"local_uuid", "$" + CollectionType::kUuidFieldName}}
-                                      : Doc{{"local_ns", "$" + CollectionType::kNssFieldName}};
+        const auto letExpr = Doc{{"local_uuid", "$" + CollectionType::kUuidFieldName}};
 
-        const auto eqNsOrUuidExpr = withUUID
-            ? Arr{Value{"$" + ChunkType::collectionUUID.name()}, Value{"$$local_uuid"_sd}}
-            : Arr{Value{"$" + ChunkType::ns.name()}, Value{"$$local_ns"_sd}};
+        const auto uuidExpr =
+            Arr{Value{"$" + ChunkType::collectionUUID.name()}, Value{"$$local_uuid"_sd}};
 
         constexpr auto chunksLookupOutputFieldName = "chunks"_sd;
 
@@ -357,7 +268,7 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
                 {"as", chunksLookupOutputFieldName},
                 {"let", letExpr},
                 {"pipeline",
-                 Arr{Value{Doc{{"$match", Doc{{"$expr", Doc{{"$eq", eqNsOrUuidExpr}}}}}}},
+                 Arr{Value{Doc{{"$match", Doc{{"$expr", Doc{{"$eq", uuidExpr}}}}}}},
                      incremental
                          ? Value{Doc{{"$match",
                                       Doc{{ChunkType::lastmod.name(),
@@ -370,9 +281,6 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
             {"coll", CollectionType::ConfigNS.coll()},
             {"pipeline",
              Arr{Value{Doc{{"$match", Doc{{CollectionType::kNssFieldName, nss.toString()}}}}},
-                 Value{
-                     Doc{{"$match",
-                          Doc{{CollectionType::kTimestampFieldName, Doc{{"$exists", withUUID}}}}}}},
                  Value{Doc{{"$match", Doc{{CollectionType::kEpochFieldName, lastmodEpochMatch}}}}},
                  Value{Doc{{"$lookup", lookupPipeline}}},
                  Value{Doc{{"$unwind", Doc{{"path", "$" + chunksLookupOutputFieldName}}}}},
@@ -380,30 +288,12 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
                      {"$project", Doc{{"_id", false}, {chunksLookupOutputFieldName, true}}}}}}}};
     };
 
-    // TODO SERVER-53283: Once 5.0 has branched out this stage is no longer necessary.
     stages.emplace_back(DocumentSourceUnionWith::createFromBson(
-        Doc{{"$unionWith", buildUnionWithFn(false /* withUUID */, true /* incremental */)}}
-            .toBson()
-            .firstElement(),
+        Doc{{"$unionWith", buildUnionWithFn(true /* incremental */)}}.toBson().firstElement(),
         expCtx));
 
     stages.emplace_back(DocumentSourceUnionWith::createFromBson(
-        Doc{{"$unionWith", buildUnionWithFn(true /* withUUID */, true /* incremental */)}}
-            .toBson()
-            .firstElement(),
-        expCtx));
-
-    // TODO SERVER-53283: Once 5.0 has branched out this stage is no longer necessary.
-    stages.emplace_back(DocumentSourceUnionWith::createFromBson(
-        Doc{{"$unionWith", buildUnionWithFn(false /* withUUID */, false /* incremental */)}}
-            .toBson()
-            .firstElement(),
-        expCtx));
-
-    stages.emplace_back(DocumentSourceUnionWith::createFromBson(
-        Doc{{"$unionWith", buildUnionWithFn(true /* withUUID */, false /* incremental */)}}
-            .toBson()
-            .firstElement(),
+        Doc{{"$unionWith", buildUnionWithFn(false /* incremental */)}}.toBson().firstElement(),
         expCtx));
 
     auto pipeline = Pipeline::create(std::move(stages), expCtx);
@@ -427,7 +317,8 @@ Status ShardingCatalogClientImpl::updateShardingCatalogEntryForCollection(
                                         BSON(CollectionType::kNssFieldName << nss.ns()),
                                         coll.toBSON(),
                                         upsert,
-                                        ShardingCatalogClient::kMajorityWriteConcern);
+                                        ShardingCatalogClient::kMajorityWriteConcern,
+                                        Shard::kDefaultConfigCommandTimeout);
     return status.getStatus().withContext(str::stream() << "Collection metadata write failed");
 }
 
@@ -539,9 +430,6 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
             !collDoc.empty());
 
     CollectionType coll(collDoc[0]);
-    uassert(ErrorCodes::NamespaceNotFound,
-            stream() << "collection " << nss.ns() << " was dropped",
-            !coll.getDropped());
     return coll;
 }
 
@@ -576,10 +464,6 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllShardedCollections
     std::vector<NamespaceString> collectionsToReturn;
     collectionsToReturn.reserve(collectionsOnConfig.size());
     for (const auto& coll : collectionsOnConfig) {
-        if (coll.getDropped()) {
-            continue;
-        }
-
         collectionsToReturn.push_back(coll.getNss());
     }
 
@@ -734,14 +618,23 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
     aggRequest.setReadConcern(readConcern.toBSONInner());
     aggRequest.setWriteConcern(WriteConcernOptions());
 
-    const auto readPref = (serverGlobalParams.clusterRole == ClusterRole::ConfigServer)
-        ? ReadPreferenceSetting()
-        : Grid::get(opCtx)->readPreferenceWithConfigTime(kConfigReadSelector);
+    const auto readPref = [&]() -> ReadPreferenceSetting {
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            return {};
+        }
+
+        const auto vcTime = VectorClock::get(opCtx)->getTime();
+        ReadPreferenceSetting readPref{kConfigReadSelector};
+        readPref.minClusterTime = vcTime.configTime().asTimestamp();
+        return readPref;
+    }();
+
     aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
 
     // Run the aggregation
     std::vector<BSONObj> aggResult;
-    auto callback = [&aggResult](const std::vector<BSONObj>& batch) {
+    auto callback = [&aggResult](const std::vector<BSONObj>& batch,
+                                 const boost::optional<BSONObj>& postBatchResumeToken) {
         aggResult.insert(aggResult.end(),
                          std::make_move_iterator(batch.begin()),
                          std::make_move_iterator(batch.end()));
@@ -778,10 +671,6 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
             }
         }
         uassert(5520101, "'collections' document not found in aggregation response", coll);
-
-        uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "Collection " << nss.ns() << " is dropped.",
-                !coll->getDropped());
     }
 
     // 2nd: Traverse all the elements and build the chunks.
@@ -1004,13 +893,6 @@ Status ShardingCatalogClientImpl::applyChunkOpsDeprecated(OperationContext* opCt
         ? std::move(response.getValue().writeConcernStatus)
         : std::move(response.getValue().commandStatus);
 
-    // TODO (Dianna) This fail point needs to be reexamined when CommitChunkMigration is in:
-    // migrations will no longer be able to exercise it, so split or merge will need to do so.
-    // SERVER-22659.
-    if (MONGO_unlikely(failApplyChunkOps.shouldFail())) {
-        status = Status(ErrorCodes::InternalError, "Failpoint 'failApplyChunkOps' generated error");
-    }
-
     if (!status.isOK()) {
         string errMsg;
 
@@ -1195,7 +1077,19 @@ StatusWith<bool> ShardingCatalogClientImpl::updateConfigDocument(
     const BSONObj& update,
     bool upsert,
     const WriteConcernOptions& writeConcern) {
-    return _updateConfigDocument(opCtx, nss, query, update, upsert, writeConcern);
+    return _updateConfigDocument(
+        opCtx, nss, query, update, upsert, writeConcern, Shard::kDefaultConfigCommandTimeout);
+}
+
+StatusWith<bool> ShardingCatalogClientImpl::updateConfigDocument(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const BSONObj& query,
+    const BSONObj& update,
+    bool upsert,
+    const WriteConcernOptions& writeConcern,
+    Milliseconds maxTimeMs) {
+    return _updateConfigDocument(opCtx, nss, query, update, upsert, writeConcern, maxTimeMs);
 }
 
 StatusWith<bool> ShardingCatalogClientImpl::_updateConfigDocument(
@@ -1204,7 +1098,8 @@ StatusWith<bool> ShardingCatalogClientImpl::_updateConfigDocument(
     const BSONObj& query,
     const BSONObj& update,
     bool upsert,
-    const WriteConcernOptions& writeConcern) {
+    const WriteConcernOptions& writeConcern,
+    Milliseconds maxTimeMs) {
     invariant(nss.db() == NamespaceString::kConfigDb);
 
     BatchedCommandRequest request([&] {
@@ -1223,7 +1118,7 @@ StatusWith<bool> ShardingCatalogClientImpl::_updateConfigDocument(
 
     auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto response = configShard->runBatchWriteCommand(
-        opCtx, Shard::kDefaultConfigCommandTimeout, request, Shard::RetryPolicy::kIdempotent);
+        opCtx, maxTimeMs, request, Shard::RetryPolicy::kIdempotent);
 
     Status status = response.toStatus();
     if (!status.isOK()) {

@@ -50,10 +50,6 @@
 #include "mongo/util/str.h"
 #include "mongo/util/visit_helper.h"
 
-namespace mongo {
-extern FailPoint disablePipelineOptimization;
-}
-
 namespace mongo::stage_builder {
 namespace {
 using ExpressionType = std::unique_ptr<sbe::EExpression>;
@@ -378,18 +374,21 @@ public:
         // 'evals' stack. If the expression is translated into a sub-tree, stack it with the
         // existing 'evalStage' sub-tree.
         auto expression = node->expression();
-        if (MONGO_likely(!disablePipelineOptimization.shouldFail())) {
-            expression = expression->optimize();
+        auto [expr, stage] = generateExpression(_context->state,
+                                                expression.get(),
+                                                std::move(_context->topLevel().evalStage),
+                                                _context->inputSlot,
+                                                _context->planNodeId);
+
+        if (auto slot = expr.getSlot(); slot) {
+            // If the expression is already bound to a slot, just use that slot
+            _context->topLevelEvals().emplace_back(*slot, nullptr);
+        } else {
+            // If the expression is not bound to a slot yet, allocate a new slot and push the
+            // slot/expr pair into topLevelEvals().
+            _context->topLevelEvals().emplace_back(_context->state.slotId(), expr.extractExpr());
         }
 
-        auto [outputSlot, expr, stage] =
-            generateExpression(_context->state,
-                               expression.get(),
-                               std::move(_context->topLevel().evalStage),
-                               _context->inputSlot,
-                               _context->planNodeId);
-
-        _context->topLevelEvals().emplace_back(outputSlot, std::move(expr));
         _context->topLevel().evalStage = std::move(stage);
     }
 

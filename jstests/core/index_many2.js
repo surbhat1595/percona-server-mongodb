@@ -2,32 +2,69 @@
 // collection.
 // @tags: [assumes_no_implicit_index_creation]
 
-t = db.index_many2;
+(function() {
+'use strict';
+
+const t = db.index_many2;
 t.drop();
 
-t.save({x: 1});
+assert.commandWorked(t.insert({_id: 1, x: 1}));
 
-assert.eq(1, t.getIndexKeys().length, "A1");
+assert.eq(1, t.getIndexKeys().length, "Expected a single default index.");
 
 function make(n) {
-    var x = {};
+    let x = {};
     x["x" + n] = 1;
     return x;
 }
 
-for (i = 1; i < 1000; i++) {
-    t.createIndex(make(i));
-}
+// This should match the constant in IndexCatalogImpl::kMaxNumIndexesAllowed.
+const maxNumIndexesAllowed = 64;
 
-assert.eq(64, t.getIndexKeys().length, "A2");
+jsTestLog("Creating " + (maxNumIndexesAllowed - 1) + " indexes.");
 
-num = t.getIndexKeys().length;
+// Only 63 will succeed because 64 is the maximum number of indexes allowed on a collection.
+let i = 1;
+assert.soon(() => {
+    const key = make(i++);
+    // May fail due to stepdowns and shutdowns. Keep trying until we reach the
+    // server limit for indexes in a collection.
+    const res = t.createIndex(key);
+    const num = t.getIndexKeys().length;
+    jsTestLog('createIndex: ' + tojson(key) + ': ' +
+              ' (num indexes: ' + num + '): ' + tojson(res));
+    return num === maxNumIndexesAllowed;
+});
 
-t.dropIndex(make(num - 1));
-assert.eq(num - 1, t.getIndexKeys().length, "B0");
+const indexKeys = t.getIndexKeys();
+const num = indexKeys.length;
+assert.eq(maxNumIndexesAllowed, num, "Expected 64 keys, found: " + num);
 
-t.createIndex({z: 1});
-assert.eq(num, t.getIndexKeys().length, "B1");
+assert.commandFailedWithCode(t.createIndex({y: 1}), ErrorCodes.CannotCreateIndex);
+
+// Drop one of the indexes.
+const indexToDrop = indexKeys.filter(key => key._id !== 1)[num - 2];
+
+jsTestLog("Dropping index: '" + tojson(indexToDrop) + "'");
+
+t.dropIndex(indexToDrop);
+assert.eq(num - 1, t.getIndexKeys().length, "After dropping an index, there should be 63 left.");
+
+// Create another index.
+const indexToCreate = {
+    z: 1
+};
+
+jsTestLog("Creating an index: '" + tojson(indexToCreate) + "'");
+
+t.createIndex(indexToCreate);
+assert.eq(num, t.getIndexKeys().length, "Expected 64 indexes.");
+
+// Drop all the indexes except the _id index.
+jsTestLog("Dropping all indexes with wildcard '*'");
 
 t.dropIndexes("*");
-assert.eq(1, t.getIndexKeys().length, "C1");
+assert.eq(1, t.getIndexKeys().length, "Expected only one index after dropping indexes via '*'");
+
+jsTestLog("Test index_many2.js complete.");
+})();

@@ -1,8 +1,15 @@
 /**
  * Tests that the donor will retry its steps if its OperationContext is interrupted by a killOp.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   disabled_due_to_server_58295,
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ *   multiversion_incompatible,
+ * ]
  */
 
 (function() {
@@ -32,10 +39,6 @@ function makeTenantId() {
 }
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 {
     // This section tests behavior in the middle of a tenant migration.
@@ -96,6 +99,8 @@ if (!tenantMigrationTest.isFeatureFlagEnabled()) {
         }));
         // The failpoints in this test run hang the TenantMigrationDonorService during service
         // rebuild, so we need to skip waiting on PrimaryOnlyServices.
+        // This is also a problem when setting the server featureCompatibilityVersion, as this
+        // waits for a rebuild, which is why this test is tagged as 'multiversion_incompatible'.
         tenantMigrationTest.getDonorRst().initiate(
             null, null, {doNotWaitForPrimaryOnlyServices: true});
         TenantMigrationUtil.createTenantMigrationRecipientRoleIfNotExist(

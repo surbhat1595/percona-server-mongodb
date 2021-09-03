@@ -1,8 +1,12 @@
 /**
  * Tests that we don't throw an error when the client performs two-phase index build operations,
  * or inserts docs that contain "commitIndexBuild" or "abortIndexBuild" fields.
- * @tags: [requires_fcv_47, incompatible_with_windows_tls, incompatible_with_eft,
- * incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -18,11 +22,6 @@ const kNs = kDbName + "." + kCollName;
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
 rst.initiate();
-if (!TenantMigrationUtil.isFeatureFlagEnabled(rst.getPrimary())) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    rst.stopSet();
-    return;
-}
 
 const primary = rst.getPrimary();
 const testDB = primary.getDB(kDbName);

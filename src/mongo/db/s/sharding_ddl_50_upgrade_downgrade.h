@@ -30,18 +30,8 @@
 #pragma once
 
 #include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/s/sharding_ddl_50_upgrade_downgrade_gen.h"
 
 namespace mongo {
-
-struct DatabaseEntryFormat {
-    enum Format {
-        kUUIDOnly,
-        kUUIDandTimestamp,
-    };
-
-    static Format get(const FixedFCVRegion& fcvRegion);
-};
 
 struct ChunkEntryFormat {
     enum Format {

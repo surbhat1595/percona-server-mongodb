@@ -1028,12 +1028,6 @@ public:
     virtual bool setContainsArbiter() const = 0;
 
     /**
-     * Returns true if the current replica set config has at least one member with 'newlyAdded'
-     * field set to true.
-     */
-    virtual bool replSetContainsNewlyAddedMembers() const = 0;
-
-    /**
      * Instructs the ReplicationCoordinator to recalculate the stable timestamp and advance it for
      * storage if needed.
      */
@@ -1065,9 +1059,9 @@ public:
      * internal operations occurs (i.e. step up, step down, or rollback). Also logs the metrics.
      */
     virtual void updateAndLogStateTransitionMetrics(
-        const ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
-        const size_t numOpsKilled,
-        const size_t numOpsRunning) const = 0;
+        ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
+        size_t numOpsKilled,
+        size_t numOpsRunning) const = 0;
 
     /**
      * Increment the server TopologyVersion and fulfill the promise of any currently waiting

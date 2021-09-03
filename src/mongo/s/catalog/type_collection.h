@@ -45,7 +45,6 @@ using ReshardingFields = TypeCollectionReshardingFields;
  *      "_id" : "foo.bar",
  *      "lastmodEpoch" : ObjectId("58b6fd76132358839e409e47"),
  *      "lastmod" : ISODate("1970-02-19T17:02:47.296Z"),
- *      "dropped" : false,
  *      "key" : {
  *          "_id" : 1
  *      },
@@ -84,14 +83,19 @@ public:
     static constexpr auto kKeyPatternFieldName = kPre50CompatibleKeyPatternFieldName;
     static constexpr auto kUuidFieldName = kPre50CompatibleUuidFieldName;
     static constexpr auto kAllowMigrationsFieldName = kPre50CompatibleAllowMigrationsFieldName;
+
+    using CollectionTypeBase::kMaxChunkSizeBytesFieldName;
+    using CollectionTypeBase::kNoAutoSplitFieldName;
     using CollectionTypeBase::kNssFieldName;
     using CollectionTypeBase::kReshardingFieldsFieldName;
+    using CollectionTypeBase::kSupportingLongNameFieldName;
     using CollectionTypeBase::kTimeseriesFieldsFieldName;
     using CollectionTypeBase::kTimestampFieldName;
     using CollectionTypeBase::kUniqueFieldName;
     using CollectionTypeBase::kUpdatedAtFieldName;
 
     // Make getters and setters accessible.
+    using CollectionTypeBase::getMaxChunkSizeBytes;
     using CollectionTypeBase::getNss;
     using CollectionTypeBase::getReshardingFields;
     using CollectionTypeBase::getTimeseriesFields;
@@ -133,10 +137,6 @@ public:
     }
     void setUuid(UUID uuid);
 
-    bool getDropped() const {
-        return getPre50CompatibleDropped().get_value_or(false);
-    }
-
     const KeyPattern& getKeyPattern() const {
         return *getPre50CompatibleKeyPattern();
     }
@@ -146,6 +146,12 @@ public:
         return getPre50CompatibleDefaultCollation().get_value_or(BSONObj());
     }
     void setDefaultCollation(const BSONObj& defaultCollation);
+
+    void setMaxChunkSizeBytes(int64_t value);
+
+    bool getAllowAutoSplit() const {
+        return !getNoAutoSplit();
+    }
 
     bool getAllowBalance() const {
         return !getNoBalance();
@@ -161,6 +167,10 @@ public:
         else
             setPre50CompatibleAllowMigrations(false);
     }
+
+    SupportingLongNameStatusEnum getSupportingLongName() const;
+
+    void setSupportingLongName(SupportingLongNameStatusEnum value);
 };
 
 }  // namespace mongo

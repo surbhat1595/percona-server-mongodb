@@ -88,14 +88,19 @@ let viewsCommandTests = {
     _configsvrCommitChunksMerge: {skip: isAnInternalCommand},
     _configsvrCommitChunkMigration: {skip: isAnInternalCommand},
     _configsvrCommitChunkSplit: {skip: isAnInternalCommand},
-    _configsvrCommitMovePrimary: {skip: isAnInternalCommand},
+    _configsvrCommitMovePrimary:
+        {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
+    _configsvrConfigureAutoSplit: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
-    _configsvrDropCollection: {skip: isAnInternalCommand},
-    _configsvrDropDatabase: {skip: isAnInternalCommand},
-    _configsvrEnableSharding: {skip: isAnInternalCommand},
+    _configsvrDropCollection:
+        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrDropDatabase:
+        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrEnableSharding:
+        {skip: isAnInternalCommand},  // TODO (SERVER-58843): Remove once 6.0 becomes last LTS
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
-    _configsvrMoveChunk: {skip: isAnInternalCommand},
+    _configsvrMoveChunk: {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrMovePrimary: {skip: isAnInternalCommand},
     _configsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrRenameCollection: {skip: isAnInternalCommand},
@@ -106,7 +111,8 @@ let viewsCommandTests = {
     _configsvrRemoveTags: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
-    _configsvrShardCollection: {skip: isAnInternalCommand},
+    _configsvrShardCollection:
+        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isUnrelated},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isUnrelated},
@@ -143,7 +149,8 @@ let viewsCommandTests = {
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
-    _shardsvrShardCollection: {skip: isAnInternalCommand},
+    _shardsvrShardCollection:
+        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {skip: isUnrelated},
@@ -200,6 +207,7 @@ let viewsCommandTests = {
     commitTransaction: {skip: isUnrelated},
     compact: {command: {compact: "view", force: true}, expectFailure: true, skipSharded: true},
     configureFailPoint: {skip: isUnrelated},
+    configureCollectionAutoSplitter: {skip: isUnrelated},
     connPoolStats: {skip: isUnrelated},
     connPoolSync: {skip: isUnrelated},
     connectionStatus: {skip: isUnrelated},

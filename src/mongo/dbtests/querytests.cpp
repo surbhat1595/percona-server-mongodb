@@ -44,7 +44,6 @@
 #include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/json.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find.h"
@@ -299,7 +298,8 @@ public:
         insert(ns, BSON("a" << 1));
         insert(ns, BSON("a" << 2));
         insert(ns, BSON("a" << 3));
-        unique_ptr<DBClientCursor> cursor = _client.query(NamespaceString(ns), BSONObj(), 2);
+        unique_ptr<DBClientCursor> cursor =
+            _client.query(NamespaceString(ns), BSONObj(), 0, 0, nullptr, 0, 2);
         long long cursorId = cursor->getCursorId();
         cursor->decouple();
         cursor.reset();
@@ -458,10 +458,11 @@ public:
         insert(ns, BSON("a" << 2));
         unique_ptr<DBClientCursor> c = _client.query(NamespaceString(ns),
                                                      Query().hint(BSON("$natural" << 1)),
-                                                     2,
+                                                     0,
                                                      0,
                                                      nullptr,
-                                                     QueryOption_CursorTailable);
+                                                     QueryOption_CursorTailable,
+                                                     2);
         ASSERT(0 != c->getCursorId());
         while (c->more())
             c->next();
@@ -591,10 +592,11 @@ public:
         insert(ns, BSON("a" << 1));
         unique_ptr<DBClientCursor> c = _client.query(NamespaceString(ns),
                                                      Query().hint(BSON("$natural" << 1)),
-                                                     2,
+                                                     0,
                                                      0,
                                                      nullptr,
-                                                     QueryOption_CursorTailable);
+                                                     QueryOption_CursorTailable,
+                                                     2);
         c->next();
         c->next();
         ASSERT(!c->more());
@@ -1915,7 +1917,8 @@ public:
         {
             // With five results and a batch size of 5, a cursor is created since we don't know
             // there are no more results.
-            std::unique_ptr<DBClientCursor> c = _client.query(NamespaceString(ns()), Query(), 5);
+            std::unique_ptr<DBClientCursor> c =
+                _client.query(NamespaceString(ns()), Query(), 0, 0, nullptr, 0, 5);
             ASSERT(c->more());
             ASSERT_NE(0, c->getCursorId());
             for (int i = 0; i < 5; ++i) {

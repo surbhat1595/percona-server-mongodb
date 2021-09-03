@@ -31,7 +31,6 @@
 
 #include <functional>
 
-#include "mongo/db/repl/optime.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
@@ -43,8 +42,6 @@ namespace mongo {
 
 class BalancerConfiguration;
 class ClusterCursorManager;
-class OperationContext;
-class ServiceContext;
 
 namespace executor {
 class NetworkInterface;
@@ -130,35 +127,6 @@ public:
     }
 
     /**
-     * Returns a readConcern at the specified level for reading after the current ConfigTime.
-     */
-    repl::ReadConcernArgs readConcernWithConfigTime(repl::ReadConcernLevel readConcernLevel) const;
-
-    /**
-     * Returns a readPreference (based on the given one) for targeting a config server that is at or
-     * after the current ConfigTime.
-     */
-    ReadPreferenceSetting readPreferenceWithConfigTime(
-        const ReadPreferenceSetting& readPreference) const;
-
-    /**
-     * Returns the the last optime that a shard or config server has reported as the current
-     * committed optime on the config server.
-     * NOTE: This is not valid to call on a config server instance.
-     */
-    repl::OpTime configOpTime() const;
-
-    /**
-     * Called whenever a mongos or shard gets a response from a config server or shard and updates
-     * what we've seen as the last config server optime.
-     * If the config optime was updated, returns the previous value.
-     * NOTE: This is not valid to call on a config server instance.
-     */
-    boost::optional<repl::OpTime> advanceConfigOpTime(OperationContext* opCtx,
-                                                      repl::OpTime opTime,
-                                                      StringData what);
-
-    /**
      * Clears the grid object so that it can be reused between test executions. This will not
      * be necessary if grid is hanging off the global ServiceContext and each test gets its
      * own service context.
@@ -184,23 +152,11 @@ private:
     // questions about the network configuration, such as getting the current server's hostname.
     executor::NetworkInterface* _network{nullptr};
 
-    CustomConnectionPoolStatsFn _customConnectionPoolStatsFn;
-
     AtomicWord<bool> _shardingInitialized{false};
 
-    // Protects _configOpTime.
     mutable Mutex _mutex = MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "Grid::_mutex");
 
-    // Last known highest opTime from the config server that should be used when doing reads.
-    // This value is updated any time a shard or mongos talks to a config server or a shard.
-    repl::OpTime _configOpTime;
-
-    /**
-     * Called to update what we've seen as the last config server optime.
-     * If the config optime was updated, returns the previous value.
-     * NOTE: This is not valid to call on a config server instance.
-     */
-    boost::optional<repl::OpTime> _advanceConfigOpTime(const repl::OpTime& opTime);
+    CustomConnectionPoolStatsFn _customConnectionPoolStatsFn;
 };
 
 }  // namespace mongo

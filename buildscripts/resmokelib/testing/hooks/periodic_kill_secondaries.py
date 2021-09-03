@@ -22,6 +22,8 @@ class PeriodicKillSecondaries(interface.Hook):
     to the primary after an unclean shutdown.
     """
 
+    IS_BACKGROUND = False
+
     DEFAULT_PERIOD_SECS = 30
 
     def __init__(self, hook_logger, rs_fixture, period_secs=DEFAULT_PERIOD_SECS):
@@ -42,7 +44,7 @@ class PeriodicKillSecondaries(interface.Hook):
         self._start_time = None
         self._last_test = None
 
-    def after_suite(self, test_report):
+    def after_suite(self, test_report, teardown_flag=None):
         """Run after suite."""
         if self._start_time is not None:
             # Ensure that we test killing the secondary and having it reach state SECONDARY after
@@ -216,7 +218,9 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
                 node.preserve_dbpath = preserve_dbpaths[i]
 
     def _validate_collections(self, test_report):
-        validate_test_case = validate.ValidateCollections(self._hook.logger, self.fixture)
+        validate_test_case = validate.ValidateCollections(
+            self._hook.logger, self.fixture,
+            {'global_vars': {'TestData': {'skipEnforceFastCountOnValidate': True}}})
         validate_test_case.before_suite(test_report)
         validate_test_case.before_test(self, test_report)
         validate_test_case.after_test(self, test_report)

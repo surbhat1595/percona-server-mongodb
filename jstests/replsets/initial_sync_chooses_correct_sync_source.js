@@ -3,7 +3,6 @@
  * initialSyncReadPreference.
  *
  * @tags: [
- *   requires_fcv_47,
  * ]
  */
 (function() {
@@ -42,7 +41,6 @@ const restartAndWaitForHeartbeats = (rst, initialSyncNode, setParameterOpts = {}
     setParameterOpts['failpoint.initialSyncHangBeforeChoosingSyncSource'] =
         tojson({mode: 'alwaysOn'});
     setParameterOpts['failpoint.initialSyncHangBeforeCreatingOplog'] = tojson({mode: 'alwaysOn'});
-    setParameterOpts['numInitialSyncAttempts'] = 1;
 
     rst.restart(initialSyncNode, {
         startClean: true,
@@ -84,7 +82,6 @@ const initialSyncNode = rst.add({
     setParameter: {
         'failpoint.initialSyncHangBeforeChoosingSyncSource': tojson({mode: 'alwaysOn'}),
         'failpoint.initialSyncHangBeforeCreatingOplog': tojson({mode: 'alwaysOn'}),
-        'numInitialSyncAttempts': 1
     }
 });
 primary.delayMessagesFrom(initialSyncNode, delayMillis);

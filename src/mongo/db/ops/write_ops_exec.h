@@ -64,9 +64,10 @@ struct WriteResult {
  * counters, managing CurOp, and of course actually doing the write. Waiting for the writeConcern is
  * *not* handled by these functions and is expected to be done by the caller if needed.
  *
- * LastError is updated for failures of individual writes, but not for batch errors reported by an
- * exception being thrown from these functions. Callers are responsible for managing LastError in
- * that case. This should generally be combined with LastError handling from parse failures.
+ * NotPrimaryErrorTracker is updated for failures of individual writes, but not for batch errors
+ * reported by an exception being thrown from these functions. Callers are responsible for managing
+ * NotPrimaryErrorTracker in that case. This should generally be combined with
+ * NotPrimaryErrorTracker handling from parse failures.
  *
  * 'type' indicates whether the operation was induced by a standard write, a chunk migration, or a
  * time-series insert.
@@ -76,13 +77,13 @@ struct WriteResult {
  */
 WriteResult performInserts(OperationContext* opCtx,
                            const write_ops::InsertCommandRequest& op,
-                           const OperationSource& source = OperationSource::kStandard);
+                           OperationSource source = OperationSource::kStandard);
 WriteResult performUpdates(OperationContext* opCtx,
                            const write_ops::UpdateCommandRequest& op,
-                           const OperationSource& source = OperationSource::kStandard);
+                           OperationSource source = OperationSource::kStandard);
 WriteResult performDeletes(OperationContext* opCtx,
                            const write_ops::DeleteCommandRequest& op,
-                           const OperationSource& source = OperationSource::kStandard);
+                           OperationSource source = OperationSource::kStandard);
 
 Status performAtomicTimeseriesWrites(OperationContext* opCtx,
                                      const std::vector<write_ops::InsertCommandRequest>& insertOps,

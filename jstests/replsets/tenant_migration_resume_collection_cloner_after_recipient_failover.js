@@ -2,11 +2,11 @@
  * Tests that in tenant migration, the recipient set can resume collection cloning from the last
  * document cloned after a failover.
  * @tags: [
- *   requires_majority_read_concern,
- *   requires_fcv_49,
- *   incompatible_with_windows_tls,
  *   incompatible_with_eft,
- *   incompatible_with_macos, requires_persistence
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
  * ]
  */
 
@@ -41,13 +41,6 @@ const tenantMigrationFailoverTest = function(isTimeSeries, createCollFn, docs) {
     const tenantMigrationTest =
         new TenantMigrationTest({name: jsTestName(), recipientRst: recipientRst});
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
-
-    if (!TenantMigrationUtil.isFeatureFlagEnabled(donorPrimary)) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        tenantMigrationTest.stop();
-        recipientRst.stopSet();
-        return;
-    }
 
     if (isTimeSeries && !TimeseriesTest.timeseriesCollectionsEnabled(donorPrimary)) {
         jsTestLog("Skipping test because the time-series collection feature flag is disabled");

@@ -4,8 +4,12 @@
  * Note: If a migration is started and SSL is not enabled on the recipient, we will repeatedly get
  * back HostUnreachable on the donor side.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- * incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -30,10 +34,6 @@ const kExpiredMigrationCertificates = {
     jsTest.log(
         "Test that certificate fields are required when tenantMigrationDisableX509Auth=false");
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        return;
-    }
 
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
@@ -96,11 +96,6 @@ const kExpiredMigrationCertificates = {
     donorRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        return;
-    }
 
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
 
@@ -127,11 +122,6 @@ const kExpiredMigrationCertificates = {
     recipientRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        recipientRst.stopSet();
-        return;
-    }
 
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 
@@ -165,12 +155,6 @@ const kExpiredMigrationCertificates = {
     recipientRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        recipientRst.stopSet();
-        return;
-    }
-
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 
     assert.commandWorked(recipientPrimary.adminCommand({
@@ -202,11 +186,6 @@ const kExpiredMigrationCertificates = {
     recipientRst.initiate();
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        recipientRst.stopSet();
-        return;
-    }
 
     const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 
@@ -247,12 +226,6 @@ const kExpiredMigrationCertificates = {
 
     const tenantMigrationTest =
         new TenantMigrationTest({name: jsTestName(), donorRst, recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        recipientRst.stopSet();
-        return;
-    }
 
     const migrationId = UUID();
     const donorStartMigrationCmdObj = {
@@ -299,12 +272,6 @@ const kExpiredMigrationCertificates = {
 
     const tenantMigrationTest =
         new TenantMigrationTest({name: jsTestName(), donorRst, recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        recipientRst.stopSet();
-        return;
-    }
 
     const donorStartMigrationCmdObj = {
         donorStartMigration: 1,
@@ -351,12 +318,6 @@ const kExpiredMigrationCertificates = {
 
     const tenantMigrationTest =
         new TenantMigrationTest({name: jsTestName(), donorRst, recipientRst});
-    if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-        jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-        donorRst.stopSet();
-        recipientRst.stopSet();
-        return;
-    }
 
     const donorStartMigrationCmdObj = {
         donorStartMigration: 1,

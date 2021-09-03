@@ -4,8 +4,8 @@
  *   assumes_no_implicit_collection_creation_after_drop,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
- *   requires_fcv_50,
  *   requires_getmore,
+ *   requires_fcv_51,
  * ]
  */
 (function() {
@@ -66,6 +66,11 @@ TimeseriesTest.run((insert) => {
 
     // Query on a single field that is not the metaField.
     testDelete([objA], [objA], 0, [{q: {measurement: "cpu"}, limit: 0}], {
+        expectedErrorCode: ErrorCodes.InvalidOptions
+    });
+
+    // Query on the "meta" field.
+    testDelete([objA], [objA], 0, [{q: {"meta": "A"}, limit: 0}], {
         expectedErrorCode: ErrorCodes.InvalidOptions
     });
 
@@ -221,10 +226,82 @@ TimeseriesTest.run((insert) => {
             limit: 0
         }]);
 
+    // Query for documents using $jsonSchema with the metaField required.
+    testDelete([nestedObjA, nestedObjB, nestedObjC],
+               [],
+               3,
+               [{q: {"$jsonSchema": {"required": [metaFieldName]}}, limit: 0}]);
+
+    // Query for documents using $jsonSchema with the metaField in dot notation required.
+    testDelete([nestedObjA, nestedObjB, nestedObjC],
+               [nestedObjB, nestedObjC],
+               1,
+               [{q: {"$jsonSchema": {"required": [metaFieldName + ".a"]}}, limit: 0}]);
+
+    // Query for documents using $jsonSchema with a field that is not the metaField required.
+    testDelete([nestedObjA, nestedObjB, nestedObjC],
+               [nestedObjA, nestedObjB, nestedObjC],
+               0,
+               [{q: {"$jsonSchema": {"required": [metaFieldName, "measurement"]}}, limit: 0}],
+               {expectedErrorCode: ErrorCodes.InvalidOptions});
+
+    const nestedMetaObj = {[timeFieldName]: ISODate(), [metaFieldName]: {[metaFieldName]: "A"}};
+
+    // Query for documents using $jsonSchema with the metaField required and a required subfield of
+    // the metaField with the same name as the metaField.
+    testDelete([objA, nestedMetaObj], [objA], 1, [{
+                   q: {
+                       "$jsonSchema": {
+                           "required": [metaFieldName],
+                           "properties": {[metaFieldName]: {"required": [metaFieldName]}}
+                       }
+                   },
+                   limit: 0
+               }]);
+
+    // Query for documents using $jsonSchema with the metaField required and an optional field that
+    // is not the metaField.
+    testDelete([objA, nestedMetaObj],
+               [objA, nestedMetaObj],
+               0,
+               [{
+                   q: {
+                       "$jsonSchema": {
+                           "required": [metaFieldName],
+                           "properties": {"measurement": {description: "can be any value"}}
+                       }
+                   },
+                   limit: 0
+               }],
+               {expectedErrorCode: ErrorCodes.InvalidOptions});
+
+    // Query on the metaField with the metaField nested within nested operators.
+    testDelete([objA, objB, objC], [objB, objC], 1, [{
+                   q: {
+                       "$and": [
+                           {
+                               "$or": [
+                                   {[metaFieldName]: {"$ne": "B"}},
+                                   {[metaFieldName]: {"a": {"$eq": "B"}}}
+                               ]
+                           },
+                           {[metaFieldName]: {"a": "A"}}
+                       ]
+                   },
+                   limit: 0
+               }]);
+
     /******************* Tests deleting from a collection without a metaField ********************/
     // Remove all documents.
     testDelete([{[timeFieldName]: ISODate(), "meta": "A"}], [], 1, [{q: {}, limit: 0}], {
         includeMetaField: false
     });
+
+    // Query on the "meta" field.
+    testDelete([objA],
+               [objA],
+               0,
+               [{q: {"meta": "A"}, limit: 0}],
+               {expectedErrorCode: ErrorCodes.InvalidOptions, includeMetaField: false});
 });
 })();

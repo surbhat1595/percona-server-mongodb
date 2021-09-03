@@ -88,10 +88,11 @@ CollectionMetadata makeChunkManagerWithShardSelector(int nShards,
                                            boost::none /* timestamp */,
                                            boost::none /* timeseriesFields */,
                                            boost::none,
+                                           boost::none /* chunkSizeBytes */,
                                            true,
                                            chunks);
     return CollectionMetadata(ChunkManager(ShardId("Shard0"),
-                                           DatabaseVersion(UUID::gen()),
+                                           DatabaseVersion(UUID::gen(), Timestamp()),
                                            makeStandaloneRoutingTableHistory(std::move(rt)),
                                            boost::none),
                               ShardId("shard0"));
@@ -120,9 +121,9 @@ MONGO_COMPILER_NOINLINE auto makeChunkManagerWithOptimalBalancedDistribution(int
 MONGO_COMPILER_NOINLINE auto runIncrementalUpdate(const CollectionMetadata& cm,
                                                   const std::vector<ChunkType>& newChunks) {
     auto rt = cm.getChunkManager()->getRoutingTableHistory_ForTest().makeUpdated(
-        boost::none, true, newChunks);
+        boost::none, boost::none, true, newChunks);
     return CollectionMetadata(ChunkManager(ShardId("shard0"),
-                                           DatabaseVersion(UUID::gen()),
+                                           DatabaseVersion(UUID::gen(), Timestamp()),
                                            makeStandaloneRoutingTableHistory(std::move(rt)),
                                            boost::none),
                               ShardId("shard0"));
@@ -178,11 +179,12 @@ auto BM_FullBuildOfChunkManager(benchmark::State& state, ShardSelectorFn selectS
                                                boost::none /* timestamp */,
                                                boost::none /* timeseriesFields */,
                                                boost::none,
+                                               boost::none /* chunkSizeBytes */,
                                                true,
                                                chunks);
         benchmark::DoNotOptimize(
             CollectionMetadata(ChunkManager(ShardId("shard0"),
-                                            DatabaseVersion(UUID::gen()),
+                                            DatabaseVersion(UUID::gen(), Timestamp()),
                                             makeStandaloneRoutingTableHistory(std::move(rt)),
                                             boost::none),
                                ShardId("shard0")));

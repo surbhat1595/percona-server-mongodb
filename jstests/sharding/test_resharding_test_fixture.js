@@ -4,9 +4,7 @@
  * Verifies that the reshardCollection command is run and kept suspended in the "applying" state.
  *
  * @tags: [
- *   requires_fcv_49,
- *   uses_atclustertime,
- *   disabled_due_to_server_58295
+ *   uses_atclustertime
  * ]
  */
 (function() {

@@ -38,17 +38,17 @@
 #include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/document_path_support.h"
+#include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_invalidate.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_topology_change.h"
 #include "mongo/db/pipeline/document_source_change_stream_close_cursor.h"
 #include "mongo/db/pipeline/document_source_change_stream_ensure_resume_token_present.h"
 #include "mongo/db/pipeline/document_source_change_stream_handle_topology_change.h"
-#include "mongo/db/pipeline/document_source_change_stream_lookup_post_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_lookup_pre_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_oplog_match.h"
 #include "mongo/db/pipeline/document_source_change_stream_transform.h"
-#include "mongo/db/pipeline/document_source_change_stream_unwind_transactions.h"
+#include "mongo/db/pipeline/document_source_change_stream_unwind_transaction.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
@@ -61,6 +61,19 @@
 #include "mongo/db/vector_clock.h"
 
 namespace mongo {
+namespace {
+std::string regexEscape(StringData source) {
+    std::string result = "";
+    std::string escapes = "*+|()^?[]./\\$";
+    for (const char& c : source) {
+        if (escapes.find(c) != std::string::npos) {
+            result.append("\\");
+        }
+        result += c;
+    }
+    return result;
+}
+}  // namespace
 
 using boost::intrusive_ptr;
 using boost::optional;
@@ -127,18 +140,6 @@ DocumentSourceChangeStream::ChangeStreamType DocumentSourceChangeStream::getChan
 }
 
 std::string DocumentSourceChangeStream::getNsRegexForChangeStream(const NamespaceString& nss) {
-    auto regexEscape = [](const std::string& source) {
-        std::string result = "";
-        std::string escapes = "*+|()^?[]./\\$";
-        for (const char& c : source) {
-            if (escapes.find(c) != std::string::npos) {
-                result.append("\\");
-            }
-            result += c;
-        }
-        return result;
-    };
-
     auto type = getChangeStreamType(nss);
     switch (type) {
         case ChangeStreamType::kSingleCollection:
@@ -152,6 +153,36 @@ std::string DocumentSourceChangeStream::getNsRegexForChangeStream(const Namespac
             // Match all namespaces that start with any db name other than admin, config, or local,
             // followed by ".", then NOT followed by '$' or 'system.'.
             return kRegexAllDBs + "\\." + kRegexAllCollections;
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+std::string DocumentSourceChangeStream::getCollRegexForChangeStream(const NamespaceString& nss) {
+    auto type = getChangeStreamType(nss);
+    switch (type) {
+        case ChangeStreamType::kSingleCollection:
+            // Match the target collection exactly.
+            return "^" + regexEscape(nss.coll()) + "$";
+        case ChangeStreamType::kSingleDatabase:
+        case ChangeStreamType::kAllChangesForCluster:
+            // Match any collection; database filtering will be done elsewhere.
+            return "^" + kRegexAllCollections;
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+std::string DocumentSourceChangeStream::getCmdNsRegexForChangeStream(const NamespaceString& nss) {
+    auto type = getChangeStreamType(nss);
+    switch (type) {
+        case ChangeStreamType::kSingleCollection:
+        case ChangeStreamType::kSingleDatabase:
+            // Match the target database command namespace exactly.
+            return "^" + regexEscape(nss.getCommandNS().ns()) + "$";
+        case ChangeStreamType::kAllChangesForCluster:
+            // Match all command namespaces on any database.
+            return kRegexAllDBs + "\\." + kRegexCmdColl;
         default:
             MONGO_UNREACHABLE;
     }
@@ -261,9 +292,9 @@ std::list<boost::intrusive_ptr<DocumentSource>> DocumentSourceChangeStream::_bui
         stages.push_back(DocumentSourceChangeStreamAddPreImage::create(expCtx, spec));
     }
 
-    // If 'fullDocument' is set to "updateLookup", add the DSCSAddPostImage stage here.
-    if (spec.getFullDocument() == FullDocumentModeEnum::kUpdateLookup) {
-        stages.push_back(DocumentSourceChangeStreamAddPostImage::create(expCtx));
+    // If 'fullDocument' is not set to "default", add the DSCSAddPostImage stage here.
+    if (spec.getFullDocument() != FullDocumentModeEnum::kDefault) {
+        stages.push_back(DocumentSourceChangeStreamAddPostImage::create(expCtx, spec));
     }
 
     // If the pipeline is built on MongoS, then the DSCSHandleTopologyChange stage acts as the
@@ -327,6 +358,18 @@ void DocumentSourceChangeStream::assertIsLegalSpecification(
     uassert(51771,
             "the 'fullDocumentBeforeChange' option is not supported in a sharded cluster",
             !(shouldAddPreImage && (expCtx->inMongos || expCtx->needsMerge)));
+
+    // TODO SERVER-58584: remove the feature flag.
+    if (!feature_flags::gFeatureFlagChangeStreamsPreAndPostImages.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "Specified value '"
+                              << FullDocumentMode_serializer(spec.getFullDocument())
+                              << "' is not a valid option for the 'fullDocument' parameter of the "
+                                 "$changeStream stage",
+                spec.getFullDocument() == FullDocumentModeEnum::kDefault ||
+                    spec.getFullDocument() == FullDocumentModeEnum::kUpdateLookup);
+    }
 
     uassert(31123,
             "Change streams from mongos may not show migration events",

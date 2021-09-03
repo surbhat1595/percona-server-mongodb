@@ -3,7 +3,7 @@
  * 'interruption' error for the 'recipientSyncData' command. This is to avoid situations like
  * SERVER-58398.
  *
- * @tags: [requires_fcv_50, requires_majority_read_concern, requires_persistence,
+ * @tags: [requires_majority_read_concern, requires_persistence,
  * incompatible_with_eft, incompatible_with_windows_tls, incompatible_with_macos]
  */
 
@@ -20,10 +20,7 @@ const kTenantId = "testTenantId";
 const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
+
 const donorRst = tenantMigrationTest.getDonorRst();
 let recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 

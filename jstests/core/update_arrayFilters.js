@@ -4,7 +4,6 @@
 //   assumes_no_implicit_collection_creation_after_drop,
 //   requires_multi_updates,
 //   requires_non_retryable_writes,
-//   requires_fcv_50,
 // ]
 
 // Tests for the arrayFilters option to update and findAndModify.
@@ -73,7 +72,7 @@ assert.writeErrorWithCode(res, ErrorCodes.BadValue);
 
 // Array filter with $geoNear inside fails to parse.
 res = coll.update({_id: 0}, {$set: {"a.$[i]": 5}}, {arrayFilters: [{loc: {$geoNear: [50, 50]}}]});
-assert.writeErrorWithCode(res, 5626500);
+assert.writeErrorWithCode(res, [ErrorCodes.BadValue, 5626500]);
 
 // Array filter with $expr inside fails to parse.
 res = coll.update(

@@ -36,6 +36,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/s/balancer_configuration.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -67,9 +68,7 @@ CollectionType::CollectionType(const BSONObj& obj) {
     if (!getPre22CompatibleEpoch()) {
         setPre22CompatibleEpoch(OID());
     }
-    uassert(ErrorCodes::NoSuchKey,
-            "Shard key is missing",
-            getPre50CompatibleKeyPattern() || getDropped());
+    uassert(ErrorCodes::NoSuchKey, "Shard key is missing", getPre50CompatibleKeyPattern());
 }
 
 std::string CollectionType::toString() const {
@@ -91,6 +90,23 @@ void CollectionType::setKeyPattern(KeyPattern keyPattern) {
 void CollectionType::setDefaultCollation(const BSONObj& defaultCollation) {
     if (!defaultCollation.isEmpty())
         setPre50CompatibleDefaultCollation(defaultCollation);
+}
+
+void CollectionType::setMaxChunkSizeBytes(int64_t value) {
+    uassert(ErrorCodes::BadValue, "Default chunk size is out of range", value > 0);
+    CollectionTypeBase::setMaxChunkSizeBytes(value);
+}
+
+SupportingLongNameStatusEnum CollectionType::getSupportingLongName() const {
+    return CollectionTypeBase::getSupportingLongName().get_value_or(
+        SupportingLongNameStatusEnum::kDisabled);
+}
+
+void CollectionType::setSupportingLongName(SupportingLongNameStatusEnum value) {
+    CollectionTypeBase::setSupportingLongName(
+        value == SupportingLongNameStatusEnum::kDisabled
+            ? boost::none
+            : boost::optional<SupportingLongNameStatusEnum>(value));
 }
 
 }  // namespace mongo

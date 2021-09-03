@@ -1,8 +1,12 @@
 /**
  * Tests that tenant migration commands cannot be run on sharded clusters.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, requires_persistence,
- * incompatible_with_eft, incompatible_with_windows_tls]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -19,13 +23,6 @@ recipientRst.initiate();
 
 const tenantMigrationTest =
     new TenantMigrationTest({name: jsTestName(), donorRst: donorRstShard, recipientRst});
-
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    st.stop();
-    recipientRst.stopSet();
-    return;
-}
 
 // Run tenant migration commands on shards.
 let donorPrimary = donorRstShard.getPrimary();

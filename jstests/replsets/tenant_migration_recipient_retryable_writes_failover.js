@@ -3,11 +3,11 @@
  * fails over while fetching retryable writes oplog entries from the donor.
  *
  * @tags: [
- *   requires_fcv_49,
- *   requires_majority_read_concern,
  *   incompatible_with_eft,
+ *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
- *   incompatible_with_macos, requires_persistence
+ *   requires_majority_read_concern,
+ *   requires_persistence,
  * ]
  */
 
@@ -26,11 +26,6 @@ if (!RetryableWritesUtil.storageEngineSupportsRetryableWrites(jsTest.options().s
 
 const tenantMigrationTest =
     new TenantMigrationTest({name: jsTestName(), sharedOptions: {nodes: 2}});
-
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 const kMigrationId = UUID();
 const kTenantId = 'testTenantId';

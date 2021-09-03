@@ -181,6 +181,8 @@ public:
      */
     static ChangeStreamType getChangeStreamType(const NamespaceString& nss);
     static std::string getNsRegexForChangeStream(const NamespaceString& nss);
+    static std::string getCollRegexForChangeStream(const NamespaceString& nss);
+    static std::string getCmdNsRegexForChangeStream(const NamespaceString& nss);
 
     /**
      * Parses a $changeStream stage from 'elem' and produces the $match and transformation
@@ -193,7 +195,7 @@ public:
      * Helper used by various change stream stages. Used for asserting that a certain Value of a
      * field has a certain type. Will uassert() if the field does not have the expected type.
      */
-    static void checkValueType(const Value v, const StringData fieldName, BSONType expectedType);
+    static void checkValueType(Value v, StringData fieldName, BSONType expectedType);
 
     /**
      * Extracts the resume token from the given spec. If a 'startAtOperationTime' is specified,

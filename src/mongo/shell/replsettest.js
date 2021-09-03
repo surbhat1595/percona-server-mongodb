@@ -1622,13 +1622,13 @@ var ReplSetTest = function(opts) {
                     const serverStatus =
                         assert.commandWorked(node.getDB("admin").runCommand({serverStatus: 1}));
                     const currVersion = serverStatus.version;
-                    const binVersionLatest =
-                        MongoRunner.areBinVersionsTheSame(MongoRunner.getBinVersionFor(currVersion),
-                                                          MongoRunner.getBinVersionFor("latest"));
+                    const olderThan50 = MongoRunner.compareBinVersions(
+                                            MongoRunner.getBinVersionFor("5.0"),
+                                            MongoRunner.getBinVersionFor(currVersion)) === 1;
 
-                    // Only set the following server parameters for nodes running on the latest
-                    // binary version.
-                    if (!binVersionLatest) {
+                    // The following params are available only on versions greater than or equal to
+                    // 5.0.
+                    if (olderThan50) {
                         continue;
                     }
 
@@ -2262,14 +2262,10 @@ var ReplSetTest = function(opts) {
         return sessions.map(session => {
             const commandObj = {dbHash: 1};
             const db = session.getDatabase(dbName);
-            // If eMRC=false or we are in binary version 4.4, we use the old behavior using
-            // $_internalReadAtClusterTime. Otherwise, we use snapshot read concern for dbhash.
+            // If eMRC=false, we use the old behavior using $_internalReadAtClusterTime.
+            // Otherwise, we use snapshot read concern for dbhash.
             if (readAtClusterTime !== undefined) {
-                // TODO (SERVER-48959): Remove 4.4 version check to see which point-in-time read
-                // behavior to use.
-                const version = assert.commandWorked(db.runCommand({buildinfo: 1})).versionArray;
-                if (jsTest.options().enableMajorityReadConcern !== false &&
-                    ((version[0] > 4) || ((version[0] == 4) && (version[1] > 4)))) {
+                if (jsTest.options().enableMajorityReadConcern !== false) {
                     commandObj.readConcern = {level: "snapshot", atClusterTime: readAtClusterTime};
                 } else {
                     commandObj.$_internalReadAtClusterTime = readAtClusterTime;
@@ -2668,65 +2664,6 @@ var ReplSetTest = function(opts) {
         }
         print("checkOplogs oplog checks complete.");
     }
-
-    /**
-     * Checks that 'fastCount' matches an iterative count for all collections.
-     */
-    this.checkCollectionCounts = function(msgPrefix = 'checkCollectionCounts') {
-        let success = true;
-        const errPrefix = `${msgPrefix}, counts did not match for collection`;
-
-        function checkCollectionCount(coll) {
-            const itCount = coll.find().itcount();
-            const fastCount = coll.count();
-            if (itCount !== fastCount) {
-                print(`${errPrefix} ${coll.getFullName()} on ${coll.getMongo().host}.` +
-                      ` itcount: ${itCount}, fast count: ${fastCount}`);
-                print("Collection info: " +
-                      tojson(coll.getDB().getCollectionInfos({name: coll.getName()})));
-                print("Collection stats: " + tojson(coll.stats()));
-                print("First 10 documents in collection: " +
-                      tojson(coll.find().limit(10).toArray()));
-
-                if (coll.getFullName() == "config.transactions") {
-                    print(`Ignoring fastcount error for ${coll.getFullName()} on ` +
-                          `${coll.getMongo().host}. itcount: ${itCount}, fast count: ${fastCount}`);
-                    return;
-                }
-                success = false;
-            }
-        }
-
-        function checkCollectionCountsForDB(_db) {
-            const res = assert.commandWorked(
-                _db.runCommand({listCollections: 1, includePendingDrops: true}));
-            const collNames = new DBCommandCursor(_db, res).toArray();
-            collNames.forEach(c => checkCollectionCount(_db.getCollection(c.name)));
-        }
-
-        function checkCollectionCountsForNode(node) {
-            const dbNames = node.getDBNames();
-            dbNames.forEach(dbName => checkCollectionCountsForDB(node.getDB(dbName)));
-        }
-
-        function checkCollectionCountsForReplSet(rst) {
-            print("checkCollectionCountsForReplSet waiting for secondaries to be ready: " +
-                  tojson(rst.nodes));
-            this.awaitSecondaryNodes();
-
-            rst.nodes.forEach(node => {
-                // Arbiters have no replicated collections.
-                if (isNodeArbiter(node)) {
-                    print("checkCollectionCounts skipping counts for arbiter: " + node.host);
-                    return;
-                }
-                checkCollectionCountsForNode(node);
-            });
-            assert(success, `Collection counts did not match. search for '${errPrefix}' in logs.`);
-        }
-
-        this.checkReplicaSet(checkCollectionCountsForReplSet, _determineLiveSecondaries(), this);
-    };
 
     /**
      * Waits for an initial connection to a given node. Should only be called after the node's

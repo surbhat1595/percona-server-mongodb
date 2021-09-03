@@ -3,8 +3,13 @@
  * tenant cloner performs (such as 'listCollections' and 'listDatabases') account for donor
  * rollback.
  *
- * @tags: [requires_majority_read_concern, requires_fcv_49, incompatible_with_windows_tls,
- * incompatible_with_eft, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -23,12 +28,6 @@ const recipientRst =
 
 recipientRst.startSet();
 recipientRst.initiateWithHighElectionTimeout();
-
-if (!TenantMigrationUtil.isFeatureFlagEnabled(recipientRst.getPrimary())) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    recipientRst.stopSet();
-    return;
-}
 
 // This function does the following:
 // 1. Runs the setup function, which typically involves loading the donor RST with some data.

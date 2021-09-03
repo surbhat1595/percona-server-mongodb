@@ -108,6 +108,7 @@ public:
             boost::none /* timestamp */,
             boost::none /* timeseriesFields */,
             boost::none,
+            boost::none /* chunkSizeBytes */,
             true,
             {ChunkType{kNss,
                        ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
@@ -120,7 +121,7 @@ public:
             ->setFilteringMetadata(
                 operationContext(),
                 CollectionMetadata(ChunkManager(ShardId("dummyShardId"),
-                                                DatabaseVersion(UUID::gen()),
+                                                DatabaseVersion(UUID::gen(), Timestamp()),
                                                 makeStandaloneRoutingTableHistory(std::move(rt)),
                                                 boost::none),
                                    ShardId("dummyShardId")));

@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -83,15 +84,44 @@ void testBothWaysIndexSpecConversion(const TimeseriesOptions& timeseriesOptions,
 
     // Test buckets => time-series schema conversion.
 
-    auto timeseriesIndexSpecResult = timeseries::createTimeseriesIndexSpecFromBucketsIndexSpec(
-        timeseriesOptions, bucketsIndexSpec);
+    auto timeseriesIndexSpecResult = timeseries::createTimeseriesIndexFromBucketsIndex(
+        timeseriesOptions, BSON(timeseries::kKeyFieldName << bucketsIndexSpec));
 
     if (testShouldSucceed) {
         ASSERT(timeseriesIndexSpecResult);
-        ASSERT_BSONOBJ_EQ(timeseriesIndexSpec, timeseriesIndexSpecResult.get());
+        ASSERT_BSONOBJ_EQ(timeseriesIndexSpec,
+                          timeseriesIndexSpecResult->getObjectField(timeseries::kKeyFieldName));
     } else {
         // A buckets collection index spec that does not conform to the supported time-series index
         // spec schema should be converted to an empty time-series index spec result.
+        ASSERT(!timeseriesIndexSpecResult);
+    }
+}
+
+TEST(TimeseriesIndexSchemaConversionTest, OriginalSpecFieldName) {
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+
+    BSONObj bucketsIndexSpec =
+        BSON(timeseries::kKeyFieldName << BSON("control.min.a" << 1 << "control.max.a" << 1)
+                                       << timeseries::kOriginalSpecFieldName << BSON("abc" << 123));
+
+    {
+        // The "originalSpec" field is used when the time-series metric indexes feature flag is
+        // enabled.
+        RAIIServerParameterControllerForTest controller("featureFlagTimeseriesMetricIndexes", true);
+        auto timeseriesIndexSpecResult =
+            timeseries::createTimeseriesIndexFromBucketsIndex(timeseriesOptions, bucketsIndexSpec);
+        ASSERT(timeseriesIndexSpecResult);
+        ASSERT_BSONOBJ_EQ(*timeseriesIndexSpecResult, BSON("abc" << 123));
+    }
+
+    {
+        // The "originalSpec" field is not used when the time-series metric indexes feature flag is
+        // disabled.
+        RAIIServerParameterControllerForTest controller("featureFlagTimeseriesMetricIndexes",
+                                                        false);
+        auto timeseriesIndexSpecResult =
+            timeseries::createTimeseriesIndexFromBucketsIndex(timeseriesOptions, bucketsIndexSpec);
         ASSERT(!timeseriesIndexSpecResult);
     }
 }
@@ -316,6 +346,55 @@ TEST(TimeseriesIndexSchemaConversionTest, 2dsphereMetadataIndexSpecConversion) {
     TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
     BSONObj timeseriesIndexSpec = BSON(kTimeseriesMetaFieldName << "2dsphere");
     BSONObj bucketsIndexSpec = BSON(timeseries::kBucketMetaFieldName << "2dsphere");
+
+    testBothWaysIndexSpecConversion(timeseriesOptions, timeseriesIndexSpec, bucketsIndexSpec);
+}
+
+// {a: 1} <=> {control.min.a: 1, control.max.a: 1}
+TEST(TimeseriesIndexSchemaConversionTest, AscendingMeasurementIndexSpecConversion) {
+    RAIIServerParameterControllerForTest controller("featureFlagTimeseriesMetricIndexes", true);
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+    BSONObj timeseriesIndexSpec = BSON("a" << 1);
+    BSONObj bucketsIndexSpec = BSON("control.min.a" << 1 << "control.max.a" << 1);
+
+    testBothWaysIndexSpecConversion(timeseriesOptions, timeseriesIndexSpec, bucketsIndexSpec);
+}
+
+// {a: -1} <=> {control.max.a: -1, control.min.a: -1}
+TEST(TimeseriesIndexSchemaConversionTest, DescendingMeasurementIndexSpecConversion) {
+    RAIIServerParameterControllerForTest controller("featureFlagTimeseriesMetricIndexes", true);
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+    BSONObj timeseriesIndexSpec = BSON("a" << -1);
+    BSONObj bucketsIndexSpec = BSON("control.max.a" << -1 << "control.min.a" << -1);
+
+    testBothWaysIndexSpecConversion(timeseriesOptions, timeseriesIndexSpec, bucketsIndexSpec);
+}
+
+// {a: 1, b: -1, c: 1, d: "2dsphere"} <=> {control.min.a: 1, control.max.a: 1,
+//                                         control.max.b: -1, control.min.b: -1,
+//                                         control.min.c: 1, control.max.c: 1,
+//                                         data.d: "2dsphere_bucket"}
+TEST(TimeseriesIndexSchemaConversionTest, MixedCompoundMeasurementIndexSpecConversion) {
+    RAIIServerParameterControllerForTest controller("featureFlagTimeseriesMetricIndexes", true);
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+    BSONObj timeseriesIndexSpec = BSON("a" << 1 << "b" << -1 << "c" << 1 << "d"
+                                           << "2dsphere");
+    BSONObj bucketsIndexSpec = BSON(
+        "control.min.a" << 1 << "control.max.a" << 1 << "control.max.b" << -1 << "control.min.b"
+                        << -1 << "control.min.c" << 1 << "control.max.c" << 1 << "data.d"
+                        << "2dsphere_bucket");
+
+    testBothWaysIndexSpecConversion(timeseriesOptions, timeseriesIndexSpec, bucketsIndexSpec);
+}
+
+// {a: "2sphere"} <=> {data.a: "2dsphere_bucket"}
+TEST(TimeseriesIndexSchemaConversionTest, 2dsphereMeasurementIndexSpecConversion) {
+    RAIIServerParameterControllerForTest controller("featureFlagTimeseriesMetricIndexes", true);
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+    BSONObj timeseriesIndexSpec = BSON("a"
+                                       << "2dsphere");
+    BSONObj bucketsIndexSpec = BSON("data.a"
+                                    << "2dsphere_bucket");
 
     testBothWaysIndexSpecConversion(timeseriesOptions, timeseriesIndexSpec, bucketsIndexSpec);
 }

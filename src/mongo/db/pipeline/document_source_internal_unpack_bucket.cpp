@@ -41,8 +41,11 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
 #include "mongo/db/matcher/expression_internal_expr_comparison.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
+#include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_project.h"
@@ -100,17 +103,6 @@ auto getIncludeExcludeProjectAndType(DocumentSource* src) {
                              TransformerInterface::TransformerType::kInclusionProjection};
     }
     return std::pair{BSONObj{}, false};
-}
-
-// Optimize the given pipeline after the $_internalUnpackBucket stage pointed to by 'itr'.
-void optimizeEndOfPipeline(Pipeline::SourceContainer::iterator itr,
-                           Pipeline::SourceContainer* container) {
-    // We must create a new SourceContainer representing the subsection of the pipeline we wish to
-    // optimize, since otherwise calls to optimizeAt() will overrun these limits.
-    auto endOfPipeline = Pipeline::SourceContainer(std::next(itr), container->end());
-    Pipeline::optimizeContainer(&endOfPipeline);
-    container->erase(std::next(itr), container->end());
-    container->splice(std::next(itr), endOfPipeline);
 }
 
 /**
@@ -279,6 +271,7 @@ bool fieldIsComputed(BucketSpec spec, std::string field) {
                 expression::isPathPrefixOf(s, field);
         });
 }
+
 }  // namespace
 
 DocumentSourceInternalUnpackBucket::DocumentSourceInternalUnpackBucket(
@@ -741,6 +734,12 @@ DocumentSourceInternalUnpackBucket::createPredicatesOnBucketLevelField(
                                          _bucketUnpacker.bucketSpec(),
                                          _bucketMaxSpanSeconds,
                                          pExpCtx->collationMatchesDefault);
+    } else if (matchExpr->matchType() == MatchExpression::GEO) {
+        auto& geoExpr = static_cast<const GeoMatchExpression*>(matchExpr)->getGeoExpression();
+        if (geoExpr.getPred() == GeoExpression::WITHIN) {
+            return std::make_unique<InternalBucketGeoWithinMatchExpression>(
+                geoExpr.getGeometryPtr(), geoExpr.getField());
+        }
     }
 
     return nullptr;
@@ -912,7 +911,7 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
     // Optimize the pipeline after this stage to merge $match stages and push them forward.
     if (!_optimizedEndOfPipeline) {
         _optimizedEndOfPipeline = true;
-        optimizeEndOfPipeline(itr, container);
+        Pipeline::optimizeEndOfPipeline(itr, container);
 
         if (std::next(itr) == container->end()) {
             return container->end();
@@ -958,6 +957,41 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
             return std::prev(itr) == container->begin() ? std::prev(itr)
                                                         : std::prev(std::prev(itr));
         }
+    }
+
+    // Attempt to push geoNear on the metaField past $_internalUnpackBucket.
+    if (auto nextNear = dynamic_cast<DocumentSourceGeoNear*>(std::next(itr)->get())) {
+        // Currently we only support geo indexes on the meta field, and we enforce this by
+        // requiring the key field to be set so we can check before we try to look up indexes.
+        auto keyField = nextNear->getKeyField();
+        uassert(5892921,
+                "Must specify 'key' option for $geoNear on a time-series collection",
+                keyField);
+
+        auto metaField = _bucketUnpacker.bucketSpec().metaField;
+        uassert(
+            4581294,
+            "Must specify part of metadata field as 'key' for $geoNear on a time-series collection",
+            metaField && *metaField == keyField->front());
+
+        // Currently we do not support query for $geoNear on a bucket
+        uassert(
+            1938439,
+            "Must not specify 'query' for $geoNear on a time-series collection; use $match instead",
+            nextNear->getQuery().binaryEqual(BSONObj()));
+
+        // Make sure we actually re-write the key field for the buckets collection so we can
+        // locate the index.
+        static const FieldPath baseMetaFieldPath{timeseries::kBucketMetaFieldName};
+        nextNear->setKeyField(keyField->getPathLength() > 1
+                                  ? baseMetaFieldPath.concat(keyField->tail())
+                                  : baseMetaFieldPath);
+
+        // Save the source, remove it, and then push it down.
+        auto source = *std::next(itr);
+        container->erase(std::next(itr));
+        container->insert(itr, source);
+        return std::prev(itr) == container->begin() ? std::prev(itr) : std::prev(std::prev(itr));
     }
 
     // Attempt to map predicates on bucketed fields to predicates on the control field.

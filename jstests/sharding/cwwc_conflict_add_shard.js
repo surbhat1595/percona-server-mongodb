@@ -1,7 +1,7 @@
 /**
  * Tests adding shard to sharded cluster will fail if CWWC on shard disagrees with existing CWWC on
  * cluster.
- * @tags: [requires_fcv_50, requires_majority_read_concern, requires_persistence]
+ * @tags: [requires_majority_read_concern, requires_persistence]
  */
 
 (function() {

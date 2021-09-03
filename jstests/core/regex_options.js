@@ -1,6 +1,6 @@
 /**
  * Test regex options in a find context.
- * @tags: [requires_fcv_50]
+ * @tags: [requires_fcv_51]
  */
 (function() {
 'use strict';

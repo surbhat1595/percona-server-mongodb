@@ -41,7 +41,7 @@
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
-#include "mongo/s/type_collection_timeseries_fields_gen.h"
+#include "mongo/s/type_collection_common_types_gen.h"
 
 namespace mongo {
 
@@ -67,7 +67,7 @@ protected:
      * Inserts a document into the config.databases collection to indicate that "dbName" is sharded
      * with primary "primaryShard".
      */
-    void setUpDatabase(const std::string& dbName, const ShardId primaryShard);
+    void setUpDatabase(const std::string& dbName, ShardId primaryShard);
 
     /**
      * Inserts a document into the config.collections collection to indicate that "collName" is

@@ -203,10 +203,10 @@ public:
     void expectStaleDbVersionError(const NamespaceString& nss, StringData expectedCmdName) {
         onCommand([&](const executor::RemoteCommandRequest& request) {
             ASSERT_EQ(request.cmdObj.firstElementFieldNameStringData(), expectedCmdName);
-            return createErrorCursorResponse(
-                Status(StaleDbRoutingVersion(
-                           nss.db().toString(), DatabaseVersion(UUID::gen()), boost::none),
-                       "dummy stale db version error"));
+            return createErrorCursorResponse(Status(
+                StaleDbRoutingVersion(
+                    nss.db().toString(), DatabaseVersion(UUID::gen(), Timestamp()), boost::none),
+                "dummy stale db version error"));
         });
     }
 
@@ -245,13 +245,27 @@ public:
     }
 };
 
-TEST_F(RecipientServiceExternalStateTest, CreateLocalReshardingCollectionBasic) {
-    // TODO (SERVER-57194): enable lock-free reads.
-    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
-    storageGlobalParams.disableLockFreeReads = true;
-    ON_BLOCK_EXIT(
-        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
+TEST_F(RecipientServiceExternalStateTest, ReshardingConfigServerUpdatesHaveNoTimeout) {
+    RecipientStateMachineExternalStateImpl externalState;
 
+    auto future = launchAsync([&] {
+        externalState.updateCoordinatorDocument(operationContext(),
+                                                BSON("query"
+                                                     << "test"),
+                                                BSON("update"
+                                                     << "test"));
+    });
+
+    onCommand([&](const executor::RemoteCommandRequest& request) {
+        ASSERT_FALSE(request.cmdObj.hasField("maxTimeMS"));
+        ASSERT_EQUALS(request.timeout, executor::RemoteCommandRequest::kNoTimeout);
+        return BSON("ok" << 1);
+    });
+
+    future.default_timed_get();
+}
+
+TEST_F(RecipientServiceExternalStateTest, CreateLocalReshardingCollectionBasic) {
     auto shards = setupNShards(2);
 
     // Shard kOrigNss by _id with chunks [minKey, 0), [0, maxKey] on shards "0" and "1"
@@ -300,12 +314,6 @@ TEST_F(RecipientServiceExternalStateTest, CreateLocalReshardingCollectionBasic) 
 
 TEST_F(RecipientServiceExternalStateTest,
        CreatingLocalReshardingCollectionRetriesOnStaleVersionErrors) {
-    // TODO (SERVER-57194): enable lock-free reads.
-    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
-    storageGlobalParams.disableLockFreeReads = true;
-    ON_BLOCK_EXIT(
-        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
-
     auto shards = setupNShards(2);
 
     // Shard kOrigNss by _id with chunks [minKey, 0), [0, maxKey] on shards "0" and "1"
@@ -359,12 +367,6 @@ TEST_F(RecipientServiceExternalStateTest,
 
 TEST_F(RecipientServiceExternalStateTest,
        CreateLocalReshardingCollectionCollectionAlreadyExistsWithNoIndexes) {
-    // TODO (SERVER-57194): enable lock-free reads.
-    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
-    storageGlobalParams.disableLockFreeReads = true;
-    ON_BLOCK_EXIT(
-        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
-
     auto shards = setupNShards(2);
 
     // Shard kOrigNss by _id with chunks [minKey, 0), [0, maxKey] on shards "0" and "1"
@@ -428,12 +430,6 @@ TEST_F(RecipientServiceExternalStateTest,
 
 TEST_F(RecipientServiceExternalStateTest,
        CreateLocalReshardingCollectionCollectionAlreadyExistsWithSomeIndexes) {
-    // TODO (SERVER-57194): enable lock-free reads.
-    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
-    storageGlobalParams.disableLockFreeReads = true;
-    ON_BLOCK_EXIT(
-        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
-
     auto shards = setupNShards(2);
 
     // Shard kOrigNss by _id with chunks [minKey, 0), [0, maxKey] on shards "0" and "1"
@@ -499,12 +495,6 @@ TEST_F(RecipientServiceExternalStateTest,
 
 TEST_F(RecipientServiceExternalStateTest,
        CreateLocalReshardingCollectionCollectionAlreadyExistsWithAllIndexes) {
-    // TODO (SERVER-57194): enable lock-free reads.
-    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
-    storageGlobalParams.disableLockFreeReads = true;
-    ON_BLOCK_EXIT(
-        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
-
     auto shards = setupNShards(2);
 
     // Shard kOrigNss by _id with chunks [minKey, 0), [0, maxKey] on shards "0" and "1"

@@ -1,10 +1,10 @@
 """FCV and Server binary version constants used for multiversion testing."""
-LAST_LTS_BIN_VERSION = "4.4"
+LAST_LTS_BIN_VERSION = "5.0"
 LAST_CONTINUOUS_BIN_VERSION = "5.0"
 
-LAST_LTS_FCV = "4.4"
+LAST_LTS_FCV = "5.0"
 LAST_CONTINUOUS_FCV = "5.0"
-LATEST_FCV = "5.0"
+LATEST_FCV = "5.1"
 
 LAST_CONTINUOUS_MONGO_BINARY = "mongo-" + LAST_CONTINUOUS_BIN_VERSION
 LAST_CONTINUOUS_MONGOD_BINARY = "mongod-" + LAST_CONTINUOUS_BIN_VERSION
@@ -14,4 +14,7 @@ LAST_LTS_MONGO_BINARY = "mongo-" + LAST_LTS_BIN_VERSION
 LAST_LTS_MONGOD_BINARY = "mongod-" + LAST_LTS_BIN_VERSION
 LAST_LTS_MONGOS_BINARY = "mongos-" + LAST_LTS_BIN_VERSION
 
-REQUIRES_FCV_TAG = "requires_fcv_47,requires_fcv_48,requires_fcv_49,requires_fcv_50"
+REQUIRES_FCV_TAG_LATEST = "requires_fcv_51"
+
+# TODO: rename this to REQUIRES_FCV_TAGS (plural) when `requires_fcv_52` is added to it.
+REQUIRES_FCV_TAG = REQUIRES_FCV_TAG_LATEST

@@ -151,8 +151,8 @@ function runHangAnalyzer(pids) {
     const args =
         ['python', scriptPath, 'hang-analyzer', '-k', '-o', 'file', '-o', 'stdout', '-d', pids];
 
-    if (jsTest.options().evergreenDebugSymbolsUrl) {
-        args.push('-ds', jsTest.options().evergreenDebugSymbolsUrl);
+    if (jsTest.options().evergreenTaskId) {
+        args.push('-t', jsTest.options().evergreenTaskId);
     }
 
     // Enable core dumps if not an ASAN build.
@@ -204,17 +204,13 @@ var extractMajorVersionFromVersionString = function(versionString) {
 };
 
 // These patterns allow substituting the binary versions used for each version string to support
-// the
-// dev/stable MongoDB release cycle.
-//
-// If you add a new version substitution to this list, you should add it to the lists of
-// versions being checked in 'verify_versions_test.js' to verify it is susbstituted correctly.
+// the dev/stable MongoDB release cycle.
+var fcvConstants = getFCVConstants();
+
 MongoRunner.binVersionSubs = [
     new MongoRunner.VersionSub("latest", shellVersion()),
-    // To-be-updated when we branch for the next release.
-    new MongoRunner.VersionSub("last-continuous", "5.0"),
-    // To be updated when we branch for the next LTS release.
-    new MongoRunner.VersionSub("last-lts", "4.4")
+    new MongoRunner.VersionSub("last-continuous", fcvConstants.lastContinuous),
+    new MongoRunner.VersionSub("last-lts", fcvConstants.lastLTS)
 ];
 
 MongoRunner.getBinVersionFor = function(version) {
@@ -697,6 +693,7 @@ MongoRunner.mongodOptions = function(opts = {}) {
     _removeSetParameterIfBeforeVersion(
         opts, "enableDefaultWriteConcernUpdatesForInitiate", "5.0.0");
     _removeSetParameterIfBeforeVersion(opts, "enableReconfigRollbackCommittedWritesCheck", "5.0.0");
+    _removeSetParameterIfBeforeVersion(opts, "featureFlagRetryableFindAndModify", "5.0.0");
 
     if (!opts.logFile && opts.useLogFiles) {
         opts.logFile = opts.dbpath + "/mongod.log";
@@ -1246,6 +1243,28 @@ function appendSetParameterArgs(argArray) {
                 if (!argArrayContains("--storageEngine")) {
                     argArray.push(...['--storageEngine', jsTest.options().storageEngine]);
                 }
+            }
+
+            function isSetParameterMentioned(setParameters, key) {
+                if (setParameters !== undefined && setParameters[key] !== undefined) {
+                    return true;
+                }
+
+                if (argArrayContainsSetParameterValue(key + '=')) {
+                    return true;
+                }
+
+                return false;
+            }
+
+            // When launching a 5.0 mongod, if we're mentioning the
+            // `storeFindAndModifyImagesInSideCollection` setParameter and the corresponding feature
+            // flag is not set, add it for good measure.
+            if (programMajorMinorVersion === 500 &&
+                isSetParameterMentioned(jsTest.options().setParameters,
+                                        "storeFindAndModifyImagesInSideCollection") &&
+                !argArrayContainsSetParameterValue("featureFlagRetryableFindAndModify=")) {
+                argArray.push(...['--setParameter', "featureFlagRetryableFindAndModify=true"]);
             }
 
             // New mongod-specific option in 4.9.x.

@@ -31,6 +31,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
+#include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
@@ -40,10 +41,10 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/json.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/matcher/doc_validation_error.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/ops/parsed_delete.h"
 #include "mongo/db/ops/parsed_update.h"
@@ -56,6 +57,7 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
+#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/retryable_writes_stats.h"
@@ -63,6 +65,7 @@
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/views/view_catalog.h"
@@ -118,57 +121,6 @@ bool isTimeseries(OperationContext* opCtx, const NamespaceString& ns) {
     return CollectionCatalog::get(opCtx)
         ->lookupCollectionByNamespaceForRead(opCtx, bucketsNs)
         .get();
-}
-
-// TODO: SERVER-58394 Remove this method since it is in an anonymous namespace in
-// timeseries_update_delete_util.
-/**
- * Returns if the given metaField is the first element of the dotted path in the given field.
- */
-bool isMetaFieldFirstElementOfDottedPathField(StringData metaField, StringData field) {
-    return field.substr(0, field.find('.')) == metaField;
-}
-
-// TODO: SERVER-58394 Remove this method and combine its logic with
-// timeseries::replaceTimeseriesQueryMetaFieldName().
-/**
- * Recurses through the mutablebson element query and replaces any occurrences of the
- * metaField with "meta" accounting for queries that may be in dot notation. shouldReplaceFieldValue
- * is set for $expr queries when "$" + the metaField should be subsitutited for "$meta".
- */
-void replaceTimeseriesQueryMetaFieldName(mutablebson::Element elem,
-                                         const StringData& metaField,
-                                         bool shouldReplaceFieldValue = false) {
-    if (metaField.empty()) {
-        return;
-    }
-    shouldReplaceFieldValue = (elem.getFieldName() != "$literal") &&
-        (shouldReplaceFieldValue || (elem.getFieldName() == "$expr"));
-    if (isMetaFieldFirstElementOfDottedPathField(metaField, elem.getFieldName())) {
-        size_t dotIndex = elem.getFieldName().find('.');
-        dotIndex >= elem.getFieldName().size()
-            ? invariantStatusOK(elem.rename("meta"))
-            : invariantStatusOK(elem.rename(
-                  "meta" +
-                  elem.getFieldName().substr(dotIndex, elem.getFieldName().size() - dotIndex)));
-    }
-    // Substitute element fieldValue with "$meta" if element is a subField of $expr, not a subField
-    // of $literal, and the element fieldValue is "$" + the metaField.
-    else if (shouldReplaceFieldValue && elem.isType(BSONType::String) &&
-             isMetaFieldFirstElementOfDottedPathField("$" + metaField, elem.getValueString())) {
-        size_t dotIndex = elem.getValueString().find('.');
-        dotIndex >= elem.getValueString().size()
-            ? invariantStatusOK(elem.setValueString("$meta"))
-            : invariantStatusOK(elem.setValueString(
-                  "$meta" +
-                  elem.getValueString().substr(dotIndex, elem.getValueString().size() - dotIndex)));
-    }
-    if (elem.hasChildren()) {
-        for (size_t i = 0; i < elem.countChildren(); ++i) {
-            replaceTimeseriesQueryMetaFieldName(
-                elem.findNthChild(i), metaField, shouldReplaceFieldValue);
-        }
-    }
 }
 
 // Default for control.version in time-series bucket collection.
@@ -361,25 +313,24 @@ boost::optional<BSONObj> generateError(OperationContext* opCtx,
                    status.extraInfo<doc_validation_error::DocumentValidationFailureInfo>()) {
         error.append("code", static_cast<int>(ErrorCodes::DocumentValidationFailure));
         error.append("errInfo", docValidationError->getDetails());
-    } else if (ErrorCodes::isTenantMigrationError(status.code())) {
-        if (ErrorCodes::TenantMigrationConflict == status.code()) {
-            auto migrationConflictInfo = status.extraInfo<TenantMigrationConflictInfo>();
+    } else if (status.code() == ErrorCodes::TenantMigrationConflict) {
+        hangWriteBeforeWaitingForMigrationDecision.pauseWhileSet(opCtx);
 
-            hangWriteBeforeWaitingForMigrationDecision.pauseWhileSet(opCtx);
+        auto migrationStatus =
+            tenant_migration_access_blocker::handleTenantMigrationConflict(opCtx, status);
 
-            auto mtab = migrationConflictInfo->getTenantMigrationAccessBlocker();
+        // Interruption errors encountered during batch execution fail the entire batch, so throw on
+        // such errors here for consistency.
+        if (ErrorCodes::isInterruption(migrationStatus)) {
+            uassertStatusOK(migrationStatus);
+        }
 
-            auto migrationStatus = mtab->waitUntilCommittedOrAborted(opCtx);
-            mtab->recordTenantMigrationError(migrationStatus);
-            error.append("code", static_cast<int>(migrationStatus.code()));
+        error.append("code", migrationStatus.code());
 
-            // We want to append an empty errmsg for the errors after the first one, so let the
-            // code below that appends errmsg do that.
-            if (status.reason() != "") {
-                error.append("errmsg", errorMessage(migrationStatus.reason()));
-            }
-        } else {
-            error.append("code", int(status.code()));
+        // We want to append an empty errmsg for the errors after the first one, so let the
+        // code below that appends errmsg do that.
+        if (status.reason() != "") {
+            error.append("errmsg", errorMessage(migrationStatus.reason()));
         }
     } else {
         error.append("code", int(status.code()));
@@ -576,7 +527,7 @@ public:
 
             return insertReply;
         } catch (const DBException& ex) {
-            LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+            NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
             throw;
         }
 
@@ -590,7 +541,7 @@ public:
                                             request().getBypassDocumentValidation(),
                                             request());
         } catch (const DBException& ex) {
-            LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+            NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
             throw;
         }
 
@@ -659,7 +610,7 @@ public:
             return _getTimeseriesSingleWriteResult(write_ops_exec::performInserts(
                 opCtx,
                 _makeTimeseriesInsertOp(batch, metadata, std::move(stmtIds)),
-                OperationSource::kTimeseries));
+                OperationSource::kTimeseriesInsert));
         }
 
         StatusWith<SingleWriteResult> _performTimeseriesUpdate(
@@ -674,7 +625,7 @@ public:
             return _getTimeseriesSingleWriteResult(write_ops_exec::performUpdates(
                 opCtx,
                 _makeTimeseriesUpdateOp(opCtx, batch, metadata, std::move(stmtIds)),
-                OperationSource::kTimeseries));
+                OperationSource::kTimeseriesInsert));
         }
 
         void _commitTimeseriesBucket(OperationContext* opCtx,
@@ -1185,12 +1136,20 @@ public:
 
         write_ops::UpdateCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
-
             write_ops::UpdateCommandReply updateReply;
+            OperationSource source = OperationSource::kStandard;
 
             if (isTimeseries(opCtx, ns())) {
-                _performTimeseriesUpdates(opCtx, &updateReply);
-                return updateReply;
+                uassert(ErrorCodes::InvalidOptions,
+                        "Time-series updates are not enabled",
+                        feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
+                            serverGlobalParams.featureCompatibility));
+                uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                        str::stream() << "Cannot perform a multi-document transaction on a "
+                                         "time-series collection: "
+                                      << ns(),
+                        !opCtx->inMultiDocumentTransaction());
+                source = OperationSource::kTimeseriesUpdate;
             }
 
             long long nModified = 0;
@@ -1199,7 +1158,7 @@ public:
             // 'postProcessHandler' and should not be accessed afterwards.
             std::vector<write_ops::Upserted> upsertedInfoVec;
 
-            auto reply = write_ops_exec::performUpdates(opCtx, request());
+            auto reply = write_ops_exec::performUpdates(opCtx, request(), source);
 
             // Handler to process each 'SingleWriteResult'.
             auto singleWriteHandler = [&](const SingleWriteResult& opResult, int index) {
@@ -1245,7 +1204,7 @@ public:
 
             return updateReply;
         } catch (const DBException& ex) {
-            LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+            NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
             throw;
         }
 
@@ -1255,7 +1214,7 @@ public:
                                             request().getBypassDocumentValidation(),
                                             request());
         } catch (const DBException& ex) {
-            LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+            NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
             throw;
         }
 
@@ -1294,95 +1253,6 @@ public:
                                    BSONObj(),
                                    _commandObj,
                                    &bodyBuilder);
-        }
-
-        write_ops::UpdateCommandReply* _performTimeseriesUpdates(
-            OperationContext* opCtx, write_ops::UpdateCommandReply* updateReply) const {
-            uassert(ErrorCodes::InvalidOptions,
-                    "Time-series updates are not enabled",
-                    feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
-                        serverGlobalParams.featureCompatibility));
-            uassert(
-                ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream()
-                    << "Cannot perform a multi-document transaction on a time-series collection: "
-                    << ns(),
-                !opCtx->inMultiDocumentTransaction());
-
-            auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(
-                opCtx, ns().makeTimeseriesBucketsNamespace());
-            uassert(ErrorCodes::NamespaceNotFound,
-                    "Could not find time-series buckets collection for update",
-                    collection);
-
-            auto timeseriesOptions = collection->getTimeseriesOptions();
-            uassert(ErrorCodes::InvalidOptions,
-                    "Time-series buckets collection is missing time-series options",
-                    timeseriesOptions);
-
-            StringData metaField = timeseriesOptions->getMetaField().value_or("");
-
-            // Create the translated updates to apply, which are used to make a new
-            // UpdateCommandRequest.
-            std::vector<write_ops::UpdateOpEntry> translatedUpdates;
-            auto numUpdates = request().getUpdates().size();
-
-            // TODO: SERVER-58394 Allow multiple time-series metaField-only updates.
-            uassert(
-                ErrorCodes::IllegalOperation,
-                str::stream() << "Multiple updates are not supported for time-series collections: "
-                              << ns(),
-                numUpdates == 1);
-
-            translatedUpdates.reserve(numUpdates);
-
-            // Translate each query-update pair in the update.
-            for (auto& updateEntry : request().getUpdates()) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream()
-                            << "multi:false updates are not supported for time-series collections: "
-                            << ns(),
-                        updateEntry.getMulti());
-
-                // Get the original update query and check that it only depends on the metaField.
-                const auto& updateQuery = updateEntry.getQ();
-                uassert(
-                    ErrorCodes::InvalidOptions,
-                    str::stream() << "Cannot perform an update on a time-series collection "
-                                     "when querying on a field that is not the metaField: "
-                                  << ns(),
-                    timeseries::queryOnlyDependsOnMetaField(opCtx, ns(), updateQuery, metaField));
-
-                // Get the original set of modifications to apply and check that they only modify
-                // the metaField.
-                const auto& updateMod = updateEntry.getU();
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "Update on a time-series collection must only "
-                                         "modify the metaField: "
-                                      << ns(),
-                        timeseries::updateOnlyModifiesMetaField(opCtx, ns(), updateMod, metaField));
-
-                translatedUpdates.push_back(timeseries::translateUpdate(
-                    metaField.empty() ? updateQuery
-                                      : timeseries::translateQuery(updateQuery, metaField),
-                    updateMod,
-                    metaField));
-            }
-
-            // Make a new UpdateCommandRequest from the translated updates.
-            write_ops::UpdateCommandRequest translatedRequest(ns().makeTimeseriesBucketsNamespace(),
-                                                              translatedUpdates);
-            translatedRequest.setWriteCommandRequestBase(request().getWriteCommandRequestBase());
-
-            auto reply = write_ops_exec::performUpdates(
-                opCtx, translatedRequest, OperationSource::kTimeseries);
-            populateReply(opCtx,
-                          !translatedRequest.getWriteCommandRequestBase().getOrdered(),
-                          numUpdates,
-                          std::move(reply),
-                          updateReply);
-
-            return updateReply;
         }
 
         BSONObj _commandObj;
@@ -1443,13 +1313,22 @@ public:
         write_ops::DeleteCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
             write_ops::DeleteCommandReply deleteReply;
+            OperationSource source = OperationSource::kStandard;
 
             if (isTimeseries(opCtx, ns())) {
-                _performTimeseriesDeletes(opCtx, &deleteReply);
-                return deleteReply;
+                uassert(ErrorCodes::InvalidOptions,
+                        "Time-series deletes are not enabled",
+                        feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
+                            serverGlobalParams.featureCompatibility));
+                uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                        str::stream() << "Cannot perform a multi-document transaction on a "
+                                         "time-series collection: "
+                                      << ns(),
+                        !opCtx->inMultiDocumentTransaction());
+                source = OperationSource::kTimeseriesDelete;
             }
 
-            auto reply = write_ops_exec::performDeletes(opCtx, request());
+            auto reply = write_ops_exec::performDeletes(opCtx, request(), source);
             populateReply(opCtx,
                           !request().getWriteCommandRequestBase().getOrdered(),
                           request().getDeletes().size(),
@@ -1458,7 +1337,7 @@ public:
 
             return deleteReply;
         } catch (const DBException& ex) {
-            LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+            NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
             throw;
         }
 
@@ -1468,7 +1347,7 @@ public:
                                             request().getBypassDocumentValidation(),
                                             request());
         } catch (const DBException& ex) {
-            LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
+            NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
             throw;
         }
 
@@ -1510,58 +1389,6 @@ public:
                                    BSONObj(),
                                    _commandObj,
                                    &bodyBuilder);
-        }
-
-        write_ops::DeleteCommandReply* _performTimeseriesDeletes(
-            OperationContext* opCtx, write_ops::DeleteCommandReply* deleteReply) {
-
-            uassert(ErrorCodes::InvalidOptions,
-                    "Time-series deletes are not enabled",
-                    feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
-                        serverGlobalParams.featureCompatibility));
-            uassert(
-                ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream()
-                    << "Cannot perform a multi-document transaction on a time-series collection: "
-                    << ns(),
-                !opCtx->inMultiDocumentTransaction());
-
-            auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(
-                opCtx, ns().makeTimeseriesBucketsNamespace());
-            uassert(ErrorCodes::NamespaceNotFound,
-                    "Could not find time-series buckets collection for write",
-                    collection);
-            auto timeseriesOptions = collection->getTimeseriesOptions();
-            uassert(ErrorCodes::InvalidOptions,
-                    "Time-series buckets collection is missing time-series options",
-                    timeseriesOptions);
-            StringData metaField = timeseriesOptions->getMetaField().value_or("");
-
-            std::vector<mongo::write_ops::DeleteOpEntry> timeseriesDeletes;
-            timeseriesDeletes.reserve(request().getDeletes().size());
-            for (auto& deleteEntry : request().getDeletes()) {
-                // TODO: SERVER-58394 Call timeseries::translateQuery() here instead.
-                mutablebson::Document doc(deleteEntry.getQ());
-                replaceTimeseriesQueryMetaFieldName(doc.root(), metaField);
-                timeseriesDeletes.push_back(deleteEntry);
-                timeseriesDeletes.back().setQ(doc.getObject());
-            }
-
-            write_ops::DeleteCommandRequest timeseriesDeleteReq(
-                ns().makeTimeseriesBucketsNamespace(), timeseriesDeletes);
-            timeseriesDeleteReq.setWriteCommandRequestBase(request().getWriteCommandRequestBase());
-            timeseriesDeleteReq.setLet(request().getLet());
-            timeseriesDeleteReq.setLegacyRuntimeConstants(request().getLegacyRuntimeConstants());
-
-            auto reply = write_ops_exec::performDeletes(
-                opCtx, timeseriesDeleteReq, OperationSource::kTimeseries);
-            populateReply(opCtx,
-                          !timeseriesDeleteReq.getWriteCommandRequestBase().getOrdered(),
-                          timeseriesDeleteReq.getDeletes().size(),
-                          std::move(reply),
-                          deleteReply);
-
-            return deleteReply;
         }
 
         const BSONObj& _commandObj;

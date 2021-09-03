@@ -307,6 +307,8 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
                   "collectionUUID"_attr = _collectionUUID,
                   logAttrs(collection->ns()),
                   "properties"_attr = *descriptor,
+                  "specIndex"_attr = i,
+                  "numSpecs"_attr = indexSpecs.size(),
                   "method"_attr = _method,
                   "maxTemporaryMemoryUsageMB"_attr =
                       eachIndexBuildMaxMemoryUsageBytes / 1024 / 1024);
@@ -332,8 +334,8 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
     } catch (const WriteConflictException&) {
         // Avoid converting WCE to Status.
         throw;
-    } catch (const TenantMigrationConflictException&) {
-        // Avoid converting TenantMigrationConflictException to Status.
+    } catch (const ExceptionForCat<ErrorCategory::TenantMigrationConflictError>&) {
+        // Avoid converting TenantMigrationConflict errors to Status.
         throw;
     } catch (const TenantMigrationCommittedException&) {
         // Avoid converting TenantMigrationCommittedException to Status.
@@ -594,7 +596,19 @@ void MultiIndexBlock::_doCollectionScan(OperationContext* opCtx,
 
         // The external sorter is not part of the storage engine and therefore does not need
         // a WriteUnitOfWork to write keys.
-        uassertStatusOK(_insert(opCtx, collection, objToIndex, loc));
+        //
+        // However, if a key constraint violation is found, it will be written to the constraint
+        // violations side table. The plan executor must be passed down to save and restore the
+        // cursor around the side table write in case any write conflict exception occurs that would
+        // otherwise reposition the cursor unexpectedly. All WUOW and write conflict exception
+        // handling for the side table write is handled internally.
+        uassertStatusOK(
+            _insert(opCtx,
+                    collection,
+                    objToIndex,
+                    loc,
+                    /*saveCursorBeforeWrite*/ [&exec] { exec->saveState(); },
+                    /*restoreCursorAfterWrite*/ [&] { exec->restoreState(&collection); }));
 
         _failPointHangDuringBuild(opCtx,
                                   &hangIndexBuildDuringCollectionScanPhaseAfterInsertion,
@@ -612,14 +626,18 @@ Status MultiIndexBlock::insertSingleDocumentForInitialSyncOrRecovery(
     OperationContext* opCtx,
     const CollectionPtr& collection,
     const BSONObj& doc,
-    const RecordId& loc) {
-    return _insert(opCtx, collection, doc, loc);
+    const RecordId& loc,
+    const std::function<void()>& saveCursorBeforeWrite,
+    const std::function<void()>& restoreCursorAfterWrite) {
+    return _insert(opCtx, collection, doc, loc, saveCursorBeforeWrite, restoreCursorAfterWrite);
 }
 
 Status MultiIndexBlock::_insert(OperationContext* opCtx,
                                 const CollectionPtr& collection,
                                 const BSONObj& doc,
-                                const RecordId& loc) {
+                                const RecordId& loc,
+                                const std::function<void()>& saveCursorBeforeWrite,
+                                const std::function<void()>& restoreCursorAfterWrite) {
     invariant(!_buildIsCleanedUp);
     for (size_t i = 0; i < _indexes.size(); i++) {
         if (_indexes[i].filterExpression && !_indexes[i].filterExpression->matchesBSON(doc)) {
@@ -631,7 +649,13 @@ Status MultiIndexBlock::_insert(OperationContext* opCtx,
         // When calling insert, BulkBuilderImpl's Sorter performs file I/O that may result in an
         // exception.
         try {
-            idxStatus = _indexes[i].bulk->insert(opCtx, collection, doc, loc, _indexes[i].options);
+            idxStatus = _indexes[i].bulk->insert(opCtx,
+                                                 collection,
+                                                 doc,
+                                                 loc,
+                                                 _indexes[i].options,
+                                                 saveCursorBeforeWrite,
+                                                 restoreCursorAfterWrite);
         } catch (...) {
             return exceptionToStatus();
         }
@@ -670,6 +694,10 @@ Status MultiIndexBlock::dumpInsertsFromBulk(
               IndexBuildPhase_serializer(_phase).toString());
     _phase = IndexBuildPhaseEnum::kBulkLoad;
 
+    // Doesn't allow yielding when in a foreground index build.
+    const int32_t kYieldIterations =
+        isBackgroundBuilding() ? internalIndexBuildBulkLoadYieldIterations.load() : 0;
+
     for (size_t i = 0; i < _indexes.size(); i++) {
         // When onDuplicateRecord is passed, 'dupsAllowed' should be passed to reflect whether or
         // not the index is unique.
@@ -688,8 +716,10 @@ Status MultiIndexBlock::dumpInsertsFromBulk(
         try {
             Status status = _indexes[i].real->commitBulk(
                 opCtx,
+                collection,
                 _indexes[i].bulk.get(),
                 dupsAllowed,
+                kYieldIterations,
                 [=](const KeyString::Value& duplicateKey) {
                     // Do not record duplicates when explicitly ignored. This may be the case on
                     // secondaries.
@@ -891,12 +921,6 @@ void MultiIndexBlock::abortWithoutCleanup(OperationContext* opCtx,
     if (isResumable) {
         invariant(_buildUUID);
         invariant(_method == IndexBuildMethod::kHybrid);
-
-        // Index builds do not yield locks during the bulk load phase so it is not possible for
-        // rollback to interrupt an index build during this phase.
-        if (!ErrorCodes::isShutdownError(opCtx->checkForInterruptNoAssert())) {
-            invariant(IndexBuildPhaseEnum::kBulkLoad != _phase, str::stream() << *_buildUUID);
-        }
 
         _writeStateToDisk(opCtx, collection);
         action = TemporaryRecordStore::FinalizationAction::kKeep;

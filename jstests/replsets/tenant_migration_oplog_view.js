@@ -3,11 +3,11 @@
  * reproduce the retryable writes oplog chain.
  *
  * @tags: [
- *   requires_fcv_49,
- *   requires_majority_read_concern,
  *   incompatible_with_eft,
+ *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
- *   incompatible_with_macos, requires_persistence
+ *   requires_majority_read_concern,
+ *   requires_persistence,
  * ]
  */
 (function() {
@@ -31,6 +31,7 @@ const donorRst = new ReplSetTest({
             // up the test.
             tenantMigrationGarbageCollectionDelayMS: kGarbageCollectionDelayMS,
             ttlMonitorSleepSecs: 1,
+            storeFindAndModifyImagesInSideCollection: false,
         }
     }
 });
@@ -39,13 +40,6 @@ donorRst.startSet();
 donorRst.initiate();
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst});
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    donorRst.stopSet();
-    tenantMigrationTest.stop();
-    return;
-}
-
 const dbName = "test";
 const collName = "collection";
 

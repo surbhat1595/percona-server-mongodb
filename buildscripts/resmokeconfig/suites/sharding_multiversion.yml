@@ -7,10 +7,6 @@ selector:
   - jstests/sharding/query/*.js
   exclude_with_any_tags:
   - multiversion_incompatible
-  - requires_fcv_47
-  - requires_fcv_48
-  - requires_fcv_49
-  - requires_fcv_50
   - requires_fcv_51
   - backport_required_multiversion
   - replica_sets_multiversion_backport_required_multiversion
@@ -23,7 +19,7 @@ selector:
   - jstests/sharding/drop_indexes_with_stale_config_error.js
   - jstests/sharding/query/merge_write_concern.js
 
-  # This tag file can be created using ./buildscripts/evergreen_gen_multiversion_tests.py
+  # This tag file can be created using ./buildscripts/resmoke.py generate-multiversion-exclude-tags
   # or downloaded from the evergreen task.
   tag_file: multiversion_exclude_tags.yml
 

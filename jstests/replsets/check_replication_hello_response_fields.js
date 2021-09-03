@@ -2,7 +2,8 @@
  * Checks all the easily testable fields in the response object returned by the hello() command and
  * its aliases, isMaster() and ismaster(). This test also checks that fields that should not be in
  * the document are absent.
- * @tags: [requires_fcv_49]
+ * @tags: [
+ * ]
  */
 
 // Skip db hash check because node 2 is slave delayed and may time out on awaitReplication.
@@ -109,15 +110,11 @@ var checkResponseFields = function(memberInfo, cmd) {
 var name = "hello_and_aliases";
 var replTest = new ReplSetTest({name: name, nodes: 4});
 var nodes = replTest.startSet();
-// If featureFlagUseSecondaryDelaySecs is enabled, we must use the 'secondaryDelaySecs' field
-// name in our config. Otherwise, we use 'slaveDelay'.
-const delayFieldName = selectDelayFieldName(replTest);
-
 var config = replTest.getReplSetConfig();
 config.members[1].priority = 0;
 config.members[2].priority = 0;
 config.members[2].hidden = true;
-config.members[2][delayFieldName] = 3;
+config.members[2].secondaryDelaySecs = 3;
 config.members[2].buildIndexes = false;
 config.members[3].arbiterOnly = true;
 replTest.initiate(config);
@@ -260,7 +257,7 @@ config.members[1].tags = {
     disk: "ssd"
 };
 config.members[1].hidden = true;
-config.members[2][delayFieldName] = 300000;
+config.members[2].secondaryDelaySecs = 300000;
 config.members[2].tags = {
     disk: "hdd"
 };

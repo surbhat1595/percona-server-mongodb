@@ -138,18 +138,16 @@ public:
      *
      * @param ns the namespace to insert the document to.
      * @param obj the document to insert.
-     * @param flags ignored.
      */
-    void insert(const std::string& ns, BSONObj obj, int flags = 0);
+    void insert(const std::string& ns, BSONObj obj);
 
     /**
      * Removes documents from this server.
      *
      * @param ns the namespace to remove documents from.
      * @param query ignored.
-     * @param flags ignored.
      */
-    void remove(const std::string& ns, Query query, int flags = 0);
+    void remove(const std::string& ns, Query query);
 
     /**
      * Assign a UUID to a collection
@@ -167,7 +165,7 @@ public:
     mongo::BSONArray query(InstanceID id,
                            const NamespaceStringOrUUID& nsOrUuid,
                            mongo::Query query = mongo::Query(),
-                           int nToReturn = 0,
+                           int limit = 0,
                            int nToSkip = 0,
                            const mongo::BSONObj* fieldsToReturn = nullptr,
                            int queryOptions = 0,

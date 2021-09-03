@@ -1,8 +1,6 @@
 /**
  * Specifies for each command whether it is expected to send a databaseVersion, and verifies that
  * the commands match the specification.
- *
- * @tags: [disabled_due_to_server_58295]
  */
 (function() {
 'use strict';
@@ -118,6 +116,9 @@ function testCommandAfterMovePrimary(testCase, st, dbName, collName) {
     // Run the test case's command.
     if (testCase.runsAgainstAdminDb) {
         assert.commandWorked(st.s0.adminCommand(command));
+    } else if (testCase.expectedFailureCode) {
+        assert.commandFailedWithCode(st.s0.getDB(dbName).runCommand(command),
+                                     testCase.expectedFailureCode);
     } else {
         assert.commandWorked(st.s0.getDB(dbName).runCommand(command));
     }
@@ -175,7 +176,11 @@ function testCommandAfterDropRecreateDatabase(testCase, st) {
     // Drop and recreate the database through the second mongos. Insert the entry for the new
     // database explicitly to ensure it is assigned the other shard as the primary shard.
     assert.commandWorked(st.s1.getDB(dbName).dropDatabase());
-    let currDbVersion = {uuid: UUID(), lastMod: NumberInt(1)};
+    let currDbVersion = {
+        uuid: UUID(),
+        timestamp: Timestamp(dbVersionBefore.timestamp.getTime() + 1, 0),
+        lastMod: NumberInt(1)
+    };
     assert.commandWorked(st.s1.getDB("config").getCollection("databases").insert({
         _id: dbName,
         partitioned: false,
@@ -199,6 +204,9 @@ function testCommandAfterDropRecreateDatabase(testCase, st) {
     // Run the test case's command.
     if (testCase.runsAgainstAdminDb) {
         assert.commandWorked(st.s0.adminCommand(command));
+    } else if (testCase.expectedFailureCode) {
+        assert.commandFailedWithCode(st.s0.getDB(dbName).runCommand(command),
+                                     testCase.expectedFailureCode);
     } else {
         assert.commandWorked(st.s0.getDB(dbName).runCommand(command));
     }
@@ -291,6 +299,7 @@ let testCases = {
     commitReshardCollection: {skip: "always targets the config server"},
     commitTransaction: {skip: "unversioned and uses special targetting rules"},
     compact: {skip: "not allowed through mongos"},
+    configureCollectionAutoSplitter: {skip: "always targets the config server"},
     configureFailPoint: {skip: "executes locally on mongos (not sent to any remote node)"},
     connPoolStats: {skip: "executes locally on mongos (not sent to any remote node)"},
     connPoolSync: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -614,6 +623,8 @@ let testCases = {
         run: {
             sendsDbVersion: true,
             explicitlyCreateCollection: true,
+            // The command should fail if there is no active index build on the collection.
+            expectedFailureCode: ErrorCodes.IndexNotFound,
             command: function(dbName, collName) {
                 return {
                     setIndexCommitQuorum: collName,

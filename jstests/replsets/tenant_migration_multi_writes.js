@@ -3,8 +3,13 @@
  * were not retried on migration abort, which would create duplicate updates. Partially
  * updated collection where each update is applied no more than once is still an expected result.
  *
- * @tags: [requires_fcv_47, requires_majority_read_concern, incompatible_with_eft,
- *  incompatible_with_windows_tls, incompatible_with_macos, requires_persistence]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -33,12 +38,6 @@ const donorRst = new ReplSetTest({
 donorRst.startSet();
 donorRst.initiateWithHighElectionTimeout();
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst: donorRst});
-
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    donorRst.stopSet();
-    return;
-}
 
 const recipientRst = tenantMigrationTest.getRecipientRst();
 const donorPrimary = donorRst.getPrimary();
@@ -81,32 +80,13 @@ function doMultiUpdate(
         } catch (err) {
             jsTestLog(`Received error ${err}`);
             assert.commandFailedWithCode(err, ErrorCodes.Interrupted);
-            assert.lte(err["nModified"], records);
-            let actualNumModified = 0;
             let findResult = assert.commandWorked(
                 db.runCommand({find: collName, readConcern: {level: readConcern}}));
             var cursor = new DBCommandCursor(db, findResult);
             cursor.forEach(doc => {
                 assert(doc.x == completedCycles || doc.x == completedCycles + 1,
                        "expected each doc to be updated at most once");
-                actualNumModified += (doc.x == completedCycles + 1 ? 1 : 0);
             });
-            // TODO(SERVER-15292): uncomment this when the bug is fixed, and reconcile with the
-            // block after the commented section.
-            //    assert.eq(err["nModified"], actualNumModified,
-            //           `expected the count of incremented values to match nModified: ${
-            //               err} during iteration # ${completedCycles}, actually modified ${
-            //               actualNumModified} in ${JSON.stringify(findResult)}`);
-            // if (actualNumModified == records) {
-            //     // All records were modified, we can continue.
-            //     continue;
-            // }
-            // break;
-            if (err["nModified"] != actualNumModified) {
-                jsTestLog(`expected the count of incremented values to match nModified: ${
-                    err} during iteration # ${completedCycles}, actually modified ${
-                    actualNumModified} in ${JSON.stringify(findResult)}`);
-            }
             break;
         }
     }

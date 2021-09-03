@@ -20,7 +20,6 @@
  *   # SERVER-56565 avoid CS stepdowns, since  an election may trigger a  refresh of stale metadata
  *   #              that form part of the test setup.
  *   does_not_support_stepdowns,
- *   disabled_due_to_server_58295
  *  ]
  */
 (function() {
@@ -55,14 +54,20 @@ let testCases = {
     _configsvrCommitChunksMerge: {skip: "primary only"},
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
-    _configsvrCommitMovePrimary: {skip: "primary only"},
-    _configsvrDropCollection: {skip: "primary only"},
-    _configsvrDropDatabase: {skip: "primary only"},
+    _configsvrCommitMovePrimary:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrConfigureAutoSplit: {skip: "primary only"},
+    _configsvrDropCollection:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrDropDatabase:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrMoveChunk: {skip: "primary only"},
-    _configsvrMovePrimary: {skip: "primary only"},
+    _configsvrMovePrimary:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrRemoveShardFromZone: {skip: "primary only"},
     _configsvrReshardCollection: {skip: "primary only"},
-    _configsvrShardCollection: {skip: "primary only"},
+    _configsvrShardCollection:
+        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "primary only"},
     _flushReshardingStateChange: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdates: {skip: "does not return user data"},
@@ -118,6 +123,7 @@ let testCases = {
     commitReshardCollection: {skip: "primary only"},
     commitTransaction: {skip: "primary only"},
     compact: {skip: "does not return user data"},
+    configureCollectionAutoSplitter: {skip: "does not return user data"},
     configureFailPoint: {skip: "does not return user data"},
     connPoolStats: {skip: "does not return user data"},
     connPoolSync: {skip: "does not return user data"},

@@ -31,6 +31,7 @@
 
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 
 namespace mongo::timeseries {
 namespace {
@@ -50,213 +51,186 @@ bool isMetaFieldFirstElementOfDottedPathField(StringData field, StringData metaF
 }
 
 /**
- * Returns a string where the substring leading up to "." in the given field is replaced with the
- * literal "meta". If there is no "." in the given field, returns "meta".
+ * Returns a string where the substring leading up to "." in the given field is replaced with
+ * newField. If there is no "." in the given field, returns newField.
  */
-std::string getRenamedMetaField(StringData field) {
+std::string getRenamedField(StringData field, StringData newField) {
     size_t dotIndex = field.find('.');
-    return dotIndex != std::string::npos ? "meta" + field.substr(dotIndex, field.size() - dotIndex)
-                                         : "meta";
+    return dotIndex != std::string::npos
+        ? newField.toString() + field.substr(dotIndex, field.size() - dotIndex)
+        : newField.toString();
 }
 
 /**
  * Replaces the first occurrence of the metaField in the given field of the given mutablebson
  * element with the literal "meta", accounting for uses of the metaField with dot notation.
+ * shouldReplaceFieldValue is set for $expr queries when "$" + the metaField should be substituted
+ * for "$meta", isTopLevelField is set for elements which potentially contain a top-level field
+ * name, and parentIsArray is set for elements with an array as a parent.
  */
-void replaceQueryMetaFieldName(mutablebson::Element elem, StringData field, StringData metaField) {
-    if (isMetaFieldFirstElementOfDottedPathField(field, metaField)) {
-        invariantStatusOK(elem.rename(getRenamedMetaField(field)));
+void replaceQueryMetaFieldName(mutablebson::Element elem,
+                               StringData field,
+                               StringData metaField,
+                               bool shouldReplaceFieldValue = false,
+                               bool isTopLevelField = true) {
+    if (isTopLevelField && isMetaFieldFirstElementOfDottedPathField(field, metaField)) {
+        invariantStatusOK(elem.rename(getRenamedField(field, "meta")));
+    }
+    // Substitute element fieldValue with "$meta" if element is a subField of $expr, not a subField
+    // of $literal, and the element fieldValue is "$" + the metaField. For example, the following
+    // query { q: { $expr: { $gt: [ "$<metaField>" , 100 ] } } } would be translated to
+    // { q: { $expr: { $gt: [ "$meta" , 100 ] } } }.
+    else if (shouldReplaceFieldValue && elem.isType(BSONType::String) &&
+             isMetaFieldFirstElementOfDottedPathField(elem.getValueString(), "$" + metaField)) {
+        invariantStatusOK(elem.setValueString(getRenamedField(elem.getValueString(), "$meta")));
     }
 }
 
 /**
- * Recurses through the mutablebson element query and replaces any occurrences of the
- * metaField with "meta" accounting for queries that may be in dot notation. shouldReplaceFieldValue
- * is set for $expr queries when "$" + the metaField should be substituted for "$meta".
+ * Recurses through the mutablebson element query and replaces any occurrences of the metaField with
+ * "meta" accounting for queries that may be in dot notation. shouldReplaceFieldValue is set for
+ * $expr queries when "$" + the metaField should be substituted for "$meta", isTopLevelField is set
+ * for elements which potentially contain a top-level field name, and parentIsArray is set for
+ * elements with an array as a parent.
  */
-void replaceQueryMetaFieldName(mutablebson::Element elem, StringData metaField) {
-    replaceQueryMetaFieldName(elem, elem.getFieldName(), metaField);
+void replaceQueryMetaFieldName(mutablebson::Element elem,
+                               StringData metaField,
+                               bool shouldReplaceFieldValue = false,
+                               bool isTopLevelField = true,
+                               bool parentIsArray = false) {
+    // Replace any occurences of the metaField in the top-level required fields of the JSON Schema
+    // object with "meta".
+    if (elem.getFieldName() == "$jsonSchema") {
+        mutablebson::Element requiredElem = elem.findFirstChildNamed("required");
+        if (requiredElem.ok()) {
+            for (auto subElem = requiredElem.leftChild(); subElem.ok();
+                 subElem = subElem.rightSibling()) {
+                if (isMetaFieldFirstElementOfDottedPathField(subElem.getValueString(), metaField)) {
+                    invariantStatusOK(
+                        subElem.setValueString(getRenamedField(subElem.getValueString(), "meta")));
+                }
+            }
+        }
+        mutablebson::Element propertiesElem = elem.findFirstChildNamed("properties");
+        if (propertiesElem.ok()) {
+            mutablebson::Element metaFieldElem = propertiesElem.findFirstChildNamed(metaField);
+            if (metaFieldElem.ok() &&
+                isMetaFieldFirstElementOfDottedPathField(metaFieldElem.getFieldName(), metaField)) {
+
+                invariantStatusOK(
+                    metaFieldElem.rename(getRenamedField(metaFieldElem.getFieldName(), "meta")));
+            }
+        }
+        return;
+    }
+    shouldReplaceFieldValue = (elem.getFieldName() != "$literal") &&
+        (shouldReplaceFieldValue || (elem.getFieldName() == "$expr"));
+    replaceQueryMetaFieldName(
+        elem, elem.getFieldName(), metaField, shouldReplaceFieldValue, isTopLevelField);
+    isTopLevelField = parentIsArray && elem.isType(BSONType::Object);
+    parentIsArray = elem.isType(BSONType::Array);
     for (size_t i = 0; i < elem.countChildren(); ++i) {
-        replaceQueryMetaFieldName(elem.findNthChild(i), metaField);
+        replaceQueryMetaFieldName(elem.findNthChild(i),
+                                  metaField,
+                                  shouldReplaceFieldValue,
+                                  isTopLevelField,
+                                  parentIsArray);
     }
 }
 }  // namespace
 
-// TODO: SERVER-58382 Handle time-series collections without a metaField.
 bool queryOnlyDependsOnMetaField(OperationContext* opCtx,
                                  const NamespaceString& ns,
                                  const BSONObj& query,
-                                 StringData metaField) {
-    boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContext(opCtx, nullptr, ns));
+                                 boost::optional<StringData> metaField,
+                                 const LegacyRuntimeConstants& runtimeConstants,
+                                 const boost::optional<BSONObj>& letParams) {
+    boost::intrusive_ptr<ExpressionContext> expCtx(
+        new ExpressionContext(opCtx, nullptr, ns, runtimeConstants, letParams));
     std::vector<BSONObj> rawPipeline{BSON("$match" << query)};
     DepsTracker dependencies = Pipeline::parse(rawPipeline, expCtx)->getDependencies({});
-    return std::all_of(dependencies.fields.begin(),
-                       dependencies.fields.end(),
-                       [metaField](const auto& dependency) {
-                           return isMetaFieldFirstElementOfDottedPathField(StringData(dependency),
-                                                                           metaField);
-                       });
+    return metaField
+        ? std::all_of(dependencies.fields.begin(),
+                      dependencies.fields.end(),
+                      [metaField](const auto& dependency) {
+                          StringData queryField(dependency);
+                          return isMetaFieldFirstElementOfDottedPathField(queryField, *metaField) ||
+                              isMetaFieldFirstElementOfDottedPathField(queryField,
+                                                                       "$" + *metaField);
+                      })
+        : dependencies.fields.empty();
 }
 
 bool updateOnlyModifiesMetaField(OperationContext* opCtx,
                                  const NamespaceString& ns,
                                  const mongo::write_ops::UpdateModification& updateMod,
                                  StringData metaField) {
-    switch (updateMod.type()) {
-        case write_ops::UpdateModification::Type::kClassic: {
-            const auto& document = updateMod.getUpdateClassic();
-            if (isDocReplacement(document))
-                return false;
-            // else document is an update document.
-            for (auto&& updatePair : document) {
-                // updatePair = <updateOperator> : {<field1> : <value1>, ... }
-                for (auto&& fieldValuePair : updatePair.embeddedObject()) {
-                    // updatePair.embeddedObject() = {<field1> : <value1>, ... }
-                    if (!isMetaFieldFirstElementOfDottedPathField(
-                            fieldValuePair.fieldNameStringData(), metaField))
-                        return false;
-                }
-            }
-            break;
-        }
-        case write_ops::UpdateModification::Type::kPipeline: {
-            const auto& updatePipeline = updateMod.getUpdatePipeline();
-            for (const auto& stage : updatePipeline) {
-                auto aggOp = stage.firstElementFieldNameStringData();
-                auto operation = stage.firstElement();
-                if (aggOp == "$set" || aggOp == "$addFields") {
-                    // stage = {$set: {<newField> : <newExpression>, ...}}
-                    // operation = $set: {<newField> : <newExpression>, ...}
-                    for (auto&& updatePair : operation.embeddedObject()) {
-                        // operation.embeddedObject() = {<newField> : <newExpression>, ...}
-                        if (!isMetaFieldFirstElementOfDottedPathField(
-                                updatePair.fieldNameStringData(), metaField)) {
-                            return false;
-                        }
-                    }
-                } else if (aggOp == "$unset" || aggOp == "$project") {
-                    if (operation.type() == BSONType::Array) {
-                        // stage = {$unset: ["field1", "field2", ...]}
-                        for (auto elt : operation.Array()) {
-                            if (!isMetaFieldFirstElementOfDottedPathField(elt.valueStringDataSafe(),
-                                                                          metaField))
-                                return false;
-                        }
-                    } else {
-                        // stage = {$unset: "singleField"}
-                        if (!isMetaFieldFirstElementOfDottedPathField(
-                                operation.valueStringDataSafe(), metaField))
-                            return false;
-                    }
-                } else {  // aggOp == "$replaceWith" || aggOp == "$replaceRoot"
-                    return false;
-                }
-            }
-            break;
-        }
-        case write_ops::UpdateModification::Type::kDelta:
-            // It is not possible for the client to run a delta update.
-            MONGO_UNREACHABLE;
-    }
-    return true;
+    invariant(updateMod.type() != write_ops::UpdateModification::Type::kDelta);
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "Pipeline upddates are not supported for time-series collections: "
+                          << ns,
+            updateMod.type() != write_ops::UpdateModification::Type::kPipeline);
+
+    const auto& document = updateMod.getUpdateClassic();
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream()
+                << "Replacement document updates are not supported for time-series collections: "
+                << ns,
+            !isDocReplacement(document));
+
+    return std::all_of(document.begin(), document.end(), [metaField](const auto& updatePair) {
+        // updatePair = <updateOperator> : {<field1> : <value1>, ... }
+        // updatePair.embeddedObject() = {<field1> : <value1>, ... }
+        return std::all_of(updatePair.embeddedObject().begin(),
+                           updatePair.embeddedObject().end(),
+                           [metaField](const auto& fieldValuePair) {
+                               return isMetaFieldFirstElementOfDottedPathField(
+                                   fieldValuePair.fieldNameStringData(), metaField);
+                           });
+    });
 }
 
 BSONObj translateQuery(const BSONObj& query, StringData metaField) {
     invariant(!metaField.empty());
     mutablebson::Document queryDoc(query);
-    timeseries::replaceQueryMetaFieldName(queryDoc.root(), metaField);
+    // The mutablebson root element is an array with a single object if the query is non-empty.
+    if (queryDoc.root().hasChildren()) {
+        replaceQueryMetaFieldName(queryDoc.root()[0], metaField);
+    }
     return queryDoc.getObject();
 }
 
-write_ops::UpdateOpEntry translateUpdate(const BSONObj& translatedQuery,
-                                         const write_ops::UpdateModification& updateMod,
-                                         StringData metaField) {
-    // Make a mutable copy of the updates to apply where we can replace all occurrences
-    // of the metaField with "meta". The update is either a document or a pipeline.
-    switch (updateMod.type()) {
-        case write_ops::UpdateModification::Type::kClassic: {
-            const auto& document = updateMod.getUpdateClassic();
-            if (isDocReplacement(document))
-                break;
+write_ops::UpdateModification translateUpdate(const write_ops::UpdateModification& updateMod,
+                                              StringData metaField) {
+    invariant(!metaField.empty());
+    invariant(updateMod.type() == write_ops::UpdateModification::Type::kClassic);
 
-            // Make a mutable copy of the update document.
-            auto updateDoc = mutablebson::Document(document);
-            // updateDoc = { <updateOperator> : { <field1>: <value1>, ... },
-            //               <updateOperator> : { <field1>: <value1>, ... },
-            //               ... }
+    const auto& document = updateMod.getUpdateClassic();
+    invariant(!isDocReplacement(document));
 
-            // updateDoc.root() = <updateOperator> : { <field1>: <value1>, ... },
-            //                    <updateOperator> : { <field1>: <value1>, ... },
-            //                    ...
-            for (size_t i = 0; i < updateDoc.root().countChildren(); ++i) {
-                auto updatePair = updateDoc.root().findNthChild(i);
-                // updatePair = <updateOperator> : { <field1>: <value1>, ... }
-                // Check each field that is being modified by the update operator
-                // and replace it if it is the metaField.
-                for (size_t j = 0; j < updatePair.countChildren(); j++) {
-                    auto fieldValuePair = updatePair.findNthChild(j);
-                    timeseries::replaceQueryMetaFieldName(
-                        fieldValuePair, fieldValuePair.getFieldName(), metaField);
-                }
-            }
+    // Make a mutable copy of the update document in order to replace all occurrences of the
+    // metaField with "meta".
+    auto updateDoc = mutablebson::Document(document);
+    // updateDoc = { <updateOperator> : { <field1>: <value1>, ... },
+    //               <updateOperator> : { <field1>: <value1>, ... },
+    //               ... }
 
-            // Create a new UpdateOpEntry and add it to the list of translated
-            // updates to perform.
-            write_ops::UpdateOpEntry newOpEntry(
-                translatedQuery,
-                write_ops::UpdateModification::parseFromClassicUpdate(updateDoc.getObject()));
-            newOpEntry.setMulti(true);
-            return newOpEntry;
+    // updateDoc.root() = <updateOperator> : { <field1>: <value1>, ... },
+    //                    <updateOperator> : { <field1>: <value1>, ... },
+    //                    ...
+    for (size_t i = 0; i < updateDoc.root().countChildren(); ++i) {
+        // TODO: SERVER-59104 Remove usages of findNthChild().
+        auto updatePair = updateDoc.root().findNthChild(i);
+        // updatePair = <updateOperator> : { <field1>: <value1>, ... }
+        // Check each field that is being modified by the update operator
+        // and replace it if it is the metaField.
+        for (size_t j = 0; j < updatePair.countChildren(); j++) {
+            // TODO: SERVER-59104 Remove usages of findNthChild().
+            auto fieldValuePair = updatePair.findNthChild(j);
+            replaceQueryMetaFieldName(fieldValuePair, fieldValuePair.getFieldName(), metaField);
         }
-        case write_ops::UpdateModification::Type::kPipeline: {
-            std::vector<BSONObj> translatedPipeline;
-            for (const auto& stage : updateMod.getUpdatePipeline()) {
-                // stage: {  <$operator> : <argument(s)> }
-                mutablebson::Document stageDoc(stage);
-                auto root = stageDoc.root();
-                for (size_t i = 0; i < root.countChildren(); ++i) {
-                    auto updatePair = root.findNthChild(i);
-                    auto aggOp = updatePair.getFieldName();
-                    if (aggOp == "$set" || aggOp == "$addFields") {
-                        // updatePair = $set: {<newField> : <newExpression>, ...}
-                        for (size_t j = 0; j < updatePair.countChildren(); j++) {
-                            auto fieldValuePair = updatePair.findNthChild(j);
-                            timeseries::replaceQueryMetaFieldName(
-                                fieldValuePair, fieldValuePair.getFieldName(), metaField);
-                        }
-                    } else if (aggOp == "$unset" || aggOp == "$project") {
-                        if (updatePair.getType() == BSONType::Array) {
-                            // updatePair = $unset: ["field1", "field2", ...]
-                            for (size_t j = 0; j < updatePair.countChildren(); j++) {
-                                timeseries::replaceQueryMetaFieldName(
-                                    updatePair,
-                                    updatePair.findNthChild(j).getValueString(),
-                                    metaField);
-                            }
-                        } else {  // updatePair.getType() == BSONType::String
-                            // updatePair = $unset: "singleField"
-                            auto singleField = StringData(updatePair.getValueString());
-                            if (isMetaFieldFirstElementOfDottedPathField(singleField, metaField)) {
-                                // Replace updatePair with a new pair where singleField is renamed.
-                                auto newPair = stageDoc.makeElementString(
-                                    aggOp, timeseries::getRenamedMetaField(singleField));
-                                updatePair.remove().ignore();
-                                root.pushBack(newPair).ignore();
-                            }
-                        }  // else aggOp == "$replaceWith" || aggOp == "$replaceRoot"
-                    }
-                }
-                // Add the translated pipeline.
-                translatedPipeline.push_back(stageDoc.getObject());
-            }
-            write_ops::UpdateOpEntry newOpEntry(translatedQuery,
-                                                write_ops::UpdateModification(translatedPipeline));
-            newOpEntry.setMulti(true);
-            return newOpEntry;
-        }
-        case write_ops::UpdateModification::Type::kDelta:
-            MONGO_UNREACHABLE;
     }
-    MONGO_UNREACHABLE;
+
+    return write_ops::UpdateModification::parseFromClassicUpdate(updateDoc.getObject());
 }
 }  // namespace mongo::timeseries

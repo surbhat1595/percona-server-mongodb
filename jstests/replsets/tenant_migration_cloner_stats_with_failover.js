@@ -10,8 +10,13 @@
  * 3. Step up the new primary. Ensure that the stats such as 'databasesClonedBeforeFailover' tally.
  * 4. Allow the tenant migration to complete and commit. Ensure that stats are sensible.
  *
- * @tags: [requires_fcv_49, requires_majority_read_concern, requires_persistence,
- * incompatible_with_eft, incompatible_with_windows_tls, incompatible_with_macos]
+ * @tags: [
+ *   incompatible_with_eft,
+ *   incompatible_with_macos,
+ *   incompatible_with_windows_tls,
+ *   requires_majority_read_concern,
+ *   requires_persistence,
+ * ]
  */
 
 (function() {
@@ -24,11 +29,6 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 // Limit the batch size to test the stat in between batches.
 const tenantMigrationTest = new TenantMigrationTest(
     {name: jsTestName(), sharedOptions: {setParameter: {collectionClonerBatchSize: 10}}});
-
-if (!tenantMigrationTest.isFeatureFlagEnabled()) {
-    jsTestLog("Skipping test because the tenant migrations feature flag is disabled");
-    return;
-}
 
 const kMigrationId = UUID();
 const kTenantId = 'testTenantId';

@@ -155,7 +155,6 @@ executor:
     tests: true
   config:
     shell_options:
-      readMode: commands
       global_vars:
         TestData:
           # Reads and writes outside of transactions will not have their read or write concerns
@@ -188,6 +187,7 @@ executor:
       set_parameters:
         enableTestCommands: 1
         roleGraphInvalidationIsFatal: 1
+        receiveChunkWaitForRangeDeleterTimeoutMS: 90000
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

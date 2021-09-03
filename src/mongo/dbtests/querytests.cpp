@@ -260,12 +260,7 @@ public:
 
 class ClientBase {
 public:
-    ClientBase() : _client(&_opCtx) {
-        mongo::LastError::get(_opCtx.getClient()).reset();
-    }
-    virtual ~ClientBase() {
-        mongo::LastError::get(_opCtx.getClient()).reset();
-    }
+    ClientBase() : _client(&_opCtx) {}
 
 protected:
     void insert(const char* ns, BSONObj o) {
@@ -768,22 +763,22 @@ public:
         insert(ns, BSON("ts" << Timestamp(1000, 0)));
         insert(ns, BSON("ts" << Timestamp(1000, 1)));
         insert(ns, BSON("ts" << Timestamp(1000, 2)));
-        unique_ptr<DBClientCursor> c = _client.query(
-            NamespaceString(ns),
-            QUERY("ts" << GT << Timestamp(1000, 1)).hint(BSON("$natural" << 1)).explain(),
-            0,
-            0,
-            nullptr);
-        ASSERT(c->more());
 
-        // Check number of results and filterSet flag in explain.
-        // filterSet is not available in oplog replay mode.
-        BSONObj explainObj = c->next();
-        ASSERT(explainObj.hasField("executionStats")) << explainObj;
-        BSONObj execStats = explainObj["executionStats"].Obj();
-        ASSERT_EQUALS(1, execStats.getIntField("nReturned"));
+        BSONObj explainCmdObj =
+            BSON("explain" << BSON("find"
+                                   << "oplog.querytests.OplogScanGtTsExplain"
+                                   << "filter" << BSON("ts" << GT << Timestamp(1000, 1)) << "hint"
+                                   << BSON("$natural" << 1))
+                           << "verbosity"
+                           << "executionStats");
 
-        ASSERT(!c->more());
+        auto reply = _client.runCommand(OpMsgRequest::fromDBAndBody("local", explainCmdObj));
+        BSONObj explainCmdReplyBody = reply->getCommandReply();
+        ASSERT_OK(getStatusFromCommandResult(explainCmdReplyBody));
+
+        ASSERT(explainCmdReplyBody.hasField("executionStats")) << explainCmdReplyBody;
+        BSONObj execStats = explainCmdReplyBody["executionStats"].Obj();
+        ASSERT_EQUALS(1, execStats.getIntField("nReturned")) << explainCmdReplyBody;
     }
 
 private:
@@ -1910,35 +1905,6 @@ private:
     OldClientContext _ctx;
 };
 
-class Exhaust : public CollectionInternalBase {
-public:
-    Exhaust() : CollectionInternalBase("exhaust") {}
-    void run() {
-        // Skip the test if the storage engine doesn't support capped collections.
-        if (!_opCtx.getServiceContext()->getStorageEngine()->supportsCappedCollections()) {
-            return;
-        }
-
-        BSONObj info;
-        ASSERT(_client.runCommand("unittests",
-                                  BSON("create"
-                                       << "querytests.exhaust"
-                                       << "capped" << true << "size" << 8192),
-                                  info));
-        _client.insert(ns(), BSON("ts" << Timestamp(1000, 0)));
-        Message message = makeQueryMessage(ns(),
-                                           BSON("ts" << GTE << Timestamp(1000, 0)),
-                                           0,
-                                           0,
-                                           nullptr,
-                                           QueryOption_CursorTailable | QueryOption_Exhaust);
-        DbMessage dbMessage(message);
-        QueryMessage queryMessage(dbMessage);
-        Message result;
-        ASSERT_TRUE(runQuery(&_opCtx, queryMessage, NamespaceString(ns()), result));
-    }
-};
-
 class QueryReadsAll : public CollectionBase {
 public:
     QueryReadsAll() : CollectionBase("queryreadsall") {}
@@ -2061,7 +2027,6 @@ public:
         add<GetIndexSpecsByUUID>();
         add<CountByUUID>();
         add<GetDatabaseInfosTest>();
-        add<Exhaust>();
         add<QueryReadsAll>();
         add<queryobjecttests::names1>();
         add<OrderingTest>();

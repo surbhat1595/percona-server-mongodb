@@ -90,8 +90,6 @@ DEFAULTS = {
     "service_executor": None,
     "shell_conn_string": None,
     "shell_port": None,
-    "shell_read_mode": None,
-    "shell_write_mode": None,
     "shuffle": None,
     "spawn_using": None,
     "stagger_jobs": None,
@@ -104,7 +102,7 @@ DEFAULTS = {
     "transport_layer": None,
     "user_friendly_output": None,
     "mixed_bin_versions": None,
-    "multiversion_bin_version": "last_lts",
+    "old_bin_version": "last_continuous",
     "linear_chain": None,
     "num_replset_nodes": None,
     "num_shards": None,
@@ -246,13 +244,13 @@ class MultiversionOptions(object):
     """Represent the multiversion version choices."""
 
     LAST_LTS = "last_lts"
-    LAST_CONTINOUS = "last_continous"
+    LAST_CONTINUOUS = "last_continuous"
 
     @classmethod
     def all_options(cls):
         """Return available version options for multiversion."""
 
-        return [cls.LAST_LTS, cls.LAST_CONTINOUS]
+        return [cls.LAST_LTS, cls.LAST_CONTINUOUS]
 
 
 ##
@@ -335,7 +333,7 @@ EVERGREEN_VARIANT_NAME = None
 EVERGREEN_VERSION_ID = None
 
 # The url that retrieve the debug symbol from a patch build.
-DEBUG_SYMBOL_PATCH_URL = None
+DEBUG_SYMBOLS_URL = None
 
 # If set, then any jstests that have any of the specified tags will be excluded from the suite(s).
 EXCLUDE_WITH_ANY_TAGS = None
@@ -439,12 +437,6 @@ SERVICE_EXECUTOR = None
 # If set, resmoke will override the default fixture and connect to the fixture specified by this
 # connection string instead.
 SHELL_CONN_STRING = None
-
-# If set, then mongo shells started by resmoke.py will use the specified read mode.
-SHELL_READ_MODE = None
-
-# If set, then mongo shells started by resmoke.py will use the specified write mode.
-SHELL_WRITE_MODE = None
 
 # If true, then the order the tests run in is randomized. Otherwise the tests will run in
 # alphabetical (case-insensitive) order.
@@ -573,3 +565,9 @@ LOGGER_DIR = None
 # Generated logging config for the current invocation.
 LOGGING_CONFIG: dict = {}
 SHORTEN_LOGGER_NAME_CONFIG: dict = {}
+
+# Whether legacy multiversion code is used. This value is not used on the master version of
+# resmoke.py but is needed to ensure the v5.0 version of fixture classes (e.g. standalone.py)
+# that get loaded for multiversion tests can behave correctly on master and on v5.0; the latter
+# case runs 5.0 and 4.4 binaries and has this value set to True. Can be removed after 6.0.
+USE_LEGACY_MULTIVERSION = True

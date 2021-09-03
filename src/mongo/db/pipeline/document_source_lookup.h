@@ -76,8 +76,8 @@ public:
          * Lookup from a sharded collection may not be allowed.
          */
         bool allowShardedForeignCollection(NamespaceString nss) const override final {
-            const bool foreignShardedAllowed =
-                getTestCommandsEnabled() && internalQueryAllowShardedLookup.load();
+            const bool foreignShardedAllowed = feature_flags::gFeatureFlagShardedLookup.isEnabled(
+                serverGlobalParams.featureCompatibility);
             if (foreignShardedAllowed) {
                 return true;
             }
@@ -283,6 +283,15 @@ private:
     void initializeResolvedIntrospectionPipeline();
 
     /**
+     * Builds the $lookup pipeline using the resolved view definition for a sharded foreign view and
+     * updates the '_resolvedPipeline', as well as '_fieldMatchPipelineIdx' in the case of a
+     * 'foreign' join.
+     */
+    std::unique_ptr<Pipeline, PipelineDeleter> buildPipelineFromViewDefinition(
+        std::vector<BSONObj> serializedPipeline,
+        ExpressionContext::ResolvedNamespace resolvedNamespace);
+
+    /**
      * Builds the $lookup pipeline and resolves any variables using the passed 'inputDoc', adding a
      * cursor and/or cache source as appropriate.
      */
@@ -309,6 +318,11 @@ private:
      * 'totalKeysExamined', 'collectionScans', 'indexesUsed', etc. to it.
      */
     void appendSpecificExecStats(MutableDocument& doc) const;
+
+    /**
+     * Returns true if 'featureFlagShardedLookup' is enabled and we are not in a transaction.
+     */
+    bool foreignShardedLookupAllowed() const;
 
     DocumentSourceLookupStats _stats;
 

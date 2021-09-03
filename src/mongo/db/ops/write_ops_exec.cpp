@@ -75,6 +75,7 @@
 #include "mongo/db/stats/server_write_concern_metrics.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
+#include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/update/document_diff_applier.h"
 #include "mongo/db/update/path_support.h"
@@ -568,6 +569,28 @@ SingleWriteResult makeWriteResultForInsertOrDeleteRetry() {
     res.setN(1);
     res.setNModified(0);
     return res;
+}
+
+// TODO: SERVER-58394 Remove this function and combine it with
+// timeseries::queryOnlyDependsOnMetaField.
+// TODO: SERVER-58382 Handle time-series collections without a metaField.
+template <typename OpEntry, typename WholeOp>
+bool isTimeseriesMetaFieldOnlyQuery(OperationContext* opCtx,
+                                    const NamespaceString& ns,
+                                    const OpEntry& opEntry,
+                                    const WholeOp& wholeOp) {
+
+    boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContext(
+        opCtx, nullptr, ns, wholeOp.getLegacyRuntimeConstants(), wholeOp.getLet()));
+
+    std::vector<BSONObj> rawPipeline{BSON("$match" << opEntry.getQ())};
+    DepsTracker dependencies = Pipeline::parse(rawPipeline, expCtx)->getDependencies({});
+    return std::all_of(
+        dependencies.fields.begin(), dependencies.fields.end(), [](const auto& dependency) {
+            StringData queryField(dependency);
+            StringData querySubStr = queryField.substr(0, queryField.find('.'));
+            return querySubStr == "meta" || querySubStr == "$meta";
+        });
 }
 
 }  // namespace
@@ -1072,7 +1095,8 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 }
 
 WriteResult performDeletes(OperationContext* opCtx,
-                           const write_ops::DeleteCommandRequest& wholeOp) {
+                           const write_ops::DeleteCommandRequest& wholeOp,
+                           const OperationSource& source) {
     // Delete performs its own retries, so we should not be in a WriteUnitOfWork unless we are in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1130,6 +1154,21 @@ WriteResult performDeletes(OperationContext* opCtx,
         });
         try {
             lastOpFixer.startingOp();
+
+            if (source == OperationSource::kTimeseries) {
+                uassert(ErrorCodes::InvalidOptions,
+                        str::stream() << "Cannot perform a delete on a time-series collection "
+                                         "when querying on a field that is not the metaField: "
+                                      << wholeOp.getNamespace(),
+                        isTimeseriesMetaFieldOnlyQuery(
+                            opCtx, wholeOp.getNamespace(), singleOp, wholeOp));
+                uassert(ErrorCodes::IllegalOperation,
+                        str::stream() << "Cannot perform a delete with limit: 1 on a "
+                                         "time-series collection: "
+                                      << wholeOp.getNamespace(),
+                        singleOp.getMulti());
+            }
+
             out.results.emplace_back(performSingleDeleteOp(opCtx,
                                                            wholeOp.getNamespace(),
                                                            stmtId,
@@ -1229,10 +1268,8 @@ Status performAtomicTimeseriesWrites(
         invariant(op.getUpdates().size() == 1);
         auto& update = op.getUpdates().front();
 
-        // TODO (SERVER-56270): Remove handling for non-clustered time-series collections.
-        auto recordId = coll->isClustered()
-            ? record_id_helpers::keyForOID(update.getQ()["_id"].OID())
-            : Helpers::findOne(opCtx, *coll, update.getQ(), false);
+        invariant(coll->isClustered());
+        auto recordId = record_id_helpers::keyForOID(update.getQ()["_id"].OID());
 
         auto original = coll->docFor(opCtx, recordId);
         auto [updated, indexesAffected] =

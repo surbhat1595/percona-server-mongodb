@@ -138,6 +138,10 @@ std::unique_ptr<sbe::EExpression> generateNaNCheck(const sbe::EVariable& var) {
     return makeFunction("isNaN", var.clone());
 }
 
+std::unique_ptr<sbe::EExpression> generateInfinityCheck(const sbe::EVariable& var) {
+    return makeFunction("isInfinity"_sd, var.clone());
+}
+
 std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable& var) {
     return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::lessEq,
                         var.clone(),
@@ -167,6 +171,10 @@ std::unique_ptr<sbe::EExpression> generateNullishOrNotRepresentableInt32Check(
     return makeBinaryOp(sbe::EPrimBinary::logicOr,
                         generateNullOrMissing(var),
                         makeNot(makeFunction("exists", std::move(numericConvert32))));
+}
+
+std::unique_ptr<sbe::EExpression> generateNonTimestampCheck(const sbe::EVariable& var) {
+    return makeNot(makeFunction("isTimestamp", var.clone()));
 }
 
 template <>
@@ -437,8 +445,13 @@ EvalStage makeHashAgg(EvalStage stage,
     for (auto& [slot, _] : aggs) {
         stage.outSlots.push_back(slot);
     }
-    stage.stage = sbe::makeS<sbe::HashAggStage>(
-        std::move(stage.stage), std::move(gbs), std::move(aggs), collatorSlot, planNodeId);
+    stage.stage = sbe::makeS<sbe::HashAggStage>(std::move(stage.stage),
+                                                std::move(gbs),
+                                                std::move(aggs),
+                                                sbe::makeSV(),
+                                                true /* optimized close */,
+                                                collatorSlot,
+                                                planNodeId);
     return stage;
 }
 

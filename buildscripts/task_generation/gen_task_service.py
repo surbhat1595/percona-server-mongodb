@@ -82,9 +82,9 @@ class GenTaskService:
                                    params.large_distro_name)
         if params.add_to_display_task:
             build_variant.display_task(fuzzer_task.task_name, fuzzer_task.sub_tasks,
-                                       distros=distros)
+                                       distros=distros, activate=False)
         else:
-            build_variant.add_tasks(fuzzer_task.sub_tasks, distros=distros)
+            build_variant.add_tasks(fuzzer_task.sub_tasks, distros=distros, activate=False)
         return fuzzer_task
 
     def generate_task(self, generated_suite: GeneratedSuite, build_variant: BuildVariant,
@@ -96,13 +96,11 @@ class GenTaskService:
         :param build_variant: Build variant to add generated configuration to.
         :param gen_params: Parameters to configuration how tasks are generated.
         """
-        # self.build_tasks = self.evg_api.tasks_by_build(self.options.build_id)
-
         execution_tasks = self.resmoke_gen_task_service.generate_tasks(generated_suite, gen_params)
         distros = self._get_distro(build_variant.name, gen_params.use_large_distro,
                                    gen_params.large_distro_name)
         build_variant.display_task(generated_suite.display_task_name(),
-                                   execution_tasks=execution_tasks, distros=distros)
+                                   execution_tasks=execution_tasks, distros=distros, activate=False)
 
     def generate_multiversion_task(self, generated_suite: GeneratedSuite,
                                    build_variant: BuildVariant,
@@ -114,14 +112,12 @@ class GenTaskService:
         :param build_variant: Build variant to add generated configuration to.
         :param gen_params: Parameters to configuration how tasks are generated.
         """
-        # self.build_tasks = self.evg_api.tasks_by_build(self.options.build_id)
-
         execution_tasks = self.multiversion_gen_task_service.generate_tasks(
             generated_suite, gen_params)
         distros = self._get_distro(build_variant.name, gen_params.use_large_distro,
                                    gen_params.large_distro_name)
         build_variant.display_task(generated_suite.display_task_name(),
-                                   execution_tasks=execution_tasks, distros=distros)
+                                   execution_tasks=execution_tasks, distros=distros, activate=False)
 
     def generate_multiversion_burnin_task(self, generated_suite: GeneratedSuite,
                                           gen_params: MultiversionGenTaskParams,

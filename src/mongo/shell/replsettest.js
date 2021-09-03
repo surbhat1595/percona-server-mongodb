@@ -2112,16 +2112,13 @@ var ReplSetTest = function(opts) {
             var secondary = secondariesToCheck[index];
             var secondaryName = secondary.host;
 
-            var secondaryConfigVersion =
-                asCluster(secondary,
-                          () => secondary._runWithForcedReadMode(
-                              "commands",
-                              () => secondary.getDB("local")['system.replset']
-                                        .find()
-                                        .readConcern("local")
-                                        .limit(1)
-                                        .next()
-                                        .version));
+            var secondaryConfigVersion = asCluster(secondary,
+                                                   () => secondary.getDB("local")['system.replset']
+                                                             .find()
+                                                             .readConcern("local")
+                                                             .limit(1)
+                                                             .next()
+                                                             .version);
 
             if (primaryConfigVersion != secondaryConfigVersion) {
                 print("ReplSetTest awaitReplication: secondary #" + secondaryCount + ", " +
@@ -2130,14 +2127,12 @@ var ReplSetTest = function(opts) {
 
                 if (secondaryConfigVersion > primaryConfigVersion) {
                     primary = self.getPrimary();
-                    primaryConfigVersion = primary._runWithForcedReadMode(
-                        "commands",
-                        () => primary.getDB("local")['system.replset']
-                                  .find()
-                                  .readConcern("local")
-                                  .limit(1)
-                                  .next()
-                                  .version);
+                    primaryConfigVersion = primary.getDB("local")['system.replset']
+                                               .find()
+                                               .readConcern("local")
+                                               .limit(1)
+                                               .next()
+                                               .version;
                     primaryName = primary.host;
 
                     print("ReplSetTest awaitReplication: optime for primary, " + primaryName +
@@ -2524,8 +2519,7 @@ var ReplSetTest = function(opts) {
                 }
 
                 try {
-                    return this.mongo._runWithForcedReadMode("commands",
-                                                             () => operation(this.cursor));
+                    return operation(this.cursor);
                 } catch (err) {
                     print("Error: " + name + " threw '" + err.message + "' on " + this.mongo.host);
                     // Occasionally, the capped collection will get truncated while we are iterating
@@ -2560,22 +2554,17 @@ var ReplSetTest = function(opts) {
                 // to time out since it may take a while to process each batch and a test may have
                 // changed "cursorTimeoutMillis" to a short time period.
                 this._cursorExhausted = false;
-                // Although this line sets the read concern, it does not need to be called via
-                // _runWithForcedReadMode() because it only creates the client-side cursor.  It's
-                // not until next()/hasNext() are called that the find command gets sent to the
-                // server.
                 this.cursor =
                     coll.find(query).sort({$natural: -1}).noCursorTimeout().readConcern("local");
             };
 
             this.getFirstDoc = function() {
-                return this.mongo._runWithForcedReadMode("commands",
-                                                         () => this.getOplogColl()
-                                                                   .find()
-                                                                   .sort({$natural: 1})
-                                                                   .readConcern("local")
-                                                                   .limit(-1)
-                                                                   .next());
+                return this.getOplogColl()
+                    .find()
+                    .sort({$natural: 1})
+                    .readConcern("local")
+                    .limit(-1)
+                    .next();
             };
 
             this.getOplogColl = function() {
@@ -2860,7 +2849,7 @@ var ReplSetTest = function(opts) {
                 const rand = Random.rand();
                 // TODO SERVER-50389: Support last-continuous binary version with
                 // useRandomBinVersionsWithinReplicaSet.
-                options.binVersion = rand < 0.5 ? "latest" : "last-lts";
+                options.binVersion = rand < 0.5 ? "latest" : "last-continuous";
             }
             print("Randomly assigned binary version: " + options.binVersion + " to node: " + n);
         }
@@ -3153,32 +3142,6 @@ var ReplSetTest = function(opts) {
                   (new Date() - startTime) + "ms for " + this.nodes.length + " nodes.");
         }
 
-        // Make shutdown faster in tests, especially when election handoff has no viable candidate.
-        // Ignore errors from setParameter, since this parameter does not exist before 4.1.10 or
-        // after 4.4.
-        // TODO(SERVER-47797): Remove reference to waitForStepDownOnNonCommandShutdown.
-        if (_callHello()) {
-            asCluster(this._liveNodes, () => {
-                for (let node of this._liveNodes) {
-                    let res;
-                    try {
-                        res = node.adminCommand({
-                            setParameter: 1,
-                            waitForStepDownOnNonCommandShutdown: false,
-                        });
-                    } catch (e) {
-                        print("Failed to set waitForStepDownOnNonCommandShutdown.");
-                        print(e);
-                    }
-                    if (res && res.ok === 0 &&
-                        !res.errmsg.includes("attempted to set unrecognized parameter")) {
-                        print("Failed to set waitForStepDownOnNonCommandShutdown.");
-                        printjson(res);
-                    }
-                }
-            });
-        }
-
         let startTime = new Date();  // Measure the execution time of shutting down nodes.
 
         // Optionally validate collections on all nodes. Parallel validation depends on use of the
@@ -3205,7 +3168,7 @@ var ReplSetTest = function(opts) {
             let port = parseInt(conn.port);
             print("ReplSetTest stopSet waiting for mongo program on port " + port + " to stop.");
             let exitCode = waitMongoProgram(port);
-            if (exitCode !== MongoRunner.EXIT_CLEAN) {
+            if (exitCode !== MongoRunner.EXIT_CLEAN && !opts.skipValidatingExitCode) {
                 throw new Error("ReplSetTest stopSet mongo program on port " + port +
                                 " shut down unexpectedly with code " + exitCode + " when code " +
                                 MongoRunner.EXIT_CLEAN + " was expected.");
@@ -3400,6 +3363,8 @@ var ReplSetTest = function(opts) {
         var existingNodes = conf.members.map(member => member.host);
         self.ports = existingNodes.map(node => node.split(':')[1]);
         self.nodes = existingNodes.map(node => {
+            // Note: the seed node is required to be operational in order for the Mongo
+            // shell to connect to it. In this code there is no fallback to other nodes.
             let conn = new Mongo(node);
             conn.name = conn.host;
             return conn;

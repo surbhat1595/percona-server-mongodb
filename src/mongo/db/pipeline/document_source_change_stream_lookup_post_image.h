@@ -38,23 +38,23 @@ namespace mongo {
  * Part of the change stream API machinery used to look up the post-image of a document. Uses the
  * "documentKey" field of the input to look up the new version of the document.
  */
-class DocumentSourceChangeStreamLookupPostImage final
+class DocumentSourceChangeStreamAddPostImage final
     : public DocumentSource,
       public ChangeStreamStageSerializationInterface {
 public:
-    static constexpr StringData kStageName = "$_internalChangeStreamLookupPostImage"_sd;
+    static constexpr StringData kStageName = "$_internalChangeStreamAddPostImage"_sd;
     static constexpr StringData kFullDocumentFieldName =
         DocumentSourceChangeStream::kFullDocumentField;
 
     /**
-     * Creates a DocumentSourceChangeStreamLookupPostImage stage.
+     * Creates a DocumentSourceChangeStreamAddPostImage stage.
      */
-    static boost::intrusive_ptr<DocumentSourceChangeStreamLookupPostImage> create(
+    static boost::intrusive_ptr<DocumentSourceChangeStreamAddPostImage> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-        return new DocumentSourceChangeStreamLookupPostImage(expCtx);
+        return new DocumentSourceChangeStreamAddPostImage(expCtx);
     }
 
-    static boost::intrusive_ptr<DocumentSourceChangeStreamLookupPostImage> createFromBson(
+    static boost::intrusive_ptr<DocumentSourceChangeStreamAddPostImage> createFromBson(
         const BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
@@ -66,12 +66,16 @@ public:
 
     StageConstraints constraints(Pipeline::SplitState pipeState) const final {
         invariant(pipeState != Pipeline::SplitState::kSplitForShards);
+
+        // TODO SERVER-55659: remove the feature flag.
+        HostTypeRequirement hostTypeRequirement =
+            feature_flags::gFeatureFlagChangeStreamsOptimization.isEnabledAndIgnoreFCV()
+            ? HostTypeRequirement::kAnyShard
+            : HostTypeRequirement::kLocalOnly;
+
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
-                                     // If this is parsed on mongos it should stay on mongos. If
-                                     // we're not in a sharded cluster then it's okay to run on
-                                     // mongod.
-                                     HostTypeRequirement::kLocalOnly,
+                                     hostTypeRequirement,
                                      DiskUseRequirement::kNoDiskUse,
                                      FacetRequirement::kNotAllowed,
                                      TransactionRequirement::kNotAllowed,
@@ -108,7 +112,7 @@ public:
     }
 
 private:
-    DocumentSourceChangeStreamLookupPostImage(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+    DocumentSourceChangeStreamAddPostImage(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSource(kStageName, expCtx) {}
 
     /**

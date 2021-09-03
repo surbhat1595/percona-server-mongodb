@@ -225,6 +225,9 @@ private:
     // config.localReshardingOperations.donor.
     DonorShardContext _donorCtx;
 
+    // This is only used to restore metrics on a stepup.
+    const ReshardingDonorMetrics _donorMetricsToRestore;
+
     const std::unique_ptr<DonorStateMachineExternalState> _externalState;
 
     // ThreadPool used by CancelableOperationContext.
@@ -289,6 +292,8 @@ public:
     virtual void updateCoordinatorDocument(OperationContext* opCtx,
                                            const BSONObj& query,
                                            const BSONObj& update) = 0;
+
+    virtual void clearFilteringMetadata(OperationContext* opCtx) = 0;
 };
 
 }  // namespace mongo

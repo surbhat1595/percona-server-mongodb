@@ -68,7 +68,9 @@ WriteErrorDetail errorFromStatus(const Status& status) {
 }
 
 // Helper to note several stale shard errors from a response
-void noteStaleShardResponses(const std::vector<ShardError>& staleErrors, NSTargeter* targeter) {
+void noteStaleShardResponses(OperationContext* opCtx,
+                             const std::vector<ShardError>& staleErrors,
+                             NSTargeter* targeter) {
     for (const auto& error : staleErrors) {
         LOGV2_DEBUG(22902,
                     4,
@@ -77,6 +79,7 @@ void noteStaleShardResponses(const std::vector<ShardError>& staleErrors, NSTarge
                     "shardId"_attr = error.endpoint.shardName,
                     "errorInfo"_attr = error.error.getErrInfo());
         targeter->noteStaleShardResponse(
+            opCtx,
             error.endpoint,
             StaleConfigInfo::parseFromCommandError(
                 error.error.isErrInfoSet() ? error.error.getErrInfo() : BSONObj()));
@@ -84,15 +87,19 @@ void noteStaleShardResponses(const std::vector<ShardError>& staleErrors, NSTarge
 }
 
 // Helper to note several stale db errors from a response
-void noteStaleDbResponses(const std::vector<ShardError>& staleErrors, NSTargeter* targeter) {
+void noteStaleDbResponses(OperationContext* opCtx,
+                          const std::vector<ShardError>& staleErrors,
+                          NSTargeter* targeter) {
     for (const auto& error : staleErrors) {
         LOGV2_DEBUG(22903,
                     4,
-                    "Noting stale database response from {shardId}: errorInfo",
+                    "Noting stale database response",
                     "shardId"_attr = error.endpoint.shardName,
-                    "errorInfo"_attr = error.error.toBSON());
+                    "errorInfo"_attr = error.error);
         targeter->noteStaleDbResponse(
-            error.endpoint, StaleDbRoutingVersion::parseFromCommandError(error.error.toBSON()));
+            opCtx,
+            error.endpoint,
+            StaleDbRoutingVersion::parseFromCommandError(error.error.toBSON()));
     }
 }
 
@@ -335,13 +342,13 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
 
                     if (!staleShardErrors.empty()) {
                         invariant(staleDbErrors.empty());
-                        noteStaleShardResponses(staleShardErrors, &targeter);
+                        noteStaleShardResponses(opCtx, staleShardErrors, &targeter);
                         ++stats->numStaleShardBatches;
                     }
 
                     if (!staleDbErrors.empty()) {
                         invariant(staleShardErrors.empty());
-                        noteStaleDbResponses(staleDbErrors, &targeter);
+                        noteStaleDbResponses(opCtx, staleDbErrors, &targeter);
                         ++stats->numStaleDbBatches;
                     }
 
@@ -419,7 +426,7 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
                                 2,
                                 {logv2::LogComponent::kShardMigrationPerf},
                                 "Starting post-migration commit refresh on the router");
-            targeter.refreshIfNeeded(opCtx, &targeterChanged);
+            targeterChanged = targeter.refreshIfNeeded(opCtx);
             LOGV2_DEBUG_OPTIONS(4817407,
                                 2,
                                 {logv2::LogComponent::kShardMigrationPerf},

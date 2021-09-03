@@ -372,6 +372,16 @@ server_parameters:
         validator:
             gt: 0
 
+    enableOverrideClusterChainingSetting:
+        description: >-
+            When enabled, allows a node to override the cluster-wide chainingAllowed setting. 
+            If chaining is disabled in the replica set, enabling this parameter allows the node
+            to chain regardless. 
+        set_at: [ startup ]
+        cpp_vartype: AtomicWord<bool>
+        cpp_varname: enableOverrideClusterChainingSetting
+        default: false
+
     disableSplitHorizonIPCheck:
         description: >-
             If true, disable check for IP addresses in split horizon configurations. As per the
@@ -521,6 +531,15 @@ server_parameters:
         cpp_varname: enableReconfigRollbackCommittedWritesCheck
         default: true
 
+    initialSyncMethod:
+        description: >-
+            Specifies which method of initial sync to use. Valid options are: fileCopyBased,
+            logical.
+        set_at: startup
+        cpp_vartype: std::string
+        cpp_varname: initialSyncMethod
+        default: "fileCopyBased"
+
 feature_flags:
     featureFlagTenantMigrations:
         description: >-
@@ -559,3 +578,9 @@ feature_flags:
         cpp_varname: feature_flags::gDefaultRCLocal
         default: true
         version: 5.0
+
+    featureFlagFileCopyBasedInitialSync:
+        description: >-
+            When enabled, file copy based initial sync will be supported in Enterprise Server.
+        cpp_varname: feature_flags::gFileCopyBasedInitialSync
+        default: false

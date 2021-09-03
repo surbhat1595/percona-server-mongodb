@@ -1,7 +1,9 @@
 /**
  * Tests that single shard transactions succeed against replica sets that contain arbiters.
  *
- * @tags: [uses_transactions, requires_find_command]
+ * @tags: [
+ *   uses_transactions,
+ * ]
  */
 
 (function() {
@@ -17,7 +19,9 @@ const shardingTest = new ShardingTest({
         nodes: [
             {/* primary */},
             {/* secondary */ rsConfig: {priority: 0}},
-            {/* arbiter */ rsConfig: {arbiterOnly: true}}
+            {/* arbiter */ rsConfig: {arbiterOnly: true}},
+            {/* secondary */ rsConfig: {priority: 0}},
+            {/* secondary */ rsConfig: {priority: 0}},
         ]
     }
 });

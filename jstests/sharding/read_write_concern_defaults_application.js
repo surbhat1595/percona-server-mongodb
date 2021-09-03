@@ -25,7 +25,8 @@
  *   does_not_support_stepdowns,
  *   requires_majority_read_concern,
  *   requires_profiling,
- *   uses_transactions
+ *   uses_transactions,
+ *   disabled_due_to_server_58295,
  * ]
  */
 (function() {
@@ -97,6 +98,7 @@ let testCases = {
     _configsvrMoveChunk: {skip: "internal command"},
     _configsvrMovePrimary: {skip: "internal command"},
     _configsvrRefineCollectionShardKey: {skip: "internal command"},
+    _configsvrRemoveChunks: {skip: "internal command"},
     _configsvrRemoveShard: {skip: "internal command"},
     _configsvrRemoveShardFromZone: {skip: "internal command"},
     _configsvrRemoveTags: {skip: "internal command"},
@@ -126,6 +128,7 @@ let testCases = {
     _shardsvrAbortReshardCollection: {skip: "internal command"},
     _shardsvrCleanupReshardCollection: {skip: "internal command"},
     _shardsvrCloneCatalogData: {skip: "internal command"},
+    _shardsvrCommitReshardCollection: {skip: "internal command"},
     _shardsvrCreateCollection: {skip: "internal command"},
     _shardsvrCreateCollectionParticipant: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
@@ -857,7 +860,7 @@ function runScenario(
 
         // Do any test-specific setup.
         if (typeof (test.setUp) === "function") {
-            conn._runWithForcedReadMode("commands", test.setUp);
+            test.setUp(conn);
         }
 
         // Get the command from the test case.

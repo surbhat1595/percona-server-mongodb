@@ -115,7 +115,6 @@ if (typeof _threadInject != "undefined") {
     // Helper class for running tests in parallel.  It assembles a set of tests
     // and then calls assert.parallelests to run them.
     ParallelTester = function() {
-        assert.neq(db.getMongo().writeMode(), "legacy", "wrong shell write mode");
         this.params = new Array();
     };
 
@@ -221,6 +220,14 @@ if (typeof _threadInject != "undefined") {
 
             // Assumes that other tests are not creating API version 1 incompatible data.
             "validate_db_metadata_command.js",
+
+            // The tests in 'bench_test*.js' files use 'benchRun()'. The main purpose of
+            // 'benchRun()' is for performance testing and the 'benchRun()' implementation itself
+            // launches multiple threads internally, it's not necessary to keep 'bench_test*.js'
+            // within the parallel test job.
+            "bench_test1.js",
+            "bench_test2.js",
+            "bench_test3.js",
         ]);
 
         // Get files, including files in subdirectories.
@@ -236,33 +243,6 @@ if (typeof _threadInject != "undefined") {
             });
             return fileList;
         };
-
-        // The following tests cannot run when shell readMode is legacy.
-        if (db.getMongo().readMode() === "legacy") {
-            var requires_find_command = [
-                "apply_ops_system_dot_views.js",
-                "command_let_variables.js",
-                "doc_validation_error.js",
-                "merge_sort_collation.js",
-                "explode_for_sort_fetch.js",
-                "update_pipeline_shell_helpers.js",
-                "update_with_pipeline.js",
-                "verify_update_mods.js",
-                "views/dbref_projection.js",
-                "views/views_aggregation.js",
-                "views/views_change.js",
-                "views/views_drop.js",
-                "views/views_find.js",
-                "wildcard_index_collation.js"
-            ];
-            Object.assign(skipTests, makeKeys(requires_find_command));
-
-            // Time-series collections require support for views, so are incompatible with legacy
-            // readMode.
-            const timeseriesTestFiles =
-                getFilesRecursive('jstests/core/timeseries').map(f => ('timeseries/' + f.baseName));
-            Object.assign(skipTests, makeKeys(timeseriesTestFiles));
-        }
 
         // Transactions are not supported on standalone nodes so we do not run them here.
         let txnsTestFiles = getFilesRecursive("jstests/core/txns").map(f => ("txns/" + f.baseName));

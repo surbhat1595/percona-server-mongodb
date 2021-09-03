@@ -58,6 +58,13 @@ const equivalentErrorCodesList = [
     [31034, 4848972],
     [31095, 4848972],
     [34435, 5154901],
+    [34443, 5154300],
+    [34444, 5154303],
+    [34445, 5154301],
+    [34446, 5154304],
+    [34447, 5154302],
+    [34448, 5154305],
+    [34449, 5154306],
     [40066, 4934200],
     [40085, 5155402],
     [40086, 5155400],
@@ -104,6 +111,10 @@ const equivalentErrorCodesList = [
     [5338800, 5338801],
     [5338801, 5439015],
     [5338802, 5439016],
+    [5687301, 5687400],
+    [5687302, 5687401],
+    [5732100, 5732102],
+    [5732101, 5732102],
 ];
 
 // This map is generated based on the contents of 'equivalentErrorCodesList'. This map should _not_
@@ -169,6 +180,13 @@ assert.commandFailedWithCode = function(res, expectedCode, msg) {
 const assertWriteErrorWithCodeOriginal = assert.writeErrorWithCode;
 assert.writeErrorWithCode = function(res, expectedCode, msg) {
     return assertWriteErrorWithCodeOriginal(res, lookupEquivalentErrorCodes(expectedCode), msg);
+};
+
+// Override the assert.throwsWithCode() function.
+const assertThrowsWithCodeOriginal = assert.throwsWithCode;
+assert.throwsWithCode = function(func, expectedCode, params, msg) {
+    return assertThrowsWithCodeOriginal(
+        func, lookupEquivalentErrorCodes(expectedCode), params, msg);
 };
 
 // NOTE: Consider using 'assert.commandFailedWithCode' and 'assert.writeErrorWithCode' instead.

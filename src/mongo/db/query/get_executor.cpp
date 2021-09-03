@@ -1186,13 +1186,10 @@ inline bool isQuerySbeCompatible(OperationContext* opCtx,
     // ENSURE_SORTED stage.
     const bool doesNotNeedEnsureSorted = !cq->getFindCommandRequest().getNtoreturn();
 
-    // OP_QUERY style find commands are not currently supported by SBE.
-    const bool isNotLegacy = !CurOp::get(opCtx)->isLegacyQuery();
-
     // Queries against a time-series collection are not currently supported by SBE.
     const bool isQueryNotAgainstTimeseriesCollection = !(cq->nss().isTimeseriesBucketsCollection());
     return allExpressionsSupported && isNotCount && doesNotContainMetadataRequirements &&
-        isNotLegacy && doesNotNeedEnsureSorted && isQueryNotAgainstTimeseriesCollection &&
+        doesNotNeedEnsureSorted && isQueryNotAgainstTimeseriesCollection &&
         doesNotSortOnMetaOrPathWithNumericComponents && isNotOplog;
 }
 }  // namespace
@@ -1243,17 +1240,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
         : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
     return _getExecutorFind(
         opCtx, collection, std::move(canonicalQuery), yieldPolicy, plannerOptions);
-}
-
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorLegacyFind(
-    OperationContext* opCtx,
-    const CollectionPtr* collection,
-    std::unique_ptr<CanonicalQuery> canonicalQuery) {
-    return _getExecutorFind(opCtx,
-                            collection,
-                            std::move(canonicalQuery),
-                            PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                            QueryPlannerParams::DEFAULT);
 }
 
 namespace {
@@ -2330,12 +2316,12 @@ getExecutorDistinctFromIndexSolutions(OperationContext* opCtx,
                                                     NamespaceString(),
                                                     std::move(currentSolution));
             if (exec.isOK()) {
-                LOGV2_DEBUG(20932,
-                            2,
-                            "Using fast distinct",
-                            "query"_attr = redact(parsedDistinct->getQuery()->toStringShort()),
-                            "planSummary"_attr =
-                                exec.getValue()->getPlanExplainer().getPlanSummary());
+                LOGV2_DEBUG(
+                    20932,
+                    2,
+                    "Using fast distinct",
+                    "query"_attr = redact(exec.getValue()->getCanonicalQuery()->toStringShort()),
+                    "planSummary"_attr = exec.getValue()->getPlanExplainer().getPlanSummary());
             }
 
             return exec;

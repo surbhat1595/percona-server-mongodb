@@ -9,7 +9,18 @@ function shardingTestUsingObjects() {
     var st = new ShardingTest({
         mongos: {s0: {verbose: 6}, s1: {verbose: 5}},
         config: {c0: {verbose: 4}},
-        shards: {d0: {verbose: 3}, rs1: {nodes: {d0: {verbose: 2}, a1: {verbose: 1}}}}
+        shards: {
+            d0: {verbose: 3},
+            rs1: {
+                nodes: {
+                    d0: {verbose: 2},
+                    a1: {verbose: 1},
+                    d2: {verbose: 2},
+                    d3: {verbose: 2},
+                    d4: {verbose: 2}
+                }
+            }
+        }
     });
 
     var s0 = st.s0;
@@ -19,7 +30,7 @@ function shardingTestUsingObjects() {
     assert.eq(s1, st._mongos[1]);
 
     var c0 = st.c0;
-    assert.eq(c0, st._configServers[0]);
+    assert.eq(c0, st.configRS.nodes[0]);
 
     var rs0 = st.rs0;
     assert.eq(rs0, st._rsObjects[0]);
@@ -56,7 +67,7 @@ function shardingTestUsingArrays() {
     assert.eq(s1, st._mongos[1]);
 
     var c0 = st.c0;
-    assert.eq(c0, st._configServers[0]);
+    assert.eq(c0, st.configRS.nodes[0]);
 
     var rs0 = st.rs0;
     assert.eq(rs0, st._rsObjects[0]);

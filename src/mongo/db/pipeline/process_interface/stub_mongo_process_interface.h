@@ -145,7 +145,9 @@ public:
     }
 
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
-        Pipeline* pipeline, bool allowTargetingShards) override {
+        Pipeline* pipeline,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none) override {
         MONGO_UNREACHABLE;
     }
 
@@ -197,8 +199,7 @@ public:
         const NamespaceString& nss,
         UUID collectionUUID,
         const Document& documentKey,
-        boost::optional<BSONObj> readConcern,
-        bool allowSpeculativeMajorityRead) {
+        boost::optional<BSONObj> readConcern) {
         MONGO_UNREACHABLE;
     }
 
@@ -208,7 +209,7 @@ public:
     }
 
     BackupCursorState openBackupCursor(OperationContext* opCtx,
-                                       const StorageEngine::BackupOptions& options) final {
+                                       const StorageEngine::BackupOptions& options) override {
         return BackupCursorState{UUID::gen(), boost::none, nullptr, {}};
     }
 

@@ -1,11 +1,3 @@
-/**
- * Use the 'requires_find_command' tag to skip this test in sharding_op_query suite. Otherwise,
- * sessionDB.coll.find() will throw "Cannot run a legacy query on a session".
- *
- * @tags: [
- *  requires_find_command,
- * ]
- */
 (function() {
 "use strict";
 
@@ -105,7 +97,7 @@ let chunk = findChunksUtil.findOneChunkByNs(sessionConfigDB, 'test.range', {min:
 assert(chunk.jumbo, tojson(chunk));
 assert.eq(st.shard0.shardName, chunk.shard);
 
-st._configServers.forEach((conn) => {
+st.forEachConfigServer((conn) => {
     conn.adminCommand({
         configureFailPoint: 'overrideBalanceRoundInterval',
         mode: 'alwaysOn',

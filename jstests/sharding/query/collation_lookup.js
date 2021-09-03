@@ -8,17 +8,15 @@
  *
  * @tags: [
  *   requires_fcv_50,
+ *   featureFlagShardedLookup,
+ *   disabled_due_to_server_58295
  * ]
  */
 (function() {
 "use strict";
 
-load("jstests/aggregation/extras/utils.js");                     // for arrayEq
-load("jstests/noPassthrough/libs/server_parameter_helpers.js");  // For setParameterOnAllHosts.
-load("jstests/libs/discover_topology.js");                       // For findDataBearingNodes.
-
-// Shard key index has collation, which is not compatible with $min/$max
-TestData.skipCheckOrphans = true;
+load("jstests/aggregation/extras/utils.js");  // for arrayEq
+load("jstests/libs/discover_topology.js");    // For findDataBearingNodes.
 
 function runTests(withDefaultCollationColl, withoutDefaultCollationColl, collation) {
     // Test that the $lookup stage respects the inherited collation.
@@ -433,7 +431,6 @@ function runTests(withDefaultCollationColl, withoutDefaultCollationColl, collati
 
     // Test that the $lookup stage uses the "simple" collation if a collation isn't set on the
     // collection or the aggregation operation, even if the foreign collection has a collation.
-
     res = withoutDefaultCollationColl
     .aggregate([
         {$match: {_id: "lowercase"}},
@@ -560,8 +557,6 @@ function runTests(withDefaultCollationColl, withoutDefaultCollationColl, collati
 }
 
 const st = new ShardingTest({shards: 2});
-setParameterOnAllHosts(
-    DiscoverTopology.findNonConfigNodes(st.s), "internalQueryAllowShardedLookup", true);
 
 const testName = "collation_lookup";
 const caseInsensitive = {
@@ -611,30 +606,29 @@ assert.commandWorked(mongosDB.adminCommand({
 
 runTests(withDefaultCollationColl, withoutDefaultCollationColl, caseInsensitive);
 
-// TODO: Enable the following tests once SERVER-32536 is fixed.
 //
-// Sharded collection with default collation and sharded collection without a default
-// collation.
+// Sharded collection with default collation and sharded collection without a default collation.
 //
 
 // Shard the collection without a default collation.
-// assert.commandWorked(mongosDB.adminCommand({
-//     shardCollection: withoutDefaultCollationColl.getFullName(),
-//     key: {_id: 1},
-// }));
+assert.commandWorked(mongosDB.adminCommand({
+    shardCollection: withoutDefaultCollationColl.getFullName(),
+    key: {_id: 1},
+}));
 
-// // Split the collection into 2 chunks.
-// assert.commandWorked(mongosDB.adminCommand(
-//     {split: withoutDefaultCollationColl.getFullName(), middle: {_id: "unmatched"}}));
+// Split the collection into 2 chunks.
+assert.commandWorked(mongosDB.adminCommand(
+    {split: withoutDefaultCollationColl.getFullName(), middle: {_id: "unmatched"}}));
 
-// // Move the chunk containing {_id: "lowercase"} to shard0001.
-// assert.commandWorked(mongosDB.adminCommand({
-//     moveChunk: withoutDefaultCollationColl.getFullName(),
-//     find: {_id: "lowercase"},
-//     to: st.shard1.shardName
-// }));
+// Move the chunk containing {_id: "lowercase"} to shard0001.
+assert.commandWorked(mongosDB.adminCommand({
+    moveChunk: withoutDefaultCollationColl.getFullName(),
+    find: {_id: "lowercase"},
+    to: st.shard1.shardName,
+    _waitForDelete: true
+}));
 
-// runTests(withDefaultCollationColl, withoutDefaultCollationColl, caseInsensitive);
+runTests(withDefaultCollationColl, withoutDefaultCollationColl, caseInsensitive);
 
 st.stop();
 })();

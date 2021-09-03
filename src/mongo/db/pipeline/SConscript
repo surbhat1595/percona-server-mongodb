@@ -34,6 +34,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/query/query_knobs',
+        '$BUILD_DIR/mongo/db/server_options',
         '$BUILD_DIR/mongo/idl/feature_flag',
         ]
     )
@@ -130,6 +131,7 @@ env.Library(
         'accumulator_last.cpp',
         'accumulator_merge_objects.cpp',
         'accumulator_min_max.cpp',
+        'accumulator_multi.cpp',
         'accumulator_push.cpp',
         'accumulator_rank.cpp',
         'accumulator_std_dev.cpp',
@@ -219,6 +221,7 @@ env.Library(
     source=[
         'change_stream_topology_change_info.cpp',
         'change_stream_invalidation_info.cpp',
+        'change_stream_start_after_invalidate_info.cpp',
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",

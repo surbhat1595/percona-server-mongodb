@@ -520,8 +520,6 @@ __split_root(WT_SESSION_IMPL *session, WT_PAGE *root)
      *
      * Note: as the root page cannot currently be evicted, the root split generation isn't ever
      * used. That said, it future proofs eviction and isn't expensive enough to special-case.
-     *
-     * Getting a new split generation implies a full barrier, no additional barrier is needed.
      */
     WT_FULL_BARRIER();
     split_gen = __wt_gen(session, WT_GEN_SPLIT);
@@ -772,8 +770,6 @@ __split_parent(WT_SESSION_IMPL *session, WT_REF *ref, WT_REF **ref_new, uint32_t
      * Get a generation for this split, mark the page. This must be after the new index is swapped
      * into place in order to know that no readers with the new generation will look at the old
      * index.
-     *
-     * Getting a new split generation implies a full barrier, no additional barrier is needed.
      */
     WT_FULL_BARRIER();
     split_gen = __wt_gen(session, WT_GEN_SPLIT);
@@ -1044,8 +1040,6 @@ __split_internal(WT_SESSION_IMPL *session, WT_PAGE *parent, WT_PAGE *page)
      * Get a generation for this split, mark the parent page. This must be after the new index is
      * swapped into place in order to know that no readers with the new generation will look at the
      * old index.
-     *
-     * Getting a new split generation implies a full barrier, no additional barrier is needed.
      */
     WT_FULL_BARRIER();
     split_gen = __wt_gen(session, WT_GEN_SPLIT);
@@ -1466,7 +1460,11 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
             WT_ERR(__wt_col_search(&cbt, recno, ref, true, NULL));
 
             /* Apply the modification. */
+#ifdef HAVE_DIAGNOSTIC
+            WT_ERR(__wt_col_modify(&cbt, recno, NULL, upd, WT_UPDATE_INVALID, true, true));
+#else
             WT_ERR(__wt_col_modify(&cbt, recno, NULL, upd, WT_UPDATE_INVALID, true));
+#endif
             break;
         case WT_PAGE_ROW_LEAF:
             /* Build a key. */
@@ -1481,7 +1479,11 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
             WT_ERR(__wt_row_search(&cbt, key, true, ref, true, NULL));
 
             /* Apply the modification. */
+#ifdef HAVE_DIAGNOSTIC
+            WT_ERR(__wt_row_modify(&cbt, key, NULL, upd, WT_UPDATE_INVALID, true, true));
+#else
             WT_ERR(__wt_row_modify(&cbt, key, NULL, upd, WT_UPDATE_INVALID, true));
+#endif
             break;
         default:
             WT_ERR(__wt_illegal_value(session, orig->type));

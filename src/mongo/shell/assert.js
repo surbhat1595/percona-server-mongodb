@@ -580,7 +580,7 @@ assert = (function() {
         return error;
     };
 
-    assert.throwsWithCode = function(func, code, params, msg) {
+    assert.throwsWithCode = function(func, expectedCode, params, msg) {
         if (arguments.length < 2) {
             throw new Error("assert.throwsWithCode expects at least 2 arguments");
         }
@@ -588,8 +588,14 @@ assert = (function() {
         // Use .apply() to preserve the length of the 'arguments' object.
         const newArgs = [func, params, msg].filter(element => element !== undefined);
         const error = assert.throws.apply(null, newArgs);
-
-        assert.eq(error.code, code);
+        if (!Array.isArray(expectedCode)) {
+            expectedCode = [expectedCode];
+        }
+        if (!expectedCode.some((ec) => error.code == ec)) {
+            doassert(_buildAssertionMessage(
+                msg,
+                "[" + tojson(error.code) + "] != [" + tojson(expectedCode) + "] are not equal"));
+        }
     };
 
     assert.doesNotThrow = function(func, params, msg) {
@@ -1077,27 +1083,6 @@ assert = (function() {
         const msgPrefix = "" + a + " is not equal to " + b + " within " + deltaMS + " millis, " +
             "actual delta: " + actualDelta + " millis";
         doassert(_buildAssertionMessage(msg, msgPrefix));
-    };
-
-    assert.gleSuccess = function(dbOrGLEDoc, msg) {
-        var gle = dbOrGLEDoc instanceof DB ? dbOrGLEDoc.getLastErrorObj() : dbOrGLEDoc;
-        if (gle.err) {
-            if (typeof (msg) == "function")
-                msg = msg(gle);
-            doassert(_buildAssertionMessage(msg, "getLastError not null: " + tojson(gle)), gle);
-        }
-        return gle;
-    };
-
-    assert.gleErrorCode = function(dbOrGLEDoc, code, msg) {
-        var gle = dbOrGLEDoc instanceof DB ? dbOrGLEDoc.getLastErrorObj() : dbOrGLEDoc;
-        if (!gle.err || gle.code != code) {
-            if (typeof (msg) == "function")
-                msg = msg(gle);
-            doassert(_buildAssertionMessage(
-                msg,
-                "getLastError is null or has code other than \"" + code + "\": " + tojson(gle)));
-        }
     };
 
     assert.includes = function(haystack, needle, msg) {

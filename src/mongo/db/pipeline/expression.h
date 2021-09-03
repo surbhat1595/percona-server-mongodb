@@ -86,32 +86,6 @@ class DocumentSource;
     }
 
 /**
- * Registers a Parser so it can be called from parseExpression and friends (but only if
- * 'featureFlag' is enabled) in a feature compatibility version >= X.
- *
- * As an example, if your expression looks like {"$foo": [1,2,3]} and should be flag-guarded by
- * feature_flags::gFoo and version >= X, you would add this line:
- * REGISTER_FEATURE_FLAG_GUARDED_EXPRESSION_WITH_MIN_VERSION(
- *     foo, ExpressionFoo::parse, feature_flags::gFoo, X);
- *
- * Expressions registered in this way will not be included in the stable API.
- */
-#define REGISTER_FEATURE_FLAG_GUARDED_EXPRESSION_WITH_MIN_VERSION(                 \
-    key, parser, featureFlag, minVersion)                                          \
-    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                      \
-                              ("BeginExpressionRegistration"),                     \
-                              ("EndExpressionRegistration"))                       \
-    (InitializerContext*) {                                                        \
-        if (featureFlag.isEnabledAndIgnoreFCV()) {                                 \
-            Expression::registerExpression("$" #key,                               \
-                                           (parser),                               \
-                                           AllowedWithApiStrict::kNeverInVersion1, \
-                                           AllowedWithClientType::kAny,            \
-                                           (minVersion));                          \
-        }                                                                          \
-    }
-
-/**
  * Registers a Parser so it can be called from parseExpression and friends. Use this version if your
  * expression can only be persisted to a catalog data structure in a feature compatibility version
  * >= X.
@@ -529,7 +503,7 @@ public:
     }
 
     const char* getOpName() const final {
-        return AccumulatorState(this->getExpressionContext()).getOpName();
+        return AccumulatorState::kName.rawData();
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -1893,6 +1867,7 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
     void validateArguments(const ExpressionVector& args) const final;
+    boost::intrusive_ptr<Expression> optimize() final;
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
         return visitor->visit(this);
@@ -2472,9 +2447,7 @@ private:
 class ExpressionRange final : public ExpressionRangedArity<ExpressionRange, 2, 3> {
 public:
     explicit ExpressionRange(ExpressionContext* const expCtx)
-        : ExpressionRangedArity<ExpressionRange, 2, 3>(expCtx) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionRangedArity<ExpressionRange, 2, 3>(expCtx) {}
 
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
@@ -4047,14 +4020,10 @@ public:
     static constexpr const char* const opName = "$tsSecond";
 
     explicit ExpressionTsSecond(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionTsSecond, 1>(expCtx) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionFixedArity<ExpressionTsSecond, 1>(expCtx) {}
 
     ExpressionTsSecond(ExpressionContext* const expCtx, ExpressionVector&& children)
-        : ExpressionFixedArity<ExpressionTsSecond, 1>(expCtx, std::move(children)) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionFixedArity<ExpressionTsSecond, 1>(expCtx, std::move(children)) {}
 
     Value evaluate(const Document& root, Variables* variables) const final;
 
@@ -4076,14 +4045,10 @@ public:
     static constexpr const char* const opName = "$tsIncrement";
 
     explicit ExpressionTsIncrement(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionTsIncrement, 1>(expCtx) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionFixedArity<ExpressionTsIncrement, 1>(expCtx) {}
 
     ExpressionTsIncrement(ExpressionContext* const expCtx, ExpressionVector&& children)
-        : ExpressionFixedArity<ExpressionTsIncrement, 1>(expCtx, std::move(children)) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionFixedArity<ExpressionTsIncrement, 1>(expCtx, std::move(children)) {}
 
     Value evaluate(const Document& root, Variables* variables) const final;
 

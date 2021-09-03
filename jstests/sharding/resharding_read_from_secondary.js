@@ -4,8 +4,8 @@
  *
  * @tags: [
  *   requires_fcv_49,
- *   requires_find_command,
  *   uses_atclustertime,
+ *   disabled_due_to_server_58295
  * ]
  */
 (function() {

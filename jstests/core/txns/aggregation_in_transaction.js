@@ -96,9 +96,6 @@ withTxnAndAutoRetryOnMongos(session, () => {
             });
         assert.docEq(cursor.next(), lookupDoc);
         assert(!cursor.hasNext());
-    } else {
-        // TODO SERVER-39048: Test that $lookup on sharded collection is banned
-        // within a transaction.
     }
 
     jsTestLog("Testing $count within a transaction.");

@@ -4,8 +4,11 @@
  * config.cache collections by the ShardServerCatalogCacheLoader after a refine shard key and makes
  * sure that the shard will be able to eventually reach the valid state on config.cache.
  *
- * @tags: [requires_fcv_47]
+ * @tags: [requires_fcv_47, disabled_due_to_server_58295]
  */
+
+load("jstests/libs/uuid_util.js");
+
 (function() {
 'use strict';
 
@@ -28,7 +31,9 @@ let priConn = st.rs0.getPrimary();
 assert.commandWorked(
     priConn.adminCommand({_flushRoutingTableCacheUpdates: 'test.user', syncFromConfig: true}));
 
-let chunkCache = priConn.getDB('config').cache.chunks.test.user;
+let collEntry = st.config.collections.findOne({_id: 'test.user'});
+let chunksCollName = "cache.chunks.test.user";
+let chunkCache = priConn.getDB('config').getCollection(chunksCollName);
 let preRefineChunks = chunkCache.find().toArray();
 assert.eq(3, preRefineChunks.length);
 

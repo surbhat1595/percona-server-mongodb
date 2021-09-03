@@ -1959,12 +1959,11 @@ void ExpressionDateToString::_doAddDependencies(DepsTracker* deps) const {
 
 /* ----------------------- ExpressionDateDiff ---------------------------- */
 
-// TODO SERVER-53028: make the expression to be available for any FCV when 5.0 becomes last-lts.
 REGISTER_EXPRESSION_WITH_MIN_VERSION(dateDiff,
                                      ExpressionDateDiff::parse,
                                      AllowedWithApiStrict::kNeverInVersion1,
                                      AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion49);
+                                     boost::none);
 
 ExpressionDateDiff::ExpressionDateDiff(ExpressionContext* const expCtx,
                                        boost::intrusive_ptr<Expression> startDate,
@@ -3153,10 +3152,50 @@ Value ExpressionIfNull::evaluate(const Document& root, Variables* variables) con
     return Value();
 }
 
-REGISTER_STABLE_EXPRESSION(ifNull, ExpressionIfNull::parse);
+boost::intrusive_ptr<Expression> ExpressionIfNull::optimize() {
+    bool allOperandsConst = true;
+    for (auto& operand : _children) {
+        operand = operand->optimize();
+        if (!dynamic_cast<ExpressionConstant*>(operand.get())) {
+            allOperandsConst = false;
+        }
+    }
+
+    // If all the operands are constant expressions, collapse the expression into one constant
+    // expression.
+    if (allOperandsConst) {
+        return ExpressionConstant::create(
+            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
+    }
+
+    // Remove all null constants, unless it is the only child.
+    // If one of the operands is a non-null constant expression, remove any operands that follow it.
+    auto it = _children.begin();
+    while (it != _children.end() && _children.size() > 1) {
+        if (auto constExpression = dynamic_cast<ExpressionConstant*>(it->get())) {
+            if (constExpression->getValue().nullish()) {
+                it = _children.erase(it);
+            } else {
+                _children.erase(it + 1, _children.end());
+                break;
+            }
+        } else {
+            ++it;
+        }
+    }
+
+    if (_children.size() == 1) {
+        // Replace $ifNull with its only child.
+        return _children[0];
+    }
+    return this;
+}
+
 const char* ExpressionIfNull::getOpName() const {
     return "$ifNull";
 }
+
+REGISTER_STABLE_EXPRESSION(ifNull, ExpressionIfNull::parse);
 
 /* ----------------------- ExpressionIn ---------------------------- */
 
@@ -4024,10 +4063,11 @@ Value ExpressionRange::evaluate(const Document& root, Variables* variables) cons
                           << endVal.toString(),
             endVal.integral());
 
-    int current = startVal.coerceToInt();
-    int end = endVal.coerceToInt();
+    // Cast to broader type 'int64_t' to prevent overflow during loop.
+    int64_t current = startVal.coerceToInt();
+    int64_t end = endVal.coerceToInt();
 
-    int step = 1;
+    int64_t step = 1;
     if (_children.size() == 3) {
         // A step was specified by the user.
         Value stepVal(_children[2]->evaluate(root, variables));
@@ -4049,11 +4089,11 @@ Value ExpressionRange::evaluate(const Document& root, Variables* variables) cons
     std::vector<Value> output;
 
     while ((step > 0 ? current < end : current > end)) {
-        output.push_back(Value(current));
+        output.push_back(Value(static_cast<int>(current)));
         current += step;
     }
 
-    return Value(output);
+    return Value(std::move(output));
 }
 
 REGISTER_STABLE_EXPRESSION(range, ExpressionRange::parse);
@@ -5181,9 +5221,45 @@ boost::intrusive_ptr<Expression> ExpressionSwitch::optimize() {
         _default = _default->optimize();
     }
 
-    for (auto&& [switchCase, switchThen] : _branches) {
-        switchCase = switchCase->optimize();
-        switchThen = switchThen->optimize();
+    std::vector<ExpressionPair>::iterator it = _branches.begin();
+    bool true_const = false;
+
+    while (!true_const && it != _branches.end()) {
+        (it->first) = (it->first)->optimize();
+
+        if (auto* val = dynamic_cast<ExpressionConstant*>((it->first).get())) {
+            if (!((val->getValue()).coerceToBool())) {
+                // Case is constant and evaluates to false, so it is removed.
+                it = _branches.erase(it);
+            } else {
+                // Case is constant and true so it is set to default and then removed.
+                true_const = true;
+
+                // Optimizing this case's then, so that default will remain optimized.
+                (it->second) = (it->second)->optimize();
+                _default = it->second;
+                it = _branches.erase(it);
+            }
+        } else {
+            // Since case is not removed from the switch, its then is now optimized.
+            (it->second) = (it->second)->optimize();
+            ++it;
+        }
+    }
+
+    // Erasing the rest of the cases because found a default true value.
+    if (true_const) {
+        _branches.erase(it, _branches.end());
+    }
+
+    // If there are no cases, make the switch its default.
+    if (_branches.size() == 0 && _default) {
+        return _default;
+    } else if (_branches.size() == 0) {
+        uassert(40069,
+                "One cannot execute a switch statement where all the cases evaluate to false "
+                "without a default.",
+                _branches.size());
     }
 
     return this;
@@ -6574,8 +6650,7 @@ boost::intrusive_ptr<Expression> ExpressionRegex::optimize() {
 void ExpressionRegex::_compile(RegexExecutionState* executionState) const {
 
     const auto pcreOptions =
-        regex_util::flagsToPcreOptions(executionState->options.value_or(""), false, _opName)
-            .all_options();
+        regex_util::flagsToPcreOptions(executionState->options.value_or(""), _opName).all_options();
 
     if (!executionState->pattern) {
         return;
@@ -7026,7 +7101,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(dateAdd,
                                      ExpressionDateAdd::parse,
                                      AllowedWithApiStrict::kNeverInVersion1,
                                      AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion49);
+                                     boost::none);
 
 boost::intrusive_ptr<Expression> ExpressionDateAdd::parse(ExpressionContext* const expCtx,
                                                           BSONElement expr,
@@ -7053,7 +7128,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(dateSubtract,
                                      ExpressionDateSubtract::parse,
                                      AllowedWithApiStrict::kNeverInVersion1,
                                      AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion49);
+                                     boost::none);
 
 boost::intrusive_ptr<Expression> ExpressionDateSubtract::parse(ExpressionContext* const expCtx,
                                                                BSONElement expr,
@@ -7078,12 +7153,11 @@ Value ExpressionDateSubtract::evaluateDateArithmetics(Date_t date,
 
 /* ----------------------- ExpressionDateTrunc ---------------------------- */
 
-// TODO SERVER-53028: make the expression to be available for any FCV when 5.0 becomes last-lts.
 REGISTER_EXPRESSION_WITH_MIN_VERSION(dateTrunc,
                                      ExpressionDateTrunc::parse,
                                      AllowedWithApiStrict::kNeverInVersion1,
                                      AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion49);
+                                     boost::none);
 
 ExpressionDateTrunc::ExpressionDateTrunc(ExpressionContext* const expCtx,
                                          boost::intrusive_ptr<Expression> date,
@@ -7254,11 +7328,11 @@ void ExpressionDateTrunc::_doAddDependencies(DepsTracker* deps) const {
 }
 
 /* -------------------------- ExpressionGetField ------------------------------ */
-REGISTER_FEATURE_FLAG_GUARDED_EXPRESSION_WITH_MIN_VERSION(
-    getField,
-    ExpressionGetField::parse,
-    feature_flags::gFeatureFlagDotsAndDollars,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(getField,
+                                     ExpressionGetField::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1,
+                                     AllowedWithClientType::kAny,
+                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
 
 intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const expCtx,
                                                     BSONElement expr,
@@ -7365,18 +7439,18 @@ Value ExpressionGetField::serialize(const bool explain) const {
 }
 
 /* -------------------------- ExpressionSetField ------------------------------ */
-REGISTER_FEATURE_FLAG_GUARDED_EXPRESSION_WITH_MIN_VERSION(
-    setField,
-    ExpressionSetField::parse,
-    feature_flags::gFeatureFlagDotsAndDollars,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(setField,
+                                     ExpressionSetField::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1,
+                                     AllowedWithClientType::kAny,
+                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
 
 // $unsetField is syntactic sugar for $setField where value is set to $$REMOVE.
-REGISTER_FEATURE_FLAG_GUARDED_EXPRESSION_WITH_MIN_VERSION(
-    unsetField,
-    ExpressionSetField::parse,
-    feature_flags::gFeatureFlagDotsAndDollars,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
+REGISTER_EXPRESSION_WITH_MIN_VERSION(unsetField,
+                                     ExpressionSetField::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1,
+                                     AllowedWithClientType::kAny,
+                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion50);
 
 intrusive_ptr<Expression> ExpressionSetField::parse(ExpressionContext* const expCtx,
                                                     BSONElement expr,

@@ -1,12 +1,10 @@
 // Tests metadata notifications of change streams on sharded collections.
-// Legacy getMore fails after dropping the database that the original cursor is on.
 // @tags: [
-//   requires_find_command,
 //   requires_majority_read_concern,
 // ]
 (function() {
 "use strict";
-load("jstests/libs/change_stream_util.js");        // For isChangeStreamOptimizationEnabled.
+load("jstests/libs/change_stream_util.js");        // For isChangeStreamsOptimizationEnabled.
 load("jstests/libs/collection_drop_recreate.js");  // For assertDropAndRecreateCollection.
 load('jstests/replsets/libs/two_phase_drops.js');  // For TwoPhaseDropCollectionTest.
 
@@ -20,7 +18,7 @@ const st = new ShardingTest({
 
 const mongosDB = st.s0.getDB(jsTestName());
 const mongosColl = mongosDB[jsTestName()];
-const isChangeStreamOptimized = isChangeStreamOptimizationEnabled(mongosDB);
+const isChangeStreamOptimized = isChangeStreamsOptimizationEnabled(mongosDB);
 
 assert.commandWorked(mongosDB.dropDatabase());
 

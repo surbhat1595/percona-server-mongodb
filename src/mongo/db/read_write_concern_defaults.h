@@ -135,8 +135,7 @@ public:
                                                      const boost::optional<WriteConcern>& wc);
 
     /**
-     * Returns true if cluster-wide write concern is set and the gDefaultWCMajority feature flag
-     * is enabled, and false otherwise.
+     * Returns true if cluster-wide write concern is set.
      */
     bool isCWWCSet(OperationContext* opCtx);
 
@@ -172,6 +171,11 @@ public:
      * This function should only be used for testing purposes.
      */
     boost::optional<bool> getImplicitDefaultWriteConcernMajority_forTest();
+
+    /**
+     * Gets the cluster-wide write concern (CWWC) persisted on disk.
+     */
+    boost::optional<WriteConcern> getCWWC(OperationContext* opCtx);
 
 private:
     enum class Type { kReadWriteConcernEntry };

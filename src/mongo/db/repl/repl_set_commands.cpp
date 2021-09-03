@@ -49,7 +49,6 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
@@ -107,7 +106,7 @@ public:
         LOGV2(21573,
               "replSetTest command received: {cmdObj}",
               "replSetTest command received",
-              "cmdObj"_attr = cmdObj.toString());
+              "cmdObj"_attr = cmdObj);
 
         auto replCoord = ReplicationCoordinator::get(getGlobalServiceContext());
 
@@ -371,7 +370,7 @@ public:
             LOGV2(21578,
                   "created this configuration for initiation : {config}",
                   "Created configuration for initiation",
-                  "config"_attr = configObj.toString());
+                  "config"_attr = configObj);
         }
 
         if (configObj.getField("version").eoo()) {
@@ -595,7 +594,7 @@ public:
         uassertStatusOK(status);
 
         uassertStatusOK(ReplicationCoordinator::get(opCtx)->setMaintenanceMode(
-            cmdObj["replSetMaintenance"].trueValue()));
+            opCtx, cmdObj["replSetMaintenance"].trueValue()));
         return true;
     }
 
@@ -665,8 +664,6 @@ public:
         status = args.initialize(cmdObj);
         if (status.isOK()) {
             status = replCoord->processReplSetUpdatePosition(args);
-
-            // TODO convert to uassertStatusOK once SERVER-34806 is done.
             return CommandHelpers::appendCommandStatusNoThrow(result, status);
         } else {
             // Parsing error from UpdatePositionArgs.

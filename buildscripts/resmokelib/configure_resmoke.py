@@ -17,6 +17,7 @@ from buildscripts.idl.lib import ALL_FEATURE_FLAG_FILE
 from buildscripts.resmokelib import config as _config
 from buildscripts.resmokelib import utils
 from buildscripts.resmokelib import mongod_fuzzer_configs
+from buildscripts.resmokelib.suitesconfig import SuiteFinder
 
 
 def validate_and_update_config(parser, args):
@@ -209,7 +210,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     if _config.MIXED_BIN_VERSIONS is not None:
         _config.MIXED_BIN_VERSIONS = _config.MIXED_BIN_VERSIONS.split("-")
 
-    _config.MULTIVERSION_BIN_VERSION = config.pop("multiversion_bin_version")
+    _config.MULTIVERSION_BIN_VERSION = config.pop("old_bin_version")
 
     _config.INSTALL_DIR = config.pop("install_dir")
     if _config.INSTALL_DIR is not None:
@@ -277,8 +278,6 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.REPORT_FAILURE_STATUS = config.pop("report_failure_status")
     _config.REPORT_FILE = config.pop("report_file")
     _config.SERVICE_EXECUTOR = config.pop("service_executor")
-    _config.SHELL_READ_MODE = config.pop("shell_read_mode")
-    _config.SHELL_WRITE_MODE = config.pop("shell_write_mode")
     _config.SPAWN_USING = config.pop("spawn_using")
     _config.EXPORT_MONGOD_CONFIG = config.pop("export_mongod_config")
     _config.STAGGER_JOBS = config.pop("stagger_jobs") == "on"
@@ -328,8 +327,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
             return url
         return None
 
-    if _config.DEBUG_SYMBOL_PATCH_URL is None:
-        _config.DEBUG_SYMBOL_PATCH_URL = calculate_debug_symbol_url()
+    _config.DEBUG_SYMBOLS_URL = calculate_debug_symbol_url()
 
     # Archival options. Archival is enabled only when running on evergreen.
     if not _config.EVERGREEN_TASK_ID:
@@ -374,9 +372,6 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
 
     _config.UNDO_RECORDER_PATH = config.pop("undo_recorder_path")
 
-    # Populate the named suites by scanning config_dir/suites
-    named_suites = {}
-
     def configure_tests(test_files, replay_file):
         # `_validate_options` has asserted that at most one of `test_files` and `replay_file` contains input.
 
@@ -396,16 +391,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
 
     configure_tests(config.pop("test_files"), config.pop("replay_file"))
 
-    suites_dir = os.path.join(_config.CONFIG_DIR, "suites")
-    root = os.path.abspath(suites_dir)
-    files = os.listdir(root)
-    for filename in files:
-        (short_name, ext) = os.path.splitext(filename)
-        if ext in (".yml", ".yaml"):
-            pathname = os.path.join(root, filename)
-            named_suites[short_name] = pathname
-
-    _config.NAMED_SUITES = named_suites
+    _config.NAMED_SUITES = SuiteFinder.get_named_suites(_config.CONFIG_DIR)
 
     _config.LOGGER_DIR = os.path.join(_config.CONFIG_DIR, "loggers")
 

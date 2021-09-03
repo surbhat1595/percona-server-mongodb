@@ -1,5 +1,6 @@
 test_kind: fsm_workload_test
-use_in_multiversion: concurrency_sharded_replication_multiversion_passthrough
+# TODO SERVER-58706 re-enable this multiversion suite.
+#use_in_multiversion: concurrency_sharded_replication_multiversion_passthrough
 
 selector:
   roots:
@@ -117,7 +118,6 @@ executor:
     tests: true
   config:
     shell_options:
-      readMode: commands
       global_vars:
         TestData:
           runningWithAutoSplit: false
@@ -142,6 +142,7 @@ executor:
       set_parameters:
         enableTestCommands: 1
         roleGraphInvalidationIsFatal: 1
+        receiveChunkWaitForRangeDeleterTimeoutMS: 90000
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

@@ -44,10 +44,10 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/warn_deprecated_wire_ops.h"
-#include "mongo/s/cluster_last_error_info.h"
 #include "mongo/s/commands/strategy.h"
 
 namespace mongo {
@@ -73,7 +73,7 @@ struct HandleRequest : public std::enable_shared_from_this<HandleRequest> {
           msgId(message.header().getId()),
           nsString(getNamespaceString(rec->getDbMessage())) {}
 
-    // Prepares the environment for handling the request (e.g., setting up `ClusterLastErrorInfo`).
+    // Prepares the environment for handling the request.
     void setupEnvironment();
 
     // Returns a future that does the heavy lifting of running client commands.
@@ -113,10 +113,6 @@ void HandleRequest::setupEnvironment() {
     // Start a new LastError session. Any exceptions thrown from here onwards will be returned
     // to the caller (if the type of the message permits it).
     auto client = opCtx->getClient();
-    if (!ClusterLastErrorInfo::get(client)) {
-        ClusterLastErrorInfo::get(client) = std::make_shared<ClusterLastErrorInfo>();
-    }
-    ClusterLastErrorInfo::get(client)->newRequest();
     LastError::get(client).startRequest();
     AuthorizationSession::get(opCtx->getClient())->startRequest(opCtx);
 
@@ -138,123 +134,42 @@ struct CommandOpRunner final : public HandleRequest::OpRunnerBase {
     }
 };
 
-// The base for operations that may throw exceptions, but should not cause the connection to close.
-struct OpRunner : public HandleRequest::OpRunnerBase {
-    using HandleRequest::OpRunnerBase::OpRunnerBase;
-    virtual DbResponse runOperation() = 0;
-    Future<DbResponse> run() override;
-};
-
-Future<DbResponse> OpRunner::run() try {
-    using namespace fmt::literals;
-    const NamespaceString& nss = hr->nsString;
-    const DbMessage& dbm = hr->rec->getDbMessage();
-
-    if (dbm.messageShouldHaveNs()) {
-        uassert(ErrorCodes::InvalidNamespace, "Invalid ns [{}]"_format(nss.ns()), nss.isValid());
-
-        uassert(ErrorCodes::IllegalOperation,
-                "Can't use 'local' database through mongos",
-                nss.db() != NamespaceString::kLocalDb);
-    }
-
-    LOGV2_DEBUG(22867,
-                3,
-                "Request::process begin ns: {namespace} msg id: {msgId} op: {operation}",
-                "Starting operation",
-                "namespace"_attr = nss,
-                "msgId"_attr = hr->msgId,
-                "operation"_attr = networkOpToString(hr->op));
-
-    auto dbResponse = runOperation();
-
-    LOGV2_DEBUG(22868,
-                3,
-                "Request::process end ns: {namespace} msg id: {msgId} op: {operation}",
-                "Done processing operation",
-                "namespace"_attr = nss,
-                "msgId"_attr = hr->msgId,
-                "operation"_attr = networkOpToString(hr->op));
-
-    return Future<DbResponse>::makeReady(std::move(dbResponse));
-} catch (const DBException& ex) {
-    LOGV2_DEBUG(22869,
-                1,
-                "Exception thrown while processing {operation} op for {namespace}: {error}",
-                "Got an error while processing operation",
-                "operation"_attr = networkOpToString(hr->op),
-                "namespace"_attr = hr->nsString.ns(),
-                "error"_attr = ex);
-
-    DbResponse dbResponse;
-    if (hr->op == dbQuery || hr->op == dbGetMore) {
-        dbResponse = replyToQuery(buildErrReply(ex), ResultFlag_ErrSet);
-    } else {
-        // No Response.
-    }
-
-    // We *always* populate the last error for now
-    auto opCtx = hr->rec->getOpCtx();
-    LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.what());
-
-    CurOp::get(opCtx)->debug().errInfo = ex.toStatus();
-
-    return Future<DbResponse>::makeReady(std::move(dbResponse));
-}
-
-struct QueryOpRunner final : public OpRunner {
-    using OpRunner::OpRunner;
-    DbResponse runOperation() override {
-        // Commands are handled through CommandOpRunner and Strategy::clientCommand().
-        invariant(!hr->nsString.isCommand());
-        warnDeprecation(*hr->rec->getOpCtx()->getClient(), networkOpToString(hr->op));
-        hr->rec->getOpCtx()->markKillOnClientDisconnect();
-        return Strategy::queryOp(hr->rec->getOpCtx(), hr->nsString, &hr->rec->getDbMessage());
-    }
-};
-
-struct GetMoreOpRunner final : public OpRunner {
-    using OpRunner::OpRunner;
-    DbResponse runOperation() override {
-        warnDeprecation(*hr->rec->getOpCtx()->getClient(), networkOpToString(hr->op));
-        return Strategy::getMore(hr->rec->getOpCtx(), hr->nsString, &hr->rec->getDbMessage());
-    }
-};
-
-struct KillCursorsOpRunner final : public OpRunner {
-    using OpRunner::OpRunner;
-    DbResponse runOperation() override {
-        warnDeprecation(*hr->rec->getOpCtx()->getClient(), networkOpToString(hr->op));
-        Strategy::killCursors(hr->rec->getOpCtx(), &hr->rec->getDbMessage());  // No Response.
-        return {};
-    }
-};
-
-struct WriteOpRunner final : public OpRunner {
-    using OpRunner::OpRunner;
-    DbResponse runOperation() override {
-        warnDeprecation(*hr->rec->getOpCtx()->getClient(), networkOpToString(hr->op));
-        Strategy::writeOp(hr->rec);  // No Response.
-        return {};
-    }
-};
-
 Future<DbResponse> HandleRequest::handleRequest() {
     switch (op) {
         case dbQuery:
-            if (!nsString.isCommand())
-                return std::make_unique<QueryOpRunner>(shared_from_this())->run();
+            if (!nsString.isCommand()) {
+                globalOpCounters.gotQueryDeprecated();
+                warnDeprecation(*(rec->getOpCtx()->getClient()), networkOpToString(dbQuery));
+                return Future<DbResponse>::makeReady(
+                    makeErrorResponseToDeprecatedOpQuery("OP_QUERY is no longer supported"));
+            }
         // FALLTHROUGH: it's a query containing a command
         case dbMsg:
             return std::make_unique<CommandOpRunner>(shared_from_this())->run();
-        case dbGetMore:
-            return std::make_unique<GetMoreOpRunner>(shared_from_this())->run();
+        case dbGetMore: {
+            globalOpCounters.gotGetMoreDeprecated();
+            warnDeprecation(*(rec->getOpCtx()->getClient()), networkOpToString(dbGetMore));
+            return Future<DbResponse>::makeReady(
+                makeErrorResponseToDeprecatedOpQuery("OP_GET_MORE is no longer supported"));
+        }
         case dbKillCursors:
-            return std::make_unique<KillCursorsOpRunner>(shared_from_this())->run();
-        case dbInsert:
+            globalOpCounters.gotKillCursorsDeprecated();
+            warnDeprecation(*(rec->getOpCtx()->getClient()), networkOpToString(op));
+            uasserted(5745707, "OP_KILL_CURSORS is no longer supported");
+        case dbInsert: {
+            auto opInsert = InsertOp::parseLegacy(rec->getMessage());
+            globalOpCounters.gotInsertsDeprecated(opInsert.getDocuments().size());
+            warnDeprecation(*(rec->getOpCtx()->getClient()), networkOpToString(op));
+            uasserted(5745706, "OP_INSERT is no longer supported");
+        }
         case dbUpdate:
+            globalOpCounters.gotUpdateDeprecated();
+            warnDeprecation(*(rec->getOpCtx()->getClient()), networkOpToString(op));
+            uasserted(5745705, "OP_UPDATE is no longer supported");
         case dbDelete:
-            return std::make_unique<WriteOpRunner>(shared_from_this())->run();
+            globalOpCounters.gotDeleteDeprecated();
+            warnDeprecation(*(rec->getOpCtx()->getClient()), networkOpToString(op));
+            uasserted(5745704, "OP_DELETE is no longer supported");
         default:
             MONGO_UNREACHABLE;
     }

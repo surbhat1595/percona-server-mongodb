@@ -60,6 +60,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
+#include "mongo/db/s/balancer/balancer.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
@@ -399,10 +400,13 @@ public:
 
         boost::optional<Timestamp> changeTimestamp;
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            // TODO(SERVER-53283): Remove the call to requestPause()
+            // to allow the execution of balancer rounds during setFCV().
+            auto scopedBalancerPauseRequest = Balancer::get(opCtx)->requestPause();
+
             // The Config Server creates a new ID (i.e., timestamp) when it receives an upgrade or
             // downgrade request. Alternatively, the request refers to a previously aborted
             // operation for which the local FCV document must contain the ID to be reused.
-
             if (!serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading()) {
                 const auto now = VectorClock::get(opCtx)->getTime();
                 changeTimestamp = now.clusterTime().asTimestamp();
@@ -560,13 +564,6 @@ private:
                 "Failing upgrade due to 'failUpgrading' failpoint set",
                 !failUpgrading.shouldFail());
 
-        // Delete any haystack indexes if we're upgrading to an FCV of 4.9 or higher.
-        //
-        // TODO SERVER-51871: This block can removed once 5.0 becomes last-lts.
-        if (requestedVersion >= FeatureCompatibility::Version::kVersion49) {
-            _deleteHaystackIndexesOnUpgrade(opCtx);
-        }
-
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // TODO SERVER-53283: This block can removed once 5.0 becomes last-lts.
             if (requestedVersion >= FeatureCompatibility::Version::kVersion50) {
@@ -594,41 +591,6 @@ private:
         }
 
         hangWhileUpgrading.pauseWhileSet(opCtx);
-    }
-
-    /**
-     * Removes all haystack indexes from the catalog.
-     *
-     * TODO SERVER-51871: This method can be removed once 5.0 becomes last-lts.
-     */
-    void _deleteHaystackIndexesOnUpgrade(OperationContext* opCtx) {
-        auto collCatalog = CollectionCatalog::get(opCtx);
-        for (const auto& db : collCatalog->getAllDbNames()) {
-            for (auto collIt = collCatalog->begin(opCtx, db); collIt != collCatalog->end(opCtx);
-                 ++collIt) {
-                NamespaceStringOrUUID collName(
-                    collCatalog->lookupNSSByUUID(opCtx, collIt.uuid().get()).get());
-                AutoGetCollectionForRead coll(opCtx, collName);
-                if (!coll) {
-                    continue;
-                }
-
-                auto idxCatalog = coll->getIndexCatalog();
-                std::vector<const IndexDescriptor*> haystackIndexes;
-                idxCatalog->findIndexByType(opCtx, IndexNames::GEO_HAYSTACK, haystackIndexes);
-
-                // Continue if 'coll' has no haystack indexes.
-                if (haystackIndexes.empty()) {
-                    continue;
-                }
-
-                std::vector<std::string> indexNames;
-                for (auto&& haystackIndex : haystackIndexes) {
-                    indexNames.emplace_back(haystackIndex->indexName());
-                }
-                dropIndexes(opCtx, *collName.nss(), indexNames);
-            }
-        }
     }
 
     void _runDowngrade(OperationContext* opCtx,

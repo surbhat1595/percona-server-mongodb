@@ -51,6 +51,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/hello_auth.h"
 #include "mongo/db/repl/hello_gen.h"
 #include "mongo/db/repl/hello_response.h"
@@ -122,6 +123,18 @@ TopologyVersion appendReplicationInfo(OperationContext* opCtx,
             replCoord->appendSecondaryInfoData(result);
         }
         invariant(helloResponse->getTopologyVersion());
+
+        // Only shard servers will respond with the isImplicitDefaultMajorityWC field.
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+            result->append(HelloCommandReply::kIsImplicitDefaultMajorityWCFieldName,
+                           replCoord->getConfig().isImplicitDefaultWriteConcernMajority());
+
+            auto cwwc = ReadWriteConcernDefaults::get(opCtx).getCWWC(opCtx);
+            if (cwwc) {
+                result->append(HelloCommandReply::kCwwcFieldName, cwwc.get().toBSON());
+            }
+        }
+
         return helloResponse->getTopologyVersion().get();
     }
 
@@ -295,7 +308,8 @@ public:
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
         auto cmd = HelloCommand::parse({"hello", apiStrict}, cmdObj);
 
-        waitInHello.pauseWhileSet(opCtx);
+        waitInHello.execute(
+            [&](const BSONObj& customArgs) { _handleHelloFailPoint(customArgs, opCtx, cmdObj); });
 
         /* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not
            authenticated.
@@ -508,6 +522,30 @@ protected:
 
     virtual bool useLegacyResponseFields() const {
         return false;
+    }
+
+private:
+    // Fail point for Hello command, it blocks until disabled. Supported arguments:
+    //   internalClient:  enabled only for internal clients
+    //   notInternalClient: enabled only for non-internal clients
+    static void _handleHelloFailPoint(const BSONObj& args,
+                                      OperationContext* opCtx,
+                                      const BSONObj& cmdObj) {
+        if (args.hasElement("internalClient") && !cmdObj.hasElement("internalClient")) {
+            LOGV2(5648901, "Fail point Hello is disabled for external client", "cmd"_attr = cmdObj);
+            return;  // Filtered out not internal client.
+        }
+        if (args.hasElement("notInternalClient") && cmdObj.hasElement("internalClient")) {
+            LOGV2(5648902, "Fail point Hello is disabled for internal client");
+            return;  // Filtered out internal client.
+        }
+        // Default action is sleep.
+        LOGV2(5648903,
+              "Fail point blocks Hello response until removed",
+              "cmd"_attr = cmdObj,
+              "client"_attr = opCtx->getClient()->clientAddress(true),
+              "desc"_attr = opCtx->getClient()->desc());
+        waitInHello.pauseWhileSet(opCtx);
     }
 
 } cmdhello;

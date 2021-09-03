@@ -591,7 +591,8 @@ public:
      * steps down and steps up so quickly that the applier signals drain complete in the wrong
      * term.
      */
-    virtual void signalDrainComplete(OperationContext* opCtx, long long termWhenBufferIsEmpty) = 0;
+    virtual void signalDrainComplete(OperationContext* opCtx,
+                                     long long termWhenBufferIsEmpty) noexcept = 0;
 
     /**
      * Signals the sync source feedback thread to wake up and send a handshake and
@@ -737,9 +738,12 @@ public:
     /**
      * Toggles maintenanceMode to the value expressed by 'activate'
      * return Status::OK if the change worked, NotSecondary if it failed because we are
-     * PRIMARY, and OperationFailed if we are not currently in maintenance mode
+     * PRIMARY, and OperationFailed if we are not currently in maintenance mode.
+     *
+     * Takes the ReplicationStateTransitionLock (RSTL) in X mode, since the state can potentially
+     * change to and from RECOVERING.
      */
-    virtual Status setMaintenanceMode(bool activate) = 0;
+    virtual Status setMaintenanceMode(OperationContext* opCtx, bool activate) = 0;
 
     /**
      * Retrieves the current count of maintenanceMode and returns 'true' if greater than 0.
@@ -1138,6 +1142,13 @@ public:
      * A testing only function that cancels and reschedules replication heartbeats immediately.
      */
     virtual void restartScheduledHeartbeats_forTest() = 0;
+
+    /**
+     * Records if the cluster-wide write concern is set during sharding initialization.
+     *
+     * This function will assert if the shard can't talk to config server.
+     */
+    virtual void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) = 0;
 
 protected:
     ReplicationCoordinator();

@@ -115,9 +115,6 @@ env.Library(
         '$BUILD_DIR/mongo/unittest/unittest',
         'query_sbe',
     ],
-    LIBDEPS_TYPEINFO=[
-        '$BUILD_DIR/mongo/db/service_context_test_fixture'
-    ],
 )
 
 env.CppUnitTest(
@@ -134,6 +131,7 @@ env.CppUnitTest(
         'expressions/sbe_get_element_builtin_test.cpp',
         'expressions/sbe_index_of_test.cpp',
         'expressions/sbe_is_array_empty_builtin_test.cpp',
+        'expressions/sbe_new_array_from_range_builtin_test.cpp',
         'expressions/sbe_is_member_builtin_test.cpp',
         'expressions/sbe_iso_date_to_parts_test.cpp',
         'expressions/sbe_mod_expression_test.cpp',
@@ -145,6 +143,7 @@ env.CppUnitTest(
         'expressions/sbe_to_upper_to_lower_test.cpp',
         'expressions/sbe_trigonometric_expressions_test.cpp',
         'expressions/sbe_trunc_builtin_test.cpp',
+        'expressions/sbe_ts_second_ts_increment_test.cpp',
         'parser/sbe_parser_test.cpp',
         'sbe_filter_test.cpp',
         'sbe_hash_agg_test.cpp',

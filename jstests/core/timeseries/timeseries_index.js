@@ -2,12 +2,11 @@
  * Tests index creation, index drops, list indexes, hide/unhide index on a time-series collection.
  *
  * @tags: [
- *     assumes_no_implicit_collection_creation_after_drop,
- *     does_not_support_stepdowns,
- *     does_not_support_transactions,
- *     requires_fcv_49,
- *     requires_find_command,
- *     requires_getmore,
+ *   assumes_no_implicit_collection_creation_after_drop,
+ *   does_not_support_stepdowns,
+ *   does_not_support_transactions,
+ *   requires_fcv_49,
+ *   requires_getmore,
  * ]
  */
 (function() {
@@ -131,9 +130,6 @@ TimeseriesTest.run((insert) => {
         assert.commandWorked(coll.dropIndex('hide2'), 'failed to drop index: hide2');
 
         // Check that we are able to create the index as hidden.
-        // TODO(SERVER-56019): This test case tends to be problematic in the burn_in_tests suite
-        // under
-        //                     the replica_sets_initsync_jscore_passthrough subtask.
         assert.commandWorked(coll.createIndex(keyForCreate, {name: 'hide3', hidden: true}),
                              'failed to create index: ' + tojson(keyForCreate));
         assert.commandFailedWithCode(assert.throws(() => bucketsColl.find().hint(hint).toArray()),
@@ -222,25 +218,25 @@ TimeseriesTest.run((insert) => {
     // collection, which in this case does not possess the index by that name.
     assert.commandFailedWithCode(coll.dropIndex('mm_1'), ErrorCodes.IndexNotFound);
 
-    // TODO (SERVER-56235): Evaluate uses of this function.
-    const testCreateIndex = function(spec, options = {}) {
+    const testCreateIndexFailed = function(spec, options = {}) {
         const indexName = 'testCreateIndex';
         const res = coll.createIndex(spec, Object.extend({name: indexName}, options));
         assert.commandFailedWithCode(res, ErrorCodes.InvalidOptions);
     };
 
-    // Partial indexes are not supported on clustered time-series bucket collections.
-    testCreateIndex({[metaFieldName]: 1}, {partialFilterExpression: {meta: {$gt: 5}}});
-    testCreateIndex({[metaFieldName]: 1}, {partialFilterExpression: {[metaFieldName]: {$gt: 5}}});
+    // Partial indexes are not supported on time-series collections.
+    testCreateIndexFailed({[metaFieldName]: 1}, {partialFilterExpression: {meta: {$gt: 5}}});
+    testCreateIndexFailed({[metaFieldName]: 1},
+                          {partialFilterExpression: {[metaFieldName]: {$gt: 5}}});
 
-    // Unique indexes are not supported on clustered time-series bucket collections.
-    testCreateIndex({[metaFieldName]: 1}, {unique: true});
+    // Unique indexes are not supported on clustered collections.
+    testCreateIndexFailed({[metaFieldName]: 1}, {unique: true});
 
-    // TTL indexes are not supported on a clustered time-series buckets collection.
-    testCreateIndex({[metaFieldName]: 1}, {expireAfterSeconds: 3600});
+    // TTL indexes are not supported on time-series collections.
+    testCreateIndexFailed({[metaFieldName]: 1}, {expireAfterSeconds: 3600});
 
-    // Text indexes are not supported on a clustered time-series buckets collection.
-    testCreateIndex({[metaFieldName]: 'text'});
+    // Text indexes are not supported on time-series collections.
+    testCreateIndexFailed({[metaFieldName]: 'text'});
 
     // If listIndexes fails to convert a non-conforming index on the bucket collection, it should
     // omit that index from the results.

@@ -47,7 +47,6 @@
 #include "mongo/db/exec/delete.h"
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/lasterror.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -68,6 +67,7 @@
 #include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/stats/top.h"
@@ -485,8 +485,10 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
     write_ops_exec::recordUpdateResultInOpDebug(updateResult, opDebug);
     opDebug->setPlanSummaryMetrics(summaryStats);
 
-    if (feature_flags::gFeatureFlagDotsAndDollars.isEnabledAndIgnoreFCV() &&
-        updateResult.containsDotsAndDollarsField) {
+    if (updateResult.containsDotsAndDollarsField &&
+        serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
+            FeatureCompatibilityParams::Version::kVersion50)) {
         // If it's an upsert, increment 'inserts' metric, otherwise increment 'updates'.
         dotsAndDollarsFieldsCounters.incrementForUpsert(!updateResult.upsertedId.isEmpty());
     }
@@ -728,6 +730,11 @@ void CmdFindAndModify::Invocation::appendMirrorableRequest(BSONObjBuilder* bob) 
     if (req.getCollation()) {
         bob->append(write_ops::FindAndModifyCommandRequest::kCollationFieldName,
                     *req.getCollation());
+    }
+
+    const auto& rawCmd = unparsedRequest().body;
+    if (const auto& shardVersion = rawCmd.getField("shardVersion"); !shardVersion.eoo()) {
+        bob->append(shardVersion);
     }
 
     // Prevent the find from returning multiple documents since we can

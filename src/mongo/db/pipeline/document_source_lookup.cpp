@@ -26,6 +26,7 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/platform/basic.h"
@@ -48,6 +49,8 @@
 #include "mongo/db/pipeline/variable_validation.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/views/resolved_view.h"
+#include "mongo/logv2/log.h"
 #include "mongo/platform/overflow_arithmetic.h"
 #include "mongo/util/fail_point.h"
 
@@ -85,10 +88,6 @@ void lookupPipeValidator(const Pipeline& pipeline) {
                               << " is not allowed within a $lookup's sub-pipeline",
                 src->constraints().isAllowedInLookupPipeline());
     });
-}
-
-bool foreignShardedLookupAllowed() {
-    return getTestCommandsEnabled() && internalQueryAllowShardedLookup.load();
 }
 
 // Parses $lookup 'from' field. The 'from' field must be a string or one of the following
@@ -300,15 +299,26 @@ const char* DocumentSourceLookUp::getSourceName() const {
     return kStageName.rawData();
 }
 
-StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState) const {
+bool DocumentSourceLookUp::foreignShardedLookupAllowed() const {
+    return feature_flags::gFeatureFlagShardedLookup.isEnabled(
+               serverGlobalParams.featureCompatibility) &&
+        !pExpCtx->opCtx->inMultiDocumentTransaction();
+}
+
+StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeState) const {
     HostTypeRequirement hostRequirement;
     if (_fromNs.isConfigDotCacheDotChunks()) {
         // $lookup from config.cache.chunks* namespaces is permitted to run on each individual
         // shard, rather than just the primary, since each shard should have an identical copy of
         // the namespace.
         hostRequirement = HostTypeRequirement::kAnyShard;
+    } else if (pipeState == Pipeline::SplitState::kSplitForShards) {
+        // This stage will only be on the shards pipeline if $lookup on sharded foreign collections
+        // is allowed.
+        hostRequirement = HostTypeRequirement::kAnyShard;
     } else {
-        // When $lookup on sharded foreign collections is allowed, the foreign collection is
+        // If the pipeline is unsplit or this stage is on the merging part of the pipeline,
+        // when $lookup on sharded foreign collections is allowed, the foreign collection is
         // sharded, and the stage is executing on mongos, the stage can run on mongos or any shard.
         hostRequirement = (foreignShardedLookupAllowed() && pExpCtx->inMongos &&
                            pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _fromNs))
@@ -368,11 +378,17 @@ DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
     } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
         // If lookup on a sharded collection is disallowed and the foreign collection is sharded,
         // throw a custom exception.
-        if (auto staleInfo = ex.extraInfo<StaleConfigInfo>()) {
+        if (auto staleInfo = ex.extraInfo<StaleConfigInfo>(); staleInfo &&
+            staleInfo->getVersionWanted() &&
+            staleInfo->getVersionWanted() != ChunkVersion::UNSHARDED()) {
+            uassert(3904800,
+                    "Cannot run $lookup with a sharded foreign collection in a transaction",
+                    !feature_flags::gFeatureFlagShardedLookup.isEnabled(
+                        serverGlobalParams.featureCompatibility) ||
+                        !pExpCtx->opCtx->inMultiDocumentTransaction());
             uassert(51069,
                     "Cannot run $lookup with sharded foreign collection",
-                    foreignShardedLookupAllowed() || !staleInfo->getVersionWanted() ||
-                        staleInfo->getVersionWanted() == ChunkVersion::UNSHARDED());
+                    foreignShardedLookupAllowed());
         }
         throw;
     }
@@ -400,6 +416,40 @@ DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
     return output.freeze();
 }
 
+std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipelineFromViewDefinition(
+    std::vector<BSONObj> serializedPipeline,
+    ExpressionContext::ResolvedNamespace resolvedNamespace) {
+    // We don't want to optimize or attach a cursor source here because we need to update
+    // _resolvedPipeline so we can reuse it on subsequent calls to getNext(), and we may need to
+    // update _fieldMatchPipelineIdx as well in the case of a field join.
+    MakePipelineOptions opts;
+    opts.optimize = false;
+    opts.attachCursorSource = false;
+    opts.validator = lookupPipeValidator;
+
+    // Resolve the view definition.
+    auto pipeline = Pipeline::makePipelineFromViewDefinition(
+        _fromExpCtx, resolvedNamespace, serializedPipeline, opts);
+
+    // Store the pipeline with resolved namespaces so that we only trigger this exception on the
+    // first input document.
+    _resolvedPipeline = pipeline->serializeToBson();
+
+    // In the case of a foreign field join we expect the match to be found in the last position of
+    // _resolvedPipeline, but optimizing might move this stage elsewhere or merge it with another
+    // stage.
+    if (hasLocalFieldForeignFieldJoin()) {
+        _fieldMatchPipelineIdx = _resolvedPipeline.size() - 1;
+    }
+
+    // Update the expression context with any new namespaces the resolved pipeline has introduced.
+    LiteParsedPipeline liteParsedPipeline(resolvedNamespace.ns, resolvedNamespace.pipeline);
+    _fromExpCtx = _fromExpCtx->copyForSubPipeline(resolvedNamespace.ns);
+    _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
+
+    return pipeline;
+}
+
 std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     const Document& inputDoc) {
     // Copy all 'let' variables into the foreign pipeline's expression context.
@@ -408,7 +458,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     // Resolve the 'let' variables to values per the given input document.
     resolveLetVariables(inputDoc, &_fromExpCtx->variables);
 
-    if (!foreignShardedLookupAllowed()) {
+    const auto allowForeignShardedColl = foreignShardedLookupAllowed();
+    if (!allowForeignShardedColl) {
         // Enforce that the foreign collection must be unsharded for lookup.
         _fromExpCtx->mongoProcessInterface->setExpectedShardVersion(
             _fromExpCtx->opCtx, _fromExpCtx->ns, ChunkVersion::UNSHARDED());
@@ -421,8 +472,31 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
         pipelineOpts.attachCursorSource = true;
         pipelineOpts.validator = lookupPipeValidator;
         // By default, $lookup doesnt support sharded 'from' collections.
-        pipelineOpts.allowTargetingShards = internalQueryAllowShardedLookup.load();
-        return Pipeline::makePipeline(_resolvedPipeline, _fromExpCtx, pipelineOpts);
+        pipelineOpts.shardTargetingPolicy = allowForeignShardedColl
+            ? ShardTargetingPolicy::kAllowed
+            : ShardTargetingPolicy::kNotAllowed;
+        try {
+            return Pipeline::makePipeline(_resolvedPipeline, _fromExpCtx, pipelineOpts);
+        } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
+            // This exception returns the information we need to resolve a sharded view. Update the
+            // pipeline with the resolved view definition.
+            auto pipeline = buildPipelineFromViewDefinition(
+                _resolvedPipeline,
+                ExpressionContext::ResolvedNamespace{e->getNamespace(), e->getPipeline()});
+
+            LOGV2_DEBUG(3254800,
+                        3,
+                        "$lookup found view definition. ns: {ns}, pipeline: {pipeline}. New "
+                        "$lookup sub-pipeline: {new_pipe}",
+                        "ns"_attr = e->getNamespace(),
+                        "pipeline"_attr = Value(e->getPipeline()),
+                        "new_pipe"_attr = _resolvedPipeline);
+
+            // We can now safely optimize and reattempt attaching the cursor source.
+            pipeline = Pipeline::makePipeline(_resolvedPipeline, _fromExpCtx, pipelineOpts);
+
+            return pipeline;
+        }
     }
 
     // Construct the basic pipeline without a cache stage. Avoid optimizing here since we need to
@@ -446,12 +520,38 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
             DocumentSourceSequentialDocumentCache::create(_fromExpCtx, _cache.get_ptr()));
     }
 
+    // We can store the unoptimized serialization of the pipeline so that if we need to resolve
+    // a sharded view later on, and we have a local-foreign field join, we will need to update
+    // metadata tracking the position of this join in the _resolvedPipeline.
+    auto serializedPipeline = pipeline->serializeToBson();
     pipeline->optimizePipeline();
 
     if (!_cache->isServing()) {
         // The cache has either been abandoned or has not yet been built. Attach a cursor.
-        pipeline = pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(
-            pipeline.release(), internalQueryAllowShardedLookup.load() /* allowTargetingShards*/);
+        auto shardTargetingPolicy = allowForeignShardedColl ? ShardTargetingPolicy::kAllowed
+                                                            : ShardTargetingPolicy::kNotAllowed;
+        try {
+            pipeline = pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(
+                pipeline.release(), shardTargetingPolicy);
+        } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
+            // This exception returns the information we need to resolve a sharded view. Update the
+            // pipeline with the resolved view definition.
+            pipeline = buildPipelineFromViewDefinition(
+                serializedPipeline,
+                ExpressionContext::ResolvedNamespace{e->getNamespace(), e->getPipeline()});
+
+            LOGV2_DEBUG(3254801,
+                        3,
+                        "$lookup found view definition. ns: {ns}, pipeline: {pipeline}. New "
+                        "$lookup sub-pipeline: {new_pipe}",
+                        "ns"_attr = e->getNamespace(),
+                        "pipeline"_attr = Value(e->getPipeline()),
+                        "new_pipe"_attr = _resolvedPipeline);
+
+            // Try to attach the cursor source again.
+            pipeline = pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(
+                pipeline.release(), shardTargetingPolicy);
+        }
     }
 
     // If the cache has been abandoned, release it.
@@ -1002,6 +1102,12 @@ DepsTracker::State DocumentSourceLookUp::getDependencies(DepsTracker* deps) cons
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceLookUp::distributedPlanLogic() {
+    // If $lookup into a sharded foreign collection is allowed, top-level $lookup stages can run in
+    // parallel on the shards.
+    if (foreignShardedLookupAllowed() && pExpCtx->subPipelineDepth == 0) {
+        return boost::none;
+    }
+
     if (_fromExpCtx->ns.isConfigDotCacheDotChunks()) {
         // When $lookup reads from config.cache.chunks.* namespaces, it should run on each
         // individual shard in parallel. This is a special case, and atypical for standard $lookup

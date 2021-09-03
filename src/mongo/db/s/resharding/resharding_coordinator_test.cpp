@@ -53,6 +53,7 @@ namespace mongo {
 namespace {
 
 using namespace resharding;
+using unittest::assertGet;
 
 class ReshardingCoordinatorPersistenceTest : public ConfigServerTestFixture {
 protected:
@@ -73,7 +74,7 @@ protected:
         client.createCollection(NamespaceString::kSessionTransactionsTableNamespace.ns());
         client.createCollection(NamespaceString::kConfigReshardingOperationsNamespace.ns());
         client.createCollection(CollectionType::ConfigNS.ns());
-
+        client.createIndex(TagsType::ConfigNS.ns(), BSON("ns" << 1 << "min" << 1));
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
         TransactionCoordinatorService::get(operationContext())
             ->onShardingInitialization(operationContext(), true);
@@ -90,8 +91,7 @@ protected:
             _reshardingUUID, _originalNss, UUID::gen(), _tempNss, _newShardKey.toBSON());
         ReshardingCoordinatorDocument doc(state,
                                           {DonorShardEntry(ShardId("shard0000"), {})},
-                                          {RecipientShardEntry(ShardId("shard0001"), {})},
-                                          ReshardingCoordinatorMetrics());
+                                          {RecipientShardEntry(ShardId("shard0001"), {})});
         doc.setCommonReshardingMetadata(meta);
         emplaceCloneTimestampIfExists(doc, std::move(fetchTimestamp));
         return doc;
@@ -560,7 +560,7 @@ protected:
             ASSERT_OK(configShard->createIndexOnConfig(
                 opCtx,
                 ChunkType::ConfigNS,
-                BSON(ChunkType::ns() << 1 << ChunkType::lastmod() << 1),
+                BSON(ChunkType::collectionUUID() << 1 << ChunkType::lastmod() << 1),
                 true));
         }
 
@@ -683,35 +683,11 @@ protected:
         writeStateTransitionUpdateExpectSuccess(operationContext(), expectedCoordinatorDoc);
     }
 
-    void assertChunkVersionDidNotIncreaseAfterStateTransition(
-        const ChunkType& chunk,
-        const ChunkVersion& collectionVersion,
-        const OID& collEpoch,
-        const boost::optional<Timestamp>& collTimestamp) {
-        auto chunkAfterTransition =
-            getChunkDoc(operationContext(), chunk.getMin(), collEpoch, collTimestamp);
-        ASSERT_EQ(chunkAfterTransition.getStatus(), Status::OK());
-        ASSERT_EQ(chunkAfterTransition.getValue().getVersion().majorVersion(),
-                  collectionVersion.majorVersion());
-    }
-
-    void assertChunkVersionIncreasedAfterStateTransition(
-        const ChunkType& chunk,
-        const ChunkVersion& collectionVersion,
-        const OID& collEpoch,
-        const boost::optional<Timestamp>& collTimestamp) {
-        auto chunkAfterTransition =
-            getChunkDoc(operationContext(), chunk.getMin(), collEpoch, collTimestamp);
-        ASSERT_EQ(chunkAfterTransition.getStatus(), Status::OK());
-        ASSERT_EQ(chunkAfterTransition.getValue().getVersion().majorVersion(),
-                  collectionVersion.majorVersion() + 1);
-    }
-
     NamespaceString _originalNss = NamespaceString("db.foo");
     UUID _originalUUID = UUID::gen();
     OID _originalEpoch = OID::gen();
-    boost::optional<Timestamp>
-        _originalTimestamp;  // TODO: SERVER-53066 Initialize it with a Timestamp.
+    // TODO: SERVER-53066 Initialize it with a Timestamp.
+    boost::optional<Timestamp> _originalTimestamp;
 
     NamespaceString _tempNss = NamespaceString("db.system.resharding." + _originalUUID.toString());
     UUID _reshardingUUID = UUID::gen();
@@ -774,11 +750,9 @@ TEST_F(ReshardingCoordinatorPersistenceTest, WriteInitialInfoSucceeds) {
     // bumped twice in 'writeInitialStateAndCatalogUpdatesExpectSuccess': once when reshardingFields
     // is inserted to the collection doc, and once again when the state transitions to
     // kPreparingToDonate.
-    auto donorChunkPostTransition =
-        getChunkDoc(operationContext(), donorChunk.getMin(), _originalEpoch, _originalTimestamp);
-    ASSERT_EQ(donorChunkPostTransition.getStatus(), Status::OK());
-    ASSERT_EQ(donorChunkPostTransition.getValue().getVersion().majorVersion(),
-              collectionVersion.majorVersion() + 2);
+    const auto postTransitionCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+    ASSERT_TRUE(collectionVersion.isOlderThan(postTransitionCollectionVersion));
 }
 
 TEST_F(ReshardingCoordinatorPersistenceTest, BasicStateTransitionSucceeds) {
@@ -787,23 +761,27 @@ TEST_F(ReshardingCoordinatorPersistenceTest, BasicStateTransitionSucceeds) {
 
     // Ensure the chunks for the original and temporary namespaces exist since they will be bumped
     // as a product of the state transition to kBlockingWrites.
-    auto donorChunk = makeAndInsertChunksForDonorShard(
+    makeAndInsertChunksForDonorShard(
         _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
-    auto donorCollectionVersion = donorChunk.getVersion();
+    auto initialOriginalCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
 
-    auto recipientChunk = makeAndInsertChunksForRecipientShard(
+    makeAndInsertChunksForRecipientShard(
         _reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
-    auto recipientCollectionVersion = donorChunk.getVersion();
+    auto initialTempCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _tempNss));
 
     // Persist the updates on disk
     auto expectedCoordinatorDoc = coordinatorDoc;
     expectedCoordinatorDoc.setState(CoordinatorStateEnum::kBlockingWrites);
 
     writeStateTransitionUpdateExpectSuccess(operationContext(), expectedCoordinatorDoc);
-    assertChunkVersionIncreasedAfterStateTransition(
-        donorChunk, donorCollectionVersion, _originalEpoch, _originalTimestamp);
-    assertChunkVersionIncreasedAfterStateTransition(
-        recipientChunk, recipientCollectionVersion, _originalEpoch, _originalTimestamp);
+    auto finalOriginalCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+    ASSERT_TRUE(initialOriginalCollectionVersion.isOlderThan(finalOriginalCollectionVersion));
+
+    auto finalTempCollectionVersion = assertGet(getCollectionVersion(operationContext(), _tempNss));
+    ASSERT_TRUE(initialTempCollectionVersion.isOlderThan(finalTempCollectionVersion));
 }
 
 TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionWithFetchTimestampSucceeds) {
@@ -812,13 +790,11 @@ TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionWithFetchTimestampSu
 
     // Ensure the chunks for the original and temporary namespaces exist since they will be bumped
     // as a product of the state transition to kCloning.
-    auto donorChunk = makeAndInsertChunksForDonorShard(
+    makeAndInsertChunksForDonorShard(
         _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
-    auto donorCollectionVersion = donorChunk.getVersion();
 
-    auto recipientChunk = makeAndInsertChunksForRecipientShard(
+    makeAndInsertChunksForRecipientShard(
         _reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
-    auto recipientCollectionVersion = recipientChunk.getVersion();
 
     // Persist the updates on disk
     auto expectedCoordinatorDoc = coordinatorDoc;
@@ -831,14 +807,22 @@ TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionWithFetchTimestampSu
         return approxCopySize;
     }());
 
+    auto initialOriginalCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+    auto initialTempCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _tempNss));
+
     writeStateTransitionUpdateExpectSuccess(operationContext(), expectedCoordinatorDoc);
-    assertChunkVersionIncreasedAfterStateTransition(
-        donorChunk, donorCollectionVersion, _originalEpoch, _originalTimestamp);
-    assertChunkVersionIncreasedAfterStateTransition(
-        recipientChunk, recipientCollectionVersion, _originalEpoch, _originalTimestamp);
+
+    auto finalOriginalCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+    ASSERT_TRUE(initialOriginalCollectionVersion.isOlderThan(finalOriginalCollectionVersion));
+
+    auto finalTempCollectionVersion = assertGet(getCollectionVersion(operationContext(), _tempNss));
+    ASSERT_TRUE(initialTempCollectionVersion.isOlderThan(finalTempCollectionVersion));
 }
 
-TEST_F(ReshardingCoordinatorPersistenceTest, StateTranstionToDecisionPersistedSucceeds) {
+TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionToDecisionPersistedSucceeds) {
     Timestamp fetchTimestamp = Timestamp(1, 1);
     auto coordinatorDoc = insertStateAndCatalogEntries(
         CoordinatorStateEnum::kBlockingWrites, _originalEpoch, fetchTimestamp);
@@ -861,12 +845,16 @@ TEST_F(ReshardingCoordinatorPersistenceTest, StateTranstionToDecisionPersistedSu
     auto updatedChunks = makeChunks(_originalUUID, _finalEpoch, _newShardKey, initialChunksIds);
     auto updatedZones = makeZones(_originalNss, _newShardKey);
 
+    auto initialCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+
+
     writeDecisionPersistedStateExpectSuccess(
         operationContext(), expectedCoordinatorDoc, fetchTimestamp, updatedChunks, updatedZones);
 
     // Since the epoch is changed, there is no need to bump the chunk versions with the transition.
-    assertChunkVersionDidNotIncreaseAfterStateTransition(
-        recipientChunk, recipientChunk.getVersion(), _finalEpoch, _finalTimestamp);
+    auto finalCollectionVersion = assertGet(getCollectionVersion(operationContext(), _originalNss));
+    ASSERT_EQ(initialCollectionVersion.toLong(), finalCollectionVersion.toLong());
 }
 
 TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionToErrorSucceeds) {
@@ -883,13 +871,17 @@ TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionToDoneSucceeds) {
 
     // Ensure the chunks for the original namespace exist since they will be bumped as a product of
     // the state transition to kDone.
-    auto finalChunk = makeAndInsertChunksForRecipientShard(
+    makeAndInsertChunksForRecipientShard(
         _reshardingUUID, _finalEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
-    auto collectionVersion = finalChunk.getVersion();
+
+    auto initialOriginalCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
 
     removeCoordinatorDocAndReshardingFieldsExpectSuccess(operationContext(), coordinatorDoc);
-    assertChunkVersionIncreasedAfterStateTransition(
-        finalChunk, collectionVersion, _finalEpoch, _finalTimestamp);
+
+    auto finalOriginalCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+    ASSERT_TRUE(initialOriginalCollectionVersion.isOlderThan(finalOriginalCollectionVersion));
 }
 
 TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionWhenCoordinatorDocDoesNotExistFails) {
@@ -899,7 +891,7 @@ TEST_F(ReshardingCoordinatorPersistenceTest, StateTransitionWhenCoordinatorDocDo
     ASSERT_THROWS_CODE(writeStateTransitionAndCatalogUpdatesThenBumpShardVersions(
                            operationContext(), coordinatorDoc),
                        AssertionException,
-                       5514600);
+                       ErrorCodes::NamespaceNotFound);
 }
 
 TEST_F(ReshardingCoordinatorPersistenceTest,
@@ -912,7 +904,7 @@ TEST_F(ReshardingCoordinatorPersistenceTest,
     // Do not create the config.collections entry for the original collection
     ASSERT_THROWS_CODE(insertCoordDocAndChangeOrigCollEntry(operationContext(), coordinatorDoc),
                        AssertionException,
-                       5514600);
+                       ErrorCodes::NamespaceNotFound);
 }
 
 }  // namespace

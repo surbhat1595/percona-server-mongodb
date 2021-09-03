@@ -183,7 +183,7 @@ public:
 
     virtual ApplierState getApplierState();
 
-    virtual void signalDrainComplete(OperationContext*, long long);
+    virtual void signalDrainComplete(OperationContext*, long long) noexcept;
 
     virtual void signalUpstreamUpdater();
 
@@ -233,7 +233,7 @@ public:
 
     virtual void cancelAndRescheduleElectionTimeout() override;
 
-    virtual Status setMaintenanceMode(bool activate);
+    virtual Status setMaintenanceMode(OperationContext* opCtx, bool activate);
 
     virtual bool getMaintenanceMode();
 
@@ -392,6 +392,8 @@ public:
                                             OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) override;
     virtual void restartScheduledHeartbeats_forTest() override;
+
+    virtual void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) final;
 
 private:
     ServiceContext* const _service;

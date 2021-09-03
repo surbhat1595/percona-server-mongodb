@@ -52,6 +52,10 @@ public:
 
 
         bool allowShardedForeignCollection(NamespaceString nss) const override {
+            if (feature_flags::gFeatureFlagShardedLookup.isEnabled(
+                    serverGlobalParams.featureCompatibility)) {
+                return true;
+            }
             return _foreignNss != nss;
         }
 
@@ -92,9 +96,19 @@ public:
     GetModPathsReturn getModifiedPaths() const final;
 
     StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        // If we are in a mongos, the from collection of the graphLookup is sharded, and the
+        // 'featureFlagShardedLookup' flag is enabled, the host type requirement is mongos or
+        // a shard. Otherwise, it's the primary shard.
+        HostTypeRequirement hostRequirement =
+            (pExpCtx->inMongos &&
+             pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _from) &&
+             foreignShardedGraphLookupAllowed())
+            ? HostTypeRequirement::kNone
+            : HostTypeRequirement::kPrimaryShard;
+
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
-                                     HostTypeRequirement::kPrimaryShard,
+                                     hostRequirement,
                                      DiskUseRequirement::kNoDiskUse,
                                      FacetRequirement::kAllowed,
                                      TransactionRequirement::kAllowed,
@@ -212,6 +226,11 @@ private:
      * Returns whether '_visited' was updated, and thus, whether the search should recurse.
      */
     bool addToVisitedAndFrontier(Document result, long long depth);
+
+    /**
+     * Returns true if 'featureFlagShardedLookup' is enabled and we are not in a transaction.
+     */
+    bool foreignShardedGraphLookupAllowed() const;
 
     // $graphLookup options.
     NamespaceString _from;

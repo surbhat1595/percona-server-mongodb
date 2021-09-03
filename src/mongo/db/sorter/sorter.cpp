@@ -561,7 +561,7 @@ public:
     }
 
     NoLimitSorter(const std::string& fileName,
-                  const std::vector<SorterRange> ranges,
+                  const std::vector<SorterRange>& ranges,
                   const SortOptions& opts,
                   const Comparator& comp,
                   const Settings& settings = Settings())
@@ -571,7 +571,7 @@ public:
           _nextSortedFileWriterOffset(!ranges.empty() ? ranges.back().getEndOffset() : 0) {
         invariant(opts.extSortAllowed);
 
-        this->_numSpills += ranges.size();
+        this->_iters.reserve(ranges.size());
         std::transform(ranges.begin(),
                        ranges.end(),
                        std::back_inserter(this->_iters),
@@ -654,7 +654,6 @@ private:
     }
 
     void spill() {
-        this->_numSpills++;
         if (_data.empty())
             return;
 
@@ -947,7 +946,6 @@ private:
     void spill() {
         invariant(!_done);
 
-        this->_numSpills += 1;
         if (_data.empty())
             return;
 
@@ -1204,7 +1202,7 @@ template <typename Key, typename Value>
 template <typename Comparator>
 Sorter<Key, Value>* Sorter<Key, Value>::makeFromExistingRanges(
     const std::string& fileName,
-    const std::vector<SorterRange> ranges,
+    const std::vector<SorterRange>& ranges,
     const SortOptions& opts,
     const Comparator& comp,
     const Settings& settings) {

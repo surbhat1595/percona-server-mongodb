@@ -741,8 +741,23 @@ Status MigrationChunkClonerSourceLegacy::nextModsBatch(OperationContext* opCtx,
         updateList.splice(updateList.cbegin(), _reload);
     }
 
-    auto totalDocSize = _xferDeletes(builder, &deleteList, 0);
-    totalDocSize = _xferUpdates(opCtx, db, builder, &updateList, totalDocSize);
+    StringData ns = _args.getNss().ns().c_str();
+    BSONArrayBuilder arrDel(builder->subarrayStart("deleted"));
+    auto noopFn = [](BSONObj idDoc, BSONObj* fullDoc) {
+        *fullDoc = idDoc;
+        return true;
+    };
+    long long totalDocSize = xferMods(&arrDel, &deleteList, 0, noopFn);
+    arrDel.done();
+
+    if (deleteList.empty()) {
+        BSONArrayBuilder arrUpd(builder->subarrayStart("reload"));
+        auto findByIdWrapper = [opCtx, db, ns](BSONObj idDoc, BSONObj* fullDoc) {
+            return Helpers::findById(opCtx, db, ns, idDoc, *fullDoc);
+        };
+        totalDocSize = xferMods(&arrUpd, &updateList, totalDocSize, findByIdWrapper);
+        arrUpd.done();
+    }
 
     builder->append("size", totalDocSize);
 
@@ -920,7 +935,9 @@ Status MigrationChunkClonerSourceLegacy::_storeCurrentLocs(OperationContext* opC
 
     uint64_t averageObjectIdSize = 0;
     const uint64_t defaultObjectIdSize = OID::kOIDSize;
-    if (totalRecs > 0) {
+
+    // For a time series collection, an index on '_id' is not required.
+    if (totalRecs > 0 && !collection->getTimeseriesOptions()) {
         const auto idIdx = collection->getIndexCatalog()->findIdIndex(opCtx)->getEntry();
         if (!idIdx) {
             return {ErrorCodes::IndexNotFound,
@@ -947,60 +964,33 @@ Status MigrationChunkClonerSourceLegacy::_storeCurrentLocs(OperationContext* opC
     return Status::OK();
 }
 
-long long MigrationChunkClonerSourceLegacy::_xferDeletes(BSONObjBuilder* builder,
-                                                         std::list<BSONObj>* removeList,
-                                                         long long initialSize) {
-    const long long maxSize = 1024 * 1024;
+long long xferMods(BSONArrayBuilder* arr,
+                   std::list<BSONObj>* modsList,
+                   long long initialSize,
+                   std::function<bool(BSONObj, BSONObj*)> extractDocToAppendFn) {
+    const long long maxSize = BSONObjMaxUserSize;
 
-    if (removeList->empty() || initialSize > maxSize) {
+    if (modsList->empty() || initialSize > maxSize) {
         return initialSize;
     }
 
-    long long totalSize = initialSize;
-    BSONArrayBuilder arr(builder->subarrayStart("deleted"));
-
-    auto docIdIter = removeList->begin();
-    for (; docIdIter != removeList->end() && totalSize < maxSize; ++docIdIter) {
-        BSONObj idDoc = *docIdIter;
-        arr.append(idDoc);
-        totalSize += idDoc.objsize();
-    }
-
-    removeList->erase(removeList->begin(), docIdIter);
-
-    arr.done();
-    return totalSize;
-}
-
-long long MigrationChunkClonerSourceLegacy::_xferUpdates(OperationContext* opCtx,
-                                                         Database* db,
-                                                         BSONObjBuilder* builder,
-                                                         std::list<BSONObj>* updateList,
-                                                         long long initialSize) {
-    const long long maxSize = 1024 * 1024;
-
-    if (updateList->empty() || initialSize > maxSize) {
-        return initialSize;
-    }
-
-    const auto& nss = _args.getNss();
-    BSONArrayBuilder arr(builder->subarrayStart("reload"));
-    long long totalSize = initialSize;
-
-    auto iter = updateList->begin();
-    for (; iter != updateList->end() && totalSize < maxSize; ++iter) {
+    auto iter = modsList->begin();
+    for (; iter != modsList->end(); ++iter) {
         auto idDoc = *iter;
 
         BSONObj fullDoc;
-        if (Helpers::findById(opCtx, db, nss.ns().c_str(), idDoc, fullDoc)) {
-            arr.append(fullDoc);
-            totalSize += fullDoc.objsize();
+        if (extractDocToAppendFn(idDoc, &fullDoc)) {
+            if (arr->arrSize() &&
+                (arr->len() + fullDoc.objsize() + kFixedCommandOverhead) > maxSize) {
+                break;
+            }
+            arr->append(fullDoc);
         }
     }
 
-    updateList->erase(updateList->begin(), iter);
+    long long totalSize = arr->len();
+    modsList->erase(modsList->begin(), iter);
 
-    arr.done();
     return totalSize;
 }
 

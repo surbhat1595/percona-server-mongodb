@@ -181,7 +181,6 @@ executor:
     tests: true
   config:
     shell_options:
-      readMode: commands
       eval: >-
         load("jstests/libs/override_methods/mongos_manual_intervention_actions.js");
       global_vars:
@@ -226,6 +225,7 @@ executor:
         enableTestCommands: 1
         enableElectionHandoff: 0
         roleGraphInvalidationIsFatal: 1
+        receiveChunkWaitForRangeDeleterTimeoutMS: 90000
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

@@ -58,12 +58,7 @@ namespace dps = ::mongo::dotted_path_support;
 
 class ClientBase {
 public:
-    ClientBase() : _client(&_opCtx) {
-        mongo::LastError::get(_opCtx.getClient()).reset();
-    }
-    virtual ~ClientBase() {
-        mongo::LastError::get(_opCtx.getClient()).reset();
-    }
+    ClientBase() : _client(&_opCtx) {}
 
 protected:
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
@@ -1726,18 +1721,9 @@ public:
 class CheckNoMods : public SetBase {
 public:
     void run() {
-        {
-            RAIIServerParameterControllerForTest controller("featureFlagDotsAndDollars", false);
-            auto response = _client.updateAcknowledged(
-                ns(), BSONObj(), BSON("i" << 5 << "$set" << BSON("q" << 3)), true);
-            ASSERT_NOT_OK(getStatusFromWriteCommandReply(response));
-        }
-        {
-            RAIIServerParameterControllerForTest controller("featureFlagDotsAndDollars", true);
-            _client.update(ns(), BSONObj(), BSON("_id" << 52307 << "$set" << BSON("q" << 3)), true);
-            ASSERT_BSONOBJ_EQ(fromjson("{'_id':52307,$set:{q:3}}"),
-                              _client.findOne(ns(), Query(BSON("_id" << 52307))));
-        }
+        _client.update(ns(), BSONObj(), BSON("_id" << 52307 << "$set" << BSON("q" << 3)), true);
+        ASSERT_BSONOBJ_EQ(fromjson("{'_id':52307,$set:{q:3}}"),
+                          _client.findOne(ns(), Query(BSON("_id" << 52307))));
     }
 };
 

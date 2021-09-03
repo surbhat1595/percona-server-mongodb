@@ -268,9 +268,9 @@ ReplicationCoordinator::Mode getReplicationModeFromSettings(const ReplSettings& 
     return ReplicationCoordinator::modeNone;
 }
 
-InitialSyncerOptions createInitialSyncerOptions(
+InitialSyncerInterface::Options createInitialSyncerOptions(
     ReplicationCoordinator* replCoord, ReplicationCoordinatorExternalState* externalState) {
-    InitialSyncerOptions options;
+    InitialSyncerInterface::Options options;
     options.getMyLastOptime = [replCoord]() { return replCoord->getMyLastAppliedOpTime(); };
     options.setMyLastOptime = [replCoord,
                                externalState](const OpTimeAndWallTime& opTimeAndWallTime) {
@@ -754,11 +754,8 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
 
             const auto lastApplied = opTimeStatus.getValue();
             _setMyLastAppliedOpTimeAndWallTime(lock, lastApplied, false);
-        }
 
-        // Clear maint. mode.
-        while (getMaintenanceMode()) {
-            setMaintenanceMode(false).transitional_ignore();
+            _topCoord->resetMaintenanceCount();
         }
 
         if (startCompleted) {
@@ -1096,7 +1093,7 @@ ReplicationCoordinator::ApplierState ReplicationCoordinatorImpl::getApplierState
 }
 
 void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
-                                                     long long termWhenBufferIsEmpty) {
+                                                     long long termWhenBufferIsEmpty) noexcept {
     // This logic is a little complicated in order to avoid acquiring the RSTL in mode X
     // unnecessarily.  This is important because the applier may call signalDrainComplete()
     // whenever it wants, not only when the ReplicationCoordinator is expecting it.
@@ -2566,11 +2563,6 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &stepdownHangBeforeRSTLEnqueue, opCtx, "stepdownHangBeforeRSTLEnqueue");
 
-    // To prevent a deadlock between session checkout and RSTL lock taking, disallow new sessions
-    // from being checked out. Existing sessions currently checked out will be killed by the
-    // killOpThread.
-    ScopedBlockSessionCheckouts blockSessions(opCtx);
-
     // Using 'force' sets the default for the wait time to zero, which means the stepdown will
     // fail if it does not acquire the lock immediately. In such a scenario, we use the
     // stepDownUntil deadline instead.
@@ -3173,11 +3165,14 @@ bool ReplicationCoordinatorImpl::getMaintenanceMode() {
     return _topCoord->getMaintenanceCount() > 0;
 }
 
-Status ReplicationCoordinatorImpl::setMaintenanceMode(bool activate) {
+Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, bool activate) {
     if (getReplicationMode() != modeReplSet) {
         return Status(ErrorCodes::NoReplicationEnabled,
                       "can only set maintenance mode on replica set members");
     }
+
+    // It is possible that we change state to or from RECOVERING. Thus, we need the RSTL in X mode.
+    ReplicationStateTransitionLockGuard transitionGuard(opCtx, MODE_X);
 
     stdx::unique_lock<Latch> lk(_mutex);
     if (_topCoord->getRole() == TopologyCoordinator::Role::kCandidate ||
@@ -3698,11 +3693,6 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
     if (isForceReconfig && _shouldStepDownOnReconfig(lk, newConfig, myIndex)) {
         _topCoord->prepareForUnconditionalStepDown();
         lk.unlock();
-
-        // To prevent a deadlock between session checkout and RSTL lock taking, disallow new
-        // sessions from being checked out. Existing sessions currently checked out will be killed
-        // by the killOpThread.
-        ScopedBlockSessionCheckouts blockSessions(opCtx);
 
         // Primary node won't be electable or removed after the configuration change.
         // So, finish the reconfig under RSTL, so that the step down occurs safely.
@@ -4562,6 +4552,7 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
     if (!oldConfig.isInitialized()) {
         // We allow the IDWC to be set only once after initial configuration is loaded.
         _setImplicitDefaultWriteConcern(opCtx, lk);
+        _validateDefaultWriteConcernOnShardStartup(lk);
     } else {
         // If 'enableDefaultWriteConcernUpdatesForInitiate' is enabled, we allow the IDWC to be
         // recalculated after a reconfig. However, this logic is only relevant for testing,
@@ -4883,9 +4874,9 @@ const ReadPreference ReplicationCoordinatorImpl::_getSyncSourceReadPreference(Wi
         }
     }
     if (!parsedSyncSourceFromInitialSync && !memberState.primary() &&
-        !_rsConfig.isChainingAllowed()) {
-        // If we are not the primary and chaining is disabled in the config, we should only be
-        // syncing from the primary.
+        !_rsConfig.isChainingAllowed() && !enableOverrideClusterChainingSetting.load()) {
+        // If we are not the primary and chaining is disabled in the config (without overrides), we
+        // should only be syncing from the primary.
         readPreference = ReadPreference::PrimaryOnly;
     }
     return readPreference;
@@ -4999,8 +4990,14 @@ OpTime ReplicationCoordinatorImpl::_recalculateStableOpTime(WithLock lk) {
     auto commitPoint = _topCoord->getLastCommittedOpTime();
     auto lastApplied = _topCoord->getMyLastAppliedOpTime();
     if (_currentCommittedSnapshot) {
-        invariant(_currentCommittedSnapshot->getTimestamp() <= commitPoint.getTimestamp());
-        invariant(*_currentCommittedSnapshot <= commitPoint);
+        invariant(_currentCommittedSnapshot->getTimestamp() <= commitPoint.getTimestamp(),
+                  str::stream() << "currentCommittedSnapshot: "
+                                << _currentCommittedSnapshot->toString()
+                                << " commitPoint: " << commitPoint.toString());
+        invariant(*_currentCommittedSnapshot <= commitPoint,
+                  str::stream() << "currentCommittedSnapshot: "
+                                << _currentCommittedSnapshot->toString()
+                                << " commitPoint: " << commitPoint.toString());
     }
 
     //
@@ -5044,10 +5041,20 @@ OpTime ReplicationCoordinatorImpl::_recalculateStableOpTime(WithLock lk) {
 
     // Check that the selected stable optime does not exceed our maximum and that it does not
     // surpass the no-overlap point.
-    invariant(stableOpTime.getTimestamp() <= maximumStableOpTime.getTimestamp());
-    invariant(stableOpTime <= maximumStableOpTime);
-    invariant(stableOpTime.getTimestamp() <= noOverlap.getTimestamp());
-    invariant(stableOpTime <= noOverlap);
+    invariant(stableOpTime.getTimestamp() <= maximumStableOpTime.getTimestamp(),
+              str::stream() << "stableOpTime: " << stableOpTime.toString()
+                            << " maximumStableOpTime: " << maximumStableOpTime.toString());
+    invariant(stableOpTime <= maximumStableOpTime,
+              str::stream() << "stableOpTime: " << stableOpTime.toString()
+                            << " maximumStableOpTime: " << maximumStableOpTime.toString());
+    invariant(stableOpTime.getTimestamp() <= noOverlap.getTimestamp(),
+              str::stream() << "stableOpTime: " << stableOpTime.toString() << " noOverlap: "
+                            << noOverlap.toString() << " lastApplied: " << lastApplied.toString()
+                            << " allDurableOpTime: " << allDurableOpTime.toString());
+    invariant(stableOpTime <= noOverlap,
+              str::stream() << "stableOpTime: " << stableOpTime.toString() << " noOverlap: "
+                            << noOverlap.toString() << " lastApplied: " << lastApplied.toString()
+                            << " allDurableOpTime: " << allDurableOpTime.toString());
 
     return stableOpTime;
 }
@@ -5815,6 +5822,32 @@ void ReplicationCoordinatorImpl::ReadWriteAbility::setCanServeNonLocalReads(Oper
 void ReplicationCoordinatorImpl::ReadWriteAbility::setCanServeNonLocalReads_UNSAFE(
     unsigned int newVal) {
     _canServeNonLocalReads.store(newVal);
+}
+
+void ReplicationCoordinatorImpl::recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) {
+    auto isCWWCSet = _externalState->isCWWCSetOnConfigShard(opCtx);
+    {
+        stdx::lock_guard<Latch> lk(_mutex);
+        _wasCWWCSetOnConfigServerOnStartup = isCWWCSet;
+    }
+}
+
+void ReplicationCoordinatorImpl::_validateDefaultWriteConcernOnShardStartup(WithLock lk) const {
+    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        // Checking whether the shard is part of a sharded cluster or not by checking if CWWC
+        // flag is set as we record it during sharding initialization phase, as on restarting a
+        // shard node for upgrading or any other reason, sharding initialization happens before
+        // config initialization.
+        if (_wasCWWCSetOnConfigServerOnStartup && !_wasCWWCSetOnConfigServerOnStartup.get() &&
+            !_rsConfig.isImplicitDefaultWriteConcernMajority()) {
+            auto msg =
+                "Cannot start shard because the implicit default write concern on this shard is "
+                "set to {w : 1}, since the number of writable voting members is not strictly more "
+                "than the voting majority. Change the shard configuration or set the cluster-wide "
+                "write concern using setDefaultRWConcern command and try again.";
+            fassert(5684400, {ErrorCodes::IllegalOperation, msg});
+        }
+    }
 }
 
 }  // namespace repl

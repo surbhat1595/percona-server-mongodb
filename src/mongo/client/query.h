@@ -93,12 +93,6 @@ public:
      */
     Query& maxKey(const BSONObj& val);
 
-    /** Return explain information about execution of this query instead of the actual query
-     * results.
-     *  Normally it is easier to use the mongo shell to run db.find(...).explain().
-     */
-    Query& explain();
-
     /** Queries to the Mongo database support a $where parameter option which contains
         a javascript function that is evaluated to see whether objects being queried match
         its criteria.  Use this helper to append such a function to a query object.
@@ -137,7 +131,6 @@ public:
     BSONObj getFilter() const;
     BSONObj getSort() const;
     BSONObj getHint() const;
-    bool isExplain() const;
 
     /**
      * @return true if the query object contains a read preference specification object.

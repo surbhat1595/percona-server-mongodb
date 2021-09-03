@@ -284,7 +284,7 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
     for (long long objCount = 0; objCount < batchSize; ++objCount) {
         ClusterQueryResult next;
         try {
-            next = uassertStatusOK(ccc->next(RouterExecStage::ExecContext::kInitialFind));
+            next = uassertStatusOK(ccc->next());
         } catch (const ExceptionFor<ErrorCodes::CloseChangeStream>&) {
             // This exception is thrown when a $changeStream stage encounters an event
             // that invalidates the cursor. We should close the cursor and return without
@@ -624,7 +624,8 @@ Status runPipelineOnPrimaryShard(const boost::intrusive_ptr<ExpressionContext>& 
                                                                            serializedCommand,
                                                                            explain,
                                                                            nullptr, /* pipeline */
-                                                                           BSONObj());
+                                                                           BSONObj(),
+                                                                           boost::none);
 
     const auto shardId = cm.dbPrimary();
     const auto cmdObjWithShardVersion = (shardId != ShardId::kConfigServerId)

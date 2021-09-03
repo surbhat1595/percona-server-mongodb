@@ -13,8 +13,6 @@ import structlog
 from structlog.stdlib import LoggerFactory
 from evergreen.api import EvergreenApi, RetryingEvergreenApi
 
-import buildscripts.evergreen_gen_multiversion_tests as gen_multiversion
-import buildscripts.evergreen_generate_resmoke_tasks as gen_resmoke
 from buildscripts.burn_in_tests import EVERGREEN_FILE, \
     DEFAULT_REPO_LOCATIONS, create_tests_by_task, TaskInfo
 from buildscripts.ciconfig.evergreen import parse_evergreen_file, EvergreenProjectConfig
@@ -36,9 +34,9 @@ from buildscripts.util.cmdutils import enable_logging
 structlog.configure(logger_factory=LoggerFactory())
 LOGGER = structlog.getLogger(__name__)
 
-MULTIVERSION_CONFIG_KEY = gen_multiversion.MULTIVERSION_CONFIG_KEY
-MULTIVERSION_PASSTHROUGH_TAG = gen_multiversion.PASSTHROUGH_TAG
-BURN_IN_MULTIVERSION_TASK = gen_multiversion.BURN_IN_TASK
+MULTIVERSION_CONFIG_KEY = "use_in_multiversion"
+MULTIVERSION_PASSTHROUGH_TAG = "multiversion_passthrough"
+BURN_IN_MULTIVERSION_TASK = "burn_in_tests_multiversion"
 DEFAULT_CONFIG_DIR = "generated_resmoke_config"
 DEFAULT_TEST_SUITE_DIR = os.path.join("buildscripts", "resmokeconfig", "suites")
 
@@ -85,23 +83,6 @@ class MultiversionBurnInOrchestrator:
         self.evg_config = evg_conf
         self.multiversion_util = multiversion_util
         self.burn_in_config = burn_in_config
-
-    def validate_multiversion_tasks_and_suites(self) -> None:
-        """
-        Validate that the multiversion suites and tasks match up.
-
-        We expect the number of suites with MULTIVERSION_PASSTHROUGH_TAG to be the same as in
-        multiversion_suites. Multiversion passthrough suites must include
-        MULTIVERSION_CONFIG_KEY as a root level key and must be set to true.
-
-        Throws an exception if there are inconsistencies.
-        """
-        multiversion_tasks = self.evg_config.get_task_names_by_tag(MULTIVERSION_PASSTHROUGH_TAG)
-        LOGGER.debug("Multiversion tasks by tag", tasks=multiversion_tasks,
-                     tag=MULTIVERSION_PASSTHROUGH_TAG)
-
-        multiversion_suites = get_named_suites_with_root_level_key(MULTIVERSION_CONFIG_KEY)
-        assert len(multiversion_tasks) == len(multiversion_suites)
 
     def generate_tests(self, repos: List[Repo], generate_config: GenerateConfig,
                        target_file: str) -> None:
@@ -282,8 +263,7 @@ def main(build_variant, run_build_variant, distro, project, generate_tasks_file,
         binder.bind(EvergreenProjectConfig, evg_conf)
         binder.bind(GenTaskOptions, gen_task_options)
         binder.bind(EvergreenApi, evg_api)
-        binder.bind(GenerationConfiguration,
-                    GenerationConfiguration.from_yaml_file(gen_resmoke.GENERATE_CONFIG_FILE))
+        binder.bind(GenerationConfiguration, GenerationConfiguration.from_yaml_file())
         binder.bind(ResmokeProxyConfig,
                     ResmokeProxyConfig(resmoke_suite_dir=DEFAULT_TEST_SUITE_DIR))
         binder.bind(EvergreenFileChangeDetector, EvergreenFileChangeDetector(task_id, evg_api))
@@ -292,7 +272,6 @@ def main(build_variant, run_build_variant, distro, project, generate_tasks_file,
     inject.configure(dependencies)
 
     burn_in_orchestrator = MultiversionBurnInOrchestrator()  # pylint: disable=no-value-for-parameter
-    burn_in_orchestrator.validate_multiversion_tasks_and_suites()
     burn_in_orchestrator.generate_tests(repos, generate_config, generate_tasks_file)
 
 

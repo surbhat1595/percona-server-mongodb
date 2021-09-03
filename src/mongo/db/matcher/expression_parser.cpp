@@ -294,7 +294,9 @@ StatusWithMatchExpression parse(const BSONObj& obj,
 
             if (!parseExpressionMatchFunction) {
                 const auto dotsAndDollarsHint =
-                    feature_flags::gFeatureFlagDotsAndDollars.isEnabledAndIgnoreFCV()
+                    serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+                        serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
+                            FeatureCompatibilityParams::Version::kVersion50)
                     ? ". If you have a field name that starts with a '$' symbol, consider using "
                       "$getField or $setField."
                     : "";
@@ -537,23 +539,32 @@ StatusWithMatchExpression parseMOD(StringData name,
 
     if (!iter.more())
         return {Status(ErrorCodes::BadValue, "malformed mod, not enough elements")};
-    auto divisor = iter.next();
-    if (!divisor.isNumber())
+    auto divisorElement = iter.next();
+    if (!divisorElement.isNumber())
         return {Status(ErrorCodes::BadValue, "malformed mod, divisor not a number")};
 
     if (!iter.more())
         return {Status(ErrorCodes::BadValue, "malformed mod, not enough elements")};
-    auto remainder = iter.next();
-    if (!remainder.isNumber())
+    auto remainderElement = iter.next();
+    if (!remainderElement.isNumber())
         return {Status(ErrorCodes::BadValue, "malformed mod, remainder not a number")};
 
     if (iter.more())
         return {Status(ErrorCodes::BadValue, "malformed mod, too many elements")};
 
+    long long divisor;
+    if (auto status = divisorElement.tryCoerce(&divisor); !status.isOK()) {
+        return status.withContext("malformed mod, divisor value is invalid"_sd);
+    }
+
+    long long remainder;
+    if (auto status = remainderElement.tryCoerce(&remainder); !status.isOK()) {
+        return status.withContext("malformed mod, remainder value is invalid"_sd);
+    }
     return {std::make_unique<ModMatchExpression>(
         name,
-        ModMatchExpression::truncateToLong(divisor),
-        ModMatchExpression::truncateToLong(remainder),
+        divisor,
+        remainder,
         doc_validation_error::createAnnotation(
             expCtx, elem.fieldNameStringData().toString(), BSON(name << elem.wrap())))};
 }

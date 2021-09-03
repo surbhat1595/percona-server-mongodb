@@ -71,8 +71,10 @@ SingleServerDiscoveryMonitor::SingleServerDiscoveryMonitor(
     boost::optional<TopologyVersion> topologyVersion,
     const SdamConfiguration& sdamConfig,
     sdam::TopologyEventsPublisherPtr eventListener,
-    std::shared_ptr<executor::TaskExecutor> executor)
+    std::shared_ptr<executor::TaskExecutor> executor,
+    std::shared_ptr<ReplicaSetMonitorStats> stats)
     : _host(host),
+      _stats(stats),
       _topologyVersion(topologyVersion),
       _eventListener(eventListener),
       _executor(executor),
@@ -252,7 +254,7 @@ StatusWith<TaskExecutor::CallbackHandle> SingleServerDiscoveryMonitor::_schedule
 
     auto swCbHandle = _executor->scheduleExhaustRemoteCommand(
         std::move(request),
-        [self = shared_from_this()](
+        [self = shared_from_this(), helloStats = _stats->collectHelloStats()](
             const executor::TaskExecutor::RemoteCommandCallbackArgs& result) mutable {
             Milliseconds nextRefreshPeriod;
             {
@@ -308,7 +310,7 @@ StatusWith<TaskExecutor::CallbackHandle> SingleServerDiscoveryMonitor::_schedule
 
     auto swCbHandle = _executor->scheduleRemoteCommand(
         std::move(request),
-        [self = shared_from_this()](
+        [self = shared_from_this(), helloStats = _stats->collectHelloStats()](
             const executor::TaskExecutor::RemoteCommandCallbackArgs& result) mutable {
             Milliseconds nextRefreshPeriod;
             {
@@ -398,7 +400,7 @@ void SingleServerDiscoveryMonitor::_onHelloSuccess(const BSONObj bson) {
                 "RSM received successful hello",
                 "host"_attr = _host,
                 "replicaSet"_attr = _setUri.getSetName(),
-                "helloReply"_attr = bson.toString());
+                "helloReply"_attr = bson);
 
     _eventListener->onServerHeartbeatSucceededEvent(_host, bson);
 }
@@ -411,7 +413,7 @@ void SingleServerDiscoveryMonitor::_onHelloFailure(const Status& status, const B
                 "host"_attr = _host,
                 "error"_attr = status.toString(),
                 "replicaSet"_attr = _setUri.getSetName(),
-                "response"_attr = bson.toString());
+                "response"_attr = bson);
 
     _eventListener->onServerHeartbeatFailureEvent(status, _host, bson);
 }
@@ -435,7 +437,9 @@ Milliseconds SingleServerDiscoveryMonitor::_currentRefreshPeriod(WithLock,
     if (scheduleImmediately)
         return Milliseconds(0);
 
-    return (_isExpedited) ? sdam::SdamConfiguration::kMinHeartbeatFrequency : _heartbeatFrequency;
+    // The _overrideRefreshPeriod() supports fail injection.
+    return (_isExpedited) ? sdam::SdamConfiguration::kMinHeartbeatFrequency
+                          : _overrideRefreshPeriod(_heartbeatFrequency);
 }
 
 void SingleServerDiscoveryMonitor::disableExpeditedChecking() {
@@ -449,8 +453,10 @@ ServerDiscoveryMonitor::ServerDiscoveryMonitor(
     const sdam::SdamConfiguration& sdamConfiguration,
     sdam::TopologyEventsPublisherPtr eventsPublisher,
     sdam::TopologyDescriptionPtr initialTopologyDescription,
+    std::shared_ptr<ReplicaSetMonitorStats> stats,
     std::shared_ptr<executor::TaskExecutor> executor)
-    : _sdamConfiguration(sdamConfiguration),
+    : _stats(stats),
+      _sdamConfiguration(sdamConfiguration),
       _eventPublisher(eventsPublisher),
       _executor(_setupExecutor(executor)),
       _isShutdown(false),
@@ -530,7 +536,8 @@ void ServerDiscoveryMonitor::onTopologyDescriptionChangedEvent(
                                   serverDescription->getTopologyVersion(),
                                   _sdamConfiguration,
                                   _eventPublisher,
-                                  _executor);
+                                  _executor,
+                                  _stats);
                           _singleMonitors[serverAddress]->init();
                       }
                   });

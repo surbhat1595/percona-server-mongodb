@@ -56,6 +56,9 @@ class CollectionPtr;
 class Database;
 class RecordId;
 
+// Overhead to prevent mods buffers from being too large
+const long long kFixedCommandOverhead = 32 * 1024;
+
 /**
  * Used to commit work for LogOpForSharding. Used to keep track of changes in documents that are
  * part of a chunk being migrated.
@@ -302,26 +305,6 @@ private:
     void _drainAllOutstandingOperationTrackRequests(stdx::unique_lock<Latch>& lk);
 
     /**
-     * Appends to the builder the list of _id of documents that were deleted during migration.
-     * Entries appended to the builder are removed from the list.
-     * Returns the total size of the documents that were appended + initialSize.
-     */
-    long long _xferDeletes(BSONObjBuilder* builder,
-                           std::list<BSONObj>* removeList,
-                           long long initialSize);
-
-    /**
-     * Appends to the builder the list of full documents that were modified/inserted during the
-     * migration. Entries appended to the builder are removed from the list.
-     * Returns the total size of the documents that were appended + initialSize.
-     */
-    long long _xferUpdates(OperationContext* opCtx,
-                           Database* db,
-                           BSONObjBuilder* builder,
-                           std::list<BSONObj>* updateList,
-                           long long initialSize);
-
-    /**
      * Sends _recvChunkStatus to the recipient shard until it receives 'steady' from the recipient,
      * an error has occurred, or a timeout is hit.
      */
@@ -403,5 +386,15 @@ private:
     // Set only once its discovered a chunk is jumbo
     boost::optional<JumboChunkCloneState> _jumboChunkCloneState;
 };
+
+/**
+ * Appends to the builder the list of documents either deleted or modified during migration.
+ * Entries appended to the builder are removed from the list.
+ * Returns the total size of the documents that were appended + initialSize.
+ */
+long long xferMods(BSONArrayBuilder* arr,
+                   std::list<BSONObj>* modsList,
+                   long long initialSize,
+                   std::function<bool(BSONObj, BSONObj*)> extractDocToAppendFn);
 
 }  // namespace mongo

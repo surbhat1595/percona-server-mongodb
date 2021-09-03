@@ -424,18 +424,6 @@ BSONObj replMonitorStats(const BSONObj& a, void* data) {
     return result.obj()[name].Obj().getOwned();
 }
 
-BSONObj useWriteCommandsDefault(const BSONObj& a, void* data) {
-    return BSON("" << shellGlobalParams.useWriteCommandsDefault);
-}
-
-BSONObj writeMode(const BSONObj&, void*) {
-    return BSON("" << shellGlobalParams.writeMode);
-}
-
-BSONObj readMode(const BSONObj&, void*) {
-    return BSON("" << shellGlobalParams.readMode);
-}
-
 BSONObj shouldRetryWrites(const BSONObj&, void* data) {
     return BSON("" << shellGlobalParams.shouldRetryWrites);
 }
@@ -466,6 +454,19 @@ BSONObj isInteractive(const BSONObj& a, void*) {
     return BSON("" << shellGlobalParams.runShell);
 }
 
+BSONObj numberDecimalsEqual(const BSONObj& input, void*) {
+    uassert(5760500, "numberDecimalsEqual expects two arguments", input.nFields() == 2);
+
+    BSONObjIterator i(input);
+    auto first = i.next();
+    auto second = i.next();
+    uassert(5760501,
+            "Both the arguments of numberDecimalsEqual should be of type 'NumberDecimal'",
+            first.type() == BSONType::NumberDecimal && second.type() == BSONType::NumberDecimal);
+
+    return BSON("" << first.numberDecimal().isEqual(second.numberDecimal()));
+}
+
 void installShellUtils(Scope& scope) {
     scope.injectNative("getMemInfo", JSGetMemInfo);
     scope.injectNative("_replMonitorStats", replMonitorStats);
@@ -479,6 +480,7 @@ void installShellUtils(Scope& scope) {
     scope.injectNative("convertShardKeyToHashed", convertShardKeyToHashed);
     scope.injectNative("fileExists", fileExistsJS);
     scope.injectNative("isInteractive", isInteractive);
+    scope.injectNative("numberDecimalsEqual", numberDecimalsEqual);
 
     installShellUtilsLauncher(scope);
     installShellUtilsExtended(scope);
@@ -496,9 +498,6 @@ void initializeEnterpriseScope(Scope& scope) {
 
 void initScope(Scope& scope) {
     // Need to define this method before JSFiles::utils is executed.
-    scope.injectNative("_useWriteCommandsDefault", useWriteCommandsDefault);
-    scope.injectNative("_writeMode", writeMode);
-    scope.injectNative("_readMode", readMode);
     scope.injectNative("_shouldRetryWrites", shouldRetryWrites);
     scope.injectNative("_shouldUseImplicitSessions", shouldUseImplicitSessions);
     scope.injectNative("_apiParameters", apiParameters);

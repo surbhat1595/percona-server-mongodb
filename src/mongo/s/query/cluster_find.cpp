@@ -49,6 +49,7 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/query_planner_common.h"
@@ -362,7 +363,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
     // results from the initial batches (that were obtained while establishing cursors) into
     // 'results'.
     while (!FindCommon::enoughForFirstBatch(findCommand, results->size())) {
-        auto next = uassertStatusOK(ccc->next(RouterExecStage::ExecContext::kInitialFind));
+        auto next = uassertStatusOK(ccc->next());
 
         if (next.isEOF()) {
             // We reached end-of-stream. If the cursor is not tailable, then we mark it as
@@ -474,7 +475,7 @@ Status setUpOperationContextStateForGetMore(OperationContext* opCtx,
         auto timeout = Milliseconds{cmd.getMaxTimeMS().value_or(1000)};
         awaitDataState(opCtx).waitForInsertsDeadline =
             opCtx->getServiceContext()->getPreciseClockSource()->now() + timeout;
-
+        awaitDataState(opCtx).shouldWaitForInserts = true;
         invariant(cursor->setAwaitDataTimeout(timeout).isOK());
     } else if (cmd.getMaxTimeMS()) {
         return {ErrorCodes::BadValue,
@@ -496,6 +497,8 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
                                const ReadPreferenceSetting& readPref,
                                std::vector<BSONObj>* results,
                                bool* partialResultsReturned) {
+    CurOp::get(opCtx)->debug().queryHash = canonical_query_encoder::computeHash(query.encodeKey());
+
     // If the user supplied a 'partialResultsReturned' out-parameter, default it to false here.
     if (partialResultsReturned) {
         *partialResultsReturned = false;
@@ -785,14 +788,10 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
     }
 
     while (!FindCommon::enoughForGetMore(batchSize, batch.size())) {
-        auto context = batch.empty()
-            ? RouterExecStage::ExecContext::kGetMoreNoResultsYet
-            : RouterExecStage::ExecContext::kGetMoreWithAtLeastOneResultInBatch;
-
         StatusWith<ClusterQueryResult> next =
             Status{ErrorCodes::InternalError, "uninitialized cluster query result"};
         try {
-            next = pinnedCursor.getValue()->next(context);
+            next = pinnedCursor.getValue()->next();
         } catch (const ExceptionFor<ErrorCodes::CloseChangeStream>&) {
             // This exception is thrown when a $changeStream stage encounters an event
             // that invalidates the cursor. We should close the cursor and return without
@@ -833,6 +832,9 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
             stashedResult = true;
             break;
         }
+
+        // As soon as we get a result, this operation no longer waits.
+        awaitDataState(opCtx).shouldWaitForInserts = false;
 
         // Add doc to the batch. Account for the space overhead associated with returning this doc
         // inside a BSON array.
@@ -882,6 +884,7 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
                                         : boost::optional<Timestamp>{},
                           startingFrom,
                           postBatchResumeToken,
+                          boost::none,
                           boost::none,
                           partialResultsReturned);
 }

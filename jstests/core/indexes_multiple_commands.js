@@ -10,7 +10,6 @@
 'use strict';
 
 var coll = db.indexes_multiple_commands;
-var usingWriteCommands = db.getMongo().writeMode() === "commands";
 
 /**
  * Assert that the result of the index creation ('cmd') indicates that 'numIndexes' were
@@ -28,32 +27,19 @@ function assertIndexesCreated(cmd, numIndexes) {
         numIndexes = 1;
     }
 
-    if (usingWriteCommands) {
-        cmdResult = cmd();
-        if (numIndexes == 0) {
-            assert.commandFailedWithCode(cmdResult, ErrorCodes.IndexOptionsConflict);
-            return;
-        }
-
-        assert.commandWorked(cmdResult);
-        var isShardedNS = cmdResult.hasOwnProperty('raw');
-        if (isShardedNS) {
-            cmdResult = cmdResult['raw'][Object.getOwnPropertyNames(cmdResult['raw'])[0]];
-        }
-        assert.eq(
-            cmdResult.numIndexesAfter - cmdResult.numIndexesBefore, numIndexes, tojson(cmdResult));
-    } else {
-        var nIndexesBefore = coll.getIndexes().length;
-        cmdResult = cmd();
-        if (numIndexes == 0) {
-            assert.commandFailedWithCode(cmdResult, ErrorCodes.IndexOptionsConflict);
-            return;
-        }
-
-        assert.commandWorked(cmdResult);
-        var nIndexesAfter = coll.getIndexes().length;
-        assert.eq(nIndexesAfter - nIndexesBefore, numIndexes, tojson(coll.getIndexes()));
+    cmdResult = cmd();
+    if (numIndexes == 0) {
+        assert.commandFailedWithCode(cmdResult, ErrorCodes.IndexOptionsConflict);
+        return;
     }
+
+    assert.commandWorked(cmdResult);
+    var isShardedNS = cmdResult.hasOwnProperty('raw');
+    if (isShardedNS) {
+        cmdResult = cmdResult['raw'][Object.getOwnPropertyNames(cmdResult['raw'])[0]];
+    }
+    assert.eq(
+        cmdResult.numIndexesAfter - cmdResult.numIndexesBefore, numIndexes, tojson(cmdResult));
 }
 
 /**
@@ -142,23 +128,18 @@ assert.commandWorked(coll.insert([{a: "a"}, {a: "A"}, {a: 20}]));
 
 // An ambiguous hint pattern fails.
 assert.throws(() => coll.find({a: 1}).hint({a: 1}).itcount());
-if (db.getMongo().useReadCommands()) {
-    assert.throws(
-        () => coll.find({a: 1}).collation({locale: "en_US", strength: 2}).hint({a: 1}).itcount());
-}
+assert.throws(
+    () => coll.find({a: 1}).collation({locale: "en_US", strength: 2}).hint({a: 1}).itcount());
 
 // Index hint by name succeeds.
 assert.eq(coll.find({a: "a"}).hint("sbc").itcount(), 1);
 // A hint on an incompatible index does a whole index scan, and then filters using the query
 // collation.
 assert.eq(coll.find({a: "a"}).hint("caseInsensitive").itcount(), 1);
-if (db.getMongo().useReadCommands()) {
-    assert.eq(coll.find({a: "a"}).collation({locale: "en_US", strength: 2}).hint("sbc").itcount(),
-              2);
+assert.eq(coll.find({a: "a"}).collation({locale: "en_US", strength: 2}).hint("sbc").itcount(), 2);
 
-    // A non-ambiguous index hint by key pattern is allowed, even if the collation doesn't
-    // match.
-    assertIndexesCreated(() => coll.createIndex({b: 1}, {collation: {locale: "fr"}}));
-    assert.eq(coll.find({a: "a"}).collation({locale: "en_US"}).hint({b: 1}).itcount(), 1);
-}
+// A non-ambiguous index hint by key pattern is allowed, even if the collation doesn't
+// match.
+assertIndexesCreated(() => coll.createIndex({b: 1}, {collation: {locale: "fr"}}));
+assert.eq(coll.find({a: "a"}).collation({locale: "en_US"}).hint({b: 1}).itcount(), 1);
 })();

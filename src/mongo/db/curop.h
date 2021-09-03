@@ -164,8 +164,6 @@ public:
 
     OpDebug() = default;
 
-    std::string report(OperationContext* opCtx, const SingleThreadedLockStats* lockStats) const;
-
     void report(OperationContext* opCtx,
                 const SingleThreadedLockStats* lockStats,
                 const ResourceConsumption::OperationMetrics* operationMetrics,
@@ -512,13 +510,6 @@ public:
      */
     LogicalOp getLogicalOp() const {
         return _logicalOp;
-    }
-
-    /**
-     * Returns true if this CurOp represents a non-command OP_QUERY request.
-     */
-    bool isLegacyQuery() const {
-        return _networkOp == NetworkOp::dbQuery && !isCommand();
     }
 
     /**
@@ -871,18 +862,4 @@ private:
 
     TickSource* _tickSource = nullptr;
 };
-
-/**
- * Upconverts a legacy query object such that it matches the format of the find command.
- */
-BSONObj upconvertQueryEntry(const BSONObj& query,
-                            const NamespaceString& nss,
-                            int ntoreturn,
-                            int ntoskip);
-
-/**
- * Generates a getMore command object from the specified namespace, cursor ID and batchsize.
- */
-BSONObj upconvertGetMoreEntry(const NamespaceString& nss, CursorId cursorId, int ntoreturn);
-
 }  // namespace mongo

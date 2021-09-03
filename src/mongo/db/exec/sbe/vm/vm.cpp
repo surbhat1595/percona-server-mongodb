@@ -122,9 +122,11 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // isBinData
     0,  // isDate
     0,  // isNaN
+    0,  // isInfinity
     0,  // isRecordId
     0,  // isMinKey
     0,  // isMaxKey
+    0,  // isTimestamp
     0,  // typeMatch
 
     0,  // function is special, the stack offset is encoded in the instruction itself
@@ -381,6 +383,10 @@ void CodeFragment::appendIsDate() {
 
 void CodeFragment::appendIsNaN() {
     appendSimpleInstruction(Instruction::isNaN);
+}
+
+void CodeFragment::appendIsInfinity() {
+    appendSimpleInstruction(Instruction::isInfinity);
 }
 
 void CodeFragment::appendIsRecordId() {
@@ -874,10 +880,61 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewArray(ArityT
 
     auto arr = value::getArrayView(val);
 
-    for (ArityType idx = 0; idx < arity; ++idx) {
-        auto [owned, tag, val] = getFromStack(idx);
-        auto [tagCopy, valCopy] = value::copyValue(tag, val);
-        arr->push_back(tagCopy, valCopy);
+    if (arity) {
+        arr->reserve(arity);
+        for (ArityType idx = 0; idx < arity; ++idx) {
+            auto [owned, tag, val] = getFromStack(idx);
+            auto [tagCopy, valCopy] = value::copyValue(tag, val);
+            arr->push_back(tagCopy, valCopy);
+        }
+    }
+
+    guard.reset();
+    return {true, tag, val};
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewArrayFromRange(
+    ArityType arity) {
+    auto [tag, val] = value::makeNewArray();
+    value::ValueGuard guard{tag, val};
+
+    auto arr = value::getArrayView(val);
+
+    auto [startOwned, startTag, start] = getFromStack(0);
+    auto [endOwned, endTag, end] = getFromStack(1);
+    auto [stepOwned, stepTag, step] = getFromStack(2);
+
+    for (auto& tag : {startTag, endTag, stepTag}) {
+        if (value::TypeTags::NumberInt32 != tag) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+    }
+
+    // Cast to broader type 'int64_t' to prevent overflow during loop.
+    auto startVal = value::numericCast<int64_t>(startTag, start);
+    auto endVal = value::numericCast<int64_t>(endTag, end);
+    auto stepVal = value::numericCast<int64_t>(stepTag, step);
+
+    if (stepVal == 0) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto isPositiveStep = stepVal > 0;
+
+    if (isPositiveStep) {
+        if (startVal < endVal) {
+            arr->reserve(1 + (endVal - startVal) / stepVal);
+            for (auto i = startVal; i < endVal; i += stepVal) {
+                arr->push_back(value::TypeTags::NumberInt32, value::bitcastTo<int32_t>(i));
+            }
+        }
+    } else {
+        if (startVal > endVal) {
+            arr->reserve(1 + (startVal - endVal) / (-stepVal));
+            for (auto i = startVal; i > endVal; i += stepVal) {
+                arr->push_back(value::TypeTags::NumberInt32, value::bitcastTo<int32_t>(i));
+            }
+        }
     }
 
     guard.reset();
@@ -888,6 +945,11 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewObj(ArityTyp
     std::vector<value::TypeTags> typeTags;
     std::vector<value::Value> values;
     std::vector<std::string> names;
+
+    size_t tmpVectorLen = arity >> 1;
+    typeTags.reserve(tmpVectorLen);
+    values.reserve(tmpVectorLen);
+    names.reserve(tmpVectorLen);
 
     for (ArityType idx = 0; idx < arity; idx += 2) {
         {
@@ -910,9 +972,12 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewObj(ArityTyp
     auto obj = value::getObjectView(val);
     value::ValueGuard guard{tag, val};
 
-    for (size_t idx = 0; idx < typeTags.size(); ++idx) {
-        auto [tagCopy, valCopy] = value::copyValue(typeTags[idx], values[idx]);
-        obj->push_back(names[idx], tagCopy, valCopy);
+    if (typeTags.size()) {
+        obj->reserve(typeTags.size());
+        for (size_t idx = 0; idx < typeTags.size(); ++idx) {
+            auto [tagCopy, valCopy] = value::copyValue(typeTags[idx], values[idx]);
+            obj->push_back(names[idx], tagCopy, valCopy);
+        }
     }
 
     guard.reset();
@@ -1501,6 +1566,7 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateToParts(Ari
     auto [dateObjTag, dateObjVal] = value::makeNewObject();
     value::ValueGuard guard{dateObjTag, dateObjVal};
     auto dateObj = value::getObjectView(dateObjVal);
+    dateObj->reserve(7);
     dateObj->push_back("year", value::TypeTags::NumberInt32, dateParts.year);
     dateObj->push_back("month", value::TypeTags::NumberInt32, dateParts.month);
     dateObj->push_back("day", value::TypeTags::NumberInt32, dateParts.dayOfMonth);
@@ -1539,6 +1605,7 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsoDateToParts(
     auto [dateObjTag, dateObjVal] = value::makeNewObject();
     value::ValueGuard guard{dateObjTag, dateObjVal};
     auto dateObj = value::getObjectView(dateObjVal);
+    dateObj->reserve(7);
     dateObj->push_back("isoWeekYear", value::TypeTags::NumberInt32, dateParts.year);
     dateObj->push_back("isoWeek", value::TypeTags::NumberInt32, dateParts.weekOfYear);
     dateObj->push_back("isoDayOfWeek", value::TypeTags::NumberInt32, dateParts.dayOfWeek);
@@ -2416,19 +2483,22 @@ std::tuple<bool, value::TypeTags, value::Value> buildRegexMatchResultObject(
     // hold the (start, limit) pairs of indexes, for each of the capture groups. We skip the first
     // two elements and start iteration from 3rd element so that we only construct the strings for
     // capture groups.
-    for (size_t i = 0; i < numCaptures; ++i) {
-        const auto start = capturesBuffer[2 * (i + 1)];
-        const auto limit = capturesBuffer[2 * (i + 1) + 1];
-        if (!verifyBounds(start, limit, true)) {
-            return {false, value::TypeTags::Nothing, 0};
-        }
+    if (numCaptures) {
+        arrayView->reserve(numCaptures);
+        for (size_t i = 0; i < numCaptures; ++i) {
+            const auto start = capturesBuffer[2 * (i + 1)];
+            const auto limit = capturesBuffer[2 * (i + 1) + 1];
+            if (!verifyBounds(start, limit, true)) {
+                return {false, value::TypeTags::Nothing, 0};
+            }
 
-        if (start == -1 && limit == -1) {
-            arrayView->push_back(value::TypeTags::Null, 0);
-        } else {
-            auto captureString = inputString.substr(start, limit - start);
-            auto [tag, val] = value::makeNewString(captureString);
-            arrayView->push_back(tag, val);
+            if (start == -1 && limit == -1) {
+                arrayView->push_back(value::TypeTags::Null, 0);
+            } else {
+                auto captureString = inputString.substr(start, limit - start);
+                auto [tag, val] = value::makeNewString(captureString);
+                arrayView->push_back(tag, val);
+            }
         }
     }
 
@@ -2779,11 +2849,14 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinExtractSubArray
         }();
 
         size_t end = convertedStart + std::min(length, arraySize - convertedStart);
+        if (convertedStart < end) {
+            resultView->reserve(end - convertedStart);
 
-        for (size_t i = convertedStart; i < end; i++) {
-            auto [tag, value] = arrayView->getAt(i);
-            auto [copyTag, copyValue] = value::copyValue(tag, value);
-            resultView->push_back(copyTag, copyValue);
+            for (size_t i = convertedStart; i < end; i++) {
+                auto [tag, value] = arrayView->getAt(i);
+                auto [copyTag, copyValue] = value::copyValue(tag, value);
+                resultView->push_back(copyTag, copyValue);
+            }
         }
     } else {
         auto advance = [](value::ArrayEnumerator& enumerator, size_t offset) {
@@ -2929,11 +3002,13 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinReverseArray(Ar
     if (inputType == value::TypeTags::Array) {
         auto inputView = value::getArrayView(inputVal);
         size_t inputSize = inputView->size();
-        resultView->reserve(inputSize);
-        for (size_t i = 0; i < inputSize; i++) {
-            auto [origTag, origVal] = inputView->getAt(inputSize - 1 - i);
-            auto [copyTag, copyVal] = copyValue(origTag, origVal);
-            resultView->push_back(copyTag, copyVal);
+        if (inputSize) {
+            resultView->reserve(inputSize);
+            for (size_t i = 0; i < inputSize; i++) {
+                auto [origTag, origVal] = inputView->getAt(inputSize - 1 - i);
+                auto [copyTag, copyVal] = copyValue(origTag, origVal);
+                resultView->push_back(copyTag, copyVal);
+            }
         }
 
         resultGuard.reset();
@@ -2949,7 +3024,6 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinReverseArray(Ar
             // Reserve space to avoid resizing on push_back calls.
             auto arraySetView = value::getArraySetView(inputVal);
             inputContents.reserve(arraySetView->size());
-            resultView->reserve(arraySetView->size());
         }
 
         while (!enumerator.atEnd()) {
@@ -2957,10 +3031,14 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinReverseArray(Ar
             enumerator.advance();
         }
 
-        // Run through the array backwards and copy into the result array.
-        for (auto it = inputContents.rbegin(); it != inputContents.rend(); ++it) {
-            auto [copyTag, copyVal] = copyValue(it->first, it->second);
-            resultView->push_back(copyTag, copyVal);
+        if (inputContents.size()) {
+            resultView->reserve(inputContents.size());
+
+            // Run through the array backwards and copy into the result array.
+            for (auto it = inputContents.rbegin(); it != inputContents.rend(); ++it) {
+                auto [copyTag, copyVal] = copyValue(it->first, it->second);
+                resultView->push_back(copyTag, copyVal);
+            }
         }
 
         resultGuard.reset();
@@ -3040,6 +3118,32 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinFtsMatch(ArityT
     return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(matches)};
 }
 
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinTsSecond(ArityType arity) {
+    invariant(arity == 1);
+
+    auto [inputValueOwn, inputTypeTag, inputValue] = getFromStack(0);
+
+    if (inputTypeTag != value::TypeTags::Timestamp) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto timestamp = Timestamp(value::bitcastTo<uint64_t>(inputValue));
+    return {false, value::TypeTags::NumberInt64, value::bitcastFrom<uint64_t>(timestamp.getSecs())};
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinTsIncrement(ArityType arity) {
+    invariant(arity == 1);
+
+    auto [inputValueOwn, inputTypeTag, inputValue] = getFromStack(0);
+
+    if (inputTypeTag != value::TypeTags::Timestamp) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto timestamp = Timestamp(value::bitcastTo<uint64_t>(inputValue));
+    return {false, value::TypeTags::NumberInt64, value::bitcastFrom<uint64_t>(timestamp.getInc())};
+}
+
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
                                                                           ArityType arity) {
     switch (f) {
@@ -3069,6 +3173,8 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builti
             return builtinDropFields(arity);
         case Builtin::newArray:
             return builtinNewArray(arity);
+        case Builtin::newArrayFromRange:
+            return builtinNewArrayFromRange(arity);
         case Builtin::newObj:
             return builtinNewObj(arity);
         case Builtin::ksToString:
@@ -3203,6 +3309,10 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builti
             return builtinFtsMatch(arity);
         case Builtin::generateSortKey:
             return builtinGenerateSortKey(arity);
+        case Builtin::tsSecond:
+            return builtinTsSecond(arity);
+        case Builtin::tsIncrement:
+            return builtinTsIncrement(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -4060,6 +4170,18 @@ std::tuple<uint8_t, value::TypeTags, value::Value> ByteCode::run(const CodeFragm
                     }
                     break;
                 }
+                case Instruction::isInfinity: {
+                    auto [owned, tag, val] = getFromStack(0);
+                    if (tag != value::TypeTags::Nothing) {
+                        topStack(false,
+                                 value::TypeTags::Boolean,
+                                 value::bitcastFrom<bool>(value::isInfinity(tag, val)));
+                    }
+                    if (owned) {
+                        value::releaseValue(tag, val);
+                    }
+                    break;
+                }
                 case Instruction::isRecordId: {
                     auto [owned, tag, val] = getFromStack(0);
 
@@ -4095,6 +4217,20 @@ std::tuple<uint8_t, value::TypeTags, value::Value> ByteCode::run(const CodeFragm
                         topStack(false,
                                  value::TypeTags::Boolean,
                                  value::bitcastFrom<bool>(tag == value::TypeTags::MaxKey));
+                    }
+
+                    if (owned) {
+                        value::releaseValue(tag, val);
+                    }
+                    break;
+                }
+                case Instruction::isTimestamp: {
+                    auto [owned, tag, val] = getFromStack(0);
+
+                    if (tag != value::TypeTags::Nothing) {
+                        topStack(false,
+                                 value::TypeTags::Boolean,
+                                 value::bitcastFrom<bool>(tag == value::TypeTags::Timestamp));
                     }
 
                     if (owned) {

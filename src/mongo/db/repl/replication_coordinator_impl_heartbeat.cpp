@@ -57,7 +57,6 @@
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/vote_requester.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/session_catalog.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/mutex.h"
@@ -154,13 +153,11 @@ void ReplicationCoordinatorImpl::handleHeartbeatResponse_forTest(BSONObj respons
     CallbackHandle handle = uassertStatusOK(
         _replExecutor->scheduleWork([=](const executor::TaskExecutor::CallbackArgs& args) {}));
     RemoteCommandRequest request;
-    request.target = _rsConfig.getMemberAt(targetIndex).getHostAndPort();
-    executor::TaskExecutor::ResponseStatus status(response, ping);
-    executor::TaskExecutor::RemoteCommandCallbackArgs cbData(
-        _replExecutor.get(), handle, request, status);
 
     {
         stdx::unique_lock<Latch> lk(_mutex);
+
+        request.target = _rsConfig.getMemberAt(targetIndex).getHostAndPort();
 
         // Simulate preparing a heartbeat request so that the target's ping stats are initialized.
         _topCoord->prepareHeartbeatRequestV1(
@@ -169,6 +166,10 @@ void ReplicationCoordinatorImpl::handleHeartbeatResponse_forTest(BSONObj respons
         // Pretend we sent a request so that _untrackHeartbeatHandle_inlock succeeds.
         _trackHeartbeatHandle_inlock(handle, HeartbeatState::kSent, request.target);
     }
+
+    executor::TaskExecutor::ResponseStatus status(response, ping);
+    executor::TaskExecutor::RemoteCommandCallbackArgs cbData(
+        _replExecutor.get(), handle, request, status);
 
     hangAfterTrackingNewHandleInHandleHeartbeatResponseForTest.pauseWhileSet();
 
@@ -525,11 +526,6 @@ void ReplicationCoordinatorImpl::_stepDownFinish(
 
     auto opCtx = cc().makeOperationContext();
 
-    // To prevent a deadlock between session checkout and RSTL lock taking, disallow new sessions
-    // from being checked out. Existing sessions currently checked out will be killed by the
-    // killOpThread.
-    ScopedBlockSessionCheckouts blockSessions(opCtx.get());
-
     // kill all write operations which are no longer safe to run on step down. Also, operations that
     // have taken global lock in S mode and operations blocked on prepare conflict will be killed to
     // avoid 3-way deadlock between read, prepared transaction and step down thread.
@@ -810,11 +806,6 @@ void ReplicationCoordinatorImpl::_heartbeatReconfigFinish(
     if (_shouldStepDownOnReconfig(lk, newConfig, myIndex)) {
         _topCoord->prepareForUnconditionalStepDown();
         lk.unlock();
-
-        // To prevent a deadlock between session checkout and RSTL lock taking, disallow new
-        // sessions from being checked out. Existing sessions currently checked out will be killed
-        // by the killOpThread.
-        ScopedBlockSessionCheckouts blockSessions(opCtx.get());
 
         // Primary node will be either unelectable or removed after the configuration change.
         // So, finish the reconfig under RSTL, so that the step down occurs safely.

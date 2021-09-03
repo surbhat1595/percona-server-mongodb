@@ -73,6 +73,7 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& nss,
     ChunkVersion targetCollectionVersion) const {
+
     auto const shardId = ShardingState::get(expCtx->opCtx)->shardId();
     auto* catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
 
@@ -81,13 +82,12 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         nss, targetCollectionVersion, shardId);
 
-    // This will throw a 'ShardCannotRefreshDueToLocksHeldInfo' exception if the cache entry is
-    // staler than 'targetCollectionVersion' and 'checkRoutingInfoEpochOrThrow' is called under a DB
-    // lock.
     const auto routingInfo =
-        uassertStatusOK(catalogCache->getCollectionRoutingInfo(expCtx->opCtx, nss, true));
+        uassertStatusOK(catalogCache->getCollectionRoutingInfo(expCtx->opCtx, nss));
 
-    auto foundVersion = routingInfo.getVersion(shardId);
+    const auto foundVersion =
+        routingInfo.isSharded() ? routingInfo.getVersion() : ChunkVersion::UNSHARDED();
+
     uassert(StaleEpochInfo(nss),
             str::stream() << "could not act as router for " << nss.ns() << ", wanted "
                           << targetCollectionVersion.toString() << ", but found "
@@ -120,6 +120,21 @@ ShardServerProcessInterface::collectDocumentKeyFieldsForHostedCollection(Operati
     // dropped and recreated as sharded. We don't know what the old document key fields might have
     // been in this case so we return just _id.
     return {{"_id"}, false};
+}
+
+boost::optional<Document> ShardServerProcessInterface::lookupSingleDocument(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const NamespaceString& nss,
+    UUID collectionUUID,
+    const Document& documentKey,
+    boost::optional<BSONObj> readConcern) {
+    // We only want to retrieve the one document that corresponds to 'documentKey', so we
+    // ignore collation when computing which shard to target.
+    MakePipelineOptions opts;
+    opts.shardTargetingPolicy = ShardTargetingPolicy::kForceTargetingWithSimpleCollation;
+    opts.readConcern = std::move(readConcern);
+
+    return doLookupSingleDocument(expCtx, nss, collectionUUID, documentKey, std::move(opts));
 }
 
 Status ShardServerProcessInterface::insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -381,8 +396,10 @@ void ShardServerProcessInterface::dropCollection(OperationContext* opCtx,
 
 std::unique_ptr<Pipeline, PipelineDeleter>
 ShardServerProcessInterface::attachCursorSourceToPipeline(Pipeline* ownedPipeline,
-                                                          bool allowTargetingShards) {
-    return sharded_agg_helpers::attachCursorToPipeline(ownedPipeline, allowTargetingShards);
+                                                          ShardTargetingPolicy shardTargetingPolicy,
+                                                          boost::optional<BSONObj> readConcern) {
+    return sharded_agg_helpers::attachCursorToPipeline(
+        ownedPipeline, shardTargetingPolicy, std::move(readConcern));
 }
 
 void ShardServerProcessInterface::setExpectedShardVersion(

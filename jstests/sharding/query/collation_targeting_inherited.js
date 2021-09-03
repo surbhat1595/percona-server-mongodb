@@ -2,9 +2,6 @@
 (function() {
 "use strict";
 
-// Shard key index has collation, which is not compatible with $min/$max
-TestData.skipCheckOrphans = true;
-
 const caseInsensitive = {
     locale: "en_US",
     strength: 2
@@ -190,12 +187,10 @@ assert.commandWorked(explain);
 assert.eq(3, explain.queryPlanner.winningPlan.shards.length);
 
 // Test a find command with a simple collation. This should be single-shard.
-if (testDB.getMongo().useReadCommands()) {
-    assert.eq(1, collCaseInsensitive.find({a: "foo"}).collation({locale: "simple"}).itcount());
-    explain = collCaseInsensitive.find({a: "foo"}).collation({locale: "simple"}).explain();
-    assert.commandWorked(explain);
-    assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
-}
+assert.eq(1, collCaseInsensitive.find({a: "foo"}).collation({locale: "simple"}).itcount());
+explain = collCaseInsensitive.find({a: "foo"}).collation({locale: "simple"}).explain();
+assert.commandWorked(explain);
+assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
 
 // Test a find command on numbers with a non-simple collation inherited from the collection
 // default. This should be single-shard.
@@ -304,15 +299,13 @@ assert.commandWorked(collCaseInsensitive.insert(a_FOO));
 assert.commandWorked(collCaseInsensitive.insert(a_foo));
 
 // Test a remove command on strings with simple collation. This should be single-shard.
-if (testDB.getMongo().writeMode() === "commands") {
-    writeRes = collCaseInsensitive.remove({a: "foo"}, {collation: {locale: "simple"}});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nRemoved);
-    explain = collCaseInsensitive.explain().remove({a: "foo"}, {collation: {locale: "simple"}});
-    assert.commandWorked(explain);
-    assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
-    assert.commandWorked(collCaseInsensitive.insert(a_foo));
-}
+writeRes = collCaseInsensitive.remove({a: "foo"}, {collation: {locale: "simple"}});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nRemoved);
+explain = collCaseInsensitive.explain().remove({a: "foo"}, {collation: {locale: "simple"}});
+assert.commandWorked(explain);
+assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
+assert.commandWorked(collCaseInsensitive.insert(a_foo));
 
 // Test a remove command on numbers with non-simple collation inherited from collection default.
 // This should be single-shard.
@@ -334,17 +327,14 @@ assert.writeError(collCaseInsensitive.remove({a: "foo"}, {justOne: true}));
 
 // Single remove on string shard key with simple collation should succeed, because it is
 // single-shard.
-if (testDB.getMongo().writeMode() === "commands") {
-    writeRes =
-        collCaseInsensitive.remove({a: "foo"}, {justOne: true, collation: {locale: "simple"}});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nRemoved);
-    explain = collCaseInsensitive.explain().remove({a: "foo"},
-                                                   {justOne: true, collation: {locale: "simple"}});
-    assert.commandWorked(explain);
-    assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
-    assert.commandWorked(collCaseInsensitive.insert(a_foo));
-}
+writeRes = collCaseInsensitive.remove({a: "foo"}, {justOne: true, collation: {locale: "simple"}});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nRemoved);
+explain = collCaseInsensitive.explain().remove({a: "foo"},
+                                               {justOne: true, collation: {locale: "simple"}});
+assert.commandWorked(explain);
+assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
+assert.commandWorked(collCaseInsensitive.insert(a_foo));
 
 // Single remove on number shard key with non-simple collation inherited from collection default
 // should succeed, because it is single-shard.
@@ -370,13 +360,10 @@ assert.eq(1, writeRes.nRemoved);
 
 // Single remove on string _id with collection-default collation explicitly given should
 // succeed, because it is an exact-ID query.
-if (testDB.getMongo().writeMode() === "commands") {
-    assert.commandWorked(collCaseInsensitive.insert({_id: "foo", a: "bar"}));
-    writeRes =
-        collCaseInsensitive.remove({_id: "foo"}, {justOne: true, collation: caseInsensitive});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nRemoved);
-}
+assert.commandWorked(collCaseInsensitive.insert({_id: "foo", a: "bar"}));
+writeRes = collCaseInsensitive.remove({_id: "foo"}, {justOne: true, collation: caseInsensitive});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nRemoved);
 
 // Single remove on number _id with non-collection-default collation should succeed, because it
 // is an exact-ID query.
@@ -398,16 +385,14 @@ assert.commandWorked(explain);
 assert.eq(3, explain.queryPlanner.winningPlan.shards.length);
 
 // Test an update command on strings with simple collation. This should be single-shard.
-if (testDB.getMongo().writeMode() === "commands") {
-    writeRes = collCaseInsensitive.update(
-        {a: "foo"}, {$set: {b: 1}}, {multi: true, collation: {locale: "simple"}});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nMatched);
-    explain = collCaseInsensitive.explain().update(
-        {a: "foo"}, {$set: {b: 1}}, {multi: true, collation: {locale: "simple"}});
-    assert.commandWorked(explain);
-    assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
-}
+writeRes = collCaseInsensitive.update(
+    {a: "foo"}, {$set: {b: 1}}, {multi: true, collation: {locale: "simple"}});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nMatched);
+explain = collCaseInsensitive.explain().update(
+    {a: "foo"}, {$set: {b: 1}}, {multi: true, collation: {locale: "simple"}});
+assert.commandWorked(explain);
+assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
 
 // Test an update command on numbers with non-simple collation inherited from collection
 // default. This should be single-shard.
@@ -429,16 +414,13 @@ assert.writeError(collCaseInsensitive.update({a: "foo"}, {$set: {b: 1}}));
 
 // Single update on string shard key with simple collation should succeed, because it is
 // single-shard.
-if (testDB.getMongo().writeMode() === "commands") {
-    writeRes =
-        collCaseInsensitive.update({a: "foo"}, {$set: {b: 1}}, {collation: {locale: "simple"}});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nMatched);
-    explain = collCaseInsensitive.explain().update(
-        {a: "foo"}, {$set: {b: 1}}, {collation: {locale: "simple"}});
-    assert.commandWorked(explain);
-    assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
-}
+writeRes = collCaseInsensitive.update({a: "foo"}, {$set: {b: 1}}, {collation: {locale: "simple"}});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nMatched);
+explain = collCaseInsensitive.explain().update(
+    {a: "foo"}, {$set: {b: 1}}, {collation: {locale: "simple"}});
+assert.commandWorked(explain);
+assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
 
 // Single update on number shard key with non-simple collation inherited from collation default
 // should succeed, because it is single-shard.
@@ -451,10 +433,8 @@ assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
 
 // Single update on string _id with non-collection-default collation should fail, because it is
 // not an exact-ID query.
-if (testDB.getMongo().writeMode() === "commands") {
-    assert.writeError(
-        collCaseInsensitive.update({_id: "foo"}, {$set: {b: 1}}, {collation: {locale: "simple"}}));
-}
+assert.writeError(
+    collCaseInsensitive.update({_id: "foo"}, {$set: {b: 1}}, {collation: {locale: "simple"}}));
 
 // Single update on string _id with collection-default collation should succeed, because it is
 // an exact-ID query.
@@ -466,23 +446,18 @@ assert.commandWorked(collCaseInsensitive.remove({_id: "foo"}, {justOne: true}));
 
 // Single update on string _id with collection-default collation explicitly given should
 // succeed, because it is an exact-ID query.
-if (testDB.getMongo().writeMode() === "commands") {
-    assert.commandWorked(collCaseInsensitive.insert({_id: "foo", a: "bar"}));
-    writeRes =
-        collCaseInsensitive.update({_id: "foo"}, {$set: {b: 1}}, {collation: caseInsensitive});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nMatched);
-    assert.commandWorked(collCaseInsensitive.remove({_id: "foo"}, {justOne: true}));
-}
+assert.commandWorked(collCaseInsensitive.insert({_id: "foo", a: "bar"}));
+writeRes = collCaseInsensitive.update({_id: "foo"}, {$set: {b: 1}}, {collation: caseInsensitive});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nMatched);
+assert.commandWorked(collCaseInsensitive.remove({_id: "foo"}, {justOne: true}));
 
 // Single update on number _id with non-collection-default collation inherited from collection
 // default should succeed, because it is an exact-ID query.
-if (testDB.getMongo().writeMode() === "commands") {
-    writeRes = collCaseInsensitive.update(
-        {_id: a_foo._id}, {$set: {b: 1}}, {collation: {locale: "simple"}});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nMatched);
-}
+writeRes =
+    collCaseInsensitive.update({_id: a_foo._id}, {$set: {b: 1}}, {collation: {locale: "simple"}});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nMatched);
 
 // Upsert must always be single-shard.
 
@@ -492,16 +467,14 @@ assert.writeError(
     collCaseInsensitive.update({a: "foo"}, {$set: {b: 1}}, {multi: true, upsert: true}));
 
 // Upsert on strings with simple collation should succeed, because it is single-shard.
-if (testDB.getMongo().writeMode() === "commands") {
-    writeRes = collCaseInsensitive.update(
-        {a: "foo"}, {$set: {b: 1}}, {multi: true, upsert: true, collation: {locale: "simple"}});
-    assert.commandWorked(writeRes);
-    assert.eq(1, writeRes.nMatched);
-    explain = collCaseInsensitive.explain().update(
-        {a: "foo"}, {$set: {b: 1}}, {multi: true, upsert: true, collation: {locale: "simple"}});
-    assert.commandWorked(explain);
-    assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
-}
+writeRes = collCaseInsensitive.update(
+    {a: "foo"}, {$set: {b: 1}}, {multi: true, upsert: true, collation: {locale: "simple"}});
+assert.commandWorked(writeRes);
+assert.eq(1, writeRes.nMatched);
+explain = collCaseInsensitive.explain().update(
+    {a: "foo"}, {$set: {b: 1}}, {multi: true, upsert: true, collation: {locale: "simple"}});
+assert.commandWorked(explain);
+assert.eq(1, explain.queryPlanner.winningPlan.shards.length);
 
 // Upsert on numbers with non-simple collation inherited from collection default should succeed,
 // because it is single-shard.

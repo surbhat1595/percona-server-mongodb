@@ -65,6 +65,8 @@ private:
 
     GetNextResult doGetNext() final;
 
+    GetNextResult _tryGetNext();
+
     // Records whether we have observed the token in the resumed stream.
     bool _hasSeenResumeToken = false;
 };

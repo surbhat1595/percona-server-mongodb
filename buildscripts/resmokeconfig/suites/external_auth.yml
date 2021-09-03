@@ -12,4 +12,3 @@ executor:
         TestData:
           roleGraphInvalidationIsFatal: true
       nodb: ''
-      readMode: commands

@@ -2,7 +2,6 @@ __quiet = false;
 __magicNoPrint = {
     __magicNoPrint: 1111
 };
-__callLastError = false;
 _verboseShell = false;
 
 chatty = function(s) {
@@ -373,6 +372,8 @@ jsTestOptions = function() {
 
             undoRecorderPath: TestData.undoRecorderPath,
             backupOnRestartDir: TestData.backupOnRestartDir || false,
+
+            evergreenDebugSymbolsUrl: TestData.evergreenDebugSymbolsUrl || null,
         });
     }
     return _jsTestOptions;
@@ -604,30 +605,6 @@ helloStatePrompt = function(helloReply) {
     return state + '> ';
 };
 
-if (typeof _useWriteCommandsDefault === "undefined") {
-    // We ensure the _useWriteCommandsDefault() function is always defined, in case the JavaScript
-    // engine is being used from someplace other than the mongo shell (e.g. map-reduce).
-    _useWriteCommandsDefault = function _useWriteCommandsDefault() {
-        return false;
-    };
-}
-
-if (typeof _writeMode === "undefined") {
-    // We ensure the _writeMode() function is always defined, in case the JavaScript engine is being
-    // used from someplace other than the mongo shell (e.g. map-reduce).
-    _writeMode = function _writeMode() {
-        return "commands";
-    };
-}
-
-if (typeof _readMode === "undefined") {
-    // We ensure the _readMode() function is always defined, in case the JavaScript engine is being
-    // used from someplace other than the mongo shell (e.g. map-reduce).
-    _readMode = function _readMode() {
-        return "legacy";
-    };
-}
-
 if (typeof _shouldRetryWrites === 'undefined') {
     // We ensure the _shouldRetryWrites() function is always defined, in case the JavaScript engine
     // is being used from someplace other than the mongo shell (e.g. map-reduce).
@@ -648,17 +625,6 @@ if (typeof _shouldUseImplicitSessions === 'undefined') {
 
 shellPrintHelper = function(x) {
     if (typeof (x) == "undefined") {
-        // Make sure that we have a db var before we use it
-        // TODO: This implicit calling of GLE can cause subtle, hard to track issues - remove?
-        if (__callLastError && typeof (db) != "undefined" && db.getMongo &&
-            db.getMongo().writeMode() == "legacy") {
-            __callLastError = false;
-            // explicit w:1 so that replset getLastErrorDefaults aren't used here which would be bad
-            var err = db.getLastError(1);
-            if (err != null) {
-                print(err);
-            }
-        }
         return;
     }
 
@@ -1250,6 +1216,10 @@ var Random = (function() {
     var errorMsg = "The random number generator hasn't been seeded yet; " +
         "call Random.setRandomSeed()";
 
+    function isInitialized() {
+        return initialized;
+    }
+
     // Set the random generator seed.
     function srand(s) {
         initialized = true;
@@ -1317,6 +1287,7 @@ var Random = (function() {
     return {
         genExp: genExp,
         genNormal: genNormal,
+        isInitialized: isInitialized,
         rand: rand,
         randInt: randInt,
         setRandomSeed: setRandomSeed,
@@ -1548,13 +1519,10 @@ rs._runCmd = function(c) {
         res = db.adminCommand(c);
     } catch (e) {
         if (isNetworkError(e)) {
-            // closed connection.  reconnect.
-            db.getLastErrorObj();
-            var o = db.getLastErrorObj();
-            if (o.ok) {
+            if (reconnect(db)) {
                 print("reconnected to server after rs command (which is normal)");
             } else {
-                printjson(o);
+                print("failed to reconnect to server after:" + e);
             }
         } else {
             print("shell got exception during repl set operation: " + e);
@@ -1818,8 +1786,6 @@ help = shellHelper.help = function(x) {
         print("    var mydb = x.getDB('mydb');");
         print("  or");
         print("    var mydb = connect('host[:port]/mydb');");
-        print(
-            "\nNote: the REPL prompt only auto-reports getLastError() for the shell command line connection.\n");
         return;
     } else if (x == "keys") {
         print("Tab completion and command history is available at the command prompt.\n");

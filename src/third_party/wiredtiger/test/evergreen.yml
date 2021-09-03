@@ -40,11 +40,60 @@ functions:
       params:
         path: "WT_TEST-big-endian.tgz"
         destination: "wiredtiger/build_posix/test/format"
+  "fetch artifacts from many-coll" :
+    - command: s3.get
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        remote_file: dbpath_100k_500.tgz
+        bucket: build_external
+        local_file: dbpath_100k_500.tgz
+    - command: shell.exec
+      params:
+        shell: bash
+        script: |
+          set -o errexit
+          set -o verbose
+          mkdir -p mongo-tests/largescale/many-collection/dbpath
+    - command: archive.targz_extract
+      params:
+        path: "dbpath_100k_500.tgz"
+        destination: "mongo-tests/largescale/many-collection/dbpath/."
   "fetch mongo-tests repo" :
     command: shell.exec
     params:
       script: |
+        set -o errexit
+        set -o verbose
         git clone https://github.com/wiredtiger/mongo-tests
+  "fetch mongo repo" :
+    command: shell.exec
+    params:
+      script: |
+        set -o errexit
+        set -o verbose
+        git clone https://github.com/mongodb/mongo
+  "import wiredtiger into mongo" :
+    command: shell.exec
+    params:
+      script: |
+        set -o errexit
+        set -o verbose
+        cp -a wiredtiger mongo/src/third_party/
+  "compile mongodb" :
+    command: shell.exec
+    params:
+      shell: bash
+      working_dir: "mongo"
+      script: |
+        set -o errexit
+        set -o verbose
+        virtualenv -p python3 venv
+        source venv/bin/activate
+        pip3 install requirements_parser
+        pip3 install -r etc/pip/compile-requirements.txt
+        ./buildscripts/scons.py --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --link-model=dynamic --ninja generate-ninja ICECC=icecc CCACHE=ccache
+        ninja -j$(nproc --all) install-mongod
   "configure wiredtiger": &configure_wiredtiger
     command: shell.exec
     params:
@@ -67,7 +116,7 @@ functions:
             mkdir -p cmake_build
             cd cmake_build
             $CMAKE \
-            ${posix_configure_flags|-DCMAKE_TOOLCHAIN_FILE=../build_cmake/toolchains/mongodbtoolchain_v3_gcc.cmake -DCMAKE_C_FLAGS="-ggdb" -DHAVE_DIAGNOSTIC=1 -DENABLE_PYTHON=1 -DENABLE_ZLIB=1 -DENABLE_STATIC=1 -DCMAKE_INSTALL_PREFIX=$(pwd)/LOCAL_INSTALL} -G "${cmake_generator|Ninja}" ./..
+            ${posix_configure_flags|-DCMAKE_TOOLCHAIN_FILE=../build_cmake/toolchains/mongodbtoolchain_v3_gcc.cmake -DCMAKE_C_FLAGS="-ggdb" -DHAVE_DIAGNOSTIC=1 -DENABLE_PYTHON=1 -DENABLE_ZLIB=1 -DENABLE_STATIC=1 -DENABLE_STRICT=1 -DCMAKE_INSTALL_PREFIX=$(pwd)/LOCAL_INSTALL} -G "${cmake_generator|Ninja}" ./..
           fi
         elif [ "$OS" != "Windows_NT" ]; then
           # Compiling with Autoconf/Libtool.
@@ -892,8 +941,10 @@ tasks:
   # End of normal make check test tasks
 
   # Start of cppsuite test tasks.
+  # All cppsuite pull request tasks must supply the relative path to the config file as we are in
+  # the build_posix working directory and the LD_LIBRARY_PATH is .libs.
 
-  - name: cppsuite-base-test
+  - name: cppsuite-base-test-default
     tags: ["pull_request"]
     depends_on:
       - name: compile
@@ -906,7 +957,50 @@ tasks:
             set -o errexit
             set -o verbose
 
-            ${test_env_vars|} $(pwd)/test/cppsuite/run -t base_test -f test/cppsuite/configs/base_test_default.txt
+            ${test_env_vars|} $(pwd)/test/cppsuite/run -t base_test -C 'debug_mode=(cursor_copy=true)' -f test/cppsuite/configs/base_test_default.txt -l 2
+
+  - name: cppsuite-hs-cleanup-default
+    tags: ["pull_request"]
+    depends_on:
+      - name: compile
+    commands:
+      - func: "fetch artifacts"
+      - command: shell.exec
+        params:
+          working_dir: "wiredtiger/build_posix/"
+          script: |
+            set -o errexit
+            set -o verbose
+
+            ${test_env_vars|} $(pwd)/test/cppsuite/run -t hs_cleanup -C 'debug_mode=(cursor_copy=true)' -f test/cppsuite/configs/hs_cleanup_default.txt -l 2
+
+  - name: cppsuite-base-test-stress
+    depends_on:
+      - name: compile
+    commands:
+      - func: "fetch artifacts"
+      - command: shell.exec
+        params:
+          working_dir: "wiredtiger/build_posix/test/cppsuite"
+          script: |
+            set -o errexit
+            set -o verbose
+
+            ${test_env_vars|} $(pwd)/run -t base_test -f configs/base_test_stress.txt -l 2
+
+  - name: cppsuite-hs-cleanup-stress
+    depends_on:
+      - name: compile
+    commands:
+      - func: "fetch artifacts"
+      - command: shell.exec
+        params:
+          working_dir: "wiredtiger/build_posix/test/cppsuite"
+          script: |
+            set -o errexit
+            set -o verbose
+
+            ${test_env_vars|} $(pwd)/run -t hs_cleanup -f configs/hs_cleanup_stress.txt -l 2
 
   # End of cppsuite test tasks.
   # Start of csuite test tasks
@@ -2490,26 +2584,61 @@ tasks:
             export "PATH=/opt/mongodbtoolchain/v3/bin:$PATH"
             ./workgen_perf_check.sh many-dhandle-stress.py output.log 50 500 500
 
+  - name: many-collection-test
+    commands:
+      - command: timeout.update
+        params:
+          exec_timeout_secs: 86400
+          timeout_secs: 86400
+      - func: "fetch mongo repo"
+      - func: "get project"
+      - func: "import wiredtiger into mongo"
+      - func: "compile mongodb"
+      - func: "fetch mongo-tests repo"
+      # After WT-7868 we can use the following function to retrieve an existing database and remove
+      # the "clean-and-populate" option from the script arguments to skip the initial populating
+      # step.
+      # - func: "fetch artifacts from many-coll"
+      - command: shell.exec
+        params:
+          working_dir: mongo-tests/largescale
+          shell: bash
+          script: |
+            set -o errexit
+            set -o verbose
+            sudo su
+            ulimit -n 1000000
+            export "PATH=/opt/mongodbtoolchain/v3/bin:$PATH"
+            virtualenv -p python3 venv
+            source venv/bin/activate
+            pip3 install lorem pymongo
+            ./run_many_coll.sh ../../mongo/build/install/bin/mongod mongodb.log config/many-collection-testing many-collection clean-and-populate
+
   - name: cyclomatic-complexity
     commands:
       - func: "get project"
       - command: shell.exec
         params:
-          working_dir: "wiredtiger/src"
+          working_dir: "wiredtiger"
           shell: bash
           script: |
             set -o verbose
 
+            # Install Metrix++, ensuring it is outside the 'src' directory
             git clone https://github.com/metrixplusplus/metrixplusplus metrixplusplus
-            python "metrixplusplus/metrix++.py" collect --std.code.lines.code --std.code.complexity.cyclomatic
-            python "metrixplusplus/metrix++.py" view
+
+            # We only want complexity measures for the 'src' directory
+            cd src
+
+            python "../metrixplusplus/metrix++.py" collect --std.code.lines.code --std.code.complexity.cyclomatic
+            python "../metrixplusplus/metrix++.py" view
 
             # Set the cyclomatic complexity limit to 20
-            python "metrixplusplus/metrix++.py" limit --max-limit=std.code.complexity:cyclomatic:20
+            python "../metrixplusplus/metrix++.py" limit --max-limit=std.code.complexity:cyclomatic:20
 
             # Fail if there are functions with cyclomatic complexity larger than 95
             set -o errexit
-            python "metrixplusplus/metrix++.py" limit --max-limit=std.code.complexity:cyclomatic:95
+            python "../metrixplusplus/metrix++.py" limit --max-limit=std.code.complexity:cyclomatic:95
 
 buildvariants:
 
@@ -2643,7 +2772,8 @@ buildvariants:
     - name: examples-c-production-disable-static-test
     - name: format-stress-pull-request-test
     - name: make-check-test
-    - name: cppsuite-base-test
+    - name: cppsuite-base-test-default
+    - name: cppsuite-hs-cleanup-default
 
 - name: ubuntu1804-compilers
   display_name: "! Ubuntu 18.04 Compilers"
@@ -2679,6 +2809,7 @@ buildvariants:
 
 - name: large-scale-tests
   display_name: "Large scale tests"
+  batchtime: 480 # 3 times a day
   run_on:
   - ubuntu1804-test
   expansions:
@@ -2686,8 +2817,30 @@ buildvariants:
     posix_configure_flags:
       --enable-silent-rules --enable-python --enable-zlib --enable-snappy
       --enable-strict --enable-static --prefix=$(pwd)/LOCAL_INSTALL
+    test_env_vars:
+      PATH=/opt/mongodbtoolchain/v3/bin:$PATH
   tasks:
     - name: many-dhandle-stress-test
+    - name: many-collection-test
+      distros: ubuntu1804-wt-large
+
+- name: cppsuite-stress-tests
+  display_name: "Cppsuite Stress Tests"
+  batchtime: 480 # 3 times a day
+  run_on:
+  - ubuntu1804-test
+  expansions:
+    test_env_vars: LD_LIBRARY_PATH=$(pwd)/../../.libs
+    make_command: PATH=/opt/mongodbtoolchain/v3/bin:$PATH make
+    posix_configure_flags:
+      --enable-silent-rules --enable-python --enable-zlib --enable-snappy
+      --enable-strict --enable-static
+    test_env_vars:
+      PATH=/opt/mongodbtoolchain/v3/bin:$PATH
+  tasks:
+    - name: compile
+    - name: cppsuite-hs-cleanup-stress
+    - name: cppsuite-base-test-stress
 
 - name: package
   display_name: "~ Package"

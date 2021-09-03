@@ -67,86 +67,11 @@ using std::string;
 
 namespace {
 
-// Lists the $-prefixed query options that can be passed alongside a wrapped query predicate for
-// OP_QUERY find. The $orderby field is omitted because "orderby" (no dollar sign) is also allowed,
-// and this requires special handling.
-const std::vector<const char*> kDollarQueryModifiers = {
-    "$hint",
-    "$comment",
-    "$max",
-    "$min",
-    "$returnKey",
-    "$showDiskLoc",
-    "$snapshot",
-    "$maxTimeMS",
-};
-
 TimerStats oplogGetMoreStats;
 ServerStatusMetricField<TimerStats> displayBatchesReceived("repl.network.oplogGetMoresProcessed",
                                                            &oplogGetMoreStats);
 
 }  // namespace
-
-BSONObj upconvertQueryEntry(const BSONObj& query,
-                            const NamespaceString& nss,
-                            int ntoreturn,
-                            int ntoskip) {
-    BSONObjBuilder bob;
-
-    bob.append("find", nss.coll());
-
-    // Whether or not the query predicate is wrapped inside a "query" or "$query" field so that
-    // other options can be passed alongside the predicate.
-    bool predicateIsWrapped = false;
-
-    // Extract the query predicate.
-    BSONObj filter;
-    if (query["query"].isABSONObj()) {
-        predicateIsWrapped = true;
-        bob.appendAs(query["query"], "filter");
-    } else if (query["$query"].isABSONObj()) {
-        predicateIsWrapped = true;
-        bob.appendAs(query["$query"], "filter");
-    } else if (!query.isEmpty()) {
-        bob.append("filter", query);
-    }
-
-    if (ntoskip) {
-        bob.append("skip", ntoskip);
-    }
-    if (ntoreturn) {
-        bob.append("ntoreturn", ntoreturn);
-    }
-
-    // The remainder of the query options are only available if the predicate is passed in wrapped
-    // form. If the predicate is not wrapped, we're done.
-    if (!predicateIsWrapped) {
-        return bob.obj();
-    }
-
-    // Extract the sort.
-    if (auto elem = query["orderby"]) {
-        bob.appendAs(elem, "sort");
-    } else if (auto elem = query["$orderby"]) {
-        bob.appendAs(elem, "sort");
-    }
-
-    // Add $-prefixed OP_QUERY modifiers, like $hint.
-    for (auto modifier : kDollarQueryModifiers) {
-        if (auto elem = query[modifier]) {
-            // Use "+ 1" to omit the leading dollar sign.
-            bob.appendAs(elem, modifier + 1);
-        }
-    }
-
-    return bob.obj();
-}
-
-BSONObj upconvertGetMoreEntry(const NamespaceString& nss, CursorId cursorId, int ntoreturn) {
-    GetMoreCommandRequest getMoreRequest(cursorId, nss.coll().toString());
-    getMoreRequest.setBatchSize(ntoreturn);
-    return getMoreRequest.toBSON({});
-}
 
 /**
  * This type decorates a Client object with a stack of active CurOp objects.
@@ -839,172 +764,6 @@ StringData getProtoString(int op) {
     if (y)                                   \
     s << " " x ":" << (*y)
 
-string OpDebug::report(OperationContext* opCtx, const SingleThreadedLockStats* lockStats) const {
-    Client* client = opCtx->getClient();
-    auto& curop = *CurOp::get(opCtx);
-    auto flowControlStats = opCtx->lockState()->getFlowControlStats();
-    StringBuilder s;
-    if (iscommand)
-        s << "command ";
-    else
-        s << networkOpToString(networkOp) << ' ';
-
-    s << curop.getNS();
-
-    if (auto clientMetadata = ClientMetadata::get(client)) {
-        auto appName = clientMetadata->getApplicationName();
-        if (!appName.empty()) {
-            s << " appName: \"" << str::escape(appName) << '\"';
-        }
-    }
-
-    auto query = appendCommentField(opCtx, curop.opDescription());
-    if (!query.isEmpty()) {
-        s << " command: ";
-        if (iscommand) {
-            const Command* curCommand = curop.getCommand();
-            if (curCommand) {
-                mutablebson::Document cmdToLog(query, mutablebson::Document::kInPlaceDisabled);
-                curCommand->snipForLogging(&cmdToLog);
-                s << curCommand->getName() << " ";
-                s << redact(cmdToLog.getObject());
-            } else {
-                // Should not happen but we need to handle curCommand == NULL gracefully.
-                // We don't know what the request payload is intended to be, so it might be
-                // sensitive, and we don't know how to redact it properly without a 'Command*'.
-                // So we just don't log it at all.
-                s << "unrecognized";
-            }
-        } else {
-            s << redact(query);
-        }
-    }
-
-    auto originatingCommand = curop.originatingCommand();
-    if (!originatingCommand.isEmpty()) {
-        s << " originatingCommand: " << redact(originatingCommand);
-    }
-
-    if (!curop.getPlanSummary().empty()) {
-        s << " planSummary: " << curop.getPlanSummary().toString();
-    }
-
-    if (prepareConflictDurationMillis > Milliseconds::zero()) {
-        s << " prepareConflictDuration: " << prepareConflictDurationMillis;
-    }
-
-    if (dataThroughputLastSecond) {
-        s << " dataThroughputLastSecond: " << *dataThroughputLastSecond << " MB/sec";
-    }
-
-    if (dataThroughputAverage) {
-        s << " dataThroughputAverage: " << *dataThroughputAverage << " MB/sec";
-    }
-
-    if (!resolvedViews.empty()) {
-        s << " resolvedViews: " << getResolvedViewsInfo();
-    }
-
-    OPDEBUG_TOSTRING_HELP(nShards);
-    OPDEBUG_TOSTRING_HELP(cursorid);
-    if (mongotCursorId) {
-        s << " mongot: " << makeMongotDebugStatsObject().toString();
-    }
-    OPDEBUG_TOSTRING_HELP(ntoreturn);
-    OPDEBUG_TOSTRING_HELP(ntoskip);
-    OPDEBUG_TOSTRING_HELP_BOOL(exhaust);
-
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("keysExamined", additiveMetrics.keysExamined);
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("docsExamined", additiveMetrics.docsExamined);
-    OPDEBUG_TOSTRING_HELP_BOOL(hasSortStage);
-    OPDEBUG_TOSTRING_HELP_BOOL(usedDisk);
-    OPDEBUG_TOSTRING_HELP_BOOL(fromMultiPlanner);
-    if (replanReason) {
-        bool replanned = true;
-        OPDEBUG_TOSTRING_HELP_BOOL(replanned);
-        s << " replanReason:\"" << str::escape(redact(*replanReason)) << "\"";
-    }
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("nMatched", additiveMetrics.nMatched);
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("nModified", additiveMetrics.nModified);
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("ninserted", additiveMetrics.ninserted);
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("ndeleted", additiveMetrics.ndeleted);
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("nUpserted", additiveMetrics.nUpserted);
-    OPDEBUG_TOSTRING_HELP_BOOL(cursorExhausted);
-
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("keysInserted", additiveMetrics.keysInserted);
-    OPDEBUG_TOSTRING_HELP_OPTIONAL("keysDeleted", additiveMetrics.keysDeleted);
-    OPDEBUG_TOSTRING_HELP_ATOMIC("prepareReadConflicts", additiveMetrics.prepareReadConflicts);
-    OPDEBUG_TOSTRING_HELP_ATOMIC("writeConflicts", additiveMetrics.writeConflicts);
-
-    s << " numYields:" << curop.numYields();
-    OPDEBUG_TOSTRING_HELP(nreturned);
-
-    if (queryHash) {
-        s << " queryHash:" << zeroPaddedHex(*queryHash);
-        invariant(planCacheKey);
-        s << " planCacheKey:" << zeroPaddedHex(*planCacheKey);
-    }
-
-    if (!errInfo.isOK()) {
-        s << " ok:" << 0;
-        if (!errInfo.reason().empty()) {
-            s << " errMsg:\"" << str::escape(redact(errInfo.reason())) << "\"";
-        }
-        s << " errName:" << errInfo.code();
-        s << " errCode:" << static_cast<int>(errInfo.code());
-    }
-
-    if (responseLength > 0) {
-        s << " reslen:" << responseLength;
-    }
-
-    if (lockStats) {
-        BSONObjBuilder locks;
-        lockStats->report(&locks);
-        s << " locks:" << locks.obj().toString();
-    }
-
-    auto userCacheAcquisitionStats = curop.getReadOnlyUserCacheAcquisitionStats();
-    if (userCacheAcquisitionStats->shouldReport()) {
-        StringBuilder userCacheAcquisitionStatsBuilder;
-        userCacheAcquisitionStats->toString(&userCacheAcquisitionStatsBuilder,
-                                            opCtx->getServiceContext()->getTickSource());
-        s << " authorization:" << userCacheAcquisitionStatsBuilder.str();
-    }
-
-    BSONObj flowControlObj = makeFlowControlObject(flowControlStats);
-    if (flowControlObj.nFields() > 0) {
-        s << " flowControl:" << flowControlObj.toString();
-    }
-
-    {
-        const auto& readConcern = repl::ReadConcernArgs::get(opCtx);
-        if (readConcern.isSpecified()) {
-            s << " readConcern:" << readConcern.toBSONInner();
-        }
-    }
-
-    if (writeConcern && !writeConcern->usedDefaultConstructedWC) {
-        s << " writeConcern:" << writeConcern->toBSON();
-    }
-
-    if (storageStats) {
-        s << " storage:" << storageStats->toBSON().toString();
-    }
-
-    if (iscommand) {
-        s << " protocol:" << getProtoString(networkOp);
-    }
-
-    if (remoteOpWaitTime) {
-        s << " remoteOpWaitMillis:" << durationCount<Milliseconds>(*remoteOpWaitTime);
-    }
-
-    s << " " << durationCount<Milliseconds>(executionTime) << "ms";
-
-    return s.str();
-}
-
 #define OPDEBUG_TOATTR_HELP(x) \
     if (x >= 0)                \
     pAttrs->add(#x, x)
@@ -1124,7 +883,8 @@ void OpDebug::report(OperationContext* opCtx,
 
     if (queryHash) {
         pAttrs->addDeepCopy("queryHash", zeroPaddedHex(*queryHash));
-        invariant(planCacheKey);
+    }
+    if (planCacheKey) {
         pAttrs->addDeepCopy("planCacheKey", zeroPaddedHex(*planCacheKey));
     }
 
@@ -1273,7 +1033,8 @@ void OpDebug::append(OperationContext* opCtx,
 
     if (queryHash) {
         b.append("queryHash", zeroPaddedHex(*queryHash));
-        invariant(planCacheKey);
+    }
+    if (planCacheKey) {
         b.append("planCacheKey", zeroPaddedHex(*planCacheKey));
     }
 

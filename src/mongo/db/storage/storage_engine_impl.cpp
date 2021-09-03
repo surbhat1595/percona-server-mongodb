@@ -43,7 +43,7 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/storage/durable_catalog_feature_tracker.h"
+#include "mongo/db/storage/durable_catalog_impl.h"
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/kv/temporary_kv_record_store.h"
@@ -618,13 +618,13 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             // an unclean shutdown before a checkpoint is taken, the subsequent startup recovery can
             // see the now-dropped ident referenced by the old index catalog entry.
             //
-            // TODO (SERVER-56639): Remove this exception once all catalog writes are timestamped.
-            invariant(
-                engineIdents.find(indexIdent) != engineIdents.end() ||
-                    (indexMetaData.buildUUID && lastShutdownState == LastShutdownState::kUnclean),
-                str::stream() << "Failed to find an index data table matching " << indexIdent
-                              << " for durable index catalog entry " << indexMetaData.spec
-                              << " in collection " << coll);
+            // TODO (SERVER-56639): Remove this relaxation once index ident drops for startup
+            // recovery are timestamped.
+            invariant(engineIdents.find(indexIdent) != engineIdents.end() ||
+                          lastShutdownState == LastShutdownState::kUnclean,
+                      str::stream() << "Failed to find an index data table matching " << indexIdent
+                                    << " for durable index catalog entry " << indexMetaData.spec
+                                    << " in collection " << coll);
 
             // Any index build with a UUID is an unfinished two-phase build and must be restarted.
             // There are no special cases to handle on primaries or secondaries. An index build may
@@ -1015,16 +1015,6 @@ bool StorageEngineImpl::supportsRecoveryTimestamp() const {
 StatusWith<Timestamp> StorageEngineImpl::recoverToStableTimestamp(OperationContext* opCtx) {
     invariant(opCtx->lockState()->isW());
 
-    // The "feature document" should not be rolled back. Perform a non-timestamped update to the
-    // feature document to lock in the current state.
-    DurableCatalogImpl::FeatureTracker::FeatureBits featureInfo;
-    {
-        WriteUnitOfWork wuow(opCtx);
-        featureInfo = _catalog->getFeatureTracker()->getInfo(opCtx);
-        _catalog->getFeatureTracker()->putInfo(opCtx, featureInfo);
-        wuow.commit();
-    }
-
     auto state = catalog::closeCatalog(opCtx);
 
     StatusWith<Timestamp> swTimestamp = _engine->recoverToStableTimestamp(opCtx);
@@ -1291,6 +1281,14 @@ void StorageEngineImpl::unpinOldestTimestamp(const std::string& requestingServic
 
 void StorageEngineImpl::setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) {
     _engine->setPinnedOplogTimestamp(pinnedTimestamp);
+}
+
+DurableCatalog* StorageEngineImpl::getCatalog() {
+    return _catalog.get();
+}
+
+const DurableCatalog* StorageEngineImpl::getCatalog() const {
+    return _catalog.get();
 }
 
 }  // namespace mongo

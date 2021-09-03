@@ -2,22 +2,20 @@
  * Tests the result of running listCollections when there are time-series collections present.
  *
  * @tags: [
- *     assumes_no_implicit_collection_creation_after_drop,
- *     does_not_support_transactions,
- *     requires_fcv_49,
- *     requires_find_command,
- *     requires_getmore,
+ *   assumes_no_implicit_collection_creation_after_drop,
+ *   does_not_support_transactions,
+ *   requires_fcv_49,
+ *   requires_getmore,
  * ]
  */
 (function() {
 'use strict';
 
-const testDB = db.getSiblingDB(jsTestName());
-assert.commandWorked(testDB.dropDatabase());
-
 const timeFieldName = 'time';
 const metaFieldName = 'meta';
-const coll = testDB.getCollection('t');
+
+const collNamePrefix = 'timeseries_list_collections_';
+let collCount = 0;
 
 const getBucketMaxSpanSeconds = function(granularity) {
     switch (granularity) {
@@ -33,9 +31,11 @@ const getBucketMaxSpanSeconds = function(granularity) {
 };
 
 const testOptions = function(options) {
+    const coll = db.getCollection(collNamePrefix + collCount++);
     coll.drop();
+
     jsTestLog('Creating time-series collection with options: ' + tojson(options));
-    assert.commandWorked(testDB.createCollection(coll.getName(), options));
+    assert.commandWorked(db.createCollection(coll.getName(), options));
 
     if (!options.timeseries.hasOwnProperty('granularity')) {
         Object.assign(options.timeseries, {granularity: 'seconds'});
@@ -60,10 +60,11 @@ const testOptions = function(options) {
         });
     }
 
-    const collections =
-        assert.commandWorked(testDB.runCommand({listCollections: 1})).cursor.firstBatch;
+    const collections = assert.commandWorked(db.runCommand({listCollections: 1})).cursor.firstBatch;
     jsTestLog('Checking listCollections result: ' + tojson(collections));
-    assert.eq(collections.length, 3);
+    // Expected number of collections >= system.views + 2 * timeseries collections
+    // 'test' database may contain collections from other tests running in parallel.
+    assert.gte(collections.length, (collCount * 2 + 1));
     assert(collections.find(entry => entry.name === 'system.views'));
     assert(collections.find(entry => entry.name === 'system.buckets.' + coll.getName()));
     assert.docEq(

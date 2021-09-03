@@ -22,6 +22,9 @@
  *                                     results for the command run with read concern 'available'.
  * - behavior: Must be one of "unshardedOnly", "targetsPrimaryUsesConnectionVersioning" or
  * "versioned". Determines what system profiler checks are performed.
+ * @tags: [
+ *   disabled_due_to_server_58295
+ * ]
  */
 (function() {
 "use strict";
@@ -65,6 +68,7 @@ let testCases = {
     _configsvrDropDatabase: {skip: "primary only"},
     _configsvrMoveChunk: {skip: "primary only"},
     _configsvrMovePrimary: {skip: "primary only"},
+    _configsvrRemoveChunks: {skip: "primary only"},
     _configsvrRemoveShardFromZone: {skip: "primary only"},
     _configsvrRemoveTags: {skip: "primary only"},
     _configsvrReshardCollection: {skip: "primary only"},

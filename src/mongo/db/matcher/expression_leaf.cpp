@@ -45,6 +45,7 @@
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/util/regex_util.h"
+#include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -210,8 +211,7 @@ const std::set<char> RegexMatchExpression::kValidRegexFlags = {'i', 'm', 's', 'x
 
 std::unique_ptr<pcrecpp::RE> RegexMatchExpression::makeRegex(const std::string& regex,
                                                              const std::string& flags) {
-    return std::make_unique<pcrecpp::RE>(regex.c_str(),
-                                         regex_util::flagsToPcreOptions(flags, true));
+    return std::make_unique<pcrecpp::RE>(regex.c_str(), regex_util::flagsToPcreOptions(flags));
 }
 
 RegexMatchExpression::RegexMatchExpression(StringData path,
@@ -221,15 +221,11 @@ RegexMatchExpression::RegexMatchExpression(StringData path,
     : LeafMatchExpression(REGEX, path, std::move(annotation)),
       _regex(regex.toString()),
       _flags(options.toString()),
-      _re(new pcrecpp::RE(_regex.c_str(), regex_util::flagsToPcreOptions(_flags, true))) {
+      _re(new pcrecpp::RE(_regex.c_str(), regex_util::flagsToPcreOptions(_flags))) {
 
     uassert(ErrorCodes::BadValue,
             "Regular expression cannot contain an embedded null byte",
             _regex.find('\0') == std::string::npos);
-
-    uassert(ErrorCodes::BadValue,
-            "Regular expression options string cannot contain an embedded null byte",
-            _flags.find('\0') == std::string::npos);
 
     uassert(51091,
             str::stream() << "Regular expression is invalid: " << _re->error(),
@@ -310,7 +306,38 @@ ModMatchExpression::ModMatchExpression(StringData path,
 bool ModMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
     if (!e.isNumber())
         return false;
-    return overflow::safeMod(truncateToLong(e), _divisor) == _remainder;
+    long long dividend;
+    if (e.type() == BSONType::NumberDouble) {
+        auto dividendDouble = e.Double();
+
+        // If dividend is NaN or Infinity, then there is no match.
+        if (!std::isfinite(dividendDouble)) {
+            return false;
+        }
+        auto dividendLong = representAs<long long>(std::trunc(dividendDouble));
+        uassert(5732100,
+                str::stream() << "dividend value cannot be represented as a 64-bit integer: "
+                              << e.toString(false),
+                dividendLong);
+        dividend = *dividendLong;
+    } else if (e.type() == BSONType::NumberDecimal) {
+        auto dividendDecimal = e.Decimal();
+
+        // If dividend is NaN or Infinity, then there is no match.
+        if (!dividendDecimal.isFinite()) {
+            return false;
+        }
+        auto dividendLong =
+            representAs<long long>(dividendDecimal.round(Decimal128::kRoundTowardZero));
+        uassert(5732101,
+                str::stream() << "dividend value cannot be represented as a 64-bit integer: "
+                              << e.toString(false),
+                dividendLong);
+        dividend = *dividendLong;
+    } else {
+        dividend = e.numberLong();
+    }
+    return overflow::safeMod(dividend, _divisor) == _remainder;
 }
 
 void ModMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {

@@ -39,7 +39,6 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collation_spec.h"
@@ -49,6 +48,7 @@
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/recoverable_critical_section_service.h"
+#include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
@@ -189,7 +189,7 @@ ReshardingRecipientService::RecipientStateMachine::_runUntilStrictConsistencyOrE
                   "error"_attr = status);
         })
         .onUnrecoverableError([](const Status& status) {})
-        .until([abortToken](const Status& status) { return status.isOK(); })
+        .until<Status>([abortToken](const Status& status) { return status.isOK(); })
         .on(**executor, abortToken)
         .onError([this, executor, abortToken](Status status) {
             if (abortToken.isCanceled()) {
@@ -219,7 +219,7 @@ ReshardingRecipientService::RecipientStateMachine::_runUntilStrictConsistencyOrE
                           "error"_attr = status);
                 })
                 .onUnrecoverableError([](const Status& status) {})
-                .until([](const Status& retryStatus) { return retryStatus.isOK(); })
+                .until<Status>([](const Status& retryStatus) { return retryStatus.isOK(); })
                 .on(**executor, abortToken);
         })
         .onCompletion([this, executor, abortToken](Status status) {
@@ -259,7 +259,7 @@ ReshardingRecipientService::RecipientStateMachine::_notifyCoordinatorAndAwaitDec
                   "error"_attr = status);
         })
         .onUnrecoverableError([](const Status& status) {})
-        .until([](const Status& status) { return status.isOK(); })
+        .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, abortToken)
         .then([this, abortToken] {
             return future_util::withCancellation(_coordinatorHasDecisionPersisted.getFuture(),
@@ -306,6 +306,9 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_finishR
 
                        if (!_isAlsoDonor) {
                            auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+
+                           _externalState->clearFilteringMetadata(opCtx.get());
+
                            RecoverableCriticalSectionService::get(opCtx.get())
                                ->releaseRecoverableCriticalSection(
                                    opCtx.get(),
@@ -334,7 +337,7 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_finishR
                   "error"_attr = status);
         })
         .onUnrecoverableError([](const Status& status) {})
-        .until([](const Status& status) { return status.isOK(); })
+        .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, stepdownToken);
 }
 
@@ -638,6 +641,43 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::
             }
 
             _transitionToStrictConsistency();
+            _writeStrictConsistencyOplog();
+        });
+}
+
+void ReshardingRecipientService::RecipientStateMachine::_writeStrictConsistencyOplog() {
+    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+    auto rawOpCtx = opCtx.get();
+
+    auto generateOplogEntry = [&]() {
+        ReshardingChangeEventO2Field changeEvent{_metadata.getReshardingUUID(),
+                                                 ReshardingChangeEventEnum::kReshardDoneCatchUp};
+
+        repl::MutableOplogEntry oplog;
+        oplog.setOpType(repl::OpTypeEnum::kNoop);
+        oplog.setNss(_metadata.getTempReshardingNss());
+        oplog.setUuid(_metadata.getReshardingUUID());
+        oplog.setObject(BSON("msg"
+                             << "The temporary resharding collection now has a "
+                                "strictly consistent view of the data"));
+        oplog.setObject2(changeEvent.toBSON());
+        oplog.setFromMigrate(true);
+        oplog.setOpTime(OplogSlot());
+        oplog.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+        return oplog;
+    };
+
+    auto oplog = generateOplogEntry();
+    writeConflictRetry(
+        rawOpCtx, "ReshardDoneCatchUpOplog", NamespaceString::kRsOplogNamespace.ns(), [&] {
+            AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+            WriteUnitOfWork wunit(rawOpCtx);
+            const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
+            uassert(5063601,
+                    str::stream() << "Failed to create new oplog entry for oplog with opTime: "
+                                  << oplog.getOpTime().toString() << ": " << redact(oplog.toBSON()),
+                    !oplogOpTime.isNull());
+            wunit.commit();
         });
 }
 

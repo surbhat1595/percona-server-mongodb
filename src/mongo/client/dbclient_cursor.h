@@ -52,6 +52,10 @@ public:
     /** If true, safe to call next().  Requests more from server if necessary. */
     virtual bool more();
 
+    bool hasMoreToCome() const {
+        return _connectionHasPendingReplies;
+    }
+
     /** If true, there is more in our local buffers to be fetched via next(). Returns
         false when a getMore request back to server would be required.  You can use this
         if you want to exhaust whatever data has been fetched to the client already but
@@ -138,13 +142,6 @@ public:
     void setBatchSize(int newBatchSize) {
         batchSize = newBatchSize;
     }
-
-
-    /**
-     * Fold this in with queryOptions to force the use of legacy query operations.
-     * This flag is never sent over the wire and is only used locally.
-     */
-    enum { QueryOptionLocal_forceOpQuery = 1 << 30 };
 
     DBClientCursor(DBClientBase* client,
                    const NamespaceStringOrUUID& nsOrUuid,
@@ -302,7 +299,6 @@ private:
     // After a successful 'find' command, 'ns' is updated to contain the namespace returned by that
     // command.
     NamespaceString ns;
-    const bool _isCommand;
     BSONObj query;
     int nToReturn;
     bool haveLimit;
@@ -317,7 +313,6 @@ private:
     std::string _scopedHost;
     std::string _lazyHost;
     bool wasError;
-    bool _useFindCommand = true;
     bool _connectionHasPendingReplies = false;
     int _lastRequestId = 0;
     Milliseconds _awaitDataTimeout = Milliseconds{0};

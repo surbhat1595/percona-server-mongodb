@@ -35,11 +35,10 @@ feature_flags:
       cpp_varname: gFeatureFlagChangeStreamsOptimization
       default: false
 
-    featureFlagDotsAndDollars:
-      description: "Feature flag for allowing use of field names containing dots and dollars"
-      cpp_varname: gFeatureFlagDotsAndDollars
-      default: true
-      version: 5.0
+    featureFlagChangeStreamsRewrite:
+      description: "Feature flag for enabling change streams oplog rewrites"
+      cpp_varname: gFeatureFlagChangeStreamsRewrite
+      default: false
 
     featureFlagDensify:
       description: "Feature flag for allowing a $densify stage in an aggregation pipeline"
@@ -54,4 +53,24 @@ feature_flags:
     featureFlagSBEGroupAndLookup:
       description: "Feature flag for allowing SBE $group and $lookup"
       cpp_varname: gFeatureFlagSBEGroupAndLookup
+      default: false
+
+    featureFlagExactTopNAccumulator:
+      description: "Feature flag for allowing use of topN family of accumulators"
+      cpp_varname: gFeatureFlagExactTopNAccumulator
+      default: false
+      
+    featureFlagShardedLookup:
+      description: "Feature flag for allowing $lookup/$graphLookup into a sharded collection"
+      cpp_varname: gFeatureFlagShardedLookup 
+      default: false
+
+    featureFlagChangeStreamsPreAndPostImages:
+      description: "Feature flag for allowing usage of point-in-time pre- and post-images of documents in change streams"
+      cpp_varname: gFeatureFlagChangeStreamsPreAndPostImages
+      default: false
+
+    featureFlagSearchMeta:
+      description: "Feature flag for allowing use of search collectors alongside search results"
+      cpp_varname: gFeatureFlagSearchMeta
       default: false

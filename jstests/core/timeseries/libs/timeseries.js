@@ -11,6 +11,22 @@ var TimeseriesTest = class {
     }
 
     /**
+     * Returns whether time-series updates and deletes are supported.
+     */
+    static timeseriesUpdatesAndDeletesEnabled(conn) {
+        return assert
+            .commandWorked(
+                conn.adminCommand({getParameter: 1, featureFlagTimeseriesUpdatesAndDeletes: 1}))
+            .featureFlagTimeseriesUpdatesAndDeletes.value;
+    }
+
+    static shardedtimeseriesCollectionsEnabled(conn) {
+        return assert
+            .commandWorked(conn.adminCommand({getParameter: 1, featureFlagShardedTimeSeries: 1}))
+            .featureFlagShardedTimeSeries.value;
+    }
+
+    /**
      * Adjusts the values in 'fields' by a random amount.
      * Ensures that the new values stay in the range [0, 100].
      */
@@ -138,8 +154,8 @@ var TimeseriesTest = class {
     /**
      * Runs the provided test with both ordered and unordered inserts.
      */
-    static run(testFn) {
-        if (!TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo())) {
+    static run(testFn, theDb) {
+        if (!TimeseriesTest.timeseriesCollectionsEnabled((theDb || db).getMongo())) {
             jsTestLog("Skipping test because the time-series collection feature flag is disabled");
             return;
         }

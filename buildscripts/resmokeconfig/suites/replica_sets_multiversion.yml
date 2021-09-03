@@ -9,8 +9,10 @@ selector:
   - requires_fcv_48
   - requires_fcv_49
   - requires_fcv_50
+  - requires_fcv_51
   - backport_required_multiversion
   - replica_sets_multiversion_backport_required_multiversion
+  - disabled_due_to_server_58295
   exclude_files:
   - jstests/replsets/initial_sync_rename_collection.js
   - jstests/replsets/initial_sync_drop_collection.js
@@ -26,7 +28,6 @@ executor:
   config:
     shell_options:
       nodb: ''
-      readMode: commands
       global_vars:
         TestData:
           useRandomBinVersionsWithinReplicaSet: true

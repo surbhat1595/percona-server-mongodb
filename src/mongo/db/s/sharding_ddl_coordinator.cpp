@@ -64,7 +64,8 @@ ShardingDDLCoordinator::ShardingDDLCoordinator(ShardingDDLCoordinatorService* se
                                                const BSONObj& coorDoc)
     : _service(service),
       _coordId(extractShardingDDLCoordinatorMetadata(coorDoc).getId()),
-      _recoveredFromDisk(extractShardingDDLCoordinatorMetadata(coorDoc).getRecoveredFromDisk()) {}
+      _recoveredFromDisk(extractShardingDDLCoordinatorMetadata(coorDoc).getRecoveredFromDisk()),
+      _firstExecution(!_recoveredFromDisk) {}
 
 ShardingDDLCoordinator::~ShardingDDLCoordinator() {
     invariant(_constructionCompletionPromise.getFuture().isReady());
@@ -116,9 +117,9 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireLockAsync(
                auto distLockManager = DistLockManager::get(opCtx);
 
                const auto coorName = DDLCoordinatorType_serializer(_coordId.getOperationType());
-               auto dbDistLock = uassertStatusOK(distLockManager->lock(
+               auto distLock = uassertStatusOK(distLockManager->lock(
                    opCtx, resource, coorName, DistLockManager::kDefaultLockTimeout));
-               _scopedLocks.emplace(dbDistLock.moveToAnotherThread());
+               _scopedLocks.emplace(distLock.moveToAnotherThread());
            })
         .until([this](Status status) { return (!_recoveredFromDisk) || status.isOK(); })
         .withBackoffBetweenIterations(kExponentialBackoff)
@@ -214,7 +215,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                          status.isA<ErrorCategory::RetriableError>() ||
                          status.isA<ErrorCategory::CancellationError>() ||
                          status.isA<ErrorCategory::ExceededTimeLimitError>() ||
-                         status == ErrorCodes::Interrupted ||
+                         status == ErrorCodes::Interrupted || status == ErrorCodes::LockBusy ||
                          status == ErrorCodes::CommandNotFound) &&
                         !token.isCanceled()) {
                         LOGV2_DEBUG(5656000,
@@ -222,6 +223,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                                     "Re-executing sharding DDL coordinator",
                                     "coordinatorId"_attr = _coordId,
                                     "reason"_attr = redact(status));
+                        _firstExecution = false;
                         return false;
                     }
                     return true;
@@ -236,8 +238,9 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             auto completionStatus = status;
 
             // Release the coordinator only if we are not stepping down
-            if (!status.isA<ErrorCategory::NotPrimaryError>() &&
-                !status.isA<ErrorCategory::ShutdownError>()) {
+            if ((!status.isA<ErrorCategory::NotPrimaryError>() &&
+                 !status.isA<ErrorCategory::ShutdownError>()) ||
+                (!status.isOK() && _completeOnError)) {
                 try {
                     LOGV2(5565601,
                           "Releasing sharding DDL coordinator",

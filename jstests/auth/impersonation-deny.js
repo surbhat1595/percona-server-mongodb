@@ -1,4 +1,5 @@
 // Test that manually inserted impersonation can't escalate privileges.
+// @tags: [requires_replication]
 
 (function() {
 'use strict';
@@ -56,6 +57,13 @@ function testMongod(mongod, systemuserpwd = undefined) {
     const standalone = MongoRunner.runMongod({auth: ''});
     testMongod(standalone);
     MongoRunner.stopMongod(standalone);
+}
+
+if (!jsTestOptions().noJournal &&
+    (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+    print("Skipping test because running WiredTiger without journaling isn't a valid" +
+          " replica set configuration");
+    return;
 }
 
 {

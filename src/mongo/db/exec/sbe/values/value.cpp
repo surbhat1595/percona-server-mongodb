@@ -143,7 +143,7 @@ std::pair<TypeTags, Value> makeCopyPcreRegex(const PcreRegex& regex) {
 }
 
 void PcreRegex::_compile() {
-    const auto pcreOptions = regex_util::flagsToPcreOptions(_options.c_str(), false).all_options();
+    const auto pcreOptions = regex_util::flagsToPcreOptions(_options.c_str()).all_options();
     const char* compile_error;
     int eoffset;
     _pcrePtr = pcre_compile(_pattern.c_str(), pcreOptions, &compile_error, &eoffset, nullptr);
@@ -823,6 +823,8 @@ std::size_t hashValue(TypeTags tag, Value val, const CollatorInterface* collator
             auto dbl = bitcastTo<double>(val);
             if (auto asInt = representAs<int64_t>(dbl); asInt) {
                 return abslHash(*asInt);
+            } else if (std::isnan(dbl)) {
+                return abslHash(std::numeric_limits<double>::quiet_NaN());
             } else {
                 // Doubles not representable as int64_t will hash as doubles.
                 return abslHash(dbl);
@@ -833,6 +835,8 @@ std::size_t hashValue(TypeTags tag, Value val, const CollatorInterface* collator
             auto dec = bitcastTo<Decimal128>(val);
             if (auto asInt = representAs<int64_t>(dec); asInt) {
                 return abslHash(*asInt);
+            } else if (dec.isNaN()) {
+                return abslHash(std::numeric_limits<double>::quiet_NaN());
             } else if (auto asDbl = representAs<double>(dec); asDbl) {
                 return abslHash(*asDbl);
             } else {
@@ -1158,6 +1162,11 @@ std::pair<TypeTags, Value> compareValue(TypeTags lhsTag,
 bool isNaN(TypeTags tag, Value val) {
     return (tag == TypeTags::NumberDouble && std::isnan(bitcastTo<double>(val))) ||
         (tag == TypeTags::NumberDecimal && bitcastTo<Decimal128>(val).isNaN());
+}
+
+bool isInfinity(TypeTags tag, Value val) {
+    return (tag == TypeTags::NumberDouble && std::isinf(bitcastTo<double>(val))) ||
+        (tag == TypeTags::NumberDecimal && bitcastTo<Decimal128>(val).isInfinite());
 }
 
 void ArraySet::push_back(TypeTags tag, Value val) {

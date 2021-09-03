@@ -50,6 +50,7 @@
 #include "mongo/db/s/recoverable_critical_section_service.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
+#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
@@ -170,6 +171,10 @@ public:
                 "update"_attr = update);
         }
     }
+
+    void clearFilteringMetadata(OperationContext* opCtx) {
+        resharding::clearFilteringMetadata(opCtx, true /* scheduleAsyncRefresh */);
+    }
 };
 
 }  // namespace
@@ -197,6 +202,8 @@ ReshardingDonorService::DonorStateMachine::DonorStateMachine(
       _metadata{donorDoc.getCommonReshardingMetadata()},
       _recipientShardIds{donorDoc.getRecipientShards()},
       _donorCtx{donorDoc.getMutableState()},
+      _donorMetricsToRestore{donorDoc.getMetrics() ? donorDoc.getMetrics().get()
+                                                   : ReshardingDonorMetrics()},
       _externalState{std::move(externalState)},
       _markKilledExecutor(std::make_shared<ThreadPool>([] {
           ThreadPool::Options options;
@@ -240,7 +247,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_runUntilBlockin
                   "error"_attr = status);
         })
         .onUnrecoverableError([](const Status& status) {})
-        .until([](const Status& status) { return status.isOK(); })
+        .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, abortToken)
         .onError([this, executor, abortToken](Status status) {
             if (abortToken.isCanceled()) {
@@ -276,7 +283,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_runUntilBlockin
                           "error"_attr = status);
                 })
                 .onUnrecoverableError([](const Status& status) {})
-                .until([](const Status& status) { return status.isOK(); })
+                .until<Status>([](const Status& status) { return status.isOK(); })
                 .on(**executor, abortToken);
         })
         .onCompletion([this, executor, abortToken](Status status) {
@@ -316,7 +323,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_notifyCoordinat
                   "error"_attr = status);
         })
         .onUnrecoverableError([](const Status& status) {})
-        .until([](const Status& status) { return status.isOK(); })
+        .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, abortToken)
         .then([this, abortToken] {
             return future_util::withCancellation(_coordinatorHasDecisionPersisted.getFuture(),
@@ -344,6 +351,9 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 
                {
                    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+
+                   _externalState->clearFilteringMetadata(opCtx.get());
+
                    RecoverableCriticalSectionService::get(opCtx.get())
                        ->releaseRecoverableCriticalSection(
                            opCtx.get(),
@@ -370,7 +380,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
                   "error"_attr = status);
         })
         .onUnrecoverableError([](const Status& status) {})
-        .until([](const Status& status) { return status.isOK(); })
+        .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, stepdownToken);
 }
 
@@ -557,6 +567,7 @@ void ReshardingDonorService::DonorStateMachine::
             oplog.setObject(BSON("msg"
                                  << "Created temporary resharding collection"));
             oplog.setObject2(changeEvent.toBSON());
+            oplog.setFromMigrate(true);
             oplog.setOpTime(OplogSlot());
             oplog.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
             return oplog;
@@ -984,8 +995,9 @@ ReshardingMetrics* ReshardingDonorService::DonorStateMachine::_metrics() const {
 }
 
 void ReshardingDonorService::DonorStateMachine::_startMetrics() {
-    if (_donorCtx.getState() > DonorStateEnum::kPreparingToDonate) {
-        _metrics()->onStepUp(ReshardingMetrics::Role::kDonor);
+    auto donorState = _donorCtx.getState();
+    if (donorState > DonorStateEnum::kPreparingToDonate) {
+        _metrics()->onStepUp(donorState, _donorMetricsToRestore);
     } else {
         _metrics()->onStart(ReshardingMetrics::Role::kDonor, getCurrentTime());
     }

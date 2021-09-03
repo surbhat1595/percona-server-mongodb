@@ -548,18 +548,15 @@ void WiredTigerRecordStore::OplogStones::_calculateStonesBySampling(OperationCon
           "approximately {containsNumRecords} records totaling to {containsNumBytes} bytes",
           "Taking samples and assuming each oplog section contains",
           "numSamples"_attr = numSamples,
+          "minBytesPerStone"_attr = _minBytesPerStone,
           "containsNumRecords"_attr = estRecordsPerStone,
           "containsNumBytes"_attr = estBytesPerStone);
-
-    // Inform the random cursor of the number of samples we intend to take. This allows it to
-    // account for skew in the tree shape.
-    const std::string extraConfig = str::stream() << "next_random_sample_size=" << numSamples;
 
     // Divide the oplog into 'wholeStones' logical sections, with each section containing
     // approximately 'estRecordsPerStone'. Do so by oversampling the oplog, sorting the samples in
     // order of their RecordId, and then choosing the samples expected to be near the right edge of
     // each logical section.
-    auto cursor = _rs->getRandomCursorWithOptions(opCtx, extraConfig);
+    auto cursor = _rs->getRandomCursor(opCtx);
     std::vector<RecordIdAndWall> oplogEstimates;
     auto lastProgressLog = Date_t::now();
     for (int i = 0; i < numSamples; ++i) {
@@ -1576,8 +1573,7 @@ StatusWith<RecordData> WiredTigerRecordStore::updateWithDamages(
 
 std::unique_ptr<RecordCursor> WiredTigerRecordStore::getRandomCursor(
     OperationContext* opCtx) const {
-    const char* extraConfig = "";
-    return getRandomCursorWithOptions(opCtx, extraConfig);
+    return std::make_unique<RandomCursor>(opCtx, *this, "");
 }
 
 Status WiredTigerRecordStore::truncate(OperationContext* opCtx) {
@@ -2302,11 +2298,6 @@ std::unique_ptr<SeekableRecordCursor> StandardWiredTigerRecordStore::getCursor(
     }
 
     return std::make_unique<WiredTigerRecordStoreStandardCursor>(opCtx, *this, forward);
-}
-
-std::unique_ptr<RecordCursor> StandardWiredTigerRecordStore::getRandomCursorWithOptions(
-    OperationContext* opCtx, StringData extraConfig) const {
-    return std::make_unique<RandomCursor>(opCtx, *this, extraConfig);
 }
 
 WiredTigerRecordStoreStandardCursor::WiredTigerRecordStoreStandardCursor(

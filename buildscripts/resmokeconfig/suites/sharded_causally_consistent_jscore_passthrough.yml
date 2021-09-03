@@ -21,7 +21,6 @@ selector:
   - jstests/core/fsync.js  # uses fsync.
   - jstests/core/geo_update_btree2.js  # notablescan.
   - jstests/core/index9.js  # "local" database.
-  - jstests/core/invalidated_legacy_cursors.js # capped collections.
   - jstests/core/queryoptimizera.js  # "local" database.
   - jstests/core/stages*.js  # stageDebug.
   - jstests/core/tailable_cursor_invalidation.js # capped collections.
@@ -109,7 +108,6 @@ executor:
       eval: |
          load("jstests/libs/override_methods/enable_causal_consistency.js");
          load("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
-      readMode: commands
   hooks:
   - class: CheckReplDBHashInBackground
   - class: CheckReplDBHash

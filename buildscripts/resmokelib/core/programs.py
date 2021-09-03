@@ -145,6 +145,9 @@ def mongo_shell_program(  # pylint: disable=too-many-arguments,too-many-branches
         "wiredTigerCollectionConfigString": (config.WT_COLL_CONFIG, ""),
         "wiredTigerEngineConfigString": (config.WT_ENGINE_CONFIG, ""),
         "wiredTigerIndexConfigString": (config.WT_INDEX_CONFIG, ""),
+
+        # Evergreen variables.
+        "evergreenDebugSymbolsUrl": (config.DEBUG_SYMBOLS_URL, ""),
     }
 
     test_data = global_vars.get("TestData", {}).copy()
@@ -188,8 +191,8 @@ def mongo_shell_program(  # pylint: disable=too-many-arguments,too-many-branches
 
     # If the 'logComponentVerbosity' setParameter for mongod was not already specified, we set its
     # value to a default.
-    mongod_set_parameters.setdefault("logComponentVerbosity",
-                                     mongod_launcher.default_mongod_log_component_verbosity())
+    mongod_set_parameters.setdefault(
+        "logComponentVerbosity", mongod_launcher.get_default_log_component_verbosity_for_mongod())
 
     # If the 'enableFlowControl' setParameter for mongod was not already specified, we set its value
     # to a default.
@@ -259,12 +262,6 @@ def mongo_shell_program(  # pylint: disable=too-many-arguments,too-many-branches
     eval_str = "; ".join(eval_sb)
     args.append("--eval")
     args.append(eval_str)
-
-    if config.SHELL_READ_MODE is not None:
-        kwargs["readMode"] = config.SHELL_READ_MODE
-
-    if config.SHELL_WRITE_MODE is not None:
-        kwargs["writeMode"] = config.SHELL_WRITE_MODE
 
     if connection_string is not None:
         # The --host and --port options are ignored by the mongo shell when an explicit connection

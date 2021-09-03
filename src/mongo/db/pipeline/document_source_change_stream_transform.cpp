@@ -50,6 +50,7 @@
 #include "mongo/db/transaction_history_iterator.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/update/update_oplog_entry_version.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -316,11 +317,31 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
             break;
         }
         case repl::OpTypeEnum::kNoop: {
-            operationType = DocumentSourceChangeStream::kNewShardDetectedOpType;
-            // Generate a fake document Id for NewShardDetected operation so that we can resume
-            // after this operation.
-            documentKey = Value(Document{{DocumentSourceChangeStream::kIdField,
-                                          input[repl::OplogEntry::kObject2FieldName]}});
+            auto o2Type = input.getNestedField("o2.type");
+            tassert(5052200, "o2.type is missing from noop oplog event", !o2Type.missing());
+
+            if (o2Type.getString() == "migrateChunkToNewShard"_sd) {
+                operationType = DocumentSourceChangeStream::kNewShardDetectedOpType;
+                // Generate a fake document Id for NewShardDetected operation so that we can
+                // resume after this operation.
+                documentKey = Value(Document{{DocumentSourceChangeStream::kIdField,
+                                              input[repl::OplogEntry::kObject2FieldName]}});
+            } else if (o2Type.getString() == "reshardBegin"_sd) {
+                operationType = DocumentSourceChangeStream::kReshardBeginOpType;
+                doc.addField(DocumentSourceChangeStream::kReshardingUuidField,
+                             input.getNestedField("o2.reshardingUUID"));
+                documentKey = Value(Document{{DocumentSourceChangeStream::kIdField,
+                                              input[repl::OplogEntry::kObject2FieldName]}});
+            } else if (o2Type.getString() == "reshardDoneCatchUp"_sd) {
+                operationType = DocumentSourceChangeStream::kReshardDoneCatchUpOpType;
+                doc.addField(DocumentSourceChangeStream::kReshardingUuidField,
+                             input.getNestedField("o2.reshardingUUID"));
+                documentKey = Value(Document{{DocumentSourceChangeStream::kIdField,
+                                              input[repl::OplogEntry::kObject2FieldName]}});
+            } else {
+                // We should never see an unknown noop entry.
+                MONGO_UNREACHABLE_TASSERT(5052201);
+            }
             break;
         }
         default: { MONGO_UNREACHABLE; }
@@ -361,16 +382,18 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
     const bool isSingleElementKey = true;
     doc.metadata().setSortKey(Value{resumeToken}, isSingleElementKey);
 
-    // "invalidate" and "newShardDetected" entries have fewer fields.
+    // Invalidation, topology change, and resharding events have fewer fields.
     if (operationType == DocumentSourceChangeStream::kInvalidateOpType ||
-        operationType == DocumentSourceChangeStream::kNewShardDetectedOpType) {
+        operationType == DocumentSourceChangeStream::kNewShardDetectedOpType ||
+        operationType == DocumentSourceChangeStream::kReshardBeginOpType ||
+        operationType == DocumentSourceChangeStream::kReshardDoneCatchUpOpType) {
         return doc.freeze();
     }
 
     // Add the post-image, pre-image, namespace, documentKey and other fields as appropriate.
     doc.addField(DocumentSourceChangeStream::kFullDocumentField, std::move(fullDocument));
     if (_includePreImageOptime) {
-        // Set 'kFullDocumentBeforeChangeField' to the pre-image optime. The DSCSLookupPreImage
+        // Set 'kFullDocumentBeforeChangeField' to the pre-image optime. The DSCSAddPreImage
         // stage will replace this optime with the actual pre-image taken from the oplog.
         doc.addField(DocumentSourceChangeStream::kFullDocumentBeforeChangeField,
                      std::move(preImageOpTime));

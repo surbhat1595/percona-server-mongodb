@@ -2961,6 +2961,11 @@ void TopologyCoordinator::adjustMaintenanceCountBy(int inc) {
     invariant(_maintenanceModeCalls >= 0);
 }
 
+void TopologyCoordinator::resetMaintenanceCount() {
+    invariant(_role == Role::kFollower);
+    _maintenanceModeCalls = 0;
+}
+
 int TopologyCoordinator::getMaintenanceCount() const {
     return _maintenanceModeCalls;
 }
@@ -3042,10 +3047,11 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
 
     int syncSourceIndex = oqMetadata.getSyncSourceIndex();
 
-    // Change sync source if chaining is disabled, we are not syncing from the primary, and we know
-    // who the new primary is. We do not consider chaining disabled if we are the primary, since
-    // we are in catchup mode.
-    auto chainingDisabled = !_rsConfig.isChainingAllowed() && _currentPrimaryIndex != _selfIndex;
+    // Change sync source if chaining is disabled (without overrides), we are not syncing from the
+    // primary, and we know who the new primary is. We do not consider chaining disabled if we are
+    // the primary, since we are in catchup mode.
+    auto chainingDisabled = !_rsConfig.isChainingAllowed() &&
+        !enableOverrideClusterChainingSetting.load() && _currentPrimaryIndex != _selfIndex;
     auto foundNewPrimary = _currentPrimaryIndex != -1 && _currentPrimaryIndex != currentSourceIndex;
     if (!replMetadata.getIsPrimary() && chainingDisabled && foundNewPrimary) {
         auto newPrimary = _rsConfig.getMemberAt(_currentPrimaryIndex).getHostAndPort();

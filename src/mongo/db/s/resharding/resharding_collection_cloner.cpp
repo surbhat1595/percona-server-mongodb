@@ -312,6 +312,7 @@ bool ReshardingCollectionCloner::doOneBatch(OperationContext* opCtx, Pipeline& p
 
     int bytesInserted = resharding::data_copy::insertBatch(opCtx, _outputNss, batch);
     _env->metrics()->onDocumentsCopied(batch.size(), bytesInserted);
+    _env->metrics()->gotInserts(batch.size());
     return true;
 }
 
@@ -334,7 +335,12 @@ SemiFuture<void> ReshardingCollectionCloner::run(
                }
 
                auto opCtx = factory.makeOperationContext(&cc());
+               auto guard = makeGuard([&] {
+                   chainCtx->pipeline->dispose(opCtx.get());
+                   chainCtx->pipeline.reset();
+               });
                chainCtx->moreToCome = doOneBatch(opCtx.get(), *chainCtx->pipeline);
+               guard.dismiss();
            })
         .onTransientError([this](const Status& status) {
             LOGV2(5269300,
@@ -352,7 +358,7 @@ SemiFuture<void> ReshardingCollectionCloner::run(
                         "readTimestamp"_attr = _atClusterTime,
                         "error"_attr = redact(status));
         })
-        .until([chainCtx, factory](const Status& status) {
+        .until<Status>([chainCtx, factory](const Status& status) {
             if (!status.isOK() && chainCtx->pipeline) {
                 auto opCtx = factory.makeOperationContext(&cc());
                 chainCtx->pipeline->dispose(opCtx.get());

@@ -151,8 +151,6 @@ std::pair<sbe::value::SlotId, EvalStage> generateTraverseHelper(
 
     // The field we will be traversing at the current nested level.
     auto fieldSlot{slotIdGenerator->generate()};
-    // The result coming from the 'in' branch of the traverse plan stage.
-    auto outputSlot{slotIdGenerator->generate()};
 
     // Generate the projection stage to read a sub-field at the current nested level and bind it
     // to 'fieldSlot'.
@@ -163,31 +161,24 @@ std::pair<sbe::value::SlotId, EvalStage> generateTraverseHelper(
                                           sbe::makeE<sbe::EVariable>(inputSlot),
                                           sbe::makeE<sbe::EConstant>(fp.getFieldName(level))));
 
-    EvalStage innerBranch;
     if (level == fp.getPathLength() - 1) {
-        innerBranch = makeProject(makeLimitCoScanStage(planNodeId),
-                                  planNodeId,
-                                  outputSlot,
-                                  sbe::makeE<sbe::EVariable>(fieldSlot));
-    } else {
-        // Generate nested traversal.
-        auto [slot, stage] = generateTraverseHelper(makeLimitCoScanStage(planNodeId),
-                                                    fieldSlot,
-                                                    fp,
-                                                    level + 1,
-                                                    planNodeId,
-                                                    slotIdGenerator);
-        innerBranch =
-            makeProject(std::move(stage), planNodeId, outputSlot, sbe::makeE<sbe::EVariable>(slot));
+        // For the last level, we can just return the field slot without the need for a
+        // traverse stage.
+        return {fieldSlot, std::move(inputStage)};
     }
 
-    // The final traverse stage for the current nested level.
+    // Generate nested traversal.
+    auto [innerResultSlot, innerBranch] = generateTraverseHelper(
+        makeLimitCoScanStage(planNodeId), fieldSlot, fp, level + 1, planNodeId, slotIdGenerator);
+
+    // Generate the traverse stage for the current nested level.
+    auto outputSlot{slotIdGenerator->generate()};
     return {outputSlot,
             makeTraverse(std::move(inputStage),
                          std::move(innerBranch),
                          fieldSlot,
                          outputSlot,
-                         outputSlot,
+                         innerResultSlot,
                          nullptr,
                          nullptr,
                          planNodeId,
@@ -2226,7 +2217,75 @@ public:
         unsupportedExpression("$pow");
     }
     void visit(const ExpressionRange* expr) final {
-        unsupportedExpression(expr->getOpName());
+        auto outerFrameId = _context->state.frameId();
+        auto innerFrameId = _context->state.frameId();
+
+        sbe::EVariable startRef(outerFrameId, 0);
+        sbe::EVariable endRef(outerFrameId, 1);
+        sbe::EVariable stepRef(outerFrameId, 2);
+
+        sbe::EVariable convertedStartRef(innerFrameId, 0);
+        sbe::EVariable convertedEndRef(innerFrameId, 1);
+        sbe::EVariable convertedStepRef(innerFrameId, 2);
+
+        auto step = expr->getChildren().size() == 3
+            ? _context->popExpr()
+            : sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32, 1);
+        auto end = _context->popExpr();
+        auto start = _context->popExpr();
+
+        auto rangeExpr = sbe::makeE<sbe::ELocalBind>(
+            outerFrameId,
+            sbe::makeEs(std::move(start), std::move(end), std::move(step)),
+            buildMultiBranchConditional(
+                CaseValuePair{
+                    generateNonNumericCheck(startRef),
+                    sbe::makeE<sbe::EFail>(ErrorCodes::Error{5154300},
+                                           "$range only supports numeric types for start")},
+                CaseValuePair{generateNonNumericCheck(endRef),
+                              sbe::makeE<sbe::EFail>(ErrorCodes::Error{5154301},
+                                                     "$range only supports numeric types for end")},
+                CaseValuePair{
+                    generateNonNumericCheck(stepRef),
+                    sbe::makeE<sbe::EFail>(ErrorCodes::Error{5154302},
+                                           "$range only supports numeric types for step")},
+                sbe::makeE<sbe::ELocalBind>(
+                    innerFrameId,
+                    sbe::makeEs(sbe::makeE<sbe::ENumericConvert>(startRef.clone(),
+                                                                 sbe::value::TypeTags::NumberInt32),
+                                sbe::makeE<sbe::ENumericConvert>(endRef.clone(),
+                                                                 sbe::value::TypeTags::NumberInt32),
+                                sbe::makeE<sbe::ENumericConvert>(
+                                    stepRef.clone(), sbe::value::TypeTags::NumberInt32)),
+                    buildMultiBranchConditional(
+                        CaseValuePair{
+                            makeNot(makeFunction("exists", convertedStartRef.clone())),
+                            sbe::makeE<sbe::EFail>(
+                                ErrorCodes::Error{5154303},
+                                "$range start argument cannot be represented as a 32-bit integer")},
+                        CaseValuePair{
+                            makeNot(makeFunction("exists", convertedEndRef.clone())),
+                            sbe::makeE<sbe::EFail>(
+                                ErrorCodes::Error{5154304},
+                                "$range end argument cannot be represented as a 32-bit integer")},
+                        CaseValuePair{
+                            makeNot(makeFunction("exists", convertedStepRef.clone())),
+                            sbe::makeE<sbe::EFail>(
+                                ErrorCodes::Error{5154305},
+                                "$range step argument cannot be represented as a 32-bit integer")},
+                        CaseValuePair{
+                            makeBinaryOp(
+                                sbe::EPrimBinary::eq,
+                                convertedStepRef.clone(),
+                                sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32, 0)),
+                            sbe::makeE<sbe::EFail>(ErrorCodes::Error{5154306},
+                                                   "$range requires a non-zero step value")},
+                        makeFunction("newArrayFromRange",
+                                     convertedStartRef.clone(),
+                                     convertedEndRef.clone(),
+                                     convertedStepRef.clone())))));
+
+        _context->pushExpr(std::move(rangeExpr));
     }
     void visit(const ExpressionReduce* expr) final {
         unsupportedExpression("$reduce");
@@ -2668,11 +2727,51 @@ public:
     }
 
     void visit(const ExpressionTsSecond* expr) final {
-        unsupportedExpression("$tsSecond");
+        _context->ensureArity(1);
+
+        auto tsSecondExpr = makeLocalBind(
+            _context->state.frameIdGenerator,
+            [&](sbe::EVariable operand) {
+                // The branching is as follows,
+                // *  if the input value is null or missing, then return null
+                // *  if the input value is not timestamp, then throw an exception
+                // *  else, create a builtin function with the name 'tsSecond'
+                return buildMultiBranchConditional(
+                    CaseValuePair{generateNullOrMissing(operand),
+                                  makeConstant(sbe::value::TypeTags::Null, 0)},
+                    CaseValuePair{generateNonTimestampCheck(operand),
+                                  sbe::makeE<sbe::EFail>(
+                                      ErrorCodes::Error{5687400},
+                                      str::stream() << expr->getOpName()
+                                                    << " expects argument of type timestamp")},
+                    makeFunction("tsSecond", operand.clone()));
+            },
+            _context->popExpr());
+        _context->pushExpr(std::move(tsSecondExpr));
     }
 
     void visit(const ExpressionTsIncrement* expr) final {
-        unsupportedExpression("$tsIncrement");
+        _context->ensureArity(1);
+
+        auto tsIncrementExpr = makeLocalBind(
+            _context->state.frameIdGenerator,
+            [&](sbe::EVariable operand) {
+                // The branching is as follows,
+                // *  if the input value is null or missing, then return null
+                // *  if the input value is not timestamp, then throw an exception
+                // *  else, create a builtin function with the name 'tsIncrement'
+                return buildMultiBranchConditional(
+                    CaseValuePair{generateNullOrMissing(operand),
+                                  makeConstant(sbe::value::TypeTags::Null, 0)},
+                    CaseValuePair{generateNonTimestampCheck(operand),
+                                  sbe::makeE<sbe::EFail>(
+                                      ErrorCodes::Error{5687401},
+                                      str::stream() << expr->getOpName()
+                                                    << " expects argument of type timestamp")},
+                    makeFunction("tsIncrement", operand.clone()));
+            },
+            _context->popExpr());
+        _context->pushExpr(std::move(tsIncrementExpr));
     }
 
 private:

@@ -662,9 +662,6 @@ env.Library(
         'commands/test_commands_enabled',
         'service_context',
     ],
-    LIBDEPS_TYPEINFO=[
-        '$BUILD_DIR/mongo/db/commands',
-    ]
 )
 
 env.Library(
@@ -840,9 +837,6 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-    ],
-    LIBDEPS_TYPEINFO=[
-        '$BUILD_DIR/mongo/db/service_context',
     ],
 )
 
@@ -1262,6 +1256,7 @@ env.Library(
         'ops/update_result.cpp',
         'pipeline/document_source_cursor.cpp',
         'pipeline/document_source_geo_near_cursor.cpp',
+        'pipeline/inner_pipeline_stage_impl.cpp',
         'pipeline/pipeline_d.cpp',
         'pipeline/plan_executor_pipeline.cpp',
         'pipeline/plan_explainer_pipeline.cpp',
@@ -1287,6 +1282,7 @@ env.Library(
         'query/sbe_plan_ranker.cpp',
         'query/sbe_runtime_planner.cpp',
         'query/sbe_stage_builder.cpp',
+        'query/sbe_stage_builder_accumulator.cpp',
         'query/sbe_stage_builder_coll_scan.cpp',
         'query/sbe_stage_builder_expression.cpp',
         'query/sbe_stage_builder_filter.cpp',
@@ -1297,7 +1293,6 @@ env.Library(
         'query/stage_builder_util.cpp',
         'query/wildcard_multikey_paths.cpp',
         'query/yield_policy_callbacks_impl.cpp',
-        'run_op_kill_cursors.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',

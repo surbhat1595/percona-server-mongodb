@@ -51,6 +51,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/all_database_cloner.h"
 #include "mongo/db/repl/initial_sync_state.h"
+#include "mongo/db/repl/initial_syncer_factory.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_fetcher.h"
@@ -126,6 +127,9 @@ MONGO_FAIL_POINT_DEFINE(initialSyncHangBeforeCompletingOplogFetching);
 // Failpoint which causes the initial sync function to hang before choosing a sync source.
 MONGO_FAIL_POINT_DEFINE(initialSyncHangBeforeChoosingSyncSource);
 
+// Failpoint which causes the initial sync function to hang after finishing.
+MONGO_FAIL_POINT_DEFINE(initialSyncHangAfterFinish);
+
 // Failpoints for synchronization, shared with cloners.
 extern FailPoint initialSyncFuzzerSynchronizationPoint1;
 extern FailPoint initialSyncFuzzerSynchronizationPoint2;
@@ -200,8 +204,29 @@ void pauseAtInitialSyncFuzzerSyncronizationPoints(std::string msg) {
 
 }  // namespace
 
+ServiceContext::ConstructorActionRegisterer initialSyncerRegisterer(
+    "InitialSyncerRegisterer",
+    {"InitialSyncerFactoryRegisterer"} /* dependency list */,
+    [](ServiceContext* service) {
+        InitialSyncerFactory::get(service)->registerInitialSyncer(
+            "logical",
+            [](InitialSyncerInterface::Options opts,
+               std::unique_ptr<DataReplicatorExternalState> dataReplicatorExternalState,
+               ThreadPool* writerPool,
+               StorageInterface* storage,
+               ReplicationProcess* replicationProcess,
+               const InitialSyncerInterface::OnCompletionFn& onCompletion) {
+                return std::make_unique<InitialSyncer>(opts,
+                                                       std::move(dataReplicatorExternalState),
+                                                       writerPool,
+                                                       storage,
+                                                       replicationProcess,
+                                                       onCompletion);
+            });
+    });
+
 InitialSyncer::InitialSyncer(
-    InitialSyncerOptions opts,
+    InitialSyncerInterface::Options opts,
     std::unique_ptr<DataReplicatorExternalState> dataReplicatorExternalState,
     ThreadPool* writerPool,
     StorageInterface* storage,
@@ -1830,22 +1855,33 @@ void InitialSyncer::_finishCallback(StatusWith<OpTimeAndWallTime> lastApplied) {
     // before InitialSyncer::join() returns.
     onCompletion = {};
 
-    stdx::lock_guard<Latch> lock(_mutex);
-    invariant(_state != State::kComplete);
-    _state = State::kComplete;
-    _stateCondition.notify_all();
+    {
+        stdx::lock_guard<Latch> lock(_mutex);
+        invariant(_state != State::kComplete);
+        _state = State::kComplete;
+        _stateCondition.notify_all();
 
-    // Clear the initial sync progress after an initial sync attempt has been successfully
-    // completed.
-    if (lastApplied.isOK() && !MONGO_unlikely(skipClearInitialSyncState.shouldFail())) {
-        _initialSyncState.reset();
+        // Clear the initial sync progress after an initial sync attempt has been successfully
+        // completed.
+        if (lastApplied.isOK() && !MONGO_unlikely(skipClearInitialSyncState.shouldFail())) {
+            _initialSyncState.reset();
+        }
+
+        // Destroy shared references to executors.
+        _attemptExec = nullptr;
+        _clonerAttemptExec = nullptr;
+        _clonerExec = nullptr;
+        _exec = nullptr;
     }
 
-    // Destroy shared references to executors.
-    _attemptExec = nullptr;
-    _clonerAttemptExec = nullptr;
-    _clonerExec = nullptr;
-    _exec = nullptr;
+    if (MONGO_unlikely(initialSyncHangAfterFinish.shouldFail())) {
+        LOGV2(5825800,
+              "initial sync finished - initialSyncHangAfterFinish fail point "
+              "enabled. Blocking until fail point is disabled.");
+        while (MONGO_unlikely(initialSyncHangAfterFinish.shouldFail()) && !_isShuttingDown()) {
+            mongo::sleepsecs(1);
+        }
+    }
 }
 
 Status InitialSyncer::_scheduleLastOplogEntryFetcher_inlock(
@@ -2081,7 +2117,7 @@ void InitialSyncer::_shutdownComponent_inlock(Component& component) {
 StatusWith<std::vector<OplogEntry>> InitialSyncer::_getNextApplierBatch_inlock() {
     // If the fail-point is active, delay the apply batch by returning an empty batch so that
     // _getNextApplierBatchCallback() will reschedule itself at a later time.
-    // See InitialSyncerOptions::getApplierBatchCallbackRetryWait.
+    // See InitialSyncerInterface::Options::getApplierBatchCallbackRetryWait.
     if (MONGO_unlikely(rsSyncApplyStop.shouldFail())) {
         return std::vector<OplogEntry>();
     }

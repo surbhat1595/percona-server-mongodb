@@ -279,7 +279,6 @@ DBCollection.prototype.insert = function(obj, options) {
     var flags = 0;
 
     var wc = undefined;
-    var allowDottedFields = false;
     if (options === undefined) {
         // do nothing
     } else if (typeof (options) == 'object') {
@@ -291,8 +290,6 @@ DBCollection.prototype.insert = function(obj, options) {
 
         if (options.writeConcern)
             wc = options.writeConcern;
-        if (options.allowdotted)
-            allowDottedFields = true;
     } else {
         flags = options;
     }
@@ -304,54 +301,33 @@ DBCollection.prototype.insert = function(obj, options) {
         wc = this._createWriteConcern(options);
 
     var result = undefined;
-    var startTime =
-        (typeof (_verboseShell) === 'undefined' || !_verboseShell) ? 0 : new Date().getTime();
 
-    if (this.getMongo().writeMode() != "legacy") {
-        // Bit 1 of option flag is continueOnError. Bit 0 (stop on error) is the default.
-        var bulk = ordered ? this.initializeOrderedBulkOp() : this.initializeUnorderedBulkOp();
-        var isMultiInsert = Array.isArray(obj);
+    // Bit 1 of option flag is continueOnError. Bit 0 (stop on error) is the default.
+    var bulk = ordered ? this.initializeOrderedBulkOp() : this.initializeUnorderedBulkOp();
+    var isMultiInsert = Array.isArray(obj);
 
-        if (isMultiInsert) {
-            obj.forEach(function(doc) {
-                bulk.insert(doc);
-            });
-        } else {
-            bulk.insert(obj);
-        }
-
-        try {
-            result = bulk.execute(wc);
-            if (!isMultiInsert)
-                result = result.toSingleResult();
-        } catch (ex) {
-            if (ex instanceof BulkWriteError) {
-                result = isMultiInsert ? ex.toResult() : ex.toSingleResult();
-            } else if (ex instanceof WriteCommandError) {
-                result = ex;
-            } else {
-                // Other exceptions rethrown as-is.
-                throw ex;
-            }
-        }
+    if (isMultiInsert) {
+        obj.forEach(function(doc) {
+            bulk.insert(doc);
+        });
     } else {
-        if (typeof (obj._id) == "undefined" && !Array.isArray(obj)) {
-            var tmp = obj;  // don't want to modify input
-            obj = {_id: new ObjectId()};
-            for (var key in tmp) {
-                obj[key] = tmp[key];
-            }
-        }
-
-        this.getMongo().insert(this._fullName, obj, flags);
-
-        // enforce write concern, if required
-        if (wc)
-            result = this.runCommand("getLastError", wc instanceof WriteConcern ? wc.toJSON() : wc);
+        bulk.insert(obj);
     }
 
-    this._lastID = obj._id;
-    this._printExtraInfo("Inserted", startTime);
+    try {
+        result = bulk.execute(wc);
+        if (!isMultiInsert)
+            result = result.toSingleResult();
+    } catch (ex) {
+        if (ex instanceof BulkWriteError) {
+            result = isMultiInsert ? ex.toResult() : ex.toSingleResult();
+        } else if (ex instanceof WriteCommandError) {
+            result = ex;
+        } else {
+            // Other exceptions rethrown as-is.
+            throw ex;
+        }
+    }
     return result;
 };
 
@@ -399,52 +375,35 @@ DBCollection.prototype.remove = function(t, justOne) {
     var letParams = parsed.let;
 
     var result = undefined;
-    var startTime =
-        (typeof (_verboseShell) === 'undefined' || !_verboseShell) ? 0 : new Date().getTime();
+    var bulk = this.initializeOrderedBulkOp();
 
-    if (this.getMongo().writeMode() != "legacy") {
-        var bulk = this.initializeOrderedBulkOp();
+    if (letParams) {
+        bulk.setLetParams(letParams);
+    }
+    var removeOp = bulk.find(query);
 
-        if (letParams) {
-            bulk.setLetParams(letParams);
-        }
-        var removeOp = bulk.find(query);
-
-        if (collation) {
-            removeOp.collation(collation);
-        }
-
-        if (justOne) {
-            removeOp.removeOne();
-        } else {
-            removeOp.remove();
-        }
-
-        try {
-            result = bulk.execute(wc).toSingleResult();
-        } catch (ex) {
-            if (ex instanceof BulkWriteError) {
-                result = ex.toSingleResult();
-            } else if (ex instanceof WriteCommandError) {
-                result = ex;
-            } else {
-                // Other exceptions thrown
-                throw ex;
-            }
-        }
-    } else {
-        if (collation) {
-            throw new Error("collation requires use of write commands");
-        }
-
-        this.getMongo().remove(this._fullName, query, justOne);
-
-        // enforce write concern, if required
-        if (wc)
-            result = this.runCommand("getLastError", wc instanceof WriteConcern ? wc.toJSON() : wc);
+    if (collation) {
+        removeOp.collation(collation);
     }
 
-    this._printExtraInfo("Removed", startTime);
+    if (justOne) {
+        removeOp.removeOne();
+    } else {
+        removeOp.remove();
+    }
+
+    try {
+        result = bulk.execute(wc).toSingleResult();
+    } catch (ex) {
+        if (ex instanceof BulkWriteError) {
+            result = ex.toSingleResult();
+        } else if (ex instanceof WriteCommandError) {
+            result = ex;
+        } else {
+            // Other exceptions thrown
+            throw ex;
+        }
+    }
     return result;
 };
 
@@ -519,69 +478,47 @@ DBCollection.prototype.update = function(query, updateSpec, upsert, multi) {
     let letParams = parsed.let;
 
     var result = undefined;
-    var startTime =
-        (typeof (_verboseShell) === 'undefined' || !_verboseShell) ? 0 : new Date().getTime();
+    var bulk = this.initializeOrderedBulkOp();
 
-    if (this.getMongo().writeMode() != "legacy") {
-        var bulk = this.initializeOrderedBulkOp();
+    if (letParams) {
+        bulk.setLetParams(letParams);
+    }
+    var updateOp = bulk.find(query);
 
-        if (letParams) {
-            bulk.setLetParams(letParams);
-        }
-        var updateOp = bulk.find(query);
-
-        if (hint) {
-            updateOp.hint(hint);
-        }
-
-        if (upsert) {
-            updateOp = updateOp.upsert();
-        }
-
-        if (collation) {
-            updateOp.collation(collation);
-        }
-
-        if (arrayFilters) {
-            updateOp.arrayFilters(arrayFilters);
-        }
-
-        if (multi) {
-            updateOp.update(updateSpec);
-        } else {
-            updateOp.updateOne(updateSpec);
-        }
-
-        try {
-            result = bulk.execute(wc).toSingleResult();
-        } catch (ex) {
-            if (ex instanceof BulkWriteError) {
-                result = ex.toSingleResult();
-            } else if (ex instanceof WriteCommandError) {
-                result = ex;
-            } else {
-                // Other exceptions thrown
-                throw ex;
-            }
-        }
-    } else {
-        if (collation) {
-            throw new Error("collation requires use of write commands");
-        }
-
-        if (arrayFilters) {
-            throw new Error("arrayFilters requires use of write commands");
-        }
-
-        this.getMongo().update(this._fullName, query, updateSpec, upsert, multi);
-
-        // Enforce write concern, if required
-        if (wc) {
-            result = this.runCommand("getLastError", wc instanceof WriteConcern ? wc.toJSON() : wc);
-        }
+    if (hint) {
+        updateOp.hint(hint);
     }
 
-    this._printExtraInfo("Updated", startTime);
+    if (upsert) {
+        updateOp = updateOp.upsert();
+    }
+
+    if (collation) {
+        updateOp.collation(collation);
+    }
+
+    if (arrayFilters) {
+        updateOp.arrayFilters(arrayFilters);
+    }
+
+    if (multi) {
+        updateOp.update(updateSpec);
+    } else {
+        updateOp.updateOne(updateSpec);
+    }
+
+    try {
+        result = bulk.execute(wc).toSingleResult();
+    } catch (ex) {
+        if (ex instanceof BulkWriteError) {
+            result = ex.toSingleResult();
+        } else if (ex instanceof WriteCommandError) {
+            result = ex;
+        } else {
+            // Other exceptions thrown
+            throw ex;
+        }
+    }
     return result;
 };
 
@@ -763,34 +700,6 @@ DBCollection.prototype.renameCollection = function(newName, dropTarget) {
         to: this._db._name + "." + newName,
         dropTarget: dropTarget
     });
-};
-
-// Display verbose information about the operation
-DBCollection.prototype._printExtraInfo = function(action, startTime) {
-    if (typeof _verboseShell === 'undefined' || !_verboseShell) {
-        __callLastError = true;
-        return;
-    }
-
-    // explicit w:1 so that replset getLastErrorDefaults aren't used here which would be bad.
-    var res = this._db.getLastErrorCmd(1);
-    if (res) {
-        if (res.err != undefined && res.err != null) {
-            // error occurred, display it
-            print(res.err);
-            return;
-        }
-
-        var info = action + " ";
-        // hack for inserted because res.n is 0
-        info += action != "Inserted" ? res.n : 1;
-        if (res.n > 0 && res.updatedExisting != undefined)
-            info += " " + (res.updatedExisting ? "existing" : "new");
-        info += " record(s)";
-        var time = new Date().getTime() - startTime;
-        info += " in " + time + "ms";
-        print(info);
-    }
 };
 
 DBCollection.prototype.validate = function(options) {
@@ -1149,13 +1058,18 @@ DBCollection.prototype.getShardDistribution = function() {
 
     collStats.forEach(function(extShardStats) {
         // Extract and store only the relevant subset of the stats for this shard
+        var newVersion = config.collections.countDocuments(
+            {_id: extShardStats.ns, timestamp: {$exists: true}}, {limit: 1});
+        var collUuid = config.collections.findOne({_id: extShardStats.ns}).uuid;
         const shardStats = {
             shardId: extShardStats.shard,
             host: config.shards.findOne({_id: extShardStats.shard}).host,
             size: extShardStats.storageStats.size,
             count: extShardStats.storageStats.count,
-            numChunks:
-                config.chunks.countDocuments({ns: extShardStats.ns, shard: extShardStats.shard}),
+            numChunks: (newVersion ? config.chunks.countDocuments(
+                                         {uuid: collUuid, shard: extShardStats.shard})
+                                   : config.chunks.countDocuments(
+                                         {ns: extShardStats.ns, shard: extShardStats.shard})),
             avgObjSize: extShardStats.storageStats.avgObjSize
         };
 

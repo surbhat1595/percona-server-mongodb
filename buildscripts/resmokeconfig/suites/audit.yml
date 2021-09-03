@@ -12,4 +12,3 @@ executor:
   config:
     shell_options:
       nodb: ''
-      readMode: commands

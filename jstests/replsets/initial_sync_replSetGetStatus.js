@@ -2,7 +2,7 @@
  * This test tests that replSetGetStatus returns initial sync stats while initial sync is in
  * progress.
  *
- * @tags: [requires_fcv_49]
+ * @tags: [requires_fcv_49, disabled_due_to_server_58295]
  */
 
 (function() {
@@ -34,8 +34,10 @@ let secondary = replSet.add(
     {rsConfig: {votes: 0, priority: 0}, setParameter: {'collectionClonerBatchSize': 2}});
 secondary.setSecondaryOk();
 
-var failPointBeforeCopying = configureFailPoint(secondary, 'initialSyncHangBeforeCopyingDatabases');
-var failPointBeforeFinish = configureFailPoint(secondary, 'initialSyncHangBeforeFinish');
+const failPointBeforeCopying =
+    configureFailPoint(secondary, 'initialSyncHangBeforeCopyingDatabases');
+const failPointBeforeFinish = configureFailPoint(secondary, 'initialSyncHangBeforeFinish');
+const failPointAfterFinish = configureFailPoint(secondary, 'initialSyncHangAfterFinish');
 let failPointAfterNumDocsCopied =
     configureFailPoint(secondary,
                        'initialSyncHangDuringCollectionClone',
@@ -151,9 +153,10 @@ assert.eq(endOfCloningRes.initialSyncStatus.approxTotalDataSize,
 assert.eq(endOfCloningRes.initialSyncStatus.approxTotalBytesCopied,
           fooCollRes.approxBytesCopied + barCollRes.approxBytesCopied + bytesCopiedAdminDb);
 
-// Let initial sync finish and get into secondary state.
 failPointBeforeFinish.off();
-replSet.awaitSecondaryNodes(60 * 1000);
+
+// Wait until the 'initialSync' field has been cleared before issuing 'replSetGetStatus'.
+failPointAfterFinish.wait();
 
 // Test that replSetGetStatus returns the correct results after initial sync is finished.
 res = assert.commandWorked(secondary.adminCommand({replSetGetStatus: 1}));
@@ -162,6 +165,11 @@ assert(!res.initialSyncStatus,
 
 assert.commandFailedWithCode(secondary.adminCommand({replSetGetStatus: 1, initialSync: "m"}),
                              ErrorCodes.TypeMismatch);
+
+// Let initial sync finish and get into secondary state.
+failPointAfterFinish.off();
+replSet.awaitSecondaryNodes(60 * 1000);
+
 assert.eq(0,
           secondary.getDB('local')['temp_oplog_buffer'].find().itcount(),
           "Oplog buffer was not dropped after initial sync");

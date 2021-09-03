@@ -1,7 +1,7 @@
 /**
  * Test all the possible succeed/fail cases around sharded collections renaming.
  *
- * @tags: [requires_fcv_49]
+ * @tags: [requires_fcv_49, disabled_due_to_server_58295]
  */
 load("jstests/libs/uuid_util.js");
 
@@ -50,6 +50,25 @@ function testRename(st, dbName, toNs, dropTarget, mustFail) {
     const toColl = mongos.getCollection(toNs);
     assert.eq(db.to.find({x: 0}).itcount(), 1, 'Expected exactly one document on the shard');
     assert.eq(toColl.find({x: 2}).itcount(), 1, 'Expected exactly one document on the shard');
+
+    // Infer whether the chunks cache collection names are based by collection UUID or collection
+    // namespace and get the actual chunks cache collection name of the target collection
+    const toConfigCollDoc = mongos.getDB('config').collections.findOne({_id: toNs});
+    const chunksNameByUUID = toConfigCollDoc.hasOwnProperty('timestamp');
+    const toChunksCollName = 'cache.chunks.' + toNs;
+
+    // Validate the correctness of the collections metadata in the catalog cache on shards
+    for (let db of [st.shard0.getDB('config'), st.shard1.getDB('config')]) {
+        // Validate that the source collection metadata has been cleaned up
+        assert.eq(db['cache.collections'].countDocuments({_id: fromNs}), 0);
+        if (!chunksNameByUUID) {
+            assert(!db['cache.chunks.' + fromNs].exists());
+        }
+
+        // Validate that the target collection metadata has been downloaded
+        assert.eq(db['cache.collections'].countDocuments({_id: toNs}), 1);
+        assert(db[toChunksCollName].exists());
+    }
 }
 
 // Never use the third shard, but leave it in order to indirectly check that rename participants

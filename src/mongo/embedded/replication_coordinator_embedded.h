@@ -193,7 +193,7 @@ public:
 
     void cancelAndRescheduleElectionTimeout() override;
 
-    Status setMaintenanceMode(bool) override;
+    Status setMaintenanceMode(OperationContext*, bool) override;
 
     Status processReplSetSyncFrom(OperationContext*, const HostAndPort&, BSONObjBuilder*) override;
 
@@ -312,6 +312,8 @@ public:
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) final;
 
     virtual void restartScheduledHeartbeats_forTest() override;
+
+    virtual void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) final;
 
 private:
     // Back pointer to the ServiceContext that has started the instance.

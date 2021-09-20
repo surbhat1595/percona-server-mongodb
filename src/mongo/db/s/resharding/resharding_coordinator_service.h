@@ -277,17 +277,29 @@ private:
     };
 
     /**
+     * Construct the initial chunks splits and write down the initial coordinator state to storage.
+     */
+    ExecutorFuture<void> _initializeCoordinator(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    /**
      * Runs resharding up through preparing to persist the decision.
      */
-    ExecutorFuture<ReshardingCoordinatorDocument> _runUntilReadyToPersistDecision(
+    ExecutorFuture<ReshardingCoordinatorDocument> _runUntilReadyToCommit(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor) noexcept;
 
     /**
      * Runs resharding through persisting the decision until cleanup.
      */
-    ExecutorFuture<void> _persistDecisionAndFinishReshardOperation(
+    ExecutorFuture<void> _commitAndFinishReshardOperation(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const ReshardingCoordinatorDocument& updatedCoordinatorDoc) noexcept;
+
+    /**
+     * Inform all of the donors and recipients of this resharding operation to begin.
+     */
+    ExecutorFuture<void> _tellAllParticipantsReshardingStarted(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
      * Runs abort cleanup logic when only the coordinator is aware of the resharding operation.
@@ -295,8 +307,8 @@ private:
      * Only safe to call if an unrecoverable error is encountered before the coordinator completes
      * its transition to kPreparingToDonate.
      */
-    void _onAbortCoordinatorOnly(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-                                 const Status& status);
+    ExecutorFuture<void> _onAbortCoordinatorOnly(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const Status& status);
 
     /*
      * Runs abort cleanup logic when both the coordinator and participants are aware of the
@@ -305,7 +317,7 @@ private:
      * Only safe to call if the coordinator progressed past kInitializing before encountering an
      * unrecoverable error.
      */
-    void _onAbortCoordinatorAndParticipants(
+    ExecutorFuture<void> _onAbortCoordinatorAndParticipants(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const Status& status);
 
     /**
@@ -373,7 +385,7 @@ private:
      *
      * Transitions to 'kCommitting'.
      */
-    Future<void> _persistDecision(const ReshardingCoordinatorDocument& updatedDoc);
+    Future<void> _commit(const ReshardingCoordinatorDocument& updatedDoc);
 
     /**
      * Waits on _reshardingCoordinatorObserver to notify that:
@@ -399,6 +411,30 @@ private:
         boost::optional<Status> abortReason = boost::none);
 
     /**
+     * Sends the command to the specified participants asynchronously.
+     */
+    void _sendCommandToAllParticipants(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const BSONObj& command);
+    void _sendCommandToAllDonors(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                                 const BSONObj& command);
+    void _sendCommandToAllRecipients(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                                     const BSONObj& command);
+
+    /**
+     * Sends '_flushRoutingTableCacheUpdatesWithWriteConcern' to ensure donor state machine creation
+     * by the time the refresh completes.
+     */
+    void _establishAllDonorsAsParticipants(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    /**
+     * Sends '_flushRoutingTableCacheUpdatesWithWriteConcern' to ensure recipient state machine
+     * creation by the time the refresh completes.
+     */
+    void _establishAllRecipientsAsParticipants(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    /**
      * Sends '_flushReshardingStateChange' to all recipient shards.
      *
      * When the coordinator is in a state before 'kCommitting', refreshes the temporary
@@ -413,9 +449,9 @@ private:
     void _tellAllDonorsToRefresh(const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
-     * Sends '_flushReshardingStateChange' for the original namespace to all participant shards.
+     * Sends '_shardsvrCommitReshardCollection' to all participant shards.
      */
-    void _tellAllParticipantsToRefresh(
+    void _tellAllParticipantsToCommit(
         const NamespaceString& nss, const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
@@ -459,8 +495,7 @@ private:
     boost::optional<CancelableOperationContextFactory> _cancelableOpCtxFactory;
 
     /**
-     * Must be locked while the `_canEnterCritical` or `_completionPromise`
-     * promises are fulfilled.
+     * Must be locked while the `_canEnterCritical` promise is being fulfilled.
      */
     mutable Mutex _fulfillmentMutex =
         MONGO_MAKE_LATCH("ReshardingCoordinatorService::_fulfillmentMutex");

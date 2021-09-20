@@ -7,14 +7,6 @@
 (function() {
 "use strict";
 
-/**
- * TODO (SERVER-57575): Re-enable test on Windows.
- */
-if (_isWindows()) {
-    jsTestLog("Skipping test on Windows");
-    return;
-}
-
 let rst = new ReplSetTest({nodes: 1});
 rst.startSet();
 rst.initiate();
@@ -28,7 +20,7 @@ const sessionDb = session.getDatabase("test");
 
 session.startTransaction();
 // This holds a database IX lock and a collection IX lock on "a".
-sessionDb.a.insert({y: 1});
+assert.commandWorked(sessionDb.a.insert({y: 1}));
 
 // This only requires database IX lock.
 assert.commandWorked(db.createView("view", "a", []));

@@ -51,6 +51,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/hello_auth.h"
 #include "mongo/db/repl/hello_gen.h"
 #include "mongo/db/repl/hello_response.h"
@@ -122,6 +123,18 @@ TopologyVersion appendReplicationInfo(OperationContext* opCtx,
             replCoord->appendSecondaryInfoData(result);
         }
         invariant(helloResponse->getTopologyVersion());
+
+        // Only shard servers will respond with the isImplicitDefaultMajorityWC field.
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+            result->append(HelloCommandReply::kIsImplicitDefaultMajorityWCFieldName,
+                           replCoord->getConfig().isImplicitDefaultWriteConcernMajority());
+
+            auto cwwc = ReadWriteConcernDefaults::get(opCtx).getCWWC(opCtx);
+            if (cwwc) {
+                result->append(HelloCommandReply::kCwwcFieldName, cwwc.get().toBSON());
+            }
+        }
+
         return helloResponse->getTopologyVersion().get();
     }
 

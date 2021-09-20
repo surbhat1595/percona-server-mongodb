@@ -698,6 +698,7 @@ MongoRunner.mongodOptions = function(opts = {}) {
     _removeSetParameterIfBeforeVersion(
         opts, "enableDefaultWriteConcernUpdatesForInitiate", "5.0.0");
     _removeSetParameterIfBeforeVersion(opts, "enableReconfigRollbackCommittedWritesCheck", "5.0.0");
+    _removeSetParameterIfBeforeVersion(opts, "featureFlagRetryableFindAndModify", "5.0.0");
 
     if (!opts.logFile && opts.useLogFiles) {
         opts.logFile = opts.dbpath + "/mongod.log";
@@ -1029,6 +1030,7 @@ MongoRunner.validateCollectionsCallback = function(port) {};
  *        pwd {string}: admin password
  *      },
  *      skipValidation: <bool>,
+ *      skipValidatingExitCode: <bool>,
  *      allowedExitCode: <int>
  *    }
  * @param {boolean} waitpid should we wait for the process to terminate after stopping it.
@@ -1092,7 +1094,7 @@ var stopMongoProgram = function(conn, signal, opts, waitpid) {
     if (!waitpid) {
         returnCode = 0;
     }
-    if (allowedExitCode !== returnCode) {
+    if (allowedExitCode !== returnCode && !opts.skipValidatingExitCode) {
         throw new MongoRunner.StopError(returnCode);
     } else if (returnCode !== MongoRunner.EXIT_CLEAN) {
         print("MongoDB process on port " + port + " intentionally exited with error code ",

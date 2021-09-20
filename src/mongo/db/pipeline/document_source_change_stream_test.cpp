@@ -60,6 +60,8 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
+#include "mongo/db/s/resharding_util.h"
 #include "mongo/db/transaction_history_iterator.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/death_test.h"
@@ -1152,6 +1154,60 @@ TEST_F(ChangeStreamStageTest, TransformNewShardDetected) {
         {DSChangeStream::kClusterTimeField, kDefaultTs},
     };
     checkTransformation(newShardDetected, expectedNewShardDetected);
+}
+
+TEST_F(ChangeStreamStageTest, TransformReshardBegin) {
+    auto uuid = UUID::gen();
+    auto reshardingUuid = UUID::gen();
+
+    ReshardingChangeEventO2Field o2Field{reshardingUuid, ReshardingChangeEventEnum::kReshardBegin};
+    auto reshardingBegin = makeOplogEntry(OpTypeEnum::kNoop,
+                                          nss,
+                                          BSONObj(),
+                                          uuid,
+                                          true,  // fromMigrate
+                                          o2Field.toBSON());
+
+    auto spec = fromjson("{$changeStream: {showMigrationEvents: true}}");
+
+    Document expectedReshardingBegin{
+        {DSChangeStream::kReshardingUuidField, reshardingUuid},
+        {DSChangeStream::kIdField,
+         makeResumeToken(kDefaultTs, uuid, BSON("_id" << o2Field.toBSON()))},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kReshardBeginOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+    };
+    checkTransformation(reshardingBegin, expectedReshardingBegin, {}, spec);
+}
+
+TEST_F(ChangeStreamStageTest, TransformReshardDoneCatchUp) {
+    auto existingUuid = UUID::gen();
+    auto reshardingUuid = UUID::gen();
+    auto temporaryNs = constructTemporaryReshardingNss(nss.db(), existingUuid);
+
+    ReshardingChangeEventO2Field o2Field{reshardingUuid,
+                                         ReshardingChangeEventEnum::kReshardDoneCatchUp};
+    auto reshardDoneCatchUp = makeOplogEntry(OpTypeEnum::kNoop,
+                                             temporaryNs,
+                                             BSONObj(),
+                                             reshardingUuid,
+                                             true,  // fromMigrate
+                                             o2Field.toBSON());
+
+    auto spec =
+        fromjson("{$changeStream: {showMigrationEvents: true, allowToRunOnSystemNS: true}}");
+    auto expCtx = getExpCtx();
+    expCtx->ns = temporaryNs;
+
+    Document expectedReshardingDoneCatchUp{
+        {DSChangeStream::kReshardingUuidField, reshardingUuid},
+        {DSChangeStream::kIdField,
+         makeResumeToken(kDefaultTs, reshardingUuid, BSON("_id" << o2Field.toBSON()))},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kReshardDoneCatchUpOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+    };
+
+    checkTransformation(reshardDoneCatchUp, expectedReshardingDoneCatchUp, {}, spec);
 }
 
 TEST_F(ChangeStreamStageTest, TransformEmptyApplyOps) {

@@ -487,7 +487,9 @@ public:
     Status insert(OperationContext* opCtx,
                   const BSONObj& obj,
                   const RecordId& loc,
-                  const InsertDeleteOptions& options) final;
+                  const InsertDeleteOptions& options,
+                  const std::function<void()>& saveCursorBeforeWrite,
+                  const std::function<void()>& restoreCursorAfterWrite) final;
 
     const MultikeyPaths& getMultikeyPaths() const final;
 
@@ -557,10 +559,13 @@ AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEn
       _isMultiKey(stateInfo.getIsMultikey()),
       _indexMultikeyPaths(createMultikeyPaths(stateInfo.getMultikeyPaths())) {}
 
-Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(OperationContext* opCtx,
-                                                          const BSONObj& obj,
-                                                          const RecordId& loc,
-                                                          const InsertDeleteOptions& options) {
+Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(
+    OperationContext* opCtx,
+    const BSONObj& obj,
+    const RecordId& loc,
+    const InsertDeleteOptions& options,
+    const std::function<void()>& saveCursorBeforeWrite,
+    const std::function<void()>& restoreCursorAfterWrite) {
     auto& executionCtx = StorageExecutionContext::get(opCtx);
 
     auto keys = executionCtx.keys();
@@ -588,7 +593,12 @@ Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(OperationContext* opCt
                                 "error"_attr = status,
                                 "loc"_attr = loc,
                                 "obj"_attr = redact(obj));
+
+                    // Save and restore the cursor around the write in case it throws a WCE
+                    // internally and causes the cursor to be unpositioned.
+                    saveCursorBeforeWrite();
                     interceptor->getSkippedRecordTracker()->record(opCtx, loc);
+                    restoreCursorAfterWrite();
                 }
             });
     } catch (...) {
@@ -685,6 +695,8 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
                                              const RecordIdHandlerFn& onDuplicateRecord) {
     Timer timer;
 
+    auto ns = _indexCatalogEntry->getNSSFromCatalog(opCtx);
+
     std::unique_ptr<BulkBuilder::Sorter::Iterator> it(bulk->done());
 
     static constexpr char message[] = "Index Build: inserting keys from external sorter into index";
@@ -728,7 +740,7 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
         // builds since this check can be expensive.
         int cmpData;
         if (_descriptor->unique()) {
-            cmpData = data.first.compareWithoutRecordId(previousKey);
+            cmpData = data.first.compareWithoutRecordIdLong(previousKey);
         }
 
         if (kDebugBuild && data.first.compare(previousKey) < 0) {
@@ -750,17 +762,16 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
             continue;
         }
 
-        Status status = writeConflictRetry(
-            opCtx, "addingKey", _indexCatalogEntry->getNSSFromCatalog(opCtx).ns(), [&] {
-                WriteUnitOfWork wunit(opCtx);
-                Status status = builder->addKey(data.first);
-                if (!status.isOK()) {
-                    return status;
-                }
+        Status status = writeConflictRetry(opCtx, "addingKey", ns.ns(), [&] {
+            WriteUnitOfWork wunit(opCtx);
+            Status status = builder->addKey(data.first);
+            if (!status.isOK()) {
+                return status;
+            }
 
-                wunit.commit();
-                return Status::OK();
-            });
+            wunit.commit();
+            return Status::OK();
+        });
 
         if (!status.isOK()) {
             // Duplicates are checked before inserting.
@@ -786,7 +797,7 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
           "Index build: inserted {bulk_getKeysInserted} keys from external sorter into index in "
           "{timer_seconds} seconds",
           "Index build: inserted keys from external sorter into index",
-          "namespace"_attr = _indexCatalogEntry->getNSSFromCatalog(opCtx),
+          logAttrs(ns),
           "index"_attr = _descriptor->indexName(),
           "keysInserted"_attr = bulk->getKeysInserted(),
           "duration"_attr = Milliseconds(Seconds(timer.seconds())));

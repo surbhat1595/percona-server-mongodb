@@ -53,6 +53,7 @@
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
 #include "mongo/db/s/resharding_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -80,6 +81,8 @@ public:
     void updateCoordinatorDocument(OperationContext* opCtx,
                                    const BSONObj& query,
                                    const BSONObj& update) override {}
+
+    void clearFilteringMetadata(OperationContext* opCtx) override {}
 };
 
 class DonorOpObserverForTest : public OpObserverForTest {
@@ -282,7 +285,7 @@ TEST_F(ReshardingDonorServiceTest, WritesNoOpOplogEntryOnReshardingBegin) {
     ASSERT_EQ(*op.getUuid(), doc.getSourceUUID()) << op.getEntry();
     ASSERT_EQ(op.getObject()["msg"].type(), BSONType::String) << op.getEntry();
     ASSERT_TRUE(receivedChangeEvent == expectedChangeEvent);
-    ASSERT_FALSE(op.getFromMigrate());
+    ASSERT_TRUE(op.getFromMigrate());
     ASSERT_FALSE(bool(op.getDestinedRecipient())) << op.getEntry();
 }
 
@@ -480,6 +483,27 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
         ASSERT_OK(donor->getCompletionFuture().getNoThrow());
         checkStateDocumentRemoved(opCtx.get());
     }
+}
+
+DEATH_TEST_REGEX_F(ReshardingDonorServiceTest, CommitFn, "4457001.*tripwire") {
+    auto doc = makeStateDocument(false /* isAlsoRecipient */);
+    auto opCtx = makeOperationContext();
+
+    createSourceCollection(opCtx.get(), doc);
+
+    DonorStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    notifyRecipientsDoneCloning(opCtx.get(), *donor, doc);
+
+    ASSERT_THROWS_CODE(donor->commit(), DBException, ErrorCodes::ReshardCollectionInProgress);
+
+    notifyToStartBlockingWrites(opCtx.get(), *donor, doc);
+    donor->awaitInBlockingWritesOrError().get();
+
+    donor->commit();
+
+    ASSERT_OK(donor->getCompletionFuture().getNoThrow());
 }
 
 TEST_F(ReshardingDonorServiceTest, DropsSourceCollectionWhenDone) {

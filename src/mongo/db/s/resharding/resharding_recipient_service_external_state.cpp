@@ -31,6 +31,7 @@
 
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
 
+#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
@@ -159,7 +160,8 @@ void RecipientStateMachineExternalStateImpl::updateCoordinatorDocument(Operation
                                             query,
                                             update,
                                             false, /* upsert */
-                                            ShardingCatalogClient::kMajorityWriteConcern));
+                                            ShardingCatalogClient::kMajorityWriteConcern,
+                                            Milliseconds::max()));
 
     if (!docWasModified) {
         LOGV2_DEBUG(
@@ -170,6 +172,10 @@ void RecipientStateMachineExternalStateImpl::updateCoordinatorDocument(Operation
             "query"_attr = query,
             "update"_attr = update);
     }
+}
+
+void RecipientStateMachineExternalStateImpl::clearFilteringMetadata(OperationContext* opCtx) {
+    resharding::clearFilteringMetadata(opCtx, true /* scheduleAsyncRefresh */);
 }
 
 }  // namespace mongo

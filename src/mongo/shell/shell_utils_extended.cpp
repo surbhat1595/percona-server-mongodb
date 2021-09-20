@@ -305,6 +305,22 @@ BSONObj mkdir(const BSONObj& args, void* data) {
     return wrapper.obj();
 }
 
+/**
+ * @param args - [ source, destination ]
+ * copies directory 'source' to 'destination'. Errors if the 'destination' file already exists.
+ */
+BSONObj copyDir(const BSONObj& args, void* data) {
+    uassert(8423308, "copyDir takes 2 arguments", args.nFields() == 2);
+
+    BSONObjIterator it(args);
+    const std::string source = it.next().str();
+    const std::string destination = it.next().str();
+
+    boost::filesystem::copy(source, destination, boost::filesystem::copy_options::recursive);
+
+    return undefinedReturn;
+}
+
 BSONObj removeFile(const BSONObj& args, void* data) {
     BSONElement e = singleArg(args);
     bool found = false;
@@ -416,7 +432,7 @@ BSONObj changeUmask(const BSONObj& a, void* data) {
     uassert(50976,
             "umask takes 1 argument, the octal mode of the umask",
             a.nFields() == 1 && isNumericBSONType(a.firstElementType()));
-    auto val = a.firstElement().Number();
+    auto val = a.firstElement().safeNumberInt();
     return BSON("" << static_cast<int>(umask(static_cast<mode_t>(val))));
 #endif
 }
@@ -539,6 +555,7 @@ void installShellUtilsExtended(Scope& scope) {
     scope.injectNative("hostname", hostname);
     scope.injectNative("md5sumFile", md5sumFile);
     scope.injectNative("mkdir", mkdir);
+    scope.injectNative("copyDir", copyDir);
     scope.injectNative("passwordPrompt", passwordPrompt);
     scope.injectNative("umask", changeUmask);
     scope.injectNative("getFileMode", getFileMode);

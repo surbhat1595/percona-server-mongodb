@@ -41,6 +41,7 @@
 #include "mongo/db/keys_collection_client_sharded.h"
 #include "mongo/db/keys_collection_manager.h"
 #include "mongo/db/logical_time_validator.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/time_proof_service.h"
@@ -205,6 +206,14 @@ Status initializeGlobalShardingState(OperationContext* opCtx,
     LogicalTimeValidator::set(service, std::make_unique<LogicalTimeValidator>(keyManager));
 
     return Status::OK();
+}
+
+void loadCWWCFromConfigServerForReplication(OperationContext* opCtx) {
+    if (serverGlobalParams.clusterRole != ClusterRole::ShardServer) {
+        return;
+    }
+
+    repl::ReplicationCoordinator::get(opCtx)->recordIfCWWCIsSetOnConfigServerOnStartup(opCtx);
 }
 
 Status waitForShardRegistryReload(OperationContext* opCtx) {

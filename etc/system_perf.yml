@@ -470,43 +470,6 @@ tasks:
             mongo-tools: ${mongo-tools_rev}
       - func: "compile mongodb"
 
-  - name: renew_ssl_cert
-    commands:
-      - command: git.get_project
-        params:
-          directory: *src_dir
-          revisions:
-            dsi: ${dsi_rev}
-      # Run the script to generate ssl cert files
-      - command: shell.exec
-        params:
-          script: AWS_ACCESS_KEY_ID=${terraform_key} AWS_SECRET_ACCESS_KEY=${terraform_secret} ./src/dsi/run-dsi generate_ssl_cert
-      # Upload files for further DSI usage
-      - command: s3.put
-        params:
-          aws_key: ${aws_key}
-          aws_secret: ${aws_secret}
-          local_file: member.pem
-          # path to the remote file is intended to be static
-          remote_file: dsi/ssl/member.pem
-          bucket: mciuploads
-          # the visibility has to be public for consumption by DSI
-          permissions: public-read
-          content_type: text/plain
-          display_name: member.pem
-      - command: s3.put
-        params:
-          aws_key: ${aws_key}
-          aws_secret: ${aws_secret}
-          local_file: root.crt
-          # path to the remote file is intended to be static
-          remote_file: dsi/ssl/root.crt
-          bucket: mciuploads
-          # the visibility has to be public for consumption by DSI
-          permissions: public-read
-          content_type: text/plain
-          display_name: root.crt
-
   - name: linkbench
     priority: 5
     commands:
@@ -834,8 +797,8 @@ tasks:
         vars:
           test_control: "initialsync-logkeeper"
           mongodb_setup: "initialsync-logkeeper-short"
-          # Logkeeper dataset with FCV set to 4.4
-          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-4.4.tgz"
+          # Logkeeper dataset with FCV set to 5.0
+          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-5.0.tgz"
 
   - name: initialsync-logkeeper
     priority: 5
@@ -857,7 +820,7 @@ tasks:
           test_control: "initialsync-logkeeper-short-s3-update"
           mongodb_setup: "initialsync-logkeeper-short-s3-update"
           # Update this to Logkeeper dataset with FCV set to latest after each LTS release.
-          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-4.4.tgz"
+          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-5.0.tgz"
 
   - name: initialsync-logkeeper-snapshot-update
     priority: 5
@@ -1293,24 +1256,6 @@ buildvariants:
       - name: industry_benchmarks
       - name: linkbench
 
-  - name: linux-shard-lite-all-feature-flags
-    display_name: Linux Shard Lite (all feature flags)
-    batchtime: 10080  # 7 days
-    modules: *modules
-    expansions:
-      mongodb_setup: shard-lite-all-feature-flags
-      infrastructure_provisioning: shard-lite
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-    run_on:
-      - "rhel70-perf-shard-lite"
-    depends_on: *_compile_amazon2
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-
   - name: linux-shard-single
     display_name: Linux Shard Single
     batchtime: 5760  # 4 days
@@ -1478,57 +1423,6 @@ buildvariants:
       - name: sb_large_scale
       - name: sb_timeseries
 
-  # Note that the "disabled-feature-flags" part of the name is kept to avoid breaking
-  # history even though the display name is "all feature flags"
-  - name: linux-3-node-replSet-disabled-feature-flags
-    display_name: Linux 3-Node ReplSet (all feature flags)
-    batchtime: 10080  # 7 days
-    modules: *modules
-    expansions:
-      mongodb_setup: replica-all-feature-flags
-      infrastructure_provisioning: replica
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-    run_on:
-      - "rhel70-perf-replset"
-    depends_on: *_compile_amazon2
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-      - name: ycsb_60GB
-      - name: industry_benchmarks_secondary_reads
-      - name: crud_workloads
-      - name: crud_workloads_majority
-      - name: mixed_workloads
-      - name: misc_workloads
-      - name: map_reduce_workloads
-      - name: refine_shard_key_transaction_stress
-      - name: smoke_test
-      - name: retryable_writes_workloads
-      - name: industry_benchmarks_wmajority
-      - name: secondary_performance # Uses a special 2 node mongodb setup
-      - name: non_sharded_workloads
-      - name: bestbuy_agg
-      - name: bestbuy_agg_merge_different_db
-      - name: bestbuy_agg_merge_same_db
-      - name: bestbuy_agg_merge_wordcount
-      - name: bestbuy_query
-      - name: change_streams_throughput
-      - name: change_streams_latency
-      - name: snapshot_reads
-      - name: secondary_reads
-      - name: tpcc
-      - name: linkbench
-      - name: linkbench2
-      # Time-series collections are available since v5.0.
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_manual_bucketing
-      - name: sb_large_scale
-      - name: sb_timeseries
 
   - name: linux-3-node-replSet-noflowcontrol
     display_name: Linux 3-Node ReplSet (Flow Control off)
@@ -1636,8 +1530,8 @@ buildvariants:
     expansions:
       mongodb_setup: initialsync-logkeeper
       infrastructure_provisioning: initialsync-logkeeper
-      # EBS logkeeper snapshot with FCV set to 4.4
-      snapshotId: snap-0dba360e743e27ea0
+      # EBS logkeeper snapshot with FCV set to 5.0
+      snapshotId: snap-0b91f3899d0b10008
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -1751,12 +1645,3 @@ buildvariants:
       - name: snapshot_reads
       - name: secondary_reads
       - name: linkbench
-
-  - name: renew-ssl-cert
-    display_name: Renew SSL Cert
-    batchtime: 10080 # 7 days
-    modules: *modules
-    run_on:  # Certbot with route53 plugin is installed on RHEL80
-      - "rhel80-small"
-    tasks:
-      - name: renew_ssl_cert

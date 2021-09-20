@@ -8,6 +8,7 @@ Adler's
 Atomicity
 BLOBs
 BLRrVv
+CAS
 CFLAGS
 CMake
 COV
@@ -47,6 +48,7 @@ ECMA
 EINVAL
 ENCRYPTOR
 ENOTSUP
+EXTLIST
 EmpId
 Encryptors
 Facebook
@@ -108,9 +110,11 @@ PPC
 PRELOAD
 PROFDATA
 README
+RLE
 RedHat
 RepMgr
 Riak
+RLE
 RocksDB
 Roelofs
 RrVv
@@ -177,7 +181,9 @@ bokeh
 bool
 boolean
 booleans
+bm
 br
+bt
 btmem
 btree
 btrees
@@ -205,6 +211,7 @@ clickable
 cmake
 colgroup
 colgroups
+colspan
 combinatorial
 command's
 comparator
@@ -228,9 +235,11 @@ cryptographically
 csuite
 ctest
 curfile
+curhs
 cursortype
 curtable
 customerABC
+customizability
 cv
 cyclomatic
 dN
@@ -252,6 +261,7 @@ decrement
 decrementing
 decrypt
 decrypted
+decrypts
 del
 desc
 destructor
@@ -267,6 +277,7 @@ dl
 dll
 dlp
 dontlock
+doxtable
 dp
 ds
 dsrc
@@ -316,6 +327,7 @@ fillfactor
 firstname
 flamegraph
 flamegraphs
+flcs
 fnv
 forw
 fprofile
@@ -362,6 +374,7 @@ insn
 intl
 intpack
 inuse
+invariants
 io
 ip
 je
@@ -515,6 +528,7 @@ putKey
 putKeyString
 putValue
 putValueString
+px
 py
 qnx
 qqq
@@ -565,6 +579,8 @@ sess
 sid
 skinparam
 skiplist
+skiplists
+sortable
 spinlock
 spinlocks
 sql
@@ -586,6 +602,7 @@ subdatabases
 subdirectory
 subpage
 substring
+subsubsection
 sudo
 superset
 svg
@@ -642,6 +659,7 @@ valuev
 vec
 versa
 viewable
+vlcs
 vm
 vpmsum
 warmup

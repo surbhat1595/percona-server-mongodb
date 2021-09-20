@@ -46,6 +46,10 @@
 
 namespace mongo {
 namespace {
+
+void normalizeArray(BSONArrayBuilder* builder, const BSONObj& obj);
+void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj);
+
 const auto getBucketCatalog = ServiceContext::declareDecoration<BucketCatalog>();
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeWriteConflict);
 
@@ -56,6 +60,20 @@ uint8_t numDigits(uint32_t num) {
         ++numDigits;
     }
     return numDigits;
+}
+
+void normalizeArray(BSONArrayBuilder* builder, const BSONObj& obj) {
+    for (auto& arrayElem : obj) {
+        if (arrayElem.type() == BSONType::Array) {
+            BSONArrayBuilder subArray = builder->subarrayStart();
+            normalizeArray(&subArray, arrayElem.Obj());
+        } else if (arrayElem.type() == BSONType::Object) {
+            BSONObjBuilder subObject = builder->subobjStart();
+            normalizeObject(&subObject, arrayElem.Obj());
+        } else {
+            builder->append(arrayElem);
+        }
+    }
 }
 
 void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
@@ -96,21 +114,27 @@ void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
     std::sort(it, end);
     for (; it != end; ++it) {
         auto elem = it->element();
-        if (elem.type() != BSONType::Object) {
-            builder->append(elem);
-        } else {
+        if (elem.type() == BSONType::Array) {
+            BSONArrayBuilder subArray(builder->subarrayStart(elem.fieldNameStringData()));
+            normalizeArray(&subArray, elem.Obj());
+        } else if (elem.type() == BSONType::Object) {
             BSONObjBuilder subObject(builder->subobjStart(elem.fieldNameStringData()));
             normalizeObject(&subObject, elem.Obj());
+        } else {
+            builder->append(elem);
         }
     }
 }
 
 void normalizeTopLevel(BSONObjBuilder* builder, const BSONElement& elem) {
-    if (elem.type() != BSONType::Object) {
-        builder->append(elem);
-    } else {
+    if (elem.type() == BSONType::Array) {
+        BSONArrayBuilder subArray(builder->subarrayStart(elem.fieldNameStringData()));
+        normalizeArray(&subArray, elem.Obj());
+    } else if (elem.type() == BSONType::Object) {
         BSONObjBuilder subObject(builder->subobjStart(elem.fieldNameStringData()));
         normalizeObject(&subObject, elem.Obj());
+    } else {
+        builder->append(elem);
     }
 }
 
@@ -350,7 +374,11 @@ void BucketCatalog::abort(std::shared_ptr<WriteBatch> batch,
     invariant(batch->_commitRights.load());
 
     if (batch->finished()) {
-        invariant(batch->getResult().getStatus() == ErrorCodes::TimeseriesBucketCleared);
+        auto batchStatus = batch->getResult().getStatus();
+        invariant(batchStatus == ErrorCodes::TimeseriesBucketCleared ||
+                      batchStatus.isA<ErrorCategory::Interruption>(),
+                  str::stream() << "Unexpected error when aborting time-series batch: "
+                                << batchStatus);
         return;
     }
 
@@ -858,6 +886,9 @@ BucketCatalog::BucketAccess::BucketAccess(BucketCatalog* catalog,
                                           Bucket* bucket,
                                           boost::optional<BucketState> targetState)
     : _catalog(catalog) {
+    invariant(!targetState || targetState == BucketState::kNormal ||
+              targetState == BucketState::kPrepared);
+
     {
         auto lk = _catalog->_lockShared();
         auto bucketIt = _catalog->_allBuckets.find(bucket);
@@ -869,17 +900,8 @@ BucketCatalog::BucketAccess::BucketAccess(BucketCatalog* catalog,
         _acquire();
     }
 
-    boost::optional<BucketState> state{BucketState::kCleared};
-    if (targetState) {
-        invariant(*targetState == BucketState::kNormal || *targetState == BucketState::kPrepared);
-        state = _catalog->_setBucketState(_bucket->_id, *targetState);
-    } else {
-        stdx::lock_guard statesLk{_catalog->_statesMutex};
-        auto statesIt = _catalog->_bucketStates.find(_bucket->_id);
-        if (statesIt != _catalog->_bucketStates.end()) {
-            state = statesIt->second;
-        }
-    }
+    auto state =
+        targetState ? _catalog->_setBucketState(_bucket->_id, *targetState) : _getBucketState();
     if (!state || state == BucketState::kCleared || state == BucketState::kPreparedAndCleared) {
         release();
     }
@@ -889,6 +911,12 @@ BucketCatalog::BucketAccess::~BucketAccess() {
     if (isLocked()) {
         release();
     }
+}
+
+boost::optional<BucketCatalog::BucketState> BucketCatalog::BucketAccess::_getBucketState() const {
+    stdx::lock_guard lk{_catalog->_statesMutex};
+    auto it = _catalog->_bucketStates.find(_bucket->_id);
+    return it != _catalog->_bucketStates.end() ? boost::make_optional(it->second) : boost::none;
 }
 
 BucketCatalog::BucketState BucketCatalog::BucketAccess::_findOpenBucketThenLock(
@@ -942,10 +970,7 @@ BucketCatalog::BucketState BucketCatalog::BucketAccess::_findOpenBucketThenLockA
 }
 
 BucketCatalog::BucketState BucketCatalog::BucketAccess::_confirmStateForAcquiredBucket() {
-    stdx::lock_guard statesLk{_catalog->_statesMutex};
-    auto statesIt = _catalog->_bucketStates.find(_bucket->_id);
-    invariant(statesIt != _catalog->_bucketStates.end());
-    auto& [_, state] = *statesIt;
+    auto state = *_getBucketState();
     if (state == BucketState::kCleared || state == BucketState::kPreparedAndCleared) {
         release();
     } else {
@@ -967,15 +992,10 @@ void BucketCatalog::BucketAccess::_findOrCreateOpenBucketThenLock(
     _bucket = it->second;
     _acquire();
 
-    {
-        stdx::lock_guard statesLk{_catalog->_statesMutex};
-        auto statesIt = _catalog->_bucketStates.find(_bucket->_id);
-        invariant(statesIt != _catalog->_bucketStates.end());
-        auto& [_, state] = *statesIt;
-        if (state == BucketState::kNormal || state == BucketState::kPrepared) {
-            _catalog->_markBucketNotIdle(_bucket, false /* locked */);
-            return;
-        }
+    auto state = *_getBucketState();
+    if (state == BucketState::kNormal || state == BucketState::kPrepared) {
+        _catalog->_markBucketNotIdle(_bucket, false /* locked */);
+        return;
     }
 
     _catalog->_abort(_guard, _bucket, nullptr, boost::none);

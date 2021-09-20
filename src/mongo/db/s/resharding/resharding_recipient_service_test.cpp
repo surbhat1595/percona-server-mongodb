@@ -40,6 +40,7 @@
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_data_replication.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
@@ -48,6 +49,7 @@
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/util/fail_point.h"
 
 namespace mongo {
@@ -129,6 +131,8 @@ public:
     void updateCoordinatorDocument(OperationContext* opCtx,
                                    const BSONObj& query,
                                    const BSONObj& update) override {}
+
+    void clearFilteringMetadata(OperationContext* opCtx) override {}
 
 private:
     RoutingTableHistoryValueHandle _makeStandaloneRoutingTableHistory(RoutingTableHistory rt) {
@@ -426,6 +430,27 @@ TEST_F(ReshardingRecipientServiceTest, StepDownStepUpEachTransition) {
     }
 }
 
+DEATH_TEST_REGEX_F(ReshardingRecipientServiceTest, CommitFn, "4457001.*tripwire") {
+    // TODO (SERVER-57194): enable lock-free reads.
+    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
+    storageGlobalParams.disableLockFreeReads = true;
+    ON_BLOCK_EXIT(
+        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
+
+    auto doc = makeStateDocument(false /* isAlsoDonor */);
+    auto opCtx = makeOperationContext();
+    RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    ASSERT_THROWS_CODE(recipient->commit(), DBException, ErrorCodes::ReshardCollectionInProgress);
+
+    notifyToStartCloning(opCtx.get(), *recipient, doc);
+    recipient->awaitInStrictConsistencyOrError().get();
+    recipient->commit();
+
+    ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+}
+
 TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort) {
     auto metrics = ReshardingRecipientServiceTest::metrics();
     for (bool isAlsoDonor : {false, true}) {
@@ -529,6 +554,57 @@ TEST_F(ReshardingRecipientServiceTest, RenamesTemporaryReshardingCollectionWhenD
         ASSERT_TRUE(bool(coll));
         ASSERT_EQ(coll->uuid(), doc.getReshardingUUID());
     }
+}
+
+TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryOnReshardDoneCatchUp) {
+    // TODO (SERVER-57194): enable lock-free reads.
+    bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
+    storageGlobalParams.disableLockFreeReads = true;
+    ON_BLOCK_EXIT(
+        [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
+
+    boost::optional<PauseDuringStateTransitions> doneTransitionGuard;
+    doneTransitionGuard.emplace(controller(), RecipientStateEnum::kDone);
+
+    auto doc = makeStateDocument(false /* isAlsoDonor */);
+    auto opCtx = makeOperationContext();
+    auto rawOpCtx = opCtx.get();
+    RecipientStateMachine::insertStateDocument(rawOpCtx, doc);
+    auto recipient = RecipientStateMachine::getOrCreate(rawOpCtx, _service, doc.toBSON());
+
+    notifyToStartCloning(rawOpCtx, *recipient, doc);
+    notifyReshardingCommitting(opCtx.get(), *recipient, doc);
+
+    doneTransitionGuard->wait(RecipientStateEnum::kDone);
+
+    stepDown();
+    doneTransitionGuard.reset();
+    ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+
+    DBDirectClient client(opCtx.get());
+    NamespaceString sourceNss = constructTemporaryReshardingNss("sourcedb", doc.getSourceUUID());
+
+    auto cursor = client.query(NamespaceString(NamespaceString::kRsOplogNamespace.ns()),
+                               BSON("ns" << sourceNss.toString()));
+
+    ASSERT_TRUE(cursor->more()) << "Found no oplog entries for source collection";
+    repl::OplogEntry op(cursor->next());
+    ASSERT_FALSE(cursor->more()) << "Found multiple oplog entries for source collection: "
+                                 << op.getEntry() << " and " << cursor->nextSafe();
+
+    ReshardingChangeEventO2Field expectedChangeEvent{
+        doc.getReshardingUUID(), ReshardingChangeEventEnum::kReshardDoneCatchUp};
+    auto receivedChangeEvent = ReshardingChangeEventO2Field::parse(
+        IDLParserErrorContext("ReshardingChangeEventO2Field"), *op.getObject2());
+
+    ASSERT_EQ(OpType_serializer(op.getOpType()), OpType_serializer(repl::OpTypeEnum::kNoop))
+        << op.getEntry();
+    ASSERT_EQ(*op.getUuid(), doc.getReshardingUUID()) << op.getEntry();
+    ASSERT_EQ(op.getObject()["msg"].type(), BSONType::String) << op.getEntry();
+    ASSERT_TRUE(receivedChangeEvent == expectedChangeEvent);
+    ASSERT_TRUE(op.getFromMigrate());
+    ASSERT_FALSE(bool(op.getDestinedRecipient())) << op.getEntry();
 }
 
 TEST_F(ReshardingRecipientServiceTest, TruncatesXLErrorOnRecipientDocument) {

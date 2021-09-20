@@ -4464,7 +4464,7 @@ tasks:
 
 - <<: *task_template
   name: replica_sets_jscore_passthrough
-  tags: ["replica_sets", "common", "san", "large", "ignore_on_linux_debug_variant"]
+  tags: ["replica_sets", "common", "san", "large", "ignore_non_generated_replica_sets_jscore_passthrough"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -4778,7 +4778,8 @@ tasks:
     vars:
       resmoke_args: --suites=sharding_jscore_op_query_passthrough --storageEngine=wiredTiger
 
-- name: sharding_jscore_passthrough_wire_ops_gen
+- <<: *gen_task_template
+  name: sharding_jscore_passthrough_wire_ops_gen
   tags: ["sharding", "jscore"]
   commands:
   - func: "generate resmoke tasks"
@@ -4900,7 +4901,7 @@ tasks:
 
 - <<: *gen_task_template
   name: parallel_gen
-  tags: ["misc_js"]
+  tags: ["misc_js", "parallel"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4976,14 +4977,13 @@ tasks:
       resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_replication_multi_stmt_txn
+- <<: *gen_task_template
+  name: concurrency_replication_multi_stmt_txn_gen
   tags: ["concurrency", "common", "repl", "txn"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: "--suites=concurrency_replication_multi_stmt_txn --storageEngine=wiredTiger"
+      resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
 
   # TODO: SERVER-35964 revert the addition of UBSAN concurrency_replication suites.
@@ -5237,14 +5237,13 @@ tasks:
       resmoke_args: --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_simultaneous_replication
+- <<: *gen_task_template
+  name: concurrency_simultaneous_replication_gen
   tags: ["concurrency", "common", "large", "repl"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: "--suites=concurrency_simultaneous_replication --storageEngine=wiredTiger"
+      resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
 
 - <<: *task_template
@@ -5838,8 +5837,8 @@ tasks:
         num_tasks: 20
         exec_timeout_secs: 604800 # 7 days
         timeout_secs: 604800 # 7 days
-        set_up_retry_count: 1000000
-        run_powercycle_args: --sshAccessRetryCount=1000000
+        set_up_retry_count: 450
+        run_powercycle_args: --sshAccessRetryCount=450
 
 - name: powercycle_sentinel
   exec_timeout_secs: 604800 # 7 days
@@ -7137,7 +7136,8 @@ buildvariants:
   - name: jsCore_txns
   - name: .logical_session_cache
   - name: parallel_gen
-  - name: .concurrency .common !.kill_terminate
+  # TODO(SERVER-58778): Re-enable concurrency_replication_multi_stmt_txn by removing !.txn
+  - name: .concurrency .common !.kill_terminate !.txn
     distros:
       - rhel80-medium
   - name: concurrency_replication_causal_consistency_gen
@@ -7186,7 +7186,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: .ocsp
   - name: .read_write_concern
-  - name: .replica_sets !.encrypt !.ignore_on_linux_debug_variant
+  - name: .replica_sets !.encrypt !.ignore_non_generated_replica_sets_jscore_passthrough
   - name: replica_sets_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
@@ -8535,7 +8535,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --disable-warnings-as-errors --variables-files=etc/scons/xcode_macosx.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --disable-warnings-as-errors --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8549,7 +8549,7 @@ buildvariants:
   - name: .logical_session_cache .one_sec
   - name: mqlrun
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
 
 ###########################################
@@ -8880,7 +8880,7 @@ buildvariants:
   - name: change_streams_whole_db_passthrough
   - name: change_streams_whole_cluster_passthrough
   - name: concurrency_replication_gen
-  - name: concurrency_replication_multi_stmt_txn
+  - name: concurrency_replication_multi_stmt_txn_gen
   - name: concurrency_sharded_replication_gen
   - name: concurrency_sharded_replication_with_balancer_gen
   - name: concurrency_sharded_clusterwide_ops_add_remove_shards_gen
@@ -9117,7 +9117,8 @@ buildvariants:
     - name: .query_fuzzer
     - name: .random_multiversion_ds
     - name: .read_write_concern
-    - name: .replica_sets
+    - name: .replica_sets !.ignore_non_generated_replica_sets_jscore_passthrough
+    - name: replica_sets_jscore_passthrough_gen
     - name: .read_only
     - name: .rollbackfuzzer
     - name: retryable_writes_jscore_passthrough_gen
@@ -10369,7 +10370,10 @@ buildvariants:
   - name: jsCore_op_query
   # SERVER-50295: Investigate jstestfuzz time outs.
   # - name: .jstestfuzz .common
-  - name: .logical_session_cache .one_sec
+  # SERVER-59095: Investigate the EFT failure and re-enable the failing jstest suite on evergreen.
+  # - name: .logical_session_cache .one_sec
+  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
   - name: .read_write_concern .linearize
   - name: replica_sets_gen
   - name: .replica_sets .common

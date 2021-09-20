@@ -132,7 +132,9 @@ MONGO_FAIL_POINT_DEFINE(skipDurableTimestampUpdates);
 MONGO_FAIL_POINT_DEFINE(omitConfigQuorumCheck);
 // Will cause signal drain complete to hang right before acquiring the RSTL.
 MONGO_FAIL_POINT_DEFINE(hangBeforeRSTLOnDrainComplete);
-// Will cause signal drain complete to hang after reconfig
+// Will cause signal drain complete to hang before reconfig.
+MONGO_FAIL_POINT_DEFINE(hangBeforeReconfigOnDrainComplete);
+// Will cause signal drain complete to hang after reconfig.
 MONGO_FAIL_POINT_DEFINE(hangAfterReconfigOnDrainComplete);
 MONGO_FAIL_POINT_DEFINE(doNotRemoveNewlyAddedOnHeartbeats);
 // Will hang right after setting the currentOp info associated with an automatic reconfig.
@@ -780,11 +782,8 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
 
             const auto lastApplied = opTimeStatus.getValue();
             _setMyLastAppliedOpTimeAndWallTime(lock, lastApplied, false);
-        }
 
-        // Clear maint. mode.
-        while (getMaintenanceMode()) {
-            setMaintenanceMode(false).transitional_ignore();
+            _topCoord->resetMaintenanceCount();
         }
 
         if (startCompleted) {
@@ -1189,6 +1188,10 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
         lk.unlock();
 
         if (needBumpConfigTerm) {
+            if (MONGO_unlikely(hangBeforeReconfigOnDrainComplete.shouldFail())) {
+                LOGV2(5726200, "Hanging due to hangBeforeReconfigOnDrainComplete failpoint");
+                hangBeforeReconfigOnDrainComplete.pauseWhileSet(opCtx);
+            }
             // We re-write the term but keep version the same. This conceptually a no-op
             // in the config consensus group, analogous to writing a new oplog entry
             // in Raft log state machine on step up.
@@ -3133,11 +3136,14 @@ bool ReplicationCoordinatorImpl::getMaintenanceMode() {
     return _topCoord->getMaintenanceCount() > 0;
 }
 
-Status ReplicationCoordinatorImpl::setMaintenanceMode(bool activate) {
+Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, bool activate) {
     if (getReplicationMode() != modeReplSet) {
         return Status(ErrorCodes::NoReplicationEnabled,
                       "can only set maintenance mode on replica set members");
     }
+
+    // It is possible that we change state to or from RECOVERING. Thus, we need the RSTL in X mode.
+    ReplicationStateTransitionLockGuard transitionGuard(opCtx, MODE_X);
 
     stdx::unique_lock<Latch> lk(_mutex);
     if (_topCoord->getRole() == TopologyCoordinator::Role::kCandidate ||
@@ -5786,6 +5792,32 @@ void ReplicationCoordinatorImpl::ReadWriteAbility::setCanServeNonLocalReads(Oper
 void ReplicationCoordinatorImpl::ReadWriteAbility::setCanServeNonLocalReads_UNSAFE(
     unsigned int newVal) {
     _canServeNonLocalReads.store(newVal);
+}
+
+void ReplicationCoordinatorImpl::recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) {
+    auto isCWWCSet = _externalState->isCWWCSetOnConfigShard(opCtx);
+    {
+        stdx::lock_guard<Latch> lk(_mutex);
+        _wasCWWCSetOnConfigServerOnStartup = isCWWCSet;
+    }
+}
+
+void ReplicationCoordinatorImpl::_validateDefaultWriteConcernOnShardStartup(WithLock lk) const {
+    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        // Checking whether the shard is part of a sharded cluster or not by checking if CWWC
+        // flag is set as we record it during sharding initialization phase, as on restarting a
+        // shard node for upgrading or any other reason, sharding initialization happens before
+        // config initialization.
+        if (_wasCWWCSetOnConfigServerOnStartup && !_wasCWWCSetOnConfigServerOnStartup.get() &&
+            !_rsConfig.isImplicitDefaultWriteConcernMajority()) {
+            auto msg =
+                "Cannot start shard because the implicit default write concern on this shard is "
+                "set to {w : 1}, since the number of writable voting members is not strictly more "
+                "than the voting majority. Change the shard configuration or set the cluster-wide "
+                "write concern using setDefaultRWConcern command and try again.";
+            fassert(5684400, {ErrorCodes::IllegalOperation, msg});
+        }
+    }
 }
 
 }  // namespace repl

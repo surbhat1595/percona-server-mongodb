@@ -273,6 +273,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/storage/journal_flusher',
+        '$BUILD_DIR/mongo/db/storage/storage_control',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         'oplog',
         'oplog_application',
@@ -314,7 +315,7 @@ env.Library(
     source=[
         'scatter_gather_algorithm.cpp',
         'scatter_gather_runner.cpp',
-        ],
+    ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/executor/task_executor_interface',
     ],
@@ -816,7 +817,7 @@ env.Library(
         'member_config.idl',
         'repl_set_config.idl',
         'repl_set_config_params.idl',
-            ],
+    ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/util/bson_extract',
@@ -908,6 +909,8 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/matcher/expressions',
+        '$BUILD_DIR/mongo/db/pipeline/pipeline',
+        '$BUILD_DIR/mongo/db/pipeline/process_interface/mongo_process_interface',
         'repl_server_parameters',
         'replication_auth',
     ],
@@ -967,7 +970,7 @@ env.Library(
         'database_cloner.cpp',
         'initial_sync_base_cloner.cpp',
     ],
-    LIBDEPS = [
+    LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/client/clientdriver_network',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
@@ -997,7 +1000,7 @@ env.Library(
         'tenant_database_cloner.cpp',
         'tenant_base_cloner.cpp',
     ],
-    LIBDEPS = [
+    LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/dbdirectclient',
         'base_cloner',
@@ -1236,6 +1239,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/server_status',
+        '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/stats/counters',
         '$BUILD_DIR/mongo/transport/message_compressor',
         'hello_auth',
@@ -1248,7 +1252,7 @@ env.Library(
 
 env.Library(
     target='tenant_migration_errors',
-    source= [
+    source=[
         'tenant_migration_conflict_info.cpp',
     ],
     LIBDEPS=[
@@ -1313,7 +1317,7 @@ env.Library(
 
 env.Library(
     target='tenant_migration_recipient_service',
-    source= [
+    source=[
         'tenant_migration_recipient_service.cpp',
     ],
     LIBDEPS=[
@@ -1444,6 +1448,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
+        '$BUILD_DIR/mongo/db/commands/rwc_defaults_commands',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/db/storage/flow_control',
@@ -1607,6 +1612,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/service_context_test_fixture',
             '$BUILD_DIR/mongo/db/stats/counters',
             '$BUILD_DIR/mongo/db/storage/ephemeral_for_test/storage_ephemeral_for_test_core',
+            '$BUILD_DIR/mongo/db/storage/storage_control',
             '$BUILD_DIR/mongo/db/transaction',
             '$BUILD_DIR/mongo/db/update/update_test_helpers',
             '$BUILD_DIR/mongo/dbtests/mocklib',
@@ -1721,7 +1727,8 @@ env.CppUnitTest(
         'tenant_cloner_test_fixture.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/auth/authmocks',  # Required for service context test fixture
+        # Required for service context test fixture
+        '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
         '$BUILD_DIR/mongo/dbtests/mocklib',

@@ -336,7 +336,7 @@ void ReplicationCoordinatorEmbedded::cancelAndRescheduleElectionTimeout() {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-Status ReplicationCoordinatorEmbedded::setMaintenanceMode(bool) {
+Status ReplicationCoordinatorEmbedded::setMaintenanceMode(OperationContext*, bool) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -571,6 +571,12 @@ BSONObj ReplicationCoordinatorEmbedded::runCmdOnPrimaryAndAwaitResponse(
 }
 
 void ReplicationCoordinatorEmbedded::restartScheduledHeartbeats_forTest() {
+    MONGO_UNREACHABLE;
+}
+
+
+void ReplicationCoordinatorEmbedded::recordIfCWWCIsSetOnConfigServerOnStartup(
+    OperationContext* opCtx) {
     MONGO_UNREACHABLE;
 }
 

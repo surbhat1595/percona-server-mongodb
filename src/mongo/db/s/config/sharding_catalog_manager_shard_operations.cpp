@@ -52,6 +52,8 @@
 #include "mongo/db/commands/set_feature_compatibility_version_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/read_write_concern_defaults.h"
+#include "mongo/db/repl/hello_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/s/add_shard_cmd_gen.h"

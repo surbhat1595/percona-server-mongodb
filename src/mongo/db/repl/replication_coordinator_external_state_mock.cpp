@@ -317,5 +317,15 @@ void ReplicationCoordinatorExternalStateMock::stopNoopWriter() {}
 
 void ReplicationCoordinatorExternalStateMock::setupNoopWriter(Seconds waitTime) {}
 
+bool ReplicationCoordinatorExternalStateMock::isCWWCSetOnConfigShard(
+    OperationContext* opCtx) const {
+    return true;
+}
+
+bool ReplicationCoordinatorExternalStateMock::isShardPartOfShardedCluster(
+    OperationContext* opCtx) const {
+    return true;
+}
+
 }  // namespace repl
 }  // namespace mongo

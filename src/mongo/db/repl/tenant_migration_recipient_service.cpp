@@ -1330,7 +1330,8 @@ void TenantMigrationRecipientService::Instance::_startOplogFetcher() {
         // We do not need to check the rollback ID.
         ReplicationProcess::kUninitializedRollbackId,
         tenantMigrationOplogFetcherBatchSize,
-        OplogFetcher::RequireFresherSyncSource::kDontRequireFresherSyncSource);
+        OplogFetcher::RequireFresherSyncSource::kDontRequireFresherSyncSource,
+        true /* forTenantMigration */);
     oplogFetcherConfig.queryFilter = _getOplogFetcherFilter();
     oplogFetcherConfig.queryReadConcern =
         ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
@@ -2291,13 +2292,6 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             // normally stop by itself on success. It completes only on errors or on external
             // interruption (e.g. by shutDown/stepDown or by recipientForgetMigration command).
             Status status = applierStatus.getStatus();
-
-            // TODO (SERVER-54735): Remove this once AsyncTry can no longer set its result with
-            // BrokenPromise error.
-            if (status == ErrorCodes::BrokenPromise) {
-                status = Status{ErrorCodes::InterruptedDueToReplStateChange,
-                                "operation was interrupted"};
-            }
 
             // If we were interrupted during oplog application, replace oplog application
             // status with error state.

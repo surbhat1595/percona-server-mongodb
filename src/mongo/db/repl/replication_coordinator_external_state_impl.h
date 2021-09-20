@@ -121,6 +121,10 @@ public:
     virtual void startNoopWriter(OpTime);
     virtual void stopNoopWriter();
 
+    virtual bool isCWWCSetOnConfigShard(OperationContext* opCtx) const final;
+
+    virtual bool isShardPartOfShardedCluster(OperationContext* opCtx) const final;
+
 private:
     /**
      * Stops data replication and returns with 'lock' locked.

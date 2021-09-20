@@ -22,6 +22,26 @@
 last-continuous:
   # Tests that should be excluded from ALL multiversion suites should be listed here.
   all:
+    - ticket: SERVER-57262
+      test_file: jstests/replsets/catchup_takeover_with_higher_config.js
+    - ticket: SERVER-58353
+      test_file: jstests/replsets/tenant_migration_aborted_buildindex.js
+    - ticket: SERVER-58898
+      test_file: jstests/replsets/write_concern_write_to_local.js
+    - ticket: SERVER-59197
+      test_file: jstests/replsets/sessions_collection_reaping.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_recipient_fetches_retryable_writes_oplog_entries.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_recipient_fetches_synthetic_find_and_modify_oplog_entries.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_retryable_write_retry.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_retryable_write_retry_on_recipient.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_find_and_modify_retry.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -46,6 +66,8 @@ last-lts:
   all:
     - ticket: SERVER-49471
       test_file: jstests/replsets/apply_prepare_txn_write_conflict_robustness.js
+    - ticket: SERVER-58353
+      test_file: jstests/replsets/tenant_migration_aborted_buildindex.js
     - ticket: SERVER-47645
       test_file: jstests/replsets/invalidate_sessions_on_stepdown.js
     - ticket: SERVER-47773
@@ -192,6 +214,24 @@ last-lts:
       test_file: jstests/sharding/movechunk_parallel.js
     - ticket: SERVER-52906
       test_file: jstests/sharding/txn_writes_during_movechunk.js
+    - ticket: SERVER-57262
+      test_file: jstests/replsets/catchup_takeover_with_higher_config.js
+    - ticket: SERVER-58898
+      test_file: jstests/replsets/write_concern_write_to_local.js
+    - ticket: SERVER-59197
+      test_file: jstests/replsets/sessions_collection_reaping.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_recipient_fetches_retryable_writes_oplog_entries.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_recipient_fetches_synthetic_find_and_modify_oplog_entries.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_retryable_write_retry.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_retryable_write_retry_on_recipient.js
+    - ticket: SERVER-57617
+      test_file: jstests/replsets/tenant_migration_find_and_modify_retry.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

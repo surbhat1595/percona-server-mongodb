@@ -43,6 +43,7 @@
 #include "mongo/db/s/config/initial_split_policy.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/resharding_coordinator_commit_monitor.h"
+#include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding_util.h"
@@ -55,7 +56,9 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/abort_reshard_collection_gen.h"
+#include "mongo/s/request_types/commit_reshard_collection_gen.h"
 #include "mongo/s/request_types/flush_resharding_state_change_gen.h"
+#include "mongo/s/request_types/flush_routing_table_cache_updates_gen.h"
 #include "mongo/s/shard_id.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/fail_point.h"
@@ -72,10 +75,12 @@ MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorAfterPreparingToDonate);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeCloning);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeBlockingWrites);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeDecisionPersisted);
+MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeRemovingStateDoc);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeCompletion);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeStartingErrorFlow);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforePersistingStateTransition);
 MONGO_FAIL_POINT_DEFINE(pauseBeforeTellDonorToRefresh);
+MONGO_FAIL_POINT_DEFINE(pauseBeforeInsertCoordinatorDoc);
 
 const std::string kReshardingCoordinatorActiveIndexName = "ReshardingCoordinatorActiveIndex";
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
@@ -589,6 +594,13 @@ void executeMetadataChangesInTxn(
                                             });
 }
 
+BSONObj makeFlushRoutingTableCacheUpdatesCmd(const NamespaceString& nss) {
+    auto cmd = _flushRoutingTableCacheUpdatesWithWriteConcern(nss);
+    cmd.setSyncFromConfig(true);
+    cmd.setDbName(nss.db());
+    return CommandHelpers::appendMajorityWriteConcern(cmd.toBSON({})).getOwned();
+}
+
 }  // namespace
 
 namespace resharding {
@@ -698,7 +710,7 @@ void writeParticipantShardsAndTempCollInfo(
             writeToConfigCollectionsForTempNss(
                 opCtx, updatedCoordinatorDoc, chunkVersion, CollationSpec::kSimpleSpec, txnNumber);
 
-            insertChunkAndTagDocsForTempNss(opCtx, std::move(initialChunks), zones, txnNumber);
+            insertChunkAndTagDocsForTempNss(opCtx, initialChunks, zones, txnNumber);
         });
 }
 
@@ -857,7 +869,8 @@ ReshardingCoordinatorExternalStateImpl::calculateParticipantShardsAndChunks(
         const auto tempNs = coordinatorDoc.getTempReshardingNss();
 
         boost::optional<std::vector<mongo::TagsType>> parsedZones;
-        if (auto rawBSONZones = coordinatorDoc.getZones()) {
+        auto rawBSONZones = coordinatorDoc.getZones();
+        if (rawBSONZones && rawBSONZones->size() != 0) {
             parsedZones.emplace();
             parsedZones->reserve(rawBSONZones->size());
 
@@ -980,6 +993,12 @@ ReshardingCoordinatorService::ReshardingCoordinator::ReshardingCoordinator(
       }())),
       _reshardingCoordinatorExternalState(externalState) {
     _reshardingCoordinatorObserver = std::make_shared<ReshardingCoordinatorObserver>();
+
+    // If the coordinator is recovering from step-up, make sure to properly initialize the
+    // promises to reflect the latest state of this resharding operation.
+    if (coordinatorDoc.getState() > CoordinatorStateEnum::kInitializing) {
+        _reshardingCoordinatorObserver->onReshardingParticipantTransition(coordinatorDoc);
+    }
 }
 
 void ReshardingCoordinatorService::ReshardingCoordinator::installCoordinatorDoc(
@@ -1028,7 +1047,7 @@ void markCompleted(const Status& status) {
 BSONObj createFlushReshardingStateChangeCommand(const NamespaceString& nss,
                                                 const UUID& reshardingUUID) {
     _flushReshardingStateChange cmd(nss);
-    cmd.setDbName(nss.db());
+    cmd.setDbName(NamespaceString::kAdminDb);
     cmd.setReshardingUUID(reshardingUUID);
     return cmd.toBSON(
         BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority));
@@ -1036,86 +1055,91 @@ BSONObj createFlushReshardingStateChangeCommand(const NamespaceString& nss,
 
 BSONObj createShardsvrCommitReshardCollectionCmd(const NamespaceString& nss,
                                                  const UUID& reshardingUUID) {
-    BSONObjBuilder cmdBuilder;
-    cmdBuilder.append(_flushReshardingStateChange::kCommandAlias, nss.toString());
-    reshardingUUID.appendToBuilder(&cmdBuilder,
-                                   _flushReshardingStateChange::kReshardingUUIDFieldName);
-    cmdBuilder.append(WriteConcernOptions::kWriteConcernField, WriteConcernOptions::Majority);
-    return cmdBuilder.obj();
+    ShardsvrCommitReshardCollection cmd(nss);
+    cmd.setDbName(NamespaceString::kAdminDb);
+    cmd.setReshardingUUID(reshardingUUID);
+    return cmd.toBSON(
+        BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority));
 }
 
-ExecutorFuture<ReshardingCoordinatorDocument>
-ReshardingCoordinatorService::ReshardingCoordinator::_runUntilReadyToPersistDecision(
-    const std::shared_ptr<executor::ScopedTaskExecutor>& executor) noexcept {
-    return ExecutorFuture<void>(**executor)
-        .then([this, executor] { _insertCoordDocAndChangeOrigCollEntry(); })
-        .then([this, executor] { _calculateParticipantsAndChunksThenWriteToDisk(); })
+ExecutorFuture<void>
+ReshardingCoordinatorService::ReshardingCoordinator::_tellAllParticipantsReshardingStarted(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
+    if (_coordinatorDoc.getState() > CoordinatorStateEnum::kPreparingToDonate) {
+        return ExecutorFuture<void>(**executor, Status::OK());
+    }
+
+    return resharding::WithAutomaticRetry([this, executor] {
+               return ExecutorFuture<void>(**executor)
+                   .then([this] {
+                       // Ensure the flushes to create participant state machines don't get
+                       // interrupted upon abort.
+                       _cancelableOpCtxFactory.emplace(_ctHolder->getStepdownToken(),
+                                                       _markKilledExecutor);
+                   })
+                   .then([this, executor] {
+                       pauseBeforeTellDonorToRefresh.pauseWhileSet();
+                       _establishAllDonorsAsParticipants(executor);
+                   })
+                   .then([this, executor] { _establishAllRecipientsAsParticipants(executor); })
+                   .onCompletion([this](Status status) {
+                       // Swap back to using operation contexts canceled upon abort until ready to
+                       // persist the decision or unrecoverable error.
+                       _cancelableOpCtxFactory.emplace(_ctHolder->getAbortToken(),
+                                                       _markKilledExecutor);
+
+                       return status;
+                   });
+           })
+        .onTransientError([](const Status& status) {
+            LOGV2(5093702,
+                  "Resharding coordinator encountered transient error while telling participants "
+                  "to refresh",
+                  "error"_attr = status);
+        })
+        .onUnrecoverableError([](const Status& status) {})
+        .until<Status>([](const Status& status) { return status.isOK(); })
+        .on(**executor, _ctHolder->getStepdownToken());
+}
+
+ExecutorFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::_initializeCoordinator(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
+    return resharding::WithAutomaticRetry([this, executor] {
+               return ExecutorFuture<void>(**executor)
+                   .then([this, executor] { _insertCoordDocAndChangeOrigCollEntry(); })
+                   .then([this, executor] { _calculateParticipantsAndChunksThenWriteToDisk(); });
+           })
+        .onTransientError([](const Status& status) {
+            LOGV2(5093703,
+                  "Resharding coordinator encountered transient error while initializing",
+                  "error"_attr = status);
+        })
+        .onUnrecoverableError([](const Status& status) {})
+        .until<Status>([](const Status& status) { return status.isOK(); })
+        .on(**executor, _ctHolder->getAbortToken())
         .onCompletion([this, executor](Status status) {
             if (_ctHolder->isSteppingOrShuttingDown()) {
-                // Propagate any errors from the coordinator stepping down.
                 return ExecutorFuture<void>(**executor, status);
             }
 
             if (_coordinatorDoc.getState() < CoordinatorStateEnum::kPreparingToDonate) {
-                // Propagate any errors if the coordinator failed before transitioning to
-                // kPreparingToDonate, meaning participants were never and should never be made
-                // aware of this failed resharding operation.
-                invariant(!status.isOK());
                 return ExecutorFuture<void>(**executor, status);
             }
 
-            // Regardless of error or non-error, guarantee that once the coordinator completes its
-            // transition to kPreparingToDonate, participants are aware of the resharding operation
-            // and their state machines are created.
-            return ExecutorFuture<void>(**executor)
-                .then([this] {
-                    // Ensure the flushes to create participant state machines don't get interrupted
-                    // upon abort.
-                    _cancelableOpCtxFactory.emplace(_ctHolder->getStepdownToken(),
-                                                    _markKilledExecutor);
-                })
-                .then([this, executor] {
-                    pauseBeforeTellDonorToRefresh.pauseWhileSet();
-
-                    _tellAllDonorsToRefresh(executor);
-                })
-                .then([this, executor] { _tellAllRecipientsToRefresh(executor); })
-                .then([this] {
-                    // Swap back to using operation contexts canceled upon abort until ready to
-                    // persist the decision or unrecoverable error.
-                    _cancelableOpCtxFactory.emplace(_ctHolder->getAbortToken(),
-                                                    _markKilledExecutor);
-                })
-                .then([status] { return status; });
+            // Regardless of error or non-error, guarantee that once the coordinator
+            // completes its transition to kPreparingToDonate, participants are aware of
+            // the resharding operation and their state machines are created.
+            return _tellAllParticipantsReshardingStarted(executor);
         })
-        .then([this, executor] { return _awaitAllDonorsReadyToDonate(executor); })
-        .then([this, executor] { _tellAllRecipientsToRefresh(executor); })
-        .then([this, executor] { return _awaitAllRecipientsFinishedCloning(executor); })
-        .then([this, executor] { _tellAllDonorsToRefresh(executor); })
-        .then([this, executor] { return _awaitAllRecipientsFinishedApplying(executor); })
-        .then([this, executor] { _tellAllDonorsToRefresh(executor); })
-        .then([this, executor] { return _awaitAllRecipientsInStrictConsistency(executor); })
-        .onCompletion([this](auto passthroughFuture) {
-            _cancelableOpCtxFactory.emplace(_ctHolder->getStepdownToken(), _markKilledExecutor);
-            return passthroughFuture;
-        })
-        .onError([this, self = shared_from_this(), executor](
-                     Status status) -> StatusWith<ReshardingCoordinatorDocument> {
+        .onError([this, executor](Status status) {
             {
                 auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
                 reshardingPauseCoordinatorBeforeStartingErrorFlow.pauseWhileSet(opCtx.get());
             }
 
             if (_ctHolder->isSteppingOrShuttingDown()) {
-                return status;
+                return ExecutorFuture<void>(**executor, status);
             }
-
-            auto nss = _coordinatorDoc.getSourceNss();
-            LOGV2(4956902,
-                  "Resharding failed",
-                  "namespace"_attr = nss.ns(),
-                  "newShardKeyPattern"_attr = _coordinatorDoc.getReshardingKey(),
-                  "error"_attr = status);
 
             if (_ctHolder->isAborted()) {
                 // If the abort cancellation token was triggered, implying that a user ran the abort
@@ -1126,40 +1150,128 @@ ReshardingCoordinatorService::ReshardingCoordinator::_runUntilReadyToPersistDeci
                 status = {ErrorCodes::ReshardCollectionAborted, "aborted"};
             }
 
-            if (_coordinatorDoc.getState() == CoordinatorStateEnum::kUnused) {
-                return status;
-            }
+            auto nss = _coordinatorDoc.getSourceNss();
+            LOGV2(4956903,
+                  "Resharding failed",
+                  "namespace"_attr = nss.ns(),
+                  "newShardKeyPattern"_attr = _coordinatorDoc.getReshardingKey(),
+                  "error"_attr = status);
+
+            // Allow abort to continue except when stepped down.
+            _cancelableOpCtxFactory.emplace(_ctHolder->getStepdownToken(), _markKilledExecutor);
 
             if (_coordinatorDoc.getState() < CoordinatorStateEnum::kPreparingToDonate) {
-                // Participants were never made aware of the resharding operation. Abort without
-                // waiting for participant acknowledgement.
-                _onAbortCoordinatorOnly(executor, status);
+                return _onAbortCoordinatorOnly(executor, status);
             } else {
-                _onAbortCoordinatorAndParticipants(executor, status);
+                return _onAbortCoordinatorAndParticipants(executor, status);
             }
-            return status;
+        });
+}
+
+ExecutorFuture<ReshardingCoordinatorDocument>
+ReshardingCoordinatorService::ReshardingCoordinator::_runUntilReadyToCommit(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor) noexcept {
+    return resharding::WithAutomaticRetry([this, executor] {
+               return ExecutorFuture<void>(**executor)
+                   .then([this, executor] { return _awaitAllDonorsReadyToDonate(executor); })
+                   .then([this, executor] {
+                       if (_coordinatorDoc.getState() == CoordinatorStateEnum::kCloning) {
+                           _tellAllRecipientsToRefresh(executor);
+                       }
+                   })
+                   .then([this, executor] { return _awaitAllRecipientsFinishedCloning(executor); })
+                   .then([this, executor] {
+                       if (_coordinatorDoc.getState() == CoordinatorStateEnum::kApplying) {
+                           _tellAllDonorsToRefresh(executor);
+                       }
+                   })
+                   .then([this, executor] { return _awaitAllRecipientsFinishedApplying(executor); })
+                   .then([this, executor] {
+                       if (_coordinatorDoc.getState() == CoordinatorStateEnum::kBlockingWrites) {
+                           _tellAllDonorsToRefresh(executor);
+                       }
+                   })
+                   .then([this, executor] {
+                       return _awaitAllRecipientsInStrictConsistency(executor);
+                   });
+           })
+        .onTransientError([](const Status& status) {
+            LOGV2(5093704,
+                  "Resharding coordinator encountered transient error",
+                  "error"_attr = status);
+        })
+        .onUnrecoverableError([](const Status& status) {})
+        .until<StatusWith<ReshardingCoordinatorDocument>>(
+            [](const StatusWith<ReshardingCoordinatorDocument>& status) { return status.isOK(); })
+        .on(**executor, _ctHolder->getAbortToken())
+        .onCompletion([this](auto passthroughFuture) {
+            _cancelableOpCtxFactory.emplace(_ctHolder->getStepdownToken(), _markKilledExecutor);
+            return passthroughFuture;
+        })
+        .onError([this, executor](Status status) -> ExecutorFuture<ReshardingCoordinatorDocument> {
+            {
+                auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+                reshardingPauseCoordinatorBeforeStartingErrorFlow.pauseWhileSet(opCtx.get());
+            }
+
+            if (_ctHolder->isSteppingOrShuttingDown()) {
+                return ExecutorFuture<ReshardingCoordinatorDocument>(**executor, status);
+            }
+
+            if (_ctHolder->isAborted()) {
+                // If the abort cancellation token was triggered, implying that a user ran the abort
+                // command, override status with a resharding abort error.
+                status = {ErrorCodes::ReshardCollectionAborted, "aborted"};
+            }
+
+            auto nss = _coordinatorDoc.getSourceNss();
+            LOGV2(4956902,
+                  "Resharding failed",
+                  "namespace"_attr = nss.ns(),
+                  "newShardKeyPattern"_attr = _coordinatorDoc.getReshardingKey(),
+                  "error"_attr = status);
+
+            invariant(_coordinatorDoc.getState() >= CoordinatorStateEnum::kPreparingToDonate);
+
+            return _onAbortCoordinatorAndParticipants(executor, status)
+                .onCompletion([](Status status) {
+                    return StatusWith<ReshardingCoordinatorDocument>(status);
+                });
         });
 }
 
 ExecutorFuture<void>
-ReshardingCoordinatorService::ReshardingCoordinator::_persistDecisionAndFinishReshardOperation(
+ReshardingCoordinatorService::ReshardingCoordinator::_commitAndFinishReshardOperation(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const ReshardingCoordinatorDocument& updatedCoordinatorDoc) noexcept {
-    return ExecutorFuture<void>(**executor)
-        .then([this, self = shared_from_this(), executor, updatedCoordinatorDoc] {
-            return _persistDecision(updatedCoordinatorDoc);
+    return resharding::WithAutomaticRetry([this, executor, updatedCoordinatorDoc] {
+               return ExecutorFuture<void>(**executor)
+                   .then([this, executor, updatedCoordinatorDoc] {
+                       return _commit(updatedCoordinatorDoc);
+                   })
+                   .then([this, executor] {
+                       _tellAllParticipantsToCommit(_coordinatorDoc.getSourceNss(), executor);
+                   })
+                   .then([this] { _updateChunkImbalanceMetrics(_coordinatorDoc.getSourceNss()); })
+                   .then([this, executor] { return _awaitAllParticipantShardsDone(executor); })
+                   .then([this, self = shared_from_this(), executor] {
+                       // Best-effort attempt to trigger a refresh on the participant shards so
+                       // they see the collection metadata without reshardingFields and no longer
+                       // throw ReshardCollectionInProgress. There is no guarantee this logic ever
+                       // runs if the config server primary steps down after having removed the
+                       // coordinator state document.
+                       return _tellAllRecipientsToRefresh(executor);
+                   });
+           })
+        .onTransientError([](const Status& status) {
+            LOGV2(5093705,
+                  "Resharding coordinator encountered transient error while committing",
+                  "error"_attr = status);
         })
-        .then([this, self = shared_from_this(), executor] {
-            _tellAllParticipantsToRefresh(_coordinatorDoc.getSourceNss(), executor);
-        })
-        .then([this] { _updateChunkImbalanceMetrics(_coordinatorDoc.getSourceNss()); })
-        .then([this, self = shared_from_this(), executor] {
-            // The shared_ptr maintaining the ReshardingCoordinatorService Instance object gets
-            // deleted from the PrimaryOnlyService's map. Thus, shared_from_this() is necessary to
-            // keep 'this' pointer alive for the remaining callbacks.
-            return _awaitAllParticipantShardsDone(executor);
-        })
-        .onError([this, self = shared_from_this(), executor](Status status) {
+        .onUnrecoverableError([](const Status& status) {})
+        .until<Status>([](const Status& status) { return status.isOK(); })
+        .on(**executor, _ctHolder->getStepdownToken())
+        .onError([this, executor](Status status) {
             {
                 auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
                 reshardingPauseCoordinatorBeforeStartingErrorFlow.pauseWhileSet(opCtx.get());
@@ -1174,6 +1286,7 @@ ReshardingCoordinatorService::ReshardingCoordinator::_persistDecisionAndFinishRe
                         "error"_attr = redact(status));
         });
 }
+
 SemiFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::run(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& stepdownToken) noexcept {
@@ -1181,12 +1294,12 @@ SemiFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::run(
     _markKilledExecutor->startup();
     _cancelableOpCtxFactory.emplace(_ctHolder->getAbortToken(), _markKilledExecutor);
 
-    return _runUntilReadyToPersistDecision(executor)
-        .then([this, self = shared_from_this(), executor](
-                  const ReshardingCoordinatorDocument& updatedCoordinatorDoc) {
-            return _persistDecisionAndFinishReshardOperation(executor, updatedCoordinatorDoc);
+    return _initializeCoordinator(executor)
+        .then([this, executor] { return _runUntilReadyToCommit(executor); })
+        .then([this, executor](const ReshardingCoordinatorDocument& updatedCoordinatorDoc) {
+            return _commitAndFinishReshardOperation(executor, updatedCoordinatorDoc);
         })
-        .onCompletion([this, self = shared_from_this(), executor](Status status) {
+        .onCompletion([this, executor](Status status) {
             if (!_ctHolder->isSteppingOrShuttingDown() &&
                 _coordinatorDoc.getState() != CoordinatorStateEnum::kUnused) {
                 // Notify `ReshardingMetrics` as the operation is now complete for external
@@ -1247,40 +1360,72 @@ SemiFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::run(
         .semi();
 }
 
-void ReshardingCoordinatorService::ReshardingCoordinator::_onAbortCoordinatorOnly(
+ExecutorFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::_onAbortCoordinatorOnly(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const Status& status) {
     if (_coordinatorDoc.getState() == CoordinatorStateEnum::kUnused) {
         // No work to be done.
-        return;
+        return ExecutorFuture<void>(**executor, status);
     }
 
-    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+    return resharding::WithAutomaticRetry([this, executor, status] {
+               auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
 
-    // The temporary collection and its corresponding entries were never created. Only the
-    // coordinator document and reshardingFields require cleanup.
-    resharding::removeCoordinatorDocAndReshardingFields(opCtx.get(), _coordinatorDoc, status);
-    return;
+               // The temporary collection and its corresponding entries were never created. Only
+               // the coordinator document and reshardingFields require cleanup.
+               resharding::removeCoordinatorDocAndReshardingFields(
+                   opCtx.get(), _coordinatorDoc, status);
+               return status;
+           })
+        .onTransientError([](const Status& retryStatus) {
+            LOGV2(5093706,
+                  "Resharding coordinator encountered transient error while aborting",
+                  "error"_attr = retryStatus);
+        })
+        .onUnrecoverableError([](const Status& retryStatus) {})
+        .until<Status>([](const Status& retryStatus) { return retryStatus.isOK(); })
+        .on(**executor, _ctHolder->getStepdownToken())
+        // Return back original status.
+        .then([status] { return status; });
 }
 
-void ReshardingCoordinatorService::ReshardingCoordinator::_onAbortCoordinatorAndParticipants(
+ExecutorFuture<void>
+ReshardingCoordinatorService::ReshardingCoordinator::_onAbortCoordinatorAndParticipants(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const Status& status) {
     // Participants should never be waited upon to complete the abort if they were never made aware
     // of the resharding operation (the coordinator flushing its state change to
     // kPreparingToDonate).
     invariant(_coordinatorDoc.getState() >= CoordinatorStateEnum::kPreparingToDonate);
 
-    // The coordinator only transitions into kAborting if there are participants to wait on before
-    // transitioning to kDone.
-    _updateCoordinatorDocStateAndCatalogEntries(
-        CoordinatorStateEnum::kAborting, _coordinatorDoc, boost::none, boost::none, status);
+    return resharding::WithAutomaticRetry([this, executor, status] {
+               if (_coordinatorDoc.getState() != CoordinatorStateEnum::kAborting) {
+                   // The coordinator only transitions into kAborting if there are participants to
+                   // wait on before transitioning to kDone.
+                   _updateCoordinatorDocStateAndCatalogEntries(CoordinatorStateEnum::kAborting,
+                                                               _coordinatorDoc,
+                                                               boost::none,
+                                                               boost::none,
+                                                               status);
+               }
 
-    _tellAllParticipantsToAbort(executor, status == ErrorCodes::ReshardCollectionAborted);
+               _tellAllParticipantsToAbort(executor,
+                                           status == ErrorCodes::ReshardCollectionAborted);
 
-    // Wait for all participants to acknowledge the operation reached an unrecoverable
-    // error.
-    future_util::withCancellation(_awaitAllParticipantShardsDone(executor),
-                                  _ctHolder->getStepdownToken())
-        .get();
+               // Wait for all participants to acknowledge the operation reached an unrecoverable
+               // error.
+               return future_util::withCancellation(_awaitAllParticipantShardsDone(executor),
+                                                    _ctHolder->getStepdownToken());
+           })
+        .onTransientError([](const Status& retryStatus) {
+            LOGV2(5093707,
+                  "Resharding coordinator encountered transient error while aborting all "
+                  "participants",
+                  "error"_attr = retryStatus);
+        })
+        .onUnrecoverableError([](const Status& retryStatus) {})
+        .until<Status>([](const Status& retryStatus) { return retryStatus.isOK(); })
+        .on(**executor, _ctHolder->getStepdownToken())
+        // Return back the original status.
+        .then([status] { return status; });
 }
 
 void ReshardingCoordinatorService::ReshardingCoordinator::abort() {
@@ -1313,9 +1458,12 @@ void ReshardingCoordinatorService::ReshardingCoordinator::onOkayToEnterCritical(
 
 void ReshardingCoordinatorService::ReshardingCoordinator::_insertCoordDocAndChangeOrigCollEntry() {
     if (_coordinatorDoc.getState() > CoordinatorStateEnum::kUnused) {
-        _coordinatorDocWrittenPromise.emplaceValue();
-        ReshardingMetrics::get(cc().getServiceContext())
-            ->onStepUp(ReshardingMetrics::Role::kCoordinator);
+        if (!_coordinatorDocWrittenPromise.getFuture().isReady()) {
+            _coordinatorDocWrittenPromise.emplaceValue();
+            ReshardingMetrics::get(cc().getServiceContext())
+                ->onStepUp(ReshardingMetrics::Role::kCoordinator);
+        }
+
         return;
     }
 
@@ -1325,11 +1473,16 @@ void ReshardingCoordinatorService::ReshardingCoordinator::_insertCoordDocAndChan
     resharding::insertCoordDocAndChangeOrigCollEntry(opCtx.get(), updatedCoordinatorDoc);
     installCoordinatorDoc(opCtx.get(), updatedCoordinatorDoc);
 
-    _coordinatorDocWrittenPromise.emplaceValue();
+    {
+        // Note: don't put blocking or interruptible code in this block.
+        _coordinatorDocWrittenPromise.emplaceValue();
 
-    // TODO SERVER-53914 to accommodate loading metrics for the coordinator.
-    ReshardingMetrics::get(cc().getServiceContext())
-        ->onStart(ReshardingMetrics::Role::kCoordinator, getCurrentTime());
+        // TODO SERVER-53914 to accommodate loading metrics for the coordinator.
+        ReshardingMetrics::get(cc().getServiceContext())
+            ->onStart(ReshardingMetrics::Role::kCoordinator, getCurrentTime());
+    }
+
+    pauseBeforeInsertCoordinatorDoc.pauseWhileSet();
 }
 
 void ReshardingCoordinatorService::ReshardingCoordinator::
@@ -1337,7 +1490,6 @@ void ReshardingCoordinatorService::ReshardingCoordinator::
     if (_coordinatorDoc.getState() > CoordinatorStateEnum::kInitializing) {
         return;
     }
-
     auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
     ReshardingCoordinatorDocument updatedCoordinatorDoc = _coordinatorDoc;
 
@@ -1519,7 +1671,7 @@ ReshardingCoordinatorService::ReshardingCoordinator::_awaitAllRecipientsInStrict
         .thenRunOn(**executor);
 }
 
-Future<void> ReshardingCoordinatorService::ReshardingCoordinator::_persistDecision(
+Future<void> ReshardingCoordinatorService::ReshardingCoordinator::_commit(
     const ReshardingCoordinatorDocument& coordinatorDoc) {
     if (_coordinatorDoc.getState() > CoordinatorStateEnum::kBlockingWrites) {
         return Status::OK();
@@ -1569,6 +1721,9 @@ ReshardingCoordinatorService::ReshardingCoordinator::_awaitAllParticipantShardsD
             auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
             auto& coordinatorDoc = coordinatorDocsChangedOnDisk[1];
 
+            reshardingPauseCoordinatorBeforeRemovingStateDoc.pauseWhileSetAndNotCanceled(
+                opCtx.get(), _ctHolder->getStepdownToken());
+
             boost::optional<Status> abortReason;
             if (coordinatorDoc.getAbortReason()) {
                 abortReason = getStatusFromAbortReason(coordinatorDoc);
@@ -1601,11 +1756,66 @@ void ReshardingCoordinatorService::ReshardingCoordinator::
     installCoordinatorDoc(opCtx.get(), updatedCoordinatorDoc);
 }
 
+void ReshardingCoordinatorService::ReshardingCoordinator::_sendCommandToAllParticipants(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const BSONObj& command) {
+    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+    auto donorShardIds = extractShardIdsFromParticipantEntries(_coordinatorDoc.getDonorShards());
+    auto recipientShardIds =
+        extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards());
+    std::set<ShardId> participantShardIds{donorShardIds.begin(), donorShardIds.end()};
+    participantShardIds.insert(recipientShardIds.begin(), recipientShardIds.end());
+
+    _reshardingCoordinatorExternalState->sendCommandToShards(
+        opCtx.get(),
+        NamespaceString::kAdminDb,
+        command,
+        {participantShardIds.begin(), participantShardIds.end()},
+        **executor);
+}
+
+void ReshardingCoordinatorService::ReshardingCoordinator::_sendCommandToAllRecipients(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const BSONObj& command) {
+    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+    auto recipientShardIds =
+        extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards());
+
+    _reshardingCoordinatorExternalState->sendCommandToShards(
+        opCtx.get(),
+        NamespaceString::kAdminDb,
+        command,
+        {recipientShardIds.begin(), recipientShardIds.end()},
+        **executor);
+}
+
+void ReshardingCoordinatorService::ReshardingCoordinator::_sendCommandToAllDonors(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor, const BSONObj& command) {
+    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+    auto donorShardIds = extractShardIdsFromParticipantEntries(_coordinatorDoc.getDonorShards());
+
+    _reshardingCoordinatorExternalState->sendCommandToShards(
+        opCtx.get(),
+        NamespaceString::kAdminDb,
+        command,
+        {donorShardIds.begin(), donorShardIds.end()},
+        **executor);
+}
+
+void ReshardingCoordinatorService::ReshardingCoordinator::_establishAllDonorsAsParticipants(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
+    invariant(_coordinatorDoc.getState() == CoordinatorStateEnum::kPreparingToDonate);
+    auto flushCmd = makeFlushRoutingTableCacheUpdatesCmd(_coordinatorDoc.getSourceNss());
+    _sendCommandToAllDonors(executor, flushCmd);
+}
+
+void ReshardingCoordinatorService::ReshardingCoordinator::_establishAllRecipientsAsParticipants(
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
+    invariant(_coordinatorDoc.getState() == CoordinatorStateEnum::kPreparingToDonate);
+    auto flushCmd = makeFlushRoutingTableCacheUpdatesCmd(_coordinatorDoc.getTempReshardingNss());
+    _sendCommandToAllRecipients(executor, flushCmd);
+}
+
 void ReshardingCoordinatorService::ReshardingCoordinator::_tellAllRecipientsToRefresh(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
-    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-    auto recipientIds = extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards());
-
     NamespaceString nssToRefresh;
     // Refresh the temporary namespace if the coordinator is in a state prior to 'kCommitting'.
     // A refresh of recipients while in 'kCommitting' should be accompanied by a refresh of
@@ -1618,68 +1828,30 @@ void ReshardingCoordinatorService::ReshardingCoordinator::_tellAllRecipientsToRe
 
     auto refreshCmd =
         createFlushReshardingStateChangeCommand(nssToRefresh, _coordinatorDoc.getReshardingUUID());
-
-    _reshardingCoordinatorExternalState->sendCommandToShards(
-        opCtx.get(),
-        NamespaceString::kAdminDb,
-        refreshCmd,
-        {recipientIds.begin(), recipientIds.end()},
-        **executor);
+    _sendCommandToAllRecipients(executor, refreshCmd);
 }
 
 void ReshardingCoordinatorService::ReshardingCoordinator::_tellAllDonorsToRefresh(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
-    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-    auto donorIds = extractShardIdsFromParticipantEntries(_coordinatorDoc.getDonorShards());
-
     auto refreshCmd = createFlushReshardingStateChangeCommand(_coordinatorDoc.getSourceNss(),
                                                               _coordinatorDoc.getReshardingUUID());
-    _reshardingCoordinatorExternalState->sendCommandToShards(opCtx.get(),
-                                                             NamespaceString::kAdminDb,
-                                                             refreshCmd,
-                                                             {donorIds.begin(), donorIds.end()},
-                                                             **executor);
+    _sendCommandToAllDonors(executor, refreshCmd);
 }
 
-void ReshardingCoordinatorService::ReshardingCoordinator::_tellAllParticipantsToRefresh(
+void ReshardingCoordinatorService::ReshardingCoordinator::_tellAllParticipantsToCommit(
     const NamespaceString& nss, const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
-    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-
-    auto donorShardIds = extractShardIdsFromParticipantEntries(_coordinatorDoc.getDonorShards());
-    auto recipientShardIds =
-        extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards());
-    std::set<ShardId> participantShardIds{donorShardIds.begin(), donorShardIds.end()};
-    participantShardIds.insert(recipientShardIds.begin(), recipientShardIds.end());
-
     auto commitCmd =
         createShardsvrCommitReshardCollectionCmd(nss, _coordinatorDoc.getReshardingUUID());
-    _reshardingCoordinatorExternalState->sendCommandToShards(
-        opCtx.get(),
-        NamespaceString::kAdminDb,
-        commitCmd,
-        {participantShardIds.begin(), participantShardIds.end()},
-        **executor);
+    _sendCommandToAllParticipants(executor, commitCmd);
 }
 
 void ReshardingCoordinatorService::ReshardingCoordinator::_tellAllParticipantsToAbort(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor, bool isUserAborted) {
-    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-
-    auto donorShardIds = extractShardIdsFromParticipantEntries(_coordinatorDoc.getDonorShards());
-    auto recipientShardIds =
-        extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards());
-    std::set<ShardId> participantShardIds{donorShardIds.begin(), donorShardIds.end()};
-    participantShardIds.insert(recipientShardIds.begin(), recipientShardIds.end());
-
     ShardsvrAbortReshardCollection abortCmd(_coordinatorDoc.getReshardingUUID(), isUserAborted);
     abortCmd.setDbName("admin");
-
-    sharding_util::sendCommandToShards(opCtx.get(),
-                                       NamespaceString::kAdminDb,
-                                       abortCmd.toBSON(BSON(WriteConcernOptions::kWriteConcernField
-                                                            << WriteConcernOptions::Majority)),
-                                       {participantShardIds.begin(), participantShardIds.end()},
-                                       **executor);
+    _sendCommandToAllParticipants(executor,
+                                  abortCmd.toBSON(BSON(WriteConcernOptions::kWriteConcernField
+                                                       << WriteConcernOptions::Majority)));
 }
 
 void ReshardingCoordinatorService::ReshardingCoordinator::_updateChunkImbalanceMetrics(

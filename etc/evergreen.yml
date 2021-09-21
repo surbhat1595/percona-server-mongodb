@@ -2613,14 +2613,14 @@ functions:
             --verbose                                        \
             --userHost $USER@$private_ip_address             \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmd"
           $python buildscripts/remote_operations.py          \
             --verbose                                        \
             --userHost $USER@$private_ip_address             \
             --operation "copy_from"                          \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --file ec2_monitor_files.tgz
           sleep 30
         done
@@ -2686,7 +2686,7 @@ functions:
             --userHost $USER@${private_ip_address}           \
             --operation "copy_to"                            \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --file buildscripts/mount_drives.sh
 
     - command: shell.exec
@@ -2723,7 +2723,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2750,7 +2750,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2773,7 +2773,7 @@ functions:
             --userHost $USER@${private_ip_address}           \
             --operation "copy_to"                            \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             $file_param                                      \
             --remoteDir ${remote_dir}
 
@@ -2797,7 +2797,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2835,7 +2835,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2860,7 +2860,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|3}                       \
+            --access_retry_count ${ssh_retries|3}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2902,7 +2902,8 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --op_retry_count 2                               \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2973,7 +2974,7 @@ functions:
               --verbose                                        \
               --userHost $USER@${private_ip_address}           \
               --sshConnectionOptions "$ssh_connection_options" \
-              --retries ${ssh_retries|0}                       \
+              --access_retry_count ${ssh_retries|0}            \
               --commands "$cmds"
           fi
 
@@ -2996,7 +2997,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - *copy_ec2_monitor_files
@@ -3049,7 +3050,7 @@ functions:
           --verbose                                        \
           --userHost $USER@${private_ip_address}           \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
+          --access_retry_count ${ssh_retries|0}            \
           --commands "$cmd"
 
   "copy EC2 artifacts": &copy_ec2_artifacts
@@ -3069,7 +3070,7 @@ functions:
           --userHost $USER@${private_ip_address}           \
           --operation "copy_from"                          \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
+          --access_retry_count ${ssh_retries|0}            \
           --file ec2_artifacts.tgz
 
   "cleanup EC2 instance": &cleanup_ec2_instance
@@ -3113,7 +3114,7 @@ functions:
           --verbose                                        \
           --userHost $USER@${private_ip_address}           \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
+          --access_retry_count ${ssh_retries|0}            \
           --commands "$cmds"
 
   "gather remote mongo coredumps": &gather_remote_mongo_coredumps
@@ -3140,7 +3141,7 @@ functions:
           --verbose                                        \
           --userHost $USER@${private_ip_address}           \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries}                         \
+          --access_retry_count ${ssh_retries}              \
           --commands "$cmds"                               \
           --commandDir $remote_dir
 
@@ -3161,7 +3162,7 @@ functions:
           --userHost $USER@${private_ip_address}           \
           --operation "copy_from"                          \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries}                         \
+          --access_retry_count ${ssh_retries}              \
           --file "$remote_dir/*.core"                      \
           --file "$remote_dir/*.mdmp"
         # Since both type of core files do not exist on the same host, this command
@@ -3629,7 +3630,7 @@ functions:
               --userHost $USER@${private_ip_address}           \
               --operation "copy_to"                            \
               --sshConnectionOptions "$ssh_connection_options" \
-              --retries ${ssh_retries}                         \
+              --access_retry_count ${ssh_retries}              \
               $file_param                                      \
               --remoteDir $remote_dir
           fi
@@ -3647,7 +3648,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries}                         \
+            --access_retry_count ${ssh_retries}              \
             --commands "$cmds"
 
           $python buildscripts/remote_operations.py          \
@@ -3655,7 +3656,7 @@ functions:
             --userHost $USER@${private_ip_address}           \
             --operation "copy_from"                          \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries}                         \
+            --access_retry_count ${ssh_retries}              \
             --file "$remote_dir/debugger*.*"                 \
             --file "$remote_dir/*.$core_ext"
         fi
@@ -10304,7 +10305,7 @@ buildvariants:
     target_resmoke_time: 10
     max_sub_suites: 3
     large_distro_name: rhel62-large
-    burn_in_tag_buildvariants: enterprise-rhel-62-64-bit-majority-read-concern-off enterprise-rhel-62-64-bit-inmem linux-64-duroff enterprise-rhel-62-64-bit-multiversion
+    burn_in_tag_buildvariants: enterprise-rhel-62-64-bit-majority-read-concern-off enterprise-rhel-62-64-bit-inmem linux-64-duroff enterprise-rhel-62-64-bit-multiversion enterprise-rhel-62-64-bit-store-fam-images-in-side-coll
   tasks:
   - name: compile_all_run_unittests_TG
     distros:
@@ -10397,7 +10398,7 @@ buildvariants:
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
 
-- name: enterprise-rhel-62-64-bit-store_fam_images_in_side_coll
+- name: enterprise-rhel-62-64-bit-store-fam-images-in-side-coll
   display_name: "Enterprise RHEL 6.2 (storeFindAndModifyImagesInSideCollection=True)"
   batchtime: 480 # 8 hours
   modules:
@@ -10432,22 +10433,10 @@ buildvariants:
   - name: compile_all_run_unittests_TG
     distros:
     - rhel62-large
-  - name: lint_pylinters
-  - name: lint_clang_format
-  - name: lint_eslint
-  - name: lint_cpplint
-  - name: lint_fuzzer_sanity_patch
-  - name: lint_yaml
-  - name: lint_errorcodes
-  - name: burn_in_tests_gen
-  - name: burn_in_tests_multiversion_gen
-  - name: check_for_todos
   - name: .aggfuzzer
   - name: .aggregation
   - name: audit
   - name: .auth
-  - name: burn_in_tags_gen
-  - name: buildscripts_test
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
@@ -10511,9 +10500,6 @@ buildvariants:
   - name: .stitch
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
-  - name: test_packages
-    distros:
-    - ubuntu1604-packer
   - name: .publish
     distros:
         - rhel62-small
@@ -12648,7 +12634,7 @@ buildvariants:
     jstestfuzz_concurrent_num_files: 10
     target_resmoke_time: 10
     large_distro_name: rhel62-large
-    burn_in_tag_buildvariants: enterprise-rhel-62-64-bit-majority-read-concern-off enterprise-rhel-62-64-bit-inmem linux-64-duroff
+    burn_in_tag_buildvariants: enterprise-rhel-62-64-bit-majority-read-concern-off enterprise-rhel-62-64-bit-inmem linux-64-duroff enterprise-rhel-62-64-bit-store-fam-images-in-side-coll
   tasks:
   - name: commit_queue_placeholder
   - name: compile_core_tools_TG

@@ -2090,6 +2090,14 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::parse(
         const StringData varName = fieldPath.substr(0, fieldPath.find('.'));
         Variables::uassertValidNameForUserRead(varName);
         auto varId = vps.getVariable(varName);
+        if (varName.compare(Variables::getBuiltinVariableName(Variables::kSearchMetaId)) == 0) {
+            return new ExpressionFieldPathNonSharded(
+                expCtx.get(),
+                fieldPath.toString(),
+                varId,
+                std::string("Search queries accessing $$SEARCH_META are not supported in sharded "
+                            "pipelines"));
+        }
         return new ExpressionFieldPath(expCtx, fieldPath.toString(), varId);
     } else {
         return new ExpressionFieldPath(expCtx,
@@ -2205,6 +2213,12 @@ Value ExpressionFieldPath::serialize(bool explain) const {
     } else {
         return Value("$$" + _fieldPath.fullPath());
     }
+}
+
+Value ExpressionFieldPathNonSharded::evaluate(const Document& root, Variables* variables) const {
+    uassert(
+        5858100, _errMsg, !getExpressionContext()->needsMerge && !getExpressionContext()->inMongos);
+    return ExpressionFieldPath::evaluate(root, variables);
 }
 
 Expression::ComputedPaths ExpressionFieldPath::getComputedPaths(const std::string& exprFieldPath,
@@ -4090,6 +4104,13 @@ ValueSet arrayToSet(const Value& val, const ValueComparator& valueComparator) {
     valueSet.insert(array.begin(), array.end());
     return valueSet;
 }
+
+ValueUnorderedSet arrayToUnorderedSet(const Value& val, const ValueComparator& valueComparator) {
+    const vector<Value>& array = val.getArray();
+    ValueUnorderedSet valueSet = valueComparator.makeUnorderedValueSet();
+    valueSet.insert(array.begin(), array.end());
+    return valueSet;
+}
 }  // namespace
 
 /* ----------------------- ExpressionSetDifference ---------------------------- */
@@ -4219,7 +4240,7 @@ const char* ExpressionSetIntersection::getOpName() const {
 /* ----------------------- ExpressionSetIsSubset ---------------------------- */
 
 namespace {
-Value setIsSubsetHelper(const vector<Value>& lhs, const ValueSet& rhs) {
+Value setIsSubsetHelper(const vector<Value>& lhs, const ValueUnorderedSet& rhs) {
     // do not shortcircuit when lhs.size() > rhs.size()
     // because lhs can have redundant entries
     for (vector<Value>::const_iterator it = lhs.begin(); it != lhs.end(); ++it) {
@@ -4244,8 +4265,8 @@ Value ExpressionSetIsSubset::evaluate(const Document& root, Variables* variables
                           << "argument is of type: " << typeName(rhs.getType()),
             rhs.isArray());
 
-    return setIsSubsetHelper(lhs.getArray(),
-                             arrayToSet(rhs, getExpressionContext()->getValueComparator()));
+    return setIsSubsetHelper(
+        lhs.getArray(), arrayToUnorderedSet(rhs, getExpressionContext()->getValueComparator()));
 }
 
 /**
@@ -4258,7 +4279,7 @@ Value ExpressionSetIsSubset::evaluate(const Document& root, Variables* variables
 class ExpressionSetIsSubset::Optimized : public ExpressionSetIsSubset {
 public:
     Optimized(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-              const ValueSet& cachedRhsSet,
+              const ValueUnorderedSet& cachedRhsSet,
               const ExpressionVector& operands)
         : ExpressionSetIsSubset(expCtx), _cachedRhsSet(cachedRhsSet) {
         _children = operands;
@@ -4276,7 +4297,7 @@ public:
     }
 
 private:
-    const ValueSet _cachedRhsSet;
+    const ValueUnorderedSet _cachedRhsSet;
 };
 
 intrusive_ptr<Expression> ExpressionSetIsSubset::optimize() {
@@ -4296,7 +4317,7 @@ intrusive_ptr<Expression> ExpressionSetIsSubset::optimize() {
 
         intrusive_ptr<Expression> optimizedWithConstant(
             new Optimized(this->getExpressionContext(),
-                          arrayToSet(rhs, getExpressionContext()->getValueComparator()),
+                          arrayToUnorderedSet(rhs, getExpressionContext()->getValueComparator()),
                           _children));
         return optimizedWithConstant;
     }

@@ -139,6 +139,47 @@ __wt_txn_release_snapshot(WT_SESSION_IMPL *session)
 }
 
 /*
+ * __wt_txn_user_active --
+ *     Check whether there are any running user transactions. Note that a new transactions may start
+ *     on a session we have already examined and the caller needs to be aware of this limitation.
+ *     Exclude prepared user transactions from this check.
+ */
+bool
+__wt_txn_user_active(WT_SESSION_IMPL *session)
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_SESSION_IMPL *session_in_list;
+    uint32_t i, session_cnt;
+    bool txn_active;
+
+    conn = S2C(session);
+    txn_active = false;
+
+    /*
+     * No lock is required because the session array is fixed size, but it may contain inactive
+     * entries. We must review any active session, so insert a read barrier after reading the active
+     * session count. That way, no matter what sessions come or go, we'll check the slots for all of
+     * the user sessions for active transactions when we started our check.
+     */
+    WT_ORDERED_READ(session_cnt, conn->session_cnt);
+    for (i = 0, session_in_list = conn->sessions; i < session_cnt; i++, session_in_list++) {
+        /* Skip inactive sessions. */
+        if (!session_in_list->active)
+            continue;
+        /* Check if a user session has a running transaction. Ignore prepared transactions. */
+        if (F_ISSET(session_in_list->txn, WT_TXN_RUNNING) &&
+          !F_ISSET(session_in_list, WT_SESSION_INTERNAL) &&
+          !F_ISSET(session_in_list->txn, WT_TXN_PREPARE)) {
+
+            txn_active = true;
+            break;
+        }
+    }
+
+    return (txn_active);
+}
+
+/*
  * __wt_txn_active --
  *     Check if a transaction is still active. If not, it is either committed, prepared, or rolled
  *     back. It is possible that we race with commit, prepare or rollback and a transaction is still
@@ -723,12 +764,14 @@ __wt_txn_release(WT_SESSION_IMPL *session)
 }
 
 /*
- * __txn_append_hs_record --
- *     Append the update older than the prepared update to the update chain
+ * __txn_locate_hs_record --
+ *     Locate the update older than the prepared update in the history store and append it to the
+ *     update chain if necessary.
  */
 static int
-__txn_append_hs_record(WT_SESSION_IMPL *session, WT_CURSOR *hs_cursor, WT_PAGE *page,
-  WT_UPDATE *chain, bool commit, WT_UPDATE **fix_updp, bool *upd_appended)
+__txn_locate_hs_record(WT_SESSION_IMPL *session, WT_CURSOR *hs_cursor, WT_PAGE *page,
+  WT_UPDATE *chain, bool commit, WT_UPDATE **fix_updp, bool *upd_appended,
+  bool first_committed_upd_in_hs)
 {
     WT_DECL_ITEM(hs_value);
     WT_DECL_RET;
@@ -769,10 +812,10 @@ __txn_append_hs_record(WT_SESSION_IMPL *session, WT_CURSOR *hs_cursor, WT_PAGE *
     *fix_updp = upd;
 
     /*
-     * When the prepared update is getting committed, use the retrieved history store update to form
-     * a proper stop timestamp in the history store.
+     * When the prepared update is getting committed or the history store update is still on the
+     * update chain, no need to append it onto the update chain.
      */
-    if (commit)
+    if (commit || first_committed_upd_in_hs)
         goto done;
 
     /*
@@ -823,6 +866,7 @@ __txn_append_hs_record(WT_SESSION_IMPL *session, WT_CURSOR *hs_cursor, WT_PAGE *
     WT_PUBLISH(chain->next, upd);
     *upd_appended = true;
 
+    *fix_updp = upd;
     __wt_cache_page_inmem_incr(session, page, total_size);
 
     if (0) {
@@ -874,14 +918,24 @@ __txn_commit_timestamps_usage_check(WT_SESSION_IMPL *session, WT_TXN_OP *op, WT_
 #ifdef HAVE_DIAGNOSTIC
     prev_op_durable_ts = upd->prev_durable_ts;
 
+    /*
+     * Exit abnormally as the key consistency mode dictates all updates must use timestamps once
+     * they have been used.
+     */
     if (FLD_ISSET(ts_flags, WT_DHANDLE_TS_KEY_CONSISTENT) && prev_op_durable_ts != WT_TS_NONE &&
-      !txn_has_ts)
+      !txn_has_ts) {
         WT_RET(__wt_msg(session,
           WT_COMMIT_TS_VERB_PREFIX
           "no timestamp provided for an update to a "
           "table configured to always use timestamps once they are first used"));
+        WT_ASSERT(session, false);
+    }
 
-    if (FLD_ISSET(ts_flags, WT_DHANDLE_TS_ORDERED) && txn_has_ts && prev_op_durable_ts > op_ts)
+    /*
+     * Exit abnormally as we don't allow out of order timestamps on a table configured for strict
+     * ordering.
+     */
+    if (FLD_ISSET(ts_flags, WT_DHANDLE_TS_ORDERED) && txn_has_ts && prev_op_durable_ts > op_ts) {
         WT_RET(__wt_msg(session,
           WT_COMMIT_TS_VERB_PREFIX
           "committing a transaction that updates a "
@@ -889,18 +943,27 @@ __txn_commit_timestamps_usage_check(WT_SESSION_IMPL *session, WT_TXN_OP *op, WT_
           "update (%s) on a table configured for strict ordering",
           __wt_timestamp_to_string(op_ts, ts_string[0]),
           __wt_timestamp_to_string(prev_op_durable_ts, ts_string[1])));
+        WT_ASSERT(session, false);
+    }
 
+    /*
+     * Exit abnormally as we don't allow an update without a timestamp if the previous update had an
+     * associated timestamp. This applies to both tables configured for strict and mixed mode
+     * orderings.
+     */
     if (FLD_ISSET(ts_flags, WT_DHANDLE_TS_ORDERED) && prev_op_durable_ts != WT_TS_NONE &&
-      !txn_has_ts)
+      !txn_has_ts) {
         WT_RET(
           __wt_msg(session,
             WT_COMMIT_TS_VERB_PREFIX "committing a transaction that updates a value without "
                                      "a timestamp while the previous update (%s) is timestamped "
                                      "on a table configured for strict ordering",
             __wt_timestamp_to_string(prev_op_durable_ts, ts_string[1])));
+        WT_ASSERT(session, false);
+    }
 
     if (FLD_ISSET(ts_flags, WT_DHANDLE_TS_MIXED_MODE) && F_ISSET(txn, WT_TXN_HAS_TS_COMMIT) &&
-      op_ts != WT_TS_NONE && prev_op_durable_ts > op_ts)
+      op_ts != WT_TS_NONE && prev_op_durable_ts > op_ts) {
         WT_RET(__wt_msg(session,
           WT_COMMIT_TS_VERB_PREFIX
           "committing a transaction that updates a "
@@ -908,6 +971,8 @@ __txn_commit_timestamps_usage_check(WT_SESSION_IMPL *session, WT_TXN_OP *op, WT_
           "update (%s) on a table configured for mixed mode ordering",
           __wt_timestamp_to_string(op_ts, ts_string[0]),
           __wt_timestamp_to_string(prev_op_durable_ts, ts_string[1])));
+        WT_ASSERT(session, false);
+    }
 #else
     WT_UNUSED(prev_op_durable_ts);
 #endif
@@ -928,6 +993,7 @@ __txn_fixup_prepared_update(
     WT_ITEM hs_value;
     WT_TIME_WINDOW tw;
     WT_TXN *txn;
+    WT_TXN_GLOBAL *txn_global;
     uint32_t txn_flags;
 #ifdef HAVE_DIAGNOSTIC
     uint64_t hs_upd_type;
@@ -935,6 +1001,7 @@ __txn_fixup_prepared_update(
 #endif
 
     txn = session->txn;
+    txn_global = &S2C(session)->txn_global;
     WT_TIME_WINDOW_INIT(&tw);
 
     /*
@@ -943,9 +1010,6 @@ __txn_fixup_prepared_update(
      */
     txn_flags = FLD_MASK(txn->flags, WT_TXN_ERROR | WT_TXN_PREPARE);
     F_CLR(txn, txn_flags);
-
-    /* The value older than the prepared update in the history store must be a full value. */
-    WT_ASSERT(session, fix_upd->type == WT_UPDATE_STANDARD);
 
     /*
      * If the history update already has a stop time point and we are committing the prepared update
@@ -974,8 +1038,48 @@ __txn_fixup_prepared_update(
         hs_cursor->set_value(hs_cursor, &tw, tw.durable_stop_ts, tw.durable_start_ts,
           (uint64_t)WT_UPDATE_STANDARD, &hs_value);
         WT_ERR(hs_cursor->update(hs_cursor));
-    } else
-        WT_ERR(hs_cursor->remove(hs_cursor));
+    } else {
+        /*
+         * Remove the history store entry if a checkpoint is not running, otherwise place a
+         * tombstone in front of the history store entry if it doesn't have a stop timestamp.
+         */
+        if (txn_global->checkpoint_running) {
+            /* Don't update the history store entry if the entry already has a stop timestamp. */
+            if (fix_upd->type != WT_UPDATE_TOMBSTONE) {
+                /*
+                 * When the history store's update start transaction id is greater than the
+                 * checkpoint's reserved transaction id, the durable timestamp of this update is
+                 * guaranteed to be greater than the checkpoint timestamp, as such there is no need
+                 * to save this unstable update in the history store.
+                 */
+                if (fix_upd->txnid > txn_global->checkpoint_reserved_txn_id)
+                    WT_ERR(hs_cursor->remove(hs_cursor));
+                else {
+                    tw.durable_stop_ts = fix_upd->durable_ts;
+                    tw.stop_ts = fix_upd->start_ts;
+
+                    /*
+                     * Set the stop transaction id of the time window to the checkpoint reserved
+                     * transaction id. As such the tombstone won't be visible to rollback to stable,
+                     * additionally checkpoint garbage collection cannot clean it up as it greater
+                     * than the globally visible transaction id.
+                     */
+                    tw.stop_txn = txn_global->checkpoint_reserved_txn_id;
+                    WT_TIME_WINDOW_SET_START(&tw, fix_upd);
+
+                    hs_value.data = fix_upd->data;
+                    hs_value.size = fix_upd->size;
+                    hs_cursor->set_value(hs_cursor, &tw, tw.durable_stop_ts, tw.durable_start_ts,
+                      (uint64_t)WT_UPDATE_STANDARD, &hs_value);
+                    WT_ERR(hs_cursor->update(hs_cursor));
+                    WT_STAT_CONN_INCR(
+                      session, txn_prepare_rollback_fix_hs_update_with_ckpt_reserved_txnid);
+                }
+            } else
+                WT_STAT_CONN_INCR(session, txn_prepare_rollback_do_not_remove_hs_update);
+        } else
+            WT_ERR(hs_cursor->remove(hs_cursor));
+    }
 
 err:
     F_SET(txn, txn_flags);
@@ -1052,18 +1156,20 @@ __txn_search_prepared_op(
 static int
 __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, WT_CURSOR **cursorp)
 {
+    WT_BTREE *btree;
     WT_CURSOR *hs_cursor;
     WT_CURSOR_BTREE *cbt;
     WT_DECL_RET;
+    WT_ITEM hs_recno_key;
     WT_TXN *txn;
-    WT_UPDATE *fix_upd, *tombstone, *upd;
+    WT_UPDATE *first_committed_upd, *fix_upd, *tombstone, *upd;
 #ifdef HAVE_DIAGNOSTIC
     WT_UPDATE *head_upd;
 #endif
     size_t not_used;
-    uint32_t hs_btree_id;
+    uint8_t *p, hs_recno_key_buf[WT_INTPACK64_MAXSIZE];
     char ts_string[3][WT_TS_INT_STRING_SIZE];
-    bool upd_appended;
+    bool first_committed_upd_in_hs, prepare_on_disk, upd_appended;
 
     hs_cursor = NULL;
     txn = session->txn;
@@ -1102,34 +1208,61 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
     if (upd == NULL || upd->prepare_state != WT_PREPARE_INPROGRESS)
         goto prepare_verify;
 
-    WT_ERR(__txn_commit_timestamps_usage_check(session, op, upd));
+    /* A prepared operation that is rolled back will not have a timestamp worth asserting on. */
+    if (commit)
+        WT_ERR(__txn_commit_timestamps_usage_check(session, op, upd));
+
+    for (first_committed_upd = upd; first_committed_upd != NULL &&
+         (first_committed_upd->txnid == WT_TXN_ABORTED ||
+           first_committed_upd->prepare_state == WT_PREPARE_INPROGRESS);
+         first_committed_upd = first_committed_upd->next)
+        ;
+
     /*
-     * Retrieve the previous update from the history store and append it to the update chain.
+     * Locate the previous update from the history store and append it to the update chain if
+     * required. We know there may be content in the history store if the prepared update is written
+     * to the disk image or first committed update older than the prepared update is marked as
+     * WT_UPDATE_HS. The second case is rare but can happen if the eviction that writes the prepared
+     * update to the disk image fails after it has inserted the other updates of the key into the
+     * history store.
      *
      * We need to do this before we resolve the prepared updates because if we abort the prepared
      * updates first, the history search logic may race with other sessions modifying the same key
      * and checkpoint moving the new updates to the history store.
      *
-     * For prepared delete commit, we don't need to fix the history store. Whereas for rollback, if
-     * the update is also from the same prepared transaction, restore the update from history store
-     * or remove the key.
+     * Fix the history store entry for the updates other than tombstone type or the tombstone
+     * followed by the update is also from the same prepared transaction by either restoring the
+     * previous update from history store or removing the key.
      */
-    if (F_ISSET(upd, WT_UPDATE_PREPARE_RESTORED_FROM_DS) &&
+    prepare_on_disk = F_ISSET(upd, WT_UPDATE_PREPARE_RESTORED_FROM_DS) &&
       (upd->type != WT_UPDATE_TOMBSTONE ||
-        (!commit && upd->next != NULL && upd->durable_ts == upd->next->durable_ts &&
-          upd->txnid == upd->next->txnid && upd->start_ts == upd->next->start_ts))) {
+        (upd->next != NULL && upd->durable_ts == upd->next->durable_ts &&
+          upd->txnid == upd->next->txnid && upd->start_ts == upd->next->start_ts));
+    first_committed_upd_in_hs =
+      first_committed_upd != NULL && F_ISSET(first_committed_upd, WT_UPDATE_HS);
+    if (prepare_on_disk || first_committed_upd_in_hs) {
+        btree = S2BT(session);
         cbt = (WT_CURSOR_BTREE *)(*cursorp);
-        hs_btree_id = S2BT(session)->id;
-        /* Open a history store table cursor. */
-        WT_ERR(__wt_curhs_open(session, NULL, &hs_cursor));
-        F_SET(hs_cursor, WT_CURSTD_HS_READ_COMMITTED);
 
         /*
-         * Scan the history store for the given btree and key with maximum start timestamp to let
-         * the search point to the last version of the key.
+         * Open a history store table cursor and scan the history store for the given btree and key
+         * with maximum start timestamp to let the search point to the last version of the key.
          */
-        hs_cursor->set_key(hs_cursor, 4, hs_btree_id, &op->u.op_row.key, WT_TS_MAX, UINT64_MAX);
+        WT_ERR(__wt_curhs_open(session, NULL, &hs_cursor));
+        F_SET(hs_cursor, WT_CURSTD_HS_READ_COMMITTED);
+        if (btree->type == BTREE_ROW)
+            hs_cursor->set_key(hs_cursor, 4, btree->id, &cbt->iface.key, WT_TS_MAX, UINT64_MAX);
+        else {
+            p = hs_recno_key_buf;
+            WT_ERR(__wt_vpack_uint(&p, 0, cbt->recno));
+            hs_recno_key.data = hs_recno_key_buf;
+            hs_recno_key.size = WT_PTRDIFF(p, hs_recno_key_buf);
+            hs_cursor->set_key(hs_cursor, 4, btree->id, &hs_recno_key, WT_TS_MAX, UINT64_MAX);
+        }
         WT_ERR_NOTFOUND_OK(__wt_curhs_search_near_before(session, hs_cursor), true);
+
+        /* We should only get not found if the prepared update is on disk. */
+        WT_ASSERT(session, ret != WT_NOTFOUND || prepare_on_disk);
         if (ret == WT_NOTFOUND && !commit) {
             /*
              * Allocate a tombstone and prepend it to the row so when we reconcile the update chain
@@ -1139,18 +1272,21 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
             WT_ERR(__wt_upd_alloc_tombstone(session, &tombstone, &not_used));
 #ifdef HAVE_DIAGNOSTIC
             WT_WITH_BTREE(session, op->btree,
-              ret = __wt_row_modify(
-                cbt, &cbt->iface.key, NULL, tombstone, WT_UPDATE_INVALID, false, false));
+              ret = btree->type == BTREE_ROW ?
+                __wt_row_modify(
+                  cbt, &cbt->iface.key, NULL, tombstone, WT_UPDATE_INVALID, false, false) :
+                __wt_col_modify(cbt, cbt->recno, NULL, tombstone, WT_UPDATE_INVALID, false, false));
 #else
             WT_WITH_BTREE(session, op->btree,
-              ret =
-                __wt_row_modify(cbt, &cbt->iface.key, NULL, tombstone, WT_UPDATE_INVALID, false));
+              ret = btree->type == BTREE_ROW ?
+                __wt_row_modify(cbt, &cbt->iface.key, NULL, tombstone, WT_UPDATE_INVALID, false) :
+                __wt_col_modify(cbt, cbt->recno, NULL, tombstone, WT_UPDATE_INVALID, false));
 #endif
             WT_ERR(ret);
             tombstone = NULL;
         } else if (ret == 0)
-            WT_ERR(__txn_append_hs_record(
-              session, hs_cursor, cbt->ref->page, upd, commit, &fix_upd, &upd_appended));
+            WT_ERR(__txn_locate_hs_record(session, hs_cursor, cbt->ref->page, upd, commit, &fix_upd,
+              &upd_appended, first_committed_upd));
         else
             ret = 0;
     }
@@ -1217,8 +1353,12 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
      * prepared updates are written to the data store. When the page is read back into memory, there
      * will be only one uncommitted prepared update.
      */
-    if (fix_upd != NULL)
+    if (fix_upd != NULL) {
         WT_ERR(__txn_fixup_prepared_update(session, hs_cursor, fix_upd, commit));
+        /* Clear the WT_UPDATE_HS flag as we should have removed it from the history store. */
+        if (first_committed_upd_in_hs && !commit)
+            F_CLR(first_committed_upd, WT_UPDATE_HS);
+    }
 
 prepare_verify:
 #ifdef HAVE_DIAGNOSTIC
@@ -1537,9 +1677,7 @@ __wt_txn_commit(WT_SESSION_IMPL *session, const char *cfg[])
          */
         if (F_ISSET(txn, WT_TXN_SYNC_SET))
             WT_ERR_MSG(session, EINVAL, "Sync already set during begin_transaction");
-        if (WT_STRING_MATCH("background", cval.str, cval.len))
-            txn->txn_logsync = WT_LOG_BACKGROUND;
-        else if (WT_STRING_MATCH("off", cval.str, cval.len))
+        if (WT_STRING_MATCH("off", cval.str, cval.len))
             txn->txn_logsync = 0;
         /*
          * We don't need to check for "on" here because that is the default to inherit from the

@@ -229,6 +229,7 @@ __wt_update_serial(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt, WT_PAGE *page
     upd = *updp;
     *updp = NULL;
     prev_upd_ts = WT_TS_NONE;
+
 #ifdef HAVE_DIAGNOSTIC
     prev_upd_ts = upd->prev_durable_ts;
 #endif
@@ -241,7 +242,7 @@ __wt_update_serial(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt, WT_PAGE *page
      * Check if our update is still permitted.
      */
     while (!__wt_atomic_cas_ptr(srch_upd, upd->next, upd)) {
-        if ((ret = __wt_txn_update_check(session, cbt, upd->next = *srch_upd, &prev_upd_ts)) != 0) {
+        if ((ret = __wt_txn_modify_check(session, cbt, upd->next = *srch_upd, &prev_upd_ts)) != 0) {
             /* Free unused memory on error. */
             __wt_free(session, upd);
             return (ret);
@@ -296,7 +297,7 @@ __wt_update_serial(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt, WT_PAGE *page
     if (WT_PAGE_TRYLOCK(session, page) != 0)
         return (0);
 
-    obsolete = __wt_update_obsolete_check(session, page, upd->next, true);
+    obsolete = __wt_update_obsolete_check(session, cbt, upd->next, true);
 
     WT_PAGE_UNLOCK(session, page);
 

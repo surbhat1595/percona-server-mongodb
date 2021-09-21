@@ -52,7 +52,9 @@ Btree
 Buf
 Bxxx
 Bzip
+CACHEABLE
 CAS
+CBT
 CCCCCCCCCCCCCCCCCC
 CELL's
 CELLs
@@ -101,6 +103,7 @@ DIRECTIO
 DNE
 DOI
 DONTNEED
+DS
 DSK
 DUPLICATEV
 DataSet
@@ -111,7 +114,7 @@ Decrement
 Decrypt
 DeleteFileW
 Destructor
-Dh
+Deterministically
 EACCES
 EAGAIN
 EB
@@ -150,11 +153,11 @@ FTRUNCATE
 FULLFSYNC
 FUNCSIG
 Facebook
+Failpoint
 FindClose
 FindFirstFile
 FindNextFileW
 Fixup
-Fk
 FlushFileBuffers
 Fprintf
 FreeBSD
@@ -242,7 +245,6 @@ LevelDB
 Levyx
 LibFuzzer
 LmRrSVv
-LmsT
 LoadLoad
 LockFile
 Lookaside
@@ -458,6 +460,7 @@ WTPERF
 WaitForSingleObject
 WakeAllConditionVariable
 Wconditional
+Wduplicated
 WeakHashLen
 Werror
 Wformat
@@ -496,7 +499,6 @@ abcdef
 abcdefghijklmnopqrstuvwxyz
 addl
 addr
-af
 agc
 alfred
 alloc
@@ -573,6 +575,7 @@ bzDecompressInit
 bzalloc
 bzfree
 bzip
+cacheable
 calc
 call's
 calloc
@@ -584,7 +587,6 @@ ccc
 ccr
 cd
 ce
-ceh
 celsius
 centric
 cfg
@@ -619,6 +621,7 @@ clsm
 cmd
 cmp
 cnt
+cntvct
 colcheck
 colgroup
 colgroups
@@ -784,6 +787,7 @@ extern
 extlist
 fadvise
 fahrenheit
+failpoint
 fallocate
 fallthrough
 fblocks
@@ -958,7 +962,6 @@ iter
 iteratively
 iters
 jjj
-jnr
 jprx
 json
 kb
@@ -1032,7 +1035,6 @@ lwsync
 lx
 lz
 lzo
-mT
 madvise
 majmin
 majorp
@@ -1062,6 +1064,7 @@ metadata
 metadata's
 metafile
 mfence
+minSnapshotHistoryWindowInSeconds
 minorp
 mips
 mkdir
@@ -1069,6 +1072,7 @@ mmap
 mmrand
 mnt
 movemask
+mrs
 msecs
 msg
 msvc
@@ -1153,8 +1157,6 @@ osfhandle
 other's
 ovfl
 ownp
-pR
-pS
 packv
 pagedump
 pagesize
@@ -1212,7 +1214,6 @@ pv
 pvA
 pwrite
 py
-qRrT
 qdown
 qqq
 qrrSS
@@ -1273,7 +1274,6 @@ runtime
 rwlock
 sH
 sHQ
-sT
 sanitizer
 sanitizers
 scalability
@@ -1416,6 +1416,7 @@ uint
 uintmax
 unbare
 unbuffered
+uncacheable
 uncompressed
 uncompressing
 uncustomized
@@ -1465,7 +1466,6 @@ util
 utils
 uu
 vN
-vW
 va
 valgrind
 valuep
@@ -1486,10 +1486,7 @@ vsize
 vsnprintf
 vtype
 vunpack
-vw
 vxr
-vxz
-vz
 waitpid
 waker
 wakeup

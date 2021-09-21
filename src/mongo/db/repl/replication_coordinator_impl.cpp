@@ -126,7 +126,9 @@ MONGO_FAIL_POINT_DEFINE(hangWhileWaitingForHelloResponse);
 MONGO_FAIL_POINT_DEFINE(skipDurableTimestampUpdates);
 // Will cause a reconfig to hang after completing the config quorum check.
 MONGO_FAIL_POINT_DEFINE(omitConfigQuorumCheck);
-// Will cause signal drain complete to hang after reconfig
+// Will cause signal drain complete to hang before reconfig.
+MONGO_FAIL_POINT_DEFINE(hangBeforeReconfigOnDrainComplete);
+// Will cause signal drain complete to hang after reconfig.
 MONGO_FAIL_POINT_DEFINE(hangAfterReconfigOnDrainComplete);
 
 // Number of times we tried to go live as a secondary.
@@ -773,11 +775,8 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
             const auto lastApplied = opTimeStatus.getValue();
             _setMyLastAppliedOpTimeAndWallTime(
                 lock, lastApplied, false, DataConsistency::Consistent);
-        }
 
-        // Clear maint. mode.
-        while (getMaintenanceMode()) {
-            setMaintenanceMode(false).transitional_ignore();
+            _topCoord->resetMaintenanceCount();
         }
 
         if (startCompleted) {
@@ -1135,6 +1134,10 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
         lk.unlock();
 
         if (needBumpConfigTerm) {
+            if (MONGO_unlikely(hangBeforeReconfigOnDrainComplete.shouldFail())) {
+                LOGV2(5726200, "Hanging due to hangBeforeReconfigOnDrainComplete failpoint");
+                hangBeforeReconfigOnDrainComplete.pauseWhileSet(opCtx);
+            }
             // We re-write the term but keep version the same. This conceptually a no-op
             // in the config consensus group, analogous to writing a new oplog entry
             // in Raft log state machine on step up.
@@ -3077,11 +3080,14 @@ bool ReplicationCoordinatorImpl::getMaintenanceMode() {
     return _topCoord->getMaintenanceCount() > 0;
 }
 
-Status ReplicationCoordinatorImpl::setMaintenanceMode(bool activate) {
+Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, bool activate) {
     if (getReplicationMode() != modeReplSet) {
         return Status(ErrorCodes::NoReplicationEnabled,
                       "can only set maintenance mode on replica set members");
     }
+
+    // It is possible that we change state to or from RECOVERING. Thus, we need the RSTL in X mode.
+    ReplicationStateTransitionLockGuard transitionGuard(opCtx, MODE_X);
 
     stdx::unique_lock<Latch> lk(_mutex);
     if (_topCoord->getRole() == TopologyCoordinator::Role::kCandidate ||
@@ -4644,7 +4650,10 @@ boost::optional<OpTimeAndWallTime> ReplicationCoordinatorImpl::_chooseStableOpTi
     // There is a valid stable optime.
     else {
         auto stableOpTime = *std::prev(upperBoundIter);
-        invariant(stableOpTime.opTime.getTimestamp() <= maximumStableTimestamp);
+        invariant(stableOpTime.opTime.getTimestamp() <= maximumStableTimestamp,
+                  str::stream() << "stableOpTime: " << stableOpTime.opTime.toString()
+                                << " maximumStableTimestamp: "
+                                << maximumStableTimestamp.toString());
         return stableOpTime;
     }
 }
@@ -4687,8 +4696,12 @@ boost::optional<OpTimeAndWallTime> ReplicationCoordinatorImpl::_recalculateStabl
     auto commitPoint = _topCoord->getLastCommittedOpTimeAndWallTime();
     if (_currentCommittedSnapshot) {
         auto snapshotOpTime = _currentCommittedSnapshot->opTime;
-        invariant(snapshotOpTime.getTimestamp() <= commitPoint.opTime.getTimestamp());
-        invariant(snapshotOpTime <= commitPoint.opTime);
+        invariant(snapshotOpTime.getTimestamp() <= commitPoint.opTime.getTimestamp(),
+                  str::stream() << "snapshotOpTime: " << snapshotOpTime.toString()
+                                << " commitPoint: " << commitPoint.opTime.toString());
+        invariant(snapshotOpTime <= commitPoint.opTime,
+                  str::stream() << "snapshotOpTime: " << snapshotOpTime.toString()
+                                << " commitPoint: " << commitPoint.opTime.toString());
     }
 
     // When majority read concern is disabled, the stable opTime is set to the lastApplied, rather
@@ -4702,9 +4715,14 @@ boost::optional<OpTimeAndWallTime> ReplicationCoordinatorImpl::_recalculateStabl
         _chooseStableOpTimeFromCandidates(lk, _stableOpTimeCandidates, maximumStableOpTime);
     if (stableOpTime) {
         // Check that the selected stable optime does not exceed our maximum.
-        invariant(stableOpTime.get().opTime.getTimestamp() <=
-                  maximumStableOpTime.opTime.getTimestamp());
-        invariant(stableOpTime.get().opTime <= maximumStableOpTime.opTime);
+        invariant(
+            stableOpTime.get().opTime.getTimestamp() <= maximumStableOpTime.opTime.getTimestamp(),
+            str::stream() << "stableOpTime: " << stableOpTime.get().opTime.toString()
+                          << " maximumStableOpTime: " << maximumStableOpTime.opTime.toString());
+        invariant(stableOpTime.get().opTime <= maximumStableOpTime.opTime,
+                  str::stream() << "stableOpTime: " << stableOpTime.get().opTime.toString()
+                                << " maximumStableOpTime: "
+                                << maximumStableOpTime.opTime.toString());
     }
 
     return stableOpTime;

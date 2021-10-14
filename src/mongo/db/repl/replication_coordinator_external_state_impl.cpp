@@ -452,13 +452,13 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                                const auto msgObj = BSON("msg" << kInitiatingSetMsg);
                                _service->getOpObserver()->onOpMessage(opCtx, msgObj);
                                wuow.commit();
-                               // ReplSetTest assumes that immediately after the replSetInitiate
-                               // command returns, it can allow other nodes to initial sync with no
-                               // retries and they will succeed.  Unfortunately, initial sync will
-                               // fail if it finds its sync source has an empty oplog.  Thus, we
-                               // need to wait here until the seed document is visible in our oplog.
-                               _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
                            });
+
+        // ReplSetTest assumes that immediately after the replSetInitiate command returns, it can
+        // allow other nodes to initial sync with no retries and they will succeed.  Unfortunately,
+        // initial sync will fail if it finds its sync source has an empty oplog.  Thus, we need to
+        // wait here until the seed document is visible in our oplog.
+        _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
 
         FeatureCompatibilityVersion::setIfCleanStartup(opCtx, _storageInterface);
     } catch (const DBException& ex) {
@@ -518,6 +518,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     _replicationProcess->getConsistencyMarkers()->clearAppliedThrough(
         opCtx, lastAppliedOpTime.getTimestamp());
 
+    LOGV2(6015309, "Logging transition to primary to oplog on stepup");
     writeConflictRetry(opCtx, "logging transition to primary to oplog", "local.oplog.rs", [&] {
         AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
         WriteUnitOfWork wuow(opCtx);
@@ -967,6 +968,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
 void ReplicationCoordinatorExternalStateImpl::dropAllSnapshots() {
     if (auto manager = _service->getStorageEngine()->getSnapshotManager())
         manager->dropAllSnapshots();
+    FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp();
 }
 
 void ReplicationCoordinatorExternalStateImpl::updateCommittedSnapshot(

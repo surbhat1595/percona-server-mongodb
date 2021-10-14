@@ -52,7 +52,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceQueue::createFromBson(
         uassert(5858202,
                 "literal documents specification must be an array of objects",
                 elem.type() == BSONType::Object);
-        queue->emplace_back(Document{elem.Obj()});
+        queue->emplace_back(Document{elem.Obj()}.getOwned());
     }
     return queue;
 }
@@ -83,7 +83,7 @@ DocumentSource::GetNextResult DocumentSourceQueue::doGetNext() {
 Value DocumentSourceQueue::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     ValueArrayStream vals;
     for (auto elem : _queue) {
-        vals << elem.getDocument();
+        vals << elem.getDocument().getOwned();
     }
     return Value(DOC(kStageName << vals.done()));
 }

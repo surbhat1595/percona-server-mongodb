@@ -420,6 +420,7 @@ Status validate(OperationContext* opCtx,
                 const NamespaceString& nss,
                 ValidateOptions options,
                 bool background,
+                RepairMode repairMode,
                 ValidateResults* results,
                 BSONObjBuilder* output,
                 bool turnOnExtraLoggingForTest) {
@@ -429,7 +430,8 @@ Status validate(OperationContext* opCtx,
 
     // This is deliberately outside of the try-catch block, so that any errors thrown in the
     // constructor fail the cmd, as opposed to returning OK with valid:false.
-    ValidateState validateState(opCtx, nss, background, options, turnOnExtraLoggingForTest);
+    ValidateState validateState(
+        opCtx, nss, background, options, repairMode, turnOnExtraLoggingForTest);
 
     // Capped collections perform un-timestamped writes to delete expired documents. As a result,
     // background validation will fail when reading documents that have just been deleted.
@@ -457,7 +459,7 @@ Status validate(OperationContext* opCtx,
     });
     if (!validateState.isBackground() && !storageGlobalParams.repair) {
         opCtx->recoveryUnit()->setPrepareConflictBehavior(
-            PrepareConflictBehavior::kIgnoreConflicts);
+            PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
     } else {
         // isBackground().
         invariant(oldPrepareConflictBehavior == PrepareConflictBehavior::kEnforce);

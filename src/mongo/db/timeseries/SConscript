@@ -43,6 +43,36 @@ env.Library(
 )
 
 env.Library(
+    target='catalog_helper',
+    source=[
+        'catalog_helper.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        'timeseries_idl',
+    ],
+)
+
+env.Library(
+    target='timeseries_commands_conversion_helper',
+    source=[
+        'timeseries_commands_conversion_helper.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/create_indexes_idl',
+        '$BUILD_DIR/mongo/db/index/index_descriptor',
+        '$BUILD_DIR/mongo/db/index_names',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
+        'timeseries_idl',
+        'timeseries_index_schema_conversion_functions'
+    ],
+)
+
+env.Library(
     target='timeseries_options',
     source=[
         'timeseries_options.cpp',
@@ -56,16 +86,33 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='timeseries_update_delete_util',
+    source=[
+        'timeseries_update_delete_util.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
+        '$BUILD_DIR/mongo/db/exec/bucket_unpacker',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+    ],
+)
+
 env.CppUnitTest(
     target='db_timeseries_test',
     source=[
         'bucket_catalog_test.cpp',
         'minmax_test.cpp',
         'timeseries_index_schema_conversion_functions_test.cpp',
+        'timeseries_update_delete_util_test.cpp',
+        'timeseries_options_test.cpp'
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
         'bucket_catalog',
         'timeseries_index_schema_conversion_functions',
+        'timeseries_options',
+        'timeseries_update_delete_util',
     ],
 )

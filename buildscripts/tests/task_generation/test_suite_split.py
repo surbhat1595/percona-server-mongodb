@@ -67,6 +67,27 @@ def build_mock_sub_suite(index, test_list):
     )
 
 
+class TestSubSuite(unittest.TestCase):
+    def test_tests_with_0_runtime_should_not_override_timeouts(self):
+        test_list = [f"test_{i}" for i in range(10)]
+        runtime_list = [
+            MagicMock(spec_set=TestRuntime, test_name=test, runtime=3.14) for test in test_list
+        ]
+        runtime_list[3].runtime = 0
+        sub_suite = under_test.SubSuite.from_test_list(0, "my_suite", test_list, None, runtime_list)
+
+        assert not sub_suite.should_overwrite_timeout()
+
+    def test_tests_with_full_runtime_history_should_override_timeouts(self):
+        test_list = [f"test_{i}" for i in range(10)]
+        runtime_list = [
+            MagicMock(spec_set=TestRuntime, test_name=test, runtime=3.14) for test in test_list
+        ]
+        sub_suite = under_test.SubSuite.from_test_list(0, "my_suite", test_list, None, runtime_list)
+
+        assert sub_suite.should_overwrite_timeout()
+
+
 class TestGeneratedSuite(unittest.TestCase):
     def test_get_test_list_should_run_tests_in_sub_tasks(self):
         n_sub_suites = 3
@@ -83,6 +104,19 @@ class TestGeneratedSuite(unittest.TestCase):
         for test_list in test_lists:
             for test in test_list:
                 self.assertIn(test, all_tests)
+
+    def test_sub_suite_config_file_should_generate_filename_for_sub_suites(self):
+        task_name = "task_name"
+        n_sub_suites = 42
+        mock_sub_suites = [build_mock_sub_suite(i, []) for i in range(n_sub_suites)]
+        mock_suite = under_test.GeneratedSuite(
+            sub_suites=mock_sub_suites, build_variant="build_variant", task_name=f"{task_name}_gen",
+            suite_name="suite_name", filename="filename")
+
+        self.assertEqual(mock_suite.sub_suite_config_file(34), "task_name_34")
+        self.assertEqual(mock_suite.sub_suite_config_file(0), "task_name_00")
+        self.assertEqual(mock_suite.sub_suite_config_file(3), "task_name_03")
+        self.assertEqual(mock_suite.sub_suite_config_file(None), "task_name_misc")
 
 
 class TestSplitSuite(unittest.TestCase):

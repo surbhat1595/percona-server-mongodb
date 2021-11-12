@@ -3,7 +3,6 @@
  *
  * @tags: [
  *     assumes_against_mongod_not_mongos,
- *     assumes_no_implicit_collection_creation_after_drop,
  *     does_not_support_stepdowns,
  *     requires_fcv_49,
  *     requires_find_command,
@@ -15,7 +14,7 @@
 
 load("jstests/core/timeseries/libs/timeseries.js");
 
-const collName = 'system.buckets.test';
+const collName = 'system.buckets.clustered_index_types';
 const coll = db[collName];
 coll.drop();
 

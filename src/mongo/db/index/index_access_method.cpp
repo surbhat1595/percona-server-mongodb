@@ -65,6 +65,9 @@ using std::set;
 using IndexVersion = IndexDescriptor::IndexVersion;
 
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildDuringBulkLoadPhase);
+MONGO_FAIL_POINT_DEFINE(hangIndexBuildDuringBulkLoadPhaseSecond);
+MONGO_FAIL_POINT_DEFINE(hangDuringIndexBuildBulkLoadYield);
+MONGO_FAIL_POINT_DEFINE(hangDuringIndexBuildBulkLoadYieldSecond);
 
 namespace {
 
@@ -117,6 +120,7 @@ AbstractIndexAccessMethod::AbstractIndexAccessMethod(const IndexCatalogEntry* bt
 
 // Find the keys for obj, put them in the tree pointing to loc.
 Status AbstractIndexAccessMethod::insert(OperationContext* opCtx,
+                                         SharedBufferFragmentBuilder& pooledBufferBuilder,
                                          const CollectionPtr& coll,
                                          const BSONObj& obj,
                                          const RecordId& loc,
@@ -131,7 +135,7 @@ Status AbstractIndexAccessMethod::insert(OperationContext* opCtx,
     auto multikeyMetadataKeys = executionCtx.multikeyMetadataKeys();
     auto multikeyPaths = executionCtx.multikeyPaths();
 
-    getKeys(executionCtx.pooledBufferBuilder(),
+    getKeys(pooledBufferBuilder,
             obj,
             options.getKeysMode,
             GetKeysContext::kAddingKeys,
@@ -270,12 +274,14 @@ RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
     KeyString::Value actualKey = [&]() {
         if (_indexCatalogEntry->getCollator()) {
             // For performance, call get keys only if there is a non-simple collation.
+            SharedBufferFragmentBuilder pooledBuilder(
+                KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
             auto& executionCtx = StorageExecutionContext::get(opCtx);
             auto keys = executionCtx.keys();
             KeyStringSet* multikeyMetadataKeys = nullptr;
             MultikeyPaths* multikeyPaths = nullptr;
 
-            getKeys(executionCtx.pooledBufferBuilder(),
+            getKeys(pooledBuilder,
                     requestedKey,
                     GetKeysMode::kEnforceConstraints,
                     GetKeysContext::kAddingKeys,
@@ -382,7 +388,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
                                               const RecordId& record,
                                               const InsertDeleteOptions& options,
                                               UpdateTicket* ticket) const {
-    auto& executionCtx = StorageExecutionContext::get(opCtx);
+    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
     const MatchExpression* indexFilter = index->getFilterExpression();
     if (!indexFilter || indexFilter->matchesBSON(from)) {
         // Override key constraints when generating keys for removal. This only applies to keys
@@ -394,7 +400,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
         // There's no need to compute the prefixes of the indexed fields that possibly caused the
         // index to be multikey when the old version of the document was written since the index
         // metadata isn't updated when keys are deleted.
-        getKeys(executionCtx.pooledBufferBuilder(),
+        getKeys(pooledBuilder,
                 from,
                 getKeysMode,
                 GetKeysContext::kRemovingKeys,
@@ -406,7 +412,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
     }
 
     if (!indexFilter || indexFilter->matchesBSON(to)) {
-        getKeys(executionCtx.pooledBufferBuilder(),
+        getKeys(pooledBuilder,
                 to,
                 options.getKeysMode,
                 GetKeysContext::kAddingKeys,
@@ -485,6 +491,7 @@ public:
                     StringData dbName);
 
     Status insert(OperationContext* opCtx,
+                  SharedBufferFragmentBuilder& pooledBuilder,
                   const BSONObj& obj,
                   const RecordId& loc,
                   const InsertDeleteOptions& options,
@@ -561,6 +568,7 @@ AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEn
 
 Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(
     OperationContext* opCtx,
+    SharedBufferFragmentBuilder& pooledBuilder,
     const BSONObj& obj,
     const RecordId& loc,
     const InsertDeleteOptions& options,
@@ -573,7 +581,7 @@ Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(
 
     try {
         _indexCatalogEntry->accessMethod()->getKeys(
-            executionCtx.pooledBufferBuilder(),
+            pooledBuilder,
             obj,
             options.getKeysMode,
             GetKeysContext::kAddingKeys,
@@ -688,9 +696,43 @@ AbstractIndexAccessMethod::BulkBuilderImpl::_makeSorter(
                                    _makeSorterSettings());
 }
 
+void AbstractIndexAccessMethod::_yieldBulkLoad(OperationContext* opCtx,
+                                               const Yieldable* yieldable,
+                                               const NamespaceString& ns) const {
+    // Releasing locks means a new snapshot should be acquired when restored.
+    opCtx->recoveryUnit()->abandonSnapshot();
+    yieldable->yield();
+
+    auto locker = opCtx->lockState();
+    Locker::LockSnapshot snapshot;
+    if (locker->saveLockStateAndUnlock(&snapshot)) {
+
+        // Track the number of yields in CurOp.
+        CurOp::get(opCtx)->yielded();
+
+        auto failPointHang = [opCtx, &ns](FailPoint* fp) {
+            fp->executeIf(
+                [fp](auto&&) {
+                    LOGV2(5180600, "Hanging index build during bulk load yield");
+                    fp->pauseWhileSet();
+                },
+                [opCtx, &ns](auto&& config) {
+                    return config.getStringField("namespace") == ns.ns();
+                });
+        };
+        failPointHang(&hangDuringIndexBuildBulkLoadYield);
+        failPointHang(&hangDuringIndexBuildBulkLoadYieldSecond);
+
+        locker->restoreLockState(opCtx, snapshot);
+    }
+    yieldable->restore();
+}
+
 Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
+                                             const CollectionPtr& collection,
                                              BulkBuilder* bulk,
                                              bool dupsAllowed,
+                                             int32_t yieldIterations,
                                              const KeyHandlerFn& onDuplicateKeyInserted,
                                              const RecordIdHandlerFn& onDuplicateRecord) {
     Timer timer;
@@ -714,24 +756,28 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
     for (int64_t i = 0; it->more(); i++) {
         opCtx->checkForInterrupt();
 
-        hangIndexBuildDuringBulkLoadPhase.executeIf(
-            [opCtx, i, &indexName = _descriptor->indexName()](const BSONObj& data) {
-                LOGV2(4924400,
-                      "Hanging index build during bulk load phase due to "
-                      "'hangIndexBuildDuringBulkLoadPhase' failpoint",
-                      "iteration"_attr = i,
-                      "index"_attr = indexName);
+        auto failPointHang = [opCtx, i, &indexName = _descriptor->indexName()](FailPoint* fp) {
+            fp->executeIf(
+                [fp, opCtx, i, &indexName](const BSONObj& data) {
+                    LOGV2(4924400,
+                          "Hanging index build during bulk load phase",
+                          "iteration"_attr = i,
+                          "index"_attr = indexName);
 
-                hangIndexBuildDuringBulkLoadPhase.pauseWhileSet(opCtx);
-            },
-            [i, &indexName = _descriptor->indexName()](const BSONObj& data) {
-                auto indexNames = data.getObjectField("indexNames");
-                return i == data["iteration"].numberLong() &&
-                    std::any_of(
-                           indexNames.begin(), indexNames.end(), [&indexName](const auto& elem) {
-                               return indexName == elem.String();
-                           });
-            });
+                    fp->pauseWhileSet(opCtx);
+                },
+                [i, &indexName](const BSONObj& data) {
+                    auto indexNames = data.getObjectField("indexNames");
+                    return i == data["iteration"].numberLong() &&
+                        std::any_of(indexNames.begin(),
+                                    indexNames.end(),
+                                    [&indexName](const auto& elem) {
+                                        return indexName == elem.String();
+                                    });
+                });
+        };
+        failPointHang(&hangIndexBuildDuringBulkLoadPhase);
+        failPointHang(&hangIndexBuildDuringBulkLoadPhaseSecond);
 
         // Get the next datum and add it to the builder.
         BulkBuilder::Sorter::Data data = it->next();
@@ -785,6 +831,11 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
             status = onDuplicateKeyInserted(data.first);
             if (!status.isOK())
                 return status;
+        }
+
+        // Starts yielding locks after the first non-zero 'yieldIterations' inserts.
+        if (yieldIterations && (i + 1) % yieldIterations == 0) {
+            _yieldBulkLoad(opCtx, &collection, ns);
         }
 
         // If we're here either it's a dup and we're cool with it or the addKey went just fine.

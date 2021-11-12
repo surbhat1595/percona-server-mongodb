@@ -103,9 +103,14 @@ private:
     void _createCollectionAndIndexes(OperationContext* opCtx);
 
     /**
+     * Creates the appropiate split policy.
+     */
+    void _createPolicy(OperationContext* opCtx);
+
+    /**
      * Given the appropiate split policy, create the initial chunks.
      */
-    void _createPolicyAndChunks(OperationContext* opCtx);
+    void _createChunks(OperationContext* opCtx);
 
     /**
      * If the optimized path can be taken, ensure the collection is already created in all the
@@ -145,7 +150,7 @@ private:
 
     // Objects generated on each execution.
     boost::optional<ShardKeyPattern> _shardKeyPattern;
-    boost::optional<BSONObj> _collation;
+    boost::optional<BSONObj> _collationBSON;
     boost::optional<UUID> _collectionUUID;
     std::unique_ptr<InitialSplitPolicy> _splitPolicy;
     InitialSplitPolicy::ShardCollectionConfig _initialChunks;

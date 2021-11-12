@@ -35,6 +35,8 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/lasterror',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_update_delete_util',
         'query/cluster_query',
         'write_ops/cluster_write_ops',
     ],
@@ -151,6 +153,7 @@ env.Library(
         'request_types/abort_reshard_collection.idl',
         'request_types/add_shard_request_type.cpp',
         'request_types/add_shard_to_zone_request_type.cpp',
+        'request_types/auto_split_vector.idl',
         'request_types/balance_chunk_request_type.cpp',
         'request_types/balancer_collection_status.idl',
         'request_types/cleanup_reshard_collection.idl',
@@ -159,6 +162,7 @@ env.Library(
         'request_types/clone_collection_options_from_primary_shard.idl',
         'request_types/commit_chunk_migration_request_type.cpp',
         'request_types/commit_reshard_collection.idl',
+        'request_types/drop_collection_if_uuid_not_matching.idl',
         'request_types/ensure_chunk_version_is_greater_than.idl',
         'request_types/flush_database_cache_updates.idl',
         'request_types/flush_resharding_state_change.idl',
@@ -200,6 +204,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/db/repl/optime',
         '$BUILD_DIR/mongo/db/server_options',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_idl',
         '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/idl/idl_parser',
     ]
@@ -210,6 +215,7 @@ env.Library(
     source=[
         'sharding_test_fixture_common.cpp',
         'catalog_cache_loader_mock.cpp',
+        'catalog_cache_mock.cpp'
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/remote_command_targeter_mock',
@@ -637,6 +643,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers_test_helpers',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongos_process_interface_factory',
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_index_schema_conversion_functions',
         '$BUILD_DIR/mongo/dbtests/mocklib',
         '$BUILD_DIR/mongo/util/net/network',
         'catalog/sharding_catalog_client_mock',

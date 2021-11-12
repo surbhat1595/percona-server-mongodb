@@ -14,8 +14,9 @@
 (function() {
 "use strict";
 
-load("jstests/libs/write_concern_util.js");
 load("jstests/libs/fail_point_util.js");
+load("jstests/libs/storage_engine_utils.js");
+load("jstests/libs/write_concern_util.js");
 
 TestData.skipCheckDBHashes = true;  // the set is not consistent when we shutdown the test
 
@@ -94,16 +95,29 @@ assert.eq(syncSource, rst.getPrimary());
 assert.commandWorked(syncSource.getDB(dbName).getCollection(collName).insert(
     {"new": "data"}, {writeConcern: {w: "majority"}}));
 
+// This failpoint will only be hit if the node's rollback common point is before the replication
+// commit point, which triggers an invariant. This failpoint is used to verify the invariant
+// will be hit without having to search the logs.
+let rollbackCommittedWritesFailPoint;
+if (storageEngineIsWiredTigerOrInMemory()) {
+    rollbackCommittedWritesFailPoint =
+        configureFailPoint(rollbackNode, "rollbackToTimestampHangCommonPointBeforeReplCommitPoint");
+} else {
+    rollbackCommittedWritesFailPoint =
+        configureFailPoint(rollbackNode, "rollbackViaRefetchHangCommonPointBeforeReplCommitPoint");
+}
+
 // Node 1 will have to roll back to rejoin the set. It will crash as it will refuse to roll back
 // majority committed data.
 rollbackNode.reconnect(syncSource);
 rollbackNode.reconnect(resyncNode);
 
-assert.soon(() => {
-    return rawMongoProgramOutput().search(
-               /Invariant.*commonPointOpTime\.getTimestamp\(\) \>\= lastCommittedOpTime\.getTimestamp\(\)/) !=
-        -1;
-});
+assert.soonNoExcept(() => {
+    rollbackCommittedWritesFailPoint.wait();
+    return true;
+}, `failed to wait for fail point ${rollbackCommittedWritesFailPoint.failPointName}`);
+
+rollbackCommittedWritesFailPoint.off();
 
 // Observe that the old write does not exist anywhere in the set.
 syncSource.setSecondaryOk();

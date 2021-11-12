@@ -140,42 +140,43 @@ __wt_txn_release_snapshot(WT_SESSION_IMPL *session)
 
 /*
  * __wt_txn_user_active --
- *     Check whether there are any running user transactions. Note that a new transactions may start
- *     on a session we have already examined and the caller needs to be aware of this limitation.
- *     Exclude prepared user transactions from this check.
+ *     Check whether there are any running user transactions. Note that a new transaction may start
+ *     after we return from this call and therefore caller should be aware of this limitation.
  */
 bool
 __wt_txn_user_active(WT_SESSION_IMPL *session)
 {
     WT_CONNECTION_IMPL *conn;
     WT_SESSION_IMPL *session_in_list;
+    WT_TXN_GLOBAL *txn_global;
+    WT_TXN_SHARED *txn_shared;
     uint32_t i, session_cnt;
     bool txn_active;
 
     conn = S2C(session);
     txn_active = false;
+    txn_global = &conn->txn_global;
 
-    /*
-     * No lock is required because the session array is fixed size, but it may contain inactive
-     * entries. We must review any active session, so insert a read barrier after reading the active
-     * session count. That way, no matter what sessions come or go, we'll check the slots for all of
-     * the user sessions for active transactions when we started our check.
-     */
+    /* We're going to scan the table: wait for the lock. */
+    __wt_writelock(session, &txn_global->rwlock);
+
     WT_ORDERED_READ(session_cnt, conn->session_cnt);
-    for (i = 0, session_in_list = conn->sessions; i < session_cnt; i++, session_in_list++) {
-        /* Skip inactive sessions. */
-        if (!session_in_list->active)
-            continue;
-        /* Check if a user session has a running transaction. Ignore prepared transactions. */
-        if (F_ISSET(session_in_list->txn, WT_TXN_RUNNING) &&
-          !F_ISSET(session_in_list, WT_SESSION_INTERNAL) &&
-          !F_ISSET(session_in_list->txn, WT_TXN_PREPARE)) {
+    WT_STAT_CONN_INCR(session, txn_walk_sessions);
+    for (i = 0, session_in_list = conn->sessions, txn_shared = txn_global->txn_shared_list;
+         i < session_cnt; i++, session_in_list++, txn_shared++) {
 
+        /* Skip inactive or internal sessions. */
+        if (!session_in_list->active || F_ISSET(session_in_list, WT_SESSION_INTERNAL))
+            continue;
+
+        /* Check if a user session has a running transaction. */
+        if (txn_shared->id != WT_TXN_NONE || txn_shared->pinned_id != WT_TXN_NONE) {
             txn_active = true;
             break;
         }
     }
 
+    __wt_writeunlock(session, &txn_global->rwlock);
     return (txn_active);
 }
 
@@ -1008,8 +1009,17 @@ __txn_fixup_prepared_update(
      * Transaction error and prepare are cleared temporarily as cursor functions are not allowed
      * after an error or a prepared transaction.
      */
-    txn_flags = FLD_MASK(txn->flags, WT_TXN_ERROR | WT_TXN_PREPARE);
+    txn_flags = FLD_MASK(txn->flags, WT_TXN_ERROR);
     F_CLR(txn, txn_flags);
+
+    /*
+     * The API layer will immediately return an error if the WT_TXN_PREPARE flag is set before
+     * attempting cursor operations. However, we can't clear the WT_TXN_PREPARE flag because a
+     * function in the eviction flow may attempt to forcibly rollback the transaction if it is not
+     * marked as a prepared transaction. The flag WT_TXN_PREPARE_IGNORE_API_CHECK is set so that
+     * cursor operations can proceed without having to clear the WT_TXN_PREPARE flag.
+     */
+    F_SET(txn, WT_TXN_PREPARE_IGNORE_API_CHECK);
 
     /*
      * If the history update already has a stop time point and we are committing the prepared update
@@ -1083,6 +1093,7 @@ __txn_fixup_prepared_update(
 
 err:
     F_SET(txn, txn_flags);
+    F_CLR(txn, WT_TXN_PREPARE_IGNORE_API_CHECK);
 
     return (ret);
 }
@@ -1115,10 +1126,18 @@ __txn_search_prepared_op(
     }
 
     /*
-     * Transaction error and prepare are cleared temporarily as cursor functions are not allowed
-     * after an error or a prepared transaction.
+     * Transaction error is cleared temporarily as cursor functions are not allowed after an error.
      */
-    txn_flags = FLD_MASK(txn->flags, WT_TXN_ERROR | WT_TXN_PREPARE);
+    txn_flags = FLD_MASK(txn->flags, WT_TXN_ERROR);
+
+    /*
+     * The API layer will immediately return an error if the WT_TXN_PREPARE flag is set before
+     * attempting cursor operations. However, we can't clear the WT_TXN_PREPARE flag because a
+     * function in the eviction flow may attempt to forcibly rollback the transaction if it is not
+     * marked as a prepared transaction. The flag WT_TXN_PREPARE_IGNORE_API_CHECK is set so that
+     * cursor operations can proceed without having to clear the WT_TXN_PREPARE flag.
+     */
+    F_SET(txn, WT_TXN_PREPARE_IGNORE_API_CHECK);
 
     switch (op->type) {
     case WT_TXN_OP_BASIC_COL:
@@ -1142,6 +1161,7 @@ __txn_search_prepared_op(
     F_CLR(txn, txn_flags);
     WT_WITH_BTREE(session, op->btree, ret = __wt_btcur_search_prepared(cursor, updp));
     F_SET(txn, txn_flags);
+    F_CLR(txn, WT_TXN_PREPARE_IGNORE_API_CHECK);
     WT_RET(ret);
     WT_RET_ASSERT(session, *updp != NULL, WT_NOTFOUND,
       "unable to locate update associated with a prepared operation");
@@ -1161,6 +1181,7 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
     WT_CURSOR_BTREE *cbt;
     WT_DECL_RET;
     WT_ITEM hs_recno_key;
+    WT_PAGE *page;
     WT_TXN *txn;
     WT_UPDATE *first_committed_upd, *fix_upd, *tombstone, *upd;
 #ifdef HAVE_DIAGNOSTIC
@@ -1219,6 +1240,14 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
         ;
 
     /*
+     * Get the underlying btree and the in-memory page with the prepared updates that are to be
+     * resolved. The hazard pointer on the page is already acquired during the cursor search
+     * operation to prevent eviction evicting the page while resolving the prepared updates.
+     */
+    cbt = (WT_CURSOR_BTREE *)(*cursorp);
+    page = cbt->ref->page;
+
+    /*
      * Locate the previous update from the history store and append it to the update chain if
      * required. We know there may be content in the history store if the prepared update is written
      * to the disk image or first committed update older than the prepared update is marked as
@@ -1242,7 +1271,6 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
       first_committed_upd != NULL && F_ISSET(first_committed_upd, WT_UPDATE_HS);
     if (prepare_on_disk || first_committed_upd_in_hs) {
         btree = S2BT(session);
-        cbt = (WT_CURSOR_BTREE *)(*cursorp);
 
         /*
          * Open a history store table cursor and scan the history store for the given btree and key
@@ -1285,8 +1313,8 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
             WT_ERR(ret);
             tombstone = NULL;
         } else if (ret == 0)
-            WT_ERR(__txn_locate_hs_record(session, hs_cursor, cbt->ref->page, upd, commit, &fix_upd,
-              &upd_appended, first_committed_upd));
+            WT_ERR(__txn_locate_hs_record(
+              session, hs_cursor, page, upd, commit, &fix_upd, &upd_appended, first_committed_upd));
         else
             ret = 0;
     }
@@ -1346,6 +1374,9 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
         __txn_resolve_prepared_update(session, upd);
         WT_STAT_CONN_INCR(session, txn_prepared_updates_committed);
     }
+
+    /* Mark the page dirty once the prepared updates are resolved. */
+    __wt_page_modify_set(session, page);
 
     /*
      * Fix the history store contents if they exist, when there are no more updates in the update

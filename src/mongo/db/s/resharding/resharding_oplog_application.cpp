@@ -45,6 +45,8 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
+#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/stats/counters.h"
@@ -58,7 +60,9 @@ Date_t getDeadline(OperationContext* opCtx) {
         Milliseconds(resharding::gReshardingOplogApplierMaxLockRequestTimeoutMillis.load());
 }
 
-void runWithTransaction(OperationContext* opCtx, unique_function<void(OperationContext*)> func) {
+void runWithTransaction(OperationContext* opCtx,
+                        const NamespaceString& nss,
+                        unique_function<void(OperationContext*)> func) {
     AlternativeSessionRegion asr(opCtx);
     auto* const client = asr.opCtx()->getClient();
     {
@@ -71,6 +75,13 @@ void runWithTransaction(OperationContext* opCtx, unique_function<void(OperationC
     TxnNumber txnNumber = 0;
     asr.opCtx()->setTxnNumber(txnNumber);
     asr.opCtx()->setInMultiDocumentTransaction();
+
+    // ReshardingOpObserver depends on the collection metadata being known when processing writes to
+    // the temporary resharding collection. We attach shard version IGNORED to the write operations
+    // and leave it to ReshardingOplogBatchApplier::applyBatch() to retry on a StaleConfig exception
+    // to allow the collection metadata information to be recovered.
+    auto& oss = OperationShardingState::get(asr.opCtx());
+    oss.initializeClientRoutingVersions(nss, ChunkVersion::IGNORED(), boost::none);
 
     MongoDOperationContextSession ocs(asr.opCtx());
     auto txnParticipant = TransactionParticipant::get(asr.opCtx());
@@ -109,13 +120,15 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
     std::vector<NamespaceString> allStashNss,
     size_t myStashIdx,
     ShardId donorShardId,
-    ChunkManager sourceChunkMgr)
+    ChunkManager sourceChunkMgr,
+    ReshardingMetrics* metrics)
     : _outputNss(std::move(outputNss)),
       _allStashNss(std::move(allStashNss)),
       _myStashIdx(myStashIdx),
       _myStashNss(_allStashNss.at(_myStashIdx)),
       _donorShardId(std::move(donorShardId)),
-      _sourceChunkMgr(std::move(sourceChunkMgr)) {}
+      _sourceChunkMgr(std::move(sourceChunkMgr)),
+      _metrics(metrics) {}
 
 Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
                                                        const repl::OplogEntry& op) const {
@@ -215,9 +228,7 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
      * 4. If there exists a document with _id == [op _id] in the output collection and it is NOT
      * owned by this donor shard, insert the contents of 'op' into the conflict stash collection.
      */
-    // Writes are replicated, so use global op counters.
-    OpCounters* opCounters = &globalOpCounters;
-    opCounters->gotInsert();
+    _metrics->gotInsert();
 
     BSONObj oField = op.getObject();
 
@@ -306,9 +317,7 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
      * 4. If there exists a document with _id == [op _id] in the output collection and it is owned
      * by this donor shard, update the document from this collection.
      */
-    // Writes are replicated, so use global op counters.
-    OpCounters* opCounters = &globalOpCounters;
-    opCounters->gotUpdate();
+    _metrics->gotUpdate();
 
     BSONObj oField = op.getObject();
     BSONObj o2Field;
@@ -393,9 +402,7 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
      * _id == [op _id] arbitrarily from among all resharding conflict stash collections to delete
      * from that resharding conflict stash collection and insert into the output collection.
      */
-    // Writes are replicated, so use global op counters.
-    OpCounters* opCounters = &globalOpCounters;
-    opCounters->gotDelete();
+    _metrics->gotDelete();
 
     BSONObj oField = op.getObject();
 
@@ -422,7 +429,7 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
     // We must run 'findByIdAndNoopUpdate' in the same storage transaction as the ops run in the
     // single replica set transaction that is executed if we apply rule #4, so we therefore must run
     // 'findByIdAndNoopUpdate' as a part of the single replica set transaction.
-    runWithTransaction(opCtx, [this, idQuery](OperationContext* opCtx) {
+    runWithTransaction(opCtx, _outputNss, [this, idQuery](OperationContext* opCtx) {
         AutoGetCollection autoCollOutput(opCtx,
                                          _outputNss,
                                          MODE_IX,

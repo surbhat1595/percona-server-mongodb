@@ -27,12 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
+#include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
@@ -64,7 +63,10 @@
 #include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
+#include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/db/write_concern.h"
@@ -108,17 +110,30 @@ bool shouldSkipOutput(OperationContext* opCtx) {
  * Returns true if 'ns' is a time-series collection. That is, this namespace is backed by a
  * time-series buckets collection.
  */
-bool isTimeseries(OperationContext* opCtx, const NamespaceString& ns) {
+template <class Request>
+bool isTimeseries(OperationContext* opCtx, const Request& request) {
+    uassert(5916400,
+            "'isTimeseriesNamespace' parameter can only be set when the request is sent on "
+            "system.buckets namespace",
+            !request.getIsTimeseriesNamespace() ||
+                request.getNamespace().isTimeseriesBucketsCollection());
+    const auto bucketNss = request.getIsTimeseriesNamespace()
+        ? request.getNamespace()
+        : request.getNamespace().makeTimeseriesBucketsNamespace();
+
     // If the buckets collection exists now, the time-series insert path will check for the
     // existence of the buckets collection later on with a lock.
     // If this check is concurrent with the creation of a time-series collection and the buckets
     // collection does not yet exist, this check may return false unnecessarily. As a result, an
     // insert attempt into the time-series namespace will either succeed or fail, depending on who
     // wins the race.
-    auto bucketsNs = ns.makeTimeseriesBucketsNamespace();
     return CollectionCatalog::get(opCtx)
-        ->lookupCollectionByNamespaceForRead(opCtx, bucketsNs)
+        ->lookupCollectionByNamespaceForRead(opCtx, bucketNss)
         .get();
+}
+
+NamespaceString makeTimeseriesBucketsNamespace(const NamespaceString& nss) {
+    return nss.isTimeseriesBucketsCollection() ? nss : nss.makeTimeseriesBucketsNamespace();
 }
 
 // Default for control.version in time-series bucket collection.
@@ -266,14 +281,22 @@ void getOpTimeAndElectionId(OperationContext* opCtx,
         : boost::none;
 }
 
-boost::optional<Status> checkFailUnorderedTimeseriesInsertFailPoint(const BSONObj& metadata) {
-    if (MONGO_unlikely(failUnorderedTimeseriesInsert.shouldFail([&metadata](const BSONObj& data) {
-            BSONElementComparator comp(BSONElementComparator::FieldNamesMode::kIgnore, nullptr);
-            return comp.compare(data["metadata"], metadata.firstElement()) == 0;
-        }))) {
-        return {{ErrorCodes::FailPointEnabled,
-                 "Failed unordered time-series insert due to failUnorderedTimeseriesInsert fail "
-                 "point"}};
+boost::optional<std::pair<Status, bool>> checkFailUnorderedTimeseriesInsertFailPoint(
+    const BSONObj& metadata) {
+    bool canContinue = true;
+    if (MONGO_unlikely(failUnorderedTimeseriesInsert.shouldFail(
+            [&metadata, &canContinue](const BSONObj& data) {
+                BSONElementComparator comp(BSONElementComparator::FieldNamesMode::kIgnore, nullptr);
+                if (auto continueElem = data["canContinue"]) {
+                    canContinue = data["canContinue"].trueValue();
+                }
+                return comp.compare(data["metadata"], metadata.firstElement()) == 0;
+            }))) {
+        return std::make_pair(
+            Status(ErrorCodes::FailPointEnabled,
+                   "Failed unordered time-series insert due to failUnorderedTimeseriesInsert fail "
+                   "point"),
+            canContinue);
     }
     return boost::none;
 }
@@ -401,7 +424,7 @@ void populateReply(OperationContext* opCtx,
     long long nVal = 0;
     std::vector<BSONObj> errors;
 
-    for (size_t i = 0; i < result.results.size(); i++) {
+    for (size_t i = 0; i < result.results.size(); ++i) {
         if (auto error = generateError(opCtx, result.results[i], i, errors.size())) {
             errors.push_back(*error);
             continue;
@@ -448,7 +471,7 @@ void transactionChecks(OperationContext* opCtx, const NamespaceString& ns) {
     uassert(50791,
             str::stream() << "Cannot write to system collection " << ns.toString()
                           << " within a transaction.",
-            !ns.isSystem() || ns.isPrivilegeCollection());
+            !ns.isSystem() || ns.isPrivilegeCollection() || ns.isTimeseriesBucketsCollection());
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     uassert(50790,
             str::stream() << "Cannot write to unreplicated collection " << ns.toString()
@@ -503,7 +526,7 @@ public:
             transactionChecks(opCtx, ns());
             write_ops::InsertCommandReply insertReply;
 
-            if (isTimeseries(opCtx, ns())) {
+            if (isTimeseries(opCtx, request())) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
@@ -533,6 +556,10 @@ public:
         using TimeseriesBatches =
             std::vector<std::pair<std::shared_ptr<BucketCatalog::WriteBatch>, size_t>>;
         using TimeseriesStmtIds = stdx::unordered_map<BucketCatalog::Bucket*, std::vector<StmtId>>;
+        struct TimeseriesSingleWriteResult {
+            StatusWith<SingleWriteResult> result;
+            bool canContinue = true;
+        };
 
         void doCheckAuthorization(OperationContext* opCtx) const final try {
             auth::checkAuthForInsertCommand(AuthorizationSession::get(opCtx->getClient()),
@@ -550,13 +577,13 @@ public:
                 : BucketCatalog::CombineWithInsertsFromOtherClients::kAllow;
         }
 
-        StatusWith<SingleWriteResult> _getTimeseriesSingleWriteResult(
-            const write_ops_exec::WriteResult& reply) const {
+        TimeseriesSingleWriteResult _getTimeseriesSingleWriteResult(
+            write_ops_exec::WriteResult&& reply) const {
             invariant(reply.results.size() == 1,
                       str::stream() << "Unexpected number of results (" << reply.results.size()
                                     << ") for insert on time-series collection " << ns());
 
-            return reply.results[0];
+            return {std::move(reply.results[0]), reply.canContinue};
         }
 
         write_ops::WriteCommandRequestBase _makeTimeseriesWriteOpBase(
@@ -578,7 +605,7 @@ public:
             std::shared_ptr<BucketCatalog::WriteBatch> batch,
             const BSONObj& metadata,
             std::vector<StmtId>&& stmtIds) const {
-            write_ops::InsertCommandRequest op{ns().makeTimeseriesBucketsNamespace(),
+            write_ops::InsertCommandRequest op{makeTimeseriesBucketsNamespace(ns()),
                                                {makeTimeseriesInsertDocument(batch, metadata)}};
             op.setWriteCommandRequestBase(_makeTimeseriesWriteOpBase(std::move(stmtIds)));
             return op;
@@ -590,43 +617,51 @@ public:
             const BSONObj& metadata,
             std::vector<StmtId>&& stmtIds) const {
             write_ops::UpdateCommandRequest op(
-                ns().makeTimeseriesBucketsNamespace(),
+                makeTimeseriesBucketsNamespace(ns()),
                 {makeTimeseriesUpdateOpEntry(opCtx, batch, metadata)});
             op.setWriteCommandRequestBase(_makeTimeseriesWriteOpBase(std::move(stmtIds)));
             return op;
         }
 
-        StatusWith<SingleWriteResult> _performTimeseriesInsert(
+        /**
+         * Returns the status and whether the request can continue.
+         */
+        TimeseriesSingleWriteResult _performTimeseriesInsert(
             OperationContext* opCtx,
             std::shared_ptr<BucketCatalog::WriteBatch> batch,
             const BSONObj& metadata,
             std::vector<StmtId>&& stmtIds) const {
             if (auto status = checkFailUnorderedTimeseriesInsertFailPoint(metadata)) {
-                return *status;
+                return {status->first, status->second};
             }
-
             return _getTimeseriesSingleWriteResult(write_ops_exec::performInserts(
                 opCtx,
                 _makeTimeseriesInsertOp(batch, metadata, std::move(stmtIds)),
-                OperationSource::kTimeseries));
+                OperationSource::kTimeseriesInsert));
         }
 
-        StatusWith<SingleWriteResult> _performTimeseriesUpdate(
+        /**
+         * Returns the status and whether the request can continue.
+         */
+        TimeseriesSingleWriteResult _performTimeseriesUpdate(
             OperationContext* opCtx,
             std::shared_ptr<BucketCatalog::WriteBatch> batch,
             const BSONObj& metadata,
             std::vector<StmtId>&& stmtIds) const {
             if (auto status = checkFailUnorderedTimeseriesInsertFailPoint(metadata)) {
-                return *status;
+                return {status->first, status->second};
             }
 
             return _getTimeseriesSingleWriteResult(write_ops_exec::performUpdates(
                 opCtx,
                 _makeTimeseriesUpdateOp(opCtx, batch, metadata, std::move(stmtIds)),
-                OperationSource::kTimeseries));
+                OperationSource::kTimeseriesInsert));
         }
 
-        void _commitTimeseriesBucket(OperationContext* opCtx,
+        /**
+         * Returns whether the request can continue.
+         */
+        bool _commitTimeseriesBucket(OperationContext* opCtx,
                                      std::shared_ptr<BucketCatalog::WriteBatch> batch,
                                      size_t start,
                                      size_t index,
@@ -641,13 +676,16 @@ public:
             bool prepared = bucketCatalog.prepareCommit(batch);
             if (!prepared) {
                 invariant(batch->finished());
-                invariant(batch->getResult().getStatus() == ErrorCodes::TimeseriesBucketCleared,
-                          str::stream()
-                              << "Got unexpected error (" << batch->getResult().getStatus()
-                              << ") preparing time-series bucket to be committed for " << ns()
-                              << ": " << redact(request().toBSON({})));
+                auto batchStatus = batch->getResult().getStatus();
+                tassert(5916402,
+                        str::stream() << "Got unexpected error (" << batch->getResult().getStatus()
+                                      << ") preparing time-series bucket to be committed for "
+                                      << ns() << ": " << redact(request().toBSON({})),
+                        batchStatus == ErrorCodes::TimeseriesBucketCleared ||
+                            batchStatus.isA<ErrorCategory::StaleShardVersionError>());
+
                 docsToRetry->push_back(index);
-                return;
+                return true;
             }
             // Now that the batch is prepared, make sure we clean up if we throw.
             auto batchGuard = makeGuard([&] { bucketCatalog.abort(batch); });
@@ -657,38 +695,42 @@ public:
             const auto docId = batch->bucket()->id();
             const bool performInsert = batch->numPreviouslyCommittedMeasurements() == 0;
             if (performInsert) {
-                auto result = _performTimeseriesInsert(opCtx, batch, metadata, std::move(stmtIds));
-
-                if (auto error = generateError(opCtx, result, start + index, errors->size())) {
+                const auto output =
+                    _performTimeseriesInsert(opCtx, batch, metadata, std::move(stmtIds));
+                if (auto error =
+                        generateError(opCtx, output.result, start + index, errors->size())) {
                     errors->push_back(*error);
-                    bucketCatalog.abort(batch, result.getStatus());
+                    bucketCatalog.abort(batch, output.result.getStatus());
                     batchGuard.dismiss();
-                    return;
+                    return output.canContinue;
                 }
 
-                invariant(result.getValue().getN() == 1,
-                          str::stream() << "Expected 1 insertion of document with _id '" << docId
-                                        << "', but found " << result.getValue().getN() << ".");
+                invariant(output.result.getValue().getN() == 1,
+                          str::stream()
+                              << "Expected 1 insertion of document with _id '" << docId
+                              << "', but found " << output.result.getValue().getN() << ".");
             } else {
-                auto result = _performTimeseriesUpdate(opCtx, batch, metadata, std::move(stmtIds));
-
-                if (auto error = generateError(opCtx, result, start + index, errors->size())) {
+                const auto output =
+                    _performTimeseriesUpdate(opCtx, batch, metadata, std::move(stmtIds));
+                if (auto error =
+                        generateError(opCtx, output.result, start + index, errors->size())) {
                     errors->push_back(*error);
-                    bucketCatalog.abort(batch, result.getStatus());
+                    bucketCatalog.abort(batch, output.result.getStatus());
                     batchGuard.dismiss();
-                    return;
+                    return output.canContinue;
                 }
 
-                invariant(result.getValue().getNModified() == 1,
+                invariant(output.result.getValue().getNModified() == 1,
                           str::stream()
                               << "Expected 1 update of document with _id '" << docId
-                              << "', but found " << result.getValue().getNModified() << ".");
+                              << "', but found " << output.result.getValue().getNModified() << ".");
             }
 
             getOpTimeAndElectionId(opCtx, opTime, electionId);
 
             bucketCatalog.finish(batch, BucketCatalog::CommitInfo{*opTime, *electionId});
             batchGuard.dismiss();
+            return true;
         }
 
         bool _commitTimeseriesBucketsAtomically(OperationContext* opCtx,
@@ -768,7 +810,7 @@ public:
             bool* containsRetry) const {
             auto& bucketCatalog = BucketCatalog::get(opCtx);
 
-            auto bucketsNs = ns().makeTimeseriesBucketsNamespace();
+            auto bucketsNs = makeTimeseriesBucketsNamespace(ns());
             // Holding this shared pointer to the collection guarantees that the collator is not
             // invalidated.
             auto bucketsColl =
@@ -798,13 +840,13 @@ public:
                     return true;
                 }
 
-                auto result =
-                    bucketCatalog.insert(opCtx,
-                                         ns(),
-                                         bucketsColl->getDefaultCollator(),
-                                         *bucketsColl->getTimeseriesOptions(),
-                                         request().getDocuments()[start + index],
-                                         _canCombineTimeseriesInsertWithOtherClients(opCtx));
+                auto result = bucketCatalog.insert(
+                    opCtx,
+                    ns().isTimeseriesBucketsCollection() ? ns().getTimeseriesViewNamespace() : ns(),
+                    bucketsColl->getDefaultCollator(),
+                    *bucketsColl->getTimeseriesOptions(),
+                    request().getDocuments()[start + index],
+                    _canCombineTimeseriesInsertWithOtherClients(opCtx));
 
                 if (auto error = generateError(opCtx, result, start + index, errors->size())) {
                     errors->push_back(*error);
@@ -833,20 +875,55 @@ public:
             return {std::move(batches), std::move(stmtIds), request().getDocuments().size()};
         }
 
+        BSONObj _cloneErrorWithIndex(BSONObj error, size_t index) const {
+            BSONObjBuilder bob;
+            for (auto&& elem : error) {
+                if (elem.fieldNameStringData() == "index") {
+                    bob.append("index", static_cast<int>(index));
+                } else {
+                    bob.append(elem);
+                }
+            }
+            return bob.obj();
+        }
+
         void _getTimeseriesBatchResults(OperationContext* opCtx,
                                         const TimeseriesBatches& batches,
                                         size_t start,
+                                        size_t indexOfLastProcessedBatch,
+                                        bool canContinue,
                                         std::vector<BSONObj>* errors,
                                         boost::optional<repl::OpTime>* opTime,
                                         boost::optional<OID>* electionId,
                                         std::vector<size_t>* docsToRetry = nullptr) const {
-            for (const auto& [batch, index] : batches) {
+            boost::optional<BSONObj> lastError;
+            if (!errors->empty()) {
+                lastError = errors->back();
+            }
+
+            for (size_t itr = 0; itr < batches.size(); ++itr) {
+                const auto& [batch, index] = batches[itr];
                 if (!batch) {
+                    continue;
+                }
+
+                // If there are any unprocessed batches, we mark them as error with the last known
+                // error.
+                if (itr > indexOfLastProcessedBatch && batch->claimCommitRights()) {
+                    auto& bucketCatalog = BucketCatalog::get(opCtx);
+                    bucketCatalog.abort(batch);
+
+                    tassert(
+                        6023100,
+                        "there should be at least one error if the batch processing exited early",
+                        lastError);
+                    errors->push_back(_cloneErrorWithIndex(*lastError, start + index));
                     continue;
                 }
 
                 auto swCommitInfo = batch->getResult();
                 if (swCommitInfo.getStatus() == ErrorCodes::TimeseriesBucketCleared) {
+                    tassert(6023102, "the 'docsToRetry' cannot be null", docsToRetry);
                     docsToRetry->push_back(index);
                     continue;
                 }
@@ -863,6 +940,15 @@ public:
                 if (commitInfo.electionId) {
                     *electionId = std::max(electionId->value_or(OID()), *commitInfo.electionId);
                 }
+            }
+
+            // If we cannot continue the request, we should convert all the 'docsToRetry' into an
+            // error.
+            if (!canContinue && docsToRetry) {
+                for (auto&& index : *docsToRetry) {
+                    errors->push_back(_cloneErrorWithIndex(*lastError, start + index));
+                }
+                docsToRetry->clear();
             }
         }
 
@@ -881,7 +967,8 @@ public:
                 return false;
             }
 
-            _getTimeseriesBatchResults(opCtx, batches, 0, errors, opTime, electionId);
+            _getTimeseriesBatchResults(
+                opCtx, batches, 0, batches.size(), true, errors, opTime, electionId);
 
             return true;
         }
@@ -926,32 +1013,41 @@ public:
                                                               bool* containsRetry) const {
             auto [batches, bucketStmtIds, _] =
                 _insertIntoBucketCatalog(opCtx, start, numDocs, indices, errors, containsRetry);
+            bool canContinue = true;
 
             hangTimeseriesInsertBeforeCommit.pauseWhileSet();
 
             std::vector<size_t> docsToRetry;
 
-            for (auto& [batch, index] : batches) {
+            size_t itr = 0;
+            for (; itr < batches.size(); ++itr) {
+                auto& [batch, index] = batches[itr];
                 if (batch->claimCommitRights()) {
                     auto stmtIds = isTimeseriesWriteRetryable(opCtx)
                         ? std::move(bucketStmtIds[batch->bucket()])
                         : std::vector<StmtId>{};
 
-                    _commitTimeseriesBucket(opCtx,
-                                            batch,
-                                            start,
-                                            index,
-                                            std::move(stmtIds),
-                                            errors,
-                                            opTime,
-                                            electionId,
-                                            &docsToRetry);
+                    canContinue = _commitTimeseriesBucket(opCtx,
+                                                          batch,
+                                                          start,
+                                                          index,
+                                                          std::move(stmtIds),
+                                                          errors,
+                                                          opTime,
+                                                          electionId,
+                                                          &docsToRetry);
                     batch.reset();
+                    if (!canContinue) {
+                        break;
+                    }
                 }
             }
 
-            _getTimeseriesBatchResults(opCtx, batches, 0, errors, opTime, electionId, &docsToRetry);
-
+            _getTimeseriesBatchResults(
+                opCtx, batches, 0, itr, canContinue, errors, opTime, electionId, &docsToRetry);
+            tassert(6023101,
+                    "the 'docsToRetry' cannot exist when the request cannot be continued",
+                    canContinue || docsToRetry.empty());
             return docsToRetry;
         }
 
@@ -978,7 +1074,7 @@ public:
                 curOp.done();
                 Top::get(opCtx->getServiceContext())
                     .record(opCtx,
-                            request().getNamespace().ns(),
+                            ns().ns(),
                             LogicalOp::opInsert,
                             Top::LockType::WriteLocked,
                             durationCount<Microseconds>(curOp.elapsedTimeExcludingPauses()),
@@ -1121,6 +1217,11 @@ public:
 
             invariant(!_commandObj.isEmpty());
 
+            if (const auto& shardVersion = _commandObj.getField("shardVersion");
+                !shardVersion.eoo()) {
+                bob->append(shardVersion);
+            }
+
             bob->append("find", _commandObj["update"].String());
             extractQueryDetails(_updateOpObj, bob);
             bob->append("batchSize", 1);
@@ -1129,15 +1230,29 @@ public:
 
         write_ops::UpdateCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
-
             write_ops::UpdateCommandReply updateReply;
+            OperationSource source = OperationSource::kStandard;
+
+            if (isTimeseries(opCtx, request())) {
+                uassert(ErrorCodes::InvalidOptions,
+                        "Time-series updates are not enabled",
+                        feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
+                            serverGlobalParams.featureCompatibility));
+                uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                        str::stream() << "Cannot perform a multi-document transaction on a "
+                                         "time-series collection: "
+                                      << ns(),
+                        !opCtx->inMultiDocumentTransaction());
+                source = OperationSource::kTimeseriesUpdate;
+            }
+
             long long nModified = 0;
 
             // Tracks the upserted information. The memory of this variable gets moved in the
             // 'postProcessHandler' and should not be accessed afterwards.
             std::vector<write_ops::Upserted> upsertedInfoVec;
 
-            auto reply = write_ops_exec::performUpdates(opCtx, request());
+            auto reply = write_ops_exec::performUpdates(opCtx, request(), source);
 
             // Handler to process each 'SingleWriteResult'.
             auto singleWriteHandler = [&](const SingleWriteResult& opResult, int index) {
@@ -1291,10 +1406,23 @@ public:
 
         write_ops::DeleteCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
-
             write_ops::DeleteCommandReply deleteReply;
+            OperationSource source = OperationSource::kStandard;
 
-            auto reply = write_ops_exec::performDeletes(opCtx, request());
+            if (isTimeseries(opCtx, request())) {
+                uassert(ErrorCodes::InvalidOptions,
+                        "Time-series deletes are not enabled",
+                        feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
+                            serverGlobalParams.featureCompatibility));
+                uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                        str::stream() << "Cannot perform a multi-document transaction on a "
+                                         "time-series collection: "
+                                      << ns(),
+                        !opCtx->inMultiDocumentTransaction());
+                source = OperationSource::kTimeseriesDelete;
+            }
+
+            auto reply = write_ops_exec::performDeletes(opCtx, request(), source);
             populateReply(opCtx,
                           !request().getWriteCommandRequestBase().getOrdered(),
                           request().getDeletes().size(),

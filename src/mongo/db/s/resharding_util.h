@@ -52,6 +52,7 @@
 namespace mongo {
 
 constexpr auto kReshardFinalOpLogType = "reshardFinalOp"_sd;
+constexpr auto kReshardProgressMark = "reshardProgressMark"_sd;
 static const auto kReshardErrorMaxBytes = 2000;
 
 /**
@@ -278,16 +279,6 @@ std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForReshard
     const ReshardingDonorOplogId& startAfter,
     UUID collUUID,
     const ShardId& recipientShard);
-
-/**
- * Returns the shard Id of the recipient shard that would own the document under the new shard
- * key pattern.
- */
-boost::optional<ShardId> getDestinedRecipient(OperationContext* opCtx,
-                                              const NamespaceString& sourceNss,
-                                              const BSONObj& fullDocument,
-                                              CollectionShardingState* css,
-                                              const ScopedCollectionDescription& collDesc);
 
 /**
  * Sentinel oplog format:

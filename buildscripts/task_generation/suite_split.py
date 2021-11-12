@@ -111,7 +111,7 @@ class SubSuite(object):
         if runtime_list:
             runtime_map = {test.test_name: test.runtime for test in runtime_list}
             for test in test_list:
-                if test in runtime_map:
+                if test in runtime_map and runtime_map[test] > 0:
                     runtime_count += 1
                     total_runtime += runtime_map[test]
                     max_runtime = max(max_runtime, runtime_map[test])
@@ -197,6 +197,18 @@ class GeneratedSuite(NamedTuple):
     def __len__(self) -> int:
         """Get the number of sub-suites."""
         return len(self.sub_suites)
+
+    def sub_suite_config_file(self, index: Optional[int] = None) -> str:
+        """
+        Get the name of the file to store the resmoke configuration.
+
+        :param index: Index of suite or None for '_misc' suite.
+        :return: Name resmoke configuration for subtask should stored.
+        """
+        if index is not None:
+            return taskname.name_generated_task(self.display_task_name(), index,
+                                                len(self.sub_suites))
+        return f"{self.display_task_name()}_misc"
 
 
 class SuiteSplitParameters(NamedTuple):

@@ -52,6 +52,17 @@ server_parameters:
           gte: 0
         default: 20
 
+    receiveChunkWaitForRangeDeleterTimeoutMS:
+        description: >-
+          Amount of time in milliseconds an incoming migration will wait for an intersecting range 
+          with data in it to be cleared up before failing.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: receiveChunkWaitForRangeDeleterTimeoutMS
+        validator:
+          gte: 0
+        default: 10000
+
     migrateCloneInsertionBatchSize:
         description: >-
           The maximum number of documents to insert in a single batch during the cloning step of
@@ -130,3 +141,14 @@ server_parameters:
         cpp_vartype: int
         cpp_varname: shardedIndexConsistencyCheckIntervalMS
         default: 600000
+
+    metadataRefreshInTransactionMaxWaitBehindCritSecMS:
+        description: >-
+          Maximum time in milliseconds to wait behind the critical section when refreshing the
+          filtering metadata within a transaction.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: metadataRefreshInTransactionMaxWaitBehindCritSecMS
+        validator:
+          gte: 0
+        default: 500

@@ -866,7 +866,7 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
         bsonRecords.push_back(bsonRecord);
     }
 
-    int64_t keysInserted;
+    int64_t keysInserted = 0;
     status = _indexCatalog->indexRecords(
         opCtx, {this, CollectionPtr::NoYieldTag{}}, bsonRecords, &keysInserted);
     if (!status.isOK()) {
@@ -1136,7 +1136,10 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
         uasserted(10089, "cannot remove from a capped collection");
     }
 
-    const auto oplogSlot = reserveOplogSlotsForRetryableFindAndModify(opCtx);
+    boost::optional<OplogSlot> oplogSlot = boost::none;
+    if (storeDeletedDoc == Collection::StoreDeletedDoc::On) {
+        oplogSlot = reserveOplogSlotsForRetryableFindAndModify(opCtx);
+    }
     OpObserver::OplogDeleteEntryArgs deleteArgs{
         nullptr, fromMigrate, getRecordPreImages(), oplogSlot, oplogSlot != boost::none};
 
@@ -1147,7 +1150,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
         getRecordPreImages()) {
         deletedDoc.emplace(doc.value().getOwned());
     }
-    int64_t keysDeleted;
+    int64_t keysDeleted = 0;
     _indexCatalog->unindexRecord(opCtx,
                                  CollectionPtr(this, CollectionPtr::NoYieldTag{}),
                                  doc.value(),
@@ -1248,7 +1251,8 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         opCtx, oldLocation, newDoc.objdata(), newDoc.objsize()));
 
     if (indexesAffected) {
-        int64_t keysInserted, keysDeleted;
+        int64_t keysInserted = 0;
+        int64_t keysDeleted = 0;
 
         uassertStatusOK(_indexCatalog->updateRecord(opCtx,
                                                     {this, CollectionPtr::NoYieldTag{}},
@@ -1772,6 +1776,26 @@ void CollectionImpl::updateHiddenSetting(OperationContext* opCtx, StringData idx
     _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
         md.indexes[offset].updateHiddenSetting(hidden);
     });
+}
+
+std::vector<std::string> CollectionImpl::removeInvalidIndexOptions(OperationContext* opCtx) {
+    std::vector<std::string> indexesWithInvalidOptions;
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        for (auto& index : md.indexes) {
+            BSONObj oldSpec = index.spec;
+
+            Status status = index_key_validate::validateIndexSpecFieldNames(oldSpec);
+            if (status.isOK()) {
+                continue;
+            }
+
+            indexesWithInvalidOptions.push_back(std::string(index.name()));
+            index.spec = index_key_validate::removeUnknownFields(oldSpec);
+        }
+    });
+
+    return indexesWithInvalidOptions;
 }
 
 void CollectionImpl::setIsTemp(OperationContext* opCtx, bool isTemp) {

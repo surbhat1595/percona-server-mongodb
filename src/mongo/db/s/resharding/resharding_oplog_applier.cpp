@@ -65,7 +65,8 @@ ReshardingOplogApplier::ReshardingOplogApplier(
                        std::move(allStashNss),
                        myStashIdx,
                        _sourceId.getShardId(),
-                       std::move(sourceChunkMgr)},
+                       std::move(sourceChunkMgr),
+                       _env->metrics()},
       _sessionApplication{},
       _batchApplier{_crudApplication, _sessionApplication},
       _oplogIter(std::move(oplogIterator)) {}
@@ -74,6 +75,7 @@ SemiFuture<void> ReshardingOplogApplier::_applyBatch(
     std::shared_ptr<executor::TaskExecutor> executor,
     CancellationToken cancelToken,
     CancelableOperationContextFactory factory) {
+    Timer latencyTimer;
     auto crudWriterVectors =
         _batchPreparer.makeCrudOpWriterVectors(_currentBatchToApply, _currentDerivedOps);
 
@@ -111,6 +113,11 @@ SemiFuture<void> ReshardingOplogApplier::_applyBatch(
         .onError([](Status status) {
             LOGV2_ERROR(
                 5012004, "Failed to apply operation in resharding", "error"_attr = redact(status));
+            return status;
+        })
+        .onCompletion([this, latencyTimer](Status status) {
+            _env->metrics()->onOplogApplierApplyBatch(
+                duration_cast<Milliseconds>(latencyTimer.elapsed()));
             return status;
         })
         .semi();

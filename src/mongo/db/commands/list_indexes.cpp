@@ -55,8 +55,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/uuid.h"
 
@@ -74,8 +74,13 @@ IndexSpecsWithNamespaceString getIndexSpecsWithNamespaceString(OperationContext*
     // Since time-series collections don't have UUIDs, we skip the time-series lookup
     // if the target collection is specified as a UUID.
     if (const auto& origNss = origNssOrUUID.nss()) {
-        if (auto timeseriesOptions = timeseries::getTimeseriesOptions(opCtx, *origNss)) {
-            auto bucketsNss = origNss->makeTimeseriesBucketsNamespace();
+        auto isCommandOnTimeseriesBucketNamespace =
+            cmd.getIsTimeseriesNamespace() && *cmd.getIsTimeseriesNamespace();
+        if (auto timeseriesOptions = timeseries::getTimeseriesOptions(
+                opCtx, *origNss, !isCommandOnTimeseriesBucketNamespace)) {
+            auto bucketsNss = isCommandOnTimeseriesBucketNamespace
+                ? *origNss
+                : origNss->makeTimeseriesBucketsNamespace();
             AutoGetCollectionForReadCommandMaybeLockFree autoColl(opCtx, bucketsNss);
 
             const CollectionPtr& coll = autoColl.getCollection();

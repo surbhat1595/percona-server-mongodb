@@ -142,9 +142,11 @@ selector:
   - jstests/concurrency/fsm_workloads/collmod_writeconflict.js
   - jstests/concurrency/fsm_workloads/invalidated_cursors.js
   - jstests/concurrency/fsm_workloads/kill_multicollection_aggregation.js
+  - jstests/concurrency/fsm_workloads/random_moveChunk_timeseries_updates.js
   - jstests/concurrency/fsm_workloads/view_catalog.js
   - jstests/concurrency/fsm_workloads/view_catalog_cycle_with_drop.js
   - jstests/concurrency/fsm_workloads/view_catalog_direct_system_writes.js
+  - jstests/concurrency/fsm_workloads/random_moveChunk_timeseries_deletes.js
 
   ##
   # Denylists specific to this suite
@@ -252,6 +254,7 @@ executor:
         enableTestCommands: 1
         enableElectionHandoff: 0
         roleGraphInvalidationIsFatal: 1
+        receiveChunkWaitForRangeDeleterTimeoutMS: 90000
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

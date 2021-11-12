@@ -280,7 +280,7 @@ static CONFIG c[] = {
 
   {"runs.timer", "run time (minutes)", C_IGNORE, 0, 0, UINT_MAX, &g.c_timer, NULL},
 
-  {"runs.type", "object type (fix | var | row)", C_IGNORE | C_STRING, 0, 0, 0, NULL,
+  {"runs.type", "object type (fix | row | var)", C_IGNORE | C_STRING, 0, 0, 0, NULL,
     &g.c_file_type},
 
   {"runs.verify_failure_dump", "configure page dump on repeatable read error", C_IGNORE | C_BOOL, 0,
@@ -352,9 +352,6 @@ static CONFIG c[] = {
 
   /* 2% */
   {"stress.split_7", "stress splits (#7)", C_BOOL, 2, 0, 0, &g.c_timing_stress_split_7, NULL},
-
-  /* 2% */
-  {"stress.split_8", "stress splits (#8)", C_BOOL, 2, 0, 0, &g.c_timing_stress_split_8, NULL},
 
   {"transaction.implicit", "implicit, without timestamps, transactions (percentage)", 0x0, 0, 100,
     100, &g.c_txn_implicit, NULL},

@@ -878,7 +878,7 @@ Status MigrationChunkClonerSourceLegacy::_storeCurrentLocs(OperationContext* opC
             avgRecSize = BSONObj::kMinBSONLength;
         }
         maxRecsWhenFull = _args.getMaxChunkSizeBytes() / avgRecSize;
-        maxRecsWhenFull = 130 * maxRecsWhenFull / 100;  // pad some slack
+        maxRecsWhenFull = 2 * maxRecsWhenFull;  // pad some slack
     } else {
         avgRecSize = 0;
         maxRecsWhenFull = kMaxObjectPerChunk + 1;
@@ -921,7 +921,9 @@ Status MigrationChunkClonerSourceLegacy::_storeCurrentLocs(OperationContext* opC
 
     uint64_t averageObjectIdSize = 0;
     const uint64_t defaultObjectIdSize = OID::kOIDSize;
-    if (totalRecs > 0) {
+
+    // For a time series collection, an index on '_id' is not required.
+    if (totalRecs > 0 && !collection->getTimeseriesOptions()) {
         const auto idIdx = collection->getIndexCatalog()->findIdIndex(opCtx)->getEntry();
         if (!idIdx) {
             return {ErrorCodes::IndexNotFound,

@@ -41,7 +41,7 @@ const RollbackResumableIndexBuildTest = class {
      *   case all index builds will be expected to resume from that phase, or it must be exactly
      *   the length of 'indexSpecs'.
      *
-     * 'resumeChecks' is an array of objects that contain exactly one of 'numScannedAferResume' and
+     * 'resumeChecks' is an array of objects that contain exactly one of 'numScannedAfterResume' and
      *   'skippedPhaseLogID'. The former is used to verify that the index build scanned the expected
      *   number of documents in the collection scan after resuming. The latter is used for phases
      *   which do not perform a collection scan after resuming, to verify that the index build did
@@ -59,10 +59,6 @@ const RollbackResumableIndexBuildTest = class {
      *   fixture should be expected to be completed when this function returns. If false, this
      *   function returns the collections, buildUUIDs, and index names of the index builds started
      *   by the test fixture.
-     *
-     * 'skipDataConsistencyChecks' is a boolean which determines whether data consistency checks
-     *   should be skipped by the rollback test fixture when transitioning to steady state
-     *   operations.
      */
     static run(rollbackTest,
                dbName,
@@ -78,7 +74,7 @@ const RollbackResumableIndexBuildTest = class {
                resumeChecks,
                insertsToBeRolledBack,
                sideWrites = [],
-               {shouldComplete = true, skipDataConsistencyChecks = false} = {}) {
+               {shouldComplete = true} = {}) {
         const originalPrimary = rollbackTest.getPrimary();
 
         if (!ResumableIndexBuildTest.resumableIndexBuildsEnabled(originalPrimary)) {
@@ -88,14 +84,16 @@ const RollbackResumableIndexBuildTest = class {
 
         rollbackTest.awaitLastOpCommitted();
 
-        assert.commandWorked(
-            originalPrimary.adminCommand({setParameter: 1, logComponentVerbosity: {index: 1}}));
+        assert.commandWorked(originalPrimary.adminCommand(
+            {setParameter: 1, logComponentVerbosity: {index: 1, replication: {heartbeats: 0}}}));
 
-        // Set internalQueryExecYieldIterations to 0 and maxIndexBuildDrainBatchSize to 1 so that
-        // the index builds are guaranteed to yield their locks between the rollback end and start
-        // failpoints.
+        // Set internalQueryExecYieldIterations to 0, internalIndexBuildBulkLoadYieldIterations to
+        // 1, and maxIndexBuildDrainBatchSize to 1 so that the index builds are guaranteed to yield
+        // their locks between the rollback end and start failpoints.
         assert.commandWorked(
             originalPrimary.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 0}));
+        assert.commandWorked(originalPrimary.adminCommand(
+            {setParameter: 1, internalIndexBuildBulkLoadYieldIterations: 1}));
         assert.commandWorked(
             originalPrimary.adminCommand({setParameter: 1, maxIndexBuildDrainBatchSize: 1}));
 
@@ -237,8 +235,7 @@ const RollbackResumableIndexBuildTest = class {
             });
         }
 
-        rollbackTest.transitionToSteadyStateOperations(
-            {skipDataConsistencyChecks: skipDataConsistencyChecks});
+        rollbackTest.transitionToSteadyStateOperations();
 
         if (shouldComplete) {
             // Ensure that the index builds completed after rollback.
@@ -281,7 +278,7 @@ const RollbackResumableIndexBuildTest = class {
             0,  // rollbackEndFailPointsIteration
             ["setYieldAllLocksHang"],
             ["collection scan"],
-            [{numScannedAferResume: docs.length - 1}],
+            [{numScannedAfterResume: docs.length - 1}],
             insertsToBeRolledBack,
             sideWrites,
             {shouldComplete: false});

@@ -20,6 +20,7 @@ env.Library(
 env.Library(
     target='server_status_core',
     source=[
+        'server_status.cpp',
         'server_status_internal.cpp',
         'server_status_metric.cpp',
     ],
@@ -31,7 +32,7 @@ env.Library(
 env.Library(
     target='server_status',
     source=[
-        'server_status.cpp',
+        'server_status_command.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/commands',
@@ -360,13 +361,17 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/storage_engine_common',
         "$BUILD_DIR/mongo/db/storage/two_phase_index_build_knobs_idl",
         '$BUILD_DIR/mongo/db/timeseries/bucket_catalog',
+        '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_commands_conversion_helper',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_index_schema_conversion_functions',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_update_delete_util',
         '$BUILD_DIR/mongo/db/transaction',
         '$BUILD_DIR/mongo/db/views/views_mongod',
         '$BUILD_DIR/mongo/executor/async_request_executor',
         '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/rpc/rewrite_state_change_errors',
+        '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/util/log_and_backoff',
         '$BUILD_DIR/mongo/util/net/http_client',
         'core',

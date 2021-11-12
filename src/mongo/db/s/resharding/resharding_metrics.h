@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/s/resharding/donor_document_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/s/resharding/common_types_gen.h"
@@ -42,6 +43,10 @@
 #include "mongo/util/uuid.h"
 
 namespace mongo {
+
+static const size_t kLatencyHistogramBucketsCount = 5;
+static const std::array<int64_t, kLatencyHistogramBucketsCount> latencyHistogramBuckets = {
+    0, 11, 101, 1001, 10001};
 
 /*
  * Maintains the metrics for resharding operations.
@@ -67,6 +72,8 @@ public:
     // Marks the resumption of a resharding operation for a particular role.
     void onStepUp(Role role) noexcept;
 
+    void onStepUp(DonorStateEnum state, ReshardingDonorMetrics donorMetrics);
+
     // So long as a resharding operation is in progress, the following may be used to update the
     // state of a donor, a recipient, and a coordinator, respectively.
     void setDonorState(DonorStateEnum) noexcept;
@@ -77,8 +84,15 @@ public:
     void setDocumentsToCopyForCurrentOp(int64_t documents, int64_t bytes) noexcept;
     // Allows updating metrics on "documents to copy" so long as the recipient is in cloning state.
     void onDocumentsCopied(int64_t documents, int64_t bytes) noexcept;
-    // Allows updating metrics on "documents to copy".
-    void onDocumentsCopiedForCurrentOp(int64_t documents, int64_t bytes) noexcept;
+
+    // Allows updating metrics on "opcounters";
+    void gotInserts(int n) noexcept;
+    void gotInsert() noexcept;
+    void gotUpdate() noexcept;
+    void gotDelete() noexcept;
+
+    void setMinRemainingOperationTime(Milliseconds minOpTime) noexcept;
+    void setMaxRemainingOperationTime(Milliseconds maxOpTime) noexcept;
 
     // Starts/ends the timers recording the times spend in the named sections.
     void startCopyingDocuments(Date_t start);
@@ -90,12 +104,22 @@ public:
     void enterCriticalSection(Date_t start);
     void leaveCriticalSection(Date_t end);
 
+    // Records latency and throughput of calls to ReshardingOplogApplier::_applyBatch
+    void onOplogApplierApplyBatch(Milliseconds latency);
+
+    // Records latency and throughput of calls to resharding::data_copy::fillBatchForInsert
+    // in ReshardingCollectionCloner::doOneBatch
+    void onCollClonerFillBatchForInsert(Milliseconds latency);
+
     // Allows updating "oplog entries to apply" metrics when the recipient is in applying state.
     void onOplogEntriesFetched(int64_t entries) noexcept;
     // Allows restoring "oplog entries to apply" metrics.
-    void onOplogEntriesFetchedForCurrentOp(int64_t entries) noexcept;
     void onOplogEntriesApplied(int64_t entries) noexcept;
-    void onOplogEntriesAppliedForCurrentOp(int64_t entries) noexcept;
+
+    void restoreForCurrentOp(int64_t documentCountCopied,
+                             int64_t documentBytesCopied,
+                             int64_t oplogEntriesFetched,
+                             int64_t oplogEntriesApplied) noexcept;
 
     // Allows tracking writes during a critical section when the donor's state is either of
     // "donating-oplog-entries" or "blocking-writes".

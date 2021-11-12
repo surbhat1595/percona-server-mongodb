@@ -150,16 +150,9 @@ OperationId getOpId(OperationContext* opCtx,
     MONGO_UNREACHABLE;
 }
 
-long long roundTimestampDown(const Date_t& time, const TimeseriesOptions& options) {
-    int roundingSeconds =
-        timeseries::getBucketRoundingSecondsFromGranularity(options.getGranularity());
-    long long seconds = durationCount<Seconds>(time.toDurationSinceEpoch());
-    return (seconds - (seconds % roundingSeconds));
-}
-
-BSONObj buildControlMinTimestampDoc(StringData timeField, long long roundedSeconds) {
+BSONObj buildControlMinTimestampDoc(StringData timeField, Date_t roundedTime) {
     BSONObjBuilder builder;
-    builder.append(timeField, Date_t::fromMillisSinceEpoch(1000 * roundedSeconds));
+    builder.append(timeField, roundedTime);
     return builder.obj();
 }
 }  // namespace
@@ -375,10 +368,12 @@ void BucketCatalog::abort(std::shared_ptr<WriteBatch> batch,
 
     if (batch->finished()) {
         auto batchStatus = batch->getResult().getStatus();
-        invariant(batchStatus == ErrorCodes::TimeseriesBucketCleared ||
-                      batchStatus.isA<ErrorCategory::Interruption>(),
-                  str::stream() << "Unexpected error when aborting time-series batch: "
-                                << batchStatus);
+        tassert(5916403,
+                str::stream() << "Unexpected error when aborting time-series batch: "
+                              << batchStatus,
+                batchStatus == ErrorCodes::TimeseriesBucketCleared ||
+                    batchStatus.isA<ErrorCategory::Interruption>() ||
+                    batchStatus.isA<ErrorCategory::StaleShardVersionError>());
         return;
     }
 
@@ -587,14 +582,23 @@ void BucketCatalog::_verifyBucketIsUnused(Bucket* bucket) const {
 
 void BucketCatalog::_expireIdleBuckets(ExecutionStats* stats) {
     // Must hold an exclusive lock on _bucketMutex from outside.
-    stdx::lock_guard lk{_idleMutex};
+    stdx::unique_lock lk{_idleMutex};
 
     // As long as we still need space and have entries, close idle buckets.
     while (!_idleBuckets.empty() &&
            _memoryUsage.load() >
-               static_cast<std::uint64_t>(gTimeseriesIdleBucketExpiryMemoryUsageThreshold)) {
+               static_cast<std::uint64_t>(gTimeseriesIdleBucketExpiryMemoryUsageThreshold.load())) {
         Bucket* bucket = _idleBuckets.back();
+
+        lk.unlock();
         _verifyBucketIsUnused(bucket);
+        lk.lock();
+        if (!bucket->_idleListEntry) {
+            // The bucket may have become non-idle between when we unlocked _idleMutex and locked
+            // the bucket's mutex.
+            continue;
+        }
+
         if (_removeBucket(bucket, true /* expiringBuckets */)) {
             stats->numBucketsClosedDueToMemoryThreshold.fetchAndAddRelaxed(1);
         }
@@ -654,11 +658,12 @@ const std::shared_ptr<BucketCatalog::ExecutionStats> BucketCatalog::_getExecutio
 void BucketCatalog::_setIdTimestamp(Bucket* bucket,
                                     const Date_t& time,
                                     const TimeseriesOptions& options) {
-    auto const roundedSeconds = roundTimestampDown(time, options);
+    auto roundedTime = timeseries::roundTimestampToGranularity(time, options.getGranularity());
+    auto const roundedSeconds = durationCount<Seconds>(roundedTime.toDurationSinceEpoch());
     bucket->_id.setTimestamp(roundedSeconds);
 
     // Make sure we set the control.min time field to match the rounded _id timestamp.
-    auto controlDoc = buildControlMinTimestampDoc(options.getTimeField(), roundedSeconds);
+    auto controlDoc = buildControlMinTimestampDoc(options.getTimeField(), roundedTime);
     bucket->_minmax.update(
         controlDoc, bucket->_metadata.getMetaField(), bucket->_metadata.getComparator());
 

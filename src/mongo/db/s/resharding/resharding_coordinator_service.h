@@ -43,16 +43,21 @@
 
 namespace mongo {
 namespace resharding {
+class CoordinatorCommitMonitor;
+
 CollectionType createTempReshardingCollectionType(
     OperationContext* opCtx,
     const ReshardingCoordinatorDocument& coordinatorDoc,
     const ChunkVersion& chunkVersion,
     const BSONObj& collation);
 
+void cleanupSourceConfigCollections(OperationContext* opCtx,
+                                    const ReshardingCoordinatorDocument& coordinatorDoc);
+
 void writeDecisionPersistedState(OperationContext* opCtx,
                                  const ReshardingCoordinatorDocument& coordinatorDoc,
                                  OID newCollectionEpoch,
-                                 boost::optional<Timestamp> newCollectionTimestamp);
+                                 Timestamp newCollectionTimestamp);
 
 void insertCoordDocAndChangeOrigCollEntry(OperationContext* opCtx,
                                           const ReshardingCoordinatorDocument& coordinatorDoc);
@@ -112,7 +117,8 @@ public:
     CoordinatorCancellationTokenHolder(CancellationToken stepdownToken)
         : _stepdownToken(stepdownToken),
           _abortSource(CancellationSource(stepdownToken)),
-          _abortToken(_abortSource.token()) {}
+          _abortToken(_abortSource.token()),
+          _commitMonitorCancellationSource(CancellationSource(_abortToken)) {}
 
     /**
      * Returns whether the any token has been canceled.
@@ -145,12 +151,20 @@ public:
         _abortSource.cancel();
     }
 
+    void cancelCommitMonitor() {
+        _commitMonitorCancellationSource.cancel();
+    }
+
     const CancellationToken& getStepdownToken() {
         return _stepdownToken;
     }
 
     const CancellationToken& getAbortToken() {
         return _abortToken;
+    }
+
+    CancellationToken getCommitMonitorToken() {
+        return _commitMonitorCancellationSource.token();
     }
 
 private:
@@ -164,6 +178,10 @@ private:
     // The token to wait on in cases where a user wants to wait on either a resharding operation
     // being aborted or the replica set node stepping/shutting down.
     CancellationToken _abortToken;
+
+    // The source created by inheriting from the abort token.
+    // Provides the means to cancel the commit monitor (e.g., due to receiving the commit command).
+    CancellationSource _commitMonitorCancellationSource;
 };
 
 class ReshardingCoordinatorService : public repl::PrimaryOnlyService {
@@ -465,6 +483,13 @@ private:
      */
     void _updateChunkImbalanceMetrics(const NamespaceString& nss);
 
+    /**
+     * When called with Status::OK(), the coordinator will eventually enter the critical section.
+     *
+     * When called with an error Status, the coordinator will never enter the critical section.
+     */
+    void _fulfillOkayToEnterCritical(Status status);
+
     // The unique key for a given resharding operation. InstanceID is an alias for BSONObj. The
     // value of this is the UUID that will be used as the collection UUID for the new sharded
     // collection. The object looks like: {_id: 'reshardingUUID'}
@@ -516,8 +541,8 @@ private:
     // Callback handle for scheduled work to handle critical section timeout.
     boost::optional<executor::TaskExecutor::CallbackHandle> _criticalSectionTimeoutCbHandle;
 
-    // Provides the means to cancel the commit monitor (e.g., due to receiving the commit command).
-    CancellationSource _commitMonitorCancellationSource;
+    SharedSemiFuture<void> _commitMonitorQuiesced;
+    std::shared_ptr<resharding::CoordinatorCommitMonitor> _commitMonitor;
 
     std::shared_ptr<ReshardingCoordinatorExternalState> _reshardingCoordinatorExternalState;
 };

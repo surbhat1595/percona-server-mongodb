@@ -44,4 +44,17 @@ feature_flags:
     featureFlagSearchMeta:
       description: "Feature flag for allowing use of search collectors alongside search results"
       cpp_varname: gFeatureFlagSearchMeta
+      default: true
+      version: 5.0
+
+    featureFlagShardedTimeSeries:
+      description: "Feature flag for allowing sharding a Time Series collection"
+      cpp_varname: gFeatureFlagShardedTimeSeries
       default: false
+
+    featureFlagShardedTimeSeriesUpdateDelete:
+      description: "Feature flag for allowing update and delete operations on a sharded Time Series collection"
+      cpp_varname: gFeatureFlagShardedTimeSeriesUpdateDelete
+      default: true
+      version: 5.0
+

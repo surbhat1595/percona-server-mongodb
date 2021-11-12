@@ -68,6 +68,7 @@ CMake
 CONCAT
 CONFIG
 COVERITY
+CPP
 CPUs
 CRC
 CSV
@@ -333,6 +334,7 @@ Pre
 Preload
 Prepend
 Prev
+QQQS
 Qsort
 RCS
 RDNOLOCK
@@ -481,6 +483,7 @@ WithSeeds
 Wpedantic
 WriteFile
 Wsign
+Wundef
 Wuninitialized
 Wunused
 XP
@@ -646,6 +649,7 @@ copyin
 copyout
 countp
 cp
+cplusplus
 cpuid
 crc
 create's
@@ -1135,6 +1139,7 @@ numSymbols
 numbare
 objs
 offpage
+ofh
 ok
 oldv
 ondisk
@@ -1487,6 +1492,7 @@ vsnprintf
 vtype
 vunpack
 vxr
+vz
 waitpid
 waker
 wakeup

@@ -369,6 +369,7 @@ struct __wt_connection_stats {
     int64_t cache_eviction_slow;
     int64_t cache_eviction_walk_leaf_notfound;
     int64_t cache_eviction_state;
+    int64_t cache_eviction_walk_sleeps;
     int64_t cache_eviction_target_page_lt10;
     int64_t cache_eviction_target_page_lt32;
     int64_t cache_eviction_target_page_ge128;
@@ -465,6 +466,8 @@ struct __wt_connection_stats {
     int64_t cache_write;
     int64_t cache_write_restore;
     int64_t cache_overhead;
+    int64_t cache_hs_insert_full_update;
+    int64_t cache_hs_insert_reverse_modify;
     int64_t cache_bytes_internal;
     int64_t cache_bytes_leaf;
     int64_t cache_bytes_dirty;
@@ -507,8 +510,6 @@ struct __wt_connection_stats {
     int64_t cursor_next_skip_total;
     int64_t cursor_prev_skip_total;
     int64_t cursor_skip_hs_cur_position;
-    int64_t cursor_next_skip_page_count;
-    int64_t cursor_prev_skip_page_count;
     int64_t cursor_search_near_prefix_fast_paths;
     int64_t cursor_cached_count;
     int64_t cursor_insert_bulk;
@@ -687,15 +688,21 @@ struct __wt_connection_stats {
     int64_t rec_time_window_stop_txn;
     int64_t rec_split_stashed_bytes;
     int64_t rec_split_stashed_objects;
-    int64_t flush_state_races;
+    int64_t local_objects_inuse;
     int64_t flush_tier;
+    int64_t local_objects_removed;
     int64_t session_open;
     int64_t session_query_ts;
     int64_t session_table_alter_fail;
     int64_t session_table_alter_success;
+    int64_t session_table_alter_trigger_checkpoint;
     int64_t session_table_alter_skip;
     int64_t session_table_compact_fail;
+    int64_t session_table_compact_fail_cache_pressure;
+    int64_t session_table_compact_running;
+    int64_t session_table_compact_skipped;
     int64_t session_table_compact_success;
+    int64_t session_table_compact_timeout;
     int64_t session_table_create_fail;
     int64_t session_table_create_success;
     int64_t session_table_drop_fail;
@@ -834,6 +841,10 @@ struct __wt_dsrc_stats {
     int64_t block_minor;
     int64_t btree_checkpoint_generation;
     int64_t btree_clean_checkpoint_timer;
+    int64_t btree_compact_pages_reviewed;
+    int64_t btree_compact_pages_write_selected;
+    int64_t btree_compact_pages_skipped;
+    int64_t btree_compact_skipped;
     int64_t btree_column_fix;
     int64_t btree_column_internal;
     int64_t btree_column_rle;
@@ -848,7 +859,7 @@ struct __wt_dsrc_stats {
     int64_t btree_maximum_depth;
     int64_t btree_entries;
     int64_t btree_overflow;
-    int64_t btree_compact_rewrite;
+    int64_t btree_compact_pages_rewritten;
     int64_t btree_row_empty_values;
     int64_t btree_row_internal;
     int64_t btree_row_leaf;
@@ -908,6 +919,8 @@ struct __wt_dsrc_stats {
     int64_t cache_eviction_pages_seen;
     int64_t cache_write;
     int64_t cache_write_restore;
+    int64_t cache_hs_insert_full_update;
+    int64_t cache_hs_insert_reverse_modify;
     int64_t cache_bytes_dirty;
     int64_t cache_eviction_clean;
     int64_t cache_state_gen_avg_gap;
@@ -944,8 +957,6 @@ struct __wt_dsrc_stats {
     int64_t cursor_next_skip_total;
     int64_t cursor_prev_skip_total;
     int64_t cursor_skip_hs_cur_position;
-    int64_t cursor_next_skip_page_count;
-    int64_t cursor_prev_skip_page_count;
     int64_t cursor_search_near_prefix_fast_paths;
     int64_t cursor_insert_bulk;
     int64_t cursor_reopen;

@@ -41,6 +41,7 @@
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -135,6 +136,14 @@ public:
         return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kNoop, oField, o2Field, oplogId);
     }
 
+    repl::MutableOplogEntry makeProgressMarkOplogEntry(Timestamp ts) {
+        ReshardingDonorOplogId oplogId(ts, ts);
+        const BSONObj oField(BSON("msg"
+                                  << "Latest oplog ts from donor's cursor response"));
+        const BSONObj o2Field(BSON("type" << kReshardProgressMark));
+        return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kNoop, oField, o2Field, oplogId);
+    }
+
     const NamespaceString& oplogNss() const {
         return _oplogNss;
     }
@@ -221,14 +230,12 @@ TEST_F(ReshardingDonorOplogIterTest, BasicExhaust) {
     const auto oplog1 = makeInsertOplog(Timestamp(2, 4), BSON("x" << 1));
     const auto oplog2 = makeInsertOplog(Timestamp(33, 6), BSON("y" << 1));
     const auto finalOplog = makeFinalOplog(Timestamp(43, 24));
-    const auto oplogBeyond = makeInsertOplog(Timestamp(123, 46), BSON("z" << 1));
 
     DBDirectClient client(operationContext());
     const auto ns = oplogNss().ns();
     client.insert(ns, oplog1.toBSON());
     client.insert(ns, oplog2.toBSON());
     client.insert(ns, finalOplog.toBSON());
-    client.insert(ns, oplogBeyond.toBSON());
 
     ReshardingDonorOplogIterator iter(oplogNss(), kResumeFromBeginning, &onInsertAlwaysReady);
     auto executor = makeTaskExecutorForIterator();
@@ -281,7 +288,6 @@ TEST_F(ReshardingDonorOplogIterTest, ExhaustWithIncomingInserts) {
     const auto oplog1 = makeInsertOplog(Timestamp(2, 4), BSON("x" << 1));
     const auto oplog2 = makeInsertOplog(Timestamp(33, 6), BSON("y" << 1));
     const auto finalOplog = makeFinalOplog(Timestamp(43, 24));
-    const auto oplogBeyond = makeInsertOplog(Timestamp(123, 46), BSON("z" << 1));
 
     DBDirectClient client(operationContext());
     const auto ns = oplogNss().ns();
@@ -317,7 +323,6 @@ TEST_F(ReshardingDonorOplogIterTest, ExhaustWithIncomingInserts) {
                              client.insert(ns, oplog2.toBSON());
                          } else {
                              client.insert(ns, finalOplog.toBSON());
-                             client.insert(ns, oplogBeyond.toBSON());
                          }
                      }};
 
@@ -378,6 +383,33 @@ TEST_F(ReshardingDonorOplogIterTest, FillsInPreImageOplogEntry) {
     ASSERT_TRUE(next.empty());
 }
 
+TEST_F(ReshardingDonorOplogIterTest, ShouldNotErrorIfPreImageOplogEntryCannotBeFound) {
+    const auto& preImageDoc = BSON("_id" << 0 << "x" << 1);
+    const auto& [preImageOp, deleteOp] =
+        makeDeleteWithPreImage(Timestamp(2, 4), preImageDoc, Timestamp(2, 5));
+    const auto& finalOplog = makeFinalOplog(Timestamp(43, 24));
+
+    DBDirectClient client(operationContext());
+    const auto& ns = oplogNss().ns();
+    client.insert(ns, deleteOp.toBSON());
+    client.insert(ns, finalOplog.toBSON());
+
+    ReshardingDonorOplogIterator iter(oplogNss(), kResumeFromBeginning, &onInsertAlwaysReady);
+    auto executor = makeTaskExecutorForIterator();
+    auto factory = makeCancelableOpCtx();
+    auto altClient = makeKillableClient();
+    AlternativeClientRegion acr(altClient);
+
+    auto next = getNextBatch(&iter, executor, factory);
+    ASSERT_EQ(next.size(), 1U);
+    ASSERT_BSONOBJ_EQ(getId(deleteOp), getId(next[0]));
+    ASSERT_FALSE(bool(next[0].getPreImageOp()));
+    ASSERT_FALSE(bool(next[0].getPostImageOp()));
+
+    next = getNextBatch(&iter, executor, factory);
+    ASSERT_TRUE(next.empty());
+}
+
 TEST_F(ReshardingDonorOplogIterTest, FillsInPostImageOplogEntry) {
     const auto& postImageDoc = BSON("_id" << 0 << "x" << 1);
     const auto& [postImageOp, updateOp] = makeUpdateWithPostImage(
@@ -410,6 +442,93 @@ TEST_F(ReshardingDonorOplogIterTest, FillsInPostImageOplogEntry) {
 
     next = getNextBatch(&iter, executor, factory);
     ASSERT_TRUE(next.empty());
+}
+
+TEST_F(ReshardingDonorOplogIterTest, ShouldNotErrorIfPostImageOplogEntryCannotBeFound) {
+    const auto& postImageDoc = BSON("_id" << 0 << "x" << 1);
+    const auto& [postImageOp, updateOp] = makeUpdateWithPostImage(
+        Timestamp(2, 4), postImageDoc, Timestamp(2, 5), BSON("$set" << BSON("x" << 1)));
+    const auto& finalOplog = makeFinalOplog(Timestamp(43, 24));
+
+    DBDirectClient client(operationContext());
+    const auto& ns = oplogNss().ns();
+    client.insert(ns, updateOp.toBSON());
+    client.insert(ns, finalOplog.toBSON());
+
+    ReshardingDonorOplogIterator iter(oplogNss(), kResumeFromBeginning, &onInsertAlwaysReady);
+    auto executor = makeTaskExecutorForIterator();
+    auto factory = makeCancelableOpCtx();
+    auto altClient = makeKillableClient();
+    AlternativeClientRegion acr(altClient);
+
+    auto next = getNextBatch(&iter, executor, factory);
+    ASSERT_EQ(next.size(), 1U);
+    ASSERT_BSONOBJ_EQ(getId(updateOp), getId(next[0]));
+    ASSERT_FALSE(bool(next[0].getPreImageOp()));
+    ASSERT_FALSE(bool(next[0].getPostImageOp()));
+
+    next = getNextBatch(&iter, executor, factory);
+    ASSERT_TRUE(next.empty());
+}
+
+TEST_F(ReshardingDonorOplogIterTest, BatchIncludesProgressMarkEntries) {
+    const auto oplog1 = makeInsertOplog(Timestamp(2, 4), BSON("x" << 1));
+    const auto progressMarkOplog1 = makeProgressMarkOplogEntry(Timestamp(15, 3));
+    const auto finalOplog = makeFinalOplog(Timestamp(43, 24));
+
+    DBDirectClient client(operationContext());
+    const auto ns = oplogNss().ns();
+    client.insert(ns, oplog1.toBSON());
+    client.insert(ns, progressMarkOplog1.toBSON());
+    client.insert(ns, finalOplog.toBSON());
+
+    ReshardingDonorOplogIterator iter(oplogNss(), kResumeFromBeginning, &onInsertAlwaysReady);
+    auto executor = makeTaskExecutorForIterator();
+    auto factory = makeCancelableOpCtx();
+    auto altClient = makeKillableClient();
+    AlternativeClientRegion acr(altClient);
+
+    auto next = getNextBatch(&iter, executor, factory);
+    ASSERT_EQ(next.size(), 1U);
+    ASSERT_BSONOBJ_EQ(getId(oplog1), getId(next[0]));
+
+    next = getNextBatch(&iter, executor, factory);
+    ASSERT_EQ(next.size(), 1U);
+    ASSERT_BSONOBJ_EQ(getId(progressMarkOplog1), getId(next[0]));
+
+    next = getNextBatch(&iter, executor, factory);
+    ASSERT_TRUE(next.empty());
+}
+
+DEATH_TEST_REGEX_F(ReshardingDonorOplogIterTest,
+                   ThrowsIfProgressMarkEntriesAfterFinalOp,
+                   "Tripwire assertion.*6077499") {
+    RAIIServerParameterControllerForTest controller{"reshardingOplogBatchLimitOperations", 100};
+
+    const auto oplog1 = makeInsertOplog(Timestamp(2, 4), BSON("x" << 1));
+    const auto progressMarkOplog1 = makeProgressMarkOplogEntry(Timestamp(15, 3));
+    const auto finalOplog = makeFinalOplog(Timestamp(43, 24));
+    // reshardProgressMark entries inserted after the reshardFinalOp entry should be ignored.
+    const auto progressMarkOplog2 = makeProgressMarkOplogEntry(Timestamp(65, 2));
+    const auto progressMarkOplog3 = makeProgressMarkOplogEntry(Timestamp(65, 3));
+    const auto progressMarkOplog4 = makeProgressMarkOplogEntry(Timestamp(65, 4));
+
+    DBDirectClient client(operationContext());
+    const auto ns = oplogNss().ns();
+    client.insert(ns, oplog1.toBSON());
+    client.insert(ns, progressMarkOplog1.toBSON());
+    client.insert(ns, finalOplog.toBSON());
+    client.insert(ns, progressMarkOplog2.toBSON());
+    client.insert(ns, progressMarkOplog3.toBSON());
+    client.insert(ns, progressMarkOplog4.toBSON());
+
+    ReshardingDonorOplogIterator iter(oplogNss(), kResumeFromBeginning, &onInsertAlwaysReady);
+    auto executor = makeTaskExecutorForIterator();
+    auto factory = makeCancelableOpCtx();
+    auto altClient = makeKillableClient();
+    AlternativeClientRegion acr(altClient);
+
+    ASSERT_THROWS_CODE(getNextBatch(&iter, executor, factory), DBException, 6077499);
 }
 
 }  // anonymous namespace

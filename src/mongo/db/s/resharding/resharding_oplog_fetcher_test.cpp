@@ -55,6 +55,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -262,41 +263,44 @@ public:
         create(dataCollectionNss);
         _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-
-        // Set a failpoint to tack a `destinedRecipient` onto oplog entries.
-        setGlobalFailPoint("addDestinedRecipient",
-                           BSON("mode"
-                                << "alwaysOn"
-                                << "data"
-                                << BSON("destinedRecipient" << destinedRecipient.toString())));
-
-        // Insert five documents. Advance the majority point.
-        const std::int32_t docsToInsert = 5;
         {
-            for (std::int32_t num = 0; num < docsToInsert; ++num) {
+            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+
+            // Set a failpoint to tack a `destinedRecipient` onto oplog entries.
+            setGlobalFailPoint("addDestinedRecipient",
+                               BSON("mode"
+                                    << "alwaysOn"
+                                    << "data"
+                                    << BSON("destinedRecipient" << destinedRecipient.toString())));
+
+            // Insert five documents. Advance the majority point.
+            const std::int32_t docsToInsert = 5;
+            {
+                for (std::int32_t num = 0; num < docsToInsert; ++num) {
+                    WriteUnitOfWork wuow(_opCtx);
+                    insertDocument(dataColl.getCollection(),
+                                   InsertStatement(BSON("_id" << num << "a" << num)));
+                    wuow.commit();
+                }
+            }
+
+            // Write an entry saying that fetching is complete.
+            {
                 WriteUnitOfWork wuow(_opCtx);
-                insertDocument(dataColl.getCollection(),
-                               InsertStatement(BSON("_id" << num << "a" << num)));
+                _opCtx->getServiceContext()->getOpObserver()->onInternalOpMessage(
+                    _opCtx,
+                    dataColl.getCollection()->ns(),
+                    dataColl.getCollection()->uuid(),
+                    BSON(
+                        "msg" << fmt::format("Writes to {} are temporarily blocked for resharding.",
+                                             dataColl.getCollection()->ns().toString())),
+                    BSON("type" << kReshardFinalOpLogType << "reshardingUUID" << _reshardingUUID),
+                    boost::none,
+                    boost::none,
+                    boost::none,
+                    boost::none);
                 wuow.commit();
             }
-        }
-
-        // Write an entry saying that fetching is complete.
-        {
-            WriteUnitOfWork wuow(_opCtx);
-            _opCtx->getServiceContext()->getOpObserver()->onInternalOpMessage(
-                _opCtx,
-                dataColl.getCollection()->ns(),
-                dataColl.getCollection()->uuid(),
-                BSON("msg" << fmt::format("Writes to {} are temporarily blocked for resharding.",
-                                          dataColl.getCollection()->ns().toString())),
-                BSON("type" << kReshardFinalOpLogType << "reshardingUUID" << _reshardingUUID),
-                boost::none,
-                boost::none,
-                boost::none,
-                boost::none);
-            wuow.commit();
         }
 
         repl::StorageInterface::get(_opCtx)->waitForAllEarlierOplogWritesToBeVisible(_opCtx);
@@ -478,8 +482,8 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
     auto hasSeenStartAtFuture = fetcher.awaitInsert(startAt);
     ASSERT_FALSE(hasSeenStartAtFuture.isReady());
 
-    // iterate() won't lead to any documents being inserted into the output collection (because no
-    // writes have happened to the data collection) so `hasSeenStartAtFuture` still won't be ready.
+    // Because no writes have happened to the data collection, the fetcher will insert a no-op entry
+    // with the latestOplogTimestamp, so `hasSeenStartAtFuture` will be ready.
     auto fetcherJob = launchAsync([&, this] {
         ThreadClient tc("RunnerForFetcher", _svcCtx, nullptr);
         fetcher.useReadConcernForTest(false);
@@ -487,25 +491,26 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
         auto factory = makeCancelableOpCtx();
         return fetcher.iterate(&cc(), factory);
     });
+
     ASSERT_TRUE(requestPassthroughHandler(fetcherJob));
-    ASSERT_FALSE(hasSeenStartAtFuture.isReady());
+    ASSERT_TRUE(hasSeenStartAtFuture.isReady());
 
     // Insert a document into the data collection and have it generate an oplog entry with a
-    // "destinedRecipient" field. Only after iterate() is called again and inserts a record into the
-    // output collection will `hasSeenStartAtFuture` have become ready.
+    // "destinedRecipient" field.
     auto dataWriteTimestamp = [&] {
         FailPointEnableBlock fp("addDestinedRecipient",
                                 BSON("destinedRecipient" << _destinationShard.toString()));
 
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-        WriteUnitOfWork wuow(_opCtx);
-        insertDocument(dataColl.getCollection(), InsertStatement(BSON("_id" << 1 << "a" << 1)));
-        wuow.commit();
+        {
+            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            WriteUnitOfWork wuow(_opCtx);
+            insertDocument(dataColl.getCollection(), InsertStatement(BSON("_id" << 1 << "a" << 1)));
+            wuow.commit();
+        }
 
         repl::StorageInterface::get(_opCtx)->waitForAllEarlierOplogWritesToBeVisible(_opCtx);
         return repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
     }();
-    ASSERT_FALSE(hasSeenStartAtFuture.isReady());
 
     fetcherJob = launchAsync([&, this] {
         ThreadClient tc("RunnerForFetcher", _svcCtx, nullptr);
@@ -521,8 +526,103 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
     ASSERT_TRUE(fetcher.awaitInsert(startAt).isReady());
 
     // However, asking for `dataWriteTimestamp` wouldn't become ready until the next record is
-    // insert into the output collection.
+    // inserted into the output collection.
     ASSERT_FALSE(fetcher.awaitInsert({dataWriteTimestamp, dataWriteTimestamp}).isReady());
+}
+
+TEST_F(ReshardingOplogFetcherTest, TestStartAtUpdatedWithProgressMarkOplogTs) {
+    const NamespaceString outputCollectionNss("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss("dbtests.runFetchIteration");
+    const NamespaceString otherCollection("dbtests.collectionNotBeingResharded");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+    create(otherCollection);
+    _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    ReshardingDonorOplogId startAt{_fetchTimestamp, _fetchTimestamp};
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   startAt,
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss);
+
+    // Insert a document into the data collection and have it generate an oplog entry with a
+    // "destinedRecipient" field.
+    auto writeToDataCollectionTs = [&] {
+        FailPointEnableBlock fp("addDestinedRecipient",
+                                BSON("destinedRecipient" << _destinationShard.toString()));
+
+        {
+            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            WriteUnitOfWork wuow(_opCtx);
+            insertDocument(dataColl.getCollection(), InsertStatement(BSON("_id" << 1 << "a" << 1)));
+            wuow.commit();
+        }
+
+        repl::StorageInterface::get(_opCtx)->waitForAllEarlierOplogWritesToBeVisible(_opCtx);
+        return repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
+    }();
+
+    auto fetcherJob = launchAsync([&, this] {
+        ThreadClient tc("RunnerForFetcher", _svcCtx, nullptr);
+        fetcher.useReadConcernForTest(false);
+        fetcher.setInitialBatchSizeForTest(2);
+        auto factory = makeCancelableOpCtx();
+        return fetcher.iterate(&cc(), factory);
+    });
+    ASSERT_TRUE(requestPassthroughHandler(fetcherJob));
+
+    // The fetcher's lastSeenTimestamp should be equal to `writeToDataCollectionTs`.
+    ASSERT_TRUE(fetcher.getLastSeenTimestamp().getClusterTime() == writeToDataCollectionTs);
+    ASSERT_TRUE(fetcher.getLastSeenTimestamp().getTs() == writeToDataCollectionTs);
+    ASSERT_EQ(1, metricsFetchedCount()) << " Verify reported metrics";
+
+    // Now, insert a document into a different collection that is not involved in resharding.
+    auto writeToOtherCollectionTs = [&] {
+        {
+            AutoGetCollection dataColl(_opCtx, otherCollection, LockMode::MODE_IX);
+            WriteUnitOfWork wuow(_opCtx);
+            insertDocument(dataColl.getCollection(), InsertStatement(BSON("_id" << 1 << "a" << 1)));
+            wuow.commit();
+        }
+
+        repl::StorageInterface::get(_opCtx)->waitForAllEarlierOplogWritesToBeVisible(_opCtx);
+        return repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
+    }();
+
+    fetcherJob = launchAsync([&, this] {
+        ThreadClient tc("RunnerForFetcher", _svcCtx, nullptr);
+        fetcher.useReadConcernForTest(false);
+        fetcher.setInitialBatchSizeForTest(2);
+        auto factory = makeCancelableOpCtx();
+        return fetcher.iterate(&cc(), factory);
+    });
+    ASSERT_TRUE(requestPassthroughHandler(fetcherJob));
+
+    // The fetcher's lastSeenTimestamp should now be equal to `writeToOtherCollectionTs`
+    // because the lastSeenTimestamp will be updated with the latest oplog timestamp from the
+    // donor's cursor response.
+    ASSERT_TRUE(fetcher.getLastSeenTimestamp().getClusterTime() == writeToOtherCollectionTs);
+    ASSERT_TRUE(fetcher.getLastSeenTimestamp().getTs() == writeToOtherCollectionTs);
+    ASSERT_EQ(2, metricsFetchedCount()) << " Verify reported metrics";
+
+    // The last document returned by ReshardingDonorOplogIterator::getNextBatch() would be
+    // `writeToDataCollectionTs`, but ReshardingOplogFetcher would have inserted a doc with
+    // `writeToOtherCollectionTs` after this so `awaitInsert` should be immediately ready when
+    // passed `writeToDataCollectionTs`.
+    ASSERT_TRUE(fetcher.awaitInsert({writeToDataCollectionTs, writeToDataCollectionTs}).isReady());
+
+    // `awaitInsert` should not be ready if passed `writeToOtherCollectionTs`.
+    ASSERT_FALSE(
+        fetcher.awaitInsert({writeToOtherCollectionTs, writeToOtherCollectionTs}).isReady());
 }
 
 TEST_F(ReshardingOplogFetcherTest, RetriesOnRemoteInterruptionError) {
@@ -563,6 +663,75 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnRemoteInterruptionError) {
 
     auto moreToCome = fetcherJob.timed_get(Seconds(5));
     ASSERT_TRUE(moreToCome);
+}
+
+TEST_F(ReshardingOplogFetcherTest, ImmediatelyDoneWhenFinalOpHasAlreadyBeenFetched) {
+    const NamespaceString outputCollectionNss("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+    _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   ReshardingOplogFetcher::kFinalOpAlreadyFetched,
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss);
+
+    auto factory = makeCancelableOpCtx();
+    auto future = fetcher.schedule(nullptr, CancellationToken::uncancelable(), factory);
+
+    ASSERT_TRUE(future.isReady());
+    ASSERT_OK(future.getNoThrow());
+}
+
+DEATH_TEST_REGEX_F(ReshardingOplogFetcherTest,
+                   CannotFetchMoreWhenFinalOpHasAlreadyBeenFetched,
+                   "Invariant failure.*_startAt != kFinalOpAlreadyFetched") {
+    const NamespaceString outputCollectionNss("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+    _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    auto fetcherJob = launchAsync([&, this] {
+        ThreadClient tc("RunnerForFetcher", _svcCtx, nullptr);
+
+        // We intentionally do not call fetcher.useReadConcernForTest(false) for this test case.
+        ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                       _reshardingUUID,
+                                       collectionUUID,
+                                       ReshardingOplogFetcher::kFinalOpAlreadyFetched,
+                                       _donorShard,
+                                       _destinationShard,
+                                       outputCollectionNss);
+        fetcher.setInitialBatchSizeForTest(2);
+
+        auto factory = makeCancelableOpCtx();
+        return fetcher.iterate(&cc(), factory);
+    });
+
+    // Calling onCommand() leads to a more helpful "Expected death, found life" error when the
+    // invariant failure isn't triggered.
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return {ErrorCodes::InternalError, "this error should never be observed"};
+    });
+
+    (void)fetcherJob.timed_get(Seconds(5));
 }
 
 }  // namespace

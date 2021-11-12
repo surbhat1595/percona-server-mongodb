@@ -33,35 +33,26 @@
 
 namespace mongo {
 
-class NamespaceString;
-class OperationContext;
-
 /**
  * Namespace for helper functions related to time-series collections.
  */
 namespace timeseries {
 
 /**
- * Returns a copy of the time-series options for namespace 'nss', if 'nss' refers to a time-series
- * collection. Otherwise returns boost::none.
- */
-boost::optional<TimeseriesOptions> getTimeseriesOptions(OperationContext* opCtx,
-                                                        const NamespaceString& nss);
-
-/**
  * Returns the default bucket timespan associated with the given granularity.
  */
 int getMaxSpanSecondsFromGranularity(BucketGranularityEnum granularity);
-
-/**
- * Returns the number of seconds used to round down the bucket ID and control.min timestamp.
- */
-int getBucketRoundingSecondsFromGranularity(BucketGranularityEnum granularity);
 
 StatusWith<std::pair<TimeseriesOptions, bool>> applyTimeseriesOptionsModifications(
     const TimeseriesOptions& current, const BSONObj& mod);
 
 BSONObj generateViewPipeline(const TimeseriesOptions& options, bool asArray);
 
+bool optionsAreEqual(const TimeseriesOptions& option1, const TimeseriesOptions& option2);
+
+/**
+ * Rounds down timestamp to the specified granularity.
+ */
+Date_t roundTimestampToGranularity(const Date_t& time, BucketGranularityEnum granularity);
 }  // namespace timeseries
 }  // namespace mongo

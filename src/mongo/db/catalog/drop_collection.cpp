@@ -88,7 +88,6 @@ Status _dropView(OperationContext* opCtx,
     // Validates the view or throws an "invalid view" error.
     ViewCatalog::get(db)->lookup(opCtx, collectionName.ns());
 
-    Lock::CollectionLock collLock(opCtx, collectionName, MODE_IX);
     // Operations all lock system.views in the end to prevent deadlock.
     Lock::CollectionLock systemViewsLock(opCtx, db->getSystemViewsName(), MODE_X);
 
@@ -132,7 +131,8 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
                                 const NamespaceString& startingNss,
                                 std::function<Status(Database*, const NamespaceString&)>&& dropFn,
                                 DropReply* reply,
-                                bool appendNs = true) {
+                                bool appendNs = true,
+                                boost::optional<UUID> dropIfUUIDNotMatching = boost::none) {
     // We only need to hold an intent lock to send abort signals to the active index builder on this
     // collection.
     boost::optional<AutoGetDb> optionalAutoDb(std::move(autoDb));
@@ -166,6 +166,9 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
 
     IndexBuildsCoordinator* indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
     const UUID collectionUUID = coll->uuid();
+    if (dropIfUUIDNotMatching && collectionUUID == *dropIfUUIDNotMatching) {
+        return Status::OK();
+    }
     const NamespaceStringOrUUID dbAndUUID{coll->ns().db().toString(), coll->uuid()};
     const int numIndexes = coll->getIndexCatalog()->numIndexesTotal(opCtx);
 
@@ -234,12 +237,12 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status _dropCollection(OperationContext* opCtx,
-                       Database* db,
-                       const NamespaceString& collectionName,
-                       const repl::OpTime& dropOpTime,
-                       DropCollectionSystemCollectionMode systemCollectionMode,
-                       DropReply* reply) {
+Status _dropCollectionForApplyOps(OperationContext* opCtx,
+                                  Database* db,
+                                  const NamespaceString& collectionName,
+                                  const repl::OpTime& dropOpTime,
+                                  DropCollectionSystemCollectionMode systemCollectionMode,
+                                  DropReply* reply) {
     Lock::CollectionLock collLock(opCtx, collectionName, MODE_X);
     const CollectionPtr& coll =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, collectionName);
@@ -282,18 +285,15 @@ Status _dropCollection(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status dropCollection(OperationContext* opCtx,
-                      const NamespaceString& collectionName,
-                      DropReply* reply,
-                      DropCollectionSystemCollectionMode systemCollectionMode) {
-    if (!serverGlobalParams.quiet.load()) {
-        LOGV2(518070, "CMD: drop", logAttrs(collectionName));
-    }
-
-    if (MONGO_unlikely(hangDropCollectionBeforeLockAcquisition.shouldFail())) {
-        LOGV2(518080, "Hanging drop collection before lock acquisition while fail point is set");
-        hangDropCollectionBeforeLockAcquisition.pauseWhileSet();
-    }
+Status _dropCollection(OperationContext* opCtx,
+                       const NamespaceString& nss,
+                       DropReply* reply,
+                       DropCollectionSystemCollectionMode systemCollectionMode,
+                       boost::optional<UUID> dropIfUUIDNotMatching = boost::none) {
+    // We rewrite drop of time-series buckets collection to drop of time-series view collection.
+    // This ensures that such drop will delete both collections.
+    const auto collectionName =
+        nss.isTimeseriesBucketsCollection() ? nss.getTimeseriesViewNamespace() : nss;
 
     try {
         return writeConflictRetry(opCtx, "drop", collectionName.ns(), [&] {
@@ -322,7 +322,9 @@ Status dropCollection(OperationContext* opCtx,
                         wuow.commit();
                         return Status::OK();
                     },
-                    reply);
+                    reply,
+                    true /* appendNs */,
+                    dropIfUUIDNotMatching);
             }
 
             auto dropTimeseries = [opCtx, &autoDb, &collectionName, &reply](
@@ -380,6 +382,9 @@ Status dropCollection(OperationContext* opCtx,
                 return dropTimeseries(view->viewOn(), true);
             }
 
+            // Take a MODE_X lock when dropping a view. This is to prevent a concurrent create
+            // collection on the same namespace that will reserve an OpTime before this drop.
+            Lock::CollectionLock viewLock(opCtx, collectionName, MODE_X);
             return _dropView(opCtx, db, collectionName, reply);
         });
     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
@@ -387,6 +392,46 @@ Status dropCollection(OperationContext* opCtx,
         // string.
         return Status(ErrorCodes::NamespaceNotFound, "ns not found");
     }
+}
+
+Status dropCollection(OperationContext* opCtx,
+                      const NamespaceString& nss,
+                      DropReply* reply,
+                      DropCollectionSystemCollectionMode systemCollectionMode) {
+    if (!serverGlobalParams.quiet.load()) {
+        LOGV2(518070, "CMD: drop", logAttrs(nss));
+    }
+
+    if (MONGO_unlikely(hangDropCollectionBeforeLockAcquisition.shouldFail())) {
+        LOGV2(518080, "Hanging drop collection before lock acquisition while fail point is set");
+        hangDropCollectionBeforeLockAcquisition.pauseWhileSet();
+    }
+
+    return _dropCollection(opCtx, nss, reply, systemCollectionMode);
+}
+
+Status dropCollectionIfUUIDNotMatching(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       const UUID& expectedUUID) {
+    AutoGetDb autoDb(opCtx, ns.db(), MODE_IX);
+    if (autoDb.getDb()) {
+        {
+            Lock::CollectionLock collLock(opCtx, ns, MODE_IS);
+            const auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, ns);
+            if (!coll || coll->uuid() == expectedUUID) {
+                return Status::OK();
+            }
+        }
+
+        DropReply repl;
+        return _dropCollection(opCtx,
+                               ns,
+                               &repl,
+                               DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops,
+                               expectedUUID);
+    }
+
+    return Status::OK();
 }
 
 Status dropCollectionForApplyOps(OperationContext* opCtx,
@@ -413,9 +458,10 @@ Status dropCollectionForApplyOps(OperationContext* opCtx,
 
         DropReply unusedReply;
         if (!coll) {
+            Lock::CollectionLock viewLock(opCtx, collectionName, MODE_IX);
             return _dropView(opCtx, db, collectionName, &unusedReply);
         } else {
-            return _dropCollection(
+            return _dropCollectionForApplyOps(
                 opCtx, db, collectionName, dropOpTime, systemCollectionMode, &unusedReply);
         }
     });

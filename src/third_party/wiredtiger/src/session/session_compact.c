@@ -183,26 +183,26 @@ int
 __wt_session_compact_check_timeout(WT_SESSION_IMPL *session)
 {
     struct timespec end;
+    WT_DECL_RET;
 
     if (session->compact->max_time == 0)
         return (0);
 
     __wt_epoch(session, &end);
-    return (
-      session->compact->max_time > WT_TIMEDIFF_SEC(end, session->compact->begin) ? 0 : ETIMEDOUT);
+    ret =
+      session->compact->max_time > WT_TIMEDIFF_SEC(end, session->compact->begin) ? 0 : ETIMEDOUT;
+    if (ret != 0)
+        WT_STAT_CONN_INCR(session, session_table_compact_timeout);
+    return (ret);
 }
 
 /*
  * __compact_checkpoint --
- *     Perform a checkpoint for compaction.
+ *     This function does wait and force checkpoint.
  */
 static int
 __compact_checkpoint(WT_SESSION_IMPL *session)
 {
-    WT_DECL_RET;
-    WT_TXN_GLOBAL *txn_global;
-    uint64_t txn_gen;
-
     /*
      * Force compaction checkpoints: we don't want to skip it because the work we need to have done
      * is done in the underlying block manager.
@@ -212,31 +212,7 @@ __compact_checkpoint(WT_SESSION_IMPL *session)
 
     /* Checkpoints take a lot of time, check if we've run out. */
     WT_RET(__wt_session_compact_check_timeout(session));
-
-    ret = __wt_txn_checkpoint(session, checkpoint_cfg, false);
-    if (ret == 0)
-        return (0);
-    WT_RET_BUSY_OK(ret);
-
-    /*
-     * If there's a checkpoint running, wait for it to complete, checking if we're out of time. If
-     * there's no checkpoint running or the checkpoint generation number changes, the checkpoint
-     * blocking us has completed.
-     */
-    txn_global = &S2C(session)->txn_global;
-    for (txn_gen = __wt_gen(session, WT_GEN_CHECKPOINT);;) {
-        /*
-         * This loop only checks objects that are declared volatile, therefore no barriers are
-         * needed.
-         */
-        if (!txn_global->checkpoint_running || txn_gen != __wt_gen(session, WT_GEN_CHECKPOINT))
-            break;
-
-        WT_RET(__wt_session_compact_check_timeout(session));
-        __wt_sleep(2, 0);
-    }
-
-    return (0);
+    return (__wt_txn_checkpoint(session, checkpoint_cfg, true));
 }
 
 /*
@@ -298,6 +274,7 @@ __compact_worker(WT_SESSION_IMPL *session)
              */
             if (ret == EBUSY) {
                 if (__wt_cache_stuck(session)) {
+                    WT_STAT_CONN_INCR(session, session_table_compact_fail_cache_pressure);
                     WT_ERR_MSG(session, EBUSY, "compaction halted by eviction pressure");
                 }
                 ret = 0;
@@ -339,6 +316,8 @@ __wt_session_compact(WT_SESSION *wt_session, const char *uri, const char *config
 
     session = (WT_SESSION_IMPL *)wt_session;
     SESSION_API_CALL(session, compact, config, cfg);
+
+    WT_STAT_CONN_SET(session, session_table_compact_running, 1);
 
     /*
      * The compaction thread should not block when the cache is full: it is holding locks blocking
@@ -424,6 +403,7 @@ err:
         WT_STAT_CONN_INCR(session, session_table_compact_fail);
     else
         WT_STAT_CONN_INCR(session, session_table_compact_success);
+    WT_STAT_CONN_SET(session, session_table_compact_running, 0);
     API_END_RET_NOTFOUND_MAP(session, ret);
 }
 

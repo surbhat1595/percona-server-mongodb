@@ -29,8 +29,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 
 #include "mongo/db/timeseries/timeseries_constants.h"
@@ -38,12 +36,12 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/redaction.h"
 
-namespace mongo {
+namespace mongo::timeseries {
 
-namespace timeseries {
-
-StatusWith<BSONObj> createBucketsIndexSpecFromTimeseriesIndexSpec(
-    const TimeseriesOptions& timeseriesOptions, const BSONObj& timeseriesIndexSpecBSON) {
+namespace {
+StatusWith<BSONObj> createBucketsSpecFromTimeseriesSpec(const TimeseriesOptions& timeseriesOptions,
+                                                        const BSONObj& timeseriesIndexSpecBSON,
+                                                        bool isShardKeySpec) {
     auto timeField = timeseriesOptions.getTimeField();
     auto metaField = timeseriesOptions.getMetaField();
 
@@ -68,8 +66,10 @@ StatusWith<BSONObj> createBucketsIndexSpecFromTimeseriesIndexSpec(
             if (elem.number() >= 0) {
                 builder.appendAs(
                     elem, str::stream() << timeseries::kControlMinFieldNamePrefix << timeField);
-                builder.appendAs(
-                    elem, str::stream() << timeseries::kControlMaxFieldNamePrefix << timeField);
+                if (!isShardKeySpec) {
+                    builder.appendAs(
+                        elem, str::stream() << timeseries::kControlMaxFieldNamePrefix << timeField);
+                }
             } else {
                 builder.appendAs(
                     elem, str::stream() << timeseries::kControlMaxFieldNamePrefix << timeField);
@@ -111,6 +111,17 @@ StatusWith<BSONObj> createBucketsIndexSpecFromTimeseriesIndexSpec(
     }
 
     return builder.obj();
+}
+}  // namespace
+
+StatusWith<BSONObj> createBucketsIndexSpecFromTimeseriesIndexSpec(
+    const TimeseriesOptions& timeseriesOptions, const BSONObj& timeseriesIndexSpecBSON) {
+    return createBucketsSpecFromTimeseriesSpec(timeseriesOptions, timeseriesIndexSpecBSON, false);
+}
+
+StatusWith<BSONObj> createBucketsShardKeySpecFromTimeseriesShardKeySpec(
+    const TimeseriesOptions& timeseriesOptions, const BSONObj& timeseriesShardKeySpecBSON) {
+    return createBucketsSpecFromTimeseriesSpec(timeseriesOptions, timeseriesShardKeySpecBSON, true);
 }
 
 boost::optional<BSONObj> createTimeseriesIndexSpecFromBucketsIndexSpec(
@@ -197,5 +208,4 @@ std::list<BSONObj> createTimeseriesIndexesFromBucketsIndexes(
     return indexSpecs;
 }
 
-}  // namespace timeseries
-}  // namespace mongo
+}  // namespace mongo::timeseries

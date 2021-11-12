@@ -90,12 +90,14 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/storage_engine_init.h"
+#include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/async_request_executor.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/grid.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -114,7 +116,10 @@ std::unique_ptr<CollMod> makeTimeseriesBucketsCollModCommand(OperationContext* o
                                                              const CollMod& origCmd) {
     const auto& origNs = origCmd.getNamespace();
 
-    auto timeseriesOptions = timeseries::getTimeseriesOptions(opCtx, origNs);
+    auto isCommandOnTimeseriesBucketNamespace =
+        origCmd.getIsTimeseriesNamespace() && *origCmd.getIsTimeseriesNamespace();
+    auto timeseriesOptions =
+        timeseries::getTimeseriesOptions(opCtx, origNs, !isCommandOnTimeseriesBucketNamespace);
 
     // Return early with null if we are not working with a time-series collection.
     if (!timeseriesOptions) {
@@ -134,7 +139,8 @@ std::unique_ptr<CollMod> makeTimeseriesBucketsCollModCommand(OperationContext* o
         index->setKeyPattern(std::move(bucketsIndexSpecWithStatus.getValue()));
     }
 
-    auto ns = origNs.makeTimeseriesBucketsNamespace();
+    auto ns =
+        isCommandOnTimeseriesBucketNamespace ? origNs : origNs.makeTimeseriesBucketsNamespace();
     auto cmd = std::make_unique<CollMod>(ns);
     cmd->setIndex(index);
     cmd->setValidator(origCmd.getValidator());
@@ -158,7 +164,10 @@ std::unique_ptr<CollMod> makeTimeseriesViewCollModCommand(OperationContext* opCt
                                                           const CollMod& origCmd) {
     const auto& ns = origCmd.getNamespace();
 
-    auto timeseriesOptions = timeseries::getTimeseriesOptions(opCtx, ns);
+    auto isCommandOnTimeseriesBucketNamespace =
+        origCmd.getIsTimeseriesNamespace() && *origCmd.getIsTimeseriesNamespace();
+    auto timeseriesOptions =
+        timeseries::getTimeseriesOptions(opCtx, ns, !isCommandOnTimeseriesBucketNamespace);
 
     // Return early with null if we are not working with a time-series collection.
     if (!timeseriesOptions) {
@@ -606,6 +615,23 @@ public:
                               const RequestParser& requestParser,
                               BSONObjBuilder& result) final {
         const auto* cmd = &requestParser.request();
+
+        // Updating granularity on sharded time-series collections is not allowed.
+        if (Grid::get(opCtx)->catalogClient() && cmd->getTimeseries() &&
+            cmd->getTimeseries()->getGranularity()) {
+            auto& nss = cmd->getNamespace();
+            auto bucketNss =
+                nss.isTimeseriesBucketsCollection() ? nss : nss.makeTimeseriesBucketsNamespace();
+            try {
+                auto coll = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, bucketNss);
+                uassert(ErrorCodes::NotImplemented,
+                        str::stream()
+                            << "Cannot update granularity of a sharded time-series collection.",
+                        !coll.getTimeseriesFields());
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                // Collection is not sharded, skip check.
+            }
+        }
 
         // If the target namespace refers to a time-series collection, we will redirect the
         // collection modification request to the underlying bucket collection.

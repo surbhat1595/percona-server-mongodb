@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2020 MongoDB, Inc.
+# Public Domain 2014-present MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -25,93 +25,227 @@
 # OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 # ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 # OTHER DEALINGS IN THE SOFTWARE.
-
-import wiredtiger, wttest
-from wtscenario import make_scenarios
-from wiredtiger import stat, WT_NOTFOUND
-
+#
 # test_cursor17.py
-# Test the cursor traversal optimization for delete heavy workloads. This optimization enables
-# cursor traversal mechanism to skip pages where all records on the page are deleted with a
-# tombstone visible to the current transaction.
+#   Test the largest_key interface under various scenarios.
+#
+import wttest
+import wiredtiger
+from wtdataset import SimpleDataSet, ComplexDataSet, ComplexLSMDataSet
+from wtscenario import make_scenarios
+
 class test_cursor17(wttest.WiredTigerTestCase):
-    conn_config = 'cache_size=50MB,statistics=(all)'
-    session_config = 'isolation=snapshot'
+    tablename = 'test_cursor17'
 
-    def get_stat(self, stat, uri):
-        stat_string = 'statistics:'
-        if (uri):
-            stat_string += uri
-        stat_cursor = self.session.open_cursor(stat_string)
-        val = stat_cursor[stat][2]
-        stat_cursor.close()
-        return val
+    # Enable the lsm tests once it is supported.
+    types = [
+        ('file-row', dict(type='file:', keyformat='i', valueformat='i', dataset=SimpleDataSet)),
+        ('table-row', dict(type='table:', keyformat='i', valueformat='i', dataset=SimpleDataSet)),
+        ('file-var', dict(type='file:', keyformat='r', valueformat='i', dataset=SimpleDataSet)),
+        ('table-var', dict(type='table:', keyformat='r', valueformat='i', dataset=SimpleDataSet)),
+        ('file-fix', dict(type='file:', keyformat='r', valueformat='8t', dataset=SimpleDataSet)),
+        # ('lsm', dict(type='lsm:', keyformat='i', valueformat='i', dataset=SimpleDataSet)),
+        ('table-r-complex', dict(type='table:', keyformat='r', valueformat=None,
+            dataset=ComplexDataSet)),
+        # ('table-i-complex-lsm', dict(type='table:', keyformat='i', valueformat=None,
+        #   dataset=ComplexLSMDataSet)),
+    ]
 
-    def test_cursor_skip_pages(self):
-        uri = 'table:test_cursor17'
-        create_params = 'key_format=i,value_format=S'
-        self.session.create(uri, create_params)
+    scenarios = make_scenarios(types)
 
-        value1 = 'a' * 500
-        value2 = 'b' * 500
-        total_keys = 40000
+    def populate(self, rownum):
+        if self.valueformat != None:
+            self.ds = self.dataset(self, self.type + self.tablename, rownum, key_format=self.keyformat, value_format=self.valueformat)
+        else:
+            self.ds = self.dataset(self, self.type + self.tablename, rownum, key_format=self.keyformat)
+        self.ds.populate()
 
-        # Keep the oldest and the stable timestamp pinned.
-        self.conn.set_timestamp('oldest_timestamp=' + self.timestamp_str(1))
-        self.conn.set_timestamp('stable_timestamp=' + self.timestamp_str(2))
-        cursor = self.session.open_cursor(uri)
+    def test_globally_deleted_key(self):
+        self.populate(100)
 
-        commit_timestamp = 3
+        # Delete the largest key.
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        self.session.begin_transaction()
+        cursor.set_key(100)
+        self.assertEqual(cursor.remove(), 0)
+        self.session.commit_transaction()
 
-        # Insert predefined number of key-value pairs.
-        for key in range(total_keys):
-            self.session.begin_transaction()
-            cursor[key] = value1
-            self.session.commit_transaction('commit_timestamp=' + self.timestamp_str(commit_timestamp))
-            commit_timestamp += 1
-
-        # Delete everything on the table except for the first and the last KV pair.
-        for key in range(1, total_keys - 1):
-            self.session.begin_transaction()
-            cursor.set_key(key)
-            self.assertEqual(cursor.remove(),0)
-            self.session.commit_transaction('commit_timestamp=' + self.timestamp_str(commit_timestamp))
-            commit_timestamp += 1
-
-        # Take a checkpoint to reconcile the pages.
-        self.session.checkpoint()
-
-        self.session.begin_transaction('read_timestamp=' + self.timestamp_str(commit_timestamp))
-        # Position the cursor on the first record.
-        cursor.set_key(0)
-        self.assertEqual(cursor.search(), 0)
-        # This should move the cursor to the last record.
-        self.assertEqual(cursor.next(), 0)
-        self.assertEqual(cursor.get_key(), total_keys - 1)
-
-        # Check if we skipped any pages while moving the cursor.
-        #
-        # We calculate the number of pages we expect to skip based on the total number of leaf pages
-        # reported in the WT stats. We subtract 2 from the count of leaf pages in the table and test
-        # that we atleast skipped 80% of the expected number of pages.
-
-        leaf_pages_in_table = self.get_stat(stat.dsrc.btree_row_leaf, uri)
-        expected_pages_skipped = ((leaf_pages_in_table - 2) * 8) // 10
-        skipped_pages = self.get_stat(stat.conn.cursor_next_skip_page_count, None)
-        self.assertGreater(skipped_pages, expected_pages_skipped)
+        # Verify the key is not visible.
+        self.session.begin_transaction()
+        cursor.set_key(100)
+        if self.valueformat != '8t':
+            self.assertEqual(cursor.search(), wiredtiger.WT_NOTFOUND)
+        else:
+            self.assertEqual(cursor.search(), 0)
         self.session.rollback_transaction()
 
-        # Update a key in the middle of the table.
+        # Verify the largest key.
         self.session.begin_transaction()
-        cursor[total_keys // 2] = value2
-        self.session.commit_transaction('commit_timestamp=' + self.timestamp_str(commit_timestamp))
-        commit_timestamp += 1
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+        self.session.rollback_transaction()
 
-        # Make sure we can reach a the record we updated in the middle of the table.
-        self.session.begin_transaction('read_timestamp=' + self.timestamp_str(commit_timestamp))
-        # Position the cursor on the first record.
-        cursor.set_key(0)
-        self.assertEqual(cursor.search(), 0)
-        # This should move the cursor to the record we updated in the middle.
+        # Verify the key is still not visible after the largest call.
+        self.session.begin_transaction()
+        cursor.set_key(100)
+        if self.valueformat != '8t':
+            self.assertEqual(cursor.search(), wiredtiger.WT_NOTFOUND)
+        else:
+            self.assertEqual(cursor.search(), 0)
+        self.session.rollback_transaction()
+
+        # Use evict cursor to evict the key from memory.
+        evict_cursor = self.session.open_cursor(self.type + self.tablename, None, "debug=(release_evict)")
+        evict_cursor.set_key(100)
+        if self.valueformat != '8t':
+            self.assertEquals(evict_cursor.search(), wiredtiger.WT_NOTFOUND)
+        else:
+            self.assertEquals(evict_cursor.search(), 0)
+        evict_cursor.close()
+
+        # Verify the largest key changed.
+        self.session.begin_transaction()
+        self.assertEqual(cursor.largest_key(), 0)
+        if self.valueformat != '8t':
+            self.assertEqual(cursor.get_key(), 99)
+        else:
+            self.assertEquals(cursor.get_key(), 100)
+        self.session.rollback_transaction()
+
+    def test_uncommitted_insert(self):
+        self.populate(100)
+
+        session2 = self.setUpSessionOpen(self.conn)
+        cursor2 = session2.open_cursor(self.type + self.tablename, None)
+        session2.begin_transaction()
+        cursor2[200] = self.ds.value(200)
+
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+
+        # Verify the largest key.
+        self.session.begin_transaction()
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 200)
+        self.session.rollback_transaction()
+
+        session2.rollback_transaction()
+    
+    def test_invisible_timestamp(self):
+        self.populate(100)
+
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        self.session.begin_transaction()
+        cursor[200] = self.ds.value(200)
+        self.session.commit_transaction("commit_timestamp=" + self.timestamp_str(10))
+
+        # Verify the largest key.
+        self.session.begin_transaction("read_timestamp=" + self.timestamp_str(5))
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 200)
+        self.session.rollback_transaction()
+    
+    def test_prepared_update(self):
+        self.populate(100)
+
+        session2 = self.setUpSessionOpen(self.conn)
+        cursor2 = session2.open_cursor(self.type + self.tablename, None)
+        session2.begin_transaction()
+        cursor2[200] = self.ds.value(200)
+        session2.prepare_transaction("prepare_timestamp=" + self.timestamp_str(10))
+
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+
+        # Verify the largest key.
+        self.session.begin_transaction("read_timestamp=" + self.timestamp_str(20))
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 200)
+        self.session.rollback_transaction()
+
+    def test_not_positioned(self):
+        self.populate(100)
+
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        # Verify the largest key.
+        self.session.begin_transaction()
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+
+        # Call prev
+        self.assertEqual(cursor.prev(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+
+        # Verify the largest key again.
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+
         self.assertEqual(cursor.next(), 0)
-        self.assertEqual(cursor.get_key(), total_keys // 2)
+        self.assertEqual(cursor.get_key(), 1)
+        self.session.rollback_transaction()
+
+    def test_get_value(self):
+        self.populate(100)
+
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        # Verify the largest key.
+        self.session.begin_transaction()
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+        with self.expectedStderrPattern("requires value be set"):
+            try:
+                cursor.get_value()
+            except wiredtiger.WiredTigerError as e:
+                gotException = True
+                self.pr('got expected exception: ' + str(e))
+                self.assertTrue(str(e).find('nvalid argument') >= 0)
+        self.assertTrue(gotException, msg = 'expected exception')
+        self.session.rollback_transaction()
+
+    def test_empty_table(self):
+        self.populate(0)
+
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        # Verify the largest key.
+        self.session.begin_transaction()
+        self.assertEquals(cursor.largest_key(), wiredtiger.WT_NOTFOUND)
+        self.session.rollback_transaction()
+
+    def test_fast_truncate(self):
+        self.populate(100)
+
+        # evict all the pages
+        evict_cursor = self.session.open_cursor(self.type + self.tablename, None, "debug=(release_evict)")
+        self.session.begin_transaction()
+        for i in range(1, 101):
+            evict_cursor.set_key(i)
+            self.assertEquals(evict_cursor.search(), 0)
+        self.session.rollback_transaction()
+        evict_cursor.close()
+
+        # truncate
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        self.session.begin_transaction()
+        cursor.set_key(1)
+        self.session.truncate(None, cursor, None, None)
+        self.session.commit_transaction('commit_timestamp=' + self.timestamp_str(5))
+
+        # verify the largest key
+        self.session.begin_transaction()
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+        self.session.rollback_transaction()
+
+    def test_slow_truncate(self):
+        self.populate(100)
+
+        # truncate
+        cursor = self.session.open_cursor(self.type + self.tablename, None)
+        self.session.begin_transaction()
+        cursor.set_key(100)
+        self.session.truncate(None, cursor, None, None)
+        self.session.commit_transaction('commit_timestamp=' + self.timestamp_str(5))
+
+        # verify the largest key
+        self.session.begin_transaction()
+        self.assertEqual(cursor.largest_key(), 0)
+        self.assertEqual(cursor.get_key(), 100)
+        self.session.rollback_transaction()

@@ -131,6 +131,7 @@ let viewsCommandTests = {
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
+    _shardsvrDropCollectionIfUUIDNotMatching: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
@@ -160,6 +161,14 @@ let viewsCommandTests = {
         skipSharded: true,
     },
     authenticate: {skip: isUnrelated},
+    autoSplitVector: {
+        command: {
+            splitVector: "test.view",
+            keyPattern: {x: 1},
+            maxChunkSize: 1,
+        },
+        expectFailure: true,
+    },
     availableQueryOptions: {skip: isAnInternalCommand},
     balancerCollectionStatus: {
         command: {balancerCollectionStatus: "test.view"},

@@ -284,7 +284,7 @@ variables:
   - name: external_auth_aws
   - name: external_auth_windows
     distros:
-    - windows-64-2016
+    - windows-2016-dc
   - name: .jscore .common !.compat !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache
@@ -657,15 +657,6 @@ functions:
   "set up remote credentials":
     - *f_expansions_write
     - *set_up_remote_credentials
-
-  "call BF Suggestion service":
-    - *f_expansions_write
-    - command: subprocess.exec
-      params:
-        binary: bash
-        silent: true
-        args:
-          - "./src/evergreen/functions/bf_suggestion_service_call.sh"
 
   "upload debugsymbols": &upload_debugsymbols
     command: s3.put
@@ -1853,7 +1844,6 @@ post:
   - func: "attach report"
   - func: "attach artifacts"
   - func: "save ec2 task artifacts"
-  - func: "call BF Suggestion service"
   - func: "attach wiki page"
   - func: "kill processes"
   - func: "save local client logs"
@@ -2685,13 +2675,6 @@ tasks:
 
   - command: archive.targz_pack
     params:
-      target: src/burn_in_tests_multiversion_gen.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-        - burn_in_tests_multiversion_gen.json
-
-  - command: archive.targz_pack
-    params:
       target: src/generate_tasks_config.tgz
       source_dir: src/generated_resmoke_config
       include:
@@ -2702,23 +2685,11 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: src/generate_tasks_config.tgz
-      remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen-${build_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/gzip
-      optional: true
-      display_name: Generated Multiversion Resmoke.py Suite Config - Execution ${execution}
-
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/burn_in_tests_multiversion_gen.tgz
       remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen_config-${build_id}.tgz
       bucket: mciuploads
       permissions: public-read
       content_type: application/gzip
-      display_name: Burn_in_tests Task Config - Execution ${execution}
+      display_name: Generated Multiversion Resmoke.py Suite Config - Execution ${execution}
 
   - command: generate.tasks
     params:
@@ -3558,6 +3529,23 @@ tasks:
       resmoke_args: >-
         --storageEngine=wiredTiger
       name: resharding_fuzzer_idempotency
+
+- <<: *jstestfuzz_template
+  name: resharding_fuzzer_stepup_gen
+  tags: ["resharding_fuzzer", "require_npm", "random_name"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 10
+      num_tasks: 5
+      npm_command: resharding-fuzzer
+      jstestfuzz_vars: >-
+        --numDonors 3 --numRecipients 3 --inPlace yes
+        --electionMech stepup --electionRole donor --electionRole recipient
+      suite: resharding_fuzzer
+      resmoke_args: --storageEngine=wiredTiger
+      name: resharding_fuzzer_stepup
 
 ## Tests that the multiversion test generation logic is not broken.
 - <<: *gen_task_template
@@ -5837,8 +5825,8 @@ tasks:
         num_tasks: 20
         exec_timeout_secs: 604800 # 7 days
         timeout_secs: 604800 # 7 days
-        set_up_retry_count: 450
-        run_powercycle_args: --sshAccessRetryCount=450
+        set_up_retry_count: 1800
+        run_powercycle_args: --sshAccessRetryCount=1800
 
 - name: powercycle_sentinel
   exec_timeout_secs: 604800 # 7 days
@@ -8167,7 +8155,7 @@ buildvariants:
     - name: external_auth_aws
     - name: external_auth_windows
       distros:
-        - windows-64-2016
+        - windows-2016-dc
     - name: .jscore .common !.compat !.sharding
     - name: jsCore_auth
     - name: jsCore_ese
@@ -8845,6 +8833,95 @@ buildvariants:
   - name: server_selection_json_test_TG
     distros:
       - rhel80-xlarge
+
+- &enterprise-rhel-80-64-bit-dynamic-backport-feature-flags-required-template
+  name: enterprise-rhel-80-64-bit-dynamic-backport-feature-flags-required
+  display_name: "! Shared Library Enterprise RHEL 8.0 (Backport Feature Flags)"
+  batchtime: 240 # 4 hour
+  modules:
+    - enterprise
+  run_on:
+    - rhel80-small
+  expansions:
+    <<: *enterprise-rhel-80-64-bit-dynamic-required-expansions
+    test_flags: >-
+      --additionalFeatureFlags=featureFlagTimeseriesUpdatesAndDeletes
+      --additionalFeatureFlags=featureFlagShardedTimeSeries
+  tasks:
+    - name: compile_test_and_package_parallel_core_stream_TG
+      distros:
+        - rhel80-xlarge
+    - name: compile_test_and_package_parallel_unittest_stream_TG
+      distros:
+        - rhel80-xlarge
+    - name: compile_test_and_package_parallel_dbtest_stream_TG
+      distros:
+        - rhel80-xlarge
+    - name: build_variant_gen
+    - name: burn_in_tests_gen
+    - name: .aggfuzzer
+    - name: .aggregation
+    - name: audit
+    - name: .auth
+    - name: .causally_consistent !.sharding
+    - name: .change_streams
+    - name: .misc_js
+    - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
+    - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+      distros:
+        - rhel80-medium
+    - name: disk_wiredtiger
+    - name: .encrypt
+    - name: initial_sync_fuzzer_gen
+    - name: jsCore
+      distros:
+        - rhel80-xlarge
+    - name: .jscore .common !jsCore
+    - name: jsCore_minimum_batch_size
+    - name: jsCore_op_query
+    - name: jsCore_txns_large_txns_format
+    - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
+    - name: .multi_shard
+    - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+    - name: multiversion_gen
+    - name: .query_fuzzer
+    - name: .read_write_concern .large
+      distros:
+        - rhel80-medium
+    - name: .read_write_concern !.large
+    - name: .replica_sets !.encrypt !.auth
+      distros:
+        - rhel80-xlarge
+    - name: replica_sets_api_version_jscore_passthrough_gen
+    - name: replica_sets_reconfig_jscore_passthrough_gen
+    - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
+      distros:
+        - rhel80-xlarge
+    - name: replica_sets_reconfig_kill_primary_jscore_passthrough
+      distros:
+        - rhel80-xlarge
+    - name: retryable_writes_jscore_passthrough_gen
+    - name: retryable_writes_jscore_stepdown_passthrough
+      distros:
+        - rhel80-medium
+    - name: .read_only
+    - name: .rollbackfuzzer
+    - name: sasl
+    - name: search
+    - name: search_auth
+    - name: search_ssl
+    - name: session_jscore_passthrough
+    - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+    - name: sharding_api_version_jscore_passthrough_gen
+    - name: .sharding .txns
+    - name: .sharding .common
+    - name: snmp
+    - name: .stitch
+    - name: .updatefuzzer
+    - name: secondary_reads_passthrough_gen
+    - name: .tenant_migration
+      distros:
+        - rhel80-xlarge
 
 - name: enterprise-rhel-80-64-bit-large-txns-format
   display_name: "Enterprise RHEL 8.0 (large transactions format)"

@@ -31,6 +31,7 @@ var ReshardingTest = class {
         criticalSectionTimeoutMS: criticalSectionTimeoutMS = 24 * 60 * 60 * 1000 /* 1 day */,
         periodicNoopIntervalSecs: periodicNoopIntervalSecs = undefined,
         writePeriodicNoops: writePeriodicNoops = undefined,
+        enableElections: enableElections = false,
     } = {}) {
         // The @private JSDoc comments cause VS Code to not display the corresponding properties and
         // methods in its autocomplete list. This makes it simpler for test authors to know what the
@@ -53,6 +54,8 @@ var ReshardingTest = class {
         this._periodicNoopIntervalSecs = periodicNoopIntervalSecs;
         /** @private */
         this._writePeriodicNoops = writePeriodicNoops;
+        /** @private */
+        this._enableElections = enableElections;
 
         // Properties set by setup().
         /** @private */
@@ -90,7 +93,37 @@ var ReshardingTest = class {
     setup() {
         const mongosOptions = {setParameter: {}};
         const configOptions = {setParameter: {}};
-        const rsOptions = {setParameter: {}};
+        const rsOptions = {setParameter: {storeFindAndModifyImagesInSideCollection: true}};
+        const configReplSetTestOptions = {};
+
+        let nodesPerShard = 2;
+        let nodesPerConfigRs = 1;
+
+        if (this._enableElections) {
+            nodesPerShard = 3;
+            nodesPerConfigRs = 3;
+
+            // Increase the likelihood that writes which aren't yet majority-committed end up
+            // getting rolled back.
+            rsOptions.settings = {catchUpTimeoutMillis: 0};
+            configReplSetTestOptions.settings = {catchUpTimeoutMillis: 0};
+
+            rsOptions.setParameter.enableElectionHandoff = 0;
+            configOptions.setParameter.enableElectionHandoff = 0;
+
+            // The server conservatively sets the minimum visible timestamp of collections created
+            // after the oldest_timestamp to be the stable_timestamp. Furthermore, there is no
+            // guarantee the oldest_timestamp will advance past the creation timestamp of the source
+            // sharded collection. This means that after a donor shard restarts an atClusterTime
+            // read at the cloneTimestamp on it would fail with SnapshotUnavailable. We enable the
+            // following failpoint so the minimum visible timestamp is set to the oldest_timestamp
+            // regardless. Note that this is safe for resharding tests to do because the source
+            // sharded collection is guaranteed to exist in the collection catalog at the
+            // cloneTimestamp and tests involving elections do not run operations which would bump
+            // the minimum visible timestamp (e.g. creating or dropping indexes).
+            rsOptions.setParameter["failpoint.setMinVisibleForAllCollectionsToOldestOnStartup"] =
+                tojson({mode: "alwaysOn"});
+        }
 
         if (this._minimumOperationDurationMS !== undefined) {
             configOptions.setParameter.reshardingMinimumOperationDurationMillis =
@@ -113,11 +146,12 @@ var ReshardingTest = class {
         this._st = new ShardingTest({
             mongos: 1,
             mongosOptions,
-            config: 1,
+            config: nodesPerConfigRs,
             configOptions,
             shards: this._numShards,
-            rs: {nodes: 2},
+            rs: {nodes: nodesPerShard},
             rsOptions,
+            configReplSetTestOptions,
             manualAddShard: true,
         });
 
@@ -145,6 +179,12 @@ var ReshardingTest = class {
                 this._st.s.adminCommand({addShard: shard.host, name: shardName}));
             shard.shardName = res.shardAdded;
         }
+
+        // In order to enable random failovers, initialize Random's seed if it has not already been
+        // done.
+        if (!Random.isInitialized()) {
+            Random.setRandomSeed();
+        }
     }
 
     /** @private */
@@ -166,6 +206,24 @@ var ReshardingTest = class {
 
     get recipientShardNames() {
         return this._recipientShards().map(shard => shard.shardName);
+    }
+
+    get configShardName() {
+        return "config";
+    }
+
+    /** @private */
+    _allReplSetTests() {
+        return [
+            {shardName: this.configShardName, rs: this._st.configRS},
+            ...Array.from({length: this._numShards}, (_, i) => this._st[`shard${i}`])
+        ];
+    }
+
+    /** @private */
+    _getReplSetForShard(shardName) {
+        const res = this._allReplSetTests().find(shardInfo => shardInfo.shardName === shardName);
+        return res.rs;
     }
 
     /**
@@ -221,6 +279,17 @@ var ReshardingTest = class {
     /** @private */
     _startReshardingInBackgroundAndAllowCommandFailure({newShardKeyPattern, newChunks},
                                                        expectedErrorCode) {
+        for (let disallowedErrorCode of [ErrorCodes.FailedToSatisfyReadPreference,
+                                         ErrorCodes.HostUnreachable,
+        ]) {
+            assert.neq(
+                expectedErrorCode,
+                disallowedErrorCode,
+                `${ErrorCodeStrings[disallowedErrorCode]} error must never be expected as final` +
+                    " reshardCollection command error response because it indicates mongos gave" +
+                    " up retrying and the client must instead retry");
+        }
+
         newChunks = newChunks.map(
             chunk => ({min: chunk.min, max: chunk.max, recipientShardId: chunk.shard}));
 
@@ -240,12 +309,34 @@ var ReshardingTest = class {
             function(
                 host, ns, newShardKeyPattern, newChunks, commandDoneSignal, expectedErrorCode) {
                 const conn = new Mongo(host);
-                const res = conn.adminCommand({
-                    reshardCollection: ns,
-                    key: newShardKeyPattern,
-                    _presetReshardedChunks: newChunks,
-                });
-                commandDoneSignal.countDown();
+
+                // We allow the client to retry the reshardCollection a large but still finite
+                // number of times. This is done because the mongos would also return a
+                // FailedToSatisfyReadPreference error response when the primary of the shard is
+                // permanently down (e.g. due to a bug causing the server to crash) and it would be
+                // preferable to not have the test run indefinitely in that situation.
+                const kMaxNumAttempts = 40;  // = [10 minutes / kDefaultFindHostTimeout]
+
+                let res;
+                for (let i = 1; i <= kMaxNumAttempts; ++i) {
+                    res = conn.adminCommand({
+                        reshardCollection: ns,
+                        key: newShardKeyPattern,
+                        _presetReshardedChunks: newChunks,
+                    });
+
+                    if (res.ok === 1 ||
+                        (res.code !== ErrorCodes.FailedToSatisfyReadPreference &&
+                         res.code !== ErrorCodes.HostUnreachable)) {
+                        commandDoneSignal.countDown();
+                        break;
+                    }
+
+                    if (i < kMaxNumAttempts) {
+                        print("Ignoring error from mongos giving up retrying" +
+                              ` _shardsvrReshardCollection command: ${tojsononeline(res)}`);
+                    }
+                }
 
                 if (expectedErrorCode === ErrorCodes.OK) {
                     assert.commandWorked(res);
@@ -697,6 +788,95 @@ var ReshardingTest = class {
         }
 
         this._st.stop();
+    }
+
+    /**
+     * Given the shardName, steps up a secondary (chosen at random) to become the new primary of the
+     * shard replica set. To force an election on the configsvr rather than a participant shard, use
+     * shardName = this.configShardName;
+     */
+    stepUpNewPrimaryOnShard(shardName) {
+        jsTestLog(`ReshardingTestFixture stepping up new primary on shard ${shardName}`);
+
+        const replSet = this._getReplSetForShard(shardName);
+        let originalPrimary = replSet.getPrimary();
+        let secondaries = replSet.getSecondaries();
+
+        while (secondaries.length > 0) {
+            // Once the primary is terminated/killed/stepped down, write availability is lost. Avoid
+            // long periods where the replica set doesn't have write availability by trying to step
+            // up secondaries until one succeeds.
+            const newPrimaryIdx = Random.randInt(secondaries.length);
+            const newPrimary = secondaries[newPrimaryIdx];
+
+            let res;
+            try {
+                res = newPrimary.adminCommand({replSetStepUp: 1});
+            } catch (e) {
+                if (!isNetworkError(e)) {
+                    throw e;
+                }
+
+                jsTest.log(
+                    `ReshardingTestFixture got a network error ${tojson(e)} while` +
+                    ` attempting to step up secondary ${newPrimary.host}. This is likely due to` +
+                    ` the secondary previously having transitioned through ROLLBACK and closing` +
+                    ` its user connections. Will retry stepping up the same secondary again`);
+                res = newPrimary.adminCommand({replSetStepUp: 1});
+            }
+
+            if (res.ok === 1) {
+                replSet.awaitNodesAgreeOnPrimary();
+                // We wait for replication to ensure all nodes have finished their rollback before
+                // another round of rollback may triggered by the test. TODO SERVER-59721: Remove
+                // this wait.
+                replSet.awaitReplication();
+                assert.eq(newPrimary, replSet.getPrimary());
+                return;
+            }
+
+            jsTest.log(`ReshardingTestFixture failed to step up secondary ${newPrimary.host} and` +
+                       ` got error ${tojson(res)}. Will retry on another secondary until all` +
+                       ` secondaries have been exhausted`);
+            secondaries.splice(newPrimaryIdx, 1);
+        }
+
+        jsTest.log(`ReshardingTestFixture failed to step up secondaries, trying to step` +
+                   ` original primary back up`);
+        replSet.stepUp(originalPrimary, {awaitReplicationBeforeStepUp: false});
+        // We wait for replication to ensure all nodes have finished their rollback before another
+        // round of rollback may triggered by the test. TODO SERVER-59721: Remove this wait.
+        replSet.awaitReplication();
+    }
+
+    killAndRestartPrimaryOnShard(shardName) {
+        jsTestLog(`ReshardingTestFixture killing and restarting primary on shard ${shardName}`);
+
+        const replSet = this._getReplSetForShard(shardName);
+        const originalPrimaryConn = replSet.getPrimary();
+
+        const SIGKILL = 9;
+        const opts = {allowedExitCode: MongoRunner.EXIT_SIGKILL};
+        replSet.restart(originalPrimaryConn, opts, SIGKILL);
+        replSet.awaitNodesAgreeOnPrimary();
+        // We wait for replication to ensure all nodes have finished their rollback before another
+        // round of rollback may triggered by the test. TODO SERVER-59721: Remove this wait.
+        replSet.awaitReplication();
+    }
+
+    shutdownAndRestartPrimaryOnShard(shardName) {
+        jsTestLog(
+            `ReshardingTestFixture shutting down and restarting primary on shard ${shardName}`);
+
+        const replSet = this._getReplSetForShard(shardName);
+        const originalPrimaryConn = replSet.getPrimary();
+
+        const SIGTERM = 15;
+        replSet.restart(originalPrimaryConn, {}, SIGTERM);
+        replSet.awaitNodesAgreeOnPrimary();
+        // We wait for replication to ensure all nodes have finished their rollback before another
+        // round of rollback may triggered by the test. TODO SERVER-59721: Remove this wait.
+        replSet.awaitReplication();
     }
 
     /**

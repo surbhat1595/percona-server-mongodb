@@ -295,7 +295,7 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(
 
     // Clear the buffer. This unblocks the OplogFetcher if it is blocked with a full queue, but
     // ensures that it won't add anything. It will also unblock the OplogApplier pipeline if it
-    // is waiting for an operation to be past the slaveDelay point.
+    // is waiting for an operation to be past the secondaryDelaySecs point.
     if (oldOplogBuffer) {
         oldOplogBuffer->clear(opCtx);
     }
@@ -462,14 +462,13 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                                const auto msgObj = BSON("msg" << kInitiatingSetMsg);
                                _service->getOpObserver()->onOpMessage(opCtx, msgObj);
                                wuow.commit();
-                               // ReplSetTest assumes that immediately after the replSetInitiate
-                               // command returns, it can allow other nodes to initial sync with
-                               // no retries and they will succeed.  Unfortunately, initial sync
-                               // will fail if it finds its sync source has an empty oplog.
-                               // Thus, we need to wait here until the seed document is visible
-                               // in our oplog.
-                               _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
                            });
+
+        // ReplSetTest assumes that immediately after the replSetInitiate command returns, it can
+        // allow other nodes to initial sync with no retries and they will succeed. Unfortunately,
+        // initial sync will fail if it finds its sync source has an empty oplog. Thus, we need to
+        // wait here until the seed document is visible in our oplog.
+        _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
 
         // Take an unstable checkpoint to ensure that the FCV document is persisted to disk.
         opCtx->recoveryUnit()->waitUntilUnjournaledWritesDurable(opCtx,
@@ -526,6 +525,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     // exclusive mode.
     _replicationProcess->getConsistencyMarkers()->clearAppliedThrough(opCtx, Timestamp());
 
+    LOGV2(6015309, "Logging transition to primary to oplog on stepup");
     writeConflictRetry(opCtx, "logging transition to primary to oplog", "local.oplog.rs", [&] {
         AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
         WriteUnitOfWork wuow(opCtx);
@@ -990,6 +990,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
 void ReplicationCoordinatorExternalStateImpl::clearCommittedSnapshot() {
     if (auto manager = _service->getStorageEngine()->getSnapshotManager())
         manager->clearCommittedSnapshot();
+    FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp();
 }
 
 void ReplicationCoordinatorExternalStateImpl::updateCommittedSnapshot(

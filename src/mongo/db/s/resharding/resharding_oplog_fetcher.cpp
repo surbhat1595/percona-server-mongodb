@@ -75,6 +75,9 @@ boost::intrusive_ptr<ExpressionContext> _makeExpressionContext(OperationContext*
 }
 }  // namespace
 
+const ReshardingDonorOplogId ReshardingOplogFetcher::kFinalOpAlreadyFetched{Timestamp::max(),
+                                                                            Timestamp::max()};
+
 ReshardingOplogFetcher::ReshardingOplogFetcher(std::unique_ptr<Env> env,
                                                UUID reshardingUUID,
                                                UUID collUUID,
@@ -107,8 +110,8 @@ Future<void> ReshardingOplogFetcher::awaitInsert(const ReshardingDonorOplogId& l
     //
     // `_startAt` is updated after each insert into the oplog buffer collection by
     // ReshardingOplogFetcher to reflect the newer resume point if a new aggregation request was
-    // being issued.
-
+    // being issued. It is also updated with the latest oplog timestamp from donor's cursor response
+    // after we finish inserting the entire batch.
     stdx::lock_guard lk(_mutex);
     if (lastSeen < _startAt) {
         // `lastSeen < _startAt` means there's at least one document which has been inserted by
@@ -133,6 +136,14 @@ ExecutorFuture<void> ReshardingOplogFetcher::schedule(
     std::shared_ptr<executor::TaskExecutor> executor,
     const CancellationToken& cancelToken,
     CancelableOperationContextFactory factory) {
+    if (_startAt == kFinalOpAlreadyFetched) {
+        LOGV2_INFO(6077400,
+                   "Resharding oplog fetcher resumed with no more work to do",
+                   "donorShard"_attr = _donorShard,
+                   "reshardingUUID"_attr = _reshardingUUID);
+        return ExecutorFuture(std::move(executor));
+    }
+
     return ExecutorFuture(executor)
         .then([this, executor, cancelToken, factory] {
             return _reschedule(std::move(executor), cancelToken, factory);
@@ -165,6 +176,10 @@ ExecutorFuture<void> ReshardingOplogFetcher::_reschedule(
         })
         .then([this, executor, cancelToken, factory](bool moreToCome) {
             if (!moreToCome) {
+                LOGV2_INFO(6077401,
+                           "Resharding oplog fetcher done fetching",
+                           "donorShard"_attr = _donorShard,
+                           "reshardingUUID"_attr = _reshardingUUID);
                 return ExecutorFuture(std::move(executor));
             }
 
@@ -255,8 +270,13 @@ AggregateCommandRequest ReshardingOplogFetcher::_makeAggregateCommandRequest(
     AggregateCommandRequest aggRequest(NamespaceString::kRsOplogNamespace,
                                        std::move(serializedPipeline));
     if (_useReadConcern) {
+        // We specify {afterClusterTime: <highest _id.clusterTime>, level: "majority"} as the read
+        // concern to guarantee the postBatchResumeToken when the batch is empty is non-decreasing.
+        // The ReshardingOplogFetcher depends on inserting documents in increasing _id order,
+        // including for the synthetic no-op oplog entries generated from the postBatchResumeToken.
+        invariant(_startAt != kFinalOpAlreadyFetched);
         auto readConcernArgs = repl::ReadConcernArgs(
-            boost::optional<LogicalTime>(_startAt.getTs()),
+            boost::optional<LogicalTime>(_startAt.getClusterTime()),
             boost::optional<repl::ReadConcernLevel>(repl::ReadConcernLevel::kMajorityReadConcern));
         aggRequest.setReadConcern(readConcernArgs.toBSONInner());
     }
@@ -293,7 +313,9 @@ bool ReshardingOplogFetcher::consume(Client* client,
     uassertStatusOK(shard->runAggregation(
         opCtxRaii.get(),
         aggRequest,
-        [this, &batchesProcessed, &moreToCome, factory](const std::vector<BSONObj>& batch) {
+        [this, &batchesProcessed, &moreToCome, factory](
+            const std::vector<BSONObj>& batch,
+            const boost::optional<BSONObj>& postBatchResumeToken) {
             ThreadClient client(fmt::format("ReshardingFetcher-{}-{}",
                                             _reshardingUUID.toString(),
                                             _donorShard.toString()),
@@ -333,6 +355,49 @@ bool ReshardingOplogFetcher::consume(Client* client,
                 if (isFinalOplog(nextOplog, _reshardingUUID)) {
                     moreToCome = false;
                     return false;
+                }
+            }
+
+            if (postBatchResumeToken) {
+                // Insert a noop entry with the latest oplog timestamp from the donor's cursor
+                // response. This will allow the fetcher to resume reading from the last oplog entry
+                // it fetched even if that entry is for a different collection, making resuming less
+                // wasteful.
+                try {
+                    auto lastOplogTs = postBatchResumeToken->getField("ts").timestamp();
+                    auto startAt = ReshardingDonorOplogId(lastOplogTs, lastOplogTs);
+
+                    WriteUnitOfWork wuow(opCtx);
+
+                    repl::MutableOplogEntry oplog;
+                    oplog.setNss(_toWriteInto);
+                    oplog.setOpType(repl::OpTypeEnum::kNoop);
+                    oplog.setUuid(_collUUID);
+                    oplog.set_id(Value(startAt.toBSON()));
+                    oplog.setObject(BSON("msg"
+                                         << "Latest oplog ts from donor's cursor response"));
+                    oplog.setObject2(BSON("type" << kReshardProgressMark));
+                    oplog.setOpTime(OplogSlot());
+                    oplog.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+
+                    uassertStatusOK(
+                        toWriteTo->insertDocument(opCtx, InsertStatement{oplog.toBSON()}, nullptr));
+                    wuow.commit();
+
+                    _env->metrics()->onOplogEntriesFetched(1);
+
+                    auto [p, f] = makePromiseFuture<void>();
+                    {
+                        stdx::lock_guard lk(_mutex);
+                        _startAt = startAt;
+                        _onInsertPromise.emplaceValue();
+                        _onInsertPromise = std::move(p);
+                        _onInsertFuture = std::move(f);
+                    }
+                } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
+                    // It's possible that the donor shard has not generated new oplog entries since
+                    // the previous getMore. In this case the latest oplog timestamp the donor
+                    // returns will be the same, so it's safe to ignore this error.
                 }
             }
 

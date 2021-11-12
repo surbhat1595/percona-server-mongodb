@@ -69,6 +69,7 @@ public:
         Documents documents;
         struct OtherFields {
             BSONObj metadata;
+            boost::optional<BSONObj> postBatchResumeToken = boost::none;
         } otherFields;
         Microseconds elapsed = Microseconds(0);
         bool first = false;
@@ -198,6 +199,13 @@ public:
      */
     State getState_forTest() const;
 
+    /**
+     * Returns a Future that will be resolved when the fetcher completes its work.
+     */
+    SharedSemiFuture<void> onCompletion() const {
+        return _completionPromise.getFuture();
+    }
+
 private:
     bool _isActive_inlock() const;
 
@@ -262,6 +270,9 @@ private:
     RemoteCommandRetryScheduler _firstRemoteCommandScheduler;
 
     const transport::ConnectSSLMode _sslMode;
+
+    // Promise that is resolved when a fetcher completes or shuts down.
+    SharedPromise<void> _completionPromise;
 };
 
 /**

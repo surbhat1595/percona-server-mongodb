@@ -37,6 +37,8 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/async_requests_sender.h"
@@ -101,17 +103,18 @@ CoordinatorCommitMonitor::CoordinatorCommitMonitor(
 SemiFuture<void> CoordinatorCommitMonitor::waitUntilRecipientsAreWithinCommitThreshold() const {
     return _makeFuture()
         .onError([](Status status) {
-            if (ErrorCodes::isCancellationError(status.code())) {
+            if (ErrorCodes::isCancellationError(status.code()) ||
+                ErrorCodes::isInterruption(status.code())) {
                 LOGV2_DEBUG(5392003,
                             kDiagnosticLogLevel,
-                            "The resharding commit monitor is interrupted",
+                            "The resharding commit monitor has been interrupted",
                             "error"_attr = status);
             } else {
                 LOGV2_WARNING(5392004,
                               "Stopped the resharding commit monitor due to an error",
                               "error"_attr = status);
             }
-            return Status::OK();
+            return status;
         })
         .semi();
 }
@@ -122,7 +125,8 @@ void CoordinatorCommitMonitor::setNetworkExecutorForTest(TaskExecutorPtr network
     _networkExecutor = std::move(networkExecutor);
 }
 
-Milliseconds CoordinatorCommitMonitor::_queryMaxRemainingOperationTimeForRecipients() const {
+CoordinatorCommitMonitor::RemainingOperationTimes
+CoordinatorCommitMonitor::queryRemainingOperationTimeForRecipients() const {
     const auto cmdObj = makeCommandObj(_ns);
     const auto requests = makeRequests(cmdObj, _recipientShards);
 
@@ -131,7 +135,7 @@ Milliseconds CoordinatorCommitMonitor::_queryMaxRemainingOperationTimeForRecipie
                 "Querying recipient shards for the remaining operation time",
                 "namespace"_attr = _ns);
 
-    auto opCtx = cc().makeOperationContext();
+    auto opCtx = CancelableOperationContext(cc().makeOperationContext(), _cancelToken, _executor);
     auto executor = _networkExecutor ? _networkExecutor : _executor;
     AsyncRequestsSender ars(opCtx.get(),
                             executor,
@@ -142,6 +146,7 @@ Milliseconds CoordinatorCommitMonitor::_queryMaxRemainingOperationTimeForRecipie
 
     hangBeforeQueryingRecipients.pauseWhileSet();
 
+    auto minRemainingTime = Milliseconds::max();
     auto maxRemainingTime = Milliseconds(0);
     while (!ars.done()) {
         iassert(ErrorCodes::CallbackCanceled,
@@ -157,10 +162,13 @@ Milliseconds CoordinatorCommitMonitor::_queryMaxRemainingOperationTimeForRecipie
         const auto status = getStatusFromCommandResult(shardResponse.data);
         uassertStatusOKWithContext(status, errorContext);
 
-        if (const auto remainingTime = extractOperationRemainingTime(shardResponse.data);
-            remainingTime && remainingTime.get() > maxRemainingTime) {
-            // A recipient shard does not report the remaining operation time when there is no data
-            // to copy and no oplog entry to apply.
+        const auto remainingTime = extractOperationRemainingTime(shardResponse.data);
+        // A recipient shard does not report the remaining operation time when there is no data
+        // to copy and no oplog entry to apply.
+        if (remainingTime && remainingTime.get() < minRemainingTime) {
+            minRemainingTime = remainingTime.get();
+        }
+        if (remainingTime && remainingTime.get() > maxRemainingTime) {
             maxRemainingTime = remainingTime.get();
         }
     }
@@ -175,16 +183,17 @@ Milliseconds CoordinatorCommitMonitor::_queryMaxRemainingOperationTimeForRecipie
                 "namespace"_attr = _ns,
                 "remainingTime"_attr = maxRemainingTime);
 
-    return maxRemainingTime;
+    return {minRemainingTime, maxRemainingTime};
 }
 
 ExecutorFuture<void> CoordinatorCommitMonitor::_makeFuture() const {
     return ExecutorFuture<void>(_executor)
-        .then([this] { return _queryMaxRemainingOperationTimeForRecipients(); })
-        .onError([](Status status) {
-            if (ErrorCodes::isCancellationError(status.code()))
+        .then([this] { return queryRemainingOperationTimeForRecipients(); })
+        .onError([this](Status status) {
+            if (_cancelToken.isCanceled()) {
                 // Do not retry on cancellation errors.
                 iasserted(status);
+            }
 
             // Absorbs any exception thrown by the query phase, except for cancellation errors, and
             // retries. The intention is to handle short term issues with querying recipients (e.g.,
@@ -192,17 +201,22 @@ ExecutorFuture<void> CoordinatorCommitMonitor::_makeFuture() const {
             LOGV2_WARNING(5392006,
                           "Encountered an error while querying recipients, will retry shortly",
                           "error"_attr = status);
-            return Milliseconds::max();
+
+            return RemainingOperationTimes{Milliseconds(0), Milliseconds::max()};
         })
-        .then([this, anchor = shared_from_this()](Milliseconds maxRemainingTime) {
+        .then([this, anchor = shared_from_this()](RemainingOperationTimes remainingTimes) {
+            auto metrics = ReshardingMetrics::get(cc().getServiceContext());
+            metrics->setMinRemainingOperationTime(remainingTimes.min);
+            metrics->setMaxRemainingOperationTime(remainingTimes.max);
+
             // Check if all recipient shards are within the commit threshold.
-            if (maxRemainingTime <= _threshold)
+            if (remainingTimes.max <= _threshold)
                 return ExecutorFuture<void>(_executor);
 
             // The following ensures that the monitor would never sleep for more than a predefined
             // maximum delay between querying recipient shards. Thus, it can handle very large,
             // and potentially inaccurate estimates of the remaining operation time.
-            auto sleepTime = std::min(maxRemainingTime - _threshold, _maxDelayBetweenQueries);
+            auto sleepTime = std::min(remainingTimes.max - _threshold, _maxDelayBetweenQueries);
             return _executor->sleepFor(sleepTime, _cancelToken)
                 .then([this, anchor = std::move(anchor)] {
                     // We are not canceled yet, so schedule new queries against recipient shards.

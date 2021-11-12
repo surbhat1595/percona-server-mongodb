@@ -66,6 +66,7 @@ using std::string;
 using std::vector;
 
 MONGO_FAIL_POINT_DEFINE(failToParseResumeIndexInfo);
+MONGO_FAIL_POINT_DEFINE(setMinVisibleForAllCollectionsToOldestOnStartup);
 
 namespace {
 const std::string catalogInfo = "_mdb_catalog";
@@ -303,6 +304,15 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx, LastShutdownState l
                 // visible timestamp pulled back to that value.
                 minVisibleTs = _engine->getOldestTimestamp();
             }
+
+            // This failpoint is useful for tests which want to exercise atClusterTime reads across
+            // server starts (e.g. resharding). It is likely only safe for tests which don't run
+            // operations that bump the minimum visible timestamp and can guarantee the collection
+            // always exists for the atClusterTime value(s).
+            setMinVisibleForAllCollectionsToOldestOnStartup.execute(
+                [this, &minVisibleTs](const BSONObj& data) {
+                    minVisibleTs = _engine->getOldestTimestamp();
+                });
         }
 
         _initCollection(opCtx, entry.catalogId, entry.nss, _options.forRepair, minVisibleTs);
@@ -617,9 +627,6 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             // timestamp when restarting an index build for startup recovery. Then, if we experience
             // an unclean shutdown before a checkpoint is taken, the subsequent startup recovery can
             // see the now-dropped ident referenced by the old index catalog entry.
-            //
-            // TODO (SERVER-56639): Remove this relaxation once index ident drops for startup
-            // recovery are timestamped.
             invariant(engineIdents.find(indexIdent) != engineIdents.end() ||
                           lastShutdownState == LastShutdownState::kUnclean,
                       str::stream() << "Failed to find an index data table matching " << indexIdent

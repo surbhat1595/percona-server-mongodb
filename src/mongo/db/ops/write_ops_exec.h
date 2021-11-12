@@ -55,6 +55,9 @@ struct WriteResult {
      * Maps 1-to-1 to single ops in request. May be shorter than input if there are errors.
      */
     std::vector<StatusWith<SingleWriteResult>> results;
+
+    // In case of an error, whether the operation can continue.
+    bool canContinue = true;
 };
 
 /**
@@ -80,7 +83,9 @@ WriteResult performInserts(OperationContext* opCtx,
 WriteResult performUpdates(OperationContext* opCtx,
                            const write_ops::UpdateCommandRequest& op,
                            const OperationSource& source = OperationSource::kStandard);
-WriteResult performDeletes(OperationContext* opCtx, const write_ops::DeleteCommandRequest& op);
+WriteResult performDeletes(OperationContext* opCtx,
+                           const write_ops::DeleteCommandRequest& op,
+                           const OperationSource& source = OperationSource::kStandard);
 
 Status performAtomicTimeseriesWrites(OperationContext* opCtx,
                                      const std::vector<write_ops::InsertCommandRequest>& insertOps,

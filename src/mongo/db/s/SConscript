@@ -18,6 +18,7 @@ env.Library(
         'operation_sharding_state.cpp',
         'sharding_migration_critical_section.cpp',
         'sharding_state.cpp',
+        'sharding_write_router.cpp',
         'transaction_coordinator_curop.cpp',
         'transaction_coordinator_factory.cpp',
         'transaction_coordinator_worker_curop_repository.cpp',
@@ -26,6 +27,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/range_arithmetic',
+        '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sharding_routing_table',
     ],
 )
@@ -36,6 +38,7 @@ env.Library(
         'active_migrations_registry.cpp',
         'active_move_primaries_registry.cpp',
         'active_shard_collection_registry.cpp',
+        'auto_split_vector.cpp',
         'chunk_move_write_concern_options.cpp',
         'chunk_splitter.cpp',
         'collection_critical_section_document.idl',
@@ -61,7 +64,12 @@ env.Library(
         'range_deletion_util.cpp',
         'read_only_catalog_cache_loader.cpp',
         'recoverable_critical_section_service.cpp',
+        'resharding_util.cpp',
+        'resharding/coordinator_document.idl','resharding/document_source_resharding_iterate_transaction.cpp',
         'resharding/document_source_resharding_ownership_match.cpp',
+        'resharding/donor_document.idl',
+        'resharding/donor_oplog_id.idl',
+        'resharding/recipient_document.idl',
         'resharding/resharding_change_event_o2_field.idl',
         'resharding/resharding_collection_cloner.cpp',
         'resharding/resharding_coordinator_commit_monitor.cpp',
@@ -147,35 +155,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/session_catalog',
         '$BUILD_DIR/mongo/idl/server_parameter',
         '$BUILD_DIR/mongo/util/future_util',
-        'resharding_util',
-    ],
-)
-
-# Be careful about adding dependencies to this library, as any dependencies will currently be
-# included in mongo_embedded.
-env.Library(
-    target='resharding_util',
-    source=[
-        'resharding_util.cpp',
-        'resharding/coordinator_document.idl',
-        'resharding/document_source_resharding_iterate_transaction.cpp',
-        'resharding/donor_document.idl',
-        'resharding/donor_oplog_id.idl',
-        'resharding/recipient_document.idl',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/catalog/collection_options_idl',
-        '$BUILD_DIR/mongo/db/common',
-        '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
-        '$BUILD_DIR/mongo/db/curop',
-        '$BUILD_DIR/mongo/db/namespace_string',
-        '$BUILD_DIR/mongo/db/pipeline/expression_context',
-        '$BUILD_DIR/mongo/db/pipeline/pipeline',
-        '$BUILD_DIR/mongo/db/storage/write_unit_of_work',
-        '$BUILD_DIR/mongo/s/async_requests_sender',
-        '$BUILD_DIR/mongo/s/grid',
-        'sharding_api_d',
     ],
 )
 
@@ -294,6 +273,7 @@ env.Library(
     target='sharding_commands_d',
     source=[
         'add_shard_cmd.cpp',
+        'auto_split_vector_command.cpp',
         'check_sharding_index_command.cpp',
         'cleanup_orphaned_cmd.cpp',
         'clone_catalog_data_command.cpp',
@@ -366,6 +346,7 @@ env.Library(
         'shardsvr_create_collection_command.cpp',
         'shardsvr_create_collection_participant_command.cpp',
         'shardsvr_drop_collection_command.cpp',
+        'shardsvr_drop_collection_if_uuid_not_matching_command.cpp',
         'shardsvr_drop_collection_participant_command.cpp',
         'shardsvr_drop_database_command.cpp',
         'shardsvr_drop_database_participant_command.cpp',
@@ -386,6 +367,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/bson/dotted_path_support',
         '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
         '$BUILD_DIR/mongo/db/cloner',
+        '$BUILD_DIR/mongo/db/commands/create_command',
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
         '$BUILD_DIR/mongo/db/commands/server_status',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
@@ -393,11 +375,13 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/primary_only_service',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages',
+        '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_idl',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_index_schema_conversion_functions',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/s/commands/shared_cluster_commands',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         '$BUILD_DIR/mongo/s/sharding_router_api',
-        'resharding_util',
         'sharding_runtime_d',
     ],
 )
@@ -467,6 +451,7 @@ env.CppUnitTest(
         'active_migrations_registry_test.cpp',
         'active_move_primaries_registry_test.cpp',
         'active_shard_collection_registry_test.cpp',
+        'auto_split_vector_test.cpp',
         'balancer/balance_stats_test.cpp',
         'chunk_split_state_driver_test.cpp',
         'collection_metadata_filtering_test.cpp',
@@ -547,7 +532,6 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor_test_fixture',
         '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_mock',
         '$BUILD_DIR/mongo/s/sharding_router_test_fixture',
-        'resharding_util',
         'shard_server_test_fixture',
         'sharding_commands_d',
         'sharding_logging',
@@ -601,6 +585,17 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/repl/replication_info',
         '$BUILD_DIR/mongo/util/version_impl',
         'config_server_test_fixture',
-        'resharding_util',
+    ],
+)
+
+env.Benchmark(
+    target="sharding_write_router_bm",
+    source=["sharding_write_router_bm.cpp"],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/db/auth/authmocks",
+        "$BUILD_DIR/mongo/s/grid",
+        "$BUILD_DIR/mongo/s/sharding_test_fixture_common",
+        "sharding_api_d",
+        "sharding_runtime_d",
     ],
 )

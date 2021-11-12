@@ -42,6 +42,7 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
+#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
@@ -729,8 +730,7 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
         CoordinatorStateEnum::kCloning,
         CoordinatorStateEnum::kApplying,
         CoordinatorStateEnum::kBlockingWrites,
-        CoordinatorStateEnum::kCommitting,
-        CoordinatorStateEnum::kDone};
+        CoordinatorStateEnum::kCommitting};
     PauseDuringStateTransitions stateTransitionsGuard{controller(), coordinatorStates};
 
     auto doc = insertStateAndCatalogEntries(CoordinatorStateEnum::kUnused, _originalEpoch);
@@ -781,20 +781,12 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
                 break;
             }
 
-            case CoordinatorStateEnum::kDone: {
-                makeDonorsProceedToDone(opCtx);
-                makeRecipientsProceedToDone(opCtx);
-                break;
-            }
-
             default:
                 break;
         }
 
-        if (state != CoordinatorStateEnum::kDone) {
-            // 'done' state is never written to storage so don't wait for it
-            stateTransitionsGuard.wait(state);
-        }
+        stateTransitionsGuard.wait(state);
+
 
         stepDown(opCtx);
 
@@ -802,6 +794,16 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
                   ErrorCodes::InterruptedDueToReplStateChange);
 
         coordinator.reset();
+
+        // Metrics should be cleared after step down.
+        {
+            auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
+            BSONObjBuilder metricsBuilder;
+            metrics->serializeCurrentOpMetrics(&metricsBuilder,
+                                               ReshardingMetrics::Role::kCoordinator);
+            ASSERT_BSONOBJ_EQ(BSONObj(), metricsBuilder.done());
+        }
+
         stepUp(opCtx);
 
         stateTransitionsGuard.unset(state);
@@ -812,15 +814,92 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
             coordinator->onOkayToEnterCritical();
         }
 
-        if (state != CoordinatorStateEnum::kDone) {
-            // 'done' state is never written to storage so don't wait for it.
-            waitUntilCommittedCoordinatorDocReach(opCtx, state);
-        }
+        // 'done' state is never written to storage so don't wait for it.
+        waitUntilCommittedCoordinatorDocReach(opCtx, state);
+
+        // Metrics should not be empty after step up.
+        auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
+        BSONObjBuilder metricsBuilder;
+        metrics->serializeCurrentOpMetrics(&metricsBuilder, ReshardingMetrics::Role::kCoordinator);
+        ASSERT_BSONOBJ_NE(BSONObj(), metricsBuilder.done());
     }
+
+    makeDonorsProceedToDone(opCtx);
+    makeRecipientsProceedToDone(opCtx);
 
     // Join the coordinator if it has not yet been cleaned up.
     if (auto coordinator = getCoordinatorIfExists(opCtx, instanceId)) {
         coordinator->getCompletionFuture().get(opCtx);
+    }
+
+    // Metrics should be cleared after commit.
+    {
+        auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
+        BSONObjBuilder metricsBuilder;
+        metrics->serializeCurrentOpMetrics(&metricsBuilder, ReshardingMetrics::Role::kCoordinator);
+        ASSERT_BSONOBJ_EQ(BSONObj(), metricsBuilder.done());
+    }
+
+    {
+        DBDirectClient client(opCtx);
+
+        // config.chunks should have been moved to the new UUID
+        std::vector<ChunkType> foundChunks;
+        auto chunkCursor = client.query(
+            ChunkType::ConfigNS, BSON(ChunkType::collectionUUID() << doc.getReshardingUUID()));
+        while (chunkCursor->more()) {
+            auto d = uassertStatusOK(ChunkType::fromConfigBSON(
+                chunkCursor->nextSafe().getOwned(), _originalEpoch, boost::none));
+            foundChunks.push_back(d);
+        }
+        ASSERT_EQUALS(foundChunks.size(), initialChunks.size());
+
+        // config.collections should not have the document with the old UUID.
+        std::vector<ChunkType> foundCollections;
+        auto collection =
+            client.findOne(CollectionType::ConfigNS.ns(),
+                           BSON(CollectionType::kNssFieldName << doc.getSourceNss().ns()));
+
+        ASSERT_EQUALS(collection.isEmpty(), false);
+        ASSERT_EQUALS(
+            UUID::parse(collection.getField(CollectionType::kUuidFieldName)).getValue().toString(),
+            doc.getReshardingUUID().toString());
+    }
+}
+
+TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorFailsIfMigrationNotAllowed) {
+    auto doc = insertStateAndCatalogEntries(CoordinatorStateEnum::kUnused, _originalEpoch);
+    auto opCtx = operationContext();
+    auto donorChunk = makeAndInsertChunksForDonorShard(
+        _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+
+    auto initialChunks =
+        makeChunks(_reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
+
+    std::vector<ReshardedChunk> presetReshardedChunks;
+    for (const auto& chunk : initialChunks) {
+        presetReshardedChunks.emplace_back(chunk.getShard(), chunk.getMin(), chunk.getMax());
+    }
+
+    doc.setPresetReshardedChunks(presetReshardedChunks);
+
+    {
+        DBDirectClient client(opCtx);
+        client.update(CollectionType::ConfigNS.ns(),
+                      BSON(CollectionType::kNssFieldName << _originalNss.ns()),
+                      BSON("$set" << BSON(CollectionType::kAllowMigrationsFieldName << false)));
+    }
+
+    auto coordinator = ReshardingCoordinator::getOrCreate(opCtx, _service, doc.toBSON());
+    ASSERT_THROWS_CODE(coordinator->getCompletionFuture().get(opCtx), DBException, 5808201);
+
+    // Check that reshardCollection keeps allowMigrations setting intact.
+    {
+        DBDirectClient client(opCtx);
+        CollectionType collDoc(
+            client.findOne(CollectionType::ConfigNS.ns(),
+                           BSON(CollectionType::kNssFieldName << _originalNss.ns())));
+        ASSERT_FALSE(collDoc.getAllowMigrations());
     }
 }
 

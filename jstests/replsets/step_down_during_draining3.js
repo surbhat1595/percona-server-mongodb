@@ -33,6 +33,9 @@ function enableFailPoint(node) {
     jsTest.log("enable failpoint " + node.host);
     assert.commandWorked(
         node.adminCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'alwaysOn'}));
+    // Wait for Oplog Applier to hang on the failpoint.
+    checkLog.contains(node,
+                      "rsSyncApplyStop fail point enabled. Blocking until fail point is disabled");
 }
 
 function disableFailPoint(node) {

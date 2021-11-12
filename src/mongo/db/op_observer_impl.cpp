@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
@@ -60,7 +61,7 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/resharding_util.h"
+#include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
@@ -167,12 +168,12 @@ struct OpTimeBundle {
  */
 OpTimeBundle replLogUpdate(OperationContext* opCtx,
                            const OplogUpdateEntryArgs& args,
-                           MutableOplogEntry oplogEntry) {
-    oplogEntry.setNss(args.nss);
-    oplogEntry.setUuid(args.uuid);
+                           MutableOplogEntry* oplogEntry) {
+    oplogEntry->setNss(args.nss);
+    oplogEntry->setUuid(args.uuid);
 
     repl::OplogLink oplogLink;
-    repl::appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, args.updateArgs.stmtIds);
+    repl::appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, args.updateArgs.stmtIds);
 
     OpTimeBundle opTimes;
     // We never want to store pre- or post- images when we're migrating oplog entries from another
@@ -180,11 +181,11 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
     const auto& migrationRecipientInfo = repl::tenantMigrationRecipientInfo(opCtx);
     const auto storePreImageInOplogForRetryableWrite =
         (args.updateArgs.storeDocOption == CollectionUpdateArgs::StoreDocOption::PreImage &&
-         opCtx->getTxnNumber() && !oplogEntry.getNeedsRetryImage());
+         opCtx->getTxnNumber() && !oplogEntry->getNeedsRetryImage());
     if ((storePreImageInOplogForRetryableWrite ||
          args.updateArgs.preImageRecordingEnabledForCollection) &&
         !migrationRecipientInfo) {
-        MutableOplogEntry noopEntry = oplogEntry;
+        MutableOplogEntry noopEntry = *oplogEntry;
         invariant(args.updateArgs.preImageDoc);
         noopEntry.setOpType(repl::OpTypeEnum::kNoop);
         noopEntry.setObject(*args.updateArgs.preImageDoc);
@@ -196,8 +197,8 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
 
     // This case handles storing the post image for retryable findAndModify's.
     if (args.updateArgs.storeDocOption == CollectionUpdateArgs::StoreDocOption::PostImage &&
-        opCtx->getTxnNumber() && !migrationRecipientInfo && !oplogEntry.getNeedsRetryImage()) {
-        MutableOplogEntry noopEntry = oplogEntry;
+        opCtx->getTxnNumber() && !migrationRecipientInfo && !oplogEntry->getNeedsRetryImage()) {
+        MutableOplogEntry noopEntry = *oplogEntry;
         noopEntry.setOpType(repl::OpTypeEnum::kNoop);
         noopEntry.setObject(args.updateArgs.updatedDoc);
         oplogLink.postImageOpTime = logOperation(opCtx, &noopEntry);
@@ -205,17 +206,17 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
         opTimes.prePostImageOpTime = oplogLink.postImageOpTime;
     }
 
-    oplogEntry.setOpType(repl::OpTypeEnum::kUpdate);
-    oplogEntry.setObject(args.updateArgs.update);
-    oplogEntry.setObject2(args.updateArgs.criteria);
-    oplogEntry.setFromMigrateIfTrue(args.updateArgs.source == OperationSource::kFromMigrate);
+    oplogEntry->setOpType(repl::OpTypeEnum::kUpdate);
+    oplogEntry->setObject(args.updateArgs.update);
+    oplogEntry->setObject2(args.updateArgs.criteria);
+    oplogEntry->setFromMigrateIfTrue(args.updateArgs.source == OperationSource::kFromMigrate);
     // oplogLink could have been changed to include pre/postImageOpTime by the previous no-op write.
-    repl::appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, args.updateArgs.stmtIds);
+    repl::appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, args.updateArgs.stmtIds);
     if (args.updateArgs.oplogSlot) {
-        oplogEntry.setOpTime(*args.updateArgs.oplogSlot);
+        oplogEntry->setOpTime(*args.updateArgs.oplogSlot);
     }
-    opTimes.writeOpTime = logOperation(opCtx, &oplogEntry);
-    opTimes.wallClockTime = oplogEntry.getWallClockTime();
+    opTimes.writeOpTime = logOperation(opCtx, oplogEntry);
+    opTimes.wallClockTime = oplogEntry->getWallClockTime();
     return opTimes;
 }
 
@@ -277,6 +278,31 @@ void writeToImageCollection(OperationContext* opCtx,
     UpdateResult res = Helpers::upsert(
         opCtx, NamespaceString::kConfigImagesNamespace.toString(), imageEntry.toBSON());
     invariant(res.numDocsModified == 1 || !res.upsertedId.isEmpty());
+}
+
+bool shouldTimestampIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) {
+    // This function returns whether a timestamp for a catalog write when beginning an index build,
+    // or aborting an index build is necessary. There are four scenarios:
+
+    // 1. A timestamp is already set -- replication application sets a timestamp ahead of time.
+    // This could include the phase of initial sync where it applies oplog entries.  Also,
+    // primaries performing an index build via `applyOps` may have a wrapping commit timestamp.
+    if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull())
+        return false;
+
+    // 2. If the node is initial syncing, we do not set a timestamp.
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    if (replCoord->isReplEnabled() && replCoord->getMemberState().startup2())
+        return false;
+
+    // 3. If the index build is on the local database, do not timestamp.
+    if (nss.isLocal())
+        return false;
+
+    // 4. All other cases, we generate a timestamp by writing a no-op oplog entry.  This is
+    // better than using a ghost timestamp.  Writing an oplog entry ensures this node is
+    // primary.
+    return true;
 }
 
 }  // namespace
@@ -372,32 +398,34 @@ void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
 
 void OpObserverImpl::onStartIndexBuildSinglePhase(OperationContext* opCtx,
                                                   const NamespaceString& nss) {
-    // This function sets a timestamp for the initial catalog write when beginning an index
-    // build, if necessary.  There are four scenarios:
-
-    // 1. A timestamp is already set -- replication application sets a timestamp ahead of time.
-    // This could include the phase of initial sync where it applies oplog entries.  Also,
-    // primaries performing an index build via `applyOps` may have a wrapping commit timestamp.
-    if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull())
+    if (!shouldTimestampIndexBuildSinglePhase(opCtx, nss)) {
         return;
+    }
 
-    // 2. If the node is initial syncing, we do not set a timestamp.
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (replCoord->isReplEnabled() && replCoord->getMemberState().startup2())
-        return;
 
-    // 3. If the index build is on the local database, do not timestamp.
-    if (nss.isLocal())
-        return;
-
-    // 4. All other cases, we generate a timestamp by writing a no-op oplog entry.  This is
-    // better than using a ghost timestamp.  Writing an oplog entry ensures this node is
-    // primary.
     onInternalOpMessage(
         opCtx,
         {},
         boost::none,
         BSON("msg" << std::string(str::stream() << "Creating indexes. Coll: " << nss)),
+        boost::none,
+        boost::none,
+        boost::none,
+        boost::none,
+        boost::none);
+}
+
+void OpObserverImpl::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
+                                                  const NamespaceString& nss) {
+    if (!shouldTimestampIndexBuildSinglePhase(opCtx, nss)) {
+        return;
+    }
+
+    onInternalOpMessage(
+        opCtx,
+        {},
+        boost::none,
+        BSON("msg" << std::string(str::stream() << "Aborting indexes. Coll: " << nss)),
         boost::none,
         boost::none,
         boost::none,
@@ -480,8 +508,8 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     std::vector<repl::OpTime> opTimeList;
     repl::OpTime lastOpTime;
 
-    auto* const css = CollectionShardingState::get(opCtx, nss);
-    auto collDesc = css->getCollectionDescription(opCtx);
+    ShardingWriteRouter shardingWriteRouter(opCtx, nss, Grid::get(opCtx)->catalogCache());
+
     if (inMultiDocumentTransaction) {
         // Do not add writes to the profile collection to the list of transaction operations, since
         // these are done outside the transaction. There is no top-level WriteUnitOfWork when we are
@@ -493,14 +521,16 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
 
         for (auto iter = first; iter != last; iter++) {
             auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid.get(), iter->doc);
-            shardAnnotateOplogEntry(opCtx, nss, iter->doc, operation, css, collDesc);
+            operation.setDestinedRecipient(
+                shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
             txnParticipant.addTransactionOperation(opCtx, operation);
         }
     } else {
         std::function<boost::optional<ShardId>(const BSONObj& doc)> getDestinedRecipientFn =
-            [&](const BSONObj& doc) {
-                return getDestinedRecipient(opCtx, nss, doc, css, collDesc);
+            [&shardingWriteRouter](const BSONObj& doc) {
+                return shardingWriteRouter.getReshardingDestinedRecipient(doc);
             };
+
         MutableOplogEntry oplogEntryTemplate;
         oplogEntryTemplate.setNss(nss);
         oplogEntryTemplate.setUuid(uuid);
@@ -532,8 +562,13 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     size_t index = 0;
     for (auto it = first; it != last; it++, index++) {
         auto opTime = opTimeList.empty() ? repl::OpTime() : opTimeList[index];
-        shardObserveInsertOp(
-            opCtx, nss, it->doc, opTime, css, fromMigrate, inMultiDocumentTransaction);
+        shardObserveInsertOp(opCtx,
+                             nss,
+                             it->doc,
+                             opTime,
+                             shardingWriteRouter,
+                             fromMigrate,
+                             inMultiDocumentTransaction);
     }
 
     if (nss.coll() == "system.js") {
@@ -588,16 +623,15 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
 
-    auto* const css = CollectionShardingState::get(opCtx, args.nss);
-    auto collDesc = css->getCollectionDescription(opCtx);
+    ShardingWriteRouter shardingWriteRouter(opCtx, args.nss, Grid::get(opCtx)->catalogCache());
 
     OpTimeBundle opTime;
     if (inMultiDocumentTransaction) {
         auto operation = MutableOplogEntry::makeUpdateOperation(
             args.nss, args.uuid, args.updateArgs.update, args.updateArgs.criteria);
 
-        shardAnnotateOplogEntry(
-            opCtx, args.nss, args.updateArgs.updatedDoc, operation, css, collDesc);
+        operation.setDestinedRecipient(
+            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs.updatedDoc));
 
         if (args.updateArgs.preImageRecordingEnabledForCollection) {
             invariant(args.updateArgs.preImageDoc);
@@ -607,12 +641,8 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
-        shardAnnotateOplogEntry(opCtx,
-                                args.nss,
-                                args.updateArgs.updatedDoc,
-                                oplogEntry.getDurableReplOperation(),
-                                css,
-                                collDesc);
+        oplogEntry.getDurableReplOperation().setDestinedRecipient(
+            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs.updatedDoc));
 
         if (opCtx->getTxnNumber() && args.updateArgs.storeImageInSideCollection) {
             // If we've stored a preImage:
@@ -628,7 +658,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             }
         }
 
-        opTime = replLogUpdate(opCtx, args, oplogEntry);
+        opTime = replLogUpdate(opCtx, args, &oplogEntry);
 
         if (oplogEntry.getNeedsRetryImage()) {
             // If the oplog entry has `needsRetryImage`, copy the image into image collection.
@@ -659,7 +689,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
                                  args.updateArgs.preImageDoc,
                                  args.updateArgs.updatedDoc,
                                  opTime.writeOpTime,
-                                 css,
+                                 shardingWriteRouter,
                                  opTime.prePostImageOpTime,
                                  inMultiDocumentTransaction);
         }
@@ -677,7 +707,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
         ReadWriteConcernDefaults::get(opCtx).observeDirectWriteToConfigSettings(
             opCtx, args.updateArgs.updatedDoc["_id"], args.updateArgs.updatedDoc);
     } else if (args.nss.isTimeseriesBucketsCollection()) {
-        if (args.updateArgs.source != OperationSource::kTimeseries) {
+        if (args.updateArgs.source != OperationSource::kTimeseriesInsert) {
             auto& bucketCatalog = BucketCatalog::get(opCtx);
             bucketCatalog.clear(args.updateArgs.updatedDoc["_id"].OID());
         }
@@ -689,11 +719,10 @@ void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
                                    BSONObj const& doc) {
     documentKeyDecoration(opCtx).emplace(getDocumentKey(opCtx, nss, doc));
 
-    auto* const css = CollectionShardingState::get(opCtx, nss);
-    auto collDesc = css->getCollectionDescription(opCtx);
+    ShardingWriteRouter shardingWriteRouter(opCtx, nss, Grid::get(opCtx)->catalogCache());
 
     repl::DurableReplOperation op;
-    shardAnnotateOplogEntry(opCtx, nss, doc, op, css, collDesc);
+    op.setDestinedRecipient(shardingWriteRouter.getReshardingDestinedRecipient(doc));
     destinedRecipientDecoration(opCtx) = op.getDestinedRecipient();
 
     shardObserveAboutToDelete(opCtx, nss, doc);
@@ -766,12 +795,12 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
     if (nss != NamespaceString::kSessionTransactionsTableNamespace) {
         if (!args.fromMigrate) {
-            auto* const css = CollectionShardingState::get(opCtx, nss);
+            ShardingWriteRouter shardingWriteRouter(opCtx, nss, Grid::get(opCtx)->catalogCache());
             shardObserveDeleteOp(opCtx,
                                  nss,
                                  documentKey.getShardKeyAndId(),
                                  opTime.writeOpTime,
-                                 css,
+                                 shardingWriteRouter,
                                  opTime.prePostImageOpTime,
                                  inMultiDocumentTransaction);
         }

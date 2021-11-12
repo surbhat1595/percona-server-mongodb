@@ -56,11 +56,7 @@ class MongoDFixture(interface.Fixture):
         if not self.preserve_dbpath and os.path.lexists(self._dbpath):
             shutil.rmtree(self._dbpath, ignore_errors=False)
 
-        try:
-            os.makedirs(self._dbpath)
-        except os.error:
-            # Directory already exists.
-            pass
+        os.makedirs(self._dbpath, exist_ok=True)
 
         launcher = MongodLauncher(self.fixturelib)
         # Second return val is the port, which we ignore because we explicitly created the port above.
@@ -325,6 +321,10 @@ class MongodLauncher(object):
             suite_set_parameters["failpoint.flowControlTicketOverride"] = {
                 "mode": "alwaysOn", "data": {"numTickets": self.config.FLOW_CONTROL_TICKETS}
             }
+
+        # The internalQueryForceClassicEngine setParameter was only added in 5.0.1.
+        if "internalQueryForceClassicEngine" in suite_set_parameters:
+            del suite_set_parameters["internalQueryForceClassicEngine"]
 
         _add_testing_set_parameters(suite_set_parameters)
 

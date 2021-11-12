@@ -39,6 +39,7 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/stdx/unordered_map.h"
 
 namespace pcrecpp {
@@ -48,6 +49,33 @@ class RE;
 namespace mongo {
 
 class CollatorInterface;
+
+/**
+ *  A struct primarily used to make input parameters for makePredicate() function. The
+ * 'MatchExprType' helps in determining which MatchExpression to make in makePredicate() function.
+ */
+template <typename MatchExprType, typename ValueType = BSONElement>
+struct MatchExprPredicate {
+    MatchExprPredicate(StringData path_, ValueType value_) : path(path_), value(value_){};
+    StringData path;
+    ValueType value;
+};
+
+/**
+ * Helper function to make $and predicates based on the set of predicates passed as parameters.
+ */
+template <typename T, typename ValueType, typename... Targs, typename... ValueTypeArgs>
+std::unique_ptr<MatchExpression> makePredicate(
+    MatchExprPredicate<T, ValueType> predicate,
+    MatchExprPredicate<Targs, ValueTypeArgs>... predicates) {
+    if constexpr (sizeof...(predicates) > 0) {
+        return std::make_unique<AndMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
+            std::make_unique<T>(predicate.path, predicate.value),
+            (std::make_unique<Targs>(predicates.path, predicates.value))...));
+    } else {
+        return std::make_unique<T>(predicate.path, predicate.value);
+    }
+}
 
 class LeafMatchExpression : public PathMatchExpression {
 public:
@@ -508,13 +536,6 @@ public:
         visitor->visit(this);
     }
 
-    static long long truncateToLong(const BSONElement& element) {
-        if (element.type() == BSONType::NumberDecimal) {
-            return element.numberDecimal().toLong(Decimal128::kRoundTowardZero);
-        }
-        return element.numberLong();
-    }
-
 private:
     ExpressionOptimizerFunc getOptimizer() const final {
         return [](std::unique_ptr<MatchExpression> expression) { return expression; };
@@ -699,6 +720,8 @@ public:
     uint64_t getBitMask() const {
         return _bitMask;
     }
+
+    std::string name() const;
 
 private:
     ExpressionOptimizerFunc getOptimizer() const final {

@@ -119,6 +119,8 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         CurOp::get(opCtx)->dbProfileLevel() > 0  // mayDbProfile
     );
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
+    expCtx->startExpressionCounters();
+
     return expCtx;
 }
 
@@ -586,6 +588,7 @@ public:
                 keyBob.append("collation", 1);
                 keyBob.append("min", 1);
                 keyBob.append("max", 1);
+                keyBob.append("shardVersion", 1);
                 return keyBob.obj();
             }();
 

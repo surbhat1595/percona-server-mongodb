@@ -34,9 +34,11 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/util/functional.h"
 
@@ -94,6 +96,12 @@ void ensureTemporaryReshardingCollectionRenamed(OperationContext* opCtx,
 Value findHighestInsertedId(OperationContext* opCtx, const CollectionPtr& collection);
 
 /**
+ * Returns the full document of the largest _id value in the collection.
+ */
+boost::optional<Document> findDocWithHighestInsertedId(OperationContext* opCtx,
+                                                       const CollectionPtr& collection);
+
+/**
  * Returns a batch of documents suitable for being inserted with insertBatch().
  *
  * The batch of documents is returned once its size exceeds batchSizeLimitBytes or the pipeline has
@@ -147,6 +155,30 @@ void updateSessionRecord(OperationContext* opCtx,
                          std::vector<StmtId> stmtIds,
                          boost::optional<repl::OpTime> preImageOpTime,
                          boost::optional<repl::OpTime> postImageOpTime);
+
+/**
+ * Calls and returns the value from the supplied lambda function.
+ *
+ * If a StaleConfig exception is thrown during its execution, then this function will attempt to
+ * refresh the collection and invoke the supplied lambda function a second time.
+ */
+template <typename Callable>
+auto withOneStaleConfigRetry(OperationContext* opCtx, Callable&& callable) {
+    try {
+        return callable();
+    } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
+        if (auto sce = ex.extraInfo<StaleConfigInfo>()) {
+            const auto refreshed =
+                onShardVersionMismatchNoExcept(opCtx, sce->getNss(), sce->getVersionReceived())
+                    .isOK();
+
+            if (refreshed) {
+                return callable();
+            }
+        }
+        throw;
+    }
+}
 
 }  // namespace resharding::data_copy
 }  // namespace mongo

@@ -39,6 +39,8 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/integer_histogram.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -47,6 +49,9 @@ namespace {
 using namespace fmt::literals;
 
 constexpr auto kOpTimeRemaining = "remainingOperationTimeEstimatedSecs"_sd;
+constexpr auto kOplogApplierApplyBatchLatencyMillis = "oplogApplierApplyBatchLatencyMillis";
+constexpr auto kCollClonerFillBatchForInsertLatencyMillis =
+    "collClonerFillBatchForInsertLatencyMillis";
 
 class ReshardingMetricsTest : public ServiceContextTest {
 public:
@@ -125,6 +130,20 @@ public:
         ASSERT_EQ(report.getIntField(tag), expectedValue)
             << fmt::format("{}: {}", errMsg, report.toString());
     };
+
+    void appendExpectedHistogramResult(BSONObjBuilder* bob,
+                                       std::string tag,
+                                       const std::vector<int64_t>& latencies) {
+        IntegerHistogram<kLatencyHistogramBucketsCount> hist(tag, latencyHistogramBuckets);
+        for (size_t i = 0; i < latencies.size(); i++) {
+            hist.increment(latencies[i]);
+        }
+
+        BSONObjBuilder histogramBuilder;
+        hist.append(histogramBuilder, false);
+        BSONObj histogram = histogramBuilder.obj();
+        bob->appendElements(histogram);
+    }
 
 private:
     ClockSourceMock* _clockSource;
@@ -237,7 +256,7 @@ TEST_F(ReshardingMetricsTest, TestOperationStatus) {
 }
 
 TEST_F(ReshardingMetricsTest, TestElapsedTime) {
-    startOperation(ReshardingMetrics::Role::kRecipient);
+    startOperation(ReshardingMetrics::Role::kDonor);
     const auto elapsedTime = 1;
     advanceTime(Seconds(elapsedTime));
     checkMetrics(
@@ -282,11 +301,6 @@ TEST_F(ReshardingMetricsTest, TestDonorAndRecipientMetrics) {
     checkMetrics(currentDonorOpReport, "totalCriticalSectionTimeElapsedSecs", elapsedTime * 2);
     checkMetrics(
         currentDonorOpReport, "countWritesDuringCriticalSection", kWritesDuringCriticalSection);
-
-    // Expected remaining time = totalCopyTimeElapsedSecs + 2 * estimated time to copy remaining
-    checkMetrics(currentDonorOpReport,
-                 "remainingOperationTimeEstimatedSecs",
-                 elapsedTime + 2 * (100 - kCopyProgress) / kCopyProgress * elapsedTime);
 
     const auto cumulativeReportAfterCompletion = getReport(OpReportType::CumulativeReport);
     checkMetrics(
@@ -402,12 +416,47 @@ TEST_F(ReshardingMetricsTest, CurrentOpMetricsAreNotRetainedAfterStepDown) {
     ASSERT_FALSE(getReport(OpReportType::CurrentOpReportRecipientRole)[kTag].ok());
 }
 
+TEST_F(ReshardingMetricsTest, CumulativeOpMetricsAreSetAndReset) {
+    const auto kExpectedMin = Milliseconds(1);
+    const auto kExpectedMax = Milliseconds(8);
+    auto constexpr kMinOpTime = "minShardRemainingOperationTimeEstimatedMillis";
+    auto constexpr kMaxOpTime = "maxShardRemainingOperationTimeEstimatedMillis";
+    startOperation(ReshardingMetrics::Role::kCoordinator);
+    getMetrics()->setCoordinatorState(CoordinatorStateEnum::kBlockingWrites);
+
+    getMetrics()->setMinRemainingOperationTime(kExpectedMin);
+    checkMetrics(kMinOpTime,
+                 durationCount<Milliseconds>(kExpectedMin),
+                 "Cumulative metrics minimum time remaining is not set",
+                 OpReportType::CumulativeReport);
+
+    getMetrics()->setMaxRemainingOperationTime(kExpectedMax);
+    checkMetrics(kMaxOpTime,
+                 durationCount<Milliseconds>(kExpectedMax),
+                 "Cumulative metrics maximum time remaining is not set",
+                 OpReportType::CumulativeReport);
+
+    advanceTime();
+    completeOperation(ReshardingMetrics::Role::kCoordinator,
+                      ReshardingOperationStatusEnum::kSuccess);
+    advanceTime();
+    checkMetrics(kMinOpTime,
+                 0,
+                 "Cumulative metrics minimum time remaining is not reset",
+                 OpReportType::CumulativeReport);
+
+    checkMetrics(kMaxOpTime,
+                 0,
+                 "Cumulative metrics maximum time remaining is not reset",
+                 OpReportType::CumulativeReport);
+}
+
 TEST_F(ReshardingMetricsTest, EstimatedRemainingOperationTime) {
     auto constexpr kTag = "remainingOperationTimeEstimatedSecs";
     const auto elapsedTime = 1;
 
     startOperation(ReshardingMetrics::Role::kRecipient);
-    checkMetrics(kTag, -1, OpReportType::CurrentOpReportDonorRole);
+    checkMetrics(kTag, -1, OpReportType::CurrentOpReportRecipientRole);
 
     const auto kDocumentsToCopy = 2;
     const auto kBytesToCopy = 200;
@@ -419,7 +468,7 @@ TEST_F(ReshardingMetricsTest, EstimatedRemainingOperationTime) {
     advanceTime(Seconds(elapsedTime));
     // Since 50% of the data is copied, the remaining copy time equals the elapsed copy time, which
     // is equal to `elapsedTime` seconds.
-    checkMetrics(kTag, elapsedTime + 2 * elapsedTime, OpReportType::CurrentOpReportDonorRole);
+    checkMetrics(kTag, elapsedTime + 2 * elapsedTime, OpReportType::CurrentOpReportRecipientRole);
 
     const auto kOplogEntriesFetched = 4;
     const auto kOplogEntriesApplied = 2;
@@ -432,7 +481,7 @@ TEST_F(ReshardingMetricsTest, EstimatedRemainingOperationTime) {
     // So far, the time to apply oplog entries equals `elapsedTime` seconds.
     checkMetrics(kTag,
                  elapsedTime * (kOplogEntriesFetched / kOplogEntriesApplied - 1),
-                 OpReportType::CurrentOpReportDonorRole);
+                 OpReportType::CurrentOpReportRecipientRole);
 }
 
 TEST_F(ReshardingMetricsTest, CurrentOpReportForDonor) {
@@ -460,7 +509,6 @@ TEST_F(ReshardingMetricsTest, CurrentOpReportForDonor) {
                              "unique: {3},"
                              "collation: {{ locale: \"simple\" }} }},"
                              "totalOperationTimeElapsedSecs: 5,"
-                             "remainingOperationTimeEstimatedSecs: -1,"
                              "countWritesDuringCriticalSection: 0,"
                              "totalCriticalSectionTimeElapsedSecs : 3,"
                              "donorState: \"{4}\","
@@ -510,7 +558,7 @@ TEST_F(ReshardingMetricsTest, CurrentOpReportForRecipient) {
         BSON("id" << 1),
         false);
 
-    const auto expected =
+    BSONObj expectedPrefix =
         fromjson(fmt::format("{{ type: \"op\","
                              "desc: \"ReshardingRecipientService {0}\","
                              "op: \"command\","
@@ -544,8 +592,103 @@ TEST_F(ReshardingMetricsTest, CurrentOpReportForRecipient) {
                              durationCount<Seconds>(kTimeSpentCloning),
                              RecipientState_serializer(kRecipientState)));
 
+    BSONObjBuilder expectedBuilder(std::move(expectedPrefix));
+
+    // Append histogram latency data.
+    appendExpectedHistogramResult(&expectedBuilder, kOplogApplierApplyBatchLatencyMillis, {});
+    appendExpectedHistogramResult(&expectedBuilder, kCollClonerFillBatchForInsertLatencyMillis, {});
+
+    BSONObj expected = expectedBuilder.done();
+
     const auto report = getMetrics()->reportForCurrentOp(options);
     ASSERT_BSONOBJ_EQ(expected, report);
+}
+
+TEST_F(ReshardingMetricsTest, TestHistogramMetricsForRecipient) {
+    const std::vector<int64_t> applyLatencies_1{3, 427, 0, 6004, 320, 10056, 12300, 105, 70};
+    const std::vector<int64_t> applyLatencies_2{800, 20, 5, 1025, 10567};
+    const std::vector<int64_t> insertLatencies_1{120, 7, 110, 50, 0, 16500, 77000, 667, 7980};
+    const std::vector<int64_t> insertLatencies_2{12450, 2400, 760, 57, 2};
+
+    const auto combineLatencies = [](std::vector<int64_t>* allLatencies,
+                                     const std::vector<int64_t>& latencies_1,
+                                     const std::vector<int64_t>& latencies_2) {
+        allLatencies->insert(allLatencies->end(), latencies_1.begin(), latencies_1.end());
+        allLatencies->insert(allLatencies->end(), latencies_2.begin(), latencies_2.end());
+    };
+
+    std::vector<int64_t> allApplyLatencies;
+    combineLatencies(&allApplyLatencies, applyLatencies_1, applyLatencies_2);
+    std::vector<int64_t> allInsertLatencies;
+    combineLatencies(&allInsertLatencies, insertLatencies_1, insertLatencies_2);
+
+
+    const ReshardingMetrics::ReporterOptions options(
+        ReshardingMetrics::Role::kRecipient,
+        UUID::parse("12345678-1234-1234-1234-123456789def").getValue(),
+        NamespaceString("db", "collection"),
+        BSON("id" << 1),
+        false);
+
+    // Test that all histogram metrics appear in both currentOp and cumulativeOp.
+    const size_t kNumTests = 4;
+    std::vector<int64_t> testLatencies[kNumTests] = {
+        applyLatencies_1, applyLatencies_2, insertLatencies_1, insertLatencies_2};
+    std::vector<int64_t> expectedLatencies[kNumTests] = {
+        applyLatencies_1, allApplyLatencies, insertLatencies_1, allInsertLatencies};
+    OpReportType testReportTypes[kNumTests] = {OpReportType::CurrentOpReportRecipientRole,
+                                               OpReportType::CumulativeReport,
+                                               OpReportType::CurrentOpReportRecipientRole,
+                                               OpReportType::CumulativeReport};
+    std::string histogramTag[kNumTests] = {kOplogApplierApplyBatchLatencyMillis,
+                                           kOplogApplierApplyBatchLatencyMillis,
+                                           kCollClonerFillBatchForInsertLatencyMillis,
+                                           kCollClonerFillBatchForInsertLatencyMillis};
+
+    auto testLatencyHistogram = [&](std::vector<int64_t> latencies,
+                                    OpReportType reportType,
+                                    std::vector<int64_t> expectedLatencies,
+                                    std::string histogramTag) {
+        LOGV2(57700,
+              "TestHistogramMetricsForRecipient test case",
+              "reportType"_attr = reportType,
+              "histogramTag"_attr = histogramTag);
+
+        startOperation(ReshardingMetrics::Role::kRecipient);
+
+        RecipientStateEnum state = (histogramTag.compare(kOplogApplierApplyBatchLatencyMillis) == 0
+                                        ? RecipientStateEnum::kApplying
+                                        : RecipientStateEnum::kCloning);
+        getMetrics()->setRecipientState(state);
+
+        for (size_t i = 0; i < latencies.size(); i++) {
+            if (histogramTag.compare(kOplogApplierApplyBatchLatencyMillis) == 0) {
+                getMetrics()->onOplogApplierApplyBatch(Milliseconds(latencies[i]));
+            } else if (histogramTag.compare(kCollClonerFillBatchForInsertLatencyMillis) == 0) {
+                getMetrics()->onCollClonerFillBatchForInsert(Milliseconds(latencies[i]));
+            } else {
+                MONGO_UNREACHABLE;
+            }
+        }
+
+        const auto report = getReport(reportType);
+        const auto buckets = report[histogramTag];
+
+        BSONObjBuilder expectedBuilder;
+        appendExpectedHistogramResult(&expectedBuilder, histogramTag, expectedLatencies);
+        const auto expectedHist = expectedBuilder.done();
+        const auto expectedBuckets = expectedHist[histogramTag];
+
+        ASSERT_EQ(buckets.woCompare(expectedBuckets), 0);
+
+        completeOperation(ReshardingMetrics::Role::kRecipient,
+                          ReshardingOperationStatusEnum::kFailure);
+    };
+
+    for (size_t i = 0; i < kNumTests; i++) {
+        testLatencyHistogram(
+            testLatencies[i], testReportTypes[i], expectedLatencies[i], histogramTag[i]);
+    }
 }
 
 TEST_F(ReshardingMetricsTest, CurrentOpReportForCoordinator) {
@@ -573,7 +716,6 @@ TEST_F(ReshardingMetricsTest, CurrentOpReportForCoordinator) {
                              "unique: {3},"
                              "collation: {{ locale: \"simple\" }} }},"
                              "totalOperationTimeElapsedSecs: {4},"
-                             "remainingOperationTimeEstimatedSecs: -1,"
                              "coordinatorState: \"{5}\","
                              "opStatus: \"running\" }}",
                              options.id.toString(),

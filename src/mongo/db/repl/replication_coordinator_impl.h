@@ -1128,6 +1128,11 @@ private:
     void _setConfigState_inlock(ConfigState newState);
 
     /**
+     * Returns the string representation of the config state.
+     */
+    static std::string getConfigStateString(ConfigState state);
+
+    /**
      * Returns true if the horizon mappings between the oldConfig and newConfig are different.
      */
     void _errorOnPromisesIfHorizonChanged(WithLock lk,
@@ -1278,10 +1283,13 @@ private:
      * history as 'committedOpTime', so we update our commit point to min(committedOpTime,
      * lastApplied).
      * Also updates corresponding wall clock time.
+     * The 'forInitiate' flag is used to force-advance our commit point during the execuction
+     * of the replSetInitiate command.
      */
     void _advanceCommitPoint(WithLock lk,
                              const OpTimeAndWallTime& committedOpTimeAndWallTime,
-                             bool fromSyncSource);
+                             bool fromSyncSource,
+                             bool forInitiate = false);
 
     /**
      * Scan the memberData and determine the highest last applied or last

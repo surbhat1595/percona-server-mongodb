@@ -42,6 +42,26 @@ last-continuous:
       test_file: jstests/replsets/tenant_migration_retryable_write_retry_on_recipient.js
     - ticket: SERVER-57617
       test_file: jstests/replsets/tenant_migration_find_and_modify_retry.js
+    - ticket: SERVER-59057
+      test_file: jstests/replsets/rollback_transaction_table.js
+    - ticket: SERVER-59525
+      test_file: jstests/replsets/tenant_migration_recipient_access_blocker_rollback.js
+    - ticket: SERVER-59023
+      test_file: jstests/sharding/resharding_secondary_recovers_temp_ns_metadata.js
+    - ticket: SERVER-51943
+      test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
+    - ticket: SERVER-56887
+      test_file: jstests/sharding/database_versioning_all_commands.js
+    - ticket: SERVER-59108
+      test_file: jstests/replsets/stepdown_race_with_transaction.js
+    - ticket: SERVER-59613
+      test_file: jstests/aggregation/range.js
+    - ticket: SERVER-59923
+      test_file: jstests/sharding/test_resharding_test_fixture_shutdown_retry_needed.js
+    - ticket: SERVER-59505
+      test_file: jstests/core/timeseries/timeseries_find.js
+    - ticket: SERVER-57700
+      test_file: jstests/sharding/resharding_histogram_metrics.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -90,10 +110,12 @@ last-lts:
       test_file: jstests/replsets/check_replication_hello_response_fields.js
     - ticket: SERVER-50640
       test_file: jstests/core/views/views_all_commands.js
-    - ticket: SERVER-50640
+    - ticket: SERVER-56887
       test_file: jstests/sharding/database_versioning_all_commands.js
     - ticket: SERVER-49988
       test_file: jstests/sharding/hello_response_validation.js
+    - ticket: SERVER-53335
+      test_file: jstests/sharding/query/collation_shard_targeting_hashed_shard_key.js
     - ticket: SERVER-50640
       test_file: jstests/sharding/read_write_concern_defaults_application.js
     - ticket: SERVER-50640
@@ -214,6 +236,8 @@ last-lts:
       test_file: jstests/sharding/movechunk_parallel.js
     - ticket: SERVER-52906
       test_file: jstests/sharding/txn_writes_during_movechunk.js
+    - ticket: SERVER-59505
+      test_file: jstests/core/timeseries/timeseries_find.js
     - ticket: SERVER-57262
       test_file: jstests/replsets/catchup_takeover_with_higher_config.js
     - ticket: SERVER-58898
@@ -232,6 +256,26 @@ last-lts:
       test_file: jstests/replsets/tenant_migration_retryable_write_retry_on_recipient.js
     - ticket: SERVER-57617
       test_file: jstests/replsets/tenant_migration_find_and_modify_retry.js
+    - ticket: SERVER-57321
+      test_file: jstests/core/mod_special_values.js
+    - ticket: SERVER-59057
+      test_file: jstests/replsets/rollback_transaction_table.js
+    - ticket: SERVER-59525
+      test_file: jstests/replsets/tenant_migration_recipient_access_blocker_rollback.js
+    - ticket: SERVER-59023
+      test_file: jstests/sharding/resharding_secondary_recovers_temp_ns_metadata.js
+    - ticket: SERVER-59765
+      test_file: jstests/aggregation/expressions/date_add_subtract.js
+    - ticket: SERVER-51943
+      test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
+    - ticket: SERVER-59108
+      test_file: jstests/replsets/stepdown_race_with_transaction.js
+    - ticket: SERVER-59613
+      test_file: jstests/aggregation/range.js
+    - ticket: SERVER-59923
+      test_file: jstests/sharding/test_resharding_test_fixture_shutdown_retry_needed.js
+    - ticket: SERVER-57700
+      test_file: jstests/sharding/resharding_histogram_metrics.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

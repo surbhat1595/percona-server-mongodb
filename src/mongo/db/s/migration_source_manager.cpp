@@ -53,6 +53,7 @@
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/type_shard_collection.h"
+#include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -128,8 +129,8 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
       _stats(ShardingStatistics::get(_opCtx)),
       _critSecReason(BSON("command"
                           << "moveChunk"
-                          << "fromShard" << request.getFromShardId() << "toShard"
-                          << request.getToShardId())) {
+                          << "fromShard" << _args.getFromShardId() << "toShard"
+                          << _args.getToShardId())) {
     invariant(!_opCtx->lockState()->isLocked());
 
     LOGV2(22016,
@@ -503,6 +504,13 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
           "Migration succeeded and updated collection version",
           "updatedCollectionVersion"_attr = refreshedMetadata.getCollVersion(),
           "migrationId"_attr = _coordinator->getMigrationId());
+
+    // If the migration has succeeded, clear the BucketCatalog so that the buckets that got migrated
+    // out are no longer updatable.
+    if (getNss().isTimeseriesBucketsCollection()) {
+        auto& bucketCatalog = BucketCatalog::get(_opCtx);
+        bucketCatalog.clear(getNss().getTimeseriesViewNamespace());
+    }
 
     _coordinator->setMigrationDecision(DecisionEnum::kCommitted);
 

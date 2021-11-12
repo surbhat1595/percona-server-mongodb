@@ -48,6 +48,7 @@
 #include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/document_source_resharding_ownership_match.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
@@ -258,15 +259,30 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_restartP
 bool ReshardingCollectionCloner::doOneBatch(OperationContext* opCtx, Pipeline& pipeline) {
     pipeline.reattachToOperationContext(opCtx);
     ON_BLOCK_EXIT([&pipeline] { pipeline.detachFromOperationContext(); });
+
+    Timer latencyTimer;
     auto batch = resharding::data_copy::fillBatchForInsert(
         pipeline, resharding::gReshardingCollectionClonerBatchSizeInBytes.load());
+    _env->metrics()->onCollClonerFillBatchForInsert(
+        duration_cast<Milliseconds>(latencyTimer.elapsed()));
 
     if (batch.empty()) {
         return false;
     }
 
-    int bytesInserted = resharding::data_copy::insertBatch(opCtx, _outputNss, batch);
+    // ReshardingOpObserver depends on the collection metadata being known when processing writes to
+    // the temporary resharding collection. We attach shard version IGNORED to the insert operations
+    // and retry once on a StaleConfig exception to allow the collection metadata information to be
+    // recovered.
+    auto& oss = OperationShardingState::get(opCtx);
+    oss.initializeClientRoutingVersions(
+        _outputNss, ChunkVersion::IGNORED() /* shardVersion */, boost::none /* dbVersion */);
+
+    int bytesInserted = resharding::data_copy::withOneStaleConfigRetry(
+        opCtx, [&] { return resharding::data_copy::insertBatch(opCtx, _outputNss, batch); });
+
     _env->metrics()->onDocumentsCopied(batch.size(), bytesInserted);
+    _env->metrics()->gotInserts(batch.size());
     return true;
 }
 
@@ -289,7 +305,12 @@ SemiFuture<void> ReshardingCollectionCloner::run(
                }
 
                auto opCtx = factory.makeOperationContext(&cc());
+               auto guard = makeGuard([&] {
+                   chainCtx->pipeline->dispose(opCtx.get());
+                   chainCtx->pipeline.reset();
+               });
                chainCtx->moreToCome = doOneBatch(opCtx.get(), *chainCtx->pipeline);
+               guard.dismiss();
            })
         .onTransientError([this](const Status& status) {
             LOGV2(5269300,

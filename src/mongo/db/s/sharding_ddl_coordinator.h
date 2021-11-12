@@ -90,6 +90,10 @@ public:
         return metadata().getForwardableOpMetadata().get();
     }
 
+    const boost::optional<mongo::DatabaseVersion>& getDatabaseVersion() const& {
+        return metadata().getDatabaseVersion();
+    }
+
     // Cached LSIDs shared between DDL coordinator instances
     class SessionCache {
 
@@ -200,7 +204,7 @@ private:
     SharedPromise<void> _constructionCompletionPromise;
     SharedPromise<void> _completionPromise;
 
-    std::stack<DistLockManager::ScopedDistLock> _scopedLocks;
+    std::stack<DistLockManager::ScopedLock> _scopedLocks;
 };
 
 class ShardingDDLCoordinator_NORESILIENT {

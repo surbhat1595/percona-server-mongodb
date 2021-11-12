@@ -26,6 +26,11 @@ function verifyDict(dict, expected) {
         if (expected[key] === undefined) {
             jsTest.log(`${key}: ${tojson(dict[key])}`);
             continue;
+        } else if (key === "oplogEntriesFetched" || key === "oplogEntriesApplied") {
+            // The fetcher writes no-op entries for each getMore that returns an empty batch. We
+            // won't know how many getMores it called however, so we can only check that the metrics
+            // are gte the number of writes we're aware of.
+            assert.gte(dict[key], expected[key]);
         } else {
             assert.eq(dict[key],
                       expected[key],
@@ -94,8 +99,20 @@ const topology = DiscoverTopology.findConnectedNodes(mongos);
 // baseline of 2 fetches/applies on each recipient (one "no-op" for each donor).
 // Additionally, recipientShard[1] gets the 10 late inserts above, so expect 12
 // oplogEntry applies for those late inserts.
-[{shardName: recipientShardNames[0], documents: 2, fetched: 2, applied: 2},
- {shardName: recipientShardNames[1], documents: 2, fetched: 12, applied: 12},
+[{
+    shardName: recipientShardNames[0],
+    documents: 2,
+    fetched: 2,
+    applied: 2,
+    opcounters: {insert: 2, update: 0, delete: 0}
+},
+ {
+     shardName: recipientShardNames[1],
+     documents: 2,
+     fetched: 12,
+     applied: 12,
+     opcounters: {insert: 12, update: 0, delete: 0}
+ },
 ].forEach(e => {
     const mongo = new Mongo(topology.shards[e.shardName].primary);
     const doc = mongo.getDB('admin').serverStatus({});
@@ -113,6 +130,13 @@ const topology = DiscoverTopology.findConnectedNodes(mongos);
         "oplogEntriesFetched": e.fetched,
         "oplogEntriesApplied": e.applied,
     });
+
+    verifyDict(sub.opcounters, {
+        "insert": e.opcounters.insert,
+        "update": e.opcounters.update,
+        "delete": e.opcounters.delete,
+    });
+
     // bytesCopied is harder to pin down but it should be >0.
     assert.betweenIn(1, sub['bytesCopied'], 1024, 'bytesCopied');
 });

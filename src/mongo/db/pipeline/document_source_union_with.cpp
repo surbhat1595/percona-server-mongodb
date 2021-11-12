@@ -206,10 +206,6 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
 
     if (_executionState == ExecutionProgress::kStartingSubPipeline) {
         auto serializedPipe = _pipeline->serializeToBson();
-        LOGV2_DEBUG(23869,
-                    1,
-                    "$unionWith attaching cursor to pipeline {pipeline}",
-                    "pipeline"_attr = serializedPipe);
         // $$SEARCH_META can be set during runtime earlier in the pipeline, and therefore must be
         // copied to the subpipeline manually.
         if (pExpCtx->variables.hasConstantValue(Variables::kSearchMetaId)) {
@@ -218,6 +214,7 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
                 pExpCtx->variables.getValue(Variables::kSearchMetaId, Document()),
                 true);
         }
+        logStartingSubPipeline(serializedPipe);
         try {
             _pipeline =
                 pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(_pipeline.release());
@@ -227,13 +224,7 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
                 pExpCtx,
                 ExpressionContext::ResolvedNamespace{e->getNamespace(), e->getPipeline()},
                 serializedPipe);
-            LOGV2_DEBUG(4556300,
-                        3,
-                        "$unionWith found view definition. ns: {ns}, pipeline: {pipeline}. New "
-                        "$unionWith sub-pipeline: {new_pipe}",
-                        "ns"_attr = e->getNamespace(),
-                        "pipeline"_attr = Value(e->getPipeline()),
-                        "new_pipe"_attr = _pipeline->serializeToBson());
+            logShardedViewFound(e);
             return doGetNext();
         }
     }
@@ -249,10 +240,39 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
     return GetNextResult::makeEOF();
 }
 
+// The use of these logging macros is done in separate NOINLINE functions to reduce the stack space
+// used on the hot getNext() path. This is done to avoid stack overflows.
+MONGO_COMPILER_NOINLINE void DocumentSourceUnionWith::logStartingSubPipeline(
+    const std::vector<BSONObj>& serializedPipe) {
+    LOGV2_DEBUG(23869,
+                1,
+                "$unionWith attaching cursor to pipeline {pipeline}",
+                "pipeline"_attr = serializedPipe);
+}
+
+MONGO_COMPILER_NOINLINE void DocumentSourceUnionWith::logShardedViewFound(
+    const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
+    LOGV2_DEBUG(4556300,
+                3,
+                "$unionWith found view definition. ns: {ns}, pipeline: {pipeline}. New "
+                "$unionWith sub-pipeline: {new_pipe}",
+                "ns"_attr = e->getNamespace(),
+                "pipeline"_attr = Value(e->getPipeline()),
+                "new_pipe"_attr = _pipeline->serializeToBson());
+}
+
 Pipeline::SourceContainer::iterator DocumentSourceUnionWith::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     auto duplicateAcrossUnion = [&](auto&& nextStage) {
         _pipeline->addFinalSource(nextStage->clone());
+        // Apply the same rewrite to the cached pipeline if available.
+        if (pExpCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
+            auto cloneForExplain = nextStage->clone();
+            if (!_cachedPipeline.empty()) {
+                cloneForExplain->setSource(_cachedPipeline.back().get());
+            }
+            _cachedPipeline.push_back(std::move(cloneForExplain));
+        }
         auto newStageItr = container->insert(itr, std::move(nextStage));
         container->erase(std::next(itr));
         return newStageItr == container->begin() ? newStageItr : std::prev(newStageItr);

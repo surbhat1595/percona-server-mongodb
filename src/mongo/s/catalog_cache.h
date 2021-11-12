@@ -35,6 +35,7 @@
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/chunk_manager.h"
+#include "mongo/s/type_collection_timeseries_fields_gen.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/read_through_cache.h"
 
@@ -78,7 +79,7 @@ class CatalogCache {
 
 public:
     CatalogCache(ServiceContext* service, CatalogCacheLoader& cacheLoader);
-    ~CatalogCache();
+    virtual ~CatalogCache();
 
     /**
      * Blocking method that ensures the specified database is in the cache, loading it if necessary,
@@ -112,9 +113,9 @@ public:
      * guaranteed to never return StaleClusterTime, because the latest routing information should
      * always be available.
      */
-    StatusWith<ChunkManager> getCollectionRoutingInfo(OperationContext* opCtx,
-                                                      const NamespaceString& nss,
-                                                      bool allowLocks = false);
+    virtual StatusWith<ChunkManager> getCollectionRoutingInfo(OperationContext* opCtx,
+                                                              const NamespaceString& nss,
+                                                              bool allowLocks = false);
 
     /**
      * Same as getDatbase above, but in addition forces the database entry to be refreshed.

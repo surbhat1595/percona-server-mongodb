@@ -175,11 +175,11 @@ ScanningReplicaSetMonitor::ScanningReplicaSetMonitor(const SetStatePtr& initialS
     : ReplicaSetMonitor(cleanupCallback), _state(initialState) {}
 
 ScanningReplicaSetMonitor::ScanningReplicaSetMonitor(const MongoURI& uri,
+                                                     std::shared_ptr<TaskExecutor> executor,
                                                      std::function<void()> cleanupCallback)
     : ScanningReplicaSetMonitor(
-          std::make_shared<SetState>(uri,
-                                     &ReplicaSetMonitorManager::get()->getNotifier(),
-                                     ReplicaSetMonitorManager::get()->getExecutor().get()),
+          std::make_shared<SetState>(
+              uri, &ReplicaSetMonitorManager::get()->getNotifier(), executor.get()),
           cleanupCallback) {}
 
 void ScanningReplicaSetMonitor::init() {
@@ -335,7 +335,7 @@ Future<std::vector<HostAndPort>> ScanningReplicaSetMonitor::_getHostsOrRefresh(
 
     stdx::lock_guard<Latch> lk(_state->mutex);
     if (_state->isDropped) {
-        return Status(ErrorCodes::ReplicaSetMonitorRemoved,
+        return Status(ErrorCodes::ShutdownInProgress,
                       str::stream()
                           << "ScanningReplicaSetMonitor for set " << getName() << " is removed");
     }

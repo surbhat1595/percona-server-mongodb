@@ -355,7 +355,7 @@ install_deps() {
       elif [ x"$RHEL" = x7 ]; then
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel
-        yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel scons rpmlint
+        yum -y install cyrus-sasl-devel cyrus-sasl-plain snappy-devel zlib-devel bzip2-devel scons rpmlint
         yum -y install rpm-build git python-pip python-devel libopcodes libcurl-devel rpmlint e2fsprogs-devel expat-devel lz4-devel which
         yum -y install openldap-devel krb5-devel xz-devel
         pip install --upgrade pip
@@ -922,7 +922,7 @@ build_tarball(){
     if [ ! -d lib/private ]; then
         mkdir -p lib/private
     fi
-    LIBLIST="libcrypto.so libssl.so libsasl2.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
+    LIBLIST="libcrypto.so libssl.so libsasl2.so liblogin.so libplain.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
     DIRLIST="bin lib/private"
 
     LIBPATH=""

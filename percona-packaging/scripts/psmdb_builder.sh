@@ -987,6 +987,13 @@ build_tarball(){
         done
     }
 
+    # Details are in ticket PSMDB-950
+    function bind_sasl_libs {
+        patchelf --add-needed liblogin.so bin/mongo
+        patchelf --add-needed libplain.so bin/mongo
+        patchelf --add-needed libsasl2.so.2 bin/mongo
+    }
+
     function create_sparse {
         local elf_path=$1
         for elf in $(find ${elf_path} -maxdepth 1 -exec file {} \; | grep 'ELF ' | cut -d':' -f1); do
@@ -1030,6 +1037,8 @@ build_tarball(){
         for DIR in ${DIRLIST}; do
             replace_libs ${DIR}
         done
+
+        bind_sasl_libs
 
         # Create and replace by sparse file to reduce size
         create_sparse bin

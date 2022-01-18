@@ -214,7 +214,7 @@ install_python3_7_12() {
         tar -zxf Python-3.7.12.tgz 
         cd Python-3.7.12/
         ./configure --enable-optimizations
-        make -j 4
+        make -j4 build_all
         make altinstall
         cd $CUR_DIR
     fi
@@ -420,14 +420,14 @@ install_deps() {
       apt-get update
       if [ x"${DEBIAN}" = "xbullseye" ]; then
         INSTALL_LIST="python3 python3-dev python3-pip"
-      elif [x"${DEBIAN}" = "xxenial"]; then
+      elif [ x"${DEBIAN}" = "xxenial" ]; then
         INSTALL_LIST="build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libreadline-dev libffi-dev libsqlite3-dev"
       else
         INSTALL_LIST="python3.7 python3.7-dev dh-systemd"
       fi
       INSTALL_LIST="${INSTALL_LIST} git valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
       INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf"
-      if [ x"${DEBIAN}" != "xstretch" -a x"${DEBIAN}" != "xbullseye" ]; then
+      if [ x"${DEBIAN}" != "xstretch" -a x"${DEBIAN}" != "xbullseye" -a x"${DEBIAN}" != "xxenial" ]; then
         INSTALL_LIST="${INSTALL_LIST} python3.7-distutils"
       fi
       until apt-get -y install dirmngr; do
@@ -439,7 +439,7 @@ install_deps() {
         echo "waiting"
       done
       apt-get -y install libext2fs-dev || apt-get -y install e2fslibs-dev
-      if [x"${DEBIAN}" = "xxenial"]; then
+      if [ x"${DEBIAN}" = "xxenial" ]; then
         install_python3_7_12
         update-alternatives --install /usr/bin/python python /usr/local/bin/python3.7 1
       fi

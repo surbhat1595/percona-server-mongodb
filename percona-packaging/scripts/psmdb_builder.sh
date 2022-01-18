@@ -1009,6 +1009,8 @@ build_tarball(){
 
     # Details are in ticket PSMDB-950
     function bind_sasl_libs {
+        cp /usr/lib64/sasl2/liblogin.so lib/private
+        cp /usr/lib64/sasl2/libplain.so lib/private
         patchelf --add-needed liblogin.so bin/mongo
         patchelf --add-needed libplain.so bin/mongo
         patchelf --add-needed libsasl2.so.2 bin/mongo

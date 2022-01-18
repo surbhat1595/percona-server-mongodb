@@ -206,6 +206,20 @@ get_system(){
     return
 }
 
+install_python3_7_12() {
+    if [ x"${DEBIAN}" = xxenial ]; then
+        wget https://www.python.org/ftp/python/3.7.12/Python-3.7.12.tgz -O /tmp/Python-3.7.12.tgz
+        CUR_DIR=$PWD
+        cd /tmp
+        tar -zxf Python-3.7.12.tgz 
+        cd Python-3.7.12/
+        ./configure --enable-optimizations
+        make -j 4
+        make altinstall
+        cd $CUR_DIR
+    fi
+}
+
 install_golang() {
     wget https://golang.org/dl/go1.15.7.linux-amd64.tar.gz -O /tmp/golang1.15.tar.gz
     tar --transform=s,go,go1.15, -zxf /tmp/golang1.15.tar.gz
@@ -395,7 +409,7 @@ install_deps() {
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
       wget https://repo.percona.com/apt/pool/testing/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
-      if [ x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
+      if [ x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
         add-apt-repository -y ppa:deadsnakes/ppa
       elif [ x"${DEBIAN}" = "xstretch" -o x"${DEBIAN}" = "xbuster" ]; then
         wget https://people.debian.org/~paravoid/python-all/unofficial-python-all.asc
@@ -406,6 +420,8 @@ install_deps() {
       apt-get update
       if [ x"${DEBIAN}" = "xbullseye" ]; then
         INSTALL_LIST="python3 python3-dev python3-pip"
+      elif [x"${DEBIAN}" = "xxenial"]; then
+        INSTALL_LIST="build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libreadline-dev libffi-dev libsqlite3-dev"
       else
         INSTALL_LIST="python3.7 python3.7-dev dh-systemd"
       fi
@@ -423,6 +439,10 @@ install_deps() {
         echo "waiting"
       done
       apt-get -y install libext2fs-dev || apt-get -y install e2fslibs-dev
+      if [x"${DEBIAN}" = "xxenial"]; then
+        install_python3_7_12
+        update-alternatives --install /usr/bin/python python /usr/local/bin/python3.7 1
+      fi
       install_golang
       install_gcc_8_deb
       wget https://bootstrap.pypa.io/get-pip.py

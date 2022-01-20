@@ -1007,13 +1007,25 @@ build_tarball(){
         done
     }
 
-    # Details are in ticket PSMDB-950
+    # Copy additional libraries
     function bind_sasl_libs {
-        cp /usr/lib64/sasl2/liblogin.so lib/private
-        cp /usr/lib64/sasl2/libplain.so lib/private
-        patchelf --add-needed liblogin.so bin/mongo
-        patchelf --add-needed libplain.so bin/mongo
+        # Details are in ticket PSMDB-950
+        if [ -f "/usr/lib64/sasl2/liblogin.so" ] && [ -f "/usr/lib64/sasl2/libplain.so" ]; then
+            cp /usr/lib64/sasl2/liblogin.so lib/private
+            cp /usr/lib64/sasl2/libplain.so lib/private
+            patchelf --add-needed liblogin.so bin/mongo
+            patchelf --add-needed libplain.so bin/mongo
+        fi
+        ln -s $(basename $(readlink -f lib/private/libsasl2.so)) lib/private/libsasl2.so.2
+        ln -s $(basename $(readlink -f lib/private/libsasl2.so)) lib/private/libsasl2.so.3
         patchelf --add-needed libsasl2.so.2 bin/mongo
+        patchelf --add-needed libsasl2.so.3 bin/mongo
+
+        LIBLDAP=$(find /usr/lib64 -type f -name "libldap_r*" | head -1)
+        if [ -f $LIBLDAP ]; then
+            cp $LIBLDAP lib/private
+            patchlef --add-needed $(basename $LIBLDAP) bin/mongo
+        fi
     }
 
     function create_sparse {

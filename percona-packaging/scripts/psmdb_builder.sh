@@ -942,7 +942,8 @@ build_tarball(){
     if [ ! -d lib/private ]; then
         mkdir -p lib/private
     fi
-    LIBLIST="libcrypto.so libssl.so libsasl2.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
+    LIBLIST="libcrypto.so libssl.so libsasl2.so liblogin.so libplain.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
+    LIBLIST="${LIBLIST} libcurl.so.4 libssl.so.10 libcrypto.so.10 libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libldap-2.4.so.2 libldap_r-2.4.so.2"
     DIRLIST="bin lib/private"
 
     LIBPATH=""
@@ -1022,9 +1023,16 @@ build_tarball(){
         patchelf --add-needed libsasl2.so.3 bin/mongo
 
         LIBLDAP=$(find /usr/lib64 -type f -name "libldap_r*" | head -1)
+        LIBLDAP_without_version_suffix=$(echo ${LIBLDAP} | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2}')
         if [ -f $LIBLDAP ]; then
             cp $LIBLDAP lib/private
-            patchlef --add-needed $(basename $LIBLDAP) bin/mongo
+                if [ ${LIBLDAP} != ${LIBLDAP_without_version_suffix} ]; then
+                    echo "Symlinking lib from ${LIBLDAP} to ${LIBLDAP_without_version_suffix}"
+                    cd lib/private
+                    ln -s ${LIBLDAP} ${LIBLDAP_without_version_suffix}
+                    cd -
+                fi
+   #         patchelf --add-needed $(basename $LIBLDAP) bin/mongo
         fi
     }
 

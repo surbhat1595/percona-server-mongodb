@@ -1022,14 +1022,27 @@ build_tarball(){
         patchelf --add-needed libsasl2.so.2 bin/mongo
         patchelf --add-needed libsasl2.so.3 bin/mongo
 
-        LIBLDAP=$(basename $(find /usr/lib64 -type f -name "libldap_r*" | head -1))
+        LIBLDAP=$(find /usr/lib64 -type f -name "libldap_r*" | head -1)
         LIBLDAP_without_version_suffix=$(echo ${LIBLDAP} | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2, $3}')
         if [ -f $LIBLDAP ]; then
             cp $LIBLDAP lib/private
                 if [ ${LIBLDAP} != ${LIBLDAP_without_version_suffix} ]; then
                     echo "Symlinking lib from ${LIBLDAP} to ${LIBLDAP_without_version_suffix}"
                     cd lib/private
-                    ln -s ${LIBLDAP} ${LIBLDAP_without_version_suffix}
+                    ln -s $(basename ${LIBLDAP}) $(basename ${LIBLDAP_without_version_suffix})
+                    cd -
+                fi
+   #         patchelf --add-needed $(basename $LIBLDAP) bin/mongo
+        fi
+
+        LIBLDAP=$(find /usr/lib64 -type f -name "libldap-*" | head -1)
+        LIBLDAP_without_version_suffix=$(echo ${LIBLDAP} | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2, $3}')
+        if [ -f $LIBLDAP ]; then
+            cp $LIBLDAP lib/private
+                if [ ${LIBLDAP} != ${LIBLDAP_without_version_suffix} ]; then
+                    echo "Symlinking lib from ${LIBLDAP} to ${LIBLDAP_without_version_suffix}"
+                    cd lib/private
+                    ln -s $(basename ${LIBLDAP}) $(basename ${LIBLDAP_without_version_suffix})
                     cd -
                 fi
    #         patchelf --add-needed $(basename $LIBLDAP) bin/mongo

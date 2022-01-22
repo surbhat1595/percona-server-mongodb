@@ -992,7 +992,7 @@ build_tarball(){
         done
     }
 
-    fubction fix_sasl_lib {
+    function fix_sasl_lib {
         # Details are in ticket PSMDB-950
         patchelf --remove-needed libsasl2.so.3 bin/mongod
         patchelf --remove-needed libsasl2.so.3 bin/mongo

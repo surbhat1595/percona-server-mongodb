@@ -942,8 +942,7 @@ build_tarball(){
     if [ ! -d lib/private ]; then
         mkdir -p lib/private
     fi
-    LIBLIST="libcrypto.so libssl.so libsasl2.so liblogin.so libplain.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
-    LIBLIST="${LIBLIST} libcurl.so.4 libssl.so.10 libcrypto.so.10 libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so"
+    LIBLIST="libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
     DIRLIST="bin lib/private"
 
     LIBPATH=""
@@ -1008,47 +1007,6 @@ build_tarball(){
         done
     }
 
-    # Copy additional libraries
-    function bind_sasl_libs {
-        # Details are in ticket PSMDB-950
-        if [ -f "/usr/lib64/sasl2/liblogin.so" ] && [ -f "/usr/lib64/sasl2/libplain.so" ]; then
-            cp /usr/lib64/sasl2/liblogin.so lib/private
-            cp /usr/lib64/sasl2/libplain.so lib/private
-            patchelf --add-needed liblogin.so bin/mongo
-            patchelf --add-needed libplain.so bin/mongo
-        fi
-        ln -s $(basename $(readlink -f lib/private/libsasl2.so)) lib/private/libsasl2.so.2
-        ln -s $(basename $(readlink -f lib/private/libsasl2.so)) lib/private/libsasl2.so.3
-        patchelf --add-needed libsasl2.so.2 bin/mongo
-        patchelf --add-needed libsasl2.so.3 bin/mongo
-
-        LIBLDAP=$(find /usr/lib64 -type f -name "libldap_r*" | head -1)
-        LIBLDAP_without_version_suffix=$(echo ${LIBLDAP} | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2, $3}')
-        if [ -f $LIBLDAP ]; then
-            cp $LIBLDAP lib/private
-                if [ ${LIBLDAP} != ${LIBLDAP_without_version_suffix} ]; then
-                    echo "Symlinking lib from ${LIBLDAP} to ${LIBLDAP_without_version_suffix}"
-                    cd lib/private
-                    ln -s $(basename ${LIBLDAP}) $(basename ${LIBLDAP_without_version_suffix})
-                    cd -
-                fi
-   #         patchelf --add-needed $(basename $LIBLDAP) bin/mongo
-        fi
-
-        LIBLDAP=$(find /usr/lib64 -type f -name "libldap-*" | head -1)
-        LIBLDAP_without_version_suffix=$(echo ${LIBLDAP} | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2, $3}')
-        if [ -f $LIBLDAP ]; then
-            cp $LIBLDAP lib/private
-                if [ ${LIBLDAP} != ${LIBLDAP_without_version_suffix} ]; then
-                    echo "Symlinking lib from ${LIBLDAP} to ${LIBLDAP_without_version_suffix}"
-                    cd lib/private
-                    ln -s $(basename ${LIBLDAP}) $(basename ${LIBLDAP_without_version_suffix})
-                    cd -
-                fi
-   #         patchelf --add-needed $(basename $LIBLDAP) bin/mongo
-        fi
-    }
-
     function create_sparse {
         local elf_path=$1
         for elf in $(find ${elf_path} -maxdepth 1 -exec file {} \; | grep 'ELF ' | cut -d':' -f1); do
@@ -1092,8 +1050,6 @@ build_tarball(){
         for DIR in ${DIRLIST}; do
             replace_libs ${DIR}
         done
-
-        bind_sasl_libs
 
         # Create and replace by sparse file to reduce size
         create_sparse bin

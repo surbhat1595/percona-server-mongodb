@@ -684,7 +684,7 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
-    if [ x"${DEBIAN}" = "xbullseye" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" ]; then
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
     fi
     #
@@ -752,7 +752,7 @@ build_deb(){
     cp -av percona-packaging/debian/rules debian/
     set_compiler
     fix_rules
-    if [ x"${DEBIAN}" = "xbullseye" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" ]; then
         sed -i 's:dh-systemd,::' debian/control
         sed -i 's:etc/:/etc/:g' debian/percona-server-mongodb-server.conffiles
     fi
@@ -996,6 +996,7 @@ build_tarball(){
         # Details are in ticket PSMDB-950
         patchelf --remove-needed libsasl2.so.3 bin/mongod
         patchelf --remove-needed libsasl2.so.3 bin/mongo
+        patchelf --remove-needed libsasl2.so bin/mongo
     }
 
     function replace_libs {

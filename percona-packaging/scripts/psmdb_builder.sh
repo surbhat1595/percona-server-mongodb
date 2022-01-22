@@ -439,15 +439,15 @@ install_deps() {
         echo "waiting"
       done
       apt-get -y install libext2fs-dev || apt-get -y install e2fslibs-dev
-      if [ x"${DEBIAN}" = "xxenial" ]; then
-        install_python3_7_12
-        update-alternatives --install /usr/bin/python python /usr/local/bin/python3.7 1
-      fi
       install_golang
       install_gcc_8_deb
       wget https://bootstrap.pypa.io/get-pip.py
       if [ x"${DEBIAN}" = "xbullseye" ]; then
         update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
+      elif [ x"${DEBIAN}" = "xxenial" ]; then
+        install_python3_7_12
+        update-alternatives --install /usr/bin/python python /usr/local/bin/python3.7 1
+        ln -sf /usr/local/bin/python3.7 /usr/bin/python3
       else
         update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
         ln -sf /usr/bin/python3.7 /usr/bin/python3
@@ -942,7 +942,7 @@ build_tarball(){
     if [ ! -d lib/private ]; then
         mkdir -p lib/private
     fi
-    LIBLIST="libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
+    LIBLIST="libcrypto.so libssl.so libsasl2.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
     DIRLIST="bin lib/private"
 
     LIBPATH=""
@@ -990,6 +990,12 @@ build_tarball(){
                 patchelf --set-rpath ${r_path} ${elf}
             fi
         done
+    }
+
+    fubction fix_sasl_lib {
+        # Details are in ticket PSMDB-950
+        patchelf --remove-needed libsasl2.so.3 bin/mongod
+        patchelf --remove-needed libsasl2.so.3 bin/mongo
     }
 
     function replace_libs {
@@ -1050,6 +1056,9 @@ build_tarball(){
         for DIR in ${DIRLIST}; do
             replace_libs ${DIR}
         done
+
+        # Use system libsasl2 for some binaries
+        fix_sasl_lib
 
         # Create and replace by sparse file to reduce size
         create_sparse bin

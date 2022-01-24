@@ -448,6 +448,7 @@ install_deps() {
         install_python3_7_12
         update-alternatives --install /usr/bin/python python /usr/local/bin/python3.7 1
         ln -sf /usr/local/bin/python3.7 /usr/bin/python3
+        sed -i 's/python3 /python3.5 /g' /usr/bin/lsb_release
       else
         update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
         ln -sf /usr/bin/python3.7 /usr/bin/python3

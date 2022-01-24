@@ -426,7 +426,7 @@ install_deps() {
         INSTALL_LIST="python3.7 python3.7-dev dh-systemd"
       fi
       INSTALL_LIST="${INSTALL_LIST} git valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
-      INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf"
+      INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf libexpat1-dev"
       if [ x"${DEBIAN}" != "xstretch" -a x"${DEBIAN}" != "xbullseye" -a x"${DEBIAN}" != "xxenial" ]; then
         INSTALL_LIST="${INSTALL_LIST} python3.7-distutils"
       fi

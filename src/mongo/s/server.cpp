@@ -65,6 +65,7 @@
 #include "mongo/db/logical_time_metadata_hook.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/process_health/fault_manager.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongos.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -771,6 +772,17 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 #endif
 
     PeriodicTask::startRunningPeriodicTasks();
+
+    status =
+        process_health::FaultManager::get(serviceContext)->startPeriodicHealthChecks().getNoThrow();
+    if (!status.isOK()) {
+        LOGV2_ERROR(5936510,
+                    "Error completing initial health check: {error}",
+                    "Error completing initial health check",
+                    "error"_attr = redact(status));
+        return EXIT_PROCESS_HEALTH_CHECK;
+    }
+
 
     SessionKiller::set(serviceContext,
                        std::make_shared<SessionKiller>(serviceContext, killSessionsRemote));

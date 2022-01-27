@@ -34,6 +34,7 @@ env.SConscript(
         'matcher',
         'ops',
         'pipeline',
+        'process_health',
         'query',
         'repl',
         's',
@@ -65,6 +66,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/index_names',
+        '$BUILD_DIR/mongo/db/process_health/process_health_feature_flag',
         '$BUILD_DIR/mongo/db/write_concern_options',
     ]
 )

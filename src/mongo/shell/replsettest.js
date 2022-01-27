@@ -1316,11 +1316,32 @@ var ReplSetTest = function(opts) {
             print("Reconfiguring replica set to add in other nodes");
             for (let i = 2; i <= originalMembers.length; i++) {
                 print("ReplSetTest adding in node " + i);
-                config.members = originalMembers.slice(0, i);
-                // Set a maxTimeMS so reconfig fails if it times out.
-                replSetCommandWithRetry(
-                    master, {replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS});
-                config.version++;
+                assert.soon(function() {
+                    master = self.getPrimary().getDB("admin");
+                    const statusRes =
+                        assert.commandWorked(master.adminCommand({replSetGetStatus: 1}));
+                    const primaryMember = statusRes.members.find((m) => m.self);
+                    config.version = primaryMember.configVersion + 1;
+
+                    config.members = originalMembers.slice(0, i);
+                    cmd = {replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS};
+                    print("Running reconfig command: " + tojsononeline(cmd));
+                    const reconfigRes = master.adminCommand(cmd);
+                    const retryableReconfigCodes = [
+                        ErrorCodes.NodeNotFound,
+                        ErrorCodes.NewReplicaSetConfigurationIncompatible,
+                        ErrorCodes.InterruptedDueToReplStateChange,
+                        ErrorCodes.ConfigurationInProgress,
+                        ErrorCodes.CurrentConfigNotCommittedYet,
+                        ErrorCodes.NotWritablePrimary
+                    ];
+                    if (retryableReconfigCodes.includes(reconfigRes.code)) {
+                        print("Retrying reconfig due to " + tojsononeline(reconfigRes));
+                        return false;
+                    }
+                    assert.commandWorked(reconfigRes);
+                    return true;
+                }, "reconfig for fixture set up failed", ReplSetTest.kDefaultTimeoutMS, 1000);
             }
         }
 
@@ -1367,6 +1388,57 @@ var ReplSetTest = function(opts) {
                 self.awaitReplication();
             });
         }
+
+        asCluster(self.nodes, () => {
+            for (let node of self.nodes) {
+                // asCluster() currently does not validate connections with X509 authentication.
+                // If the test is using X509, we skip disabling the server parameter as the
+                // 'setParameter' command will fail.
+                const nodeId = "n" + self.getNodeId(node);
+                const nodeOptions = self.nodeOptions[nodeId] || {};
+                const options =
+                    (nodeOptions === {} || !self.startOptions) ? nodeOptions : self.startOptions;
+                const authMode = options.clusterAuthMode;
+                const notX509 =
+                    authMode != "sendX509" && authMode != "x509" && authMode != "sendKeyFile";
+
+                // We should only be checking the binary version if we are not using X509 auth,
+                // as any server command will fail if the 'authMode' is X509.
+                if (notX509) {
+                    let serverStatus;
+                    try {
+                        serverStatus =
+                            assert.commandWorked(node.getDB("admin").runCommand({serverStatus: 1}));
+                    } catch (e) {
+                        // If we are not authorized, skip resetting the flag to enable reconfig
+                        // checks. This is safe as we should have sufficient coverage across
+                        // non-auth tests.
+                        assert.eq(ErrorCodes.Unauthorized, e.code, tojson(e));
+                        continue;
+                    }
+
+                    const currVersion = serverStatus.version;
+                    const binVersionLatest =
+                        MongoRunner.areBinVersionsTheSame(MongoRunner.getBinVersionFor(currVersion),
+                                                          MongoRunner.getBinVersionFor("latest"));
+
+                    // Only set the following server parameters for nodes running on the latest
+                    // binary version.
+                    if (!binVersionLatest) {
+                        continue;
+                    }
+
+                    // Re-enable the reconfig check to ensure that committed writes cannot be rolled
+                    // back. We disabled this check during initialization to ensure that replica
+                    // sets will not fail to start up.
+                    if (jsTestOptions().enableTestCommands &&
+                        !jsTestOptions().networkErrorAndTxnOverrideConfig.retryOnNetworkErrors) {
+                        assert.commandWorked(node.adminCommand(
+                            {setParameter: 1, enableReconfigRollbackCommittedWritesCheck: true}));
+                    }
+                }
+            }
+        });
 
         const awaitTsStart = new Date();  // Measure duration of awaitLastStableRecoveryTimestamp.
         if (!doNotWaitForStableRecoveryTimestamp) {
@@ -2835,6 +2907,12 @@ var ReplSetTest = function(opts) {
         options.setParameter.numInitialSyncConnectAttempts =
             options.setParameter.numInitialSyncConnectAttempts || 60;
 
+        // Disable a check in reconfig that will prevent certain configs with arbiters from
+        // spinning up. We will re-enable this check after the replica set has finished initiating.
+        if (jsTestOptions().enableTestCommands) {
+            options.setParameter.enableReconfigRollbackCommittedWritesCheck = false;
+        }
+
         if (tojson(options) != tojson({}))
             printjson(options);
 
@@ -3311,7 +3389,7 @@ var ReplSetTest = function(opts) {
             // and too slowly processing heartbeats. When it steps down, it closes all of
             // its connections.
             _constructFromExistingSeedNode(opts);
-        }, 60);
+        }, ReplSetTest.kDefaultRetries);
     } else {
         _constructStartNewInstances(opts);
     }
@@ -3321,6 +3399,7 @@ var ReplSetTest = function(opts) {
  *  Global default timeout (10 minutes).
  */
 ReplSetTest.kDefaultTimeoutMS = 10 * 60 * 1000;
+ReplSetTest.kDefaultRetries = 240;
 
 /**
  *  Global default number that's effectively infinite.

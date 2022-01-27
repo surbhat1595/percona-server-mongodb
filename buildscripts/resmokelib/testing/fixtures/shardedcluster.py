@@ -22,6 +22,7 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
 
     _CONFIGSVR_REPLSET_NAME = "config-rs"
     _SHARD_REPLSET_NAME_PREFIX = "shard-rs"
+    AWAIT_SHARDING_INITIALIZATION_TIMEOUT_SECS = 60
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-locals
             self, logger, job_num, mongos_executable=None, mongos_options=None, mongod_options=None,
@@ -107,6 +108,19 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
         for shard in self.shards:
             shard.setup()
 
+    def refresh_logical_session_cache(self, target):
+        """Refresh logical session cache with no timeout."""
+        primary = (target.mongo_client()
+                   if self.num_rs_nodes_per_shard is None else target.get_primary().mongo_client())
+        try:
+            primary.admin.command({"refreshLogicalSessionCacheNow": 1})
+        except pymongo.errors.OperationFailure as err:
+            if err.code != self._WRITE_CONCERN_FAILED:
+                raise err
+            self.logger.info("Ignoring write concern timeout for refreshLogicalSessionCacheNow "
+                             "command and continuing to wait")
+            target.await_last_op_committed(target.AWAIT_REPL_TIMEOUT_FOREVER_MINS * 60)
+
     def await_ready(self):
         """Block until the fixture can be used for testing."""
         # Wait for the config server
@@ -160,15 +174,40 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
             self.logger.info("Enabling sharding for '%s' database...", db_name)
             client.admin.command({"enablesharding": db_name})
 
+        # Wait for mongod's to be ready.
+        self._await_mongod_sharding_initialization()
+
         # Ensure that the sessions collection gets auto-sharded by the config server
         if self.configsvr is not None:
-            primary = self.configsvr.get_primary().mongo_client()
-            primary.admin.command({"refreshLogicalSessionCacheNow": 1})
+            self.refresh_logical_session_cache(self.configsvr)
 
         for shard in self.shards:
-            primary = (shard.mongo_client() if self.num_rs_nodes_per_shard is None else
-                       shard.get_primary().mongo_client())
-            primary.admin.command({"refreshLogicalSessionCacheNow": 1})
+            self.refresh_logical_session_cache(shard)
+
+    def _await_mongod_sharding_initialization(self):
+        if (self.enable_sharding) and (self.num_rs_nodes_per_shard is not None):
+            deadline = time.time(
+            ) + ShardedClusterFixture.AWAIT_SHARDING_INITIALIZATION_TIMEOUT_SECS
+            timeout_occurred = lambda: deadline - time.time() <= 0.0
+
+            mongod_clients = [(mongod.mongo_client(), mongod.port) for shard in self.shards
+                              for mongod in shard.nodes]
+
+            for client, port in mongod_clients:
+                self._auth_to_db(client)
+
+                while True:
+                    # The choice of namespace (local.fooCollection) does not affect the output.
+                    get_shard_version_result = client.admin.command(
+                        "getShardVersion", "local.fooCollection", check=False)
+                    if get_shard_version_result["ok"]:
+                        break
+
+                    if timeout_occurred():
+                        raise errors.ServerFailure(
+                            "mongod on port: {} failed waiting for getShardVersion success after {} seconds"
+                            .format(port, standalone.MongoDFixture.AWAIT_READY_TIMEOUT_SECS))
+                    time.sleep(0.1)
 
     def _auth_to_db(self, client):
         """Authenticate client for the 'authenticationDatabase'."""

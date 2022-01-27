@@ -59,6 +59,7 @@ namespace {
 MONGO_FAIL_POINT_DEFINE(pauseBatchApplicationBeforeCompletion);
 MONGO_FAIL_POINT_DEFINE(pauseBatchApplicationAfterWritingOplogEntries);
 MONGO_FAIL_POINT_DEFINE(hangAfterRecordingOpApplicationStartTime);
+MONGO_FAIL_POINT_DEFINE(hangAfterApplyingCollectionDropOplogEntry);
 
 // The oplog entries applied
 Counter64 opsAppliedStats;
@@ -769,6 +770,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
             fassert(50686,
                     _storageInterface->setIndexIsMultikey(opCtx,
                                                           info.nss,
+                                                          info.collectionUUID,
                                                           info.indexName,
                                                           info.multikeyMetadataKeys,
                                                           info.multikeyPaths,
@@ -1015,6 +1017,15 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
                 incrementOpsAppliedStats();
                 return status;
             });
+        if (op.getCommandType() == mongo::repl::OplogEntry::CommandType::kDrop) {
+            hangAfterApplyingCollectionDropOplogEntry.executeIf(
+                [&](const BSONObj&) {
+                    hangAfterApplyingCollectionDropOplogEntry.pauseWhileSet();
+                    LOGV2(5863600,
+                          "Hanging due to 'hangAfterApplyingCollectionDropOplogEntry' failpoint.");
+                },
+                [&](const BSONObj& data) { return (nss.db() == data["dbName"].str()); });
+        }
         return finishAndLogApply(opCtx, clockSource, status, applyStartTime, entryOrGroupedInserts);
     }
 

@@ -47,6 +47,8 @@
 
 namespace mongo {
 
+MONGO_FAIL_POINT_DEFINE(SleepDbCheckInBatch);
+
 namespace {
 
 /*
@@ -108,30 +110,38 @@ std::string renderForHealthLog(OplogEntriesEnum op) {
             return "dbCheckBatch";
         case OplogEntriesEnum::Collection:
             return "dbCheckCollection";
+        case OplogEntriesEnum::Start:
+            return "dbCheckStart";
+        case OplogEntriesEnum::Stop:
+            return "dbCheckStop";
     }
 
     MONGO_UNREACHABLE;
 }
 
+}  // namespace
 /**
  * Fills in the timestamp and scope, which are always the same for dbCheck's entries.
  */
-std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const NamespaceString& nss,
+std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<NamespaceString>& nss,
                                                       SeverityEnum severity,
                                                       const std::string& msg,
                                                       OplogEntriesEnum operation,
-                                                      const BSONObj& data) {
+                                                      const boost::optional<BSONObj>& data) {
     auto entry = std::make_unique<HealthLogEntry>();
-    entry->setNss(nss);
+    if (nss) {
+        entry->setNss(*nss);
+    }
     entry->setTimestamp(Date_t::now());
     entry->setSeverity(severity);
     entry->setScope(ScopeEnum::Cluster);
     entry->setMsg(msg);
     entry->setOperation(renderForHealthLog(operation));
-    entry->setData(data);
+    if (data) {
+        entry->setData(*data);
+    }
     return entry;
 }
-}  // namespace
 
 /**
  * Get an error message if the check fails.
@@ -139,9 +149,22 @@ std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const NamespaceString& nss
 std::unique_ptr<HealthLogEntry> dbCheckErrorHealthLogEntry(const NamespaceString& nss,
                                                            const std::string& msg,
                                                            OplogEntriesEnum operation,
-                                                           const Status& err) {
+                                                           const Status& err,
+                                                           const BSONObj& context) {
+    return dbCheckHealthLogEntry(
+        nss,
+        SeverityEnum::Error,
+        msg,
+        operation,
+        BSON("success" << false << "error" << err.toString() << "context" << context));
+}
+
+std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(const NamespaceString& nss,
+                                                             const std::string& msg,
+                                                             OplogEntriesEnum operation,
+                                                             const Status& err) {
     return dbCheckHealthLogEntry(nss,
-                                 SeverityEnum::Error,
+                                 SeverityEnum::Warning,
                                  msg,
                                  operation,
                                  BSON("success" << false << "error" << err.toString()));
@@ -150,25 +173,49 @@ std::unique_ptr<HealthLogEntry> dbCheckErrorHealthLogEntry(const NamespaceString
 /**
  * Get a HealthLogEntry for a dbCheck batch.
  */
-std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(const NamespaceString& nss,
-                                                  int64_t count,
-                                                  int64_t bytes,
-                                                  const std::string& expectedHash,
-                                                  const std::string& foundHash,
-                                                  const BSONKey& minKey,
-                                                  const BSONKey& maxKey,
-                                                  const repl::OpTime& optime) {
+std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(
+    const NamespaceString& nss,
+    int64_t count,
+    int64_t bytes,
+    const std::string& expectedHash,
+    const std::string& foundHash,
+    const BSONKey& minKey,
+    const BSONKey& maxKey,
+    const boost::optional<Timestamp>& readTimestamp,
+    const repl::OpTime& optime,
+    const boost::optional<CollectionOptions>& options) {
     auto hashes = expectedFound(expectedHash, foundHash);
 
-    auto data = BSON("success" << true << "count" << count << "bytes" << bytes << "md5"
-                               << hashes.second << "minKey" << minKey.elem() << "maxKey"
-                               << maxKey.elem() << "optime" << optime);
+    BSONObjBuilder builder;
+    builder.append("success", true);
+    builder.append("count", count);
+    builder.append("bytes", bytes);
+    builder.append("md5", hashes.second);
+    builder.appendAs(minKey.elem(), "minKey");
+    builder.appendAs(maxKey.elem(), "maxKey");
+    if (readTimestamp) {
+        builder.append("readTimestamp", *readTimestamp);
+    }
+    builder.append("optime", optime.toBSON());
 
-    auto severity = hashes.first ? SeverityEnum::Info : SeverityEnum::Error;
+    const auto hashesMatch = hashes.first;
+    const auto severity = [&] {
+        if (hashesMatch) {
+            return SeverityEnum::Info;
+        }
+        // Implcitily replicated collections and capped collections not replicating truncation are
+        // not designed to be consistent, so inconsistency is not necessarily pathological.
+        if (nss.isChangeStreamPreImagesCollection() || nss.isConfigImagesCollection() ||
+            (options && options->capped)) {
+            return SeverityEnum::Warning;
+        }
+
+        return SeverityEnum::Error;
+    }();
     std::string msg =
-        "dbCheck batch " + (hashes.first ? std::string("consistent") : std::string("inconsistent"));
+        "dbCheck batch " + (hashesMatch ? std::string("consistent") : std::string("inconsistent"));
 
-    return dbCheckHealthLogEntry(nss, severity, msg, OplogEntriesEnum::Batch, data);
+    return dbCheckHealthLogEntry(nss, severity, msg, OplogEntriesEnum::Batch, builder.obj());
 }
 
 DbCheckHasher::DbCheckHasher(OperationContext* opCtx,
@@ -184,7 +231,6 @@ DbCheckHasher::DbCheckHasher(OperationContext* opCtx,
 
     // Get the _id index.
     const IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex(opCtx);
-
     uassert(ErrorCodes::IndexNotFound, "dbCheck needs _id index", desc);
 
     // Set up a simple index scan on that.
@@ -211,82 +257,17 @@ void maybeAppend(md5_state_t* state, const boost::optional<UUID>& uuid) {
     }
 }
 
-std::string hashCollectionInfo(const DbCheckCollectionInformation& info) {
-    md5_state_t state;
-    md5_init(&state);
-
-    md5_append(&state, md5Cast(info.collectionName.data()), info.collectionName.size());
-
-    maybeAppend(&state, info.prev);
-    maybeAppend(&state, info.next);
-
-    for (const auto& index : info.indexes) {
-        md5_append(&state, md5Cast(index.objdata()), index.objsize());
-    }
-
-    md5_append(&state, md5Cast(info.options.objdata()), info.options.objsize());
-
-    md5digest digest;
-
-    md5_finish(&state, digest);
-    return digestToString(digest);
-}
-
-std::pair<boost::optional<UUID>, boost::optional<UUID>> getPrevAndNextUUIDs(
-    OperationContext* opCtx, Collection* collection) {
-    const CollectionCatalog& catalog = CollectionCatalog::get(opCtx);
-    const UUID uuid = collection->uuid();
-
-    std::vector<CollectionUUID> collectionUUIDs =
-        catalog.getAllCollectionUUIDsFromDb(collection->ns().db());
-    auto uuidIt = std::find(collectionUUIDs.begin(), collectionUUIDs.end(), uuid);
-    invariant(uuidIt != collectionUUIDs.end());
-
-    boost::optional<UUID> prevUUID;
-    boost::optional<UUID> nextUUID;
-
-    if (uuidIt != collectionUUIDs.begin()) {
-        prevUUID = *std::prev(uuidIt);
-    }
-
-    if (auto nextIt = std::next(uuidIt); nextIt != collectionUUIDs.end()) {
-        nextUUID = *nextIt;
-    }
-
-    return std::make_pair(prevUUID, nextUUID);
-}
-
-std::unique_ptr<HealthLogEntry> dbCheckCollectionEntry(const NamespaceString& nss,
-                                                       const UUID& uuid,
-                                                       const DbCheckCollectionInformation& expected,
-                                                       const DbCheckCollectionInformation& found,
-                                                       const repl::OpTime& optime) {
-    auto names = expectedFound(expected.collectionName, found.collectionName);
-    auto prevs = expectedFound(expected.prev, found.prev);
-    auto nexts = expectedFound(expected.next, found.next);
-    auto indices = expectedFound(expected.indexes, found.indexes);
-    auto options = expectedFound(expected.options, found.options);
-    bool match = names.first && prevs.first && nexts.first && indices.first && options.first;
-    auto severity = match ? SeverityEnum::Info : SeverityEnum::Error;
-
-    // Get the hash of all of the other fields.
-    auto md5s = expectedFound(hashCollectionInfo(expected), hashCollectionInfo(found));
-
-    std::string msg =
-        "dbCheck collection " + (match ? std::string("consistent") : std::string("inconsistent"));
-    auto data = BSON("success" << true << "uuid" << uuid.toString() << "found" << true << "name"
-                               << names.second << "prev" << prevs.second << "next" << nexts.second
-                               << "indexes" << indices.second << "options" << options.second
-                               << "md5" << md5s.second << "optime" << optime);
-
-    return dbCheckHealthLogEntry(nss, severity, msg, OplogEntriesEnum::Collection, data);
-}
-
-Status DbCheckHasher::hashAll(void) {
+Status DbCheckHasher::hashAll(OperationContext* opCtx, Date_t deadline) {
     BSONObj currentObj;
 
     PlanExecutor::ExecState lastState;
     while (PlanExecutor::ADVANCED == (lastState = _exec->getNext(&currentObj, nullptr))) {
+
+        SleepDbCheckInBatch.execute([opCtx](const BSONObj& data) {
+            int sleepMs = data["sleepMs"].safeNumberInt();
+            opCtx->sleepFor(Milliseconds(sleepMs));
+        });
+
         if (!currentObj.hasField("_id")) {
             return Status(ErrorCodes::NoSuchKey, "Document missing _id");
         }
@@ -302,6 +283,10 @@ Status DbCheckHasher::hashAll(void) {
         _countSeen += 1;
 
         md5_append(&_state, md5Cast(currentObj.objdata()), currentObj.objsize());
+
+        if (Date_t::now() > deadline) {
+            break;
+        }
     }
 
     // If we got to the end of the collection, set the last key to MaxKey.
@@ -350,161 +335,78 @@ bool DbCheckHasher::_canHash(const BSONObj& obj) {
     return true;
 }
 
-std::vector<BSONObj> collectionIndexInfo(OperationContext* opCtx, Collection* collection) {
-    std::vector<BSONObj> result;
-    std::vector<std::string> names;
-
-    // List the indices,
-    auto durableCatalog = DurableCatalog::get(opCtx);
-    durableCatalog->getAllIndexes(opCtx, collection->getCatalogId(), &names);
-
-    // and get the info for each one.
-    for (const auto& name : names) {
-        result.push_back(durableCatalog->getIndexSpec(opCtx, collection->getCatalogId(), name));
-    }
-
-    auto comp = std::make_unique<SimpleBSONObjComparator>();
-
-    std::sort(result.begin(), result.end(), SimpleBSONObjComparator::LessThan());
-
-    return result;
-}
-
-BSONObj collectionOptions(OperationContext* opCtx, Collection* collection) {
-    return DurableCatalog::get(opCtx)
-        ->getCollectionOptions(opCtx, collection->getCatalogId())
-        .toBSON();
-}
-
-AutoGetDbForDbCheck::AutoGetDbForDbCheck(OperationContext* opCtx, const NamespaceString& nss)
-    : localLock(opCtx, "local"_sd, MODE_IX), agd(opCtx, nss.db(), MODE_S) {}
-
-AutoGetCollectionForDbCheck::AutoGetCollectionForDbCheck(OperationContext* opCtx,
-                                                         const NamespaceString& nss,
-                                                         const OplogEntriesEnum& type)
-    : _agd(opCtx, nss), _collLock(opCtx, nss, MODE_S) {
-    std::string msg;
-
-    _collection = _agd.getDb()
-        ? CollectionCatalog::get(opCtx).lookupCollectionByNamespace(opCtx, nss)
-        : nullptr;
-
-    // If the collection gets deleted after the check is launched, record that in the health log.
-    if (!_collection) {
-        msg = "Collection under dbCheck no longer exists";
-
-        auto entry = dbCheckHealthLogEntry(nss,
-                                           SeverityEnum::Error,
-                                           "dbCheck failed",
-                                           type,
-                                           BSON("success" << false << "error" << msg));
-        HealthLog::get(opCtx).log(*entry);
-    }
-}
-
 namespace {
+
+// Cumulative number of batches processed. Can wrap around; it's not guaranteed to be in lockstep
+// with other replica set members.
+unsigned int batchesProcessed = 0;
 
 Status dbCheckBatchOnSecondary(OperationContext* opCtx,
                                const repl::OpTime& optime,
                                const DbCheckOplogBatch& entry) {
-    AutoGetCollectionForDbCheck agc(opCtx, entry.getNss(), entry.getType());
-    Collection* collection = agc.getCollection();
-    std::string msg = "replication consistency check";
-
-    if (!collection) {
-        return Status::OK();
-    }
+    const auto msg = "replication consistency check";
 
     // Set up the hasher,
-    Status status = Status::OK();
     boost::optional<DbCheckHasher> hasher;
     try {
+        auto lockMode = MODE_S;
+        if (entry.getReadTimestamp()) {
+            lockMode = MODE_IS;
+            opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided,
+                                                          entry.getReadTimestamp());
+        }
+
+        AutoGetCollection coll(opCtx, entry.getNss(), lockMode);
+        const auto& collection = coll.getCollection();
+
+        if (!collection) {
+            const auto msg = "Collection under dbCheck no longer exists";
+            auto logEntry = dbCheckHealthLogEntry(entry.getNss(),
+                                                  SeverityEnum::Info,
+                                                  "dbCheck failed",
+                                                  OplogEntriesEnum::Batch,
+                                                  BSON("success" << false << "info" << msg));
+            HealthLog::get(opCtx).log(*logEntry);
+            return Status::OK();
+        }
+
         hasher.emplace(opCtx, collection, entry.getMinKey(), entry.getMaxKey());
+        uassertStatusOK(hasher->hashAll(opCtx));
+
+        std::string expected = entry.getMd5().toString();
+        std::string found = hasher->total();
+
+        auto options =
+            DurableCatalog::get(opCtx)->getCollectionOptions(opCtx, collection->getCatalogId());
+        auto logEntry = dbCheckBatchEntry(entry.getNss(),
+                                          hasher->docsSeen(),
+                                          hasher->bytesSeen(),
+                                          expected,
+                                          found,
+                                          entry.getMinKey(),
+                                          hasher->lastKey(),
+                                          entry.getReadTimestamp(),
+                                          optime,
+                                          options);
+
+        batchesProcessed++;
+        if (kDebugBuild || logEntry->getSeverity() != SeverityEnum::Info ||
+            (batchesProcessed % gDbCheckHealthLogEveryNBatches.load() == 0)) {
+            // On debug builds, health-log every batch result; on release builds, health-log
+            // every N batches.
+            HealthLog::get(opCtx).log(*logEntry);
+        }
     } catch (const DBException& exception) {
+        // In case of an error, report it to the health log,
         auto logEntry = dbCheckErrorHealthLogEntry(
-            entry.getNss(), msg, OplogEntriesEnum::Batch, exception.toStatus());
+            entry.getNss(), msg, OplogEntriesEnum::Batch, exception.toStatus(), entry.toBSON());
         HealthLog::get(opCtx).log(*logEntry);
         return Status::OK();
     }
-
-    // run the hasher.
-    if (status.isOK()) {
-        status = hasher->hashAll();
-    }
-
-    // In case of an error, report it to the health log,
-    if (!status.isOK()) {
-        auto logEntry =
-            dbCheckErrorHealthLogEntry(entry.getNss(), msg, OplogEntriesEnum::Batch, status);
-        HealthLog::get(opCtx).log(*logEntry);
-        return Status::OK();
-    }
-
-    std::string expected = entry.getMd5().toString();
-    std::string found = hasher->total();
-
-    auto logEntry = dbCheckBatchEntry(entry.getNss(),
-                                      hasher->docsSeen(),
-                                      hasher->bytesSeen(),
-                                      expected,
-                                      found,
-                                      entry.getMinKey(),
-                                      hasher->lastKey(),
-                                      optime);
-
-    HealthLog::get(opCtx).log(*logEntry);
 
     return Status::OK();
 }
 
-Status dbCheckDatabaseOnSecondary(OperationContext* opCtx,
-                                  const repl::OpTime& optime,
-                                  const DbCheckOplogCollection& entry) {
-    // dbCheckCollectionResult-specific stuff.
-    auto uuid = uassertStatusOK(UUID::parse(entry.getUuid().toString()));
-    auto collection = CollectionCatalog::get(opCtx).lookupCollectionByUUID(opCtx, uuid);
-
-    if (!collection) {
-        Status status(ErrorCodes::NamespaceNotFound, "Could not find collection for dbCheck");
-        auto logEntry = dbCheckErrorHealthLogEntry(
-            entry.getNss(), "dbCheckCollection failed", OplogEntriesEnum::Collection, status);
-        HealthLog::get(opCtx).log(*logEntry);
-        return Status::OK();
-    }
-
-    auto db = collection->ns().db();
-    AutoGetDb agd(opCtx, db, MODE_X);
-
-    DbCheckCollectionInformation expected;
-    DbCheckCollectionInformation found;
-
-    expected.collectionName = entry.getNss().coll().toString();
-    found.collectionName = collection->ns().coll().toString();
-
-    auto prevAndNext = getPrevAndNextUUIDs(opCtx, collection);
-
-    // found/expected previous UUID,
-    expected.prev = entry.getPrev();
-    found.prev = prevAndNext.first;
-
-    // found/expected next UUID,
-    expected.next = entry.getNext();
-    found.next = prevAndNext.second;
-
-    // found/expected indices,
-    expected.indexes = entry.getIndexes();
-    found.indexes = collectionIndexInfo(opCtx, collection);
-
-    // and found/expected collection options.
-    expected.options = entry.getOptions();
-    found.options = collectionOptions(opCtx, collection);
-
-    auto hle = dbCheckCollectionEntry(entry.getNss(), uuid, expected, found, optime);
-
-    HealthLog::get(opCtx).log(*hle);
-
-    return Status::OK();
-}
 }  // namespace
 
 namespace repl {
@@ -529,9 +431,17 @@ Status dbCheckOplogCommand(OperationContext* opCtx,
             return dbCheckBatchOnSecondary(opCtx, opTime, invocation);
         }
         case OplogEntriesEnum::Collection: {
-            auto invocation = DbCheckOplogCollection::parse(ctx, cmd);
-            return dbCheckDatabaseOnSecondary(opCtx, opTime, invocation);
+            // TODO SERVER-61963.
+            return Status::OK();
         }
+        case OplogEntriesEnum::Start:
+            // fallthrough
+        case OplogEntriesEnum::Stop:
+            const auto entry = mongo::dbCheckHealthLogEntry(
+                boost::none /*nss*/, SeverityEnum::Info, "", type, boost::none /*data*/
+            );
+            HealthLog::get(Client::getCurrent()->getServiceContext()).log(*entry);
+            return Status::OK();
     }
 
     MONGO_UNREACHABLE;

@@ -211,7 +211,9 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
         logStartingSubPipeline(serializedPipe);
         // $$SEARCH_META can be set during runtime earlier in the pipeline, and therefore must be
         // copied to the subpipeline manually.
-        if (enableSearchMeta.load()) {
+        if (serverGlobalParams.featureCompatibility.getVersion() >=
+                ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo44 &&
+            enableSearchMeta.load()) {
             auto metaVal = pExpCtx->variables.getValue(Variables::kSearchMetaId, Document());
             if (!metaVal.missing()) {
                 _pipeline->getContext()->variables.setReservedValue(
@@ -265,6 +267,14 @@ Pipeline::SourceContainer::iterator DocumentSourceUnionWith::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     auto duplicateAcrossUnion = [&](auto&& nextStage) {
         _pipeline->addFinalSource(nextStage->clone());
+        // Apply the same rewrite to the cached pipeline if available.
+        if (pExpCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
+            auto cloneForExplain = nextStage->clone();
+            if (!_cachedPipeline.empty()) {
+                cloneForExplain->setSource(_cachedPipeline.back().get());
+            }
+            _cachedPipeline.push_back(std::move(cloneForExplain));
+        }
         auto newStageItr = container->insert(itr, std::move(nextStage));
         container->erase(std::next(itr));
         return newStageItr == container->begin() ? newStageItr : std::prev(newStageItr);

@@ -170,13 +170,34 @@ protected:
 TEST_F(MetadataManagerTest, CleanUpForMigrateIn) {
     _manager->setFilteringMetadata(makeEmptyMetadata());
 
+    CollectionOptions emptyCollOptions;
+    ASSERT_OK(_storage->createCollection(operationContext(), kNss, emptyCollOptions));
+
     // Sanity checks
     ASSERT(_manager->getActiveMetadata(boost::none)->isSharded());
     ASSERT_EQ(0UL, _manager->getActiveMetadata(boost::none)->getOwnedChunks().size());
 
     ChunkRange range1(BSON("key" << 0), BSON("key" << 10));
     ChunkRange range2(BSON("key" << 10), BSON("key" << 20));
-    ChunkRange range3(BSON("key" << 20), BSON("key" << 30));
+
+    auto notif1 = _manager->beginReceive(range1);
+    ASSERT(!notif1.isReady());
+
+    auto notif2 = _manager->beginReceive(range2);
+    ASSERT(!notif2.isReady());
+
+    ASSERT_EQ(2UL, _manager->numberOfRangesToClean());
+    ASSERT_EQ(0UL, _manager->numberOfRangesToCleanStillInUse());
+}
+
+TEST_F(MetadataManagerTest, CleanUpForMigrateWithNonExistingCollection) {
+    _manager->setFilteringMetadata(makeEmptyMetadata());
+
+    // Sanity checks
+    ASSERT(_manager->getActiveMetadata(boost::none)->isSharded());
+    ASSERT_EQ(0UL, _manager->getActiveMetadata(boost::none)->getOwnedChunks().size());
+
+    ChunkRange range1(BSON("key" << 0), BSON("key" << 10));
 
     {
         FailPointEnableBlock fpb("suspendRangeDeletion");
@@ -185,18 +206,6 @@ TEST_F(MetadataManagerTest, CleanUpForMigrateIn) {
         // This will hang if the range deletion task on the non-existing collection is scheduled
         notif1.wait();
     }
-
-    CollectionOptions emptyCollOptions;
-    ASSERT_OK(_storage->createCollection(operationContext(), kNss, emptyCollOptions));
-
-    auto notif2 = _manager->beginReceive(range2);
-    ASSERT(!notif2.isReady());
-
-    auto notif3 = _manager->beginReceive(range3);
-    ASSERT(!notif3.isReady());
-
-    ASSERT_EQ(2UL, _manager->numberOfRangesToClean());
-    ASSERT_EQ(0UL, _manager->numberOfRangesToCleanStillInUse());
 }
 
 TEST_F(MetadataManagerTest,
@@ -258,6 +267,9 @@ TEST_F(MetadataManagerTest,
 
 TEST_F(MetadataManagerTest, TrackOrphanedDataCleanupBlocksOnScheduledRangeDeletions) {
     ChunkRange cr1(BSON("key" << 0), BSON("key" << 10));
+
+    CollectionOptions emptyCollOptions;
+    ASSERT_OK(_storage->createCollection(operationContext(), kNss, emptyCollOptions));
 
     // Enable fail point to suspendRangeDeletion.
     globalFailPointRegistry().find("suspendRangeDeletion")->setMode(FailPoint::alwaysOn);
@@ -368,6 +380,9 @@ TEST_F(MetadataManagerTest, RangesToCleanMembership) {
     ChunkRange cr(BSON("key" << 0), BSON("key" << 10));
 
     ASSERT_EQ(0UL, _manager->numberOfRangesToClean());
+
+    CollectionOptions emptyCollOptions;
+    ASSERT_OK(_storage->createCollection(operationContext(), kNss, emptyCollOptions));
 
     // Enable fail point to suspendRangeDeletion.
     globalFailPointRegistry().find("suspendRangeDeletion")->setMode(FailPoint::alwaysOn);

@@ -31,6 +31,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/auth/action_type_gen.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
@@ -56,9 +57,12 @@
 #include "mongo/db/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(allowExternalReadsForReverseOplogScanRule);
 
 const auto kTermField = "term"_sd;
 
@@ -127,6 +131,8 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         // support it. Use default value for the ExpressionContext's 'sortKeyFormat' member
         // variable, which is the newest format.
     }
+    expCtx->startExpressionCounters();
+
     return expCtx;
 }
 
@@ -338,10 +344,16 @@ public:
                     "The 'readOnce' option is not supported within a transaction.",
                     !txnParticipant || !opCtx->inMultiDocumentTransaction() || !qr->isReadOnce());
 
-            uassert(ErrorCodes::InvalidOptions,
-                    "The '$_internalReadAtClusterTime' option is only supported when testing"
+            if (qr->getReadAtClusterTime()) {
+                AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
+                const bool authorized = authSession->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forClusterResource(), ActionType::applyOps);
+                uassert(
+                    ErrorCodes::Unauthorized,
+                    "The '$_internalReadAtClusterTime' option requires authorization unless testing"
                     " commands are enabled",
-                    !qr->getReadAtClusterTime() || getTestCommandsEnabled());
+                    authorized || getTestCommandsEnabled());
+            }
 
             uassert(
                 ErrorCodes::OperationNotSupportedInTransaction,
@@ -361,9 +373,20 @@ public:
                     !qr->getReadAtClusterTime() || storageEngine->supportsDocLocking());
 
             // Validate term before acquiring locks, if provided.
-            if (auto term = qr->getReplicationTerm()) {
+            auto term = qr->getReplicationTerm();
+            if (term) {
                 // Note: updateTerm returns ok if term stayed the same.
                 uassertStatusOK(replCoord->updateTerm(opCtx, *term));
+            }
+
+            // The presence of a term in the request indicates that this is an internal replication
+            // oplog read request.
+            if (term && parsedNss == NamespaceString::kRsOplogNamespace) {
+                // We do not want to take tickets for internal (replication) oplog reads. Stalling
+                // on ticket acquisition can cause complicated deadlocks. Primaries may depend on
+                // data reaching secondaries in order to proceed; and secondaries may get stalled
+                // replicating because of an inability to acquire a read ticket.
+                opCtx->lockState()->skipAcquireTicket();
             }
 
             // We call RecoveryUnit::setTimestampReadSource() before acquiring a lock on the
@@ -417,6 +440,41 @@ public:
                 // command ignores prepare conflicts by default, change the behavior.
                 opCtx->recoveryUnit()->setPrepareConflictBehavior(
                     PrepareConflictBehavior::kEnforce);
+            }
+
+            // If this read represents a reverse oplog scan, we want to bypass oplog visibility
+            // rules in the case of secondaries. We normally only read from these nodes at batch
+            // boundaries, but in this specific case we should fetch all new entries, to be
+            // consistent with any catalog changes that might be observable before the batch is
+            // finalized. This special rule for reverse oplog scans is needed by replication
+            // initial sync, for the purposes of calculating the stopTimestamp correctly.
+            boost::optional<PinReadSourceBlock> pinReadSourceBlock;
+            boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock>
+                shouldNotConflictBlock;
+            const bool isOplogNss = (qr->nss() == NamespaceString::kRsOplogNamespace);
+            if (isOplogNss) {
+                auto reverseScan = false;
+
+                auto cmdSort = qr->getSort();
+                if (!cmdSort.isEmpty()) {
+                    BSONElement natural = cmdSort[QueryRequest::kNaturalSortField];
+                    if (natural) {
+                        reverseScan = natural.safeNumberInt() < 0;
+                    }
+                }
+
+                auto isInternal = (opCtx->getClient()->session() &&
+                                   (opCtx->getClient()->session()->getTags() &
+                                    transport::Session::kInternalClient));
+
+                if (MONGO_unlikely(allowExternalReadsForReverseOplogScanRule.shouldFail())) {
+                    isInternal = true;
+                }
+
+                if (reverseScan && isInternal) {
+                    pinReadSourceBlock.emplace(opCtx->recoveryUnit());
+                    shouldNotConflictBlock.emplace(opCtx->lockState());
+                }
             }
 
             // Acquire locks. If the query is on a view, we release our locks and convert the query
@@ -606,6 +664,7 @@ public:
                 keyBob.append("collation", 1);
                 keyBob.append("min", 1);
                 keyBob.append("max", 1);
+                keyBob.append("shardVersion", 1);
                 return keyBob.obj();
             }();
 

@@ -3255,9 +3255,10 @@ def doConfigure(myenv):
 
         myenv = conf.Finish()
 
-    # We set this to work around https://gcc.gnu.org/bugzilla/show_bug.cgi?id=43052
-    if not myenv.ToolchainIs('msvc'):
-        AddToCCFLAGSIfSupported(myenv, "-fno-builtin-memcmp")
+    # We set this with GCC on x86 platforms to work around
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=43052
+    if myenv.ToolchainIs('gcc') and (env['TARGET_ARCH'] in ['i386', 'x86_64']):
+        AddToCCFLAGSIfSupported(myenv, '-fno-builtin-memcmp')
 
     def CheckThreadLocal(context):
         test_body = """
@@ -4452,13 +4453,6 @@ if split_dwarf.exists(env):
 if get_option('ninja') == 'disabled':
     env.Tool("compilation_db")
 
-# If we can, load the dagger tool for build dependency graph introspection.
-# Dagger is only supported on Linux and OSX (not Windows or Solaris).
-should_dagger = ( mongo_platform.is_running_os('osx') or mongo_platform.is_running_os('linux')  ) and "dagger" in COMMAND_LINE_TARGETS
-
-if should_dagger:
-    env.Tool("dagger")
-
 incremental_link = Tool('incremental_link')
 if incremental_link.exists(env):
     incremental_link(env)
@@ -4804,12 +4798,6 @@ if get_option("install-mode") != "hygienic":
         allTargets.extend(['dbtest'])
 
     env.Alias('all', allTargets)
-
-# run the Dagger tool if it's installed
-if should_dagger:
-    dagger = env.Dagger('library_dependency_graph.json')
-    env.Depends(dagger, env.Alias("install-all") if get_option("install-mode") == "hygienic" else "all")
-    dependencyDb = env.Alias("dagger", dagger)
 
 # Declare the cache prune target
 cachePrune = env.Command(

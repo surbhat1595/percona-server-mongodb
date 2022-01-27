@@ -48,51 +48,41 @@ class OpTime;
 }
 
 /**
- * Get an error message if the check fails.
+ * Logs an entry into 'local.system.healthLog'.
+ */
+std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<NamespaceString>& nss,
+                                                      SeverityEnum severity,
+                                                      const std::string& msg,
+                                                      OplogEntriesEnum operation,
+                                                      const boost::optional<BSONObj>& data);
+
+/**
+ * Logs an error into 'local.system.healthLog'.
  */
 std::unique_ptr<HealthLogEntry> dbCheckErrorHealthLogEntry(const NamespaceString& nss,
                                                            const std::string& msg,
                                                            OplogEntriesEnum operation,
-                                                           const Status& err);
+                                                           const Status& err,
+                                                           const BSONObj& context = BSONObj());
 
+std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(const NamespaceString& nss,
+                                                             const std::string& msg,
+                                                             OplogEntriesEnum operation,
+                                                             const Status& err);
 /**
  * Get a HealthLogEntry for a dbCheck batch.
  */
-std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(const NamespaceString& nss,
-                                                  int64_t count,
-                                                  int64_t bytes,
-                                                  const std::string& expectedHash,
-                                                  const std::string& foundHash,
-                                                  const BSONKey& minKey,
-                                                  const BSONKey& maxKey,
-                                                  const repl::OpTime& optime);
-
-/**
- * The collection metadata dbCheck sends between nodes.
- */
-struct DbCheckCollectionInformation {
-    std::string collectionName;
-    boost::optional<UUID> prev;
-    boost::optional<UUID> next;
-    std::vector<BSONObj> indexes;
-    BSONObj options;
-};
-
-/**
- * Returns a pair of previous and next UUIDs around the given collections uuid. If there is no
- * previous or next UUID, return boost::none respectively.
- */
-std::pair<boost::optional<UUID>, boost::optional<UUID>> getPrevAndNextUUIDs(OperationContext* opCtx,
-                                                                            Collection* collection);
-
-/**
- * Get a HealthLogEntry for a dbCheck collection.
- */
-std::unique_ptr<HealthLogEntry> dbCheckCollectionEntry(const NamespaceString& nss,
-                                                       const UUID& uuid,
-                                                       const DbCheckCollectionInformation& expected,
-                                                       const DbCheckCollectionInformation& found,
-                                                       const repl::OpTime& optime);
+std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(
+    const NamespaceString& nss,
+    int64_t count,
+    int64_t bytes,
+    const std::string& expectedHash,
+    const std::string& foundHash,
+    const BSONKey& minKey,
+    const BSONKey& maxKey,
+    const boost::optional<Timestamp>& timestamp,
+    const repl::OpTime& optime,
+    const boost::optional<CollectionOptions>& options = boost::none);
 
 /**
  * Hashing collections and plans.
@@ -125,9 +115,9 @@ public:
                   int64_t maxBytes = std::numeric_limits<int64_t>::max());
 
     /**
-     * Hash all of our documents.
+     * Hash all documents up to the deadline.
      */
-    Status hashAll(void);
+    Status hashAll(OperationContext* opCtx, Date_t deadline = Date_t::max());
 
     /**
      * Return the total hash of all documents seen so far.
@@ -164,53 +154,6 @@ private:
     int64_t _maxBytes = 0;
     int64_t _bytesSeen = 0;
 };
-
-/**
- * Get the given database in MODE_S, while also blocking stepdown (SERVER-28544) and allowing writes
- * to "local".
- */
-class AutoGetDbForDbCheck {
-public:
-    AutoGetDbForDbCheck(OperationContext* opCtx, const NamespaceString& nss);
-
-    Database* getDb(void) {
-        return agd.getDb();
-    }
-
-private:
-    Lock::DBLock localLock;
-    AutoGetDb agd;
-};
-
-/**
- * Get the given collection in MODE_S, except that if the collection is missing it will report that
- * to the health log, and it takes an IX lock on "local" as a workaround to SERVER-28544.
- */
-class AutoGetCollectionForDbCheck {
-public:
-    AutoGetCollectionForDbCheck(OperationContext* opCtx,
-                                const NamespaceString& nss,
-                                const OplogEntriesEnum& type);
-    Collection* getCollection(void) {
-        return _collection;
-    }
-
-private:
-    AutoGetDbForDbCheck _agd;
-    Lock::CollectionLock _collLock;
-    Collection* _collection;
-};
-
-
-/**
- * Gather the index information for a collection.
- */
-std::vector<BSONObj> collectionIndexInfo(OperationContext* opCtx, Collection* collection);
-
-/**
- * Gather other information for a collection.
- */
-BSONObj collectionOptions(OperationContext* opCtx, Collection* collection);
 
 namespace repl {
 

@@ -356,7 +356,6 @@ variables:
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
-  - enterprise-ubuntu1804-ppc64le
   - enterprise-ubuntu2004-64
   - enterprise-windows
   - enterprise-windows-compile-all
@@ -401,7 +400,6 @@ variables:
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
-  - rhel-72-s390x
   - enterprise-rhel-71-ppc64le
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
@@ -428,7 +426,6 @@ variables:
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
-  - enterprise-ubuntu1804-ppc64le
   - enterprise-ubuntu2004-64
   - enterprise-windows
   - windows
@@ -810,31 +807,6 @@ functions:
         [Boto]
         https_validate_certificates = False
         EOF
-
-  "call BF Suggestion service":
-    command: shell.exec
-    params:
-      working_dir: src
-      shell: bash
-      silent: true
-      script: |
-        report_file="report.json"
-        # Check if the report file exists and has failures.
-        if [ -f $report_file ] && grep -Eq "\"failures\": [1-9]" $report_file; then
-          # Calling the BF Suggestion server endpoint to start feature extraction.
-          payload="{\"task_id\": \"${task_id}\", \"execution\": ${execution}}"
-          echo "Sending task info to the BF suggestion service"
-          # The --user option is passed through stdin to avoid showing in process list.
-          user_option="--user ${bfsuggestion_user}:${bfsuggestion_password}"
-          curl --header "Content-Type: application/json" \
-               --data "$payload" \
-               --max-time 10 \
-               --silent \
-               --show-error \
-               --config - \
-               https://bfsuggestion.corp.mongodb.com/tasks <<< $user_option
-          echo "Request to BF Suggestion service status: $?"
-        fi
 
   "upload debugsymbols": &upload_debugsymbols
     command: s3.put
@@ -3815,7 +3787,6 @@ post:
   - func: "attach report"
   - func: "attach artifacts"
   - func: "save ec2 task artifacts"
-  - func: "call BF Suggestion service"
   - func: "attach wiki page"
   - func: "kill processes"
   - func: "save local client logs"
@@ -3874,7 +3845,6 @@ tasks:
           - "bypass_compile_expansions.yml"
           - "compile_expansions.yml"
           - "jstests/**"
-          - "library_dependency_graph.json"
           - "patch_files.txt"
           - "pytests/**"
           - "src/mongo/client/sdam/json_tests/sdam_tests/**"
@@ -4004,17 +3974,6 @@ tasks:
         task_compile_flags: >-
           --detect-odr-violations
           --separate-debug
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: src/library_dependency_graph.json
-        remote_file: ${project}/${build_variant}/${revision}/library_dependency_graph.${build_id}.json
-        bucket: mciuploads
-        permissions: public-read
-        content_type: application/json
-        display_name: Library Dependency Graph (library_dependency_graph.json)
-        build_variants: [enterprise-rhel-70-64-bit-kitchen-sink] # This must be the Dagger variant
 
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
@@ -8864,7 +8823,7 @@ buildvariants:
 - &linux-64-debug-template
   name: linux-64-debug
   display_name: "! Linux DEBUG"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   run_on:
   - rhel62-large
   expansions:
@@ -9232,51 +9191,6 @@ buildvariants:
   - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
-  - name: .publish
-    distros:
-    - ubuntu1804-test
-
-- name: enterprise-ubuntu1804-ppc64le
-  display_name: Enterprise Ubuntu 18.04 PPC64LE
-  modules:
-  - enterprise
-  run_on:
-  - ubuntu1804-power8-test
-  batchtime: 10080 # 7 days
-  expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: ppc64le-enterprise-ubuntu1804
-    compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling
-    resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: ppc64le
-    packager_distro: ubuntu1804
-    repo_edition: enterprise
-    multiversion_platform: ubuntu1804
-    multiversion_architecture: ppc64le
-    multiversion_edition: enterprise
-    use_default_timeouts: true
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - ubuntu1804-power8-build
-  - name: aggregation
-  - name: .auth !.audit !.multiversion !.jscore
-  - name: .misc_js
-  - name: fle
-  - name: .jscore .common !.auth
-  - name: .ocsp
-  - name: replica_sets
-  - name: .replica_sets .common
-  - name: .sharding .txns
-  - name: sharding_gen
-  - name: .ssl
-  - name: .stitch
   - name: .publish
     distros:
     - ubuntu1804-test
@@ -9795,7 +9709,7 @@ buildvariants:
 
 - name: windows-debug
   display_name: "* Windows DEBUG"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -9862,7 +9776,7 @@ buildvariants:
 
 - name: enterprise-windows-required
   display_name: "! Enterprise Windows"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -9905,7 +9819,7 @@ buildvariants:
 
 - name: enterprise-windows
   display_name: "* Enterprise Windows"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
     - enterprise
   run_on:
@@ -10165,7 +10079,7 @@ buildvariants:
 
 - name: macos-debug
   display_name: "* macOS DEBUG"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   run_on:
   - macos-1014
   expansions:
@@ -10280,7 +10194,7 @@ buildvariants:
 
 - name: enterprise-rhel-62-64-bit
   display_name: "! Enterprise RHEL 6.2"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -10400,7 +10314,7 @@ buildvariants:
 
 - name: enterprise-rhel-62-64-bit-store-fam-images-in-side-coll
   display_name: "Enterprise RHEL 6.2 (storeFindAndModifyImagesInSideCollection=True)"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -10859,7 +10773,7 @@ buildvariants:
 - &enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit
   display_name: "* Enterprise RHEL 7.0"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -11025,25 +10939,10 @@ buildvariants:
     distros:
     - rhel80-small
 
-# This variant is to intentionally test uncommon features nightly
-- <<: *enterprise-rhel-70-64-bit-template
-  name: enterprise-rhel-70-64-bit-kitchen-sink
-  display_name: "~ Enterprise RHEL 7.0 (Dagger)"
-  batchtime: 1440 # 1 day
-  expansions:
-    <<: *enterprise-rhel-70-64-bit-expansions-template
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    additional_compile_targets: dagger # If this moves to another variant, update the compile_all task
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel70
-  - name: jsCore
-
 - <<: *enterprise-rhel-70-64-bit-template
   name: hot_backups-rhel-70-64-bit
   display_name: "hot_backups RHEL 7.0"
-  batchtime: 1440 # 1 day
+  batchtime: 10080 # 7 days
   run_on:
   - rhel70
   expansions:
@@ -11149,7 +11048,7 @@ buildvariants:
 
 - name: ubuntu1604-debug
   display_name: "* Ubuntu 16.04 DEBUG"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   run_on:
   - ubuntu1604-test
   expansions:
@@ -11504,32 +11403,6 @@ buildvariants:
     distros:
     - rhel70-small
 
-- name: rhel-72-s390x
-  display_name: RHEL 7.2 s390x
-  run_on:
-  - rhel72-zseries-test
-  expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: s390x
-    packager_distro: rhel72
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: s390x-rhel72
-    repo_edition: org
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel72-zseries-build
-  - name: jsCore
-  - name: replica_sets_jscore_passthrough
-  - name: ssl_gen
-  - name: .publish
-    distros:
-    - rhel70-small
-
 ###########################################
 #          Ubuntu buildvariants           #
 ###########################################
@@ -11587,7 +11460,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1604-clang
   display_name: "! Shared Library Enterprise Ubuntu 16.04 (Clang)"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -11615,7 +11488,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1604-clang-tidy
   display_name: "* Enterprise Clang Tidy"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -11636,7 +11509,7 @@ buildvariants:
 
 - name: ubuntu-dynamic-1604-clang
   display_name: "* Shared Library Ubuntu 16.04 (Clang)"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   run_on:
    - ubuntu1604-test
   expansions:
@@ -12389,7 +12262,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-aubsan-lite
   display_name: "! {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   run_on:
@@ -12438,7 +12311,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1604-64-bit
   display_name: "* Shared Library Enterprise Ubuntu 16.04"
-  batchtime: 480 # 8 hours
+  batchtime: 1440 # 1 day
   modules:
   - enterprise
   expansions:
@@ -12459,7 +12332,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-no-latch-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (without Diagnostic Latches)"
-  batchtime: 1440 # 1 day
+  batchtime: 10080 # 7 days
   modules:
   - enterprise
   expansions:
@@ -12471,7 +12344,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-no-latch-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 DEBUG (Unoptimized)"
-  batchtime: 1440 # 1 day
+  batchtime: 10080 # 7 days
   modules:
   - enterprise
   expansions:
@@ -12484,7 +12357,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-scanning-replica-set-monitor-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (with ScanningReplicaSetMonitor)"
-  batchtime: 1440 # 1 day
+  batchtime: 10080 # 7 days
   run_on:
     - ubuntu1604-test
   modules:
@@ -12516,7 +12389,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-sdam-replica-set-monitor-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (with SdamReplicaSetMonitor)"
-  batchtime: 1440 # 1 day
+  batchtime: 10080 # 7 days
   run_on:
     - ubuntu1604-test
   modules:
@@ -12547,7 +12420,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-task-executor-pool-size-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (with {taskExecutorPoolSize: 4})"
-  batchtime: 1440 # 1 day
+  batchtime: 10080 # 7 days
   run_on:
     - ubuntu1604-test
   modules:

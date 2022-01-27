@@ -635,6 +635,21 @@ void StreamableReplicaSetMonitor::onTopologyDescriptionChangedEvent(
             }
         }
     }
+
+    if (auto previousMaxElectionIdSetVersionPair =
+            previousDescription->getMaxElectionIdSetVersionPair(),
+        newMaxElectionIdSetVersionPair = newDescription->getMaxElectionIdSetVersionPair();
+        setVersionWentBackwards(previousMaxElectionIdSetVersionPair,
+                                newMaxElectionIdSetVersionPair)) {
+        // The previous primary was unable to reach consensus for the config with
+        // higher version and it was abandoned after failover.
+        LOGV2(5940902,
+              "Max known Set version coming from new primary forces to rollback it backwards",
+              "replicaSet"_attr = getName(),
+              "newElectionIdSetVersion"_attr = newMaxElectionIdSetVersionPair.setVersion,
+              "previousMaxElectionIdSetVersion"_attr =
+                  previousMaxElectionIdSetVersionPair.setVersion);
+    }
 }
 
 void StreamableReplicaSetMonitor::onServerHeartbeatSucceededEvent(const HostAndPort& hostAndPort,
@@ -773,7 +788,7 @@ Status StreamableReplicaSetMonitor::_makeUnsatisfiedReadPrefError(
 }
 
 Status StreamableReplicaSetMonitor::_makeReplicaSetMonitorRemovedError() const {
-    return Status(ErrorCodes::ReplicaSetMonitorRemoved,
+    return Status(ErrorCodes::ShutdownInProgress,
                   str::stream() << "ReplicaSetMonitor for set " << getName() << " is removed");
 }
 

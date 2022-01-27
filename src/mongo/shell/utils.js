@@ -1451,35 +1451,43 @@ _awaitRSHostViaRSMonitor = function(hostAddr, desiredState, rsName, timeout) {
 
 rs.help = function() {
     print(
-        "\trs.status()                                { replSetGetStatus : 1 } checks repl set status");
+        "\trs.status()                                     { replSetGetStatus : 1 } checks repl set status");
     print(
-        "\trs.initiate()                              { replSetInitiate : null } initiates set with default settings");
+        "\trs.initiate()                                   { replSetInitiate : null } initiates set with default settings");
     print(
-        "\trs.initiate(cfg)                           { replSetInitiate : cfg } initiates set with configuration cfg");
+        "\trs.initiate(cfg)                                { replSetInitiate : cfg } initiates set with configuration cfg");
     print(
-        "\trs.conf()                                  get the current configuration object from local.system.replset");
+        "\trs.conf()                                       get the current configuration object from local.system.replset");
     print(
-        "\trs.reconfig(cfg)                           updates the configuration of a running replica set with cfg (disconnects)");
+        "\trs.reconfig(cfg, opts)                          updates the configuration of a running replica set with cfg, using the given opts (disconnects)");
     print(
-        "\trs.add(hostportstr)                        add a new member to the set with default attributes (disconnects)");
+        "\trs.reconfigForPSASet(memberIndex, cfg, opts)    updates the configuration of a Primary-Secondary-Arbiter (PSA) replica set while preserving majority writes");
     print(
-        "\trs.add(membercfgobj)                       add a new member to the set with extra attributes (disconnects)");
+        "\t                                                    memberIndex: index of the node being updated; cfg: the desired new config; opts: options passed in with the reconfig");
     print(
-        "\trs.addArb(hostportstr)                     add a new member which is arbiterOnly:true (disconnects)");
-    print("\trs.stepDown([stepdownSecs, catchUpSecs])   step down as primary (disconnects)");
+        "\t                                                    Not to be used with every configuration");
     print(
-        "\trs.syncFrom(hostportstr)                   make a secondary sync from the given member");
+        "\t                                                    For more information, visit: https://docs.mongodb.com/manual/reference/method/rs.reconfigForPSASet/");
     print(
-        "\trs.freeze(secs)                            make a node ineligible to become primary for the time specified");
+        "\trs.add(hostportstr)                             add a new member to the set with default attributes (disconnects)");
     print(
-        "\trs.remove(hostportstr)                     remove a host from the replica set (disconnects)");
-    print("\trs.secondaryOk()                               allow queries on secondary nodes");
+        "\trs.add(membercfgobj)                            add a new member to the set with extra attributes (disconnects)");
+    print(
+        "\trs.addArb(hostportstr)                          add a new member which is arbiterOnly:true (disconnects)");
+    print("\trs.stepDown([stepdownSecs, catchUpSecs])        step down as primary (disconnects)");
+    print(
+        "\trs.syncFrom(hostportstr)                        make a secondary sync from the given member");
+    print(
+        "\trs.freeze(secs)                                 make a node ineligible to become primary for the time specified");
+    print(
+        "\trs.remove(hostportstr)                          remove a host from the replica set (disconnects)");
+    print("\trs.secondaryOk()                                allow queries on secondary nodes");
     print();
-    print("\trs.printReplicationInfo()                  check oplog size and time range");
+    print("\trs.printReplicationInfo()                       check oplog size and time range");
     print(
-        "\trs.printSecondaryReplicationInfo()             check replica set members and replication lag");
-    print("\tdb.isMaster()                              check who is primary");
-    print("\tdb.hello()                              check who is primary");
+        "\trs.printSecondaryReplicationInfo()              check replica set members and replication lag");
+    print("\tdb.isMaster()                                   check who is primary");
+    print("\tdb.hello()                                      check who is primary");
     print();
     print("\treconfiguration helpers disconnect from the database so the shell will display");
     print("\tan error, even if the command succeeds.");
@@ -1548,6 +1556,55 @@ rs.reconfig = function(cfg, options) {
         cmd[i] = options[i];
     }
     return this._runCmd(cmd);
+};
+
+_validateMemberIndex = function(memberIndex, newConfig) {
+    const newMemberConfig = newConfig.members[memberIndex];
+    assert(newMemberConfig, `Node at index ${memberIndex} does not exist in the new config`);
+    assert.eq(1,
+              newMemberConfig.votes,
+              `Node at index ${memberIndex} must have {votes: 1} in the new config`);
+
+    // Use memberId to compare nodes across configs.
+    const memberId = newMemberConfig._id;
+    const oldConfig = rs.conf();
+    const oldMemberConfig = oldConfig.members.find(member => member._id === memberId);
+
+    // If the node doesn't exist in the old config, we are adding it as a new node. Skip validating
+    // the node in the old config.
+    if (!oldMemberConfig) {
+        return;
+    }
+
+    assert(!oldMemberConfig.votes,
+           `Node at index ${memberIndex} must have {votes: 0} in the old config`);
+};
+
+rs.reconfigForPSASet = function(memberIndex, cfg, options) {
+    _validateMemberIndex(memberIndex, cfg);
+
+    const memberPriority = cfg.members[memberIndex].priority;
+    print(
+        `Running first reconfig to give member at index ${memberIndex} { votes: 1, priority: 0 }`);
+    cfg.members[memberIndex].votes = 1;
+    cfg.members[memberIndex].priority = 0;
+    let res = rs.reconfig(cfg, options);
+    if (!res.ok) {
+        return res;
+    }
+
+    print(`Running second reconfig to give member at index ${memberIndex} { priority: ${
+        memberPriority} }`);
+    cfg.members[memberIndex].priority = memberPriority;
+
+    // If the first reconfig added a new node, the second config will not succeed until the
+    // automatic reconfig to remove the 'newlyAdded' field is completed. Retry the second reconfig
+    // until it succeeds in that case.
+    assert.soon(() => {
+        res = rs.reconfig(cfg, options);
+        return res.ok;
+    });
+    return res;
 };
 rs.add = function(hostport, arb) {
     var cfg = hostport;

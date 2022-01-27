@@ -35,6 +35,54 @@ global:
 
 imports:
   - "mongo/idl/basic_types.idl"
+  - "mongo/db/write_concern_options.idl"
+
+server_parameters:
+    dbCheckCollectionTryLockTimeoutMillis:
+        description: 'Timeout to acquire the collection for processing a dbCheck batch. Each subsequent attempt doubles the timeout'
+        set_at: [ startup, runtime ]
+        cpp_vartype: 'AtomicWord<int>'
+        cpp_varname: gDbCheckCollectionTryLockTimeoutMillis
+        default: 10
+        validator:
+          gte: 1
+          lte: 10000
+    dbCheckCollectionTryLockMaxAttempts:
+        description: 'Maximum number of attempts with backoff to acquire the collection lock for processing a dbCheck batch'
+        set_at: [ startup, runtime ]
+        cpp_vartype: 'AtomicWord<int>'
+        cpp_varname: gDbCheckCollectionTryLockMaxAttempts
+        default: 5
+        validator:
+          gte: 1
+          lte: 20
+    dbCheckCollectionTryLockMinBackoffMillis:
+        description: 'Initial backoff on failure to acquire the collection lock for processing a dbCheck batch. Grows exponentially'
+        set_at: [ startup, runtime ]
+        cpp_vartype: 'AtomicWord<int>'
+        cpp_varname: gDbCheckCollectionTryLockMinBackoffMillis
+        default: 10
+        validator:
+          gte: 2
+          lte: 60000
+    dbCheckCollectionTryLockMaxBackoffMillis:
+        description: 'Maximum exponential backoff on failure to acquire the collection lock for processing a dbCheck batch.'
+        set_at: [ startup, runtime ]
+        cpp_vartype: 'AtomicWord<int>'
+        cpp_varname: gDbCheckCollectionTryLockMaxBackoffMillis
+        default: 60000
+        validator:
+          gte: 20
+          lte: 120000
+    dbCheckHealthLogEveryNBatches:
+        description: 'Emit an info-severity health log batch every N batches processed'
+        set_at: [ startup, runtime ]
+        cpp_vartype: 'AtomicWord<int>'
+        cpp_varname: gDbCheckHealthLogEveryNBatches
+        default: 25
+        validator:
+          gte: 1
+          lte: 10000
 
 types:
   _id_key:
@@ -51,6 +99,8 @@ enums:
     values:
       Batch: "batch"
       Collection: "collection"
+      Start: "start"
+      Stop: "stop"
 
 structs:
   DbCheckSingleInvocation:
@@ -74,6 +124,31 @@ structs:
       maxCountPerSecond:
         type: safeInt64
         default: "std::numeric_limits<int64_t>::max()"
+      maxDocsPerBatch:
+        type: safeInt64
+        default: 5000
+        validator:
+          gte: 1
+          lte: 10000
+      maxBytesPerBatch:
+        type: safeInt64
+        default: 20 * 1024 * 1024
+        validator:
+          gte: 102400
+          lte: 268435456
+      maxBatchTimeMillis:
+        type: safeInt64
+        default: 1000
+        validator:
+          gte: 10
+          lte: 20000
+      snapshotRead:
+        type: safeBool
+        default: true
+      batchWriteConcern:
+        description: Wait for this writeConcern at the end of every batch. Default is w:1 with no timeout.
+        type: WriteConcern
+        default: WriteConcernOptions()
 
   DbCheckAllInvocation:
     description: "Command object for database-wide form of dbCheck invocation"
@@ -84,6 +159,31 @@ structs:
       maxCountPerSecond:
         type: safeInt64
         default: "std::numeric_limits<int64_t>::max()"
+      maxDocsPerBatch:
+        type: safeInt64
+        default: 5000
+        validator:
+          gte: 1
+          lte: 10000
+      maxBytesPerBatch:
+        type: safeInt64
+        default: 20 * 1024 * 1024
+        validator:
+          gte: 102400
+          lte: 268435456
+      maxBatchTimeMillis:
+        type: safeInt64
+        default: 1000
+        validator:
+          gte: 10
+          lte: 20000
+      snapshotRead:
+        type: safeBool
+        default: true
+      batchWriteConcern:
+        description: Wait for this writeConcern at the end of every batch. Default is w:1 with no timeout.
+        type: WriteConcern
+        default: WriteConcernOptions()
 
   DbCheckOplogBatch:
     description: "Oplog entry for a dbCheck batch"
@@ -105,6 +205,9 @@ structs:
         cpp_name: maxKey
       maxRate:
         type: safeInt64
+        optional: true
+      readTimestamp:
+        type: timestamp
         optional: true
 
   DbCheckOplogCollection:
@@ -133,3 +236,13 @@ structs:
       options:
         type: object
         cpp_name: options
+
+  DbCheckOplogStartStop:
+    description: "Oplog entry for dbCheck start and stop"
+    fields:
+      dbCheck:
+        type: namespacestring
+        cpp_name: nss
+      type:
+        type: OplogEntries
+        cpp_name: type

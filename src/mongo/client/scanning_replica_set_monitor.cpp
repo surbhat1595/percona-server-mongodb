@@ -56,6 +56,8 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/timer.h"
 
+extern ::mongo::FailPoint maxElectionIdSetVersionPairUpdated;
+
 namespace mongo {
 
 using std::numeric_limits;
@@ -170,11 +172,10 @@ const Seconds kDefaultRefreshPeriod(30);
 ScanningReplicaSetMonitor::ScanningReplicaSetMonitor(const SetStatePtr& initialState)
     : _state(initialState) {}
 
-ScanningReplicaSetMonitor::ScanningReplicaSetMonitor(const MongoURI& uri)
-    : ScanningReplicaSetMonitor(
-          std::make_shared<SetState>(uri,
-                                     &ReplicaSetMonitorManager::get()->getNotifier(),
-                                     ReplicaSetMonitorManager::get()->getExecutor().get())) {}
+ScanningReplicaSetMonitor::ScanningReplicaSetMonitor(const MongoURI& uri,
+                                                     std::shared_ptr<TaskExecutor> executor)
+    : ScanningReplicaSetMonitor(std::make_shared<SetState>(
+          uri, &ReplicaSetMonitorManager::get()->getNotifier(), executor.get())) {}
 
 void ScanningReplicaSetMonitor::init() {
     if (areRefreshRetriesDisabledForTest()) {
@@ -318,7 +319,7 @@ Future<std::vector<HostAndPort>> ScanningReplicaSetMonitor::_getHostsOrRefresh(
 
     stdx::lock_guard<Latch> lk(_state->mutex);
     if (_state->isDropped) {
-        return Status(ErrorCodes::ReplicaSetMonitorRemoved,
+        return Status(ErrorCodes::ShutdownInProgress,
                       str::stream()
                           << "ScanningReplicaSetMonitor for set " << getName() << " is removed");
     }
@@ -854,7 +855,16 @@ Status Refresher::receivedIsMasterFromMaster(const HostAndPort& from, const IsMa
                               << _set->maxElectionId};
         }
 
+        const auto existingMaxElectionId = _set->maxElectionId;
         _set->maxElectionId = reply.electionId;
+
+        if (MONGO_unlikely(maxElectionIdSetVersionPairUpdated.shouldFail())) {
+            // name inherited from streaming monitor.
+            LOGV2(6146601,
+                  "Fail point maxElectionIdSetVersionPairUpdated",
+                  "incomingElectionId"_attr = reply.electionId,
+                  "currentMaxElectionId"_attr = existingMaxElectionId);
+        }
     }
 
     _set->configVersion = reply.configVersion;

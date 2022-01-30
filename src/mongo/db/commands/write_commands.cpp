@@ -65,6 +65,7 @@
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/transaction_participant.h"
@@ -135,9 +136,6 @@ bool isTimeseries(OperationContext* opCtx, const Request& request) {
 NamespaceString makeTimeseriesBucketsNamespace(const NamespaceString& nss) {
     return nss.isTimeseriesBucketsCollection() ? nss : nss.makeTimeseriesBucketsNamespace();
 }
-
-// Default for control.version in time-series bucket collection.
-const int kTimeseriesControlVersion = 1;
 
 /**
  * Transforms a single time-series insert to an update request on an existing bucket.
@@ -216,6 +214,8 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
  */
 BSONObj makeTimeseriesInsertDocument(std::shared_ptr<BucketCatalog::WriteBatch> batch,
                                      const BSONObj& metadata) {
+    using namespace timeseries;
+
     auto metadataElem = metadata.firstElement();
 
     StringDataMap<BSONObjBuilder> dataBuilders;
@@ -235,15 +235,16 @@ BSONObj makeTimeseriesInsertDocument(std::shared_ptr<BucketCatalog::WriteBatch> 
     builder.append("_id", batch->bucketId());
     {
         BSONObjBuilder bucketControlBuilder(builder.subobjStart("control"));
-        bucketControlBuilder.append("version", kTimeseriesControlVersion);
-        bucketControlBuilder.append("min", batch->min());
-        bucketControlBuilder.append("max", batch->max());
+        bucketControlBuilder.append(kBucketControlVersionFieldName,
+                                    kTimeseriesControlDefaultVersion);
+        bucketControlBuilder.append(kBucketControlMinFieldName, batch->min());
+        bucketControlBuilder.append(kBucketControlMaxFieldName, batch->max());
     }
     if (metadataElem) {
-        builder.appendAs(metadataElem, "meta");
+        builder.appendAs(metadataElem, kBucketMetaFieldName);
     }
     {
-        BSONObjBuilder bucketDataBuilder(builder.subobjStart("data"));
+        BSONObjBuilder bucketDataBuilder(builder.subobjStart(kBucketDataFieldName));
         for (auto& dataBuilder : dataBuilders) {
             bucketDataBuilder.append(dataBuilder.first, dataBuilder.second.obj());
         }
@@ -676,15 +677,6 @@ public:
             bool prepared = bucketCatalog.prepareCommit(batch);
             if (!prepared) {
                 invariant(batch->finished());
-                auto batchStatus = batch->getResult().getStatus();
-                tassert(5916402,
-                        str::stream() << "Got unexpected error (" << batchStatus
-                                      << ") preparing time-series bucket to be committed for "
-                                      << ns() << ": " << redact(request().toBSON({})),
-                        batchStatus == ErrorCodes::TimeseriesBucketCleared ||
-                            batchStatus.isA<ErrorCategory::Interruption>() ||
-                            batchStatus.isA<ErrorCategory::StaleShardVersionError>());
-
                 docsToRetry->push_back(index);
                 return true;
             }

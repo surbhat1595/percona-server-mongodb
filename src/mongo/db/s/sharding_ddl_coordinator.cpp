@@ -72,6 +72,26 @@ ShardingDDLCoordinator::~ShardingDDLCoordinator() {
     invariant(_completionPromise.getFuture().isReady());
 }
 
+ExecutorFuture<bool> ShardingDDLCoordinator::_removeDocumentUntillSuccessOrStepdown(
+    std::shared_ptr<executor::TaskExecutor> executor) {
+    return AsyncTry([this, anchor = shared_from_this()] {
+               auto opCtxHolder = cc().makeOperationContext();
+               auto* opCtx = opCtxHolder.get();
+
+               return StatusWith(_removeDocument(opCtx));
+           })
+        .until([this](const StatusWith<bool>& sw) {
+            // We can't rely on the instance token because after removing the document the
+            // CancellationSource object of the instance is lost, so the reference to the parent POS
+            // token is also lost, making any subsequent cancel during a stepdown unnoticeable by
+            // the token.
+            return sw.isOK() || sw.getStatus().isA<ErrorCategory::NotPrimaryError>() ||
+                sw.getStatus().isA<ErrorCategory::ShutdownError>();
+        })
+        .withBackoffBetweenIterations(kExponentialBackoff)
+        .on(executor, CancellationToken::uncancelable());
+}
+
 bool ShardingDDLCoordinator::_removeDocument(OperationContext* opCtx) {
     DBDirectClient dbClient(opCtx);
     auto commandResponse = dbClient.runCommand([&] {
@@ -149,7 +169,6 @@ void ShardingDDLCoordinator::interrupt(Status status) {
 
 SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                              const CancellationToken& token) noexcept {
-
     return ExecutorFuture<void>(**executor)
         .then([this, executor, token, anchor = shared_from_this()] {
             return _acquireLockAsync(executor, token, nss().db());
@@ -214,7 +233,8 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     //  If the token is not cancelled we retry because it could have been generated
                     //  by a remote node.
                     if (!status.isOK() && !_completeOnError &&
-                        (status.isA<ErrorCategory::CursorInvalidatedError>() ||
+                        (_mustAlwaysMakeProgress() ||
+                         status.isA<ErrorCategory::CursorInvalidatedError>() ||
                          status.isA<ErrorCategory::ShutdownError>() ||
                          status.isA<ErrorCategory::RetriableError>() ||
                          status.isA<ErrorCategory::CancellationError>() ||
@@ -224,11 +244,10 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                          status == ErrorCodes::Interrupted || status == ErrorCodes::LockBusy ||
                          status == ErrorCodes::CommandNotFound) &&
                         !token.isCanceled()) {
-                        LOGV2_DEBUG(5656000,
-                                    1,
-                                    "Re-executing sharding DDL coordinator",
-                                    "coordinatorId"_attr = _coordId,
-                                    "reason"_attr = redact(status));
+                        LOGV2_INFO(5656000,
+                                   "Re-executing sharding DDL coordinator",
+                                   "coordinatorId"_attr = _coordId,
+                                   "reason"_attr = redact(status));
                         _firstExecution = false;
                         return false;
                     }
@@ -237,7 +256,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                 .withBackoffBetweenIterations(kExponentialBackoff)
                 .on(**executor, CancellationToken::uncancelable());
         })
-        .onCompletion([this, anchor = shared_from_this()](const Status& status) {
+        .onCompletion([this, executor, token, anchor = shared_from_this()](const Status& status) {
             auto opCtxHolder = cc().makeOperationContext();
             auto* opCtx = opCtxHolder.get();
 
@@ -249,16 +268,20 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             // Release the coordinator only in case the node is not stepping down or in case of
             // acceptable error
             if (!isSteppingDown || (!status.isOK() && _completeOnError)) {
-                try {
-                    LOGV2(5565601,
-                          "Releasing sharding DDL coordinator",
-                          "coordinatorId"_attr = _coordId);
+                LOGV2(
+                    5565601, "Releasing sharding DDL coordinator", "coordinatorId"_attr = _coordId);
 
-                    auto session = metadata().getSession();
-                    const auto docWasRemoved = _removeDocument(opCtx);
+                auto session = metadata().getSession();
+
+                try {
+                    // We need to execute this in another executor to ensure the remove work is
+                    // done.
+                    const auto docWasRemoved = _removeDocumentUntillSuccessOrStepdown(
+                                                   _service->getInstanceCleanupExecutor())
+                                                   .get();
 
                     if (!docWasRemoved) {
-                        // Release the instance without interrupting it
+                        // Release the instance without interrupting it.
                         _service->releaseInstance(
                             BSON(ShardingDDLCoordinatorMetadata::kIdFieldName << _coordId.toBSON()),
                             Status::OK());
@@ -269,13 +292,12 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                         // discarded.
                         SessionCache::get(opCtx)->release(*session);
                     }
-                } catch (DBException& ex) {
-                    static constexpr auto errMsg = "Failed to release sharding DDL coordinator";
-                    LOGV2_WARNING(5565605,
-                                  errMsg,
-                                  "coordinatorId"_attr = _coordId,
-                                  "error"_attr = redact(ex));
-                    completionStatus = ex.toStatus(errMsg);
+                } catch (const DBException& ex) {
+                    completionStatus = ex.toStatus();
+                    isSteppingDown = completionStatus.isA<ErrorCategory::NotPrimaryError>() ||
+                        completionStatus.isA<ErrorCategory::ShutdownError>() ||
+                        completionStatus.isA<ErrorCategory::CancellationError>();
+                    dassert(isSteppingDown);
                 }
             }
 

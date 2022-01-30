@@ -103,7 +103,7 @@ class CacheDirValidate(SCons.CacheDir.CacheDir):
                 csig = f_out.read().decode().strip()
         except OSError as ex:
             raise InvalidChecksum(cls.get_hash_path(src_file), dst, f"failed to read hash file: {ex}") from ex
-        finally:
+        else:
             if not csig:
                 raise InvalidChecksum(cls.get_hash_path(src_file), dst, f"no content_hash data found")
 
@@ -153,6 +153,9 @@ class CacheDirValidate(SCons.CacheDir.CacheDir):
         self.CacheDebugJson({'type': cache_event}, node, cachefile)
 
     def retrieve(self, node):
+        if not self.is_enabled():
+            return False
+
         self.log_json_cachedebug(node)
         try:
             return super().retrieve(node)
@@ -165,6 +168,8 @@ class CacheDirValidate(SCons.CacheDir.CacheDir):
             return False
 
     def push(self, node):
+        if self.is_readonly() or not self.is_enabled():
+            return
         self.log_json_cachedebug(node, pushing=True)
         try:
             return super().push(node)
@@ -218,14 +223,12 @@ class CacheDirValidate(SCons.CacheDir.CacheDir):
     def clean_bad_cachefile(self, node, cache_csig, computed_csig):
 
         cksum_dir = pathlib.Path(self.cachepath(node)[1])
-
-        try:
-            pathlib.Path(self.get_bad_cachefile_path(cksum_dir)).touch()
-        except FileExistsError:
-            pass
-
         rm_path = f"{cksum_dir}.{SCons.CacheDir.cache_tmp_uuid}.del"
         try:
+            try:
+                pathlib.Path(self.get_bad_cachefile_path(cksum_dir)).touch()
+            except FileExistsError:
+                pass
             cksum_dir.replace(rm_path)
         except OSError as ex:
             msg = f"Failed to rename {cksum_dir} to {rm_path}: {ex}"
@@ -247,6 +250,9 @@ class CacheDirValidate(SCons.CacheDir.CacheDir):
                 return f_out.read().decode()
 
     def cachepath(self, node):
+        if not self.is_enabled():
+            return None, None
+
         dir, path = super().cachepath(node)
         if node.fs.exists(path):
             return dir, path

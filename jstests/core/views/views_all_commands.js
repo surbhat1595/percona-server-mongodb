@@ -106,6 +106,7 @@ let viewsCommandTests = {
     _configsvrRemoveShard: {skip: isAnInternalCommand},
     _configsvrRemoveShardFromZone: {skip: isAnInternalCommand},
     _configsvrRemoveTags: {skip: isAnInternalCommand},
+    _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrShardCollection: {skip: isAnInternalCommand},
@@ -146,6 +147,7 @@ let viewsCommandTests = {
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
+    _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrShardCollection: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
@@ -494,6 +496,13 @@ let viewsCommandTests = {
         }
     ],
     repairDatabase: {skip: isUnrelated},
+    repairShardedCollectionChunksHistory: {
+        command: {repairShardedCollectionChunksHistory: "test.view"},
+        skipStandalone: true,
+        isAdminCommand: true,
+        expectFailure: true,
+        expectedErrorCode: ErrorCodes.NamespaceNotFound,
+    },
     replSetAbortPrimaryCatchUp: {skip: isUnrelated},
     replSetFreeze: {skip: isUnrelated},
     replSetGetConfig: {skip: isUnrelated},
@@ -537,6 +546,16 @@ let viewsCommandTests = {
     },
     revokeRolesFromRole: {skip: isUnrelated},
     revokeRolesFromUser: {skip: isUnrelated},
+    setAllowMigrations: {
+        command: {setAllowMigrations: "test.view", allowMigrations: false},
+        setup: function(conn) {
+            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
+        },
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true
+    },
     rolesInfo: {skip: isUnrelated},
     rotateCertificates: {skip: isUnrelated},
     saslContinue: {skip: isUnrelated},

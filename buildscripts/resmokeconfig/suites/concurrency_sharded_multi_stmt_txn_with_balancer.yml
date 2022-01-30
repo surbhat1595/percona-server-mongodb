@@ -150,6 +150,7 @@ selector:
 executor:
   archive:
     hooks:
+      - RunDBCheckInBackground
       - CheckReplDBHashInBackground
       - CheckReplDBHash
       - ValidateCollections
@@ -163,6 +164,7 @@ executor:
           runningWithSessions: true
           traceExceptions: false
   hooks:
+  - class: RunDBCheckInBackground
   - class: CheckReplDBHashInBackground
   - class: CheckReplDBHash
   - class: ValidateCollections

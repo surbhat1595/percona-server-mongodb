@@ -270,10 +270,6 @@ make sure it actually is able to fetch from the sync source candidate’s oplog.
 * If the oldest entry in the sync source candidate's oplog is newer than the node's newest entry,
   then the node denylists that sync source candidate as well because the candidate is too far
   ahead.
-* During initial sync, rollback, or recovery from unclean shutdown, nodes will set a specific
-  OpTime, [**`minValid`**](#replication-timestamp-glossary), that they must reach before it is safe
-  to read from the node and before the node can transition into `SECONDARY` state. If the secondary
-  has a `minValid`, then the sync source candidate is checked for that `minValid` entry.
 * The sync source's **RollbackID** is also fetched to be checked after the first batch is returned
   by the `OplogFetcher`.
 
@@ -1887,12 +1883,13 @@ This document is present in every mongod in the cluster and is replicated to oth
 replica set whenever it is updated via writes to the `admin.system.version` collection. The FCV
 document is also present on standalone nodes.
 
-On a clean startup (the server currently has no non-local databases), the server will create the FCV
-document for the first time. If it is running as a shard server (with the `--shardsvr option`), the 
-server will set the FCV to be the last LTS version. This is to ensure compatibility when adding the
-shard to a downgraded version cluster. The config server will run `setFeatureCompatibilityVersion`
-on the shard to match the clusters FCV as part of `addShard`. If the server is not running as a
-shard server, then the server will set its FCV to the latest version by default.
+On a clean startup (the server currently has no replicated collections), the server will create the
+FCV document for the first time. If it is running as a shard server (with the `--shardsvr option`),
+the server will set the FCV to be the last LTS version. This is to ensure compatibility when adding
+the shard to a downgraded version cluster. The config server will run
+`setFeatureCompatibilityVersion`on the shard to match the clusters FCV as part of `addShard`. If the
+server is not running as a shard server, then the server will set its FCV to the latest version by
+default.
 
 As part of a startup with an existing FCV document, the server caches an in-memory value of the FCV
 from disk. The `FcvOpObserver` keeps this in-memory value in sync with the on-disk FCV document

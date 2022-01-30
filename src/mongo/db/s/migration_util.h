@@ -163,7 +163,7 @@ void persistAbortDecision(OperationContext* opCtx,
 void deleteRangeDeletionTaskLocally(
     OperationContext* opCtx,
     const UUID& deletionTaskId,
-    const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern);
+    const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcernShardingTimeout);
 
 /**
  * Deletes the range deletion task document with the specified id from config.rangeDeletions on the
@@ -224,6 +224,12 @@ void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx);
  * Assumes the caller to have entered CollectionCriticalSection.
  */
 void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss);
+
+/**
+ * Recovers all unfinished migrations pending recovery.
+ * Note: This method assumes its caller is preventing new migrations from starting.
+ */
+void drainMigrationsPendingRecovery(OperationContext* opCtx);
 
 }  // namespace migrationutil
 }  // namespace mongo

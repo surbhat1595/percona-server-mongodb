@@ -977,8 +977,6 @@ void WiredTigerKVEngine::cleanShutdown() {
     ON_BLOCK_EXIT([&] { _encryptionKeyDB.reset(nullptr); });
     WiredTigerUtil::resetTableLoggingInfo();
 
-    if (!_readOnly)
-        syncSizeInfo(true);
     if (!_conn) {
         return;
     }
@@ -997,8 +995,17 @@ void WiredTigerKVEngine::cleanShutdown() {
                        "Initial Data Timestamp"_attr = Timestamp(_initialDataTimestamp.load()),
                        "Oldest Timestamp"_attr = Timestamp(_oldestTimestamp.load()));
 
-    _sizeStorer.reset();
     _sessionCache->shuttingDown();
+
+    if (!_readOnly) {
+        syncSizeInfo(/*syncToDisk=*/true);
+    }
+
+    // The size storer has to be destructed after the session cache has shut down. This sets the
+    // shutdown flag internally in the session cache. As operations get interrupted during shutdown,
+    // they release their session back to the session cache. If the shutdown flag has been set,
+    // released sessions will skip flushing the size storer.
+    _sizeStorer.reset();
 
     // We want WiredTiger to leak memory for faster shutdown except when we are running tools to
     // look for memory leaks.
@@ -1062,16 +1069,6 @@ void WiredTigerKVEngine::cleanShutdown() {
     if (_encryptionKeyDB && downgrade) {
         _encryptionKeyDB->reconfigure(_fileVersion.getDowngradeString().c_str());
     }
-}
-
-Status WiredTigerKVEngine::okToRename(OperationContext* opCtx,
-                                      StringData fromNS,
-                                      StringData toNS,
-                                      StringData ident,
-                                      const RecordStore* originalRecordStore) const {
-    syncSizeInfo(false);
-
-    return Status::OK();
 }
 
 int64_t WiredTigerKVEngine::getIdentSize(OperationContext* opCtx, StringData ident) {

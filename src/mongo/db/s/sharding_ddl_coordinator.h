@@ -129,7 +129,7 @@ protected:
 
         auto opCtx = cc().makeOperationContext();
         PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-        store.add(opCtx.get(), newDoc, WriteConcerns::kMajorityWriteConcern);
+        store.add(opCtx.get(), newDoc, WriteConcerns::kMajorityWriteConcernShardingTimeout);
 
         return std::move(newDoc);
     }
@@ -141,7 +141,7 @@ protected:
         store.update(opCtx,
                      BSON(StateDoc::kIdFieldName << newDoc.getId().toBSON()),
                      newDoc.toBSON(),
-                     WriteConcerns::kMajorityWriteConcern);
+                     WriteConcerns::kMajorityWriteConcernShardingTimeout);
         return std::move(newDoc);
     }
 
@@ -176,7 +176,15 @@ protected:
         return osi;
     }
 
-protected:
+    /*
+     * Specify if the coordinator must indefinitely be retried in case of exceptions. It is always
+     * expected for a coordinator to make progress after performing intermediate operations that
+     * can't be rollbacked.
+     */
+    virtual bool _mustAlwaysMakeProgress() {
+        return false;
+    };
+
     ShardingDDLCoordinatorService* _service;
     const ShardingDDLCoordinatorId _coordId;
 
@@ -196,6 +204,10 @@ private:
     void interrupt(Status status) override final;
 
     bool _removeDocument(OperationContext* opCtx);
+
+    ExecutorFuture<bool> _removeDocumentUntillSuccessOrStepdown(
+        std::shared_ptr<executor::TaskExecutor> executor);
+
     ExecutorFuture<void> _acquireLockAsync(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                            const CancellationToken& token,
                                            StringData resource);

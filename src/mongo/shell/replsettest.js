@@ -3007,10 +3007,15 @@ var ReplSetTest = function(opts) {
     this.freeze = _nodeParamToSingleNode(_nodeParamToConn(function(node) {
         assert.soon(() => {
             try {
-                // Ensure node is not primary. Ignore errors, probably means it's already secondary.
-                node.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true});
-                // Prevent node from running election. Fails if it already started an election.
-                assert.commandWorked(node.adminCommand({replSetFreeze: ReplSetTest.kForeverSecs}));
+                // Ensure node is authenticated.
+                asCluster(node, () => {
+                    // Ensure node is not primary. Ignore errors, probably means it's already
+                    // secondary.
+                    node.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true});
+                    // Prevent node from running election. Fails if it already started an election.
+                    assert.commandWorked(
+                        node.adminCommand({replSetFreeze: ReplSetTest.kForeverSecs}));
+                });
                 return true;
             } catch (e) {
                 if (isNetworkError(e) || e.code === ErrorCodes.NotSecondary ||
@@ -3425,7 +3430,7 @@ var ReplSetTest = function(opts) {
             // and too slowly processing heartbeats. When it steps down, it closes all of
             // its connections.
             _constructFromExistingSeedNode(opts);
-        }, 120);
+        }, ReplSetTest.kDefaultRetries);
     } else if (typeof opts.rstArgs === "object") {
         _constructFromExistingNodes(opts.rstArgs);
     } else {
@@ -3457,6 +3462,7 @@ var ReplSetTest = function(opts) {
  *  Global default timeout (10 minutes).
  */
 ReplSetTest.kDefaultTimeoutMS = 10 * 60 * 1000;
+ReplSetTest.kDefaultRetries = 240;
 
 /**
  *  Global default number that's effectively infinite.

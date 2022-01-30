@@ -1,6 +1,7 @@
 /**
  * Tests aggregate expression counters.
- * Initially limited to $getField and $setField.
+ * @tags: [
+ * ]
  */
 
 (function() {
@@ -22,39 +23,64 @@ for (let i = 0; i < 3; i++) {
     }));
 }
 
-const isDotsAndDollarsEnabled = db.adminCommand({getParameter: 1, featureFlagDotsAndDollars: 1})
-                                    .featureFlagDotsAndDollars.value;
+/**
+ * Execute the `command` and compare the operator counters with the expected values.
+ * @param {*} command to be executed.
+ * @param {*} expectedCounters  expected operator counters.
+ */
+function checkCounters(command, expectedCounters) {
+    const origCounters = db.serverStatus().metrics.operatorCounters.expressions;
 
-if (!isDotsAndDollarsEnabled) {
-    jsTestLog("Skipping test because the featureFlagDotsAndDollars is disabled");
-    MongoRunner.stopMongod(mongod);
-    return;
+    command();
+
+    const newCounters = db.serverStatus().metrics.operatorCounters.expressions;
+    let actualCounters = {};
+    for (let ec in origCounters) {
+        const diff = newCounters[ec] - origCounters[ec];
+        if (diff !== 0) {
+            actualCounters[ec] = diff;
+        }
+    }
+
+    assert.docEq(expectedCounters, actualCounters);
 }
 
-function checkCounterIncrement(command, exprCounter) {
-    const origCounter = db.serverStatus().metrics.operatorCounters.expressions[exprCounter];
-    command();
-    assert.gt(db.serverStatus().metrics.operatorCounters.expressions[exprCounter], origCounter);
+/**
+ * Check operator counters in the `find`.
+ * @param {*} query to be executed.
+ * @param {*} expectedCounters - expected operator counters.
+ * @param {*} expectedCount - expected number of records returned by the `find` function.
+ */
+function checkFindCounters(query, expectedCounters, expectedCount) {
+    checkCounters(() => assert.eq(expectedCount, coll.find(query).itcount()), expectedCounters);
+}
+
+/**
+ * Check operator counters in the `aggregate`.
+ * @param {*} pipeline to be executed.
+ * @param {*} expectedCounters - expected operator counters.
+ * @param {*} expectedCount - expected number of records returned by the `find` function.
+ */
+function checkAggregationCounters(pipeline, expectedCounters, expectedCount) {
+    checkCounters(() => assert.eq(expectedCount, coll.aggregate(pipeline).itcount()),
+                  expectedCounters);
 }
 
 // Find.
-checkCounterIncrement(
-    () => assert.eq(3, coll.find({$expr: {$eq: [{$getField: "a$b"}, "foo"]}}).itcount()),
-    "$getField");
+checkFindCounters({$expr: {$eq: [{$getField: "a$b"}, "foo"]}}, {"$getField": 1, "$eq": 1}, 3);
 
 // Update.
-checkCounterIncrement(
-    () => assert.commandWorked(
-        coll.update({_id: 0, $expr: {$eq: [{$getField: {field: "a$b", input: "$$ROOT"}}, "foo"]}},
-                    {$set: {y: 10}})),
-    "$getField");
+checkCounters(() => assert.commandWorked(coll.update(
+                  {_id: 0, $expr: {$eq: [{$getField: {field: "a$b", input: "$$ROOT"}}, "foo"]}},
+                  {$set: {y: 10}})),
+              {"$getField": 1, "$eq": 1});
 
-checkCounterIncrement(
+checkCounters(
     () => assert.commandWorked(coll.update(
         {_id: 1}, [{$replaceWith: {$setField: {field: "a.b", input: "$$ROOT", value: "qqq"}}}])),
-    "$setField");
+    {"$setField": 1});
 
-checkCounterIncrement(() => assert.commandWorked(db.runCommand({
+checkCounters(() => assert.commandWorked(db.runCommand({
     update: coll.getName(),
     updates: [{
         q: {_id: 1},
@@ -62,30 +88,30 @@ checkCounterIncrement(() => assert.commandWorked(db.runCommand({
         upsert: false
     }]
 })),
-                      "$setField");
+              {"$setField": 1});
 
 // Delete.
-checkCounterIncrement(() => assert.commandWorked(db.runCommand({
+checkCounters(() => assert.commandWorked(db.runCommand({
     delete: coll.getName(),
     deletes: [{q: {"_id": {$gt: 1}, $expr: {$eq: [{$getField: "a$b"}, "foo"]}}, limit: 1}]
 })),
-                      "$getField");
+              {"$getField": 1, "$eq": 1});
 
 // In aggregation pipeline.
 let pipeline = [{$project: {_id: 1, test: {$getField: "a$b"}}}];
-checkCounterIncrement(() => assert.eq(2, coll.aggregate(pipeline).itcount()), "$getField");
+checkAggregationCounters(pipeline, {"$getField": 1}, 2);
 
 pipeline = [{$match: {_id: 1, $expr: {$eq: [{$getField: "a$b"}, "foo"]}}}];
-checkCounterIncrement(() => assert.eq(1, coll.aggregate(pipeline).itcount()), "$getField");
+checkAggregationCounters(pipeline, {"$getField": 1, "$eq": 1}, 1);
 
 pipeline =
     [{$match: {_id: 1, $expr: {$eq: [{$getField: {field: "a$b", input: {"a$b": "b"}}}, "b"]}}}];
-checkCounterIncrement(() => assert.eq(1, coll.aggregate(pipeline).itcount()), "$getField");
+checkAggregationCounters(pipeline, {"$getField": 1, "$eq": 1}, 1);
 
 pipeline = [{
     $project: {_id: 1, test: {$setField: {field: {$const: "a.b"}, input: "$$ROOT", value: "barrr"}}}
 }];
-checkCounterIncrement(() => assert.eq(2, coll.aggregate(pipeline).itcount()), "$setField");
+checkAggregationCounters(pipeline, {"$setField": 1, "$const": 1}, 2);
 
 // With sub-pipeline.
 const testColl = db.operator_counters_expressions2;
@@ -109,7 +135,7 @@ pipeline = [
         }
     }
 ];
-checkCounterIncrement(() => assert.eq(3, coll.aggregate(pipeline).itcount()), "$getField");
+checkAggregationCounters(pipeline, {"$getField": 1}, 3);
 
 initTestColl(5);
 pipeline = [
@@ -118,7 +144,7 @@ pipeline = [
         pipeline: [{$project: {x: 1, _id: 0, test: {$getField: "a$b"}}}],
         as: "joinedField"
 }}];
-checkCounterIncrement(() => assert.eq(2, coll.aggregate(pipeline).itcount()), "$getField");
+checkAggregationCounters(pipeline, {"$getField": 1}, 2);
 
 initTestColl(1);
 let mergePipeline =
@@ -127,39 +153,105 @@ pipeline = [{
     $merge:
         {into: testColl.getName(), on: "_id", whenMatched: mergePipeline, whenNotMatched: "insert"}
 }];
-checkCounterIncrement(() => {
+checkCounters(() => {
     coll.aggregate(pipeline).itcount();
     assert.eq(2, testColl.find().itcount());
-}, "$setField");
+}, {"$setField": 1});
 
 // Expressions in view pipeline.
 db.view.drop();
 let viewPipeline = [{$match: {$expr: {$eq: [{$getField: "a.b"}, "bar"]}}}];
 assert.commandWorked(
     db.runCommand({create: "view", viewOn: coll.getName(), pipeline: viewPipeline}));
-checkCounterIncrement(() => db.view.find().itcount(), "$getField");
+checkCounters(() => db.view.find().itcount(), {"$getField": 1, "$eq": 1});
 
 // Expressions in document validator.
-const initCounter = db.serverStatus().metrics.operatorCounters.expressions["$getField"];
-initTestColl(1);
-assert.commandWorked(db.runCommand(
-    {"collMod": testColl.getName(), "validator": {$expr: {$eq: [{$getField: "a$b"}, "new"]}}}));
-const validatorCounter = db.serverStatus().metrics.operatorCounters.expressions["$getField"];
-assert.gt(validatorCounter, initCounter);
+checkCounters(() => {
+    initTestColl(1);
+    assert.commandWorked(db.runCommand(
+        {"collMod": testColl.getName(), "validator": {$expr: {$eq: [{$getField: "a$b"}, "new"]}}}));
+}, {"$getField": 1, "$eq": 1});
 
 // Expression counter is not incremented for each validated document.
-assert.commandWorked(testColl.insert({
-    _id: 2,
-    x: 2,
-    "a$b": "new",
-}));
-assertDocumentValidationFailure(testColl.insert({
-    _id: 3,
-    x: 3,
-    "a$b": "invalid",
-}),
-                                testColl);
-assert.eq(validatorCounter, db.serverStatus().metrics.operatorCounters.expressions["$getField"]);
+checkCounters(() => {
+    assert.commandWorked(testColl.insert({
+        _id: 2,
+        x: 2,
+        "a$b": "new",
+    }));
+    assertDocumentValidationFailure(testColl.insert({
+        _id: 3,
+        x: 3,
+        "a$b": "invalid",
+    }),
+                                    testColl);
+}, {});
+
+// $cond
+pipeline = [{$project: {item: 1, discount: {$cond: {if: {$gte: ["$x", 1]}, then: 10, else: 0}}}}];
+checkAggregationCounters(pipeline, {"$cond": 1, "$gte": 1}, 2);
+
+// $ifNull
+pipeline = [{$project: {description: {$ifNull: ["$description", "Unspecified"]}}}];
+checkAggregationCounters(pipeline, {"$ifNull": 1}, 2);
+
+// $divide, $switch
+let query = {
+    $expr: {
+        $eq: [
+            {
+                $switch: {
+                    branches: [{case: {$gt: ["$x", 0]}, then: {$divide: ["$x", 2]}}],
+                    default: {$subtract: [100, "$x"]}
+                }
+            },
+            100
+        ]
+    }
+};
+checkFindCounters(query, {"$divide": 1, "$subtract": 1, "$eq": 1, "$gt": 1, "$switch": 1}, 1);
+
+// $cmp, $exp, $abs, $range
+pipeline = [{
+    $project: {
+        cmpField: {$cmp: ["$x", 250]},
+        expField: {$exp: "$x"},
+        absField: {$abs: "$x"},
+        rangeField: {$range: [0, "$x", 25]}
+    }
+}];
+checkAggregationCounters(pipeline, {"$abs": 1, "$cmp": 1, "$exp": 1, "$range": 1}, 2);
+
+// $or
+pipeline = [{$match: {$expr: {$or: [{$eq: ["$_id", 0]}, {$eq: ["$x", 1]}]}}}];
+checkAggregationCounters(pipeline, {"$eq": 2, "$or": 1}, 2);
+
+// $dateFromParts
+pipeline =
+    [{$project: {date: {$dateFromParts: {'year': 2021, 'month': 10, 'day': {$add: ['$x', 10]}}}}}];
+checkAggregationCounters(pipeline, {"$add": 1, "$dateFromParts": 1}, 2);
+
+// $concat
+pipeline = [{$project: {mystring: {$concat: [{$getField: "a$b"}, {$getField: "a.b"}]}}}];
+checkAggregationCounters(pipeline, {"$concat": 1, "$getField": 2}, 2);
+
+// $toDouble
+pipeline = [{$project: {doubleval: {$toDouble: "$_id"}}}];
+checkAggregationCounters(pipeline, {"$toDouble": 1}, 2);
+
+// $setIntersection
+pipeline = [{$project: {intersection: {$setIntersection: [[1, 2, 3], [3, 2]]}}}];
+checkAggregationCounters(pipeline, {"$setIntersection": 1}, 2);
+
+// Expressions in bulk operations.
+const bulkColl = db.operator_counters_expressions3;
+for (let i = 0; i < 3; i++) {
+    assert.commandWorked(bulkColl.insert({_id: i, x: i}));
+}
+const bulkOp = bulkColl.initializeUnorderedBulkOp();
+bulkOp.find({$expr: {$eq: ["$x", 2]}}).update({$set: {x: 10}});
+bulkOp.find({$expr: {$lt: ["$x", 1]}}).remove();
+checkCounters(() => assert.commandWorked(bulkOp.execute()), {"$eq": 1, "$lt": 1});
 
 MongoRunner.stopMongod(mongod);
 })();

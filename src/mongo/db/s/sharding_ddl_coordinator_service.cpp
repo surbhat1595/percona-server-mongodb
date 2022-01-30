@@ -46,6 +46,7 @@
 #include "mongo/db/s/drop_collection_coordinator.h"
 #include "mongo/db/s/drop_database_coordinator.h"
 #include "mongo/db/s/rename_collection_coordinator.h"
+#include "mongo/db/s/set_allow_migrations_coordinator.h"
 
 namespace mongo {
 namespace {
@@ -67,6 +68,9 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kCreateCollection:
             return std::make_shared<CreateCollectionCoordinator>(service, std::move(initialState));
             break;
+        case DDLCoordinatorTypeEnum::kSetAllowMigrations:
+            return std::make_shared<SetAllowMigrationsCoordinator>(service,
+                                                                   std::move(initialState));
         default:
             uasserted(ErrorCodes::BadValue,
                       str::stream()
@@ -240,6 +244,12 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx, BSON
     }
 
     return coordinator;
+}
+
+
+std::shared_ptr<executor::TaskExecutor> ShardingDDLCoordinatorService::getInstanceCleanupExecutor()
+    const {
+    return PrimaryOnlyService::getInstanceCleanupExecutor();
 }
 
 }  // namespace mongo

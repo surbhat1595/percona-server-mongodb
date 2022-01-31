@@ -128,8 +128,8 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
 
     // A backup cursor is open. Any exception code path must leave the BackupCursorService in an
     // inactive state.
-    auto closeCursorGuard =
-        makeGuard([this, opCtx, &lk] { _closeBackupCursor(opCtx, _openCursor.get(), lk); });
+    ScopeGuard closeCursorGuard(
+        [this, opCtx, &lk] { _closeBackupCursor(opCtx, _openCursor.get(), lk); });
 
     uassert(50919,
             "Failpoint hit after opening the backup cursor.",

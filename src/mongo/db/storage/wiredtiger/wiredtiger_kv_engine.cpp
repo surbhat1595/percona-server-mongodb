@@ -511,7 +511,10 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         bool just_created{false};
         fs::path keyDBPath = path;
         keyDBPath /= keydbDir;
-        auto keyDBPathGuard = makeGuard([&] { if (just_created) fs::remove_all(keyDBPath); });
+        ScopeGuard keyDBPathGuard([&] {
+            if (just_created)
+                fs::remove_all(keyDBPath);
+        });
         if (!fs::exists(keyDBPath)) {
             fs::path betaKeyDBPath = path;
             betaKeyDBPath /= "keydb";

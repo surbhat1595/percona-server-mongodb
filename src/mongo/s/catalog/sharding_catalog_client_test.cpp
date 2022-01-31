@@ -86,7 +86,7 @@ TEST_F(ShardingCatalogClientTest, GetCollectionExisting) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
     CollectionType expectedColl(
-        NamespaceString("TestDB.TestNS"), OID::gen(), Date_t::now(), UUID::gen());
+        NamespaceString("TestDB.TestNS"), OID::gen(), Timestamp(), Date_t::now(), UUID::gen());
     expectedColl.setKeyPattern(BSON("KeyName" << 1));
 
     const OpTime newOpTime(Timestamp(7, 6), 5);
@@ -353,12 +353,13 @@ TEST_F(ShardingCatalogClientTest, GetAllShardsWithInvalidShard) {
 TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1, 1);
 
     ChunkType chunkA;
     chunkA.setName(OID::gen());
-    chunkA.setNS(kNamespace);
+    chunkA.setCollectionUUID(collUuid);
     chunkA.setMin(BSON("a" << 1));
     chunkA.setMax(BSON("a" << 100));
     chunkA.setVersion({1, 2, collEpoch, collTimestamp});
@@ -366,7 +367,7 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
 
     ChunkType chunkB;
     chunkB.setName(OID::gen());
-    chunkB.setNS(kNamespace);
+    chunkB.setCollectionUUID(collUuid);
     chunkB.setMin(BSON("a" << 100));
     chunkB.setMax(BSON("a" << 200));
     chunkB.setVersion({3, 4, collEpoch, collTimestamp});
@@ -375,8 +376,8 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
     ChunkVersion queryChunkVersion({1, 2, collEpoch, collTimestamp});
 
     const BSONObj chunksQuery(
-        BSON(ChunkType::ns("TestDB.TestColl")
-             << ChunkType::lastmod()
+        BSON(ChunkType::collectionUUID()
+             << collUuid << ChunkType::lastmod()
              << BSON("$gte" << static_cast<long long>(queryChunkVersion.toLong()))));
 
     const OpTime newOpTime(Timestamp(7, 6), 5);
@@ -435,17 +436,18 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
     ASSERT_BSONOBJ_EQ(chunkB.toConfigBSON(), chunks[1].toConfigBSON());
 }
 
-TEST_F(ShardingCatalogClientTest, GetChunksForNSNoSortNoLimit) {
+TEST_F(ShardingCatalogClientTest, GetChunksForUUIDNoSortNoLimit) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp();
 
     ChunkVersion queryChunkVersion({1, 2, collEpoch, collTimestamp});
 
     const BSONObj chunksQuery(
-        BSON(ChunkType::ns("TestDB.TestColl")
-             << ChunkType::lastmod()
+        BSON(ChunkType::collectionUUID()
+             << collUuid << ChunkType::lastmod()
              << BSON("$gte" << static_cast<long long>(queryChunkVersion.toLong()))));
 
     auto future = launchAsync([this, &chunksQuery, &collEpoch, &collTimestamp] {
@@ -487,11 +489,12 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSNoSortNoLimit) {
 TEST_F(ShardingCatalogClientTest, GetChunksForNSInvalidChunk) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    ChunkVersion queryChunkVersion({1, 2, OID::gen(), boost::none /* timestamp */});
+    const auto collUuid = UUID::gen();
+    ChunkVersion queryChunkVersion({1, 2, OID::gen(), Timestamp()});
 
     const BSONObj chunksQuery(
-        BSON(ChunkType::ns("TestDB.TestColl")
-             << ChunkType::lastmod()
+        BSON(ChunkType::collectionUUID()
+             << collUuid << ChunkType::lastmod()
              << BSON("$gte" << static_cast<long long>(queryChunkVersion.toLong()))));
 
     auto future = launchAsync([this, &chunksQuery, &queryChunkVersion] {
@@ -508,19 +511,19 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSInvalidChunk) {
         ASSERT_EQUALS(ErrorCodes::NoSuchKey, swChunks.getStatus());
     });
 
-    onFindCommand([&chunksQuery](const RemoteCommandRequest& request) {
+    onFindCommand([&chunksQuery, collUuid](const RemoteCommandRequest& request) {
         ChunkType chunkA;
-        chunkA.setNS(kNamespace);
+        chunkA.setCollectionUUID(collUuid);
         chunkA.setMin(BSON("a" << 1));
         chunkA.setMax(BSON("a" << 100));
-        chunkA.setVersion({1, 2, OID::gen(), boost::none /* timestamp */});
+        chunkA.setVersion({1, 2, OID::gen(), Timestamp()});
         chunkA.setShard(ShardId("shard0000"));
 
         ChunkType chunkB;
-        chunkB.setNS(kNamespace);
+        chunkB.setCollectionUUID(collUuid);
         chunkB.setMin(BSON("a" << 100));
         chunkB.setMax(BSON("a" << 200));
-        chunkB.setVersion({3, 4, OID::gen(), boost::none /* timestamp */});
+        chunkB.setVersion({3, 4, OID::gen(), Timestamp()});
         // Missing shard id
 
         return vector<BSONObj>{chunkA.toConfigBSON(), chunkB.toConfigBSON()};
@@ -762,13 +765,14 @@ TEST_F(ShardingCatalogClientTest, RunUserManagementWriteCommandNotWritablePrimar
 TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsNoDb) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    CollectionType coll1(NamespaceString{"test.coll1"}, OID::gen(), network()->now(), UUID::gen());
+    CollectionType coll1(
+        NamespaceString{"test.coll1"}, OID::gen(), Timestamp(), network()->now(), UUID::gen());
     coll1.setKeyPattern(KeyPattern{BSON("_id" << 1)});
     coll1.setUnique(false);
 
 
     CollectionType coll2(
-        NamespaceString{"anotherdb.coll1"}, OID::gen(), network()->now(), UUID::gen());
+        NamespaceString{"anotherdb.coll1"}, OID::gen(), Timestamp(), network()->now(), UUID::gen());
     coll2.setKeyPattern(KeyPattern{BSON("_id" << 1)});
     coll2.setUnique(false);
 
@@ -815,11 +819,13 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsNoDb) {
 TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsWithDb) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    CollectionType coll1(NamespaceString{"test.coll1"}, OID::gen(), network()->now(), UUID::gen());
+    CollectionType coll1(
+        NamespaceString{"test.coll1"}, OID::gen(), Timestamp(), network()->now(), UUID::gen());
     coll1.setKeyPattern(KeyPattern{BSON("_id" << 1)});
     coll1.setUnique(true);
 
-    CollectionType coll2(NamespaceString{"test.coll2"}, OID::gen(), network()->now(), UUID::gen());
+    CollectionType coll2(
+        NamespaceString{"test.coll2"}, OID::gen(), Timestamp(), network()->now(), UUID::gen());
     coll2.setKeyPattern(KeyPattern{BSON("_id" << 1)});
     coll2.setUnique(false);
 
@@ -860,7 +866,7 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsInvalidCollectionType) {
     });
 
     CollectionType validColl(
-        NamespaceString{"test.coll1"}, OID::gen(), network()->now(), UUID::gen());
+        NamespaceString{"test.coll1"}, OID::gen(), Timestamp(), network()->now(), UUID::gen());
     validColl.setKeyPattern(KeyPattern{BSON("_id" << 1)});
     validColl.setUnique(true);
 
@@ -1135,14 +1141,15 @@ TEST_F(ShardingCatalogClientTest, ApplyChunkOpsDeprecatedSuccessful) {
                                         << BSON("precondition2"
                                                 << "second precondition"));
     const NamespaceString nss("config.chunks");
-    ChunkVersion lastChunkVersion(0, 0, OID(), boost::none /* timestamp */);
+    const UUID uuid = UUID::gen();
+    ChunkVersion lastChunkVersion(0, 0, OID(), Timestamp(42));
 
-    auto future = launchAsync([this, updateOps, preCondition, nss, lastChunkVersion] {
+    auto future = launchAsync([this, updateOps, preCondition, uuid, nss, lastChunkVersion] {
         auto status =
             catalogClient()->applyChunkOpsDeprecated(operationContext(),
                                                      updateOps,
                                                      preCondition,
-                                                     NamespaceStringOrUUID(nss),
+                                                     uuid,
                                                      nss,
                                                      lastChunkVersion,
                                                      ShardingCatalogClient::kMajorityWriteConcern,
@@ -1180,14 +1187,15 @@ TEST_F(ShardingCatalogClientTest, ApplyChunkOpsDeprecatedSuccessfulWithCheck) {
                                         << BSON("precondition2"
                                                 << "second precondition"));
     const NamespaceString nss("config.chunks");
-    ChunkVersion lastChunkVersion(0, 0, OID(), boost::none /* timestamp */);
+    const UUID uuid = UUID::gen();
+    ChunkVersion lastChunkVersion(0, 0, OID(), Timestamp());
 
-    auto future = launchAsync([this, updateOps, preCondition, nss, lastChunkVersion] {
+    auto future = launchAsync([this, updateOps, preCondition, uuid, nss, lastChunkVersion] {
         auto status =
             catalogClient()->applyChunkOpsDeprecated(operationContext(),
                                                      updateOps,
                                                      preCondition,
-                                                     NamespaceStringOrUUID(nss),
+                                                     uuid,
                                                      nss,
                                                      lastChunkVersion,
                                                      ShardingCatalogClient::kMajorityWriteConcern,
@@ -1202,13 +1210,13 @@ TEST_F(ShardingCatalogClientTest, ApplyChunkOpsDeprecatedSuccessfulWithCheck) {
         return responseBuilder.obj();
     });
 
-    onFindCommand([this](const RemoteCommandRequest& request) {
+    onFindCommand([this, uuid](const RemoteCommandRequest& request) {
         ChunkType chunk;
         chunk.setName(OID::gen());
-        chunk.setNS(kNamespace);
+        chunk.setCollectionUUID(uuid);
         chunk.setMin(BSON("a" << 1));
         chunk.setMax(BSON("a" << 100));
-        chunk.setVersion({1, 2, OID::gen(), boost::none /* timestamp */});
+        chunk.setVersion({1, 2, OID::gen(), Timestamp(42)});
         chunk.setShard(ShardId("shard0000"));
         return vector<BSONObj>{chunk.toConfigBSON()};
     });
@@ -1229,14 +1237,15 @@ TEST_F(ShardingCatalogClientTest, ApplyChunkOpsDeprecatedFailedWithCheck) {
                                         << BSON("precondition2"
                                                 << "second precondition"));
     const NamespaceString nss("config.chunks");
-    ChunkVersion lastChunkVersion(0, 0, OID(), boost::none /* timestamp */);
+    const UUID uuid = UUID::gen();
+    ChunkVersion lastChunkVersion(0, 0, OID(), Timestamp(42));
 
-    auto future = launchAsync([this, updateOps, preCondition, nss, lastChunkVersion] {
+    auto future = launchAsync([this, uuid, updateOps, preCondition, nss, lastChunkVersion] {
         auto status =
             catalogClient()->applyChunkOpsDeprecated(operationContext(),
                                                      updateOps,
                                                      preCondition,
-                                                     NamespaceStringOrUUID(nss),
+                                                     uuid,
                                                      nss,
                                                      lastChunkVersion,
                                                      ShardingCatalogClient::kMajorityWriteConcern,

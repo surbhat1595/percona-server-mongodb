@@ -31,6 +31,7 @@
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/s/concurrency/locker_mongos_client_observer.h"
 #include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_router.h"
@@ -70,8 +71,15 @@ void sortByEndpoint(std::vector<TargetedWrite*>* writes) {
 
 class WriteOpTest : public ServiceContextTest {
 protected:
-    const ServiceContext::UniqueOperationContext _opCtxHolder{makeOperationContext()};
-    OperationContext* const _opCtx{_opCtxHolder.get()};
+    WriteOpTest() {
+        auto service = getServiceContext();
+        service->registerClientObserver(std::make_unique<LockerMongosClientObserver>());
+        _opCtxHolder = makeOperationContext();
+        _opCtx = _opCtxHolder.get();
+    }
+
+    ServiceContext::UniqueOperationContext _opCtxHolder;
+    OperationContext* _opCtx;
 };
 
 // Test of basic error-setting on write op
@@ -125,11 +133,11 @@ TEST_F(WriteOpTest, TargetSingle) {
 // Multi-write targeting test where our query goes to one shard
 TEST_F(WriteOpTest, TargetMultiOneShard) {
     ShardEndpoint endpointA(
-        ShardId("shardA"), ChunkVersion(10, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardA"), ChunkVersion(10, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointB(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointC(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
 
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -161,11 +169,11 @@ TEST_F(WriteOpTest, TargetMultiOneShard) {
 // Multi-write targeting test where our write goes to more than one shard
 TEST_F(WriteOpTest, TargetMultiAllShards) {
     ShardEndpoint endpointA(
-        ShardId("shardA"), ChunkVersion(10, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardA"), ChunkVersion(10, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointB(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointC(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
 
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -204,9 +212,9 @@ TEST_F(WriteOpTest, TargetMultiAllShards) {
 
 TEST_F(WriteOpTest, TargetMultiAllShardsAndErrorSingleChildOp) {
     ShardEndpoint endpointA(
-        ShardId("shardA"), ChunkVersion(10, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardA"), ChunkVersion(10, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointB(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
 
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -356,11 +364,11 @@ private:
 
 TEST_F(WriteOpTransactionTest, TargetMultiDoesNotTargetAllShards) {
     ShardEndpoint endpointA(
-        ShardId("shardA"), ChunkVersion(10, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardA"), ChunkVersion(10, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointB(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointC(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
 
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -397,9 +405,9 @@ TEST_F(WriteOpTransactionTest, TargetMultiDoesNotTargetAllShards) {
 
 TEST_F(WriteOpTransactionTest, TargetMultiAllShardsAndErrorSingleChildOp) {
     ShardEndpoint endpointA(
-        ShardId("shardA"), ChunkVersion(10, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardA"), ChunkVersion(10, 0, OID(), Timestamp()), boost::none);
     ShardEndpoint endpointB(
-        ShardId("shardB"), ChunkVersion(20, 0, OID(), boost::none /* timestamp */), boost::none);
+        ShardId("shardB"), ChunkVersion(20, 0, OID(), Timestamp()), boost::none);
 
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -411,7 +419,8 @@ TEST_F(WriteOpTransactionTest, TargetMultiAllShardsAndErrorSingleChildOp) {
     _opCtx->setTxnNumber(kTxnNumber);
 
     auto txnRouter = TransactionRouter::get(_opCtx);
-    txnRouter.beginOrContinueTxn(_opCtx, kTxnNumber, TransactionRouter::TransactionActions::kStart);
+    txnRouter.beginOrContinueTxn(
+        _opCtx, kTxnNumber, TransactionRouter::TransactionActions::kStart, 0 /* txnRetryCounter */);
 
     // Do multi-target write op
     WriteOp writeOp(BatchItemRef(&request, 0), true);

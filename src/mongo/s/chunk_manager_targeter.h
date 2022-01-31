@@ -110,13 +110,19 @@ public:
 
     int getNShardsOwningChunks() const override;
 
+    bool isShardedTimeSeriesBucketsNamespace() const override;
+
+    bool timeseriesNamespaceNeedsRewrite(const NamespaceString& nss) const;
+
+    const ChunkManager& getRoutingInfo() const;
+
     static BSONObj extractBucketsShardKeyFromTimeseriesDoc(
         const BSONObj& doc,
         const ShardKeyPattern& pattern,
         const TimeseriesOptions& timeseriesOptions);
 
 private:
-    void _init(OperationContext* opCtx);
+    ChunkManager _init(OperationContext* opCtx, bool refresh);
 
     /**
      * Returns a vector of ShardEndpoints for a potentially multi-shard query.
@@ -144,15 +150,19 @@ private:
     // Full namespace of the collection for this targeter
     NamespaceString _nss;
 
+    // Used to identify the original namespace that the user has requested. Note: this will only be
+    // true if the buckets namespace is sharded.
+    bool _isRequestOnTimeseriesViewNamespace = false;
+
     // Stores last error occurred
     boost::optional<LastErrorType> _lastError;
-
-    // The latest loaded routing cache entry
-    boost::optional<ChunkManager> _cm;
 
     // Set to the epoch of the namespace we are targeting. If we ever refresh the catalog cache and
     // find a new epoch, we immediately throw a StaleEpoch exception.
     boost::optional<OID> _targetEpoch;
+
+    // The latest loaded routing cache entry
+    ChunkManager _cm;
 };
 
 }  // namespace mongo

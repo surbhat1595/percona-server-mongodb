@@ -111,7 +111,7 @@ boost::optional<LogicalSessionId> ReshardingTxnCloner::_fetchProgressLsid(Operat
 
     boost::optional<LogicalSessionId> progressLsid;
     store.forEach(opCtx,
-                  QUERY(ReshardingTxnClonerProgress::kSourceIdFieldName << _sourceId.toBSON()),
+                  BSON(ReshardingTxnClonerProgress::kSourceIdFieldName << _sourceId.toBSON()),
                   [&](const auto& doc) {
                       progressLsid = doc.getProgress();
                       return false;
@@ -184,7 +184,7 @@ void ReshardingTxnCloner::_updateProgressDocument(OperationContext* opCtx,
 
     store.upsert(
         opCtx,
-        QUERY(ReshardingTxnClonerProgress::kSourceIdFieldName << _sourceId.toBSON()),
+        BSON(ReshardingTxnClonerProgress::kSourceIdFieldName << _sourceId.toBSON()),
         BSON("$set" << BSON(ReshardingTxnClonerProgress::kProgressFieldName << progress.toBSON())),
         {1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)});
 }
@@ -220,7 +220,7 @@ SemiFuture<void> ReshardingTxnCloner::run(
                    // due to a prepared transaction having been in progress.
                    if (!chainCtx->donorRecord) {
                        auto opCtx = factory.makeOperationContext(&cc());
-                       auto guard = makeGuard([&] {
+                       ScopeGuard guard([&] {
                            chainCtx->pipeline->dispose(opCtx.get());
                            chainCtx->pipeline.reset();
                        });

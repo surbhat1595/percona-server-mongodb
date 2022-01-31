@@ -199,7 +199,7 @@ public:
     Validator parseValidator(OperationContext* opCtx,
                              const BSONObj& validator,
                              MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-                             boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
+                             boost::optional<multiversion::FeatureCompatibilityVersion>
                                  maxFeatureCompatibilityVersion) const {
         std::abort();
     }
@@ -255,6 +255,14 @@ public:
     }
 
     void setRecordPreImages(OperationContext* opCtx, bool val) {
+        std::abort();
+    }
+
+    bool isChangeStreamPreAndPostImagesEnabled() const {
+        std::abort();
+    }
+
+    void setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) {
         std::abort();
     }
 
@@ -374,6 +382,10 @@ public:
     }
 
     void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) {
+        std::abort();
+    }
+
+    std::vector<std::string> removeInvalidIndexOptions(OperationContext* opCtx) {
         std::abort();
     }
 

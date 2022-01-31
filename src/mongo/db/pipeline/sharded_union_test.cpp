@@ -82,6 +82,8 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnNetworkError) {
     });
 
     future.default_timed_get();
+
+    unionWith.dispose();
 }
 
 TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
@@ -128,12 +130,14 @@ TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
     onCommand(assertHasExpectedMaxTimeMSAndReturnResult);
 
     future.default_timed_get();
+
+    unionWith.dispose();
 }
 
 TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     // Sharded by {_id: 1}, [MinKey, 0) on shard "0", [0, MaxKey) on shard "1".
     setupNShards(2);
-    loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
+    const auto cm = loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
 
     auto pipeline = Pipeline::create(
         {DocumentSourceMatch::create(fromjson("{_id: 'unionResult'}"), expCtx())}, expCtx());
@@ -164,18 +168,19 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     // Mock the expected config server queries.
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
+    const Timestamp timestamp;
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
 
-    ChunkVersion version(1, 0, epoch, boost::none /* timestamp */);
+    ChunkVersion version(1, 0, epoch, timestamp);
 
-    ChunkType chunk1(kTestAggregateNss,
+    ChunkType chunk1(*cm.getUUID(),
                      {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
                      version,
                      {"0"});
     chunk1.setName(OID::gen());
     version.incMinor();
 
-    ChunkType chunk2(kTestAggregateNss,
+    ChunkType chunk2(*cm.getUUID(),
                      {BSON("_id" << 0), shardKeyPattern.getKeyPattern().globalMax()},
                      version,
                      {"1"});
@@ -183,7 +188,7 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     version.incMinor();
 
     expectCollectionAndChunksAggregation(
-        kTestAggregateNss, epoch, uuid, shardKeyPattern, {chunk1, chunk2});
+        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2});
 
     // That error should be retried, but only the one on that shard.
     onCommand([&](const executor::RemoteCommandRequest& request) {
@@ -192,14 +197,16 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     });
 
     future.default_timed_get();
+
+    unionWith.dispose();
 }
 
 TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequiresIt) {
     // Sharded by {_id: 1}, [MinKey, 0) on shard "0", [0, MaxKey) on shard "1".
     auto shards = setupNShards(2);
-    loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
+    const auto cm = loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
 
-    auto&& parser = AccumulationStatement::getParser("$sum", boost::none);
+    auto&& [parser, _1, _2, _3] = AccumulationStatement::getParser("$sum");
     auto accumulatorArg = BSON("" << 1);
     auto sumStatement =
         parser(expCtx().get(), accumulatorArg.firstElement(), expCtx()->variablesParseState);
@@ -240,11 +247,12 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     // created and moved to the first shard.
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
+    const Timestamp timestamp;
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
 
-    ChunkVersion version(1, 0, epoch, boost::none /* timestamp */);
+    ChunkVersion version(1, 0, epoch, timestamp);
 
-    ChunkType chunk1(kTestAggregateNss,
+    ChunkType chunk1(*cm.getUUID(),
                      {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
                      version,
                      {shards[0].getName()});
@@ -252,18 +260,18 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     version.incMinor();
 
     ChunkType chunk2(
-        kTestAggregateNss, {BSON("_id" << 0), BSON("_id" << 10)}, version, {shards[1].getName()});
+        *cm.getUUID(), {BSON("_id" << 0), BSON("_id" << 10)}, version, {shards[1].getName()});
     chunk2.setName(OID::gen());
     version.incMinor();
 
-    ChunkType chunk3(kTestAggregateNss,
+    ChunkType chunk3(*cm.getUUID(),
                      {BSON("_id" << 10), shardKeyPattern.getKeyPattern().globalMax()},
                      version,
                      {shards[0].getName()});
     chunk3.setName(OID::gen());
 
     expectCollectionAndChunksAggregation(
-        kTestAggregateNss, epoch, uuid, shardKeyPattern, {chunk1, chunk2, chunk3});
+        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2, chunk3});
 
     // That error should be retried, this time two shards.
     onCommand([&](const executor::RemoteCommandRequest& request) {
@@ -278,14 +286,16 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     });
 
     future.default_timed_get();
+
+    unionWith.dispose();
 }
 
 TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNotRequire) {
     // Sharded by {_id: 1}, [MinKey, 0) on shard "0", [0, MaxKey) on shard "1".
     auto shards = setupNShards(2);
-    loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
+    const auto cm = loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
 
-    auto&& parser = AccumulationStatement::getParser("$sum", boost::none);
+    auto&& [parser, _1, _2, _3] = AccumulationStatement::getParser("$sum");
     auto accumulatorArg = BSON("" << 1);
     auto sumStatement =
         parser(expCtx().get(), accumulatorArg.firstElement(), expCtx()->variablesParseState);
@@ -327,16 +337,18 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     // the same shard.
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
+    const Timestamp timestamp;
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
-    ChunkVersion version(1, 0, epoch, boost::none /* timestamp */);
+    ChunkVersion version(1, 0, epoch, timestamp);
     ChunkType chunk1(
-        kTestAggregateNss,
+        *cm.getUUID(),
         {shardKeyPattern.getKeyPattern().globalMin(), shardKeyPattern.getKeyPattern().globalMax()},
         version,
         {shards[0].getName()});
     chunk1.setName(OID::gen());
 
-    expectCollectionAndChunksAggregation(kTestAggregateNss, epoch, uuid, shardKeyPattern, {chunk1});
+    expectCollectionAndChunksAggregation(
+        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1});
 
     // That error should be retried, this time targetting only one shard.
     onCommand([&](const executor::RemoteCommandRequest& request) {
@@ -346,12 +358,14 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     });
 
     future.default_timed_get();
+
+    unionWith.dispose();
 }
 
 TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceived) {
     // Sharded by {_id: 1}, [MinKey, 0) on shard "0", [0, MaxKey) on shard "1".
     auto shards = setupNShards(2);
-    loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
+    auto cm = loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
 
     NamespaceString nsToUnionWith(expCtx()->ns.db(), "view");
     // Mock out the view namespace as emtpy for now - this is what it would be when parsing in a
@@ -378,18 +392,44 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
         ASSERT(unionWith->getNext().isEOF());
     });
 
-    // Mock out one error response, then expect a refresh of the sharding catalog for that
-    // namespace, then mock out a successful response.
+    // Mock the expected config server queries.
+    const OID epoch = OID::gen();
+    const UUID uuid = UUID::gen();
+    const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
+
+    const Timestamp timestamp;
+    ChunkVersion version(1, 0, epoch, timestamp);
+
+    ChunkType chunk1(*cm.getUUID(),
+                     {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
+                     version,
+                     {"0"});
+    chunk1.setName(OID::gen());
+    version.incMinor();
+
+    ChunkType chunk2(*cm.getUUID(),
+                     {BSON("_id" << 0), shardKeyPattern.getKeyPattern().globalMax()},
+                     version,
+                     {"1"});
+    chunk2.setName(OID::gen());
+    version.incMinor();
+
+    expectCollectionAndChunksAggregation(
+        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2});
+
+    // Mock out the sharded view error responses from both shards.
+    std::vector<BSONObj> viewPipeline = {fromjson("{$group: {_id: '$groupKey'}}"),
+                                         // Prevent the $match from being pushed into the shards
+                                         // where it would not execute in this mocked environment.
+                                         fromjson("{$_internalInhibitOptimization: {}}"),
+                                         fromjson("{$match: {_id: 'unionResult'}}")};
     onCommand([&](const executor::RemoteCommandRequest& request) {
         return createErrorCursorResponse(
-            Status{ResolvedView{expectedBackingNs,
-                                {fromjson("{$group: {_id: '$groupKey'}}"),
-                                 // Prevent the $match from being pushed into the shards where it
-                                 // would not execute in this mocked environment.
-                                 fromjson("{$_internalInhibitOptimization: {}}"),
-                                 fromjson("{$match: {_id: 'unionResult'}}")},
-                                BSONObj()},
-                   "It was a view!"_sd});
+            Status{ResolvedView{expectedBackingNs, viewPipeline, BSONObj()}, "It was a view!"_sd});
+    });
+    onCommand([&](const executor::RemoteCommandRequest& request) {
+        return createErrorCursorResponse(
+            Status{ResolvedView{expectedBackingNs, viewPipeline, BSONObj()}, "It was a view!"_sd});
     });
 
     // That error should be incorporated, then we should target both shards. The results should be
@@ -409,6 +449,8 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
     });
 
     future.default_timed_get();
+
+    unionWith->dispose();
 }
 
 TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
@@ -416,7 +458,7 @@ TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
     setupNShards(2);
     loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
 
-    auto&& parser = AccumulationStatement::getParser("$sum", boost::none);
+    auto&& [parser, _1, _2, _3] = AccumulationStatement::getParser("$sum");
     auto accumulatorArg = BSON("" << 1);
     auto sumExpression =
         parser(expCtx().get(), accumulatorArg.firstElement(), expCtx()->variablesParseState);
@@ -461,6 +503,8 @@ TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
     onCommand(assertHasExpectedReadConcernAndReturnResult);
 
     future.default_timed_get();
+
+    unionWith.dispose();
 }
 }  // namespace
 }  // namespace mongo

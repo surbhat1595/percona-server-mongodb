@@ -125,10 +125,26 @@ bool LiteParsedDocumentSourceNestedPipelines::allowedToPassthroughFromMongos() c
 }
 
 bool LiteParsedDocumentSourceNestedPipelines::allowShardedForeignCollection(
-    NamespaceString nss) const {
-    return std::all_of(_pipelines.begin(), _pipelines.end(), [&nss](auto&& pipeline) {
-        return pipeline.allowShardedForeignCollection(nss);
-    });
+    NamespaceString nss, bool inMultiDocumentTransaction) const {
+    return std::all_of(
+        _pipelines.begin(), _pipelines.end(), [&nss, inMultiDocumentTransaction](auto&& pipeline) {
+            return pipeline.allowShardedForeignCollection(nss, inMultiDocumentTransaction);
+        });
+}
+
+ReadConcernSupportResult LiteParsedDocumentSourceNestedPipelines::supportsReadConcern(
+    repl::ReadConcernLevel level, bool isImplicitDefault) const {
+    // Assume that the document source holding the pipeline has no constraints of its own, so
+    // return the strictest of the constraints on the sub-pipelines.
+    auto result = ReadConcernSupportResult::allSupportedAndDefaultPermitted();
+    for (auto& pipeline : _pipelines) {
+        result.merge(pipeline.sourcesSupportReadConcern(level, isImplicitDefault));
+        // If both result statuses are already not OK, stop checking.
+        if (!result.readConcernSupport.isOK() && !result.defaultReadConcernPermit.isOK()) {
+            break;
+        }
+    }
+    return result;
 }
 
 }  // namespace mongo

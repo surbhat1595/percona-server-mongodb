@@ -45,23 +45,28 @@ public:
         return _shardKeyPattern;
     }
 
+    const UUID& uuid() const {
+        return _uuid;
+    }
+
 private:
     KeyPattern _shardKeyPattern{BSON("a" << 1)};
+    const UUID _uuid = UUID::gen();
 };
 
 }  // namespace
 
 TEST_F(ChunkMapTest, TestAddChunk) {
     const OID epoch = OID::gen();
-    ChunkVersion version{1, 0, epoch, boost::none /* timestamp */};
+    ChunkVersion version{1, 0, epoch, Timestamp()};
 
     auto chunk = std::make_shared<ChunkInfo>(
-        ChunkType{kNss,
+        ChunkType{uuid(),
                   ChunkRange{getShardKeyPattern().globalMin(), getShardKeyPattern().globalMax()},
                   version,
                   kThisShard});
 
-    ChunkMap chunkMap{epoch, boost::none /* timestamp */};
+    ChunkMap chunkMap{epoch, Timestamp()};
     auto newChunkMap = chunkMap.createMerged({chunk});
 
     ASSERT_EQ(newChunkMap.size(), 1);
@@ -69,24 +74,24 @@ TEST_F(ChunkMapTest, TestAddChunk) {
 
 TEST_F(ChunkMapTest, TestEnumerateAllChunks) {
     const OID epoch = OID::gen();
-    ChunkMap chunkMap{epoch, boost::none /* timestamp */};
-    ChunkVersion version{1, 0, epoch, boost::none /* timestamp */};
+    ChunkMap chunkMap{epoch, Timestamp()};
+    ChunkVersion version{1, 0, epoch, Timestamp()};
 
     auto newChunkMap = chunkMap.createMerged(
         {std::make_shared<ChunkInfo>(
-             ChunkType{kNss,
+             ChunkType{uuid(),
                        ChunkRange{getShardKeyPattern().globalMin(), BSON("a" << 0)},
                        version,
                        kThisShard}),
 
          std::make_shared<ChunkInfo>(
-             ChunkType{kNss, ChunkRange{BSON("a" << 0), BSON("a" << 100)}, version, kThisShard}),
+             ChunkType{uuid(), ChunkRange{BSON("a" << 0), BSON("a" << 100)}, version, kThisShard}),
 
-         std::make_shared<ChunkInfo>(ChunkType{
-             kNss,
-             ChunkRange{BSON("a" << 100), getShardKeyPattern().globalMax()},
-             version,
-             kThisShard})});
+         std::make_shared<ChunkInfo>(
+             ChunkType{uuid(),
+                       ChunkRange{BSON("a" << 100), getShardKeyPattern().globalMax()},
+                       version,
+                       kThisShard})});
 
     int count = 0;
     auto lastMax = getShardKeyPattern().globalMin();
@@ -104,24 +109,24 @@ TEST_F(ChunkMapTest, TestEnumerateAllChunks) {
 
 TEST_F(ChunkMapTest, TestIntersectingChunk) {
     const OID epoch = OID::gen();
-    ChunkMap chunkMap{epoch, boost::none /* timestamp */};
-    ChunkVersion version{1, 0, epoch, boost::none /* timestamp */};
+    ChunkMap chunkMap{epoch, Timestamp()};
+    ChunkVersion version{1, 0, epoch, Timestamp()};
 
     auto newChunkMap = chunkMap.createMerged(
         {std::make_shared<ChunkInfo>(
-             ChunkType{kNss,
+             ChunkType{uuid(),
                        ChunkRange{getShardKeyPattern().globalMin(), BSON("a" << 0)},
                        version,
                        kThisShard}),
 
          std::make_shared<ChunkInfo>(
-             ChunkType{kNss, ChunkRange{BSON("a" << 0), BSON("a" << 100)}, version, kThisShard}),
+             ChunkType{uuid(), ChunkRange{BSON("a" << 0), BSON("a" << 100)}, version, kThisShard}),
 
-         std::make_shared<ChunkInfo>(ChunkType{
-             kNss,
-             ChunkRange{BSON("a" << 100), getShardKeyPattern().globalMax()},
-             version,
-             kThisShard})});
+         std::make_shared<ChunkInfo>(
+             ChunkType{uuid(),
+                       ChunkRange{BSON("a" << 100), getShardKeyPattern().globalMax()},
+                       version,
+                       kThisShard})});
 
     auto intersectingChunk = newChunkMap.findIntersectingChunk(BSON("a" << 50));
 
@@ -134,24 +139,24 @@ TEST_F(ChunkMapTest, TestIntersectingChunk) {
 
 TEST_F(ChunkMapTest, TestEnumerateOverlappingChunks) {
     const OID epoch = OID::gen();
-    ChunkMap chunkMap{epoch, boost::none /* timestamp */};
-    ChunkVersion version{1, 0, epoch, boost::none /* timestamp */};
+    ChunkMap chunkMap{epoch, Timestamp()};
+    ChunkVersion version{1, 0, epoch, Timestamp()};
 
     auto newChunkMap = chunkMap.createMerged(
         {std::make_shared<ChunkInfo>(
-             ChunkType{kNss,
+             ChunkType{uuid(),
                        ChunkRange{getShardKeyPattern().globalMin(), BSON("a" << 0)},
                        version,
                        kThisShard}),
 
          std::make_shared<ChunkInfo>(
-             ChunkType{kNss, ChunkRange{BSON("a" << 0), BSON("a" << 100)}, version, kThisShard}),
+             ChunkType{uuid(), ChunkRange{BSON("a" << 0), BSON("a" << 100)}, version, kThisShard}),
 
-         std::make_shared<ChunkInfo>(ChunkType{
-             kNss,
-             ChunkRange{BSON("a" << 100), getShardKeyPattern().globalMax()},
-             version,
-             kThisShard})});
+         std::make_shared<ChunkInfo>(
+             ChunkType{uuid(),
+                       ChunkRange{BSON("a" << 100), getShardKeyPattern().globalMax()},
+                       version,
+                       kThisShard})});
 
     auto min = BSON("a" << -50);
     auto max = BSON("a" << 150);

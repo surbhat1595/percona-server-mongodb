@@ -43,6 +43,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
+#include "mongo/db/pipeline/document_source_find_and_modify_image_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/resharding/document_source_resharding_iterate_transaction.h"
@@ -58,31 +59,6 @@
 
 namespace mongo {
 using namespace fmt::literals;
-
-namespace {
-
-UUID getCollectionUuid(OperationContext* opCtx, const NamespaceString& nss) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IS));
-
-    auto uuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss);
-    invariant(uuid);
-
-    return *uuid;
-}
-
-// Ensure that this shard owns the document. This must be called after verifying that we
-// are in a resharding operation so that we are guaranteed that migrations are suspended.
-bool documentBelongsToMe(OperationContext* opCtx,
-                         CollectionShardingState* css,
-                         const ScopedCollectionDescription& collDesc,
-                         const BSONObj& doc) {
-    auto currentKeyPattern = ShardKeyPattern(collDesc.getKeyPattern());
-    auto ownershipFilter = css->getOwnershipFilter(
-        opCtx, CollectionShardingState::OrphanCleanupPolicy::kAllowOrphanCleanup);
-
-    return ownershipFilter.keyBelongsToMe(currentKeyPattern.extractShardKeyFromDoc(doc));
-}
-}  // namespace
 
 BSONObj serializeAndTruncateReshardingErrorIfNeeded(Status originalError) {
     BSONObjBuilder originalBob;
@@ -286,6 +262,10 @@ std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForReshard
             .toBson(),
         expCtx));
 
+    // Converts oplog entries with kNeedsRetryImageFieldName into the old style pair of
+    // update/delete oplog and pre/post image no-op oplog.
+    stages.emplace_back(DocumentSourceFindAndModifyImageLookup::create(expCtx));
+
     // Emits transaction entries chronologically, and adds _id to all events in the stream.
     stages.emplace_back(DocumentSourceReshardingIterateTransaction::create(expCtx));
 
@@ -328,36 +308,6 @@ std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForReshard
         expCtx));
 
     return Pipeline::create(std::move(stages), expCtx);
-}
-
-boost::optional<ShardId> getDestinedRecipient(OperationContext* opCtx,
-                                              const NamespaceString& sourceNss,
-                                              const BSONObj& fullDocument,
-                                              CollectionShardingState* css,
-                                              const ScopedCollectionDescription& collDesc) {
-    if (!ShardingState::get(opCtx)->enabled()) {
-        // Don't bother looking up the sharding state for the collection if the server isn't even
-        // running with sharding enabled. We know there couldn't possibly be any resharding fields.
-        return boost::none;
-    }
-
-    auto reshardingKeyPattern = collDesc.getReshardingKeyIfShouldForwardOps();
-    if (!reshardingKeyPattern)
-        return boost::none;
-
-    if (!documentBelongsToMe(opCtx, css, collDesc, fullDocument))
-        return boost::none;
-
-    bool allowLocks = true;
-    auto tempNssRoutingInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(
-            opCtx,
-            constructTemporaryReshardingNss(sourceNss.db(), getCollectionUuid(opCtx, sourceNss)),
-            allowLocks));
-
-    auto shardKey = reshardingKeyPattern->extractShardKeyFromDocThrows(fullDocument);
-
-    return tempNssRoutingInfo.findIntersectingChunkWithSimpleCollation(shardKey).getShardId();
 }
 
 bool isFinalOplog(const repl::OplogEntry& oplog) {

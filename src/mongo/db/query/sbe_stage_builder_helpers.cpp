@@ -250,17 +250,6 @@ std::unique_ptr<sbe::EExpression> makeNothingArrayCheck(
                                 std::move(otherwise));
 }
 
-std::unique_ptr<sbe::EExpression> buildAccumulatorMinMax(mongo::StringData name,
-                                                         std::unique_ptr<sbe::EExpression> arg) {
-    tassert(5755103,
-            str::stream() << "Expected 'min' or 'max' for name but got: " << name,
-            name == "min" || name == "max");
-    return makeFunction(name,
-                        sbe::makeE<sbe::EIf>(generateNullOrMissing(arg->clone()),
-                                             makeConstant(sbe::value::TypeTags::Nothing, 0),
-                                             arg->clone()));
-}
-
 std::unique_ptr<sbe::EExpression> generateShardKeyBinding(
     const FieldRef& keyPatternField,
     sbe::value::FrameIdGenerator& frameIdGenerator,
@@ -311,7 +300,7 @@ std::pair<sbe::value::SlotId, EvalStage> projectEvalExpr(
     sbe::value::SlotIdGenerator* slotIdGenerator) {
     // If expr's value is already in a slot, return the slot.
     if (expr.getSlot()) {
-        return {*expr.getSlot(), std::move(stage)};
+        return {*expr.getSlot(), stageOrLimitCoScan(std::move(stage), planNodeId)};
     }
 
     // If expr's value is an expression, create a ProjectStage to evaluate the expression
@@ -445,7 +434,7 @@ EvalStage makeUnion(std::vector<EvalStage> inputStages,
                     std::vector<sbe::value::SlotVector> inputVals,
                     sbe::value::SlotVector outputVals,
                     PlanNodeId planNodeId) {
-    std::vector<std::unique_ptr<sbe::PlanStage>> branches;
+    sbe::PlanStage::Vector branches;
     branches.reserve(inputStages.size());
     for (auto& inputStage : inputStages) {
         branches.emplace_back(std::move(inputStage.stage));
@@ -503,7 +492,7 @@ EvalExprStagePair generateUnion(std::vector<EvalExprStagePair> branches,
                                 BranchFn branchFn,
                                 PlanNodeId planNodeId,
                                 sbe::value::SlotIdGenerator* slotIdGenerator) {
-    std::vector<std::unique_ptr<sbe::PlanStage>> stages;
+    sbe::PlanStage::Vector stages;
     std::vector<sbe::value::SlotVector> inputs;
     stages.reserve(branches.size());
     inputs.reserve(branches.size());

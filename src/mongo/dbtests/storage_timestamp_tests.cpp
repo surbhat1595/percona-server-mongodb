@@ -275,7 +275,7 @@ public:
 
         // Build an index.
         MultiIndexBlock indexer;
-        auto abortOnExit = makeGuard(
+        ScopeGuard abortOnExit(
             [&] { indexer.abortIndexBuild(_opCtx, coll, MultiIndexBlock::kNoopOnCleanUpFn); });
 
         BSONObj indexInfoObj;
@@ -1767,8 +1767,11 @@ public:
         auto txnParticipant = TransactionParticipant::get(_opCtx);
         ASSERT(txnParticipant);
 
-        txnParticipant.beginOrContinue(
-            _opCtx, *_opCtx->getTxnNumber(), false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(_opCtx,
+                                       *_opCtx->getTxnNumber(),
+                                       false /* autocommit */,
+                                       true /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
         txnParticipant.unstashTransactionResources(_opCtx, "insert");
         {
             // Insert a document that will set the index as multikey.
@@ -2105,7 +2108,7 @@ public:
 
         // Build an index on `{a: 1}`. This index will be multikey.
         MultiIndexBlock indexer;
-        auto abortOnExit = makeGuard(
+        ScopeGuard abortOnExit(
             [&] { indexer.abortIndexBuild(_opCtx, coll, MultiIndexBlock::kNoopOnCleanUpFn); });
         const LogicalTime beforeIndexBuild = _clock->tickClusterTime(2);
         BSONObj indexInfoObj;
@@ -2219,7 +2222,7 @@ public:
 
         // Build an index on `{a: 1}`.
         MultiIndexBlock indexer;
-        auto abortOnExit = makeGuard([&] {
+        ScopeGuard abortOnExit([&] {
             indexer.abortIndexBuild(_opCtx, collection, MultiIndexBlock::kNoopOnCleanUpFn);
         });
         const LogicalTime beforeIndexBuild = _clock->tickClusterTime(2);
@@ -2960,7 +2963,7 @@ public:
 
         const IndexCatalogEntry* buildingIndex = nullptr;
         MultiIndexBlock indexer;
-        auto abortOnExit = makeGuard([&] {
+        ScopeGuard abortOnExit([&] {
             indexer.abortIndexBuild(_opCtx, collection, MultiIndexBlock::kNoopOnCleanUpFn);
         });
 
@@ -3111,7 +3114,7 @@ public:
         auto taskFuture = task.get_future();
         stdx::thread taskThread{std::move(task)};
 
-        auto joinGuard = makeGuard([&] {
+        ScopeGuard joinGuard([&] {
             batchInProgress.promise.emplaceValue(false);
             taskThread.join();
         });
@@ -3464,8 +3467,11 @@ public:
         auto txnParticipant = TransactionParticipant::get(_opCtx);
         ASSERT(txnParticipant);
         // Start a retryable write.
-        txnParticipant.beginOrContinue(
-            _opCtx, txnNumber, boost::none /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(_opCtx,
+                                       txnNumber,
+                                       boost::none /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
     }
 
 protected:
@@ -3670,8 +3676,11 @@ public:
         auto txnParticipant = TransactionParticipant::get(_opCtx);
         ASSERT(txnParticipant);
 
-        txnParticipant.beginOrContinue(
-            _opCtx, *_opCtx->getTxnNumber(), false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(_opCtx,
+                                       *_opCtx->getTxnNumber(),
+                                       false /* autocommit */,
+                                       true /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
         txnParticipant.unstashTransactionResources(_opCtx, "insert");
         {
             AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);

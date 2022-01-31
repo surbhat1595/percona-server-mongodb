@@ -48,6 +48,7 @@
 #include "mongo/db/pipeline/document_source_union_with.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/stub_lookup_single_document_process_interface.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
 
@@ -91,6 +92,9 @@ TEST_F(DocumentSourceUnionWithTest, BasicSerialUnions) {
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
+
+    unionWithOne.dispose();
+    unionWithTwo.dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, BasicNestedUnions) {
@@ -125,6 +129,8 @@ TEST_F(DocumentSourceUnionWithTest, BasicNestedUnions) {
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
+
+    unionWithTwo.dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, UnionsWithNonEmptySubPipelines) {
@@ -162,6 +168,9 @@ TEST_F(DocumentSourceUnionWithTest, UnionsWithNonEmptySubPipelines) {
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
+
+    unionWithOne.dispose();
+    unionWithTwo.dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, SerializeAndParseWithPipeline) {
@@ -323,6 +332,9 @@ TEST_F(DocumentSourceUnionWithTest, PropagatePauses) {
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
     ASSERT_TRUE(unionWithTwo.getNext().isEOF());
+
+    unionWithOne.dispose();
+    unionWithTwo.dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, ReturnEOFAfterBeingDisposed) {
@@ -409,6 +421,8 @@ TEST_F(DocumentSourceUnionWithTest, RespectsViewDefinition) {
     ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"_sd, 2}}));
 
     ASSERT_TRUE(unionWith->getNext().isEOF());
+
+    unionWith->dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, ConcatenatesViewDefinitionToPipeline) {
@@ -445,6 +459,8 @@ TEST_F(DocumentSourceUnionWithTest, ConcatenatesViewDefinitionToPipeline) {
     ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"_sd, 3}, {"originalId"_sd, 2}}));
 
     ASSERT_TRUE(unionWith->getNext().isEOF());
+
+    unionWith->dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, RejectUnionWhenDepthLimitIsExceeded) {
@@ -453,7 +469,7 @@ TEST_F(DocumentSourceUnionWithTest, RejectUnionWhenDepthLimitIsExceeded) {
     expCtx->setResolvedNamespaces(StringMap<ExpressionContext::ResolvedNamespace>{
         {fromNs.coll().toString(), {fromNs, std::vector<BSONObj>()}}});
 
-    expCtx->subPipelineDepth = ExpressionContext::kMaxSubPipelineViewDepth;
+    expCtx->subPipelineDepth = internalMaxSubPipelineViewDepth.load();
 
     ASSERT_THROWS_CODE(
         DocumentSourceUnionWith::createFromBson(
@@ -478,6 +494,8 @@ TEST_F(DocumentSourceUnionWithTest, ConstraintsWithoutPipelineAreCorrect) {
                                         StageConstraints::LookupRequirement::kAllowed,
                                         StageConstraints::UnionRequirement::kAllowed);
     ASSERT_TRUE(emptyUnion.constraints(Pipeline::SplitState::kUnsplit) == defaultConstraints);
+
+    emptyUnion.dispose();
 }
 
 TEST_F(DocumentSourceUnionWithTest, ConstraintsWithMixedSubPipelineAreCorrect) {

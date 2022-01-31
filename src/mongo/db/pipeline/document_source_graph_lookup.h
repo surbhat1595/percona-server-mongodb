@@ -51,9 +51,11 @@ public:
                                                  const BSONElement& spec);
 
 
-        bool allowShardedForeignCollection(NamespaceString nss) const override {
+        bool allowShardedForeignCollection(NamespaceString nss,
+                                           bool inMultiDocumentTransaction) const override {
             if (feature_flags::gFeatureFlagShardedLookup.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility) &&
+                !inMultiDocumentTransaction) {
                 return true;
             }
             return _foreignNss != nss;
@@ -63,6 +65,8 @@ public:
             return {Privilege(ResourcePattern::forExactNamespace(_foreignNss), ActionType::find)};
         }
     };
+
+    DocumentSourceGraphLookUp(const DocumentSourceGraphLookUp&);
 
     const char* getSourceName() const final;
 
@@ -146,6 +150,8 @@ public:
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
+    boost::intrusive_ptr<DocumentSource> clone() const final;
 
 protected:
     GetNextResult doGetNext() final;
@@ -273,7 +279,7 @@ private:
 
     // If we absorbed a $unwind that specified 'includeArrayIndex', this is used to populate that
     // field, tracking how many results we've returned so far for the current input document.
-    long long _outputIndex;
+    long long _outputIndex = 0;
 
     // Holds variables defined both in this stage and in parent pipelines. These are copied to the
     // '_fromExpCtx' ExpressionContext's 'variables' and 'variablesParseState' for use in the

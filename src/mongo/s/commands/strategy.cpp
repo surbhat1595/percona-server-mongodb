@@ -627,6 +627,9 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         auto txnNumber = opCtx->getTxnNumber();
         invariant(txnNumber);
 
+        auto txnRetryCounter = opCtx->getTxnRetryCounter();
+        invariant(txnRetryCounter);
+
         auto transactionAction = ([&] {
             auto startTxnSetting = _parc->_osi->getStartTransaction();
             if (startTxnSetting && *startTxnSetting) {
@@ -641,7 +644,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         })();
 
         startTransaction = (transactionAction == TransactionRouter::TransactionActions::kStart);
-        txnRouter.beginOrContinueTxn(opCtx, *txnNumber, transactionAction);
+        txnRouter.beginOrContinueTxn(opCtx, *txnNumber, transactionAction, *txnRetryCounter);
     }
 
     bool supportsWriteConcern = invocation->supportsWriteConcern();
@@ -757,12 +760,8 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
                 ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
             const auto rcDefault = rwcDefaults.getDefaultReadConcern();
             if (rcDefault) {
-                const bool isDefaultRCLocalFeatureFlagEnabled =
-                    serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-                    repl::feature_flags::gDefaultRCLocal.isEnabled(
-                        serverGlobalParams.featureCompatibility);
                 const auto readConcernSource = rwcDefaults.getDefaultReadConcernSource();
-                customDefaultReadConcernWasApplied = !isDefaultRCLocalFeatureFlagEnabled ||
+                customDefaultReadConcernWasApplied =
                     (readConcernSource &&
                      readConcernSource.get() == DefaultReadConcernSourceEnum::kGlobal);
 
@@ -915,7 +914,7 @@ void ParseAndRunCommand::RunAndRetry::_checkRetryForTransaction(Status& status) 
     if (!txnRouter)
         return;
 
-    auto abortGuard = makeGuard([&] { txnRouter.implicitlyAbortTransaction(opCtx, status); });
+    ScopeGuard abortGuard([&] { txnRouter.implicitlyAbortTransaction(opCtx, status); });
 
     if (!_canRetry()) {
         addContextForTransactionAbortingError(

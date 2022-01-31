@@ -87,10 +87,11 @@ public:
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
     std::vector<DebugPrinter::Block> debugPrint() const final;
+    size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState() final;
-    void doRestoreState() final;
+    void doSaveState(bool relinquishCursor) final;
+    void doRestoreState(bool relinquishCursor) final;
 
 private:
     void openInner(value::TypeTags tag, value::Value val);

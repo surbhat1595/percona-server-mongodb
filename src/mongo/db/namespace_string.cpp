@@ -78,6 +78,9 @@ const NamespaceString NamespaceString::kTenantMigrationRecipientsNamespace(
 const NamespaceString NamespaceString::kTenantMigrationOplogView(
     NamespaceString::kLocalDb, "system.tenantMigration.oplogView");
 
+const NamespaceString NamespaceString::kTenantSplitDonorsNamespace(NamespaceString::kConfigDb,
+                                                                   "tenantSplitDonors");
+
 const NamespaceString NamespaceString::kShardConfigCollectionsNamespace(NamespaceString::kConfigDb,
                                                                         "cache.collections");
 const NamespaceString NamespaceString::kShardConfigDatabasesNamespace(NamespaceString::kConfigDb,
@@ -89,6 +92,8 @@ const NamespaceString NamespaceString::kExternalKeysCollectionNamespace(Namespac
 const NamespaceString NamespaceString::kRsOplogNamespace(NamespaceString::kLocalDb, "oplog.rs");
 const NamespaceString NamespaceString::kSystemReplSetNamespace(NamespaceString::kLocalDb,
                                                                "system.replset");
+const NamespaceString NamespaceString::kChangeStreamPreImagesNamespace(NamespaceString::kLocalDb,
+                                                                       "system.preimages");
 const NamespaceString NamespaceString::kIndexBuildEntryNamespace(NamespaceString::kConfigDb,
                                                                  "system.indexBuilds");
 const NamespaceString NamespaceString::kRangeDeletionNamespace(NamespaceString::kConfigDb,
@@ -112,6 +117,10 @@ const NamespaceString NamespaceString::kShardingRenameParticipantsNamespace(
 
 const NamespaceString NamespaceString::kConfigSettingsNamespace(NamespaceString::kConfigDb,
                                                                 "settings");
+
+const NamespaceString NamespaceString::kConfigBalancerCommandsNamespace(
+    NamespaceString::kConfigDb, "balancerCommandsSchedulerOngoingOperations");
+
 const NamespaceString NamespaceString::kVectorClockNamespace(NamespaceString::kConfigDb,
                                                              "vectorClock");
 
@@ -171,14 +180,13 @@ bool NamespaceString::isLegalClientSystemNS(
         return true;
     if (coll() == kSystemDotViewsCollectionName)
         return true;
-    if (currentFCV.isGreaterThanOrEqualTo(
-            ServerGlobalParams::FeatureCompatibility::Version::kVersion47) &&
-        // While this FCV check is being added in 4.9, the namespace was allowed in 4.7 binaries
-        // without an FCV check.
-        isTemporaryReshardingCollection()) {
+    if (isTemporaryReshardingCollection()) {
         return true;
     }
     if (isTimeseriesBucketsCollection()) {
+        return true;
+    }
+    if (isChangeStreamPreImagesCollection()) {
         return true;
     }
 
@@ -325,6 +333,10 @@ bool NamespaceString::isTemporaryReshardingCollection() const {
 
 bool NamespaceString::isTimeseriesBucketsCollection() const {
     return coll().startsWith(kTimeseriesBucketsCollectionPrefix);
+}
+
+bool NamespaceString::isChangeStreamPreImagesCollection() const {
+    return ns() == kChangeStreamPreImagesNamespace.ns();
 }
 
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {

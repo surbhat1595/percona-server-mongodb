@@ -37,6 +37,7 @@
 #include <string>
 
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/client/read_preference.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -225,6 +226,7 @@ void setUpOperationContextStateForGetMore(OperationContext* opCtx,
                                           bool disableAwaitDataFailpointActive) {
     applyCursorReadConcern(opCtx, cursor.getReadConcernArgs());
     opCtx->setWriteConcern(cursor.getWriteConcernOptions());
+    ReadPreferenceSetting::get(opCtx) = cursor.getReadPreferenceSetting();
 
     auto apiParamsFromClient = APIParameters::get(opCtx);
     uassert(
@@ -510,7 +512,7 @@ public:
             }
 
             // On early return, get rid of the cursor.
-            auto cursorFreer = makeGuard([&] { cursorPin.deleteUnderlying(); });
+            ScopeGuard cursorFreer([&] { cursorPin.deleteUnderlying(); });
 
             // If the 'waitAfterPinningCursorBeforeGetMoreBatch' fail point is enabled, set the
             // 'msg' field of this operation's CurOp to signal that we've hit this point and then

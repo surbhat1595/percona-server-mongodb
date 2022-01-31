@@ -41,6 +41,7 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog_impl.h"
 #include "mongo/db/catalog/index_consistency.h"
@@ -203,16 +204,55 @@ Status checkValidatorCanBeUsedOnNs(const BSONObj& validator,
     return Status::OK();
 }
 
-Status validatePreImageRecording(OperationContext* opCtx, const NamespaceString& ns) {
-    if (ns.db() == NamespaceString::kAdminDb || ns.db() == NamespaceString::kLocalDb) {
+Status validateIsNotInDbs(const NamespaceString& ns,
+                          const std::vector<StringData>& disallowedDbs,
+                          StringData optionName) {
+    if (std::find(disallowedDbs.begin(), disallowedDbs.end(), ns.db()) != disallowedDbs.end()) {
         return {ErrorCodes::InvalidOptions,
-                str::stream() << "recordPreImages collection option is not supported on the "
+                str::stream() << optionName << " collection option is not supported on the "
                               << ns.db() << " database"};
     }
 
+    return Status::OK();
+}
+
+// Validates that the option is not used on admin or local db as well as not being used on shards
+// or config servers.
+Status validateRecordPreImagesOptionIsPermitted(const NamespaceString& ns) {
+    const auto validationStatus = validateIsNotInDbs(
+        ns, {NamespaceString::kAdminDb, NamespaceString::kLocalDb}, "recordPreImages");
+    if (validationStatus != Status::OK()) {
+        return validationStatus;
+    }
+
     if (serverGlobalParams.clusterRole != ClusterRole::None) {
-        return {ErrorCodes::InvalidOptions,
-                "recordPreImages collection option is not supported on shards or config servers"};
+        return {
+            ErrorCodes::InvalidOptions,
+            str::stream()
+                << "namespace " << ns.ns()
+                << " has the recordPreImages option set, this is not supported on a "
+                   "sharded cluster. Consider restarting without --shardsvr and --configsvr and "
+                   "disabling recordPreImages via collMod"};
+    }
+
+    return Status::OK();
+}
+
+// Validates that the option is not used on admin, local or config db as well as not being used on
+// config servers.
+Status validateChangeStreamPreAndPostImagesOptionIsPermitted(const NamespaceString& ns) {
+    const auto validationStatus = validateIsNotInDbs(
+        ns,
+        {NamespaceString::kAdminDb, NamespaceString::kLocalDb, NamespaceString::kConfigDb},
+        "changeStreamPreAndPostImages");
+    if (validationStatus != Status::OK()) {
+        return validationStatus;
+    }
+
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        return {
+            ErrorCodes::InvalidOptions,
+            "changeStreamPreAndPostImages collection option is not supported on config servers"};
     }
 
     return Status::OK();
@@ -392,7 +432,11 @@ void CollectionImpl::init(OperationContext* opCtx) {
     // Make sure to copy the action and level before parsing MatchExpression, since certain features
     // are not supported with certain combinations of action and level.
     if (collectionOptions.recordPreImages) {
-        uassertStatusOK(validatePreImageRecording(opCtx, _ns));
+        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_ns));
+    }
+
+    if (collectionOptions.changeStreamPreAndPostImagesEnabled) {
+        uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_ns));
     }
 
     // Store the result (OK / error) of parsing the validator, but do not enforce that the result is
@@ -566,8 +610,8 @@ Collection::Validator CollectionImpl::parseValidator(
     OperationContext* opCtx,
     const BSONObj& validator,
     MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-    boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
-        maxFeatureCompatibilityVersion) const {
+    boost::optional<multiversion::FeatureCompatibilityVersion> maxFeatureCompatibilityVersion)
+    const {
     if (MONGO_unlikely(allowSettingMalformedCollectionValidators.shouldFail())) {
         return {validator, nullptr, nullptr};
     }
@@ -894,7 +938,7 @@ void CollectionImpl::_cappedDeleteAsNeeded(OperationContext* opCtx,
     }
 
     bool useOldCappedDeleteBehaviour = serverGlobalParams.featureCompatibility.isLessThan(
-        ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
+        multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
     if (!useOldCappedDeleteBehaviour && !opCtx->isEnforcingConstraints()) {
         // With new capped delete behavior, secondaries only delete from capped collections via
@@ -1208,6 +1252,9 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         args->preImageDoc = oldDoc.value().getOwned();
     }
     args->preImageRecordingEnabledForCollection = getRecordPreImages();
+    args->changeStreamPreAndPostImagesEnabledForCollection =
+        isChangeStreamPreAndPostImagesEnabled();
+
     const bool storePrePostImage =
         args->storeDocOption != CollectionUpdateArgs::StoreDocOption::None;
     if (!args->oplogSlot && storePrePostImage) {
@@ -1271,7 +1318,7 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
     // For in-place updates we need to grab an owned copy of the pre-image doc if pre-image
     // recording is enabled and we haven't already set the pre-image due to this update being
     // a retryable findAndModify or a possible update to the shard key.
-    if (!args->preImageDoc && getRecordPreImages()) {
+    if (!args->preImageDoc && (getRecordPreImages() || isChangeStreamPreAndPostImagesEnabled())) {
         args->preImageDoc = oldRec.value().toBson().getOwned();
     }
     const bool storePrePostImage =
@@ -1293,6 +1340,9 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
     if (newRecStatus.isOK()) {
         args->updatedDoc = newRecStatus.getValue().toBson();
         args->preImageRecordingEnabledForCollection = getRecordPreImages();
+        args->changeStreamPreAndPostImagesEnabledForCollection =
+            isChangeStreamPreAndPostImagesEnabled();
+
         OplogUpdateEntryArgs entryArgs(*args, ns(), _uuid);
         getGlobalServiceContext()->getOpObserver()->onUpdate(opCtx, entryArgs);
     }
@@ -1345,11 +1395,28 @@ bool CollectionImpl::getRecordPreImages() const {
 
 void CollectionImpl::setRecordPreImages(OperationContext* opCtx, bool val) {
     if (val) {
-        uassertStatusOK(validatePreImageRecording(opCtx, _ns));
+        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_ns));
     }
 
     _writeMetadata(
         opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) { md.options.recordPreImages = val; });
+}
+
+bool CollectionImpl::isChangeStreamPreAndPostImagesEnabled() const {
+    return _metadata->options.changeStreamPreAndPostImagesEnabled;
+}
+
+void CollectionImpl::setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) {
+    if (val) {
+        uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_ns));
+
+        // Create preimages collection if it doesn't already exist.
+        createChangeStreamPreImagesCollection(opCtx);
+    }
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        md.options.changeStreamPreAndPostImagesEnabled = val;
+    });
 }
 
 bool CollectionImpl::isCapped() const {
@@ -1761,6 +1828,26 @@ void CollectionImpl::updateHiddenSetting(OperationContext* opCtx, StringData idx
     _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
         md.indexes[offset].updateHiddenSetting(hidden);
     });
+}
+
+std::vector<std::string> CollectionImpl::removeInvalidIndexOptions(OperationContext* opCtx) {
+    std::vector<std::string> indexesWithInvalidOptions;
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        for (auto& index : md.indexes) {
+            BSONObj oldSpec = index.spec;
+
+            Status status = index_key_validate::validateIndexSpecFieldNames(oldSpec);
+            if (status.isOK()) {
+                continue;
+            }
+
+            indexesWithInvalidOptions.push_back(std::string(index.nameStringData()));
+            index.spec = index_key_validate::removeUnknownFields(oldSpec);
+        }
+    });
+
+    return indexesWithInvalidOptions;
 }
 
 void CollectionImpl::setIsTemp(OperationContext* opCtx, bool isTemp) {

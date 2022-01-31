@@ -32,6 +32,7 @@
 #include <memory>
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/auth/ldap_cumulative_operation_stats.h"
 #include "mongo/db/auth/ldap_operation_stats.h"
 #include "mongo/db/client.h"
 #include "mongo/platform/mutex.h"
@@ -97,6 +98,9 @@ public:
         _ldapOperationStats.toString(sb, tickSource);
     }
 
+    const LDAPOperationStats& getLdapOperationStats() const {
+        return _ldapOperationStats;
+    }
 
 private:
     /**
@@ -152,6 +156,10 @@ private:
     void _recordUnbindEnd(TickSource* tickSource) {
         stdx::lock_guard<Latch> lk(_mutex);
         _ldapOperationStats.setUnbindStatsEndTime(_getTime(tickSource));
+        auto ldapCumulativeOperationsStats = LDAPCumulativeOperationStats::get();
+        if (nullptr != ldapCumulativeOperationsStats) {
+            ldapCumulativeOperationsStats->recordOpStats(_ldapOperationStats, true);
+        }
     }
 
     /**
@@ -213,21 +221,23 @@ public:
                                TickSource* tickSource,
                                UserAcquisitionOpType type)
         : _stats(statsParam), _tickSource(tickSource), _type(type) {
-        switch (_type) {
-            case kCache:
-                _stats->_recordCacheAccessStart(_tickSource);
-                break;
-            case kBind:
-                _stats->_recordBindStart(_tickSource);
-                break;
-            case kSearch:
-                _stats->_recordSearchStart(_tickSource);
-                break;
-            case kUnbind:
-                _stats->_recordUnbindStart(_tickSource);
-                break;
-            case kIncrementReferrals:
-                break;
+        if (_stats) {
+            switch (_type) {
+                case kCache:
+                    _stats->_recordCacheAccessStart(_tickSource);
+                    break;
+                case kBind:
+                    _stats->_recordBindStart(_tickSource);
+                    break;
+                case kSearch:
+                    _stats->_recordSearchStart(_tickSource);
+                    break;
+                case kUnbind:
+                    _stats->_recordUnbindStart(_tickSource);
+                    break;
+                case kIncrementReferrals:
+                    break;
+            }
         }
     }
 

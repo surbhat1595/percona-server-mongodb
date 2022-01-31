@@ -49,7 +49,6 @@
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/rpc/protocol.h"
 #include "mongo/rpc/unique_message.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/session.h"
@@ -148,7 +147,8 @@ public:
 
     std::unique_ptr<DBClientCursor> query(
         const NamespaceStringOrUUID& nsOrUuid,
-        Query query = Query(),
+        const BSONObj& filter,
+        const Query& querySettings = Query(),
         int limit = 0,
         int nToSkip = 0,
         const BSONObj* fieldsToReturn = nullptr,
@@ -157,7 +157,8 @@ public:
         boost::optional<BSONObj> readConcernObj = boost::none) override {
         checkConnection();
         return DBClientBase::query(nsOrUuid,
-                                   query,
+                                   filter,
+                                   querySettings,
                                    limit,
                                    nToSkip,
                                    fieldsToReturn,
@@ -166,9 +167,10 @@ public:
                                    readConcernObj);
     }
 
-    unsigned long long query(std::function<void(DBClientCursorBatchIterator&)> f,
+    unsigned long long query(std::function<void(DBClientCursorBatchIterator&)>,
                              const NamespaceStringOrUUID& nsOrUuid,
-                             Query query,
+                             const BSONObj& filter,
+                             const Query& querySettings,
                              const BSONObj* fieldsToReturn,
                              int queryOptions,
                              int batchSize = 0,

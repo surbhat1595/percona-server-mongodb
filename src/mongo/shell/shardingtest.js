@@ -386,13 +386,13 @@ var ShardingTest = function(params) {
         }
     };
 
-    this.stopAllConfigServers = function(opts) {
-        this.configRS.stopSet(undefined, undefined, opts);
+    this.stopAllConfigServers = function(opts, forRestart = undefined) {
+        this.configRS.stopSet(undefined, forRestart, opts);
     };
 
-    this.stopAllShards = function(opts) {
+    this.stopAllShards = function(opts, forRestart = undefined) {
         this._rs.forEach((rs) => {
-            rs.test.stopSet(15, undefined, opts);
+            rs.test.stopSet(15, forRestart, opts);
         });
     };
 
@@ -436,6 +436,22 @@ var ShardingTest = function(params) {
             return true;
 
         throw _getErrorWithCode(res, "command " + tojson(cmd) + " failed: " + tojson(res));
+    };
+
+    this.restartAllConfigServers = function(opts) {
+        this.configRS.startSet(opts, true);
+    };
+
+    this.restartAllShards = function(opts) {
+        this._rs.forEach((rs) => {
+            rs.test.startSet(opts, true);
+        });
+    };
+
+    this.restartAllMongos = function(opts) {
+        for (var i = 0; i < this._mongos.length; i++) {
+            this.restartMongos(i, opts);
+        }
     };
 
     this.forEachConnection = function(fn) {
@@ -955,12 +971,12 @@ var ShardingTest = function(params) {
             // Must check shardMixedBinVersion because it causes shardOptions.binVersion to be an
             // object (versionIterator) rather than a version string. Must check mongosBinVersion,
             // as well, because it does not update mongosOptions.binVersion.
-            // TODO SERVER-50389: Differentiate between 'last-lts' and 'last-continuous' when
-            // last-continuous is supported with shardMixedBinVersions.
-            if ((MongoRunner.areBinVersionsTheSame(binVersion, "last-continuous") &&
-                 jsTestOptions().shardMixedBinVersions) ||
-                (jsTestOptions().mongosBinVersion &&
-                 MongoRunner.areBinVersionsTheSame(binVersion, jsTestOptions().mongosBinVersion))) {
+            const isMixedVersionShard = jsTestOptions().shardMixedBinVersions &&
+                MongoRunner.areBinVersionsTheSame(binVersion,
+                                                  jsTestOptions().shardMixedBinVersions);
+            const isMixedVersionMongos = jsTestOptions().mongosBinVersion &&
+                MongoRunner.areBinVersionsTheSame(binVersion, jsTestOptions().mongosBinVersion);
+            if (isMixedVersionShard || isMixedVersionMongos) {
                 return true;
             }
 
@@ -1229,13 +1245,12 @@ var ShardingTest = function(params) {
                 // If the test doesn't depend on specific shard binVersions, create a mixed
                 // version
                 // shard cluster that randomly assigns shard binVersions, half "latest" and half
-                // "last-continuous".
-                // TODO SERVER-50389: Support last-continuous binary version with
+                // "last-continuous" or "last-lts".
                 // shardMixedBinVersions.
                 if (!otherParams.shardOptions.binVersion) {
                     Random.setRandomSeed();
-                    otherParams.shardOptions.binVersion =
-                        MongoRunner.versionIterator(["latest", "last-continuous"], true);
+                    otherParams.shardOptions.binVersion = MongoRunner.versionIterator(
+                        ["latest", jsTestOptions().shardMixedBinVersions], true);
                 }
             }
 

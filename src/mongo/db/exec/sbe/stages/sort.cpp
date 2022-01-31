@@ -32,6 +32,7 @@
 #include "mongo/db/exec/sbe/stages/sort.h"
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/str.h"
@@ -251,7 +252,7 @@ std::unique_ptr<PlanStageStats> SortStage::getStats(bool includeDebugInfo) const
                                _dirs[idx] == sbe::value::SortDirection::Ascending ? "asc" : "desc");
         }
         childrenBob.doneFast();
-        bob.append("outputSlots", _vals);
+        bob.append("outputSlots", _vals.begin(), _vals.end());
         ret->debugInfo = bob.obj();
     }
 
@@ -304,6 +305,16 @@ std::vector<DebugPrinter::Block> SortStage::debugPrint() const {
     DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
 
     return ret;
+}
+
+size_t SortStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_obs);
+    size += size_estimator::estimate(_dirs);
+    size += size_estimator::estimate(_vals);
+    size += size_estimator::estimate(_specificStats);
+    return size;
 }
 }  // namespace sbe
 }  // namespace mongo

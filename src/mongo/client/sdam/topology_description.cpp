@@ -28,9 +28,14 @@
  */
 #include "mongo/client/sdam/topology_description.h"
 
+#include "mongo/client/sdam/sdam_datatypes.h"
 #include "mongo/client/sdam/server_description.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/util/fail_point.h"
+#include <algorithm>
+#include <cstring>
+#include <iterator>
+#include <memory>
 
 namespace mongo::sdam {
 MONGO_FAIL_POINT_DEFINE(topologyDescriptionInstallServerDescription);
@@ -50,14 +55,21 @@ TopologyDescription::TopologyDescription(SdamConfiguration config)
 
 TopologyDescriptionPtr TopologyDescription::create(SdamConfiguration config) {
     auto result = std::make_shared<TopologyDescription>(config);
-    TopologyDescription::associateServerDescriptions(result);
+    for (auto& server : result->_servers) {
+        server->_topologyDescription = result;
+    }
     return result;
 }
 
-TopologyDescriptionPtr TopologyDescription::clone(TopologyDescriptionPtr source) {
-    invariant(source);
-    auto result = std::make_shared<TopologyDescription>(*source);
-    TopologyDescription::associateServerDescriptions(result);
+TopologyDescriptionPtr TopologyDescription::clone(const TopologyDescription& source) {
+    auto result = std::make_shared<TopologyDescription>(source);
+    result->_id = UUID::gen();
+
+    for (auto& server : result->_servers) {
+        server = std::make_shared<ServerDescription>(*server);
+        server->_topologyDescription = result;
+    }
+
     return result;
 }
 
@@ -79,6 +91,10 @@ const boost::optional<int>& TopologyDescription::getMaxSetVersion() const {
 
 const boost::optional<OID>& TopologyDescription::getMaxElectionId() const {
     return _maxElectionId;
+}
+
+const ElectionIdSetVersionPair TopologyDescription::getMaxElectionIdSetVersionPair() const {
+    return ElectionIdSetVersionPair{getMaxElectionId(), getMaxSetVersion()};
 }
 
 const std::vector<ServerDescriptionPtr>& TopologyDescription::getServers() const {
@@ -164,7 +180,7 @@ void TopologyDescription::removeServerDescription(const HostAndPort& HostAndPort
 }
 
 void TopologyDescription::checkWireCompatibilityVersions() {
-    const WireVersionInfo supportedWireVersion = {BATCH_COMMANDS, LATEST_WIRE_VERSION};
+    const WireVersionInfo supportedWireVersion = {SUPPORTS_OP_MSG, LATEST_WIRE_VERSION};
     std::ostringstream errorOss;
 
     _compatible = true;
@@ -284,14 +300,6 @@ BSONObj TopologyDescription::toBSON() {
 
 std::string TopologyDescription::toString() {
     return toBSON().toString();
-}
-
-void TopologyDescription::associateServerDescriptions(
-    const TopologyDescriptionPtr& topologyDescription) {
-    auto& servers = topologyDescription->_servers;
-    for (auto& server : servers) {
-        server->_topologyDescription = topologyDescription;
-    }
 }
 
 boost::optional<ServerDescriptionPtr> TopologyDescription::getPrimary() {

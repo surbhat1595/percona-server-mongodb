@@ -98,6 +98,17 @@ public:
 
             const NamespaceString& nss = ns();
 
+            const auto catalogClient = Grid::get(opCtx)->catalogClient();
+            try {
+                const auto collEntry = catalogClient->getCollection(opCtx, nss);
+                uassert(ErrorCodes::NotImplemented,
+                        "reshardCollection command of a sharded time-series collection is not "
+                        "supported",
+                        !collEntry.getTimeseriesFields());
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                // collection doesn't exist or not sharded, skip check for time-series collection.
+            }
+
             uassert(ErrorCodes::BadValue,
                     "The unique field must be false",
                     !request().getUnique().get_value_or(false));
@@ -114,8 +125,8 @@ public:
                         !collator);
             }
 
-            const auto& authoritativeTags = uassertStatusOK(
-                Grid::get(opCtx)->catalogClient()->getTagsForCollection(opCtx, nss));
+            const auto& authoritativeTags =
+                uassertStatusOK(catalogClient->getTagsForCollection(opCtx, nss));
             if (!authoritativeTags.empty()) {
                 uassert(ErrorCodes::BadValue,
                         "Must specify value for zones field",
@@ -229,6 +240,11 @@ public:
                                                            ActionType::internal));
         }
     };
+
+    bool skipApiVersionCheck() const override {
+        // Internal command (server to server).
+        return true;
+    }
 
     std::string help() const override {
         return "Internal command, which is exported by the sharding config server. Do not call "

@@ -1127,8 +1127,20 @@ private:
     /**
      * Start replicating data, and does an initial sync if needed first.
      */
-    void _startDataReplication(OperationContext* opCtx,
-                               std::function<void()> startCompleted = nullptr);
+    void _startDataReplication(OperationContext* opCtx);
+
+    /**
+     * Start initial sync.
+     */
+    void _startInitialSync(OperationContext* opCtx,
+                           InitialSyncerInterface::OnCompletionFn onCompletionFn,
+                           bool fallbackToLogical = false);
+
+
+    /**
+     * Function to be called on completion of initial sync.
+     */
+    void _initialSyncerCompletionFunction(const StatusWith<OpTimeAndWallTime>& opTimeStatus);
 
     /**
      * Finishes the work of processReplSetInitiate() in the event of a successful quorum check.
@@ -1150,6 +1162,11 @@ private:
      * Changes _rsConfigState to newState, and notify any waiters.
      */
     void _setConfigState_inlock(ConfigState newState);
+
+    /**
+     * Returns the string representation of the config state.
+     */
+    static std::string getConfigStateString(ConfigState state);
 
     /**
      * Returns true if the horizon mappings between the oldConfig and newConfig are different.
@@ -1302,10 +1319,13 @@ private:
      * history as 'committedOpTime', so we update our commit point to min(committedOpTime,
      * lastApplied).
      * Also updates corresponding wall clock time.
+     * The 'forInitiate' flag is used to force-advance our commit point during the execuction
+     * of the replSetInitiate command.
      */
     void _advanceCommitPoint(WithLock lk,
                              const OpTimeAndWallTime& committedOpTimeAndWallTime,
-                             bool fromSyncSource);
+                             bool fromSyncSource,
+                             bool forInitiate = false);
 
     /**
      * Scan the memberData and determine the highest last applied or last
@@ -1720,6 +1740,8 @@ private:
 
     // This should be set during sharding initialization.
     boost::optional<bool> _wasCWWCSetOnConfigServerOnStartup;
+
+    InitialSyncerInterface::OnCompletionFn _onCompletion;
 };
 
 }  // namespace repl

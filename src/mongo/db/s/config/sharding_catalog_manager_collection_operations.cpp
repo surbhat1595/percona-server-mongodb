@@ -138,17 +138,9 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx, const Collectio
     const auto allShards = uassertStatusOK(Grid::get(opCtx)->catalogClient()->getAllShards(
                                                opCtx, repl::ReadConcernLevel::kLocalReadConcern))
                                .value;
-
     for (const auto& shardEntry : allShards) {
-        const auto query = [&]() {
-            if (coll.getTimestamp()) {
-                return BSON(ChunkType::collectionUUID << coll.getUuid()
-                                                      << ChunkType::shard(shardEntry.getName()));
-            } else {
-                return BSON(ChunkType::ns(coll.getNss().ns())
-                            << ChunkType::shard(shardEntry.getName()));
-            }
-        }();
+        const auto query = BSON(ChunkType::collectionUUID
+                                << coll.getUuid() << ChunkType::shard(shardEntry.getName()));
 
         const auto chunk = uassertStatusOK(shardRegistry->getConfigShard()->exhaustiveFindOnConfig(
                                                opCtx,
@@ -184,7 +176,6 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx, const Collectio
 //
 // The chunk updates:
 // [{$set: {
-//    lastmodEpoch: <new epoch>,
 //    min: {$arrayToObject: {$concatArrays: [
 //      {$objectToArray: "$min"},
 //      {$literal: [{k: <new_sk_suffix_1>, v: MinKey}, ...]},
@@ -232,9 +223,7 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx, const Collectio
 //    }}
 //  }}]
 std::pair<std::vector<BSONObj>, std::vector<BSONObj>> makeChunkAndTagUpdatesForRefine(
-    const BSONObj& newShardKeyFields,
-    OID newEpoch,
-    const boost::optional<Timestamp>& newTimestamp) {
+    const BSONObj& newShardKeyFields) {
     // Make the $literal objects used in the $set below to add new fields to the boundaries of the
     // existing chunks and tags that may include "." characters.
     //
@@ -280,12 +269,9 @@ std::pair<std::vector<BSONObj>, std::vector<BSONObj>> makeChunkAndTagUpdatesForR
                                                      << "then" << literalMaxObject << "else"
                                                      << literalMinObject))))))));
 
-    // The chunk updates change the min and max fields and unset the jumbo field. If the collection
-    // is in the old (pre-5.0 format, it also sets the new epoch).
+    // The chunk updates change the min and max fields and unset the jumbo field.
     std::vector<BSONObj> chunkUpdates;
-    chunkUpdates.emplace_back(BSON("$set" << (newTimestamp ? extendMinAndMaxModifier.getOwned()
-                                                           : extendMinAndMaxModifier.addFields(BSON(
-                                                                 ChunkType::epoch(newEpoch))))));
+    chunkUpdates.emplace_back(BSON("$set" << extendMinAndMaxModifier.getOwned()));
     chunkUpdates.emplace_back(BSON("$unset" << ChunkType::jumbo()));
 
     // The tag updates only change the min and max fields.
@@ -302,8 +288,8 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
     // migrations. Take _kZoneOpLock in exclusive mode to prevent concurrent zone operations.
     // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
     // move chunks on different collections to proceed in parallel.
-    Lock::ExclusiveLock chunkLk(opCtx->lockState(), _kChunkOpLock);
-    Lock::ExclusiveLock zoneLk(opCtx->lockState(), _kZoneOpLock);
+    Lock::ExclusiveLock chunkLk(opCtx, opCtx->lockState(), _kChunkOpLock);
+    Lock::ExclusiveLock zoneLk(opCtx, opCtx->lockState(), _kZoneOpLock);
 
     Timer executionTimer, totalTimer;
     const auto newEpoch = OID::gen();
@@ -326,12 +312,9 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
     collType.setEpoch(newEpoch);
     collType.setKeyPattern(newShardKeyPattern.getKeyPattern());
 
-    boost::optional<Timestamp> newTimestamp;
-    if (collType.getTimestamp()) {
-        auto now = VectorClock::get(opCtx)->getTime();
-        newTimestamp = now.clusterTime().asTimestamp();
-        collType.setTimestamp(newTimestamp);
-    }
+    auto now = VectorClock::get(opCtx)->getTime();
+    Timestamp newTimestamp = now.clusterTime().asTimestamp();
+    collType.setTimestamp(newTimestamp);
 
     auto updateCollectionAndChunksFn = [&](OperationContext* opCtx, TxnNumber txnNumber) {
         // Update the config.collections entry for the given namespace.
@@ -352,20 +335,12 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
             hangRefineCollectionShardKeyBeforeUpdatingChunks.pauseWhileSet(opCtx);
         }
 
-        auto [chunkUpdates, tagUpdates] =
-            makeChunkAndTagUpdatesForRefine(newFields, newEpoch, newTimestamp);
+        auto [chunkUpdates, tagUpdates] = makeChunkAndTagUpdatesForRefine(newFields);
 
-        // Update all config.chunks entries for the given namespace by setting (i) their epoch
-        // to the newly-generated objectid, (ii) their bounds for each new field in the refined
-        // key to MinKey (except for the global max chunk where the max bounds are set to
-        // MaxKey), and unsetting (iii) their jumbo field.
-        const auto chunksQuery = [&]() {
-            if (collType.getTimestamp()) {
-                return BSON(ChunkType::collectionUUID << collType.getUuid());
-            } else {
-                return BSON(ChunkType::ns(collType.getNss().ns()));
-            }
-        }();
+        // Update all config.chunks entries for the given namespace by setting (i) their bounds for
+        // each new field in the refined key to MinKey (except for the global max chunk where the
+        // max bounds are set to MaxKey), and unsetting (ii) their jumbo field.
+        const auto chunksQuery = BSON(ChunkType::collectionUUID << collType.getUuid());
         writeToConfigDocumentInTxn(
             opCtx,
             ChunkType::ConfigNS,
@@ -551,8 +526,8 @@ void ShardingCatalogManager::renameShardedMetadata(
     // migrations. Take _kZoneOpLock in exclusive mode to prevent concurrent zone operations.
     // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
     // move chunks on different collections to proceed in parallel.
-    Lock::ExclusiveLock chunkLk(opCtx->lockState(), _kChunkOpLock);
-    Lock::ExclusiveLock zoneLk(opCtx->lockState(), _kZoneOpLock);
+    Lock::ExclusiveLock chunkLk(opCtx, opCtx->lockState(), _kChunkOpLock);
+    Lock::ExclusiveLock zoneLk(opCtx, opCtx->lockState(), _kZoneOpLock);
 
     std::string logMsg = str::stream() << from << " to " << to;
     if (optFromCollType) {

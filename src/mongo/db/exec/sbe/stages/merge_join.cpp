@@ -32,6 +32,7 @@
 #include "mongo/db/exec/sbe/stages/merge_join.h"
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -321,8 +322,8 @@ void MergeJoinStage::close() {
     _outerProjectsBuffer.clear();
 }
 
-void MergeJoinStage::doSaveState() {
-    if (!slotsAccessible()) {
+void MergeJoinStage::doSaveState(bool relinquishCursor) {
+    if (!slotsAccessible() || !relinquishCursor) {
         return;
     }
 
@@ -336,10 +337,10 @@ std::unique_ptr<PlanStageStats> MergeJoinStage::getStats(bool includeDebugInfo) 
 
     if (includeDebugInfo) {
         BSONObjBuilder bob;
-        bob.append("outerKeys", _outerKeys);
-        bob.append("outerProjects", _outerProjects);
-        bob.append("innerKeys", _innerKeys);
-        bob.append("innerProjects", _innerProjects);
+        bob.append("outerKeys", _outerKeys.begin(), _outerKeys.end());
+        bob.append("outerProjects", _outerProjects.begin(), _outerProjects.end());
+        bob.append("innerKeys", _innerKeys.begin(), _innerKeys.end());
+        bob.append("innerProjects", _innerProjects.begin(), _innerProjects.end());
         bob.append("sortDirs", _dirs);
         ret->debugInfo = bob.obj();
     }
@@ -422,6 +423,17 @@ std::vector<DebugPrinter::Block> MergeJoinStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     return ret;
+}
+
+size_t MergeJoinStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_outerKeys);
+    size += size_estimator::estimate(_outerProjects);
+    size += size_estimator::estimate(_innerKeys);
+    size += size_estimator::estimate(_innerProjects);
+    size += size_estimator::estimate(_dirs);
+    return size;
 }
 }  // namespace sbe
 }  // namespace mongo

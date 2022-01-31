@@ -30,9 +30,11 @@
 #pragma once
 
 #include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/logical_session_cache.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/mutex.h"
@@ -43,6 +45,7 @@
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/shard_key_pattern.h"
+#include "mongo/s/write_ops/batched_command_request.h"
 
 namespace mongo {
 
@@ -178,7 +181,8 @@ public:
      * Starts and commits a transaction on the config server, with a no-op find on the specified
      * namespace in order to internally start the transaction. All writes done inside the
      * passed-in function must assume that they are run inside a transaction that will be commited
-     * after the function itself has completely finished.
+     * after the function itself has completely finished. Does not support running transaction
+     * operations remotely.
      */
     static void withTransaction(OperationContext* opCtx,
                                 const NamespaceString& namespaceForInitialFind,
@@ -187,7 +191,8 @@ public:
     /**
      * Runs the write 'request' on namespace 'nss' in a transaction with 'txnNumber'. Write must be
      * on a collection in the config database. If expectedNumModified is specified, the number of
-     * documents modified must match expectedNumModified - throws otherwise.
+     * documents modified must match expectedNumModified - throws otherwise. Does not support
+     * running transaction operations remotely.
      */
     BSONObj writeToConfigDocumentInTxn(OperationContext* opCtx,
                                        const NamespaceString& nss,
@@ -195,14 +200,22 @@ public:
                                        TxnNumber txnNumber);
 
     /**
-     * Inserts 'docs' to namespace 'nss' in a transaction with 'txnNumber'. Breaks into multiple
-     * batches if 'docs' is larger than the max batch size. Write must be on a collection in the
-     * config database.
+     * Inserts 'docs' to namespace 'nss'. If a txnNumber is passed in, the write will be done in a
+     * transaction with 'txnNumber'. Breaks into multiple batches if 'docs' is larger than the max
+     * batch size. Write must be on a collection in the config database.
      */
-    void insertConfigDocumentsInTxn(OperationContext* opCtx,
-                                    const NamespaceString& nss,
-                                    std::vector<BSONObj> docs,
-                                    TxnNumber txnNumber);
+    void insertConfigDocuments(OperationContext* opCtx,
+                               const NamespaceString& nss,
+                               std::vector<BSONObj> docs,
+                               boost::optional<TxnNumber> txnNumber = boost::none);
+
+    /**
+     * Find a single document while under a local transaction.
+     */
+    boost::optional<BSONObj> findOneConfigDocumentInTxn(OperationContext* opCtx,
+                                                        const NamespaceString& nss,
+                                                        TxnNumber txnNumber,
+                                                        const BSONObj& query);
 
     //
     // Chunk Operations
@@ -290,8 +303,7 @@ public:
      * that doesn't pass these extra fields.
      */
     void ensureChunkVersionIsGreaterThan(OperationContext* opCtx,
-                                         const boost::optional<NamespaceString>& nss,
-                                         const boost::optional<UUID>& collUUID,
+                                         const UUID& collUUID,
                                          const BSONObj& minKey,
                                          const BSONObj& maxKey,
                                          const ChunkVersion& version);
@@ -427,6 +439,20 @@ public:
      */
     Status setFeatureCompatibilityVersionOnShards(OperationContext* opCtx, const BSONObj& cmdObj);
 
+    /**
+     * Upgrade the persistent metadata to FCV 5.1 (phase 2).
+     *
+     * TODO: Remove once FCV 6.0 becomes last-lts
+     */
+    void upgradeMetadataTo51Phase2(OperationContext* opCtx);
+
+    /**
+     * Upgrade the persistent metadata from FCV 5.1 (phase 2).
+     *
+     * TODO: Remove once FCV 6.0 becomes last-lts
+     */
+    void downgradeMetadataToPre51Phase2(OperationContext* opCtx);
+
     /*
      * Rename collection metadata as part of a renameCollection operation.
      *
@@ -548,9 +574,9 @@ private:
      * Retrieve the full chunk description from the config.
      */
     StatusWith<ChunkType> _findChunkOnConfig(OperationContext* opCtx,
-                                             const NamespaceStringOrUUID& nsOrUUID,
+                                             const UUID& uuid,
                                              const OID& epoch,
-                                             const boost::optional<Timestamp>& timestamp,
+                                             const Timestamp& timestamp,
                                              const BSONObj& key);
 
     /**
@@ -561,6 +587,30 @@ private:
                                                       const ReadPreferenceSetting& readPref,
                                                       const std::string& shardName,
                                                       const std::string& zoneName);
+
+    /**
+     * Enable the support for long collection name for each entity in 'config.collections' for
+     * which the support is unset, then force the catalog cache refresh of updated collections on
+     * each shard.
+     *
+     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
+     * phase 1 or 2.
+     *
+     * TODO: Remove once FCV 6.0 becomes last-lts
+     */
+    void _enableSupportForLongCollectionName(OperationContext* opCtx);
+
+    /**
+     * Disable the support for long collection name for each entity in 'config.collections' for
+     * which the support is implicitely enabled, then force the catalog cache refresh of updated
+     * collections on each shard.
+     *
+     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
+     * phase 1 or 2.
+     *
+     * TODO: Remove once FCV 6.0 becomes last-lts
+     */
+    void _disableSupportForLongCollectionName(OperationContext* opCtx);
 
     // The owning service context
     ServiceContext* const _serviceContext;

@@ -64,6 +64,11 @@ public:
                     str::stream() << Request::kCommandName << " can only be run on config servers",
                     serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
 
+            uassert(8423309,
+                    "_configsvrConfigureAutoSplit command not supported",
+                    mongo::feature_flags::gShardingPerCollectionAutoSplitter.isEnabled(
+                        serverGlobalParams.featureCompatibility));
+
             const NamespaceString& nss = ns();
 
             uassert(ErrorCodes::InvalidNamespace,
@@ -99,6 +104,11 @@ public:
                                                            ActionType::internal));
         }
     };
+
+    bool skipApiVersionCheck() const override {
+        // Internal command (server to server).
+        return true;
+    }
 
     std::string help() const override {
         return "Internal command, which is exported by the sharding config server. Do not call "

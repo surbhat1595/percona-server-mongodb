@@ -80,6 +80,7 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+#include "mongo/util/version/releases.h"
 
 namespace mongo {
 namespace {
@@ -88,7 +89,6 @@ using CallbackHandle = executor::TaskExecutor::CallbackHandle;
 using CallbackArgs = executor::TaskExecutor::CallbackArgs;
 using RemoteCommandCallbackArgs = executor::TaskExecutor::RemoteCommandCallbackArgs;
 using RemoteCommandCallbackFn = executor::TaskExecutor::RemoteCommandCallbackFn;
-using FeatureCompatibility = ServerGlobalParams::FeatureCompatibility;
 
 const ReadPreferenceSetting kConfigReadSelector(ReadPreference::Nearest, TagSet{});
 
@@ -595,7 +595,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
     const std::shared_ptr<Shard> shard{shardRegistry->createConnection(shardConnectionString)};
     auto targeter = shard->getTargeter();
 
-    auto stopMonitoringGuard = makeGuard([&] {
+    ScopeGuard stopMonitoringGuard([&] {
         if (shardConnectionString.type() == ConnectionString::ConnectionType::kReplicaSet) {
             // This is a workaround for the case were we could have some bad shard being
             // requested to be added and we put that bad connection string on the global replica set
@@ -691,9 +691,9 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
                 !fcvRegion->isUpgradingOrDowngrading());
 
         // (Generic FCV reference): These FCV checks should exist across LTS binary versions.
-        invariant(fcvRegion == FeatureCompatibility::kLatest ||
-                  fcvRegion == FeatureCompatibility::kLastContinuous ||
-                  fcvRegion == FeatureCompatibility::kLastLTS);
+        invariant(fcvRegion == multiversion::GenericFCV::kLatest ||
+                  fcvRegion == multiversion::GenericFCV::kLastContinuous ||
+                  fcvRegion == multiversion::GenericFCV::kLastLTS);
 
         SetFeatureCompatibilityVersion setFcvCmd(fcvRegion->getVersion());
         setFcvCmd.setDbName(NamespaceString::kAdminDb);

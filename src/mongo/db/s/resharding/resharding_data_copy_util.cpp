@@ -105,8 +105,8 @@ void ensureOplogCollectionsDropped(OperationContext* opCtx,
             NamespaceString::kReshardingApplierProgressNamespace);
         oplogApplierProgressStore.remove(
             opCtx,
-            QUERY(ReshardingOplogApplierProgress::kOplogSourceIdFieldName
-                  << reshardingSourceId.toBSON()),
+            BSON(ReshardingOplogApplierProgress::kOplogSourceIdFieldName
+                 << reshardingSourceId.toBSON()),
             WriteConcernOptions());
 
         // Remove the txn cloner progress doc for this donor.
@@ -114,7 +114,7 @@ void ensureOplogCollectionsDropped(OperationContext* opCtx,
             NamespaceString::kReshardingTxnClonerProgressNamespace);
         txnClonerProgressStore.remove(
             opCtx,
-            QUERY(ReshardingTxnClonerProgress::kSourceIdFieldName << reshardingSourceId.toBSON()),
+            BSON(ReshardingTxnClonerProgress::kSourceIdFieldName << reshardingSourceId.toBSON()),
             WriteConcernOptions());
 
         // Drop the conflict stash collection for this donor.
@@ -249,7 +249,11 @@ boost::optional<SharedSemiFuture<void>> withSessionCheckedOut(OperationContext* 
     auto txnParticipant = TransactionParticipant::get(opCtx);
 
     try {
-        txnParticipant.beginOrContinue(opCtx, txnNumber, boost::none, boost::none);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       boost::none /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
 
         if (stmtId && txnParticipant.checkStatementExecuted(opCtx, *stmtId)) {
             // Skip the incoming statement because it has already been logged locally.

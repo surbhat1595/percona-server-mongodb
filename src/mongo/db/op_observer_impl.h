@@ -39,6 +39,8 @@ class ReplOperation;
 
 }  // namespace repl
 
+class ShardingWriteRouter;
+
 class OpObserverImpl : public OpObserver {
     OpObserverImpl(const OpObserverImpl&) = delete;
     OpObserverImpl& operator=(const OpObserverImpl&) = delete;
@@ -76,6 +78,7 @@ public:
                            const std::vector<BSONObj>& indexes,
                            bool fromMigrate) final;
     void onStartIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) final;
+    void onAbortIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) final;
 
     void onCommitIndexBuild(OperationContext* opCtx,
                             const NamespaceString& nss,
@@ -229,7 +232,7 @@ private:
                                       const NamespaceString nss,
                                       const BSONObj& insertedDoc,
                                       const repl::OpTime& opTime,
-                                      CollectionShardingState* css,
+                                      const ShardingWriteRouter& shardingWriteRouter,
                                       const bool fromMigrate,
                                       const bool inMultiDocumentTransaction) {}
     virtual void shardObserveUpdateOp(OperationContext* opCtx,
@@ -237,27 +240,20 @@ private:
                                       boost::optional<BSONObj> preImageDoc,
                                       const BSONObj& postImageDoc,
                                       const repl::OpTime& opTime,
-                                      CollectionShardingState* css,
+                                      const ShardingWriteRouter& shardingWriteRouter,
                                       const repl::OpTime& prePostImageOpTime,
                                       const bool inMultiDocumentTransaction) {}
     virtual void shardObserveDeleteOp(OperationContext* opCtx,
                                       const NamespaceString nss,
                                       const BSONObj& documentKey,
                                       const repl::OpTime& opTime,
-                                      CollectionShardingState* css,
+                                      const ShardingWriteRouter& shardingWriteRouter,
                                       const repl::OpTime& preImageOpTime,
                                       const bool inMultiDocumentTransaction) {}
     virtual void shardObserveTransactionPrepareOrUnpreparedCommit(
         OperationContext* opCtx,
         const std::vector<repl::ReplOperation>& stmts,
         const repl::OpTime& prepareOrCommitOptime) {}
-
-    virtual void shardAnnotateOplogEntry(OperationContext* opCtx,
-                                         const NamespaceString nss,
-                                         const BSONObj& doc,
-                                         repl::DurableReplOperation& op,
-                                         CollectionShardingState* css,
-                                         const ScopedCollectionDescription& collDesc) {}
 };
 
 extern const OperationContext::Decoration<boost::optional<OpObserverImpl::DocumentKey>>

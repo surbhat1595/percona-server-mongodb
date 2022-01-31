@@ -65,7 +65,7 @@ void assertExistsReshardingDocument(OperationContext* opCtx, UUID reshardingUUID
 
     boost::optional<ReshardingCoordinatorDocument> docOptional;
     store.forEach(opCtx,
-                  QUERY(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << reshardingUUID),
+                  BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << reshardingUUID),
                   [&](const ReshardingCoordinatorDocument& doc) {
                       docOptional.emplace(doc);
                       return false;
@@ -161,6 +161,11 @@ public:
                                                            ActionType::internal));
         }
     };
+
+    bool skipApiVersionCheck() const override {
+        // Internal command (server to server).
+        return true;
+    }
 
     std::string help() const override {
         return "Internal command, which is exported by the sharding config server. Do not call "

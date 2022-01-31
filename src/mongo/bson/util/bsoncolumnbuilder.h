@@ -45,6 +45,8 @@ namespace mongo {
 class BSONColumnBuilder {
 public:
     BSONColumnBuilder(StringData fieldName);
+    BSONColumnBuilder(StringData fieldName, BufBuilder&& builder);
+    BSONColumnBuilder(BSONColumnBuilder&&) = delete;
 
     /**
      * Appends a BSONElement to this BSONColumnBuilder.
@@ -52,6 +54,8 @@ public:
      * Value will be stored delta compressed if possible and uncompressed otherwise.
      *
      * The field name will be ignored.
+     *
+     * Throws InvalidBSONType if MinKey or MaxKey is appended.
      */
     BSONColumnBuilder& append(BSONElement elem);
 
@@ -68,11 +72,24 @@ public:
     }
 
     /**
+     * Returns the number of BSONElements added or skipped so far.
+     */
+    size_t size() const {
+        return _elementCount;
+    }
+
+    /**
      * Finalizes the BSON Column and returns the BinData binary.
      *
      * The BSONColumnBuilder must remain in scope for the pointer to be valid.
      */
     BSONBinData finalize();
+
+    /**
+     * Detaches the buffer associated with this BSONColumnBuilder. Allows the memory to be reused
+     * for building another BSONColumn.
+     */
+    BufBuilder detach();
 
 private:
     BSONElement _previous() const;
@@ -80,7 +97,6 @@ private:
     void _storePrevious(BSONElement elem);
     void _writeLiteralFromPrevious();
     void _incrementSimple8bCount();
-    bool _usesDeltaOfDelta(BSONType type);
     bool _objectIdDeltaPossible(BSONElement elem, BSONElement prev);
 
     // Helper to append doubles to this Column builder. Returns true if append was successful and
@@ -109,14 +125,15 @@ private:
     std::ptrdiff_t _controlByteOffset = 0;
 
     // Additional variables needed for previous state
-    int64_t _prevEncoded;
+    int64_t _prevEncoded64 = 0;
+    int128_t _prevEncoded128 = 0;
     double _lastValueInPrevBlock = 0;
     uint8_t _scaleIndex;
 
     // Buffer for the BSON Column binary
     BufBuilder _bufBuilder;
 
-    // Field name
+    uint32_t _elementCount = 0;
     std::string _fieldName;
 
     // Chose whether to use 128 or 64 Simple-8b builder

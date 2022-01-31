@@ -54,6 +54,7 @@
 #include "mongo/config.h"
 #include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/locker_noop_client_observer.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
@@ -119,7 +120,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
 // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
 (InitializerContext* context) {
     mongo::serverGlobalParams.mutableFeatureCompatibility.setVersion(
-        ServerGlobalParams::FeatureCompatibility::kLatest);
+        multiversion::GenericFCV::kLatest);
 }
 
 MONGO_INITIALIZER_WITH_PREREQUISITES(WireSpec, ("EndStartupOptionSetup"))(InitializerContext*) {
@@ -714,7 +715,9 @@ int mongo_main(int argc, char* argv[]) {
         mongo::shell_utils::RecordMyLocation(argv[0]);
 
         mongo::runGlobalInitializersOrDie(std::vector<std::string>(argv, argv + argc));
-        setGlobalServiceContext(ServiceContext::make());
+        auto serviceContextHolder = ServiceContext::make();
+        serviceContextHolder->registerClientObserver(std::make_unique<LockerNoopClientObserver>());
+        setGlobalServiceContext(std::move(serviceContextHolder));
         // TODO This should use a TransportLayerManager or TransportLayerFactory
         auto serviceContext = getGlobalServiceContext();
 
@@ -841,7 +844,7 @@ int mongo_main(int argc, char* argv[]) {
         mongo::getGlobalScriptEngine()->enableJavaScriptProtection(
             shellGlobalParams.javascriptProtection);
 
-        auto poolGuard = makeGuard([] { ScriptEngine::dropScopeCache(); });
+        ScopeGuard poolGuard([] { ScriptEngine::dropScopeCache(); });
 
         std::unique_ptr<mongo::Scope> scope(mongo::getGlobalScriptEngine()->newScope());
         shellMainScope = scope.get();
@@ -926,21 +929,38 @@ int mongo_main(int argc, char* argv[]) {
             }
         }
 
+        {
+            const StringData parallelShellCode = "uncheckedParallelShellPidsString();"_sd;
+            shellMainScope->invokeSafe(parallelShellCode.rawData(), nullptr, nullptr);
+            std::string ret = shellMainScope->getString("__returnValue");
+            if (!ret.empty()) {
+                std::cout << "exiting due to parallel shells with unchecked return values. "
+                             "When starting a parallel shell, always call the returned "
+                             "function to ensure correct process cleanup and handling "
+                             "of failed assertions."
+                          << std::endl;
+                std::cout << "pids of parallel shells: " << ret << std::endl;
+                std::cout << "exiting with code " << static_cast<int>(kUnterminatedProcess)
+                          << std::endl;
+                return kUnterminatedProcess;
+            }
+        }
+
         if (shellGlobalParams.files.size() == 0 && shellGlobalParams.script.empty())
             shellGlobalParams.runShell = true;
 
         bool lastLineSuccessful = true;
         if (shellGlobalParams.runShell) {
-            std::cout << "================\n"
-                         "Warning: the \"mongo\" shell has been superseded by \"mongosh\",\n"
-                         "which delivers improved usability and compatibility."
-                         "The \"mongo\" shell has been deprecated and will be removed in\n"
-                         "an upcoming release.\n"
-                         "We recommend you begin using \"mongosh\".\n"
-                         "For installation instructions, see\n"
-                         "https://docs.mongodb.com/mongodb-shell/install/\n"
-                         "================"
-                      << std::endl;
+            if (!mongo::serverGlobalParams.quiet.load())
+                std::cout << "================\n"
+                             "Warning: the \"mongo\" shell has been superseded by \"mongosh\",\n"
+                             "which delivers improved usability and compatibility."
+                             "The \"mongo\" shell has been deprecated and will be removed in\n"
+                             "an upcoming release.\n"
+                             "For installation instructions, see\n"
+                             "https://docs.mongodb.com/mongodb-shell/install/\n"
+                             "================"
+                          << std::endl;
 
             mongo::shell_utils::MongoProgramScope s;
             // If they specify norc, assume it's not their first time

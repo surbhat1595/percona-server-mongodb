@@ -60,7 +60,6 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeStartingOplogFetcher);
 MONGO_FAIL_POINT_DEFINE(hangBeforeOplogFetcherRetries);
 MONGO_FAIL_POINT_DEFINE(hangBeforeProcessingSuccessfulBatch);
 MONGO_FAIL_POINT_DEFINE(hangOplogFetcherBeforeAdvancingLastFetched);
-MONGO_FAIL_POINT_DEFINE(skipWaitingToRecreateCursor);
 
 namespace {
 class OplogBatchStats {
@@ -264,8 +263,12 @@ OpTime OplogFetcher::getLastOpTimeFetched_forTest() const {
     return _getLastOpTimeFetched();
 }
 
-BSONObj OplogFetcher::getFindQuery_forTest(long long findTimeout) const {
-    return _makeFindQuery(findTimeout);
+BSONObj OplogFetcher::getFindQueryFilter_forTest() const {
+    return _makeFindQueryFilter();
+}
+
+Query OplogFetcher::getFindQuerySettings_forTest(long long findTimeout) const {
+    return _makeFindQuerySettings(findTimeout);
 }
 
 Milliseconds OplogFetcher::getAwaitDataTimeout_forTest() const {
@@ -429,18 +432,16 @@ void OplogFetcher::_runQuery(const executor::TaskExecutor::CallbackArgs& callbac
         if (_cursor->isDead()) {
             if (!_cursor->tailable()) {
                 try {
-                    if (!MONGO_unlikely(skipWaitingToRecreateCursor.shouldFail())) {
-                        stdx::unique_lock<Latch> lk(_mutex);
-                        auto opCtx = cc().makeOperationContext();
-                        // Wait a little before re-running the aggregation command on the donor's
-                        // oplog. We are not actually intending to wait for shutdown here, we use
-                        // this as a way to wait while still being able to be interrupted outside of
-                        // primary-only service shutdown.
-                        opCtx->waitForConditionOrInterruptFor(
-                            _shutdownCondVar, lk, _awaitDataTimeout, [&] {
-                                return _isShuttingDown_inlock();
-                            });
-                    }
+                    auto opCtx = cc().makeOperationContext();
+                    stdx::unique_lock<Latch> lk(_mutex);
+                    // Wait a little before re-running the aggregation command on the donor's
+                    // oplog. We are not actually intending to wait for shutdown here, we use
+                    // this as a way to wait while still being able to be interrupted outside of
+                    // primary-only service shutdown.
+                    opCtx->waitForConditionOrInterruptFor(_shutdownCondVar,
+                                                          lk,
+                                                          _awaitDataTimeout,
+                                                          [&] { return _isShuttingDown_inlock(); });
                     _cursor.reset();
                     continue;
                 } catch (const DBException& e) {
@@ -572,11 +573,11 @@ AggregateCommandRequest OplogFetcher::_makeAggregateCommandRequest(long long max
     return aggRequest;
 }
 
-BSONObj OplogFetcher::_makeFindQuery(long long findTimeout) const {
+BSONObj OplogFetcher::_makeFindQueryFilter() const {
     BSONObjBuilder queryBob;
 
     auto lastOpTimeFetched = _getLastOpTimeFetched();
-    BSONObjBuilder filterBob(queryBob.subobjStart("query"));
+    BSONObjBuilder filterBob;
     filterBob.append("ts", BSON("$gte" << lastOpTimeFetched.getTimestamp()));
     // Handle caller-provided filter.
     if (!_config.queryFilter.isEmpty()) {
@@ -584,34 +585,34 @@ BSONObj OplogFetcher::_makeFindQuery(long long findTimeout) const {
             "$or",
             BSON_ARRAY(_config.queryFilter << BSON("ts" << lastOpTimeFetched.getTimestamp())));
     }
-    filterBob.done();
+    return filterBob.obj();
+}
 
-    queryBob.append("$maxTimeMS", findTimeout);
+Query OplogFetcher::_makeFindQuerySettings(long long findTimeout) const {
+    Query query = Query().maxTimeMS(findTimeout);
     if (_config.requestResumeToken) {
-        queryBob.append("$hint", BSON("$natural" << 1));
-        queryBob.append("$_requestResumeToken", true);
+        query.hint(BSON("$natural" << 1)).requestResumeToken(true);
     }
 
     auto lastCommittedWithCurrentTerm =
         _dataReplicatorExternalState->getCurrentTermAndLastCommittedOpTime();
     auto term = lastCommittedWithCurrentTerm.value;
     if (term != OpTime::kUninitializedTerm) {
-        queryBob.append("term", term);
+        query.term(term);
     }
 
     if (_config.queryReadConcern.isEmpty()) {
         // This ensures that the sync source waits for all earlier oplog writes to be visible.
         // Since Timestamp(0, 0) isn't allowed, Timestamp(0, 1) is the minimal we can use.
-        queryBob.append("readConcern",
-                        BSON("level"
-                             << "local"
-                             << "afterClusterTime" << Timestamp(0, 1)));
+        query.readConcern(BSON("level"
+                               << "local"
+                               << "afterClusterTime" << Timestamp(0, 1)));
     } else {
         // Caller-provided read concern.
-        queryBob.appendElements(_config.queryReadConcern.toBSON());
+        query.appendElements(_config.queryReadConcern.toBSON());
     }
 
-    return queryBob.obj();
+    return query;
 }
 
 Status OplogFetcher::_createNewCursor(bool initialFind) {
@@ -642,7 +643,8 @@ Status OplogFetcher::_createNewCursor(bool initialFind) {
         _cursor = std::make_unique<DBClientCursor>(
             _conn.get(),
             _nss,
-            _makeFindQuery(maxTimeMs),
+            _makeFindQueryFilter(),
+            _makeFindQuerySettings(maxTimeMs),
             0 /* nToReturn */,
             0 /* nToSkip */,
             nullptr /* fieldsToReturn */,
@@ -1039,7 +1041,7 @@ Status OplogFetcher::_checkTooStaleToSyncFromSource(const OpTime lastFetched,
         auto query = Query().sort(BSON("$natural" << 1));
         // Since this function is called after the first batch, the exhaust stream has not been
         // started yet. As a result, using the same connection is safe.
-        remoteFirstOplogEntry = _conn->findOne(_nss.ns(), query);
+        remoteFirstOplogEntry = _conn->findOne(_nss.ns(), BSONObj{}, query);
     } catch (DBException& e) {
         // If an error occurs with the query, throw an error.
         return Status(ErrorCodes::TooStaleToSyncFromSource, e.reason());

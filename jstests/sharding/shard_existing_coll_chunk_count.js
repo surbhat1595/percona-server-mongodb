@@ -2,7 +2,10 @@
  * This test confirms that after sharding a collection with some pre-existing data,
  * the resulting chunks aren't auto-split too aggressively.
  *
- * @tags: [requires_persistence]
+ * @tags: [
+ *    requires_fcv_51,
+ *    requires_persistence
+ * ]
  */
 (function() {
 'use strict';
@@ -156,8 +159,8 @@ runCase({
 runCase({
     docSize: 510 * 1024,
     stages: [
-        {numDocsToInsert: 10, expectedNumChunks: 6},
-        {numDocsToInsert: 10, expectedNumChunks: 10},
+        {numDocsToInsert: 10, expectedNumChunks: 4},
+        {numDocsToInsert: 10, expectedNumChunks: 9},
     ],
 });
 
@@ -165,8 +168,8 @@ runCase({
 runCase({
     docSize: 514 * 1024,
     stages: [
-        {numDocsToInsert: 10, expectedNumChunks: 10},
-        {numDocsToInsert: 10, expectedNumChunks: 18},
+        {numDocsToInsert: 10, expectedNumChunks: 6},
+        {numDocsToInsert: 10, expectedNumChunks: 9},
     ],
 });
 

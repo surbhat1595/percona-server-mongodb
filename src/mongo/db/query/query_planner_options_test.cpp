@@ -30,6 +30,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/unittest/unittest.h"
@@ -89,6 +90,32 @@ TEST_F(QueryPlannerTest, MaxValid) {
     assertSolutionExists(
         "{fetch: {filter: null, "
         "node: {ixscan: {filter: null, pattern: {a: 1}}}}}");
+}
+
+TEST_F(QueryPlannerTest, MaxWithoutMinMultipleComponents) {
+    addIndex(BSON("a" << 1 << "b" << 1));
+    runQueryHintMinMax(
+        BSONObj(), BSONObj(fromjson("{a: 1, b: 1}")), BSONObj(), fromjson("{a: 1, b: 1}"));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(
+        "{fetch: {filter: null, "
+        "node: {ixscan: {filter: null, pattern: {a: 1, b: 1},"
+        "bounds: {'$startKey': {'': {$minKey: 1}, '': {$minKey: 1}}, '$endKey': {'': 1, '': 1}}"
+        "}}}}");
+}
+
+TEST_F(QueryPlannerTest, MinWithoutMaxMultipleComponents) {
+    addIndex(BSON("a" << 1 << "b" << 1));
+    runQueryHintMinMax(
+        BSONObj(), BSONObj(fromjson("{a: 1, b: 1}")), fromjson("{a: 1, b: 1}"), BSONObj());
+
+    assertNumSolutions(1U);
+    assertSolutionExists(
+        "{fetch: {filter: null, "
+        "node: {ixscan: {filter: null, pattern: {a: 1, b: 1},"
+        "bounds: {'$startKey': {'': 1, '': 1}, '$endKey': {'': {$maxKey:1}, '': {$maxKey:1}}}"
+        "}}}}");
 }
 
 TEST_F(QueryPlannerTest, MinMaxSameValue) {
@@ -811,9 +838,9 @@ TEST_F(QueryPlannerTest, TagAccordingToCacheFailsOnBadInput) {
     scopedCq = std::move(statusWithCQ.getValue());
 
     // Mismatched tree topology.
-    PlanCacheIndexTree* child = new PlanCacheIndexTree();
+    auto child = std::make_unique<PlanCacheIndexTree>();
     child->setIndexEntry(buildSimpleIndexEntry(BSON("a" << 1), "a_1"));
-    indexTree->children.push_back(child);
+    indexTree->children.push_back(std::move(child));
     s = QueryPlanner::tagAccordingToCache(scopedCq->root(), indexTree.get(), indexMap);
     ASSERT_NOT_OK(s);
 }

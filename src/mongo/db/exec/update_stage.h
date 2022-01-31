@@ -44,10 +44,20 @@ namespace mongo {
 class OperationContext;
 class OpDebug;
 struct PlanSummaryStats;
+class ShardingWriteRouter;
 
 struct UpdateStageParams {
-    UpdateStageParams(const UpdateRequest* r, UpdateDriver* d, OpDebug* o)
-        : request(r), driver(d), opDebug(o), canonicalQuery(nullptr) {}
+    using DocumentCounter = std::function<size_t(const BSONObj&)>;
+
+    UpdateStageParams(const UpdateRequest* r,
+                      UpdateDriver* d,
+                      OpDebug* o,
+                      DocumentCounter&& documentCounter = nullptr)
+        : request(r),
+          driver(d),
+          opDebug(o),
+          canonicalQuery(nullptr),
+          numStatsForDoc(std::move(documentCounter)) {}
 
     // Contains update parameters like whether it's a multi update or an upsert. Not owned.
     // Must outlive the UpdateStage.
@@ -62,6 +72,10 @@ struct UpdateStageParams {
 
     // Not owned here.
     CanonicalQuery* canonicalQuery;
+
+    // Determines how the update stats should be incremented. Will be incremented by 1 if the
+    // function is empty.
+    DocumentCounter numStatsForDoc;
 
 private:
     // Default constructor not allowed.
@@ -173,12 +187,12 @@ private:
      * If the update changes shard key fields but the new shard key remains on the same node,
      * returns true. If the update does not change shard key fields, returns false.
      */
-    bool wasExistingShardKeyUpdated(CollectionShardingState* css,
+    bool wasExistingShardKeyUpdated(const ShardingWriteRouter& shardingWriteRouter,
                                     const ScopedCollectionDescription& collDesc,
                                     const BSONObj& newObj,
                                     const Snapshotted<BSONObj>& oldObj);
 
-    bool wasReshardingKeyUpdated(CollectionShardingState* css,
+    bool wasReshardingKeyUpdated(const ShardingWriteRouter& shardingWriteRouter,
                                  const ScopedCollectionDescription& collDesc,
                                  const BSONObj& newObj,
                                  const Snapshotted<BSONObj>& oldObj);

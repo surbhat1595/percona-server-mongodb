@@ -99,13 +99,6 @@ public:
      */
     using OnCompletionGuard = CallbackCompletionGuard<StatusWith<OpTimeAndWallTime>>;
 
-    /**
-     * Type of function to create a database client
-     *
-     * Used for testing only.
-     */
-    using CreateClientFn = std::function<std::unique_ptr<DBClientConnection>()>;
-
     struct InitialSyncAttemptInfo {
         int durationMillis;
         Status status;
@@ -166,6 +159,8 @@ public:
      * Returns true if an initial sync is currently running or in the process of shutting down.
      */
     bool isActive() const;
+
+    std::string getInitialSyncMethod() const final;
 
     Status startup(OperationContext* opCtx, std::uint32_t maxAttempts) noexcept final;
 

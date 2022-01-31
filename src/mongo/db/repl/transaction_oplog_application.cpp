@@ -207,6 +207,9 @@ Status applyCommitTransaction(OperationContext* opCtx,
             invariant(entry.getTxnNumber());
             opCtx->setLogicalSessionId(*entry.getSessionId());
             opCtx->setTxnNumber(*entry.getTxnNumber());
+            if (auto txnRetryCounter = entry.getOperationSessionInfo().getTxnRetryCounter()) {
+                opCtx->setTxnRetryCounter(*txnRetryCounter);
+            }
             opCtx->setInMultiDocumentTransaction();
 
             // The write on transaction table may be applied concurrently, so refreshing state
@@ -249,6 +252,9 @@ Status applyAbortTransaction(OperationContext* opCtx,
             invariant(entry.getTxnNumber());
             opCtx->setLogicalSessionId(*entry.getSessionId());
             opCtx->setTxnNumber(*entry.getTxnNumber());
+            if (auto txnRetryCounter = entry.getOperationSessionInfo().getTxnRetryCounter()) {
+                opCtx->setTxnRetryCounter(*txnRetryCounter);
+            }
             opCtx->setInMultiDocumentTransaction();
 
             // The write on transaction table may be applied concurrently, so refreshing state
@@ -420,6 +426,9 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
     invariant(entry.getTxnNumber());
     opCtx->setLogicalSessionId(*entry.getSessionId());
     opCtx->setTxnNumber(*entry.getTxnNumber());
+    if (auto txnRetryCounter = entry.getOperationSessionInfo().getTxnRetryCounter()) {
+        opCtx->setTxnRetryCounter(*txnRetryCounter);
+    }
     opCtx->setInMultiDocumentTransaction();
 
     return writeConflictRetry(opCtx, "applying prepare transaction", entry.getNss().ns(), [&] {
@@ -431,9 +440,13 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
 
         auto txnParticipant = TransactionParticipant::get(opCtx);
 
+        // We reset the recovery unit on retries, so make sure that we ignore prepare conflicts.
+        opCtx->recoveryUnit()->setPrepareConflictBehavior(
+            PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
+
         // Release the WUOW, transaction lock resources and abort storage transaction so that the
         // writeConflictRetry loop will be able to retry applying transactional ops on WCE error.
-        auto abortOnError = makeGuard([&txnParticipant, opCtx] {
+        ScopeGuard abortOnError([&txnParticipant, opCtx] {
             // Abort the transaction and invalidate the session it is associated with.
             txnParticipant.abortTransaction(opCtx);
             txnParticipant.invalidate(opCtx);
@@ -556,8 +569,8 @@ void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplica
 
     DBDirectClient client(opCtx);
     const auto cursor = client.query(NamespaceString::kSessionTransactionsTableNamespace,
-                                     {BSON("state"
-                                           << "prepared")});
+                                     BSON("state"
+                                          << "prepared"));
 
     // Iterate over each entry in the transactions table that has a prepared transaction.
     while (cursor->more()) {

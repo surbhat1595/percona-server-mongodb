@@ -33,6 +33,7 @@
 
 #include "mongo/base/init.h"
 #include "mongo/db/client.h"
+#include "mongo/db/exec/sbe/size_estimator.h"
 
 namespace mongo::sbe {
 std::unique_ptr<ThreadPool> s_globalThreadPool;
@@ -132,6 +133,16 @@ ExchangePipe* ExchangeState::pipe(size_t consumerTid, size_t producerTid) {
     return _consumers[consumerTid]->pipe(producerTid);
 }
 
+size_t ExchangeState::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_fields);
+    size += _partition ? _partition->estimateSize() : 0;
+    size += _orderLess ? _orderLess->estimateSize() : 0;
+    size += size_estimator::estimate(_consumers);
+    size += size_estimator::estimate(_producers);
+    return size;
+}
+
 ExchangeBuffer* ExchangeConsumer::getBuffer(size_t producerId) {
     if (_fullBuffers[producerId]) {
         return _fullBuffers[producerId].get();
@@ -191,7 +202,7 @@ void ExchangeConsumer::prepare(CompileCtx& ctx) {
         // Only consumer ID 0 prepares (copies) the compilation context. Note that we do not have to
         // lock the shared state here - it is accessed only by consmer ID 0 again in the future.
         for (size_t idx = 0; idx < _state->numOfProducers(); ++idx) {
-            _state->producerCompileCtxs().push_back(ctx.makeCopy(true));
+            _state->producerCompileCtxs().push_back(ctx.makeCopyForParallelUse());
         }
     }
 
@@ -429,6 +440,13 @@ ExchangePipe* ExchangeConsumer::pipe(size_t producerTid) {
     } else {
         return _pipes[0].get();
     }
+}
+
+size_t ExchangeConsumer::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += _state->estimateCompileTimeSize();
+    return size;
 }
 
 ExchangeBuffer* ExchangeProducer::getBuffer(size_t consumerId) {

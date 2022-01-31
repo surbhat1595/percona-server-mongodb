@@ -77,7 +77,8 @@ std::pair<ShardStatisticsVector, ShardToChunksMap> generateCluster(
 
     int64_t currentChunk = 0;
 
-    ChunkVersion chunkVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion chunkVersion(1, 0, OID::gen(), Timestamp());
+    const UUID uuid = UUID::gen();
 
     const KeyPattern shardKeyPattern(BSON("x" << 1));
 
@@ -91,7 +92,7 @@ std::pair<ShardStatisticsVector, ShardToChunksMap> generateCluster(
         for (size_t i = 0; i < numChunks; i++, currentChunk++) {
             ChunkType chunk;
 
-            chunk.setNS(kNamespace);
+            chunk.setCollectionUUID(uuid);
             chunk.setMin(currentChunk == 0 ? shardKeyPattern.globalMin()
                                            : BSON("x" << currentChunk));
             chunk.setMax(currentChunk == totalNumChunks - 1 ? shardKeyPattern.globalMax()

@@ -56,13 +56,12 @@ protected:
     static CollectionMetadata makeShardedMetadata(OperationContext* opCtx,
                                                   UUID uuid = UUID::gen()) {
         const OID epoch = OID::gen();
+        const Timestamp timestamp;
         auto range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
-        auto chunk = ChunkType(kTestNss,
-                               std::move(range),
-                               ChunkVersion(1, 0, epoch, boost::none /* timestamp */),
-                               ShardId("other"));
+        auto chunk = ChunkType(
+            uuid, std::move(range), ChunkVersion(1, 0, epoch, timestamp), ShardId("other"));
         ChunkManager cm(ShardId("0"),
-                        DatabaseVersion(UUID::gen(), Timestamp()),
+                        DatabaseVersion(UUID::gen(), timestamp),
                         makeStandaloneRoutingTableHistory(
                             RoutingTableHistory::makeNew(kTestNss,
                                                          uuid,
@@ -70,7 +69,7 @@ protected:
                                                          nullptr,
                                                          false,
                                                          epoch,
-                                                         boost::none /* timestamp */,
+                                                         timestamp,
                                                          boost::none /* timeseriesFields */,
                                                          boost::none,
                                                          boost::none /* chunkSizeBytes */,
@@ -265,8 +264,7 @@ public:
         return std::make_unique<StaticCatalogClient>(kShardList);
     }
 
-    CollectionType createCollection(const OID& epoch,
-                                    boost::optional<Timestamp> timestamp = boost::none) {
+    CollectionType createCollection(const OID& epoch, const Timestamp& timestamp) {
         CollectionType res(kNss, epoch, timestamp, Date_t::now(), kCollUUID);
         res.setKeyPattern(BSON(kShardKey << 1));
         res.setUnique(false);
@@ -275,14 +273,15 @@ public:
     }
 
     std::vector<ChunkType> createChunks(const OID& epoch,
-                                        boost::optional<Timestamp> timestamp = boost::none) {
+                                        const UUID& uuid,
+                                        const Timestamp& timestamp) {
         auto range1 = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << 5));
         ChunkType chunk1(
-            kNss, range1, ChunkVersion(1, 0, epoch, timestamp), kShardList[0].getName());
+            uuid, range1, ChunkVersion(1, 0, epoch, timestamp), kShardList[0].getName());
 
         auto range2 = ChunkRange(BSON(kShardKey << 5), BSON(kShardKey << MAXKEY));
         ChunkType chunk2(
-            kNss, range2, ChunkVersion(1, 1, epoch, timestamp), kShardList[0].getName());
+            uuid, range2, ChunkVersion(1, 1, epoch, timestamp), kShardList[0].getName());
 
         return {chunk1, chunk2};
     }
@@ -290,88 +289,6 @@ public:
 protected:
     CatalogCacheLoaderMock* _mockCatalogCacheLoader;
 };
-
-TEST_F(CollectionShardingRuntimeTestWithMockedLoader,
-       ForceShardFilteringMetadataRefreshWithUpdateMetadataFormat) {
-    const DatabaseType dbType(kNss.db().toString(),
-                              kShardList[0].getName(),
-                              true,
-                              DatabaseVersion(UUID::gen(), Timestamp()));
-
-    const auto epoch = OID::gen();
-    const Timestamp timestamp(42);
-
-    const auto coll = createCollection(epoch);
-    const auto chunks = createChunks(epoch);
-
-    const auto timestampedColl = createCollection(epoch, timestamp);
-    const auto timestampedChunks = createChunks(epoch, timestamp);
-
-    auto checkForceFilteringMetadataRefresh = [&](const auto& coll, const auto& chunks) {
-        auto opCtx = operationContext();
-
-        _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(dbType);
-        _mockCatalogCacheLoader->setCollectionRefreshValues(
-            kNss, coll, chunks, boost::none /* reshardingFields */);
-        forceShardFilteringMetadataRefresh(opCtx, kNss);
-        AutoGetCollection autoColl(opCtx, kNss, LockMode::MODE_IS);
-        const auto currentMetadata =
-            CollectionShardingRuntime::get(opCtx, kNss)->getCurrentMetadataIfKnown();
-        ASSERT_TRUE(currentMetadata);
-        ASSERT_EQ(currentMetadata->getCollVersion().getTimestamp(), coll.getTimestamp());
-    };
-
-    // Testing the following transitions:
-    // CV<E, M, m> -> CV<E, T, M, m> -> CV<E, M, m>
-    // Note that the loader only returns the last chunk since we didn't modify any chunk.
-    checkForceFilteringMetadataRefresh(coll, chunks);
-    checkForceFilteringMetadataRefresh(timestampedColl, std::vector{timestampedChunks.back()});
-    checkForceFilteringMetadataRefresh(coll, std::vector{chunks.back()});
-}
-
-TEST_F(CollectionShardingRuntimeTestWithMockedLoader,
-       OnShardVersionMismatchWithUpdateMetadataFormat) {
-    const DatabaseType dbType(kNss.db().toString(),
-                              kShardList[0].getName(),
-                              true,
-                              DatabaseVersion(UUID::gen(), Timestamp()));
-
-    const auto epoch = OID::gen();
-    const Timestamp timestamp(42);
-
-    const auto coll = createCollection(epoch);
-    const auto chunks = createChunks(epoch);
-    const auto collVersion = chunks.back().getVersion();
-
-    const auto timestampedColl = createCollection(epoch, timestamp);
-    const auto timestampedChunks = createChunks(epoch, timestamp);
-    const auto timestampedCollVersion = timestampedChunks.back().getVersion();
-
-    auto opCtx = operationContext();
-
-    auto onShardVersionMismatchCheck =
-        [&](const auto& coll, const auto& chunks, const auto& receivedVersion) {
-            _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(dbType);
-            _mockCatalogCacheLoader->setCollectionRefreshValues(
-                kNss, coll, chunks, boost::none /* reshardingFields */);
-
-            onShardVersionMismatch(opCtx, kNss, receivedVersion);
-
-            AutoGetCollection autoColl(opCtx, kNss, LockMode::MODE_IS);
-            auto currentMetadata =
-                CollectionShardingRuntime::get(opCtx, kNss)->getCurrentMetadataIfKnown();
-            ASSERT_TRUE(currentMetadata);
-            ASSERT_EQ(currentMetadata->getCollVersion(), receivedVersion);
-        };
-
-    // Testing the following transitions:
-    // CV<E, M, m> -> CV<E, T, M, m> -> CV<E, M, m>
-    // Note that the loader only returns the last chunk since we didn't modify any chunk.
-    onShardVersionMismatchCheck(coll, chunks, collVersion);
-    onShardVersionMismatchCheck(
-        timestampedColl, std::vector{timestampedChunks.back()}, timestampedCollVersion);
-    onShardVersionMismatchCheck(coll, std::vector{chunks.back()}, collVersion);
-}
 
 /**
  * Fixture for when range deletion functionality is required in CollectionShardingRuntime tests.
@@ -432,7 +349,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         kTestNss,
         uuid(),
         ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Milliseconds::max());
+        Date_t::max());
     ASSERT_EQ(status.code(), ErrorCodes::ConflictingOperationInProgress);
 }
 
@@ -448,7 +365,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         kTestNss,
         randomUuid,
         ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Milliseconds::max());
+        Date_t::max());
     ASSERT_EQ(status.code(), ErrorCodes::ConflictingOperationInProgress);
 }
 
@@ -463,7 +380,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         kTestNss,
         uuid(),
         ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Milliseconds::max());
+        Date_t::max());
 
     ASSERT_OK(status);
 }
@@ -488,7 +405,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         kTestNss,
         uuid(),
         ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Milliseconds::max());
+        Date_t::max());
 
     ASSERT_EQ(status.code(), ErrorCodes::MaxTimeMSExpired);
 
@@ -519,7 +436,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         kTestNss,
         uuid(),
         ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Milliseconds::max());
+        Date_t::max());
 
     // waitForClean should block until both cleanup tasks have run. This is a best-effort check,
     // since even if it did not block, it is possible that the cleanup tasks could complete before
@@ -546,7 +463,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         kTestNss,
         uuid(),
         ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Milliseconds::max());
+        Date_t::max());
 
     ASSERT_OK(status);
     ASSERT(cleanupComplete.isReady());

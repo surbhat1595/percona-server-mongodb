@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/db/s/resharding/coordinator_document_gen.h"
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
@@ -237,7 +238,7 @@ protected:
         OperationContext* opCtx, ReshardingCoordinatorDocument expectedCoordinatorDoc) {
         DBDirectClient client(opCtx);
         auto doc = client.findOne(NamespaceString::kConfigReshardingOperationsNamespace.ns(),
-                                  Query(BSON("ns" << expectedCoordinatorDoc.getSourceNss().ns())));
+                                  BSON("ns" << expectedCoordinatorDoc.getSourceNss().ns()));
 
         auto coordinatorDoc = ReshardingCoordinatorDocument::parse(
             IDLParserErrorContext("ReshardingCoordinatorTest"), doc);
@@ -319,7 +320,7 @@ protected:
         const ReshardingCoordinatorDocument& expectedCoordinatorDoc) {
         DBDirectClient client(opCtx);
         CollectionType onDiskEntry(
-            client.findOne(CollectionType::ConfigNS.ns(), Query(BSON("_id" << _originalNss.ns()))));
+            client.findOne(CollectionType::ConfigNS.ns(), BSON("_id" << _originalNss.ns())));
 
         ASSERT_EQUALS(onDiskEntry.getAllowMigrations(), expectedCollType.getAllowMigrations());
 
@@ -378,8 +379,7 @@ protected:
     void assertTemporaryCollectionCatalogEntryMatchesExpected(
         OperationContext* opCtx, boost::optional<CollectionType> expectedCollType) {
         DBDirectClient client(opCtx);
-        auto doc =
-            client.findOne(CollectionType::ConfigNS.ns(), Query(BSON("_id" << _tempNss.ns())));
+        auto doc = client.findOne(CollectionType::ConfigNS.ns(), BSON("_id" << _tempNss.ns()));
         if (!expectedCollType) {
             ASSERT(doc.isEmpty());
             return;
@@ -423,7 +423,7 @@ protected:
                                                        const Timestamp& collTimestamp) {
         DBDirectClient client(opCtx);
         std::vector<ChunkType> foundChunks;
-        auto cursor = client.query(ChunkType::ConfigNS, Query(BSON("uuid" << uuid)));
+        auto cursor = client.query(ChunkType::ConfigNS, BSON("uuid" << uuid));
         while (cursor->more()) {
             auto d = uassertStatusOK(
                 ChunkType::fromConfigBSON(cursor->nextSafe().getOwned(), collEpoch, collTimestamp));
@@ -449,7 +449,7 @@ protected:
 
         DBDirectClient client(opCtx);
         std::vector<TagsType> foundZones;
-        auto cursor = client.query(TagsType::ConfigNS, Query(BSON("ns" << nss.ns())));
+        auto cursor = client.query(TagsType::ConfigNS, BSON("ns" << nss.ns()));
         while (cursor->more()) {
             foundZones.push_back(
                 uassertStatusOK(TagsType::fromBSON(cursor->nextSafe().getOwned())));
@@ -618,15 +618,21 @@ protected:
 
         // Check that chunks and tags under the temp namespace have been removed
         DBDirectClient client(opCtx);
-        auto chunkDoc =
-            client.findOne(ChunkType::ConfigNS.ns(), Query(BSON("ns" << _tempNss.ns())));
+        auto chunkDoc = client.findOne(ChunkType::ConfigNS.ns(), BSON("ns" << _tempNss.ns()));
         ASSERT(chunkDoc.isEmpty());
 
-        auto tagDoc = client.findOne(TagsType::ConfigNS.ns(), Query(BSON("ns" << _tempNss.ns())));
+        auto tagDoc = client.findOne(TagsType::ConfigNS.ns(), BSON("ns" << _tempNss.ns()));
         ASSERT(tagDoc.isEmpty());
+    }
 
+    void cleanupSourceCollectionExpectSuccess(OperationContext* opCtx,
+                                              ReshardingCoordinatorDocument expectedCoordinatorDoc,
+                                              std::vector<ChunkType> expectedChunks,
+                                              std::vector<TagsType> expectedZones) {
+        cleanupSourceConfigCollections(opCtx, expectedCoordinatorDoc);
         // Check that chunks and tags entries previously under the temporary namespace have been
         // correctly updated to the original namespace
+
         readChunkCatalogEntriesAndAssertMatchExpected(
             opCtx, _reshardingUUID, expectedChunks, _finalEpoch, _finalTimestamp);
         readTagCatalogEntriesAndAssertMatchExpected(opCtx, expectedZones);
@@ -642,7 +648,7 @@ protected:
         // Check that the entry is removed from config.reshardingOperations
         DBDirectClient client(opCtx);
         auto doc = client.findOne(NamespaceString::kConfigReshardingOperationsNamespace.ns(),
-                                  Query(BSON("ns" << expectedCoordinatorDoc.getSourceNss().ns())));
+                                  BSON("ns" << expectedCoordinatorDoc.getSourceNss().ns()));
         ASSERT(doc.isEmpty());
 
         // Check that the resharding fields are removed from the config.collections entry and
@@ -900,6 +906,45 @@ TEST_F(ReshardingCoordinatorPersistenceTest,
     ASSERT_THROWS_CODE(insertCoordDocAndChangeOrigCollEntry(operationContext(), coordinatorDoc),
                        AssertionException,
                        ErrorCodes::NamespaceNotFound);
+}
+
+TEST_F(ReshardingCoordinatorPersistenceTest, SourceCleanupBetweenTransitionsSucceeds) {
+
+    Timestamp fetchTimestamp = Timestamp(1, 1);
+    auto coordinatorDoc = insertStateAndCatalogEntries(
+        CoordinatorStateEnum::kBlockingWrites, _originalEpoch, fetchTimestamp);
+    auto initialChunksIds = std::vector{OID::gen(), OID::gen()};
+
+    auto tempNssChunks = makeChunks(_reshardingUUID, _tempEpoch, _newShardKey, initialChunksIds);
+    auto recipientChunk = tempNssChunks[1];
+    insertChunkAndZoneEntries(tempNssChunks, makeZones(_tempNss, _newShardKey));
+
+    insertChunkAndZoneEntries(
+        makeChunks(_originalUUID, OID::gen(), _oldShardKey, std::vector{OID::gen(), OID::gen()}),
+        makeZones(_originalNss, _oldShardKey));
+
+    // Persist the updates on disk
+    auto expectedCoordinatorDoc = coordinatorDoc;
+    expectedCoordinatorDoc.setState(CoordinatorStateEnum::kCommitting);
+
+    // The new epoch to use for the resharded collection to indicate that the collection is a
+    // new incarnation of the namespace
+    auto updatedChunks = makeChunks(_originalUUID, _finalEpoch, _newShardKey, initialChunksIds);
+    auto updatedZones = makeZones(_originalNss, _newShardKey);
+
+    auto initialCollectionVersion =
+        assertGet(getCollectionVersion(operationContext(), _originalNss));
+
+
+    writeDecisionPersistedStateExpectSuccess(
+        operationContext(), expectedCoordinatorDoc, fetchTimestamp, updatedChunks, updatedZones);
+
+    // Since the epoch is changed, there is no need to bump the chunk versions with the transition.
+    auto finalCollectionVersion = assertGet(getCollectionVersion(operationContext(), _originalNss));
+    ASSERT_EQ(initialCollectionVersion.toLong(), finalCollectionVersion.toLong());
+
+    cleanupSourceCollectionExpectSuccess(
+        operationContext(), expectedCoordinatorDoc, updatedChunks, updatedZones);
 }
 
 }  // namespace

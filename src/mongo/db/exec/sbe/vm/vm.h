@@ -33,11 +33,14 @@
 #include <memory>
 #include <vector>
 
+#include "mongo/base/compare_numbers.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+
+#include <absl/container/inlined_vector.h>
 
 namespace mongo {
 namespace sbe {
@@ -68,8 +71,22 @@ std::pair<value::TypeTags, value::Value> genericCompare(
                 return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
             }
             case value::TypeTags::NumberDecimal: {
-                auto result = op(value::numericCast<Decimal128>(lhsTag, lhsValue),
-                                 value::numericCast<Decimal128>(rhsTag, rhsValue));
+                auto result = [&]() {
+                    if (lhsTag == value::TypeTags::NumberDouble) {
+                        return op(compareDoubleToDecimal(
+                                      value::numericCast<double>(lhsTag, lhsValue),
+                                      value::numericCast<Decimal128>(rhsTag, rhsValue)),
+                                  0);
+                    } else if (rhsTag == value::TypeTags::NumberDouble) {
+                        return op(
+                            compareDecimalToDouble(value::numericCast<Decimal128>(lhsTag, lhsValue),
+                                                   value::numericCast<double>(rhsTag, rhsValue)),
+                            0);
+                    } else {
+                        return op(value::numericCast<Decimal128>(lhsTag, lhsValue),
+                                  value::numericCast<Decimal128>(rhsTag, rhsValue));
+                    }
+                }();
                 return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
             }
             default:
@@ -247,6 +264,8 @@ struct Instruction {
         getArraySize,
 
         aggSum,
+        aggDoubleDoubleSum,
+        doubleDoubleSumFinalize,
         aggMin,
         aggMax,
         aggFirst,
@@ -379,6 +398,29 @@ enum class Builtin : uint8_t {
     tsIncrement,
 };
 
+/**
+ * This enum defines indices into an 'Array' that accumulates $sum results.
+ *
+ * The array might contain up to four elements:
+ * - The element at index `kNonDecimalTotalTag` keeps track of the widest type of the sum of
+ * non-decimal values.
+ * - The elements at indices `kNonDecimalTotalSum` and `kNonDecimalTotalAddend` together represent
+ * non-decimal value which is the sum of all non-decimal values.
+ * - The element at index `kDecimalTotal` is optional and represents the sum of all decimal values
+ * if any such values are encountered.
+ *
+ * See 'aggDoubleDoubleSumImpl()'/'aggDoubleDoubleSum()'/'doubleDoubleSumFinalize()' for more
+ * details.
+ */
+enum AggSumValueElems {
+    kNonDecimalTotalTag,
+    kNonDecimalTotalSum,
+    kNonDecimalTotalAddend,
+    kDecimalTotal,
+    // This is actually not an index but represents the maximum number of elements.
+    kMaxSizeOfArray
+};
+
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
 
@@ -395,9 +437,9 @@ public:
     }
     void removeFixup(FrameId frameId);
 
-    void append(std::unique_ptr<CodeFragment> code);
-    void appendNoStack(std::unique_ptr<CodeFragment> code);
-    void append(std::unique_ptr<CodeFragment> lhs, std::unique_ptr<CodeFragment> rhs);
+    void append(CodeFragment&& code);
+    void appendNoStack(CodeFragment&& code);
+    void append(CodeFragment&& lhs, CodeFragment&& rhs);
     void appendConstVal(value::TypeTags tag, value::Value val);
     void appendAccessVal(value::SlotAccessor* accessor);
     void appendMoveVal(value::SlotAccessor* accessor);
@@ -478,6 +520,8 @@ public:
     void appendGetArraySize();
 
     void appendSum();
+    void appendDoubleDoubleSum();
+    void appendDoubleDoubleSumFinalize();
     void appendMin();
     void appendMax();
     void appendFirst();
@@ -528,9 +572,9 @@ private:
     }
 
     void adjustStackSimple(const Instruction& i);
-    void copyCodeAndFixup(const CodeFragment& from);
+    void copyCodeAndFixup(CodeFragment&& from);
 
-    std::vector<uint8_t> _instrs;
+    absl::InlinedVector<uint8_t, 16> _instrs;
 
     /**
      * Local variables bound by the let expressions live on the stack and are accessed by knowing an
@@ -664,6 +708,21 @@ private:
                                                            value::Value accValue,
                                                            value::TypeTags fieldTag,
                                                            value::Value fieldValue);
+
+    std::tuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSumImpl(value::TypeTags lhsTag,
+                                                                           value::Value lhsValue,
+                                                                           value::TypeTags rhsTag,
+                                                                           value::Value rhsValue);
+
+    std::tuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSum(value::TypeTags accTag,
+                                                                       value::Value accValue,
+                                                                       value::TypeTags fieldTag,
+                                                                       value::Value fieldValue);
+
+    // This function is necessary because 'aggDoubleDoubleSum()' result is 'Array' type but we need
+    // to produce a scalar value out of it.
+    std::tuple<bool, value::TypeTags, value::Value> doubleDoubleSumFinalize(
+        value::TypeTags fieldTag, value::Value fieldValue);
 
     std::tuple<bool, value::TypeTags, value::Value> aggMin(value::TypeTags accTag,
                                                            value::Value accValue,

@@ -139,7 +139,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     WorkingSetMember* member = _ws->get(id);
 
     // We want to free this member when we return, unless we need to retry deleting or returning it.
-    auto memberFreer = makeGuard([&] { _ws->free(id); });
+    ScopeGuard memberFreer([&] { _ws->free(id); });
 
     invariant(member->hasRecordId());
     RecordId recordId = member->recordId;
@@ -209,7 +209,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
             return prepareToRetryWSM(id, out);
         }
     }
-    ++_specificStats.docsDeleted;
+    _specificStats.docsDeleted += _params->numStatsForDoc ? _params->numStatsForDoc(bsonObjDoc) : 1;
 
     if (_params->returnDeleted) {
         // After deleting the document, the RecordId associated with this member is invalid.

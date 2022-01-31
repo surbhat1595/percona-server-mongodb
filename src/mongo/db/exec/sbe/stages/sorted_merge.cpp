@@ -32,10 +32,11 @@
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/size_estimator.h"
 
 namespace mongo {
 namespace sbe {
-SortedMergeStage::SortedMergeStage(std::vector<std::unique_ptr<PlanStage>> inputStages,
+SortedMergeStage::SortedMergeStage(PlanStage::Vector inputStages,
                                    std::vector<value::SlotVector> inputKeys,
                                    std::vector<value::SortDirection> dirs,
                                    std::vector<value::SlotVector> inputVals,
@@ -63,7 +64,7 @@ SortedMergeStage::SortedMergeStage(std::vector<std::unique_ptr<PlanStage>> input
 }
 
 std::unique_ptr<PlanStage> SortedMergeStage::clone() const {
-    std::vector<std::unique_ptr<PlanStage>> inputStages;
+    Vector inputStages;
     inputStages.reserve(_children.size());
     for (auto& child : _children) {
         inputStages.emplace_back(child->clone());
@@ -159,11 +160,11 @@ std::unique_ptr<PlanStageStats> SortedMergeStage::getStats(bool includeDebugInfo
         {
             BSONArrayBuilder valsArrBob(bob.subarrayStart("inputValSlots"));
             for (auto&& slots : _inputVals) {
-                valsArrBob.append(slots);
+                valsArrBob.append(slots.begin(), slots.end());
             }
         }
 
-        bob.append("outputSlots", _outputVals);
+        bob.append("outputSlots", _outputVals.begin(), _outputVals.end());
         ret->debugInfo = bob.obj();
     }
 
@@ -231,6 +232,16 @@ std::vector<DebugPrinter::Block> SortedMergeStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block("`]"));
 
     return ret;
+}
+
+size_t SortedMergeStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_inputKeys);
+    size += size_estimator::estimate(_dirs);
+    size += size_estimator::estimate(_inputVals);
+    size += size_estimator::estimate(_outputVals);
+    return size;
 }
 }  // namespace sbe
 }  // namespace mongo

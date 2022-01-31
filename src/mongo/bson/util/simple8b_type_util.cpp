@@ -35,6 +35,13 @@
 #include <cmath>
 
 namespace mongo {
+namespace {
+int128_t encodeCharArray(const char (&arr)[16]) {
+    uint64_t low = ConstDataView(arr).read<LittleEndian<uint64_t>>();
+    uint64_t high = ConstDataView(arr + 8).read<LittleEndian<uint64_t>>();
+    return absl::MakeInt128(high, low);
+}
+}  // namespace
 
 uint64_t Simple8bTypeUtil::encodeInt64(int64_t val) {
     return (static_cast<uint64_t>(val) << 1) ^ (val >> 63);
@@ -82,26 +89,30 @@ int64_t Simple8bTypeUtil::encodeObjectId(const OID& oid) {
     return LittleEndian<uint64_t>::load(encoded);
 }
 
-OID Simple8bTypeUtil::decodeObjectId(int64_t val, OID::InstanceUnique processUnique) {
-    unsigned char objId[OID::kOIDSize];
-
+void Simple8bTypeUtil::decodeObjectIdInto(char* buffer,
+                                          int64_t val,
+                                          OID::InstanceUnique processUnique) {
     val = LittleEndian<uint64_t>::store(val);
     uint8_t* encodedBytes = reinterpret_cast<uint8_t*>(&val);
 
     // Set Timestamp and Counter variables together.
-    objId[0] = encodedBytes[6];   // Timestamp index 0.
-    objId[1] = encodedBytes[4];   // Timestamp index 1.
-    objId[2] = encodedBytes[2];   // Timestamp index 2.
-    objId[3] = encodedBytes[0];   // Timestamp index 3.
-    objId[9] = encodedBytes[5];   // Counter index 0;
-    objId[10] = encodedBytes[3];  // Counter index 1.
-    objId[11] = encodedBytes[1];  // Counter index 2.
+    buffer[0] = encodedBytes[6];   // Timestamp index 0.
+    buffer[1] = encodedBytes[4];   // Timestamp index 1.
+    buffer[2] = encodedBytes[2];   // Timestamp index 2.
+    buffer[3] = encodedBytes[0];   // Timestamp index 3.
+    buffer[9] = encodedBytes[5];   // Counter index 0;
+    buffer[10] = encodedBytes[3];  // Counter index 1.
+    buffer[11] = encodedBytes[1];  // Counter index 2.
 
     // Finally set Process Unique.
     std::copy(processUnique.bytes,
               processUnique.bytes + OID::kInstanceUniqueSize,
-              objId + OID::kTimestampSize);
+              buffer + OID::kTimestampSize);
+}
 
+OID Simple8bTypeUtil::decodeObjectId(int64_t val, OID::InstanceUnique processUnique) {
+    unsigned char objId[OID::kOIDSize];
+    decodeObjectIdInto(reinterpret_cast<char*>(objId), val, processUnique);
     return OID(objId);
 }
 
@@ -133,8 +144,11 @@ boost::optional<uint8_t> Simple8bTypeUtil::calculateDecimalShiftMultiplier(doubl
 }
 
 boost::optional<int64_t> Simple8bTypeUtil::encodeDouble(double val, uint8_t scaleIndex) {
-    if (scaleIndex == kMemoryAsInteger)
-        return *reinterpret_cast<int64_t*>(&val);
+    if (scaleIndex == kMemoryAsInteger) {
+        int64_t ret;
+        memcpy(&ret, &val, sizeof(ret));
+        return ret;
+    }
 
     // Checks for both overflow and handles NaNs
     // We use 2^53 because this is the max integer that we can guarentee can be
@@ -160,8 +174,11 @@ boost::optional<int64_t> Simple8bTypeUtil::encodeDouble(double val, uint8_t scal
 }
 
 double Simple8bTypeUtil::decodeDouble(int64_t val, uint8_t scaleIndex) {
-    if (scaleIndex == kMemoryAsInteger)
-        return *reinterpret_cast<double*>(&val);
+    if (scaleIndex == kMemoryAsInteger) {
+        double ret;
+        memcpy(&ret, &val, sizeof(ret));
+        return ret;
+    }
 
     return val / kScaleMultiplier[scaleIndex];
 }
@@ -177,6 +194,60 @@ Decimal128 Simple8bTypeUtil::decodeDecimal128(int128_t val) {
     constructFromValue.low64 = absl::Uint128Low64(val);
     Decimal128 res(constructFromValue);
     return res;
+}
+
+boost::optional<int128_t> Simple8bTypeUtil::encodeBinary(const char* val, size_t size) {
+    if (size > 16)
+        return boost::none;
+
+    char arr[16] = {};
+    memcpy(arr, val, size);
+    return encodeCharArray(arr);
+}
+
+void Simple8bTypeUtil::decodeBinary(int128_t val, char* result, size_t size) {
+    uint64_t low = LittleEndian<uint64_t>::store(absl::Int128Low64(val));
+    uint64_t high = LittleEndian<uint64_t>::store(absl::Int128High64(val));
+    if (size > 8) {
+        memcpy(result, &low, 8);
+        memcpy(result + 8, &high, size - 8);
+    } else {
+        memcpy(result, &low, size);
+    }
+}
+
+boost::optional<int128_t> Simple8bTypeUtil::encodeString(StringData str) {
+    auto size = str.size();
+    if (size > 16)
+        return boost::none;
+
+    // Strings are reversed as it is deemed likely that entopy is located at the end of the string.
+    // This will put the entropy in the least significant byte creating a smaller delta. We can't
+    // have leading zero bytes as that would create a decoding ambiguity. Empty strings are fine
+    // however, they are just encoded as 0.
+    if (!str.empty() && str[0] == '\0')
+        return boost::none;
+
+    char arr[16] = {};
+    std::reverse_copy(str.begin(), str.end(), arr);
+    return encodeCharArray(arr);
+}
+Simple8bTypeUtil::SmallString Simple8bTypeUtil::decodeString(int128_t val) {
+    // String may be up to 16 characters, provide that decode and then we need to scan the result to
+    // find actual size
+    char str[16] = {};
+    decodeBinary(val, str, 16);
+
+    // Find first non null character from the end of the string to determine actual size
+    int8_t i = 15;
+    for (; i >= 0 && str[i] == '\0'; --i) {
+    }
+
+    // Reverse and return string
+    SmallString ret;
+    ret.size = i + 1;
+    std::reverse_copy(str, str + ret.size, ret.str.data());
+    return ret;
 }
 
 }  // namespace mongo

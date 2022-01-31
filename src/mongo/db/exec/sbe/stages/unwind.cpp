@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/unwind.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/util/str.h"
 
 namespace mongo::sbe {
@@ -200,8 +201,8 @@ std::vector<DebugPrinter::Block> UnwindStage::debugPrint() const {
     return ret;
 }
 
-void UnwindStage::doSaveState() {
-    if (!slotsAccessible()) {
+void UnwindStage::doSaveState(bool fullSave) {
+    if (!slotsAccessible() || !fullSave) {
         return;
     }
 
@@ -213,11 +214,17 @@ void UnwindStage::doSaveState() {
     }
 }
 
-void UnwindStage::doRestoreState() {
+void UnwindStage::doRestoreState(bool fullSave) {
     if (!slotsAccessible()) {
         return;
     }
 
     _inArrayAccessor.refresh();
+}
+
+size_t UnwindStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    return size;
 }
 }  // namespace mongo::sbe

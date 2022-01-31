@@ -73,6 +73,10 @@ public:
         ServiceContextMongoDTest::setUp();
 
         auto serviceContext = getServiceContext();
+
+        // Initialize sharding components as a shard server.
+        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
         {
             auto opCtx = makeOperationContext();
             auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext);
@@ -177,8 +181,11 @@ public:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, txnNumber, false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       false /* autocommit */,
+                                       true /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
 
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
@@ -198,8 +205,11 @@ public:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, txnNumber, false /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       false /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
 
         txnParticipant.unstashTransactionResources(opCtx, "abortTransaction");
         txnParticipant.abortTransaction(opCtx);
@@ -229,7 +239,7 @@ public:
         std::vector<repl::DurableOplogEntry> result;
 
         PersistentTaskStore<repl::OplogEntryBase> store(NamespaceString::kRsOplogNamespace);
-        store.forEach(opCtx, QUERY("ts" << BSON("$gt" << ts)), [&](const auto& oplogEntry) {
+        store.forEach(opCtx, BSON("ts" << BSON("$gt" << ts)), [&](const auto& oplogEntry) {
             result.emplace_back(
                 unittest::assertGet(repl::DurableOplogEntry::parse(oplogEntry.toBSON())));
             return true;
@@ -245,7 +255,7 @@ public:
         PersistentTaskStore<SessionTxnRecord> store(
             NamespaceString::kSessionTransactionsTableNamespace);
         store.forEach(opCtx,
-                      QUERY(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()),
+                      BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()),
                       [&](const auto& sessionTxnRecord) {
                           result.emplace(sessionTxnRecord);
                           return false;
@@ -287,9 +297,9 @@ private:
     ChunkManager makeChunkManagerForSourceCollection() {
         const OID epoch = OID::gen();
         std::vector<ChunkType> chunks = {ChunkType{
-            _sourceNss,
+            _sourceUUID,
             ChunkRange{BSON(_currentShardKey << MINKEY), BSON(_currentShardKey << MAXKEY)},
-            ChunkVersion(100, 0, epoch, boost::none /* timestamp */),
+            ChunkVersion(100, 0, epoch, Timestamp()),
             _myDonorId}};
 
         auto rt = RoutingTableHistory::makeNew(_sourceNss,
@@ -298,7 +308,7 @@ private:
                                                nullptr /* defaultCollator */,
                                                false /* unique */,
                                                std::move(epoch),
-                                               boost::none /* timestamp */,
+                                               Timestamp(),
                                                boost::none /* timeseriesFields */,
                                                boost::none /* reshardingFields */,
                                                boost::none /* chunkSizeBytes */,

@@ -45,9 +45,9 @@
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_access_method.h"
+#include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
@@ -77,10 +77,16 @@ CoreIndexInfo indexInfoFromIndexCatalogEntry(const IndexCatalogEntry& ice) {
             projExec};
 }
 
+std::shared_ptr<PlanCache> makePlanCache() {
+    return std::make_shared<PlanCache>(internalQueryCacheMaxEntriesPerCollection.load());
+}
+
 }  // namespace
 
 CollectionQueryInfo::CollectionQueryInfo()
-    : _keysComputed(false), _planCache(std::make_shared<PlanCache>()) {}
+    : _keysComputed(false),
+      _planCacheIndexabilityState(std::make_shared<PlanCacheIndexabilityState>()),
+      _planCache(makePlanCache()) {}
 
 const UpdateIndexData& CollectionQueryInfo::getIndexKeys(OperationContext* opCtx) const {
     invariant(_keysComputed);
@@ -193,7 +199,6 @@ void CollectionQueryInfo::clearQueryCache(OperationContext* opCtx, const Collect
                     "Clearing plan cache - collection info cache reinstantiated",
                     "namespace"_attr = coll->ns());
 
-        _planCache = std::make_shared<PlanCache>();
         updatePlanCacheIndexEntries(opCtx, coll);
     }
 }
@@ -210,6 +215,10 @@ PlanCache* CollectionQueryInfo::getPlanCache() const {
     return _planCache.get();
 }
 
+const PlanCacheIndexabilityState& CollectionQueryInfo::getPlanCacheIndexabilityState() const {
+    return *_planCacheIndexabilityState;
+}
+
 void CollectionQueryInfo::updatePlanCacheIndexEntries(OperationContext* opCtx,
                                                       const CollectionPtr& coll) {
     std::vector<CoreIndexInfo> indexCores;
@@ -224,7 +233,9 @@ void CollectionQueryInfo::updatePlanCacheIndexEntries(OperationContext* opCtx,
         indexCores.emplace_back(indexInfoFromIndexCatalogEntry(*ice));
     }
 
-    _planCache->notifyOfIndexUpdates(indexCores);
+    _planCache = makePlanCache();
+    _planCacheIndexabilityState = std::make_shared<PlanCacheIndexabilityState>();
+    _planCacheIndexabilityState->updateDiscriminators(indexCores);
 }
 
 void CollectionQueryInfo::init(OperationContext* opCtx, const CollectionPtr& coll) {
@@ -241,8 +252,6 @@ void CollectionQueryInfo::init(OperationContext* opCtx, const CollectionPtr& col
 }
 
 void CollectionQueryInfo::rebuildIndexData(OperationContext* opCtx, const CollectionPtr& coll) {
-    _planCache = std::make_shared<PlanCache>();
-
     _keysComputed = false;
     computeIndexKeys(opCtx, coll);
     updatePlanCacheIndexEntries(opCtx, coll);

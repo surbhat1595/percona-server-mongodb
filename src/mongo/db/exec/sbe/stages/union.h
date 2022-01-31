@@ -50,7 +50,7 @@ namespace mongo::sbe {
  */
 class UnionStage final : public PlanStage {
 public:
-    UnionStage(std::vector<std::unique_ptr<PlanStage>> inputStages,
+    UnionStage(PlanStage::Vector inputStages,
                std::vector<value::SlotVector> inputVals,
                value::SlotVector outputVals,
                PlanNodeId planNodeId);
@@ -66,6 +66,7 @@ public:
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
     std::vector<DebugPrinter::Block> debugPrint() const final;
+    size_t estimateCompileTimeSize() const final;
 
 private:
     struct UnionBranch {

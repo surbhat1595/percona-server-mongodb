@@ -43,6 +43,8 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer_impl.h"
+#include "mongo/db/op_observer_registry.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -51,6 +53,7 @@
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -326,19 +329,11 @@ void ConfigServerTestFixture::setupCollection(const NamespaceString& nss,
         setupDatabase(nss.db().toString(), ShardId(shard.getName()), true /* sharded */);
     }
 
-    const auto collUUID = [&]() {
-        const auto& chunk = chunks.front();
-        if (chunk.getVersion().getTimestamp()) {
-            return chunk.getCollectionUUID();
-        } else {
-            return UUID::gen();
-        }
-    }();
     CollectionType coll(nss,
                         chunks[0].getVersion().epoch(),
                         chunks[0].getVersion().getTimestamp(),
                         Date_t::now(),
-                        collUUID);
+                        chunks[0].getCollectionUUID());
     coll.setTimestamp(chunks.front().getVersion().getTimestamp());
     coll.setKeyPattern(shardKey);
     ASSERT_OK(
@@ -350,15 +345,13 @@ void ConfigServerTestFixture::setupCollection(const NamespaceString& nss,
     }
 }
 
-StatusWith<ChunkType> ConfigServerTestFixture::getChunkDoc(
-    OperationContext* opCtx,
-    const NamespaceStringOrUUID& nssOrUuid,
-    const BSONObj& minKey,
-    const OID& collEpoch,
-    const boost::optional<Timestamp>& collTimestamp) {
-    const auto query = nssOrUuid.uuid()
-        ? BSON(ChunkType::collectionUUID() << *nssOrUuid.uuid() << ChunkType::min(minKey))
-        : BSON(ChunkType::ns(nssOrUuid.nss()->ns()) << ChunkType::min(minKey));
+StatusWith<ChunkType> ConfigServerTestFixture::getChunkDoc(OperationContext* opCtx,
+                                                           const UUID& uuid,
+                                                           const BSONObj& minKey,
+                                                           const OID& collEpoch,
+                                                           const Timestamp& collTimestamp) {
+
+    const auto query = BSON(ChunkType::collectionUUID() << uuid << ChunkType::min(minKey));
     auto doc = findOneOnConfigCollection(opCtx, ChunkType::ConfigNS, query);
     if (!doc.isOK())
         return doc.getStatus();
@@ -366,11 +359,10 @@ StatusWith<ChunkType> ConfigServerTestFixture::getChunkDoc(
     return ChunkType::fromConfigBSON(doc.getValue(), collEpoch, collTimestamp);
 }
 
-StatusWith<ChunkType> ConfigServerTestFixture::getChunkDoc(
-    OperationContext* opCtx,
-    const BSONObj& minKey,
-    const OID& collEpoch,
-    const boost::optional<Timestamp>& collTimestamp) {
+StatusWith<ChunkType> ConfigServerTestFixture::getChunkDoc(OperationContext* opCtx,
+                                                           const BSONObj& minKey,
+                                                           const OID& collEpoch,
+                                                           const Timestamp& collTimestamp) {
     auto doc = findOneOnConfigCollection(opCtx, ChunkType::ConfigNS, BSON(ChunkType::min(minKey)));
     if (!doc.isOK())
         return doc.getStatus();
@@ -387,12 +379,11 @@ StatusWith<ChunkVersion> ConfigServerTestFixture::getCollectionVersion(Operation
 
     const CollectionType coll(collectionDoc.getValue());
 
-    auto chunkDoc = findOneOnConfigCollection(
-        opCtx,
-        ChunkType::ConfigNS,
-        coll.getTimestamp() ? BSON(ChunkType::collectionUUID << coll.getUuid())
-                            : BSON(ChunkType::ns << coll.getNss().ns()) /* query */,
-        BSON(ChunkType::lastmod << -1) /* sort */);
+    auto chunkDoc =
+        findOneOnConfigCollection(opCtx,
+                                  ChunkType::ConfigNS,
+                                  BSON(ChunkType::collectionUUID << coll.getUuid()) /* query */,
+                                  BSON(ChunkType::lastmod << -1) /* sort */);
 
     if (!chunkDoc.isOK())
         return chunkDoc.getStatus();
@@ -483,6 +474,13 @@ void ConfigServerTestFixture::expectSetShardVersion(
 
         return BSON("ok" << true);
     });
+}
+
+void ConfigServerTestFixture::setupOpObservers() {
+    auto opObserverRegistry =
+        checked_cast<OpObserverRegistry*>(getServiceContext()->getOpObserver());
+    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+    opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
 }
 
 }  // namespace mongo

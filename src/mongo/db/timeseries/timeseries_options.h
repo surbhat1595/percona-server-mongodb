@@ -33,20 +33,10 @@
 
 namespace mongo {
 
-class NamespaceString;
-class OperationContext;
-
 /**
  * Namespace for helper functions related to time-series collections.
  */
 namespace timeseries {
-
-/**
- * Returns a copy of the time-series options for namespace 'nss', if 'nss' refers to a time-series
- * collection. Otherwise returns boost::none.
- */
-boost::optional<TimeseriesOptions> getTimeseriesOptions(OperationContext* opCtx,
-                                                        const NamespaceString& nss);
 
 /**
  * Returns the default bucket timespan associated with the given granularity.

@@ -132,29 +132,8 @@ BSONObj genericTransformForShards(MutableDocument&& cmdForShards,
                                   boost::optional<ExplainOptions::Verbosity> explainVerbosity,
                                   BSONObj collationObj,
                                   boost::optional<BSONObj> readConcern) {
-    // Serialize the variables.
-    // Check whether we are in a mixed-version cluster and so must use the old serialization format.
-    // This is only tricky in the case we are sending an aggregate from shard to shard. For this
-    // scenario we can rely on feature compatibility version to detect when this is safe. Feature
-    // compatibility version is not generally accurate on mongos since it was intended to guard
-    // changes to data format and mongos has no persisted state. However, mongos is upgraded last
-    // after all the shards, so any recipient will understand the 'let' parameter.
-    // TODO SERVER-52900 This code can be remove when we branch for the next LTS release.
-    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
-        !serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-            ServerGlobalParams::FeatureCompatibility::Version::kVersion49)) {
-        // A mixed version cluster. Use the old format to be sure it is understood.
-        auto [legacyRuntimeConstants, unusedSerializedVariables] =
-            expCtx->variablesParseState.transitionalCompatibilitySerialize(expCtx->variables);
-
-        cmdForShards[AggregateCommandRequest::kLegacyRuntimeConstantsFieldName] =
-            Value(legacyRuntimeConstants.toBSON());
-    } else {
-        // Either this is a "modern" cluster or we are a mongos and can assume the shards are
-        // "modern" and will understand the 'let' parameter.
-        cmdForShards[AggregateCommandRequest::kLetFieldName] =
-            Value(expCtx->variablesParseState.serialize(expCtx->variables));
-    }
+    cmdForShards[AggregateCommandRequest::kLetFieldName] =
+        Value(expCtx->variablesParseState.serialize(expCtx->variables));
 
     cmdForShards[AggregateCommandRequest::kFromMongosFieldName] = Value(expCtx->inMongos);
 
@@ -1294,30 +1273,103 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
     auto expCtx = ownedPipeline->getContext();
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline(ownedPipeline,
                                                         PipelineDeleter(expCtx->opCtx));
-    invariant(pipeline->getSources().empty() ||
-              !dynamic_cast<DocumentSourceMergeCursors*>(pipeline->getSources().front().get()));
+    boost::optional<DocumentSource*> hasFirstStage = pipeline->getSources().empty()
+        ? boost::optional<DocumentSource*>{}
+        : pipeline->getSources().front().get();
 
-    if (expCtx->ns.isConfigDotCacheDotChunks()) {
-        // We take special care to attach the local cursor stage to 'ownedPipeline' here rather than
-        // attaching it to a serialized and re-parsed copy of the pipeline to avoid optimizations
-        // such as the $sequentialCache stage from being lost. This is safe because each shard has
-        // its own complete copy of any "config.cache.chunks.*" namespace.
-        return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
-            pipeline.release());
+    if (hasFirstStage) {
+        // Make sure the first stage isn't already a $mergeCursors, and also check if it is a stage
+        // which needs to actually get a cursor attached or not.
+        const auto* firstStage = *hasFirstStage;
+        invariant(!dynamic_cast<const DocumentSourceMergeCursors*>(firstStage));
+        // Here we check the hostRequirment because there is at least one stage ($indexStats) which
+        // does not require input data, but is still expected to fan out and contact remote shards
+        // nonetheless.
+        if (auto constraints = firstStage->constraints(); !constraints.requiresInputDocSource &&
+            (constraints.hostRequirement == StageConstraints::HostTypeRequirement::kLocalOnly)) {
+            // There's no need to attach a cursor here - the first stage provides its own data and
+            // is meant to be run locally (e.g. $documents).
+            return pipeline;
+        }
     }
+
+    // Helper to decide whether we should ignore the given shardTargetingPolicy for this namespace.
+    // Certain namespaces are shard-local; that is, they exist independently on every shard. For
+    // these namespaces, a local cursor should always be used.
+    // TODO SERVER-59957: use NamespaceString::isPerShardNamespace instead.
+    auto shouldAlwaysAttachLocalCursorForNamespace = [](const NamespaceString& ns) {
+        return (ns.isLocal() || ns.isConfigDotCacheDotChunks() ||
+                ns.isReshardingLocalOplogBufferCollection() ||
+                ns == NamespaceString::kConfigImagesNamespace ||
+                ns == NamespaceString::kChangeStreamPreImagesNamespace);
+    };
 
     auto catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
     return shardVersionRetry(
         expCtx->opCtx, catalogCache, expCtx->ns, "targeting pipeline to attach cursors"_sd, [&]() {
             auto pipelineToTarget = pipeline->clone();
             if (shardTargetingPolicy == ShardTargetingPolicy::kNotAllowed ||
-                expCtx->ns.db() == "local" || expCtx->ns.isReshardingLocalOplogBufferCollection()) {
-                // If the db is local, this may be a change stream examining the oplog. We know the
-                // oplog, other local collections, and collections that store the local resharding
-                // oplog buffer won't be sharded.
+                shouldAlwaysAttachLocalCursorForNamespace(expCtx->ns)) {
                 return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
                     pipelineToTarget.release());
             }
+
+            auto cm = catalogCache->getCollectionRoutingInfo(expCtx->opCtx, expCtx->ns);
+            if (cm.isOK() && !cm.getValue().isSharded()) {
+                // If the collection is unsharded and we are on the primary, we should be able to
+                // do a local read. The primary may be moved right after the primary shard check,
+                // but the local read path will do a db version check before it establishes a cursor
+                // to catch this case and ensure we fail to read locally.
+                auto setDbVersion = false;
+                try {
+                    expCtx->mongoProcessInterface->setExpectedShardVersion(
+                        expCtx->opCtx, expCtx->ns, ChunkVersion::UNSHARDED());
+                    setDbVersion = expCtx->mongoProcessInterface->setExpectedDbVersion(
+                        expCtx->opCtx, expCtx->ns, cm.getValue().dbVersion());
+
+                    // During 'attachCursorSourceToPipelineForLocalRead', the expected db version
+                    // must be set. Whether or not that call is succesful, to avoid affecting later
+                    // operations on this db, we should unset the expected db version on the opCtx,
+                    // if we set it above.
+                    ScopeGuard dbVersionUnsetter([&]() {
+                        if (setDbVersion) {
+                            expCtx->mongoProcessInterface->unsetExpectedDbVersion(expCtx->opCtx,
+                                                                                  expCtx->ns);
+                        }
+                    });
+
+                    expCtx->mongoProcessInterface->checkOnPrimaryShardForDb(expCtx->opCtx,
+                                                                            expCtx->ns);
+
+                    LOGV2_DEBUG(5837600,
+                                3,
+                                "Performing local read",
+                                "ns"_attr = expCtx->ns,
+                                "pipeline"_attr = pipelineToTarget->serializeToBson(),
+                                "comment"_attr = expCtx->opCtx->getComment());
+
+                    return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
+                        pipelineToTarget.release());
+                } catch (ExceptionFor<ErrorCodes::IllegalOperation>&) {
+                    // The current node isn't the primary for or has stale information about this
+                    // collection, proceed with shard targeting.
+                } catch (ExceptionFor<ErrorCodes::StaleDbVersion>&) {
+                    // The current node has stale information about this collection, proceed with
+                    // shard targeting, which has logic to handle refreshing that may be needed.
+                } catch (ExceptionForCat<ErrorCategory::StaleShardVersionError>&) {
+                    // The current node has stale information about this collection, proceed with
+                    // shard targeting, which has logic to handle refreshing that may be needed.
+                } catch (ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
+                    // The current node may be trying to run a pipeline on a namespace which is an
+                    // unresolved view, proceed with shard targeting,
+                }
+
+                // The local read failed. Recreate 'pipelineToTarget' if it was released above.
+                if (!pipelineToTarget) {
+                    pipelineToTarget = pipeline->clone();
+                }
+            }
+
             return targetShardsAndAddMergeCursors(expCtx,
                                                   std::move(pipelineToTarget),
                                                   boost::none,

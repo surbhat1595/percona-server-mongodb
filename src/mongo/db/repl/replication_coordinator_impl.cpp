@@ -421,7 +421,7 @@ void ReplicationCoordinatorImpl::appendConnectionStats(executor::ConnectionPoolS
 
 bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     OperationContext* opCtx, StorageEngine::LastShutdownState lastShutdownState) {
-    LOGV2_DEBUG(4280500, 1, "Attempting to create internal replication collections");
+    LOGV2(4280500, "Attempting to create internal replication collections");
     // Create necessary replication collections to guarantee that if a checkpoint sees data after
     // initial sync has completed, it also sees these collections.
     fassert(50708, _replicationProcess->getConsistencyMarkers()->createInternalCollections(opCtx));
@@ -434,7 +434,7 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
 
     fassert(51240, _externalState->createLocalLastVoteCollection(opCtx));
 
-    LOGV2_DEBUG(4280501, 1, "Attempting to load local voted for document");
+    LOGV2(4280501, "Attempting to load local voted for document");
     StatusWith<LastVote> lastVote = _externalState->loadLocalLastVoteDocument(opCtx);
     if (!lastVote.isOK()) {
         LOGV2_FATAL_NOTRACE(40367,
@@ -451,7 +451,7 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
         _topCoord->loadLastVote(lastVote.getValue());
     }
 
-    LOGV2_DEBUG(4280502, 1, "Searching for local Rollback ID document");
+    LOGV2(4280502, "Searching for local Rollback ID document");
     // Check that we have a local Rollback ID. If we do not have one, create one.
     auto status = _replicationProcess->refreshRollbackID(opCtx);
     if (!status.isOK()) {
@@ -507,16 +507,14 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
             "config"_attr = cfg.getValue());
     }
 
-    LOGV2_DEBUG(
-        4280504, 1, "Cleaning up any partially applied oplog batches & reading last op from oplog");
+    LOGV2(4280504, "Cleaning up any partially applied oplog batches & reading last op from oplog");
     // Read the last op from the oplog after cleaning up any partially applied batches.
     const auto stableTimestamp = boost::none;
     _replicationProcess->getReplicationRecovery()->recoverFromOplog(opCtx, stableTimestamp);
-    LOGV2_DEBUG(4280505,
-                1,
-                "Creating any necessary TenantMigrationAccessBlockers for unfinished migrations");
+    LOGV2(4280505,
+          "Creating any necessary TenantMigrationAccessBlockers for unfinished migrations");
     tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
-    LOGV2_DEBUG(4280506, 1, "Reconstructing prepared transactions");
+    LOGV2(4280506, "Reconstructing prepared transactions");
     reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
 
     const auto lastOpTimeAndWallTimeResult = _externalState->loadLastOpTimeAndWallTime(opCtx);
@@ -535,7 +533,7 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     stdx::lock_guard<Latch> lk(_mutex);
     _finishLoadLocalConfigCbh = std::move(handle.getValue());
 
-    LOGV2_DEBUG(4280507, 1, "Loaded replica set config, scheduled callback to set local config");
+    LOGV2(4280507, "Loaded replica set config, scheduled callback to set local config");
     return false;
 }
 
@@ -564,8 +562,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         return;
     }
 
-    LOGV2_DEBUG(
-        4280508, 1, "Attempting to set local replica set config; validating config for startup");
+    LOGV2(4280508, "Attempting to set local replica set config; validating config for startup");
     StatusWith<int> myIndex =
         validateConfigForStartUp(_externalState.get(), localConfig, getServiceContext());
     if (!myIndex.isOK()) {
@@ -606,7 +603,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
                       "commandLineSetName"_attr = _settings.ourSetName());
         myIndex = StatusWith<int>(-1);
     }
-    LOGV2_DEBUG(4280509, 1, "Local configuration validated for startup");
+    LOGV2(4280509, "Local configuration validated for startup");
 
     // Do not check optime, if this node is an arbiter.
     bool isArbiter =
@@ -689,93 +686,20 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         // Step down is impossible, so we don't need to wait for the returned event.
         _updateTerm_inlock(term);
     }
-    LOGV2_DEBUG(21320, 1, "Current term is now {term}", "Updated term", "term"_attr = term);
+    LOGV2(21320, "Current term is now {term}", "Updated term", "term"_attr = term);
     _performPostMemberStateUpdateAction(action);
 
     if (!isArbiter && myIndex.getValue() != -1) {
         _externalState->startThreads();
         _startDataReplication(opCtx.get());
     }
-    LOGV2_DEBUG(4280511, 1, "Set local replica set config");
+    LOGV2(4280511, "Set local replica set config");
 }
 
-void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
-                                                       std::function<void()> startCompleted) {
-    if (_startedSteadyStateReplication.swap(true)) {
-        // This is not the first call.
-        return;
-    }
-
-    // Check to see if we need to do an initial sync.
-    const auto lastOpTime = getMyLastAppliedOpTime();
-    const auto needsInitialSync =
-        lastOpTime.isNull() || _externalState->isInitialSyncFlagSet(opCtx);
-    if (!needsInitialSync) {
-        LOGV2_DEBUG(4280512, 1, "No initial sync required. Attempting to begin steady replication");
-        // Start steady replication, since we already have data.
-        // ReplSetConfig has been installed, so it's either in STARTUP2 or REMOVED.
-        auto memberState = getMemberState();
-        invariant(memberState.startup2() || memberState.removed());
-        invariant(setFollowerMode(MemberState::RS_RECOVERING));
-        // Set an initial sync ID, in case we were upgraded or restored from backup without doing
-        // an initial sync.
-        _replicationProcess->getConsistencyMarkers()->setInitialSyncIdIfNotSet(opCtx);
-        _externalState->startSteadyStateReplication(opCtx, this);
-        return;
-    }
-
-    LOGV2_DEBUG(4280513, 1, "Initial sync required. Attempting to start initial sync...");
-    // Do initial sync.
-    if (!_externalState->getTaskExecutor()) {
-        LOGV2(21323, "Not running initial sync during test");
-        return;
-    }
-
-    auto onCompletion = [this, startCompleted](const StatusWith<OpTimeAndWallTime>& opTimeStatus) {
-        {
-            stdx::lock_guard<Latch> lock(_mutex);
-            if (opTimeStatus == ErrorCodes::CallbackCanceled) {
-                LOGV2(21324,
-                      "Initial Sync has been cancelled: {error}",
-                      "Initial Sync has been cancelled",
-                      "error"_attr = opTimeStatus.getStatus());
-                return;
-            } else if (!opTimeStatus.isOK()) {
-                if (_inShutdown) {
-                    LOGV2(21325,
-                          "Initial Sync failed during shutdown due to {error}",
-                          "Initial Sync failed during shutdown",
-                          "error"_attr = opTimeStatus.getStatus());
-                    return;
-                } else {
-                    LOGV2_ERROR(21416,
-                                "Initial sync failed, shutting down now. Restart the server "
-                                "to attempt a new initial sync");
-                    fassertFailedWithStatusNoTrace(40088, opTimeStatus.getStatus());
-                }
-            }
-
-            const auto lastApplied = opTimeStatus.getValue();
-            _setMyLastAppliedOpTimeAndWallTime(lock, lastApplied, false);
-
-            _topCoord->resetMaintenanceCount();
-        }
-
-        if (startCompleted) {
-            startCompleted();
-        }
-        // Transition from STARTUP2 to RECOVERING and start the producer and the applier.
-        // If the member state is REMOVED, this will do nothing until we receive a config with
-        // ourself in it.
-        const auto memberState = getMemberState();
-        invariant(memberState.startup2() || memberState.removed());
-        invariant(setFollowerMode(MemberState::RS_RECOVERING));
-        auto opCtxHolder = cc().makeOperationContext();
-        _externalState->startSteadyStateReplication(opCtxHolder.get(), this);
-        // This log is used in tests to ensure we made it to this point.
-        LOGV2_DEBUG(4853000, 1, "initial sync complete.");
-    };
-
+void ReplicationCoordinatorImpl::_startInitialSync(
+    OperationContext* opCtx,
+    InitialSyncerInterface::OnCompletionFn onCompletion,
+    bool fallbackToLogical) {
     std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
     try {
         {
@@ -799,7 +723,8 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
                     onCompletion);
             };
 
-            if (repl::feature_flags::gFileCopyBasedInitialSync.isEnabledAndIgnoreFCV()) {
+            if (repl::feature_flags::gFileCopyBasedInitialSync.isEnabledAndIgnoreFCV() &&
+                !fallbackToLogical) {
                 auto swInitialSyncer = createInitialSyncer(initialSyncMethod);
                 if (swInitialSyncer.getStatus().code() == ErrorCodes::NotImplemented &&
                     initialSyncMethod != "logical") {
@@ -820,7 +745,7 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
         // InitialSyncer::startup() must be called outside lock because it uses features (eg.
         // setting the initial sync flag) which depend on the ReplicationCoordinatorImpl.
         uassertStatusOK(initialSyncerCopy->startup(opCtx, numInitialSyncAttempts.load()));
-        LOGV2_DEBUG(4280514, 1, "Initial sync started");
+        LOGV2(4280514, "Initial sync started");
     } catch (const DBException& e) {
         auto status = e.toStatus();
         LOGV2(21327,
@@ -832,6 +757,104 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
         }
         fassertFailedWithStatusNoTrace(40354, status);
     }
+}
+
+void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
+    const StatusWith<OpTimeAndWallTime>& opTimeStatus) {
+    {
+        stdx::unique_lock<Latch> lock(_mutex);
+        if (opTimeStatus == ErrorCodes::CallbackCanceled) {
+            LOGV2(21324,
+                  "Initial Sync has been cancelled: {error}",
+                  "Initial Sync has been cancelled",
+                  "error"_attr = opTimeStatus.getStatus());
+            return;
+        } else if (opTimeStatus == ErrorCodes::InvalidSyncSource &&
+                   _initialSyncer->getInitialSyncMethod() != "logical") {
+            LOGV2(5780600,
+                  "Falling back to logical initial sync: {error}",
+                  "Falling back to logical initial sync",
+                  "error"_attr = opTimeStatus.getStatus());
+            lock.unlock();
+            clearSyncSourceDenylist();
+            _scheduleWorkAt(_replExecutor->now(),
+                            [=](const mongo::executor::TaskExecutor::CallbackArgs& cbData) {
+                                _startInitialSync(
+                                    cc().makeOperationContext().get(),
+                                    [this](const StatusWith<OpTimeAndWallTime>& opTimeStatus) {
+                                        _initialSyncerCompletionFunction(opTimeStatus);
+                                    },
+                                    true /* fallbackToLogical */);
+                            });
+            return;
+        } else if (!opTimeStatus.isOK()) {
+            if (_inShutdown) {
+                LOGV2(21325,
+                      "Initial Sync failed during shutdown due to {error}",
+                      "Initial Sync failed during shutdown",
+                      "error"_attr = opTimeStatus.getStatus());
+                return;
+            } else {
+                LOGV2_ERROR(21416,
+                            "Initial sync failed, shutting down now. Restart the server "
+                            "to attempt a new initial sync");
+                fassertFailedWithStatusNoTrace(40088, opTimeStatus.getStatus());
+            }
+        }
+
+
+        const auto lastApplied = opTimeStatus.getValue();
+        _setMyLastAppliedOpTimeAndWallTime(lock, lastApplied, false);
+
+        _topCoord->resetMaintenanceCount();
+    }
+
+    // Transition from STARTUP2 to RECOVERING and start the producer and the applier.
+    // If the member state is REMOVED, this will do nothing until we receive a config with
+    // ourself in it.
+    const auto memberState = getMemberState();
+    invariant(memberState.startup2() || memberState.removed());
+    invariant(setFollowerMode(MemberState::RS_RECOVERING));
+    auto opCtxHolder = cc().makeOperationContext();
+    _externalState->startSteadyStateReplication(opCtxHolder.get(), this);
+    // This log is used in tests to ensure we made it to this point.
+    LOGV2_DEBUG(4853000, 1, "initial sync complete.");
+}
+
+void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) {
+    if (_startedSteadyStateReplication.swap(true)) {
+        // This is not the first call.
+        return;
+    }
+
+    // Check to see if we need to do an initial sync.
+    const auto lastOpTime = getMyLastAppliedOpTime();
+    const auto needsInitialSync =
+        lastOpTime.isNull() || _externalState->isInitialSyncFlagSet(opCtx);
+    if (!needsInitialSync) {
+        LOGV2(4280512, "No initial sync required. Attempting to begin steady replication");
+        // Start steady replication, since we already have data.
+        // ReplSetConfig has been installed, so it's either in STARTUP2 or REMOVED.
+        auto memberState = getMemberState();
+        invariant(memberState.startup2() || memberState.removed());
+        invariant(setFollowerMode(MemberState::RS_RECOVERING));
+        // Set an initial sync ID, in case we were upgraded or restored from backup without doing
+        // an initial sync.
+        _replicationProcess->getConsistencyMarkers()->setInitialSyncIdIfNotSet(opCtx);
+        _externalState->startSteadyStateReplication(opCtx, this);
+        return;
+    }
+
+    LOGV2(4280513, "Initial sync required. Attempting to start initial sync...");
+    // Do initial sync.
+    if (!_externalState->getTaskExecutor()) {
+        LOGV2(21323, "Not running initial sync during test");
+        return;
+    }
+
+    _startInitialSync(opCtx, [this](const StatusWith<OpTimeAndWallTime>& opTimeStatus) {
+        _initialSyncerCompletionFunction(opTimeStatus);
+    });
 }
 
 void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
@@ -1147,6 +1170,7 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
 
     stdx::unique_lock<Latch> lk(_mutex);
     if (_applierState != ApplierState::Draining) {
+        LOGV2(6015306, "Applier already left draining state, exiting.");
         return;
     }
     lk.unlock();
@@ -1171,6 +1195,8 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
     // current term, and we're allowed to become the writable primary.
     if (_applierState != ApplierState::Draining ||
         !_topCoord->canCompleteTransitionToPrimary(termWhenBufferIsEmpty)) {
+        LOGV2(6015308,
+              "Applier left draining state or not allowed to become writeable primary, exiting");
         return;
     }
     _applierState = ApplierState::Stopped;
@@ -1231,6 +1257,7 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
             hangAfterReconfigOnDrainComplete.pauseWhileSet(opCtx);
         }
 
+        LOGV2(6015310, "Starting to transition to primary.");
         AllowNonLocalWritesBlock writesAllowed(opCtx);
         OpTime firstOpTime = _externalState->onTransitionToPrimary(opCtx);
         ReplicaSetAwareServiceRegistry::get(_service).onStepUpComplete(opCtx,
@@ -2583,7 +2610,7 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
         _waitingForRSTLAtStepDown++;
         _fulfillTopologyChangePromise(lk);
     }
-    auto clearStepDownFlag = makeGuard([&] {
+    ScopeGuard clearStepDownFlag([&] {
         stdx::lock_guard lk(_mutex);
         _waitingForRSTLAtStepDown--;
         _fulfillTopologyChangePromise(lk);
@@ -2651,7 +2678,7 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
 
         _performPostMemberStateUpdateAction(action);
     };
-    auto onExitGuard = makeGuard([&] {
+    ScopeGuard onExitGuard([&] {
         abortFn();
         updateMemberState();
     });
@@ -3432,6 +3459,7 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
                         "_rsConfigState"_attr = int(_rsConfigState));
     }
 
+    LOGV2(6015313, "Replication config state is Steady, starting reconfig");
     invariant(_rsConfig.isInitialized());
 
     if (!force && !_readWriteAbility->canAcceptNonLocalWrites(lk) && !skipSafetyChecks) {
@@ -3492,7 +3520,7 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
 
     _setConfigState_inlock(kConfigReconfiguring);
     auto configStateGuard =
-        makeGuard([&] { lockAndCall(&lk, [=] { _setConfigState_inlock(kConfigSteady); }); });
+        ScopeGuard([&] { lockAndCall(&lk, [=] { _setConfigState_inlock(kConfigSteady); }); });
 
     ReplSetConfig oldConfig = _rsConfig;
     int myIndex = _selfIndex;
@@ -3586,6 +3614,16 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     // we bypass the check for finding ourselves in the config, since we know it should already be
     // satisfied.
     if (!sameConfigContents(oldConfig, newConfig)) {
+        if (skipSafetyChecks) {
+            LOGV2_ERROR(5986700,
+                        "Configuration changed substantially in a config change that should have "
+                        "only changed term",
+                        "oldConfig"_attr = oldConfig,
+                        "newConfig"_attr = newConfig);
+            // Always debug assert if we reach this point.
+            dassert(!skipSafetyChecks);
+        }
+        LOGV2(6015314, "Finding self in new config");
         StatusWith<int> myIndexSw = force
             ? findSelfInConfig(_externalState.get(), newConfig, opCtx->getServiceContext())
             : findSelfInConfigIfElectable(
@@ -3646,6 +3684,7 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     }
     // Wait for durability of the new config document.
     JournalFlusher::get(opCtx)->waitForJournalFlush();
+    LOGV2(6015315, "Persisted new config to disk");
 
     configStateGuard.dismiss();
     _finishReplSetReconfig(opCtx, newConfig, force, myIndex);
@@ -3668,12 +3707,11 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
     // we have already set our ReplicationCoordinatorImpl::_rsConfigState state to
     // "kConfigReconfiguring" which prevents new elections from happening.
     if (electionFinishedEvent) {
-        LOGV2_DEBUG(21354,
-                    2,
-                    "Waiting for election to complete before finishing reconfig to config with "
-                    "{configVersionAndTerm}",
-                    "Waiting for election to complete before finishing reconfig",
-                    "configVersionAndTerm"_attr = newConfig.getConfigVersionAndTerm());
+        LOGV2(21354,
+              "Waiting for election to complete before finishing reconfig to config with "
+              "{configVersionAndTerm}",
+              "Waiting for election to complete before finishing reconfig",
+              "configVersionAndTerm"_attr = newConfig.getConfigVersionAndTerm());
         // Wait for the election to complete and the node's Role to be set to follower.
         _replExecutor->waitForEvent(electionFinishedEvent);
     }
@@ -3744,7 +3782,6 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
     if (defaultDurableChanged || (isForceReconfig && contentChanged)) {
         _clearCommittedSnapshot_inlock();
     }
-
 
     lk.unlock();
     _performPostMemberStateUpdateAction(action);
@@ -3933,8 +3970,9 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
     invariant(!_rsConfig.isInitialized());
     _setConfigState_inlock(kConfigInitiating);
 
-    auto configStateGuard =
-        makeGuard([&] { lockAndCall(&lk, [=] { _setConfigState_inlock(kConfigUninitialized); }); });
+    ScopeGuard configStateGuard = [&] {
+        lockAndCall(&lk, [=] { _setConfigState_inlock(kConfigUninitialized); });
+    };
 
     // When writing our first oplog entry below, disable advancement of the stable timestamp so that
     // we don't set it before setting our initial data timestamp. We will set it after we set our
@@ -4031,8 +4069,21 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
         _shouldSetStableTimestamp = true;
         _setStableTimestampForStorage(lk);
     }
-    _finishReplSetInitiate(opCtx, newConfig, myIndex.getValue());
 
+    // In the EMRC=true case, we need to advance the commit point and take a stable checkpoint,
+    // to make sure that we can recover if we happen to roll back our first entries after
+    // replSetInitiate.
+    if (serverGlobalParams.enableMajorityReadConcern) {
+        LOGV2_INFO(5872101, "Taking a stable checkpoint for replSetInitiate");
+        stdx::unique_lock<Latch> lk(_mutex);
+        // Will call _setStableTimestampForStorage() on success.
+        _advanceCommitPoint(
+            lk, lastAppliedOpTimeAndWallTime, false /* fromSyncSource */, true /* forInitiate */);
+        opCtx->recoveryUnit()->waitUntilUnjournaledWritesDurable(opCtx,
+                                                                 /*stableCheckpoint*/ true);
+    }
+
+    _finishReplSetInitiate(opCtx, newConfig, myIndex.getValue());
     // A configuration passed to replSetInitiate() with the current node as an arbiter
     // will fail validation with a "replSet initiate got ... while validating" reason.
     invariant(!newConfig.getMemberAt(myIndex.getValue()).isArbiter());
@@ -4056,8 +4107,35 @@ void ReplicationCoordinatorImpl::_finishReplSetInitiate(OperationContext* opCtx,
 
 void ReplicationCoordinatorImpl::_setConfigState_inlock(ConfigState newState) {
     if (newState != _rsConfigState) {
+        LOGV2(6015317,
+              "Setting new configuration state",
+              "newState"_attr = getConfigStateString(newState),
+              "oldState"_attr = getConfigStateString(_rsConfigState));
         _rsConfigState = newState;
         _rsConfigStateChange.notify_all();
+    }
+}
+
+std::string ReplicationCoordinatorImpl::getConfigStateString(ConfigState state) {
+    switch (state) {
+        case kConfigPreStart:
+            return "ConfigPreStart";
+        case kConfigStartingUp:
+            return "ConfigStartingUp";
+        case kConfigReplicationDisabled:
+            return "ConfigReplicationDisabled";
+        case kConfigUninitialized:
+            return "ConfigUninitialized";
+        case kConfigSteady:
+            return "ConfigSteady";
+        case kConfigInitiating:
+            return "ConfigInitiating";
+        case kConfigReconfiguring:
+            return "ConfigReconfiguring";
+        case kConfigHBReconfiguring:
+            return "ConfigHBReconfiguring";
+        default:
+            MONGO_UNREACHABLE;
     }
 }
 
@@ -4329,6 +4407,7 @@ void ReplicationCoordinatorImpl::CatchupState::start_inlock() {
 
     // No catchup in single node replica set.
     if (_repl->_rsConfig.getNumMembers() == 1) {
+        LOGV2(6015304, "Skipping primary catchup since we are the only node in the replica set.");
         abort_inlock(PrimaryCatchUpConclusionReason::kSkipped);
         return;
     }
@@ -4398,6 +4477,10 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate_inlock() {
     auto targetOpTime = _repl->_topCoord->latestKnownOpTimeSinceHeartbeatRestart();
     // Haven't collected all heartbeat responses.
     if (!targetOpTime) {
+        LOGV2_DEBUG(
+            6015305,
+            1,
+            "Not updating target optime for catchup, we haven't collected all heartbeat responses");
         return;
     }
 
@@ -5227,9 +5310,12 @@ void ReplicationCoordinatorImpl::advanceCommitPoint(
 }
 
 void ReplicationCoordinatorImpl::_advanceCommitPoint(
-    WithLock lk, const OpTimeAndWallTime& committedOpTimeAndWallTime, bool fromSyncSource) {
-    if (_topCoord->advanceLastCommittedOpTimeAndWallTime(committedOpTimeAndWallTime,
-                                                         fromSyncSource)) {
+    WithLock lk,
+    const OpTimeAndWallTime& committedOpTimeAndWallTime,
+    bool fromSyncSource,
+    bool forInitiate) {
+    if (_topCoord->advanceLastCommittedOpTimeAndWallTime(
+            committedOpTimeAndWallTime, fromSyncSource, forInitiate)) {
         if (_getMemberState_inlock().arbiter()) {
             // Arbiters do not store replicated data, so we consider their data trivially
             // consistent.
@@ -5490,6 +5576,7 @@ Status ReplicationCoordinatorImpl::updateTerm(OperationContext* opCtx, long long
 
     // Wait for potential stepdown to finish.
     if (finishEvh.isValid()) {
+        LOGV2(6015302, "Waiting for potential stepdown to complete before finishing term update");
         _replExecutor->waitForEvent(finishEvh);
     }
     if (updateTermResult == TopologyCoordinator::UpdateTermResult::kUpdatedTerm ||
@@ -5723,6 +5810,7 @@ Status ReplicationCoordinatorImpl::stepUpIfEligible(bool skipDryRun) {
         }
     }
     if (finishEvent.isValid()) {
+        LOGV2(6015303, "Waiting for in-progress election to complete before finishing stepup");
         _replExecutor->waitForEvent(finishEvent);
     }
     {

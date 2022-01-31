@@ -576,8 +576,15 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
             // Final applyOp for a transaction.
             auto sessionId = *entry.getSessionId();
             auto txnNumber = *entry.getTxnNumber();
+            auto optTxnRetryCounter = entry.getOperationSessionInfo().getTxnRetryCounter();
+            uassert(ErrorCodes::InvalidOptions,
+                    "txnRetryCounter is only supported in sharded clusters",
+                    !optTxnRetryCounter.has_value() || *optTxnRetryCounter == 0);
             opCtx->setLogicalSessionId(sessionId);
             opCtx->setTxnNumber(txnNumber);
+            if (optTxnRetryCounter) {
+                opCtx->setTxnRetryCounter(*optTxnRetryCounter);
+            }
             opCtx->setInMultiDocumentTransaction();
             LOGV2_DEBUG(5351502,
                         1,
@@ -605,11 +612,14 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
                                   << " because the transaction number "
                                   << txnParticipant.getActiveTxnNumber() << " has already started",
                     txnParticipant.getActiveTxnNumber() < txnNumber);
-            txnParticipant.beginOrContinueTransactionUnconditionally(opCtx.get(), txnNumber);
+            txnParticipant.beginOrContinueTransactionUnconditionally(
+                opCtx.get(), txnNumber, optTxnRetryCounter);
 
-            // Only set sessionId and txnNumber for the final applyOp in a transaction.
+            // Only set sessionId, txnNumber and txnRetryCounter for the final applyOp in a
+            // transaction.
             noopEntry.setSessionId(sessionId);
             noopEntry.setTxnNumber(txnNumber);
+            noopEntry.getOperationSessionInfo().setTxnRetryCounter(optTxnRetryCounter);
 
             // Write a fake applyOps with the tenantId as the namespace so that this will be picked
             // up by the committed transaction prefetch pipeline in subsequent migrations.
@@ -620,6 +630,7 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
             // Use the same wallclock time as the noop entry.
             sessionTxnRecord.emplace(sessionId, txnNumber, OpTime(), noopEntry.getWallClockTime());
             sessionTxnRecord->setState(DurableTxnStateEnum::kCommitted);
+            sessionTxnRecord->setTxnRetryCounter(optTxnRetryCounter);
 
             // If we have a prePostImage no-op here, it is orphaned; this can happen in some
             // very unlikely rollback situations.
@@ -735,7 +746,8 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
             txnParticipant.beginOrContinue(opCtx.get(),
                                            txnNumber,
                                            boost::none /* autocommit */,
-                                           boost::none /* startTransaction */);
+                                           boost::none /* startTransaction */,
+                                           boost::none /* txnRetryCounter */);
 
             // We could have an existing lastWriteOpTime for the same retryable write chain from a
             // previously aborted migration. This could also happen if the tenant being migrated has
@@ -766,7 +778,8 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
                 txnParticipant.beginOrContinue(opCtx.get(),
                                                txnNumber,
                                                boost::none /* autocommit */,
-                                               boost::none /* startTransaction */);
+                                               boost::none /* startTransaction */,
+                                               boost::none /* txnRetryCounter */);
             }
 
             // We should never process the same donor statement twice, except in failover

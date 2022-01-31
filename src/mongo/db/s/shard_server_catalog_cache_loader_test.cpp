@@ -116,6 +116,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeFiveChunks(
     const ChunkVersion& collectionVersion) {
     ChunkVersion collVersion(collectionVersion);
     vector<ChunkType> chunks;
+    const UUID uuid = UUID::gen();
 
     BSONObj mins[] = {
         BSON("a" << MINKEY), BSON("a" << 10), BSON("a" << 50), BSON("a" << 100), BSON("a" << 200)};
@@ -126,7 +127,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeFiveChunks(
         collVersion.incMajor();
 
         ChunkType chunk;
-        chunk.setNS(kNss);
+        chunk.setCollectionUUID(uuid);
         chunk.setMin(mins[i]);
         chunk.setMax(maxs[i]);
         chunk.setShard(kShardId);
@@ -142,6 +143,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeThreeUpdatedChunksDiff(
     const ChunkVersion& collectionVersion) {
     ChunkVersion collVersion(collectionVersion);
     vector<ChunkType> chunks;
+    const UUID uuid = UUID::gen();
 
     // The diff query is for GTE a known version, so prepend the previous newest chunk, which is
     // unmodified by this change and so should be found. Note: it is important for testing that the
@@ -149,7 +151,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeThreeUpdatedChunksDiff(
     // dependent on a race between persistence and retrieving data because it combines enqueued and
     // persisted results without applying modifications.
     ChunkType oldChunk;
-    oldChunk.setNS(kNss);
+    oldChunk.setCollectionUUID(uuid);
     oldChunk.setMin(BSON("a" << 200));
     oldChunk.setMax(BSON("a" << MAXKEY));
     oldChunk.setShard(kShardId);
@@ -165,7 +167,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeThreeUpdatedChunksDiff(
         collVersion.incMinor();
 
         ChunkType chunk;
-        chunk.setNS(kNss);
+        chunk.setCollectionUUID(uuid);
         chunk.setMin(mins[i]);
         chunk.setMax(maxs[i]);
         chunk.setShard(kShardId);
@@ -201,7 +203,7 @@ CollectionType ShardServerCatalogCacheLoaderTest::makeCollectionType(
 
 std::pair<CollectionType, vector<ChunkType>>
 ShardServerCatalogCacheLoaderTest::setUpChunkLoaderWithFiveChunks() {
-    ChunkVersion collectionVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion collectionVersion(1, 0, OID::gen(), Timestamp(1, 1));
 
     CollectionType collectionType = makeCollectionType(collectionVersion);
     vector<ChunkType> chunks = makeFiveChunks(collectionVersion);
@@ -369,7 +371,7 @@ TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindNewEpoch)
 
     // Then refresh again and find that the collection has been dropped and recreated.
 
-    ChunkVersion collVersionWithNewEpoch(1, 0, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion collVersionWithNewEpoch(1, 0, OID::gen(), Timestamp(2, 0));
     CollectionType collectionTypeWithNewEpoch = makeCollectionType(collVersionWithNewEpoch);
     vector<ChunkType> chunksWithNewEpoch = makeFiveChunks(collVersionWithNewEpoch);
     _remoteLoaderMock->setCollectionRefreshReturnValue(collectionTypeWithNewEpoch);
@@ -396,7 +398,7 @@ TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindMixedChun
     // Then refresh again and retrieve chunks from the config server that have mixed epoches, like
     // as if the chunks read yielded around a drop and recreate of the collection.
 
-    ChunkVersion collVersionWithNewEpoch(1, 0, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion collVersionWithNewEpoch(1, 0, OID::gen(), Timestamp(2, 0));
     CollectionType collectionTypeWithNewEpoch = makeCollectionType(collVersionWithNewEpoch);
     vector<ChunkType> chunksWithNewEpoch = makeFiveChunks(collVersionWithNewEpoch);
     vector<ChunkType> mixedChunks;
@@ -438,42 +440,50 @@ TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindMixedChun
     }
 }
 
-TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindDbMetadataFormatChanged) {
-    const std::string dbName("dbName");
-    DatabaseVersion version(UUID::gen(), Timestamp());
-    DatabaseType dbType(dbName, kShardId, true /* sharded */, version);
-
-    _remoteLoaderMock->setDatabaseRefreshReturnValue(dbType);
-    auto newDbType = _shardLoader->getDatabase(dbName).get();
-    ASSERT_EQUALS(dbType.getVersion().getUuid(), newDbType.getVersion().getUuid());
-    ASSERT_EQUALS(dbType.getVersion().getTimestamp(), newDbType.getVersion().getTimestamp());
-
-    dbType.setVersion(DatabaseVersion(UUID::gen(), Timestamp(42)));
-    _remoteLoaderMock->setDatabaseRefreshReturnValue(dbType);
-    newDbType = _shardLoader->getDatabase(dbName).get();
-    ASSERT_EQUALS(dbType.getVersion().getUuid(), newDbType.getVersion().getUuid());
-    ASSERT_EQUALS(dbType.getVersion().getTimestamp(), newDbType.getVersion().getTimestamp());
-}
-
 TEST_F(ShardServerCatalogCacheLoaderTest, TimeseriesFieldsAreProperlyPropagatedOnSSCCL) {
-    ChunkVersion collectionVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion collectionVersion(1, 0, OID::gen(), Timestamp());
 
     CollectionType collectionType = makeCollectionType(collectionVersion);
-    TypeCollectionTimeseriesFields tsFields;
-    tsFields.setTimeseriesOptions(TimeseriesOptions("fieldName"));
-    collectionType.setTimeseriesFields(tsFields);
-
     vector<ChunkType> chunks = makeFiveChunks(collectionVersion);
+    auto timeseriesOptions = TimeseriesOptions("fieldName");
 
-    _remoteLoaderMock->setCollectionRefreshReturnValue(collectionType);
-    _remoteLoaderMock->setChunkRefreshReturnValue(chunks);
+    {
+        TypeCollectionTimeseriesFields tsFields;
+        tsFields.setTimeseriesOptions(timeseriesOptions);
+        collectionType.setTimeseriesFields(tsFields);
 
-    auto collAndChunksRes = _shardLoader->getChunksSince(kNss, ChunkVersion::UNSHARDED()).get();
-    ASSERT(collAndChunksRes.timeseriesFields.is_initialized());
+        _remoteLoaderMock->setCollectionRefreshReturnValue(collectionType);
+        _remoteLoaderMock->setChunkRefreshReturnValue(chunks);
+
+        auto collAndChunksRes = _shardLoader->getChunksSince(kNss, ChunkVersion::UNSHARDED()).get();
+        ASSERT(collAndChunksRes.timeseriesFields.is_initialized());
+        ASSERT(collAndChunksRes.timeseriesFields->getGranularity() ==
+               BucketGranularityEnum::Seconds);
+    }
+
+    {
+        auto& lastChunk = chunks.back();
+        const auto maxLoaderVersion = lastChunk.getVersion();
+        ChunkVersion newCollectionVersion = maxLoaderVersion;
+        newCollectionVersion.incMinor();
+        lastChunk.setVersion(newCollectionVersion);
+
+        TypeCollectionTimeseriesFields tsFields;
+        timeseriesOptions.setGranularity(BucketGranularityEnum::Hours);
+        tsFields.setTimeseriesOptions(timeseriesOptions);
+        collectionType.setTimeseriesFields(tsFields);
+
+        _remoteLoaderMock->setCollectionRefreshReturnValue(collectionType);
+        _remoteLoaderMock->setChunkRefreshReturnValue(std::vector{lastChunk});
+
+        auto collAndChunksRes = _shardLoader->getChunksSince(kNss, maxLoaderVersion).get();
+        ASSERT(collAndChunksRes.timeseriesFields.is_initialized());
+        ASSERT(collAndChunksRes.timeseriesFields->getGranularity() == BucketGranularityEnum::Hours);
+    }
 }
 
 void ShardServerCatalogCacheLoaderTest::refreshCollectionEpochOnRemoteLoader() {
-    ChunkVersion collectionVersion(1, 2, OID::gen(), boost::none);
+    ChunkVersion collectionVersion(1, 2, OID::gen(), Timestamp());
     CollectionType collectionType = makeCollectionType(collectionVersion);
     vector<ChunkType> chunks = makeFiveChunks(collectionVersion);
     _remoteLoaderMock->setCollectionRefreshReturnValue(collectionType);
@@ -503,7 +513,7 @@ TEST_F(ShardServerCatalogCacheLoaderTest, CollAndChunkTasksConsistency) {
 }
 
 TEST_F(ShardServerCatalogCacheLoaderTest, SupportingLongNameFieldsAreProperlyPropagatedOnSSCCL) {
-    ChunkVersion collectionVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion collectionVersion(1, 0, OID::gen(), Timestamp());
 
     CollectionType collectionType = makeCollectionType(collectionVersion);
     collectionType.setSupportingLongName(SupportingLongNameStatusEnum::kExplicitlyEnabled);

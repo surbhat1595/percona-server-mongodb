@@ -84,7 +84,6 @@ let viewsCommandTests = {
     _configsvrBalancerStop: {skip: isAnInternalCommand},
     _configsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _configsvrClearJumboFlag: {skip: isAnInternalCommand},
-    _configsvrCommitChunkMerge: {skip: isAnInternalCommand},
     _configsvrCommitChunksMerge: {skip: isAnInternalCommand},
     _configsvrCommitChunkMigration: {skip: isAnInternalCommand},
     _configsvrCommitChunkSplit: {skip: isAnInternalCommand},
@@ -135,6 +134,7 @@ let viewsCommandTests = {
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
+    _shardsvrDropCollectionIfUUIDNotMatching: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
@@ -165,6 +165,14 @@ let viewsCommandTests = {
         skipSharded: true,
     },
     authenticate: {skip: isUnrelated},
+    autoSplitVector: {
+        command: {
+            splitVector: "test.view",
+            keyPattern: {x: 1},
+            maxChunkSize: 1,
+        },
+        expectFailure: true,
+    },
     availableQueryOptions: {skip: isAnInternalCommand},
     balancerCollectionStatus: {
         command: {balancerCollectionStatus: "test.view"},
@@ -270,6 +278,9 @@ let viewsCommandTests = {
     donorForgetMigration: {skip: isUnrelated},
     donorStartMigration: {skip: isUnrelated},
     donorWaitForMigrationToCommit: {skip: isUnrelated},
+    donorAbortSplit: {skip: isUnrelated},
+    donorForgetSplit: {skip: isUnrelated},
+    donorStartSplit: {skip: isUnrelated},
     driverOIDTest: {skip: isUnrelated},
     drop: {command: {drop: "view"}},
     dropAllRolesFromDatabase: {skip: isUnrelated},
@@ -563,7 +574,7 @@ let viewsCommandTests = {
             max: {x: 0},
             keyPattern: {x: 1},
             splitKeys: [{x: -2}, {x: -1}],
-            shardVersion: [Timestamp(1, 2), ObjectId()]
+            shardVersion: [Timestamp(1, 2), ObjectId(), Timestamp(1, 1)]
         },
         skipSharded: true,
         expectFailure: true,

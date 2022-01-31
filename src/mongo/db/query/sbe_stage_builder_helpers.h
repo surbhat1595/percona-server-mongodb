@@ -216,6 +216,10 @@ std::unique_ptr<sbe::EExpression> makeVariable(sbe::value::SlotId slotId);
 
 std::unique_ptr<sbe::EExpression> makeVariable(sbe::FrameId frameId, sbe::value::SlotId slotId);
 
+inline auto makeFail(int code, StringData errorMessage) {
+    return sbe::makeE<sbe::EFail>(ErrorCodes::Error{code}, errorMessage);
+}
+
 /**
  * Check if expression returns Nothing and return null if so. Otherwise, return the expression.
  */
@@ -232,13 +236,6 @@ std::unique_ptr<sbe::EExpression> makeFillEmptyUndefined(std::unique_ptr<sbe::EE
  */
 std::unique_ptr<sbe::EExpression> makeNothingArrayCheck(
     std::unique_ptr<sbe::EExpression> isArrayInput, std::unique_ptr<sbe::EExpression> otherwise);
-
-/**
- * Check if arg is null or missing and return a min/max expression with arg as Nothing if so.
- * Otherwise, return a min/max expression with arg.
- */
-std::unique_ptr<sbe::EExpression> buildAccumulatorMinMax(mongo::StringData name,
-                                                         std::unique_ptr<sbe::EExpression> arg);
 
 /**
  * Creates an expression to extract a shard key part from inputExpr. The generated expression is a

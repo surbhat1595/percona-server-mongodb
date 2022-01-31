@@ -58,7 +58,6 @@ public:
                     opCtx->getWriteConcern().wMode == WriteConcernOptions::kMajority);
             ShardingCatalogManager::get(opCtx)->ensureChunkVersionIsGreaterThan(
                 opCtx,
-                request().getNss(),
                 request().getCollectionUUID(),
                 request().getMinKey(),
                 request().getMaxKey(),
@@ -82,6 +81,11 @@ public:
                                                            ActionType::internal));
         }
     };
+
+    bool skipApiVersionCheck() const override {
+        // Internal command (server to server).
+        return true;
+    }
 
     std::string help() const override {
         return "Internal command, which is exported by the sharding config server. Do not call "

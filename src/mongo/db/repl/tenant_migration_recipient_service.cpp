@@ -573,6 +573,7 @@ OpTime TenantMigrationRecipientService::Instance::_getDonorMajorityOpTime(
         BSON(OplogEntry::kTimestampFieldName << 1 << OplogEntry::kTermFieldName << 1);
     auto majorityOpTimeBson =
         client->findOne(NamespaceString::kRsOplogNamespace.ns(),
+                        BSONObj{},
                         Query().sort("$natural", -1),
                         &oplogOpTimeFields,
                         QueryOption_SecondaryOk,
@@ -867,8 +868,8 @@ void TenantMigrationRecipientService::Instance::_getStartOpTimesFromDonor(WithLo
     auto transactionTableOpTimeFields = BSON(SessionTxnRecord::kStartOpTimeFieldName << 1);
     auto earliestOpenTransactionBson = _client->findOne(
         NamespaceString::kSessionTransactionsTableNamespace.ns(),
-        QUERY("state" << BSON("$in" << BSON_ARRAY(preparedState << inProgressState)))
-            .sort(SessionTxnRecord::kStartOpTimeFieldName.toString(), 1),
+        BSON("state" << BSON("$in" << BSON_ARRAY(preparedState << inProgressState))),
+        Query().sort(SessionTxnRecord::kStartOpTimeFieldName.toString(), 1),
         &transactionTableOpTimeFields,
         QueryOption_SecondaryOk,
         ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
@@ -945,6 +946,10 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
         SessionTxnRecord::parse(IDLParserErrorContext("SessionTxnRecord"), entry);
     auto sessionId = sessionTxnRecord.getSessionId();
     auto txnNumber = sessionTxnRecord.getTxnNum();
+    auto optTxnRetryCounter = sessionTxnRecord.getTxnRetryCounter();
+    uassert(ErrorCodes::InvalidOptions,
+            "txnRetryCounter is only supported in sharded clusters",
+            !optTxnRetryCounter.has_value() || *optTxnRetryCounter == 0);
 
     auto uniqueOpCtx = cc().makeOperationContext();
     auto opCtx = uniqueOpCtx.get();
@@ -956,6 +961,9 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
         boost::make_optional<TenantMigrationRecipientInfo>(getMigrationUUID());
     opCtx->setLogicalSessionId(sessionId);
     opCtx->setTxnNumber(txnNumber);
+    if (optTxnRetryCounter) {
+        opCtx->setTxnRetryCounter(*optTxnRetryCounter);
+    }
     opCtx->setInMultiDocumentTransaction();
     MongoDOperationContextSession ocs(opCtx);
 
@@ -993,7 +1001,7 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
         return;
     }
 
-    txnParticipant.beginOrContinueTransactionUnconditionally(opCtx, txnNumber);
+    txnParticipant.beginOrContinueTransactionUnconditionally(opCtx, txnNumber, optTxnRetryCounter);
 
     MutableOplogEntry noopEntry;
     noopEntry.setOpType(repl::OpTypeEnum::kNoop);
@@ -1006,6 +1014,7 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     noopEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
     noopEntry.setSessionId(sessionId);
     noopEntry.setTxnNumber(txnNumber);
+    noopEntry.getOperationSessionInfo().setTxnRetryCounter(optTxnRetryCounter);
 
     // Use the same wallclock time as the noop entry.
     sessionTxnRecord.setStartOpTime(boost::none);
@@ -1029,10 +1038,15 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     // the transaction state from 'config.transactions'.
     txnParticipant.invalidate(opCtx);
 
-    if (MONGO_unlikely(hangAfterUpdatingTransactionEntry.shouldFail())) {
+    hangAfterUpdatingTransactionEntry.execute([&](const BSONObj& data) {
         LOGV2(5351400, "hangAfterUpdatingTransactionEntry failpoint enabled");
         hangAfterUpdatingTransactionEntry.pauseWhileSet();
-    }
+        if (data["failAfterHanging"].trueValue()) {
+            // Simulate the sync source shutting down/restarting.
+            uasserted(ErrorCodes::ShutdownInProgress,
+                      "Throwing error due to hangAfterUpdatingTransactionEntry failpoint");
+        }
+    });
 }
 
 SemiFuture<void>
@@ -1875,6 +1889,7 @@ void TenantMigrationRecipientService::Instance::_fetchAndStoreDonorClusterTimeKe
     std::vector<ExternalKeysCollectionDocument> keyDocs;
     auto cursor =
         _client->query(NamespaceString::kKeysCollectionNamespace,
+                       BSONObj{},
                        Query().readPref(_readPreference.pref, _readPreference.tags.getTagBSON()));
     while (cursor->more()) {
         const auto doc = cursor->nextSafe().getOwned();
@@ -1892,7 +1907,8 @@ void TenantMigrationRecipientService::Instance::_compareRecipientAndDonorFCV() c
 
     auto donorFCVbson =
         _client->findOne(NamespaceString::kServerConfigurationNamespace.ns(),
-                         QUERY("_id" << FeatureCompatibilityVersionParser::kParameterName),
+                         BSON("_id" << multiversion::kParameterName),
+                         Query(),
                          nullptr,
                          QueryOption_SecondaryOk,
                          ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());

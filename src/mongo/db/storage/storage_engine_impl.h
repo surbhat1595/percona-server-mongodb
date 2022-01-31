@@ -255,43 +255,37 @@ public:
             Callback _callback;
         };
 
-        TimestampMonitor(KVEngine* engine, PeriodicRunner* runner);
+        /**
+         * Starts monitoring timestamp changes in the background with an initial listener.
+         */
+        TimestampMonitor(KVEngine* engine, TimestampListener* listener, PeriodicRunner* runner);
+
         ~TimestampMonitor();
 
         /**
-         * Monitor changes in timestamps and to notify the listeners on change. Notifies all
-         * listeners on Timestamp::min() in order to support standalone mode that is untimestamped.
+         * Removes registered listeners from the monitor.
          */
-        void startup();
+        void clearListeners();
 
         /**
          * Adds a new listener to the monitor if it isn't already registered. A listener can only be
          * bound to one type of timestamp at a time.
          */
-        void addListener(TimestampListener* listener);
-
-        /**
-         * Removes an existing listener from the monitor if it was registered.
-         */
-        void removeListener(TimestampListener* listener);
+        void addListener_forTestOnly(TimestampListener* listener);
 
         bool isRunning_forTestOnly() const {
             return _running;
         }
 
     private:
-        struct MonitoredTimestamps {
-            Timestamp checkpoint;
-            Timestamp oldest;
-            Timestamp stable;
-            Timestamp minOfCheckpointAndOldest;
-        };
+        /**
+         * Monitor changes in timestamps and to notify the listeners on change. Notifies all
+         * listeners on Timestamp::min() in order to support standalone mode that is untimestamped.
+         */
+        void _startup();
 
         KVEngine* _engine;
         bool _running;
-
-        // The set of timestamps that were last reported to the listeners by the monitor.
-        MonitoredTimestamps _currentTimestamps;
 
         // Periodic runner that the timestamp monitor schedules its job on.
         PeriodicRunner* _periodicRunner;

@@ -39,6 +39,7 @@
 
 namespace mongo {
 
+class CollectionPtr;
 class CollatorInterface;
 struct TwoDIndexingParams;
 struct S2IndexingParams;
@@ -56,6 +57,14 @@ class FTSSpec;
  */
 class ExpressionKeysPrivate {
 public:
+    //
+    // Common
+    //
+
+    static void validateDocumentCommon(const CollectionPtr& collection,
+                                       const BSONObj& obj,
+                                       const BSONObj& keyPattern);
+
     //
     // 2d
     //
@@ -123,19 +132,6 @@ public:
                           KeyString::Version keyStringVersion,
                           Ordering ordering,
                           boost::optional<RecordId> id = boost::none);
-
-    /**
-     * Generates keys for S2Bucket access method.
-     */
-    static void getS2BucketKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
-                                const BSONObj& obj,
-                                const BSONObj& keyPattern,
-                                const S2IndexingParams& params,
-                                KeyStringSet* keys,
-                                MultikeyPaths* multikeyPaths,
-                                KeyString::Version keyStringVersion,
-                                Ordering ordering,
-                                boost::optional<RecordId> id = boost::none);
 };
 
 }  // namespace mongo

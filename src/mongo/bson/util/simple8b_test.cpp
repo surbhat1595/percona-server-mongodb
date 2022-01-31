@@ -910,6 +910,44 @@ TEST(Simple8b, RleSkip) {
     testSimple8b(expectedInts, expectedBinary);
 }
 
+TEST(Simple8b, FlushSkipRLE) {
+    // Make sure that flushing skips does not re-enable RLE when it fits a full Simple8b. We need at
+    // least 121 skips to verify this (60+60+1)
+    std::vector<boost::optional<uint64_t>> expectedInts(121, boost::none);
+
+    std::vector<uint8_t> expectedBinary{
+        // The selector is 1 and there are 60 bucket with skip.
+        0xF1,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,  // 1st word.
+        // The selector is 1 and there are 60 bucket with skip.
+        0xF1,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,  // 2nd word.
+        // The selector is 14 and there are 1 bucket with skip.
+        0xFE,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,  // 3rd word.
+    };
+
+    testSimple8b(expectedInts, expectedBinary);
+}
+
 TEST(Simple8b, RleChangeOfValue) {
     std::vector<boost::optional<uint64_t>> expectedInts(300, 1);
     expectedInts.push_back(7);
@@ -1080,4 +1118,74 @@ TEST(Simple8b, RleEightSelectorLarge) {
                                            0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                            0x88, 0xF4, 0xE8, 0xD1, 0xA3, 0x47, 0x8F, 0x1E};
     testSimple8b(expectedInts, expectedBinary);
+}
+
+TEST(Simple8b, EightSelectorLargeMax) {
+    // Selector 8 value
+    // 1111 + 124 zeros
+    // This should be encoded as
+    // [001111] [11111]  x5 [1001] [1000] = 1FF3FE7FCFF9FF98
+    uint128_t val = absl::MakeUint128(0xF000000000000000, 0x0);
+    std::vector<boost::optional<uint128_t>> expectedInts(5, val);
+    std::vector<uint8_t> expectedBinary = {0x98, 0xFF, 0xF9, 0xCF, 0x7F, 0xFE, 0xF3, 0x1f};
+    testSimple8b(expectedInts, expectedBinary);
+}
+
+TEST(Simple8b, ValueTooLarge) {
+    // This value needs 61 bits which it too large for Simple8b
+    uint64_t value = 0x1FFFFFFFFFFFFFFF;
+    Simple8bBuilder<uint64_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
+}
+
+TEST(Simple8b, ValueTooManyTrailingFor8SmallTooManyMeaningfulFor8Large) {
+    // This value has 52 meaningful bits and 61 trailing zeros. This is too many trailing zeros for
+    // Selector 8 Small and too many meaningful bits for Selector 8 Large.
+    uint128_t value = absl::MakeUint128(0x1FFFFF0FFFFFF, 0xE000000000000000);
+    Simple8bBuilder<uint128_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
+}
+
+TEST(Simple8b, ValueTooLargeMax8SmallAddForSkipPattern) {
+    // This value has 52 meaningful bits and 60 trailing zeros. But one extra 0 needs to be added to
+    // the meaningful bits to differentiate from the missing value pattern to be able to store in
+    // Extended 8 Small which brings it to 53 bits which is too many. Extended 8 Large can't be used
+    // either as it can only store 51 meaningful bits.
+    uint128_t value = absl::MakeUint128(0xFFFFFFFFFFFF, 0xF000000000000000);
+    Simple8bBuilder<uint128_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
+}
+
+TEST(Simple8b, ValueTooLargeTrailingZerosNotDivisibleBy4) {
+    // This value has 52 meaningful bits and 59 trailing zeros. But 3 of the trailing bits need to
+    // be stored in the data bits as it's not divisible by 4. This brings the data bits to 55 which
+    // it too large.
+    uint128_t value = absl::MakeUint128(0x7FFFFFFFFFFF, 0xF800000000000000);
+    Simple8bBuilder<uint128_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
+}
+
+TEST(Simple8b, ValueTooLargeBitCountUsedForExtendedSelectors) {
+    // This value has 63 meaningful bits and does not fit in Simple8b. When evaluating the extended
+    // selectors it will almost fit as it can pack the 9 trailing zero in the count but the amount
+    // of bits required will still be too large. Make sure append takes into the account the number
+    // of bits used for the count when checking if the value can be stored.
+    uint64_t value = 0x646075fffc000200;
+    Simple8bBuilder<uint64_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
 }

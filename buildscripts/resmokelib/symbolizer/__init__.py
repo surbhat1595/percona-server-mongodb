@@ -91,9 +91,9 @@ class Symbolizer(Subcommand):
 
     def _get_multiversion_setup(self):
         if self.download_symbols_only:
-            download_options = _DownloadOptions(db=False, ds=True, da=False)
+            download_options = _DownloadOptions(db=False, ds=True, da=False, dv=False)
         else:
-            download_options = _DownloadOptions(db=True, ds=True, da=False)
+            download_options = _DownloadOptions(db=True, ds=True, da=False, dv=False)
         return SetupMultiversion(download_options=download_options, ignore_failed_push=True)
 
     def _get_compile_artifacts(self):
@@ -101,7 +101,7 @@ class Symbolizer(Subcommand):
         version_id = self.task_info.version_id
         buildvariant_name = self.task_info.build_variant
 
-        urls = self.multiversion_setup.get_urls(binary_version=None, evergreen_version=version_id,
+        urls = self.multiversion_setup.get_urls(version=version_id,
                                                 buildvariant_name=buildvariant_name)
 
         self.multiversion_setup.download_and_extract_from_urls(urls, bin_suffix=None,

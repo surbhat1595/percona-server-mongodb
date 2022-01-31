@@ -176,8 +176,7 @@ void OplogApplierImplTest::setUp() {
     // test fixture does not create a featureCompatibilityVersion document from which to initialize
     // the server parameter.
     // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(
-        ServerGlobalParams::FeatureCompatibility::kLatest);
+    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
 
     // This is necessary to generate ghost timestamps for index builds that are not 0, since 0 is an
     // invalid timestamp.
@@ -350,7 +349,7 @@ void checkTxnTable(OperationContext* opCtx,
                    boost::optional<DurableTxnStateEnum> expectedState) {
     DBDirectClient client(opCtx);
     auto result = client.findOne(NamespaceString::kSessionTransactionsTableNamespace.ns(),
-                                 {BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON())});
+                                 BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()));
     ASSERT_FALSE(result.isEmpty());
 
     auto txnRecord =
@@ -393,7 +392,7 @@ StatusWith<BSONObj> CollectionReader::next() {
 
 bool docExists(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& doc) {
     DBDirectClient client(opCtx);
-    auto result = client.findOne(nss.ns(), {doc});
+    auto result = client.findOne(nss.ns(), doc);
     return !result.isEmpty();
 }
 

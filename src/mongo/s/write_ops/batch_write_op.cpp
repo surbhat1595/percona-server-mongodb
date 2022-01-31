@@ -394,10 +394,10 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
         // StaleShardVersion and has to return number of errors equivalent to the number of writes
         // in the batch, the response size will not exceed the max BSON size.
         //
-        // The constant of 256 is chosen as an approximation of the size of the BSON representataion
+        // The constant of 272 is chosen as an approximation of the size of the BSON representataion
         // of the StaleConfigInfo (which contains the shard id) and the adjacent error message.
         const int errorResponsePotentialSizeBytes =
-            ordered ? 0 : write_ops::kWriteCommandBSONArrayPerElementOverheadBytes + 256;
+            ordered ? 0 : write_ops::kWriteCommandBSONArrayPerElementOverheadBytes + 272;
 
         if (wouldMakeBatchesTooBig(
                 writes, std::max(writeSizeBytes, errorResponsePotentialSizeBytes), batchMap)) {
@@ -462,8 +462,8 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
     return Status::OK();
 }
 
-BatchedCommandRequest BatchWriteOp::buildBatchRequest(
-    const TargetedWriteBatch& targetedBatch) const {
+BatchedCommandRequest BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& targetedBatch,
+                                                      const NSTargeter& targeter) const {
     const auto batchType = _clientRequest.getBatchType();
 
     boost::optional<std::vector<int32_t>> stmtIdsForOp;
@@ -511,13 +511,13 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
         switch (batchType) {
             case BatchedCommandRequest::BatchType_Insert:
                 return BatchedCommandRequest([&] {
-                    write_ops::InsertCommandRequest insertOp(_clientRequest.getNS());
+                    write_ops::InsertCommandRequest insertOp(targeter.getNS());
                     insertOp.setDocuments(std::move(*insertDocs));
                     return insertOp;
                 }());
             case BatchedCommandRequest::BatchType_Update: {
                 return BatchedCommandRequest([&] {
-                    write_ops::UpdateCommandRequest updateOp(_clientRequest.getNS());
+                    write_ops::UpdateCommandRequest updateOp(targeter.getNS());
                     updateOp.setUpdates(std::move(*updates));
                     // Each child batch inherits its let params/runtime constants from the parent
                     // batch.
@@ -528,7 +528,7 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
             }
             case BatchedCommandRequest::BatchType_Delete:
                 return BatchedCommandRequest([&] {
-                    write_ops::DeleteCommandRequest deleteOp(_clientRequest.getNS());
+                    write_ops::DeleteCommandRequest deleteOp(targeter.getNS());
                     deleteOp.setDeletes(std::move(*deletes));
                     // Each child batch inherits its let params from the parent batch.
                     deleteOp.setLet(_clientRequest.getLet());
@@ -545,6 +545,11 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
         wcb.setBypassDocumentValidation(
             _clientRequest.getWriteCommandRequestBase().getBypassDocumentValidation());
         wcb.setOrdered(_clientRequest.getWriteCommandRequestBase().getOrdered());
+
+        if (targeter.isShardedTimeSeriesBucketsNamespace() &&
+            !_clientRequest.getNS().isTimeseriesBucketsCollection()) {
+            wcb.setIsTimeseriesNamespace(true);
+        }
 
         if (_batchTxnNum) {
             wcb.setStmtIds(std::move(stmtIdsForOp));

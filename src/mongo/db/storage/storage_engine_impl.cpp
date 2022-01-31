@@ -164,18 +164,8 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx, LastShutdownState l
         _catalogRecordStore.get(), _options.directoryPerDB, _options.directoryForIndexes, this));
     _catalog->init(opCtx);
 
-    // We populate 'identsKnownToStorageEngine' only if:
-    // - doing repair; or
-    // - or asked to recover orphaned idents, which is the case when loading after an unclean
-    //   shutdown.
-    auto loadingFromUncleanShutdownOrRepair =
-        lastShutdownState == LastShutdownState::kUnclean || _options.forRepair;
-
-    std::vector<std::string> identsKnownToStorageEngine;
-    if (loadingFromUncleanShutdownOrRepair) {
-        identsKnownToStorageEngine = _engine->getAllIdents(opCtx);
-        std::sort(identsKnownToStorageEngine.begin(), identsKnownToStorageEngine.end());
-    }
+    std::vector<std::string> identsKnownToStorageEngine = _engine->getAllIdents(opCtx);
+    std::sort(identsKnownToStorageEngine.begin(), identsKnownToStorageEngine.end());
 
     std::vector<DurableCatalog::Entry> catalogEntries = _catalog->getAllCatalogEntries(opCtx);
 
@@ -251,6 +241,8 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx, LastShutdownState l
         }
     }
 
+    const auto loadingFromUncleanShutdownOrRepair =
+        lastShutdownState == LastShutdownState::kUnclean || _options.forRepair;
     for (DurableCatalog::Entry entry : catalogEntries) {
         if (loadingFromUncleanShutdownOrRepair) {
             // If we are loading the catalog after an unclean shutdown or during repair, it's
@@ -287,6 +279,26 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx, LastShutdownState l
                     continue;
                 }
             }
+        }
+
+        if (!entry.nss.isReplicated() &&
+            !std::binary_search(identsKnownToStorageEngine.begin(),
+                                identsKnownToStorageEngine.end(),
+                                entry.ident)) {
+            // All collection drops are non-transactional and unreplicated collections are dropped
+            // immediately as they do not use two-phase drops. It's possible to run into a situation
+            // where there are collections in the catalog that are unknown to the storage engine
+            // after restoring from backed up data files. See SERVER-55552.
+            WriteUnitOfWork wuow(opCtx);
+            fassert(5555200, _catalog->_removeEntry(opCtx, entry.catalogId));
+            wuow.commit();
+
+            LOGV2_INFO(5555201,
+                       "Removed unknown unreplicated collection from the catalog",
+                       "catalogId"_attr = entry.catalogId,
+                       logAttrs(entry.nss),
+                       "ident"_attr = entry.ident);
+            continue;
         }
 
         Timestamp minVisibleTs = Timestamp::min();
@@ -611,9 +623,6 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             // timestamp when restarting an index build for startup recovery. Then, if we experience
             // an unclean shutdown before a checkpoint is taken, the subsequent startup recovery can
             // see the now-dropped ident referenced by the old index catalog entry.
-            //
-            // TODO (SERVER-56639): Remove this relaxation once index ident drops for startup
-            // recovery are timestamped.
             invariant(engineIdents.find(indexIdent) != engineIdents.end() ||
                           lastShutdownState == LastShutdownState::kUnclean,
                       str::stream() << "Failed to find an index data table matching " << indexIdent
@@ -719,7 +728,7 @@ std::string StorageEngineImpl::getFilesystemPathForDb(const std::string& dbName)
 
 void StorageEngineImpl::cleanShutdown() {
     if (_timestampMonitor) {
-        _timestampMonitor->removeListener(&_minOfCheckpointAndOldestTimestampListener);
+        _timestampMonitor->clearListeners();
     }
 
     CollectionCatalog::write(getGlobalServiceContext(), [](CollectionCatalog& catalog) {
@@ -739,10 +748,10 @@ StorageEngineImpl::~StorageEngineImpl() {}
 
 void StorageEngineImpl::finishInit() {
     if (_engine->supportsRecoveryTimestamp()) {
-        _timestampMonitor = std::make_unique<TimestampMonitor>(
-            _engine.get(), getGlobalServiceContext()->getPeriodicRunner());
-        _timestampMonitor->startup();
-        _timestampMonitor->addListener(&_minOfCheckpointAndOldestTimestampListener);
+        _timestampMonitor =
+            std::make_unique<TimestampMonitor>(_engine.get(),
+                                               &_minOfCheckpointAndOldestTimestampListener,
+                                               getGlobalServiceContext()->getPeriodicRunner());
     }
 }
 
@@ -810,7 +819,7 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
     }
 
     // Ensure the method exits with the same "commit timestamp" state that it was called with.
-    auto addCommitTimestamp = makeGuard([&opCtx, commitTs] {
+    ScopeGuard addCommitTimestamp([&opCtx, commitTs] {
         if (!commitTs.isNull()) {
             opCtx->recoveryUnit()->setCommitTimestamp(commitTs);
         }
@@ -1009,6 +1018,13 @@ StatusWith<Timestamp> StorageEngineImpl::recoverToStableTimestamp(OperationConte
 
     auto state = catalog::closeCatalog(opCtx);
 
+    // SERVER-58311: Reset the recovery unit to unposition storage engine cursors. This allows WT to
+    // assert it has sole access when performing rollback_to_stable().
+    auto recovUnit = opCtx->releaseRecoveryUnit();
+    recovUnit.reset();
+    opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(newRecoveryUnit()),
+                           WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+
     StatusWith<Timestamp> swTimestamp = _engine->recoverToStableTimestamp(opCtx);
     if (!swTimestamp.isOK()) {
         return swTimestamp;
@@ -1113,16 +1129,12 @@ void StorageEngineImpl::_onMinOfCheckpointAndOldestTimestampChanged(const Timest
     }
 }
 
-StorageEngineImpl::TimestampMonitor::TimestampMonitor(KVEngine* engine, PeriodicRunner* runner)
+StorageEngineImpl::TimestampMonitor::TimestampMonitor(KVEngine* engine,
+                                                      TimestampListener* listener,
+                                                      PeriodicRunner* runner)
     : _engine(engine), _running(false), _periodicRunner(runner) {
-    _currentTimestamps.checkpoint = _engine->getCheckpointTimestamp();
-    _currentTimestamps.oldest = _engine->getOldestTimestamp();
-    _currentTimestamps.stable = _engine->getStableTimestamp();
-    _currentTimestamps.minOfCheckpointAndOldest =
-        (_currentTimestamps.checkpoint.isNull() ||
-         (_currentTimestamps.checkpoint > _currentTimestamps.oldest))
-        ? _currentTimestamps.oldest
-        : _currentTimestamps.checkpoint;
+    _listeners.push_back(listener);
+    _startup();
 }
 
 StorageEngineImpl::TimestampMonitor::~TimestampMonitor() {
@@ -1131,7 +1143,7 @@ StorageEngineImpl::TimestampMonitor::~TimestampMonitor() {
     invariant(_listeners.empty());
 }
 
-void StorageEngineImpl::TimestampMonitor::startup() {
+void StorageEngineImpl::TimestampMonitor::_startup() {
     invariant(!_running);
 
     LOGV2(22262, "Timestamp monitor starting");
@@ -1145,11 +1157,6 @@ void StorageEngineImpl::TimestampMonitor::startup() {
                 }
             }
 
-            Timestamp checkpoint = _currentTimestamps.checkpoint;
-            Timestamp oldest = _currentTimestamps.oldest;
-            Timestamp stable = _currentTimestamps.stable;
-            Timestamp minOfCheckpointAndOldest = _currentTimestamps.minOfCheckpointAndOldest;
-
             try {
                 auto opCtx = client->getOperationContext();
                 mongo::ServiceContext::UniqueOperationContext uOpCtx;
@@ -1157,6 +1164,11 @@ void StorageEngineImpl::TimestampMonitor::startup() {
                     uOpCtx = client->makeOperationContext();
                     opCtx = uOpCtx.get();
                 }
+
+                Timestamp checkpoint;
+                Timestamp oldest;
+                Timestamp stable;
+                Timestamp minOfCheckpointAndOldest;
 
                 {
                     // Take a global lock in MODE_IS while fetching timestamps to guarantee that
@@ -1177,20 +1189,14 @@ void StorageEngineImpl::TimestampMonitor::startup() {
                 {
                     stdx::lock_guard<Latch> lock(_monitorMutex);
                     for (const auto& listener : _listeners) {
-                        // Notify the listener if the timestamp changed.
-                        if (listener->getType() == TimestampType::kCheckpoint &&
-                            _currentTimestamps.checkpoint != checkpoint) {
+                        if (listener->getType() == TimestampType::kCheckpoint) {
                             listener->notify(checkpoint);
-                        } else if (listener->getType() == TimestampType::kOldest &&
-                                   _currentTimestamps.oldest != oldest) {
+                        } else if (listener->getType() == TimestampType::kOldest) {
                             listener->notify(oldest);
-                        } else if (listener->getType() == TimestampType::kStable &&
-                                   _currentTimestamps.stable != stable) {
+                        } else if (listener->getType() == TimestampType::kStable) {
                             listener->notify(stable);
                         } else if (listener->getType() ==
-                                       TimestampType::kMinOfCheckpointAndOldest &&
-                                   _currentTimestamps.minOfCheckpointAndOldest !=
-                                       minOfCheckpointAndOldest) {
+                                   TimestampType::kMinOfCheckpointAndOldest) {
                             listener->notify(minOfCheckpointAndOldest);
                         } else if (stable == Timestamp::min()) {
                             // Special case notification of all listeners when writes do not have
@@ -1200,10 +1206,6 @@ void StorageEngineImpl::TimestampMonitor::startup() {
                     }
                 }
 
-                _currentTimestamps.checkpoint = checkpoint;
-                _currentTimestamps.oldest = oldest;
-                _currentTimestamps.stable = stable;
-                _currentTimestamps.minOfCheckpointAndOldest = minOfCheckpointAndOldest;
             } catch (const ExceptionForCat<ErrorCategory::Interruption>& ex) {
                 if (!ErrorCodes::isCancellationError(ex))
                     throw;
@@ -1213,7 +1215,7 @@ void StorageEngineImpl::TimestampMonitor::startup() {
                 return;
             } catch (const DBException& ex) {
                 // Logs and rethrows the exceptions of other types.
-                LOGV2_ERROR(58025, "Timestamp monitor throws an exception", "error"_attr = ex);
+                LOGV2_ERROR(5802500, "Timestamp monitor throws an exception", "error"_attr = ex);
                 throw;
             }
         },
@@ -1224,7 +1226,7 @@ void StorageEngineImpl::TimestampMonitor::startup() {
     _running = true;
 }
 
-void StorageEngineImpl::TimestampMonitor::addListener(TimestampListener* listener) {
+void StorageEngineImpl::TimestampMonitor::addListener_forTestOnly(TimestampListener* listener) {
     stdx::lock_guard<Latch> lock(_monitorMutex);
     if (std::find(_listeners.begin(), _listeners.end(), listener) != _listeners.end()) {
         bool listenerAlreadyRegistered = true;
@@ -1233,13 +1235,9 @@ void StorageEngineImpl::TimestampMonitor::addListener(TimestampListener* listene
     _listeners.push_back(listener);
 }
 
-void StorageEngineImpl::TimestampMonitor::removeListener(TimestampListener* listener) {
+void StorageEngineImpl::TimestampMonitor::clearListeners() {
     stdx::lock_guard<Latch> lock(_monitorMutex);
-    if (std::find(_listeners.begin(), _listeners.end(), listener) == _listeners.end()) {
-        bool listenerNotRegistered = true;
-        invariant(!listenerNotRegistered);
-    }
-    _listeners.erase(std::remove(_listeners.begin(), _listeners.end(), listener));
+    _listeners.clear();
 }
 
 int64_t StorageEngineImpl::sizeOnDiskForDb(OperationContext* opCtx, StringData dbName) {

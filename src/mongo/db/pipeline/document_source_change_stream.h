@@ -116,6 +116,10 @@ public:
     // full document is only present for certain types of operations, such as an insert.
     static constexpr StringData kFullDocumentField = "fullDocument"_sd;
 
+    // The name of the field where the pre-image id will be found. Needed for fetching the pre-image
+    // from the pre-images collection.
+    static constexpr StringData kPreImageIdField = "preImageId"_sd;
+
     // The name of the field where the change identifier will be located after the transformation.
     static constexpr StringData kIdField = "_id"_sd;
 
@@ -152,6 +156,8 @@ public:
     static constexpr StringData kTxnNumberField = "txnNumber"_sd;
     static constexpr StringData kLsidField = "lsid"_sd;
     static constexpr StringData kTxnOpIndexField = "txnOpIndex"_sd;
+    static constexpr StringData kApplyOpsIndexField = "applyOpsIndex"_sd;
+    static constexpr StringData kRawOplogUpdateSpecField = "rawOplogUpdateSpec"_sd;
 
     // The target namespace of a rename operation.
     static constexpr StringData kRenameTargetNssField = "to"_sd;
@@ -183,6 +189,8 @@ public:
     static std::string getNsRegexForChangeStream(const NamespaceString& nss);
     static std::string getCollRegexForChangeStream(const NamespaceString& nss);
     static std::string getCmdNsRegexForChangeStream(const NamespaceString& nss);
+
+    static std::string regexEscapeNsForChangeStream(StringData source);
 
     /**
      * Parses a $changeStream stage from 'elem' and produces the $match and transformation

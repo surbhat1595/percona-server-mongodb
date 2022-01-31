@@ -32,6 +32,7 @@
 #include "mongo/db/exec/sbe/stages/branch.h"
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/size_estimator.h"
 
 namespace mongo {
 namespace sbe {
@@ -184,9 +185,9 @@ std::unique_ptr<PlanStageStats> BranchStage::getStats(bool includeDebugInfo) con
         bob.appendNumber("elseBranchCloses",
                          static_cast<long long>(_specificStats.elseBranchCloses));
         bob.append("filter", DebugPrinter{}.print(_filter->debugPrint()));
-        bob.append("thenSlots", _inputThenVals);
-        bob.append("elseSlots", _inputElseVals);
-        bob.append("outputSlots", _outputVals);
+        bob.append("thenSlots", _inputThenVals.begin(), _inputThenVals.end());
+        bob.append("elseSlots", _inputElseVals.begin(), _inputElseVals.end());
+        bob.append("outputSlots", _outputVals.begin(), _outputVals.end());
         ret->debugInfo = bob.obj();
     }
 
@@ -240,6 +241,17 @@ std::vector<DebugPrinter::Block> BranchStage::debugPrint() const {
 
     DebugPrinter::addBlocks(ret, _children[1]->debugPrint());
     return ret;
+}
+
+size_t BranchStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += _filter->estimateSize();
+    size += size_estimator::estimate(_inputThenVals);
+    size += size_estimator::estimate(_inputElseVals);
+    size += size_estimator::estimate(_outputVals);
+    size += size_estimator::estimate(_specificStats);
+    return size;
 }
 
 }  // namespace sbe

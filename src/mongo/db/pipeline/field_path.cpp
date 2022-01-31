@@ -100,7 +100,7 @@ void FieldPath::uassertValidFieldName(StringData fieldName) {
     const auto dotsAndDollarsHint =
         serverGlobalParams.featureCompatibility.isVersionInitialized() &&
             serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-                FeatureCompatibilityParams::Version::kFullyDowngradedTo50)
+                multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0)
         ? " Consider using $getField or $setField."
         : "";
 
@@ -122,6 +122,9 @@ FieldPath FieldPath::concat(const FieldPath& tail) const {
     const FieldPath& head = *this;
 
     std::string concat;
+    uassert(ErrorCodes::Overflow,
+            "FieldPath concat would be too long",
+            getPathLength() + tail.getPathLength() <= BSONDepth::getMaxAllowableDepth());
     const auto expectedStringSize = _fieldPath.size() + 1 + tail._fieldPath.size();
     concat.reserve(expectedStringSize);
     concat.insert(concat.begin(), head._fieldPath.begin(), head._fieldPath.end());

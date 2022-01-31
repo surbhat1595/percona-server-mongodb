@@ -35,6 +35,7 @@
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_xor.h"
@@ -161,6 +162,32 @@ bool _isSubsetOf(const MatchExpression* lhs, const ComparisonMatchExpression* rh
             }
         }
         return true;
+    }
+    return false;
+}
+
+/**
+ * Returns true if the documents matched by 'lhs' are a subset of the documents matched by
+ * 'rhs', i.e. a document matched by 'lhs' must also be matched by 'rhs', and false otherwise.
+ */
+bool _isSubsetOf(const MatchExpression* lhs, const InMatchExpression* rhs) {
+    // An expression can only match a subset of the documents matched by another if they are
+    // comparing the same field.
+    if (lhs->path() != rhs->path()) {
+        return false;
+    }
+
+    if (!rhs->getRegexes().empty()) {
+        return false;
+    }
+
+    for (BSONElement elem : rhs->getEqualities()) {
+        // Each element in the $in-array represents an equality predicate.
+        EqualityMatchExpression equality(rhs->path(), elem);
+        equality.setCollator(rhs->getCollator());
+        if (_isSubsetOf(lhs, &equality)) {
+            return true;
+        }
     }
     return false;
 }
@@ -355,6 +382,95 @@ bool isSubsetOf(const MatchExpression* lhs, const MatchExpression* rhs) {
         return true;
     }
 
+    // $and/$or should be evaluated prior to leaf MatchExpressions. Additionally any recursion
+    // should be done through the 'rhs' expression prior to 'lhs'. Swapping the recursion order
+    // would cause a comparison like the following to fail as neither the 'a' or 'b' left hand
+    // clause would match the $and on the right hand side on their own.
+    //     lhs: {a:5, b:5}
+    //     rhs: {$or: [{a: 3}, {$and: [{a: 5}, {b: 5}]}]}
+
+    if (rhs->matchType() == MatchExpression::OR) {
+        // 'lhs' must match a subset of the documents matched by 'rhs'.
+        for (size_t i = 0; i < rhs->numChildren(); i++) {
+            if (isSubsetOf(lhs, rhs->getChild(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (rhs->matchType() == MatchExpression::AND) {
+        // 'lhs' must match a subset of the documents matched by each clause of 'rhs'.
+        for (size_t i = 0; i < rhs->numChildren(); i++) {
+            if (!isSubsetOf(lhs, rhs->getChild(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (lhs->matchType() == MatchExpression::AND) {
+        // At least one clause of 'lhs' must match a subset of the documents matched by 'rhs'.
+        for (size_t i = 0; i < lhs->numChildren(); i++) {
+            if (isSubsetOf(lhs->getChild(i), rhs)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (lhs->matchType() == MatchExpression::OR) {
+        // Every clause of 'lhs' must match a subset of the documents matched by 'rhs'.
+        for (size_t i = 0; i < lhs->numChildren(); i++) {
+            if (!isSubsetOf(lhs->getChild(i), rhs)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (lhs->matchType() == MatchExpression::INTERNAL_BUCKET_GEO_WITHIN &&
+        rhs->matchType() == MatchExpression::INTERNAL_BUCKET_GEO_WITHIN) {
+        auto indexMatchExpression = static_cast<const InternalBucketGeoWithinMatchExpression*>(rhs);
+
+        // {$_internalBucketGeoWithin: {$withinRegion: {$geometry: ...}, field: 'loc' }}
+        auto queryInternalBucketGeoWithinObj = lhs->serialize();
+        // '$_internalBucketGeoWithin: {$withinRegion: ... , field: 'loc' }'
+        auto queryInternalBucketGeoWithinElement = queryInternalBucketGeoWithinObj.firstElement();
+        // Confirm that the "field" arguments match before continuing.
+        if (queryInternalBucketGeoWithinElement["field"].type() != mongo::String ||
+            queryInternalBucketGeoWithinElement["field"].valueStringData() !=
+                indexMatchExpression->getField()) {
+            return false;
+        }
+        // {$withinRegion: {$geometry: {type: "Polygon", coords:[...]}}
+        auto queryWithinRegionObj = queryInternalBucketGeoWithinElement.Obj();
+        // '$withinRegion: {$geometry: {type: "Polygon", coords:[...]}'
+        auto queryWithinRegionElement = queryWithinRegionObj.firstElement();
+        // {$geometry: {type: "Polygon", coordinates: [...]}}
+        auto queryGeometryObj = queryWithinRegionElement.Obj();
+
+        // We only handle $_internalBucketGeoWithin queries that use the $geometry operator.
+        if (!queryGeometryObj.hasField("$geometry"))
+            return false;
+
+        // geometryElement is '$geometry: {type: ... }'
+        auto queryGeometryElement = queryGeometryObj.firstElement();
+        MatchDetails* details = nullptr;
+
+        if (GeoMatchExpression::contains(*indexMatchExpression->getGeoContainer(),
+                                         GeoExpression::WITHIN,
+                                         false,
+                                         queryGeometryElement,
+                                         details)) {
+            // The region described by query is within the region captured by the index.
+            // For example, a query over the $geometry for the city of Houston is covered by an
+            // index over the $geometry for the entire state of texas. Therefore this index can be
+            // used in a potential solution for this query.
+            return true;
+        }
+    }
+
     if (lhs->matchType() == MatchExpression::GEO && rhs->matchType() == MatchExpression::GEO) {
         // lhs is the query, eg {loc: {$geoWithin: {$geometry: {type: "Polygon", coordinates:
         // [...]}}}} geoWithinObj is {$geoWithin: {$geometry: {type: "Polygon", coordinates:
@@ -388,42 +504,16 @@ bool isSubsetOf(const MatchExpression* lhs, const MatchExpression* rhs) {
         }
     }
 
-    if (rhs->matchType() == MatchExpression::AND) {
-        // 'lhs' must match a subset of the documents matched by each clause of 'rhs'.
-        for (size_t i = 0; i < rhs->numChildren(); i++) {
-            if (!isSubsetOf(lhs, rhs->getChild(i))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    if (lhs->matchType() == MatchExpression::AND) {
-        // At least one clause of 'lhs' must match a subset of the documents matched by 'rhs'.
-        for (size_t i = 0; i < lhs->numChildren(); i++) {
-            if (isSubsetOf(lhs->getChild(i), rhs)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    if (lhs->matchType() == MatchExpression::OR) {
-        // Every clause of 'lhs' must match a subset of the documents matched by 'rhs'.
-        for (size_t i = 0; i < lhs->numChildren(); i++) {
-            if (!isSubsetOf(lhs->getChild(i), rhs)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     if (ComparisonMatchExpression::isComparisonMatchExpression(rhs)) {
         return _isSubsetOf(lhs, static_cast<const ComparisonMatchExpression*>(rhs));
     }
 
     if (rhs->matchType() == MatchExpression::EXISTS) {
         return _isSubsetOf(lhs, static_cast<const ExistsMatchExpression*>(rhs));
+    }
+
+    if (rhs->matchType() == MatchExpression::MATCH_IN) {
+        return _isSubsetOf(lhs, static_cast<const InMatchExpression*>(rhs));
     }
 
     return false;

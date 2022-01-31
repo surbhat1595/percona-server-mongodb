@@ -39,26 +39,24 @@ feature_flags:
     featureFlagChangeStreamsRewrite:
       description: "Feature flag for enabling change streams oplog rewrites"
       cpp_varname: gFeatureFlagChangeStreamsRewrite
-      default: false
-
-    featureFlagDensify:
-      description: "Feature flag for allowing a $densify stage in an aggregation pipeline"
-      cpp_varname: gFeatureFlagDensify
-      default: false
+      default: true
+      version: 5.1
 
     featureFlagShardedTimeSeries:
       description: "Feature flag for allowing sharding a Time Series collection"
       cpp_varname: gFeatureFlagShardedTimeSeries
-      default: false
+      default: true
+      version: 5.1 
 
     featureFlagShardedTimeSeriesUpdateDelete:
       description: "Feature flag for allowing update and delete operations on a sharded Time Series collection"
       cpp_varname: gFeatureFlagShardedTimeSeriesUpdateDelete
-      default: false
+      default: true
+      version: 5.1
 
-    featureFlagSBEGroupAndLookup:
-      description: "Feature flag for allowing SBE $group and $lookup"
-      cpp_varname: gFeatureFlagSBEGroupAndLookup
+    featureFlagSBEGroupPushdown:
+      description: "Feature flag for allowing SBE $group pushdown"
+      cpp_varname: gFeatureFlagSBEGroupPushdown
       default: false
 
     featureFlagExactTopNAccumulator:
@@ -69,11 +67,12 @@ feature_flags:
     featureFlagShardedLookup:
       description: "Feature flag for allowing $lookup/$graphLookup into a sharded collection"
       cpp_varname: gFeatureFlagShardedLookup 
-      default: false
+      default: true
+      version: 5.1
 
-    featureFlagChangeStreamsPreAndPostImages:
+    featureFlagChangeStreamPreAndPostImages:
       description: "Feature flag for allowing usage of point-in-time pre- and post-images of documents in change streams"
-      cpp_varname: gFeatureFlagChangeStreamsPreAndPostImages
+      cpp_varname: gFeatureFlagChangeStreamPreAndPostImages
       default: false
 
     featureFlagSearchMeta:

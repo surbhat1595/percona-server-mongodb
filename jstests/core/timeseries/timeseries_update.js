@@ -1,7 +1,6 @@
 /**
  * Tests running the update command on a time-series collection.
  * @tags: [
- *   assumes_no_implicit_collection_creation_after_drop,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
  *   requires_getmore,
@@ -12,9 +11,23 @@
 "use strict";
 
 load("jstests/core/timeseries/libs/timeseries.js");
+load("jstests/libs/fixture_helpers.js");
 
 if (!TimeseriesTest.timeseriesUpdatesAndDeletesEnabled(db.getMongo())) {
     jsTestLog("Skipping test because the time-series updates and deletes feature flag is disabled");
+    return;
+}
+
+if (FixtureHelpers.isMongos(db) &&
+    !TimeseriesTest.shardedtimeseriesCollectionsEnabled(db.getMongo())) {
+    jsTestLog("Skipping test because the sharded time-series feature flag is disabled");
+    return;
+}
+
+if (FixtureHelpers.isMongos(db) &&
+    !TimeseriesTest.shardedTimeseriesUpdatesAndDeletesEnabled(db.getMongo())) {
+    jsTestLog(
+        "Skipping test because the sharded time-series updates and deletes feature flag is disabled");
     return;
 }
 
@@ -33,7 +46,8 @@ TimeseriesTest.run((insert) => {
         initialDocList,
         updateList,
         resultDocList,
-        nModifiedBuckets,
+        n,
+        nModified = n,
         letDoc = {},
         failCode = null,
         hasMetaField = true,
@@ -53,15 +67,15 @@ TimeseriesTest.run((insert) => {
             ? assert.commandFailedWithCode(testDB.runCommand(updateCommand), failCode)
             : assert.commandWorked(testDB.runCommand(updateCommand));
 
-        assert.eq(nModifiedBuckets, res.n);
+        assert.eq(n, res.n);
+        assert.eq(nModified, res.nModified);
         assert.eq(initialDocList.length, resultDocList.length);
 
         resultDocList.forEach(resultDoc => {
-            const actualDoc = coll.findOne(resultDoc);
-            assert(actualDoc,
-                   "Document " + tojson(resultDoc) +
-                       " is not found in the result collection as expected");
-            assert.docEq(resultDoc, actualDoc);
+            assert.docEq(resultDoc,
+                         coll.findOne({_id: resultDoc._id}),
+                         "Expected document not found in result collection:" +
+                             tojson(coll.find().toArray()));
         });
 
         assert(coll.drop());
@@ -78,12 +92,16 @@ TimeseriesTest.run((insert) => {
     const doc4 = {_id: 4, [timeFieldName]: dateTime, [metaFieldName]: {a: "A", b: "B"}, f: "F"};
     const doc5 = {_id: 5, [timeFieldName]: dateTime, [metaFieldName]: {a: "A", b: "B", c: "C"}};
 
+    const arrayDoc1 = {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: [1, 4, 7, 11, 13]};
+    const arrayDoc2 = {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [2, 5, 9, 12]};
+    const arrayDoc3 = {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: [3, 6, 10]};
+
     /************************************ multi:false updates ************************************/
     testUpdate({
         initialDocList: [doc1],
         updateList: [{q: {[metaFieldName]: {b: "B"}}, u: {$set: {[metaFieldName]: {b: "C"}}}}],
         resultDocList: [doc1],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -98,7 +116,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {c: "C"}}],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     // Query on the metaField and modify the metaField.
@@ -115,7 +133,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {e: "E"},
             f: [{"k": "K", "v": "V"}]
         }],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     // Query on the metaField and modify the metaField of 1 matching document.
@@ -138,7 +156,7 @@ TimeseriesTest.run((insert) => {
             doc5
         ],
         ordered: false,
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     // Query on the metaField and update the metaField of multiple matching documents.
@@ -161,7 +179,32 @@ TimeseriesTest.run((insert) => {
             {_id: 5, [timeFieldName]: dateTime, [metaFieldName]: {b: "B", c: "C"}}
         ],
         ordered: false,
-        nModifiedBuckets: 2,
+        n: 3,
+    });
+
+    testUpdate({
+        initialDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: 200, f: "F"}, doc3],
+        updateList: [{
+            q: {[metaFieldName]: {$nin: [5, 15]}},
+            u: {$mul: {[metaFieldName]: 10}},
+            multi: true,
+        }],
+        resultDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: 2000, f: "F"},
+            {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: 0, f: "F"}
+        ],
+        n: 2,
+    });
+
+    testUpdate({
+        initialDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: 200, f: "F"}, doc3],
+        updateList: [{
+            q: {[metaFieldName]: {$exists: true, $nin: [5, 15]}},
+            u: {$mul: {[metaFieldName]: 10}},
+            multi: true,
+        }],
+        resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: 2000, f: "F"}, doc3],
+        n: 1,
     });
 
     // Query on a field that is not the metaField.
@@ -173,7 +216,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc1],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -186,7 +229,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc2],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -201,7 +244,7 @@ TimeseriesTest.run((insert) => {
             },
         ],
         resultDocList: [doc1],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -214,7 +257,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc2],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -227,7 +270,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {c: "C"}}],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     // Query on the metaField using dot notation and modify the metaField.
@@ -239,7 +282,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {c: "C"}}],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     // Query on the metaField using dot notation and modify the metaField.
@@ -256,7 +299,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {c: "C", d: 12},
             f: [{"k": "K", "v": "V"}]
         }],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     // Query on a field that is not the metaField using dot notation and modify the metaField.
@@ -268,7 +311,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc1],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -289,7 +332,124 @@ TimeseriesTest.run((insert) => {
                 f: [{"k": "K", "v": "V"}]
             }
         ],
-        nModifiedBuckets: 2,
+        n: 2,
+    });
+
+    // Remove the metaField.
+    testUpdate({
+        initialDocList: [doc1],
+        updateList: [{
+            q: {[metaFieldName]: {a: "A", b: "B"}},
+            u: {$unset: {[metaFieldName]: ""}},
+            multi: true
+        }],
+        resultDocList: [{_id: 1, [timeFieldName]: dateTime}],
+        n: 1,
+    });
+
+    // Rename the metaField.
+    testUpdate({
+        initialDocList: [doc1, doc2, doc4],
+        updateList: [{
+            q: {[metaFieldName + ".a"]: "A"},
+            u: {$rename: {[metaFieldName]: "Z"}},
+            multi: true,
+        }],
+        resultDocList: [doc1, doc2, doc4],
+        n: 0,
+        failCode: ErrorCodes.InvalidOptions,
+    });
+
+    // Rename a subfield of the metaField.
+    testUpdate({
+        initialDocList: [doc1, doc2],
+        updateList: [{
+            q: {[metaFieldName + ".a"]: "A"},
+            u: {$rename: {[metaFieldName + ".a"]: metaFieldName + ".z"}},
+            multi: true,
+        }],
+        resultDocList:
+            [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {z: "A", b: "B"}}, doc2],
+        n: 1,
+    });
+
+    // Rename a subfield of the metaField to something not in the metaField.
+    testUpdate({
+        initialDocList: [doc1, doc2, doc4],
+        updateList: [{
+            q: {[metaFieldName + ".a"]: "A"},
+            u: {$rename: {[metaFieldName + ".a"]: "notMetaField.a"}},
+            multi: true,
+        }],
+        resultDocList: [doc1, doc2, doc4],
+        n: 0,
+        failCode: ErrorCodes.InvalidOptions,
+    });
+
+    // For all documents that have at least one 2 in its metaField array, update the first 2
+    // to be 100 using the positional $ operator.
+    testUpdate({
+        initialDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: [1, 2, 2]},
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [2, 3, 4]}
+        ],
+        updateList: [{
+            q: {[metaFieldName]: 2},
+            u: {$set: {[metaFieldName + ".$"]: 1000}},
+            multi: true,
+        }],
+        resultDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: [1, 1000, 2]},
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [1000, 3, 4]}
+        ],
+        n: 2,
+    });
+
+    // Decrement (i.e. increment by a negative amount) all elements in the metaField array using the
+    // positional $[] operator.
+    testUpdate({
+        initialDocList: [arrayDoc2, arrayDoc3],
+        updateList: [{
+            q: {},
+            u: {$inc: {[metaFieldName + ".$[]"]: -3}},
+            multi: true,
+        }],
+        resultDocList: [
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [-1, 2, 6, 9]},
+            {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: [0, 3, 7]}
+        ],
+        n: 2,
+    });
+
+    // Remove elements from all metaField arrays that match a condition.
+    testUpdate({
+        initialDocList: [arrayDoc1, arrayDoc2],
+        updateList: [{
+            q: {},
+            u: {$pull: {[metaFieldName]: {$gt: 10}}},
+            multi: true,
+        }],
+        resultDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: [1, 4, 7]},
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [2, 5, 9]}
+        ],
+        n: 2,
+    });
+
+    // Multiple updates, ordered: Remove elements from the metaField array that match a condition,
+    // and then add elements to the metaField array.
+    testUpdate({
+        initialDocList: [arrayDoc2, arrayDoc3],
+        updateList: [{
+            q: {},
+            u: {$pull: {[metaFieldName]: {$in: [1, 2, 3, 4, 5]}}},
+            multi: true,
+        }],
+        resultDocList: [
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [9, 12]},
+            {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: [6, 10]}
+        ],
+        n: 2,
     });
 
     // Multiple updates, ordered: Query on the metaField and modify the metaField multiple times.
@@ -318,10 +478,45 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: 3,
             f: [{"k": "K", "v": "V"}],
         }],
-        nModifiedBuckets: 3,
+        n: 3,
+    });
+
+    testUpdate({
+        initialDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: 200, f: "F"}],
+        updateList: [
+            {q: {}, u: {$min: {[metaFieldName]: 180}}, multi: true},
+            {q: {}, u: {$max: {[metaFieldName]: 190}}, multi: true},
+            {q: {}, u: {$mul: {[metaFieldName]: 3}}, multi: true}
+        ],
+        resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: 570, f: "F"}],
+        n: 3,
     });
 
     // Multiple updates, ordered: Query on the metaField and modify the metaField multiple times.
+    testUpdate({
+        initialDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {arr: [3, 6, 10], f: 10}},
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: {arr: [1, 2], f: 3}}
+        ],
+        updateList: [
+            {
+                q: {[metaFieldName + ".arr"]: {$ne: 7}},
+                u: {$pop: {[metaFieldName + ".arr"]: 1}},
+                multi: true,
+            },
+            {
+                q: {[metaFieldName + ".f"]: {$mod: [2, 1]}},
+                u: {$pop: {[metaFieldName + ".arr"]: -1}},
+                multi: true,
+            }
+        ],
+        resultDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {arr: [3, 6], f: 10}},
+            {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: {arr: [], f: 3}}
+        ],
+        n: 3,
+    });
+
     testUpdate({
         initialDocList: [doc1],
         updateList: [
@@ -337,7 +532,7 @@ TimeseriesTest.run((insert) => {
             }
         ],
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {c: "CC", d: 1}}],
-        nModifiedBuckets: 2,
+        n: 2,
     });
 
     // Multiple updates, ordered: Query on the metaField and on a field that is not the metaField.
@@ -356,7 +551,7 @@ TimeseriesTest.run((insert) => {
             }
         ],
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {c: "C", d: 1}}],
-        nModifiedBuckets: 1,
+        n: 1,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -382,7 +577,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {c: "C", d: 8},
             f: [{"k": "K", "v": "V"}],
         }],
-        nModifiedBuckets: 1,
+        n: 1,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -403,7 +598,7 @@ TimeseriesTest.run((insert) => {
             }
         ],
         resultDocList: [doc2],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -430,7 +625,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {c: "C", d: 8},
             f: [{"k": "K", "v": "V"}],
         }],
-        nModifiedBuckets: 1,
+        n: 1,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -461,7 +656,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {c: "C", d: 8},
             f: [{"k": "K", "v": "V"}],
         }],
-        nModifiedBuckets: 1,
+        n: 1,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -493,7 +688,7 @@ TimeseriesTest.run((insert) => {
             f: [{"k": "K", "v": "V"}],
         }],
         ordered: false,
-        nModifiedBuckets: 2,
+        n: 2,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -520,7 +715,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {c: "C", d: 8},
             f: [{"k": "K", "v": "V"}],
         }],
-        nModifiedBuckets: 1,
+        n: 1,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -551,7 +746,7 @@ TimeseriesTest.run((insert) => {
             [metaFieldName]: {c: "C", d: 8},
             f: [{"k": "K", "v": "V"}],
         }],
-        nModifiedBuckets: 1,
+        n: 1,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -583,7 +778,7 @@ TimeseriesTest.run((insert) => {
             f: [{"k": "K", "v": "V"}],
         }],
         ordered: false,
-        nModifiedBuckets: 2,
+        n: 2,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -614,7 +809,26 @@ TimeseriesTest.run((insert) => {
             {_id: 5, [timeFieldName]: dateTime, [metaFieldName]: {b: "B", c: "C", d: 5}}
         ],
         ordered: false,
-        nModifiedBuckets: 4,
+        n: 5,
+    });
+
+    // Update where one of the matching documents is a no-op update.
+    testUpdate({
+        initialDocList: [doc1, doc4, doc5],
+        updateList: [
+            {
+                q: {[metaFieldName + ".a"]: "A"},
+                u: {$set: {[metaFieldName + ".c"]: "C"}},
+                multi: true,
+            },
+        ],
+        resultDocList: [
+            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: {a: "A", b: "B", c: "C"}},
+            {_id: 4, [timeFieldName]: dateTime, [metaFieldName]: {a: "A", b: "B", c: "C"}, f: "F"},
+            {_id: 5, [timeFieldName]: dateTime, [metaFieldName]: {a: "A", b: "B", c: "C"}}
+        ],
+        n: 3,
+        nModified: 2,
     });
 
     // Query for documents using $jsonSchema with the metaField required.
@@ -630,7 +844,7 @@ TimeseriesTest.run((insert) => {
             {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: "a", f: [{"k": "K", "v": "V"}]},
             doc3
         ],
-        nModifiedBuckets: 2
+        n: 2
     });
 
     // Query for documents using $jsonSchema with the metaField in dot notation required.
@@ -641,8 +855,9 @@ TimeseriesTest.run((insert) => {
             u: {$set: {[metaFieldName]: "a"}},
             multi: true
         }],
-        resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: "a"}, doc2, doc3],
-        nModifiedBuckets: 1
+        resultDocList: [doc1, doc2, doc3],
+        n: 0,
+        failCode: ErrorCodes.InvalidOptions,
     });
 
     // Query for documents using $jsonSchema with a field that is not the metaField required.
@@ -654,7 +869,7 @@ TimeseriesTest.run((insert) => {
             multi: true
         }],
         resultDocList: [doc1, doc2, doc3],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions
     });
 
@@ -669,7 +884,6 @@ TimeseriesTest.run((insert) => {
             q: {
                 "$jsonSchema": {
                     "required": [metaFieldName],
-
                     "properties": {[metaFieldName]: {"required": [metaFieldName]}}
                 }
             },
@@ -677,7 +891,7 @@ TimeseriesTest.run((insert) => {
             multi: true
         }],
         resultDocList: [doc1, {_id: 6, [timeFieldName]: dateTime, [metaFieldName]: "a"}],
-        nModifiedBuckets: 1
+        n: 1
     });
 
     // Query for documents using $jsonSchema with the metaField required and an optional field that
@@ -695,13 +909,9 @@ TimeseriesTest.run((insert) => {
             multi: true
         }],
         resultDocList: [doc1, nestedMetaObj],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions
     });
-
-    const arrayDoc1 = {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: [1, 4, 7, 11, 13]};
-    const arrayDoc2 = {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [2, 5, 9, 12]};
-    const arrayDoc3 = {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: [3, 6, 10]};
 
     // Multiple updates, unordered: Modify the metaField of all documents using arrayFilters.
     testUpdate({
@@ -717,7 +927,7 @@ TimeseriesTest.run((insert) => {
             {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [2, 5, 100, 100]},
             {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: [3, 6, 100]}
         ],
-        nModifiedBuckets: 3,
+        n: 3,
     });
 
     // Multiple updates, unordered: Modify the metaField of multiple documents using arrayFilters.
@@ -734,7 +944,7 @@ TimeseriesTest.run((insert) => {
             {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: [2, 5, 2009, 2012]},
             arrayDoc3
         ],
-        nModifiedBuckets: 2,
+        n: 2,
     });
 
     testUpdate({
@@ -750,7 +960,7 @@ TimeseriesTest.run((insert) => {
             arrayDoc2,
             arrayDoc3
         ],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 
     testUpdate({
@@ -784,7 +994,7 @@ TimeseriesTest.run((insert) => {
                 [metaFieldName]: [{a: 1, b: 3, c: 5}, {a: 7, b: 9, c: 0}, {a: 3, b: 6, c: 9}]
             }
         ],
-        nModifiedBuckets: 2,
+        n: 2,
     });
 
     // Query for documents on the metaField with the metaField nested within nested operators.
@@ -806,7 +1016,7 @@ TimeseriesTest.run((insert) => {
             multi: true
         }],
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: "a"}, doc2, doc3],
-        nModifiedBuckets: 1
+        n: 1
     });
 
     // Updates where upsert:false should not insert a new document when no match is found.
@@ -818,7 +1028,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc1, doc4, doc5],
-        nModifiedBuckets: 0,
+        n: 0,
     });
 
     // Do the same test case as above but with upsert:true, which should fail.
@@ -831,25 +1041,8 @@ TimeseriesTest.run((insert) => {
             upsert: true,
         }],
         resultDocList: [doc1, doc4, doc5],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
-    });
-
-    // Use a variable defined in the let option in the query to modify the metaField.
-    testUpdate({
-        initialDocList: [doc1, doc4, doc5],
-        updateList: [{
-            q: {$expr: {$eq: ["$" + metaFieldName + ".a", "$$oldVal"]}},
-            u: {$set: {[metaFieldName]: "aaa"}},
-            multi: true,
-        }],
-        letDoc: {oldVal: "A"},
-        resultDocList: [
-            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: "aaa"},
-            {_id: 4, [timeFieldName]: dateTime, [metaFieldName]: "aaa", f: "F"},
-            {_id: 5, [timeFieldName]: dateTime, [metaFieldName]: "aaa"}
-        ],
-        nModifiedBuckets: 2,
     });
 
     // Variables defined in the let option can only be used in the update if the update is an
@@ -864,31 +1057,7 @@ TimeseriesTest.run((insert) => {
         }],
         letDoc: {myVar: "aaa"},
         resultDocList: [{_id: 1, [timeFieldName]: dateTime, [metaFieldName]: "$$myVar"}],
-        nModifiedBuckets: 1,
-    });
-
-    // Use variables defined in the let option in the query to modify the metaField multiple times.
-    testUpdate({
-        initialDocList: [doc1, doc4, doc5],
-        updateList: [
-            {
-                q: {$expr: {$eq: ["$" + metaFieldName + ".a", "$$val1"]}},
-                u: {$set: {[metaFieldName]: "aaa"}},
-                multi: true,
-            },
-            {
-                q: {$expr: {$eq: ["$" + metaFieldName, "$$val2"]}},
-                u: {$set: {[metaFieldName]: "bbb"}},
-                multi: true,
-            }
-        ],
-        letDoc: {val1: "A", val2: "aaa"},
-        resultDocList: [
-            {_id: 1, [timeFieldName]: dateTime, [metaFieldName]: "bbb"},
-            {_id: 4, [timeFieldName]: dateTime, [metaFieldName]: "bbb", f: "F"},
-            {_id: 5, [timeFieldName]: dateTime, [metaFieldName]: "bbb"}
-        ],
-        nModifiedBuckets: 4,
+        n: 1,
     });
 
     /************************** Tests updating with an update pipeline **************************/
@@ -904,7 +1073,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc1],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -919,7 +1088,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc2],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -933,7 +1102,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc2],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
     });
 
@@ -947,7 +1116,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc3],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
         hasMetaField: false,
     });
@@ -961,7 +1130,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc3],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
         hasMetaField: false,
     });
@@ -975,7 +1144,7 @@ TimeseriesTest.run((insert) => {
             multi: true,
         }],
         resultDocList: [doc3],
-        nModifiedBuckets: 0,
+        n: 0,
         failCode: ErrorCodes.InvalidOptions,
         hasMetaField: false,
     });
@@ -999,10 +1168,10 @@ TimeseriesTest.run((insert) => {
             {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: "Updated"},
             {_id: 3, [timeFieldName]: dateTime, [metaFieldName]: "Updated"}
         ],
-        nModifiedBuckets: 3,
+        n: 3,
     });
 
-    // Query on the metafield and modify the metaField using collation with the default strength
+    // Query on the metaField and modify the metaField using collation with the default strength
     // (level 3).
     testUpdate({
         initialDocList: [collationDoc1, collationDoc2, collationDoc3],
@@ -1017,7 +1186,7 @@ TimeseriesTest.run((insert) => {
             {_id: 2, [timeFieldName]: dateTime, [metaFieldName]: "Updated"},
             collationDoc3,
         ],
-        nModifiedBuckets: 1,
+        n: 1,
     });
 });
 }());

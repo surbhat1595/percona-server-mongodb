@@ -137,8 +137,8 @@ protected:
         ASSERT_GT(response["n"].Int(), 0);
     }
 
-    void updateDocsInShardedCollection(BSONObj query, BSONObj updated) {
-        auto response = client()->updateAcknowledged(kNss.ns(), query, updated);
+    void updateDocsInShardedCollection(BSONObj filter, BSONObj updated) {
+        auto response = client()->updateAcknowledged(kNss.ns(), filter, updated);
         ASSERT_OK(getStatusFromWriteCommandReply(response));
         ASSERT_GT(response["n"].Int(), 0);
     }
@@ -162,6 +162,7 @@ protected:
 
         [&] {
             const OID epoch = OID::gen();
+            const Timestamp timestamp(1);
 
             auto rt = RoutingTableHistory::makeNew(
                 kNss,
@@ -170,14 +171,14 @@ protected:
                 nullptr,
                 false,
                 epoch,
-                boost::none /* timestamp */,
+                timestamp,
                 boost::none /* timeseriesFields */,
                 boost::none /* resharding Fields */,
                 boost::none /* chunkSizeBytes */,
                 true,
-                {ChunkType{kNss,
+                {ChunkType{uuid,
                            ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
-                           ChunkVersion(1, 0, epoch, boost::none /* timestamp */),
+                           ChunkVersion(1, 0, epoch, timestamp),
                            ShardId("dummyShardId")}});
 
             AutoGetDb autoDb(operationContext(), kNss.db(), MODE_IX);
@@ -206,7 +207,7 @@ protected:
         MoveChunkRequest::appendAsCommand(
             &cmdBuilder,
             kNss,
-            ChunkVersion(1, 0, OID::gen(), boost::none /* timestamp */),
+            ChunkVersion(1, 0, OID::gen(), Timestamp()),
             kDonorConnStr.getSetName(),
             kRecipientConnStr.getSetName(),
             chunkRange,

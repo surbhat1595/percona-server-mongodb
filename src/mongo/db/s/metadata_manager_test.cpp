@@ -85,13 +85,12 @@ protected:
             nullptr,
             false,
             epoch,
-            boost::none /* timestamp */,
+            Timestamp(),
             boost::none /* timeseriesFields */,
             boost::none,
             boost::none /* chunkSizeBytes */,
             true,
-            {ChunkType{
-                kNss, range, ChunkVersion(1, 0, epoch, boost::none /* timestamp */), kOtherShard}});
+            {ChunkType{uuid, range, ChunkVersion(1, 0, epoch, Timestamp()), kOtherShard}});
 
         return CollectionMetadata(ChunkManager(kThisShard,
                                                DatabaseVersion(UUID::gen(), Timestamp()),
@@ -126,19 +125,24 @@ protected:
 
         if (SimpleBSONObjComparator::kInstance.evaluate(chunkToSplit.getMin() < minKey)) {
             chunkVersion.incMajor();
-            splitChunks.emplace_back(
-                kNss, ChunkRange(chunkToSplit.getMin(), minKey), chunkVersion, kOtherShard);
+            splitChunks.emplace_back(*collMetadata.getUUID(),
+                                     ChunkRange(chunkToSplit.getMin(), minKey),
+                                     chunkVersion,
+                                     kOtherShard);
         }
 
         chunkVersion.incMajor();
-        splitChunks.emplace_back(kNss, ChunkRange(minKey, maxKey), chunkVersion, kThisShard);
+        splitChunks.emplace_back(
+            *collMetadata.getUUID(), ChunkRange(minKey, maxKey), chunkVersion, kThisShard);
 
         chunkVersion.incMajor();
-        splitChunks.emplace_back(
-            kNss, ChunkRange(maxKey, chunkToSplit.getMax()), chunkVersion, kOtherShard);
+        splitChunks.emplace_back(*collMetadata.getUUID(),
+                                 ChunkRange(maxKey, chunkToSplit.getMax()),
+                                 chunkVersion,
+                                 kOtherShard);
 
         auto rt = cm->getRoutingTableHistory_ForTest().makeUpdated(
-            boost::none, boost::none, true, splitChunks);
+            boost::none /* timeseriesFields */, boost::none, boost::none, true, splitChunks);
 
         return CollectionMetadata(ChunkManager(cm->dbPrimary(),
                                                cm->dbVersion(),
@@ -163,10 +167,12 @@ protected:
         chunkVersion.incMajor();
 
         auto rt = cm->getRoutingTableHistory_ForTest().makeUpdated(
+            boost::none /* timeseriesFields */,
             boost::none,
             boost::none,
             true,
-            {ChunkType(kNss, ChunkRange(minKey, maxKey), chunkVersion, kOtherShard)});
+            {ChunkType(
+                *metadata.getUUID(), ChunkRange(minKey, maxKey), chunkVersion, kOtherShard)});
 
         return CollectionMetadata(ChunkManager(cm->dbPrimary(),
                                                cm->dbVersion(),

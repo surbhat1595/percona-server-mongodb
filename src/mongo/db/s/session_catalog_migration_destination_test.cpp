@@ -183,7 +183,11 @@ public:
         opCtx->setTxnNumber(txnNum);
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(opCtx, txnNum, boost::none, boost::none);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNum,
+                                       boost::none /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
     }
 
     void checkOplog(const repl::OplogEntry& originalOplog, const repl::OplogEntry& oplogToCheck) {
@@ -250,8 +254,11 @@ public:
             initializeOperationSessionInfo(innerOpCtx.get(), insertBuilder.obj(), true, true, true);
             MongoDOperationContextSession sessionTxnState(innerOpCtx.get());
             auto txnParticipant = TransactionParticipant::get(innerOpCtx.get());
-            txnParticipant.beginOrContinue(
-                innerOpCtx.get(), *sessionInfo.getTxnNumber(), boost::none, boost::none);
+            txnParticipant.beginOrContinue(innerOpCtx.get(),
+                                           *sessionInfo.getTxnNumber(),
+                                           boost::none /* autocommit */,
+                                           boost::none /* startTransaction */,
+                                           boost::none /* txnRetryCounter */);
 
             const auto reply = write_ops_exec::performInserts(innerOpCtx.get(), insertRequest);
             ASSERT(reply.results.size() == 1);
@@ -1879,7 +1886,11 @@ TEST_F(SessionCatalogMigrationDestinationTest,
         auto txnParticipant = TransactionParticipant::get(opCtx);
 
         txnParticipant.refreshFromStorageIfNeeded(opCtx);
-        txnParticipant.beginOrContinue(opCtx, 3, boost::none, boost::none);
+        txnParticipant.beginOrContinue(opCtx,
+                                       3,
+                                       boost::none /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
     }
 
     OperationSessionInfo sessionInfo2;
@@ -1994,7 +2005,7 @@ TEST_F(SessionCatalogMigrationDestinationTest, MigratingKnownStmtWhileOplogTrunc
     {
         // Confirm that oplog is indeed empty.
         DBDirectClient client(opCtx);
-        auto result = client.findOne(NamespaceString::kRsOplogNamespace.ns(), {});
+        auto result = client.findOne(NamespaceString::kRsOplogNamespace.ns(), BSONObj{});
         ASSERT_TRUE(result.isEmpty());
     }
 

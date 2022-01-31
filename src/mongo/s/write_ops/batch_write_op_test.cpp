@@ -30,6 +30,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/owned_pointer_map.h"
+#include "mongo/s/concurrency/locker_mongos_client_observer.h"
 #include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/sharding_router_test_fixture.h"
@@ -113,8 +114,15 @@ void addWCError(BatchedCommandResponse* response) {
 
 class WriteOpTestFixture : public ServiceContextTest {
 protected:
-    const ServiceContext::UniqueOperationContext _opCtxHolder{makeOperationContext()};
-    OperationContext* const _opCtx{_opCtxHolder.get()};
+    WriteOpTestFixture() {
+        auto service = getServiceContext();
+        service->registerClientObserver(std::make_unique<LockerMongosClientObserver>());
+        _opCtxHolder = makeOperationContext();
+        _opCtx = _opCtxHolder.get();
+    }
+
+    ServiceContext::UniqueOperationContext _opCtxHolder;
+    OperationContext* _opCtx;
 };
 
 using BatchWriteOpTest = WriteOpTestFixture;
@@ -248,7 +256,8 @@ TEST_F(BatchWriteOpTest, SingleWriteConcernErrorOrdered) {
     ASSERT_EQUALS(targeted.size(), 1u);
     assertEndpointsEqual(targeted.begin()->second->getEndpoint(), endpoint);
 
-    BatchedCommandRequest targetBatch = batchOp.buildBatchRequest(*targeted.begin()->second);
+    BatchedCommandRequest targetBatch =
+        batchOp.buildBatchRequest(*targeted.begin()->second, targeter);
     ASSERT(targetBatch.getWriteConcern().woCompare(request.getWriteConcern()) == 0);
 
     BatchedCommandResponse response;
@@ -1552,8 +1561,10 @@ public:
         _scopedSession.emplace(operationContext());
 
         auto txnRouter = TransactionRouter::get(operationContext());
-        txnRouter.beginOrContinueTxn(
-            operationContext(), kTxnNumber, TransactionRouter::TransactionActions::kStart);
+        txnRouter.beginOrContinueTxn(operationContext(),
+                                     kTxnNumber,
+                                     TransactionRouter::TransactionActions::kStart,
+                                     0 /* txnRetryCounter */);
     }
 
     void tearDown() override {

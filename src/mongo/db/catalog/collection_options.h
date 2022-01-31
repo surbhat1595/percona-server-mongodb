@@ -34,6 +34,7 @@
 #include <boost/optional.hpp>
 
 #include "mongo/base/status.h"
+#include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/collection_options_gen.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -131,6 +132,11 @@ struct CollectionOptions {
     bool temp = false;
     bool recordPreImages = false;
 
+    // If set to true, stores the pre-images of the documents affected by update and delete
+    // operations in a dedicated collection, that will be used for reading data via changeStreams.
+    // Can not be set to true together with 'recordPreImages' (mutually exclusive).
+    bool changeStreamPreAndPostImagesEnabled = false;
+
     // Storage engine collection options. Always owned or empty.
     BSONObj storageEngine;
 
@@ -148,8 +154,8 @@ struct CollectionOptions {
     // The namespace's default collation.
     BSONObj collation;
 
-    // Whether this collection is clustered on _id.
-    bool clusteredIndex = false;
+    // Exists if the collection is clustered.
+    boost::optional<ClusteredCollectionInfo> clusteredIndex;
 
     // If present, the number of seconds after which old data should be deleted. Only for
     // collections which are clustered on _id.

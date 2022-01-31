@@ -33,7 +33,9 @@
 
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/commands/create_gen.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -45,12 +47,14 @@
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/timeseries/catalog_helper.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/cluster_write.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/long_collection_names_gen.h"
 
 namespace mongo {
 namespace {
@@ -90,13 +94,30 @@ OptionsAndIndexes getCollectionOptionsAndIndexes(OperationContext* opCtx,
 }
 
 /**
+ * Constructs the BSON specification document for the create collections command using the given
+ * namespace, collation, and timeseries options.
+ */
+BSONObj makeCreateCommand(const NamespaceString& nss,
+                          const boost::optional<Collation>& collation,
+                          const TimeseriesOptions& tsOpts) {
+    CreateCommand create(nss);
+    create.setTimeseries(tsOpts);
+    if (collation) {
+        create.setCollation(*collation);
+    }
+    BSONObj commandPassthroughFields;
+    return create.toBSON(commandPassthroughFields);
+}
+
+/**
  * Compares the proposed shard key with the shard key of the collection's existing zones
  * to ensure they are a legal combination.
  */
 void validateShardKeyAgainstExistingZones(OperationContext* opCtx,
+                                          const NamespaceString& nss,
                                           const BSONObj& proposedKey,
-                                          const ShardKeyPattern& shardKeyPattern,
                                           const std::vector<TagsType>& tags) {
+    const AutoGetCollection coll(opCtx, nss, MODE_IS);
     for (const auto& tag : tags) {
         BSONObjIterator tagMinFields(tag.getMinKey());
         BSONObjIterator tagMaxFields(tag.getMaxKey());
@@ -132,20 +153,37 @@ void validateShardKeyAgainstExistingZones(OperationContext* opCtx,
                 !ShardKeyPattern::isHashedPatternEl(proposedKeyElement) ||
                     (ShardKeyPattern::isValidHashedValue(tagMinKeyElement) &&
                      ShardKeyPattern::isValidHashedValue(tagMaxKeyElement)));
+
+            if (coll && coll->getTimeseriesOptions()) {
+                const std::string controlTimeField =
+                    timeseries::kControlMinFieldNamePrefix.toString() +
+                    coll->getTimeseriesOptions()->getTimeField();
+                if (tagMinKeyElement.fieldNameStringData() == controlTimeField) {
+                    uassert(ErrorCodes::InvalidOptions,
+                            str::stream() << "time field cannot be specified in the zone range for "
+                                             "time-series collections",
+                            tagMinKeyElement.type() == MinKey);
+                }
+                if (tagMaxKeyElement.fieldNameStringData() == controlTimeField) {
+                    uassert(ErrorCodes::InvalidOptions,
+                            str::stream() << "time field cannot be specified in the zone range for "
+                                             "time-series collections",
+                            tagMaxKeyElement.type() == MinKey);
+                }
+            }
         }
     }
 }
 
 std::vector<TagsType> getTagsAndValidate(OperationContext* opCtx,
                                          const NamespaceString& nss,
-                                         const BSONObj& proposedKey,
-                                         const ShardKeyPattern& shardKeyPattern) {
+                                         const BSONObj& proposedKey) {
     // Read zone info
     const auto catalogClient = Grid::get(opCtx)->catalogClient();
     auto tags = uassertStatusOK(catalogClient->getTagsForCollection(opCtx, nss));
 
     if (!tags.empty()) {
-        validateShardKeyAgainstExistingZones(opCtx, proposedKey, shardKeyPattern, tags);
+        validateShardKeyAgainstExistingZones(opCtx, nss, proposedKey, tags);
     }
 
     return tags;
@@ -156,7 +194,7 @@ bool checkIfCollectionIsEmpty(OperationContext* opCtx, const NamespaceString& ns
     // command doesn't just consult the cached metadata, which may not always be
     // correct
     DBDirectClient localClient(opCtx);
-    return localClient.findOne(nss.ns(), Query()).isEmpty();
+    return localClient.findOne(nss.ns(), BSONObj{}).isEmpty();
 }
 
 int getNumShards(OperationContext* opCtx) {
@@ -166,9 +204,10 @@ int getNumShards(OperationContext* opCtx) {
     return shardRegistry->getNumShards(opCtx);
 }
 
-BSONObj getCollation(OperationContext* opCtx,
-                     const NamespaceString& nss,
-                     const boost::optional<BSONObj>& collation) {
+std::pair<boost::optional<Collation>, BSONObj> getCollation(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const boost::optional<BSONObj>& collation) {
     // Ensure the collation is valid. Currently we only allow the simple collation.
     std::unique_ptr<CollatorInterface> requestedCollator = nullptr;
     if (collation) {
@@ -195,9 +234,10 @@ BSONObj getCollation(OperationContext* opCtx,
     }();
 
     if (!requestedCollator && !actualCollator)
-        return BSONObj();
+        return {boost::none, BSONObj()};
 
-    auto actualCollatorBSON = actualCollator->getSpec().toBSON();
+    auto actualCollation = actualCollator->getSpec();
+    auto actualCollatorBSON = actualCollation.toBSON();
 
     if (!collation) {
         auto actualCollatorFilter =
@@ -210,7 +250,7 @@ BSONObj getCollation(OperationContext* opCtx,
                 !actualCollatorFilter);
     }
 
-    return actualCollatorBSON;
+    return {actualCollation, actualCollatorBSON};
 }
 
 void cleanupPartialChunksFromPreviousAttempt(OperationContext* opCtx,
@@ -431,7 +471,7 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                             opCtx,
                             nss(),
                             _shardKeyPattern->getKeyPattern().toBSON(),
-                            getCollation(opCtx, nss(), _doc.getCollation()),
+                            getCollation(opCtx, nss(), _doc.getCollation()).second,
                             _doc.getUnique().value_or(false))) {
                     _result = createCollectionResponseOpt;
                     // The collection was already created and commited but there was a
@@ -578,10 +618,14 @@ void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx
             "the hashed field by declaring an additional (non-hashed) unique index on the field.",
             !_shardKeyPattern->isHashedPattern() || !_doc.getUnique().value_or(false));
 
-    // Ensure that a time-series collection cannot be sharded
-    uassert(ErrorCodes::IllegalOperation,
-            str::stream() << "can't shard time-series collection " << nss(),
-            !timeseries::getTimeseriesOptions(opCtx, nss()));
+    // Ensure that a time-series collection cannot be sharded unless the feature flag is enabled.
+    if (nss().isTimeseriesBucketsCollection()) {
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "can't shard time-series collection " << nss(),
+                feature_flags::gFeatureFlagShardedTimeSeries.isEnabled(
+                    serverGlobalParams.featureCompatibility) ||
+                    !timeseries::getTimeseriesOptions(opCtx, nss(), false));
+    }
 
     // Ensure the namespace is valid.
     uassert(ErrorCodes::IllegalOperation,
@@ -632,13 +676,34 @@ void CreateCollectionCoordinator::_createCollectionAndIndexes(OperationContext* 
     LOGV2_DEBUG(
         5277903, 2, "Create collection _createCollectionAndIndexes", "namespace"_attr = nss());
 
-    _collation = getCollation(opCtx, nss(), _doc.getCollation());
+    boost::optional<Collation> collation;
+    std::tie(collation, _collationBSON) = getCollation(opCtx, nss(), _doc.getCollation());
+
+    // We need to implicitly create a timeseries view and underlying bucket collection.
+    if (_collectionEmpty && _doc.getTimeseries()) {
+        const auto viewName = nss().getTimeseriesViewNamespace();
+        auto createCmd = makeCreateCommand(viewName, collation, _doc.getTimeseries().get());
+
+        BSONObj createRes;
+        DBDirectClient localClient(opCtx);
+        localClient.runCommand(nss().db().toString(), createCmd, createRes);
+        auto createStatus = getStatusFromCommandResult(createRes);
+
+        if (!createStatus.isOK() && createStatus.code() == ErrorCodes::NamespaceExists) {
+            LOGV2_DEBUG(5909400,
+                        3,
+                        "Timeseries namespace already exists",
+                        "namespace"_attr = viewName.toString());
+        } else {
+            uassertStatusOK(createStatus);
+        }
+    }
 
     const auto indexCreated = shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
         opCtx,
         nss(),
         *_shardKeyPattern,
-        _collation,
+        _collationBSON,
         _doc.getUnique().value_or(false),
         shardkeyutil::ValidationBehaviorsShardCollection(opCtx));
 
@@ -667,18 +732,12 @@ void CreateCollectionCoordinator::_createPolicyAndChunks(OperationContext* opCtx
         _doc.getNumInitialChunks() ? *_doc.getNumInitialChunks() : 0,
         _doc.getPresplitHashedZones() ? *_doc.getPresplitHashedZones() : false,
         _doc.getInitialSplitPoints(),
-        getTagsAndValidate(opCtx, nss(), _shardKeyPattern->toBSON(), *_shardKeyPattern),
+        getTagsAndValidate(opCtx, nss(), _shardKeyPattern->toBSON()),
         getNumShards(opCtx),
         *_collectionEmpty);
 
     _initialChunks = _splitPolicy->createFirstChunks(
-        opCtx,
-        *_shardKeyPattern,
-        {nss(),
-         *_collectionUUID,
-         ShardingState::get(opCtx)->shardId(),
-         ChunkEntryFormat::getForVersionCallerGuaranteesFCVStability(
-             ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50)});
+        opCtx, *_shardKeyPattern, {*_collectionUUID, ShardingState::get(opCtx)->shardId()});
 
     // There must be at least one chunk.
     invariant(!_initialChunks.chunks.empty());
@@ -764,10 +823,21 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx) {
 
     coll.setKeyPattern(_shardKeyPattern->getKeyPattern());
 
-    const auto& currentFCV = serverGlobalParams.featureCompatibility;
-    if (currentFCV.isGreaterThanOrEqualTo(
-            ServerGlobalParams::FeatureCompatibility::Version::kVersion51)) {
-        coll.setSupportingLongName(SupportingLongNameStatusEnum::kImplicitlyEnabled);
+    // Prevent the FCV from changing before committing the new collection to the config server.
+    // This ensures that the 'supportingLongName' field is properly set (and committed) based on
+    // the current shard's FCV.
+    //
+    // TODO: Remove once FCV 6.0 becomes last-lts
+    std::shared_ptr<FixedFCVRegion> currentFCV;
+
+    // TODO: Remove condition once FCV 6.0 becomes last-lts
+    if (feature_flags::gFeatureFlagLongCollectionNames.isEnabledAndIgnoreFCV()) {
+        currentFCV = std::make_shared<FixedFCVRegion>(opCtx);
+        if ((*currentFCV)
+                ->isGreaterThanOrEqualTo(
+                    multiversion::FeatureCompatibilityVersion::kUpgradingFrom_5_0_To_5_1)) {
+            coll.setSupportingLongName(SupportingLongNameStatusEnum::kImplicitlyEnabled);
+        }
     }
 
     if (_doc.getCreateCollectionRequest().getTimeseries()) {
@@ -776,8 +846,8 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx) {
         coll.setTimeseriesFields(std::move(timeseriesFields));
     }
 
-    if (_collation) {
-        coll.setDefaultCollation(_collation.value());
+    if (_collationBSON) {
+        coll.setDefaultCollation(_collationBSON.value());
     }
 
     if (_doc.getUnique()) {

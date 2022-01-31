@@ -31,6 +31,8 @@
 
 #include "mongo/db/exec/sbe/stages/check_bounds.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
+
 namespace mongo::sbe {
 CheckBoundsStage::CheckBoundsStage(std::unique_ptr<PlanStage> input,
                                    const CheckBoundsParams& params,
@@ -174,8 +176,20 @@ std::vector<DebugPrinter::Block> CheckBoundsStage::debugPrint() const {
     return ret;
 }
 
-void CheckBoundsStage::doSaveState() {
-    if (!slotsAccessible()) {
+size_t CheckBoundsStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_specificStats);
+    size += size_estimator::estimate(_params.keyPattern);
+    size += size_estimator::estimate(_params.bounds);
+    size += size_estimator::estimate(_seekPoint);
+    size += size_estimator::estimate(_checker);
+    size += size_estimator::estimate(_keyBuffer);
+    return size;
+}
+
+void CheckBoundsStage::doSaveState(bool relinquishCursor) {
+    if (!slotsAccessible() || !relinquishCursor) {
         return;
     }
 

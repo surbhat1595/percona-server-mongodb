@@ -206,8 +206,8 @@ public:
         std::vector<ChunkType> chunks;
 
         for (unsigned long i = 0; i < chunkRanges.size(); ++i) {
-            ChunkVersion version(1, 0, OID::gen(), boost::none /* timestamp */);
-            ChunkType chunk(_nss, chunkRanges[i], version, shardIds[i]);
+            ChunkVersion version(1, 0, OID::gen(), Timestamp());
+            ChunkType chunk(_uuid, chunkRanges[i], version, shardIds[i]);
             chunk.setHistory({ChunkHistory(timeStamp, shardIds[i])});
             chunks.push_back(chunk);
         }
@@ -230,6 +230,10 @@ public:
         return _nss;
     }
 
+    const UUID& uuid() {
+        return _uuid;
+    }
+
     const ShardKeyPattern& shardKeyPattern() {
         return _shardKeyPattern;
     }
@@ -248,6 +252,7 @@ public:
 
 private:
     const NamespaceString _nss{"test.foo"};
+    const UUID _uuid{UUID::gen()};
     const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x"
                                                                   << "hashed"));
     const std::string _shardName = "testShard";
@@ -279,12 +284,7 @@ TEST_F(GenerateInitialHashedSplitChunksTest, NoSplitPoints) {
     const std::vector<BSONObj> splitPoints;
     const std::vector<ShardId> shardIds = makeShardIds(2);
     const auto shardCollectionConfig = InitialSplitPolicy::generateShardCollectionInitialChunks(
-        {nss(), UUID::gen(), shardIds[0], ChunkEntryFormat::kNamespaceOnlyNoTimestamps},
-        shardKeyPattern(),
-        timeStamp(),
-        splitPoints,
-        shardIds,
-        1);
+        {UUID::gen(), shardIds[0]}, shardKeyPattern(), timeStamp(), splitPoints, shardIds, 1);
 
     // there should only be one chunk
     const auto expectedChunks =
@@ -296,15 +296,15 @@ TEST_F(GenerateInitialHashedSplitChunksTest, NoSplitPoints) {
 
 TEST_F(GenerateInitialHashedSplitChunksTest, SplitPointsMoreThanAvailableShards) {
     const std::vector<ShardId> shardIds = makeShardIds(2);
-    const auto shardCollectionConfig = InitialSplitPolicy::generateShardCollectionInitialChunks(
-        {nss(), UUID::gen(), shardIds[0], ChunkEntryFormat::kNamespaceOnlyNoTimestamps},
-        shardKeyPattern(),
-        timeStamp(),
-        hashedSplitPoints(),
-        shardIds,
-        1);
+    const auto shardCollectionConfig =
+        InitialSplitPolicy::generateShardCollectionInitialChunks({UUID::gen(), shardIds[0]},
+                                                                 shardKeyPattern(),
+                                                                 timeStamp(),
+                                                                 hashedSplitPoints(),
+                                                                 shardIds,
+                                                                 1);
 
-    // // chunks should be distributed in a round-robin manner
+    // chunks should be distributed in a round-robin manner
     const std::vector<ChunkType> expectedChunks = makeChunks(
         hashedChunkRanges(), {shardId("0"), shardId("1"), shardId("0"), shardId("1")}, timeStamp());
     assertChunkVectorsAreEqual(expectedChunks, shardCollectionConfig.chunks);
@@ -313,63 +313,18 @@ TEST_F(GenerateInitialHashedSplitChunksTest, SplitPointsMoreThanAvailableShards)
 TEST_F(GenerateInitialHashedSplitChunksTest,
        SplitPointsNumContiguousChunksPerShardsGreaterThanOne) {
     const std::vector<ShardId> shardIds = makeShardIds(2);
-    const auto shardCollectionConfig = InitialSplitPolicy::generateShardCollectionInitialChunks(
-        {nss(), UUID::gen(), shardIds[0], ChunkEntryFormat::kNamespaceOnlyNoTimestamps},
-        shardKeyPattern(),
-        timeStamp(),
-        hashedSplitPoints(),
-        shardIds,
-        2);
+    const auto shardCollectionConfig =
+        InitialSplitPolicy::generateShardCollectionInitialChunks({UUID::gen(), shardIds[0]},
+                                                                 shardKeyPattern(),
+                                                                 timeStamp(),
+                                                                 hashedSplitPoints(),
+                                                                 shardIds,
+                                                                 2);
 
     // chunks should be distributed in a round-robin manner two chunks at a time
     const std::vector<ChunkType> expectedChunks = makeChunks(
         hashedChunkRanges(), {shardId("0"), shardId("0"), shardId("1"), shardId("1")}, timeStamp());
     assertChunkVectorsAreEqual(expectedChunks, shardCollectionConfig.chunks);
-}
-
-using InitialSplitPolicyDuringUpgradeDowngradeTest = GenerateInitialSplitChunksTestBase;
-
-TEST_F(InitialSplitPolicyDuringUpgradeDowngradeTest, UpgradingTo50) {
-    SingleChunkOnPrimarySplitPolicy splitPolicy;
-    auto initialChunks = splitPolicy.createFirstChunks(
-        operationContext(),
-        ShardKeyPattern{BSON("x" << 1)},
-        SplitPolicyParams{nss(),
-                          UUID::gen(),
-                          ShardId("TestShardID"),
-                          ChunkEntryFormat::kNamespaceAndUUIDWithTimestamps});
-    ASSERT_EQ(1U, initialChunks.chunks.size());
-    ASSERT(initialChunks.collVersion().getTimestamp());
-    ASSERT(initialChunks.chunks[0].toConfigBSON()["ns"]);
-    ASSERT(initialChunks.chunks[0].toConfigBSON()["uuid"]);
-}
-
-TEST_F(InitialSplitPolicyDuringUpgradeDowngradeTest, UpgradedTo50) {
-    SingleChunkOnPrimarySplitPolicy splitPolicy;
-    auto initialChunks = splitPolicy.createFirstChunks(
-        operationContext(),
-        ShardKeyPattern{BSON("x" << 1)},
-        SplitPolicyParams{
-            nss(), UUID::gen(), ShardId("TestShardID"), ChunkEntryFormat::kUUIDOnlyWithTimestamps});
-    ASSERT_EQ(1U, initialChunks.chunks.size());
-    ASSERT(initialChunks.collVersion().getTimestamp());
-    ASSERT(!initialChunks.chunks[0].toConfigBSON()["ns"]);
-    ASSERT(initialChunks.chunks[0].toConfigBSON()["uuid"]);
-}
-
-TEST_F(InitialSplitPolicyDuringUpgradeDowngradeTest, DowngradingTo44) {
-    SingleChunkOnPrimarySplitPolicy splitPolicy;
-    auto initialChunks = splitPolicy.createFirstChunks(
-        operationContext(),
-        ShardKeyPattern{BSON("x" << 1)},
-        SplitPolicyParams{nss(),
-                          UUID::gen(),
-                          ShardId("TestShardID"),
-                          ChunkEntryFormat::kNamespaceAndUUIDNoTimestamps});
-    ASSERT_EQ(1U, initialChunks.chunks.size());
-    ASSERT(!initialChunks.collVersion().getTimestamp());
-    ASSERT(initialChunks.chunks[0].toConfigBSON()["ns"]);
-    ASSERT(initialChunks.chunks[0].toConfigBSON()["uuid"]);
 }
 
 class SingleChunkPerTagSplitPolicyTest : public GenerateInitialSplitChunksTestBase {
@@ -388,13 +343,8 @@ public:
         setupShards(shards);
         shardRegistry()->reload(opCtx);
         SingleChunkPerTagSplitPolicy splitPolicy(opCtx, tags);
-        const auto shardCollectionConfig =
-            splitPolicy.createFirstChunks(opCtx,
-                                          shardKeyPattern,
-                                          {nss(),
-                                           UUID::gen(),
-                                           expectedShardIds.front(),
-                                           ChunkEntryFormat::kNamespaceOnlyNoTimestamps});
+        const auto shardCollectionConfig = splitPolicy.createFirstChunks(
+            opCtx, shardKeyPattern, {UUID::gen(), expectedShardIds.front()});
 
         const auto currentTime = VectorClock::get(opCtx)->getTime();
         const std::vector<ChunkType> expectedChunks = makeChunks(
@@ -623,13 +573,11 @@ TEST_F(SingleChunkPerTagSplitPolicyTest, ZoneNotAssociatedWithAnyShardShouldFail
 
     SingleChunkPerTagSplitPolicy splitPolicy(operationContext(), tags);
 
-    ASSERT_THROWS_CODE(
-        splitPolicy.createFirstChunks(
-            operationContext(),
-            shardKeyPattern(),
-            {nss(), UUID::gen(), ShardId("shardId"), ChunkEntryFormat::kNamespaceOnlyNoTimestamps}),
-        AssertionException,
-        50973);
+    ASSERT_THROWS_CODE(splitPolicy.createFirstChunks(operationContext(),
+                                                     shardKeyPattern(),
+                                                     {UUID::gen(), ShardId("shardId")}),
+                       AssertionException,
+                       50973);
 }
 
 class PresplitHashedZonesChunksTest : public SingleChunkPerTagSplitPolicyTest {
@@ -647,13 +595,8 @@ public:
                                          bool isCollEmpty = true) {
         PresplitHashedZonesSplitPolicy splitPolicy(
             operationContext(), shardKeyPattern, tags, numInitialChunk, isCollEmpty);
-        const auto shardCollectionConfig =
-            splitPolicy.createFirstChunks(operationContext(),
-                                          shardKeyPattern,
-                                          {nss(),
-                                           UUID::gen(),
-                                           expectedShardIds.front(),
-                                           ChunkEntryFormat::kNamespaceOnlyNoTimestamps});
+        const auto shardCollectionConfig = splitPolicy.createFirstChunks(
+            operationContext(), shardKeyPattern, {UUID::gen(), expectedShardIds.front()});
 
         const auto currentTime = VectorClock::get(operationContext())->getTime();
         const std::vector<ChunkType> expectedChunks = makeChunks(
@@ -1798,13 +1741,8 @@ public:
                                          const ShardKeyPattern& shardKeyPattern,
                                          const std::vector<ChunkRange>& expectedChunkRanges,
                                          const std::vector<ShardId>& expectedShardIds) {
-        const auto shardCollectionConfig =
-            splitPolicy->createFirstChunks(operationContext(),
-                                           shardKeyPattern,
-                                           {nss(),
-                                            UUID::gen(),
-                                            expectedShardIds.front(),
-                                            ChunkEntryFormat::kNamespaceOnlyNoTimestamps});
+        const auto shardCollectionConfig = splitPolicy->createFirstChunks(
+            operationContext(), shardKeyPattern, {UUID::gen(), expectedShardIds.front()});
 
         const auto currentTime = VectorClock::get(operationContext())->getTime();
         const std::vector<ChunkType> expectedChunks = makeChunks(
@@ -2146,8 +2084,7 @@ TEST_F(ReshardingInitSplitTest, ZonesHasIncompatibleReshardKey) {
     ReshardingSplitPolicy initSplitPolicy(
         2 /* numInitialChunks */, zones, std::move(mockSampleSource));
 
-    SplitPolicyParams params{
-        nss(), UUID::gen(), shardId("0"), ChunkEntryFormat::kNamespaceOnlyNoTimestamps};
+    SplitPolicyParams params{UUID::gen(), shardId("0")};
     ASSERT_THROWS(initSplitPolicy.createFirstChunks(operationContext(), shardKey, params),
                   DBException);
 }
@@ -2172,8 +2109,7 @@ TEST_F(ReshardingInitSplitTest, InsufficientSamples) {
     ReshardingSplitPolicy initSplitPolicy(
         10 /* numInitialChunks */, boost::none /* zones */, std::move(mockSampleSource));
 
-    SplitPolicyParams params{
-        nss(), UUID::gen(), shardId("0"), ChunkEntryFormat::kNamespaceOnlyNoTimestamps};
+    SplitPolicyParams params{UUID::gen(), shardId("0")};
     ASSERT_THROWS(initSplitPolicy.createFirstChunks(operationContext(), shardKey, params),
                   DBException);
 }

@@ -47,8 +47,9 @@ const BSONObj kMax = BSON("a" << 20);
 const ShardId kShard("shard0000");
 
 TEST(ChunkType, MissingConfigRequiredFields) {
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp();
 
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
 
@@ -61,68 +62,68 @@ TEST(ChunkType, MissingConfigRequiredFields) {
     ASSERT_FALSE(chunkRes.isOK());
 
     BSONObj objModKeys =
-        BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("test.mycol") << "lastmod" << Timestamp(chunkVersion.toLong())
-             << "lastmodEpoch" << chunkVersion.epoch() << ChunkType::shard("shard0001"));
+        BSON(ChunkType::name(OID::gen()) << ChunkType::collectionUUID() << collUuid << "lastmod"
+                                         << Timestamp(chunkVersion.toLong()) << "lastmodEpoch"
+                                         << chunkVersion.epoch() << ChunkType::shard("shard0001"));
     chunkRes = ChunkType::fromConfigBSON(objModKeys, collEpoch, collTimestamp);
     ASSERT_FALSE(chunkRes.isOK());
 
-    BSONObj objModShard =
-        BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("test.mycol") << ChunkType::min(BSON("a" << 10 << "b" << 10))
-             << ChunkType::max(BSON("a" << 20)) << "lastmod" << Timestamp(chunkVersion.toLong())
-             << "lastmodEpoch" << chunkVersion.epoch());
+    BSONObj objModShard = BSON(
+        ChunkType::name(OID::gen())
+        << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << 10 << "b" << 10))
+        << ChunkType::max(BSON("a" << 20)) << "lastmod" << Timestamp(chunkVersion.toLong())
+        << "lastmodEpoch" << chunkVersion.epoch());
     chunkRes = ChunkType::fromConfigBSON(objModShard, collEpoch, collTimestamp);
     ASSERT_FALSE(chunkRes.isOK());
 
-    BSONObj objModVersion =
-        BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("test.mycol") << ChunkType::min(BSON("a" << 10 << "b" << 10))
-             << ChunkType::max(BSON("a" << 20)) << ChunkType::shard("shard0001"));
+    BSONObj objModVersion = BSON(
+        ChunkType::name(OID::gen())
+        << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << 10 << "b" << 10))
+        << ChunkType::max(BSON("a" << 20)) << ChunkType::shard("shard0001"));
     chunkRes = ChunkType::fromConfigBSON(objModVersion, collEpoch, collTimestamp);
     ASSERT_FALSE(chunkRes.isOK());
 }
 
 TEST(ChunkType, MissingShardRequiredFields) {
     const OID epoch = OID::gen();
-    ChunkVersion chunkVersion(1, 2, epoch, boost::none /* timestamp */);
+    const Timestamp timestamp;
+    ChunkVersion chunkVersion(1, 2, epoch, timestamp);
     const auto lastmod = Timestamp(chunkVersion.toLong());
 
     BSONObj objModMin =
         BSON(ChunkType::max(kMax) << ChunkType::shard(kShard.toString()) << "lastmod" << lastmod);
-    StatusWith<ChunkType> chunkRes =
-        ChunkType::fromShardBSON(objModMin, epoch, boost::none /* timestamp */);
+    StatusWith<ChunkType> chunkRes = ChunkType::fromShardBSON(objModMin, epoch, timestamp);
     ASSERT_EQUALS(chunkRes.getStatus(), ErrorCodes::NoSuchKey);
     ASSERT_STRING_CONTAINS(chunkRes.getStatus().reason(), ChunkType::minShardID.name());
 
     BSONObj objModMax = BSON(ChunkType::minShardID(kMin)
                              << ChunkType::shard(kShard.toString()) << "lastmod" << lastmod);
-    chunkRes = ChunkType::fromShardBSON(objModMax, epoch, boost::none /* timestamp */);
+    chunkRes = ChunkType::fromShardBSON(objModMax, epoch, timestamp);
     ASSERT_EQUALS(chunkRes.getStatus(), ErrorCodes::NoSuchKey);
     ASSERT_STRING_CONTAINS(chunkRes.getStatus().reason(), ChunkType::max.name());
 
     BSONObj objModShard =
         BSON(ChunkType::minShardID(kMin) << ChunkType::max(kMax) << "lastmod" << lastmod);
-    chunkRes = ChunkType::fromShardBSON(objModShard, epoch, boost::none /* timestamp */);
+    chunkRes = ChunkType::fromShardBSON(objModShard, epoch, timestamp);
     ASSERT_EQUALS(chunkRes.getStatus(), ErrorCodes::NoSuchKey);
     ASSERT_STRING_CONTAINS(chunkRes.getStatus().reason(), ChunkType::shard.name());
 
     BSONObj objModLastmod = BSON(ChunkType::minShardID(kMin)
                                  << ChunkType::max(kMax) << ChunkType::shard(kShard.toString()));
-    chunkRes = ChunkType::fromShardBSON(objModLastmod, epoch, boost::none /* timestamp */);
+    chunkRes = ChunkType::fromShardBSON(objModLastmod, epoch, timestamp);
     ASSERT_EQUALS(chunkRes.getStatus(), ErrorCodes::NoSuchKey);
 }
 
 TEST(ChunkType, ToFromShardBSON) {
     const OID epoch = OID::gen();
-    ChunkVersion chunkVersion(1, 2, epoch, boost::none /* timestamp */);
+    const Timestamp timestamp;
+    ChunkVersion chunkVersion(1, 2, epoch, timestamp);
     auto lastmod = Timestamp(chunkVersion.toLong());
 
     BSONObj obj = BSON(ChunkType::minShardID(kMin)
                        << ChunkType::max(kMax) << ChunkType::shard(kShard.toString()) << "lastmod"
                        << lastmod);
-    ChunkType shardChunk =
-        assertGet(ChunkType::fromShardBSON(obj, epoch, boost::none /* timestamp */));
+    ChunkType shardChunk = assertGet(ChunkType::fromShardBSON(obj, epoch, timestamp));
 
     ASSERT_BSONOBJ_EQ(obj, shardChunk.toShardBSON());
 
@@ -133,43 +134,48 @@ TEST(ChunkType, ToFromShardBSON) {
 }
 
 TEST(ChunkType, MinAndMaxShardKeysDifferInNumberOfKeys) {
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
-    BSONObj obj =
-        BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("test.mycol") << ChunkType::min(BSON("a" << 10 << "b" << 10))
-             << ChunkType::max(BSON("a" << 20)) << "lastmod" << Timestamp(chunkVersion.toLong())
-             << "lastmodEpoch" << chunkVersion.epoch() << ChunkType::shard("shard0001"));
+    BSONObj obj = BSON(
+        ChunkType::name(OID::gen())
+        << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << 10 << "b" << 10))
+        << ChunkType::max(BSON("a" << 20)) << "lastmod" << Timestamp(chunkVersion.toLong())
+        << "lastmodEpoch" << chunkVersion.epoch() << "lastmodTimestamp"
+        << chunkVersion.getTimestamp() << ChunkType::shard("shard0001"));
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(obj, collEpoch, collTimestamp);
     ASSERT_OK(chunkRes.getStatus());
     ASSERT_FALSE(chunkRes.getValue().validate().isOK());
 }
 
 TEST(ChunkType, MinAndMaxShardKeysDifferInKeyNames) {
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
     BSONObj obj =
         BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("test.mycol") << ChunkType::min(BSON("a" << 10))
+             << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << 10))
              << ChunkType::max(BSON("b" << 20)) << "lastmod" << Timestamp(chunkVersion.toLong())
-             << "lastmodEpoch" << chunkVersion.epoch() << ChunkType::shard("shard0001"));
+             << "lastmodEpoch" << chunkVersion.epoch() << "lastmodTimestamp"
+             << chunkVersion.getTimestamp() << ChunkType::shard("shard0001"));
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(obj, collEpoch, collTimestamp);
     ASSERT_OK(chunkRes.getStatus());
     ASSERT_FALSE(chunkRes.getValue().validate().isOK());
 }
 
 TEST(ChunkType, MinToMaxNotAscending) {
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
     BSONObj obj =
         BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("test.mycol") << ChunkType::min(BSON("a" << 20))
+             << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << 20))
              << ChunkType::max(BSON("a" << 10)) << "lastmod" << Timestamp(chunkVersion.toLong())
              << "lastmodEpoch" << chunkVersion.epoch() << ChunkType::shard("shard0001"));
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(obj, collEpoch, collTimestamp);
@@ -177,16 +183,16 @@ TEST(ChunkType, MinToMaxNotAscending) {
 }
 
 TEST(ChunkType, ToFromConfigBSON) {
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     const auto chunkID = OID::gen();
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
-    BSONObj obj =
-        BSON(ChunkType::name(chunkID)
-             << ChunkType::ns("test.mycol") << ChunkType::min(BSON("a" << 10))
-             << ChunkType::max(BSON("a" << 20)) << ChunkType::shard("shard0001") << "lastmod"
-             << Timestamp(chunkVersion.toLong()) << "lastmodEpoch" << chunkVersion.epoch());
+    BSONObj obj = BSON(ChunkType::name(chunkID)
+                       << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << 10))
+                       << ChunkType::max(BSON("a" << 20)) << ChunkType::shard("shard0001")
+                       << "lastmod" << Timestamp(chunkVersion.toLong()));
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(obj, collEpoch, collTimestamp);
     ASSERT_OK(chunkRes.getStatus());
     ChunkType chunk = chunkRes.getValue();
@@ -194,7 +200,7 @@ TEST(ChunkType, ToFromConfigBSON) {
     ASSERT_BSONOBJ_EQ(chunk.toConfigBSON(), obj);
 
     ASSERT_EQUALS(chunk.getName(), chunkID);
-    ASSERT_EQUALS(chunk.getNS().ns(), "test.mycol");
+    ASSERT_EQUALS(chunk.getCollectionUUID(), collUuid);
     ASSERT_BSONOBJ_EQ(chunk.getMin(), BSON("a" << 10));
     ASSERT_BSONOBJ_EQ(chunk.getMax(), BSON("a" << 20));
     ASSERT_EQUALS(chunk.getVersion().toLong(), chunkVersion.toLong());
@@ -205,7 +211,7 @@ TEST(ChunkType, ToFromConfigBSON) {
 
 TEST(ChunkType, BadType) {
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     BSONObj obj = BSON(ChunkType::name() << 0);
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(obj, collEpoch, collTimestamp);
@@ -213,33 +219,35 @@ TEST(ChunkType, BadType) {
 }
 
 TEST(ChunkType, BothNsAndUUID) {
+    const auto collUuid = UUID::gen();
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
 
     BSONObj objModNS =
         BSON(ChunkType::name(OID::gen())
-             << ChunkType::ns("ns") << ChunkType::collectionUUID() << mongo::UUID::gen()
-             << ChunkType::min(BSON("a" << 10 << "b" << 10)) << ChunkType::max(BSON("a" << 20))
-             << "lastmod" << Timestamp(chunkVersion.toLong()) << "lastmodEpoch"
-             << chunkVersion.epoch() << ChunkType::shard("shard0001"));
+             << ChunkType::collectionUUID() << collUuid << ChunkType::collectionUUID()
+             << mongo::UUID::gen() << ChunkType::min(BSON("a" << 10 << "b" << 10))
+             << ChunkType::max(BSON("a" << 20)) << "lastmod" << Timestamp(chunkVersion.toLong())
+             << "lastmodEpoch" << chunkVersion.epoch() << "lastmodTimestamp"
+             << chunkVersion.getTimestamp() << ChunkType::shard("shard0001"));
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(objModNS, collEpoch, collTimestamp);
     ASSERT_TRUE(chunkRes.isOK());
 }
 
 TEST(ChunkType, UUIDPresentAndNsMissing) {
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(1);
 
     ChunkVersion chunkVersion(1, 2, collEpoch, collTimestamp);
 
-    BSONObj objModNS =
-        BSON(ChunkType::name(OID::gen())
-             << ChunkType::collectionUUID() << mongo::UUID::gen()
-             << ChunkType::min(BSON("a" << 10 << "b" << 10)) << ChunkType::max(BSON("a" << 20))
-             << "lastmod" << Timestamp(chunkVersion.toLong()) << "lastmodEpoch"
-             << chunkVersion.epoch() << ChunkType::shard("shard0001"));
+    BSONObj objModNS = BSON(
+        ChunkType::name(OID::gen())
+        << ChunkType::collectionUUID() << mongo::UUID::gen()
+        << ChunkType::min(BSON("a" << 10 << "b" << 10)) << ChunkType::max(BSON("a" << 20))
+        << "lastmod" << Timestamp(chunkVersion.toLong()) << "lastmodEpoch" << chunkVersion.epoch()
+        << "lastmodTimestamp" << chunkVersion.getTimestamp() << ChunkType::shard("shard0001"));
     StatusWith<ChunkType> chunkRes = ChunkType::fromConfigBSON(objModNS, collEpoch, collTimestamp);
     ASSERT_TRUE(chunkRes.isOK());
 }

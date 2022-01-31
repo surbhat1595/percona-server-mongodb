@@ -285,7 +285,7 @@ __wt_evict_thread_run(WT_SESSION_IMPL *session, WT_THREAD *thread)
      * busy and then opens a different file (in this case, the HS file), it can deadlock with a
      * thread waiting for the first file to drain from the eviction queue. See WT-5946 for details.
      */
-    WT_RET(__wt_curhs_cache(session));
+    WT_ERR(__wt_curhs_cache(session));
     if (conn->evict_server_running && __wt_spin_trylock(session, &cache->evict_pass_lock) == 0) {
         /*
          * Cannot use WT_WITH_PASS_LOCK because this is a try lock. Fix when that is supported. We
@@ -349,10 +349,11 @@ __wt_evict_thread_stop(WT_SESSION_IMPL *session, WT_THREAD *thread)
     WT_WITH_PASS_LOCK(session, ret = __evict_clear_all_walks(session));
     WT_ERR(ret);
     /*
-     * The only two cases when the eviction server is expected to stop are when recovery is finished
-     * or when the connection is closing.
+     * The only cases when the eviction server is expected to stop are when recovery is finished,
+     * when the connection is closing or when an error has occurred and connection panic flag is
+     * set.
      */
-    WT_ASSERT(session, F_ISSET(conn, WT_CONN_CLOSING | WT_CONN_RECOVERING));
+    WT_ASSERT(session, F_ISSET(conn, WT_CONN_CLOSING | WT_CONN_PANIC | WT_CONN_RECOVERING));
 
     /* Clear the eviction thread session flag. */
     F_CLR(session, WT_SESSION_EVICTION);
@@ -1522,6 +1523,16 @@ retry:
             }
             __wt_spin_unlock(session, &cache->evict_walk_lock);
             WT_ERR(ret);
+            /*
+             * If there is a checkpoint thread gathering handles, which means it is holding the
+             * schema lock, then there is often contention on the evict walk lock with that thread.
+             * If eviction is not in aggressive mode, sleep a bit to give the checkpoint thread a
+             * chance to gather its handles.
+             */
+            if (F_ISSET(conn, WT_CONN_CKPT_GATHER) && !__wt_cache_aggressive(session)) {
+                __wt_sleep(0, 10);
+                WT_STAT_CONN_INCR(session, cache_eviction_walk_sleeps);
+            }
         }
     }
 

@@ -162,7 +162,7 @@ public:
         Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
     static std::unique_ptr<Pipeline, PipelineDeleter> makePipelineFromViewDefinition(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
         ExpressionContext::ResolvedNamespace resolvedNs,
         std::vector<BSONObj> currentPipeline,
         MakePipelineOptions opts);
@@ -272,6 +272,11 @@ public:
     std::vector<Value> serialize() const;
     std::vector<BSONObj> serializeToBson() const;
 
+    /**
+     * Serializes the pipeline into BSON for explain/debug logging purposes.
+     */
+    std::vector<BSONObj> serializeToBSONForDebug() const;
+
     // The initial source is special since it varies between mongos and mongod.
     void addInitialSource(boost::intrusive_ptr<DocumentSource> source);
 
@@ -314,6 +319,13 @@ public:
     SourceContainer& getSources() {
         return _sources;
     }
+
+    /**
+     * Stitch together the source pointers by calling setSource() for each source in 'container'.
+     * This function must be called any time the order of stages within the container changes, e.g.
+     * in optimizeContainer().
+     */
+    static void stitch(SourceContainer* container);
 
     /**
      * Removes and returns the first stage of the pipeline. Returns nullptr if the pipeline is
@@ -383,13 +395,6 @@ private:
      * in optimizePipeline().
      */
     void stitch();
-
-    /**
-     * Stitch together the source pointers by calling setSource() for each source in 'container'.
-     * This function must be called any time the order of stages within the container changes, e.g.
-     * in optimizeContainer().
-     */
-    static void stitch(SourceContainer* container);
 
     /**
      * Returns Status::OK if the pipeline can run on mongoS, or an error with a message explaining

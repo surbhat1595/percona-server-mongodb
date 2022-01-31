@@ -535,15 +535,46 @@ server_parameters:
         cpp_varname: initialSyncMethod
         default: "logical"
 
-feature_flags:
-    # TODO (SERVER-54730): Remove featureFlagUseSecondaryDelaySecs.
-    featureFlagUseSecondaryDelaySecs:
+    fileBasedInitialSyncMaxLagSec:
         description: >-
-            If enabled, use field secondaryDelaySecs instead of slaveDelay in MemberConfig.
-        cpp_varname: feature_flags::gUseSecondaryDelaySecs
-        default: true
-        version: 4.9
+            Specifies the max lag in seconds between the syncing node and the sync source to mark
+            the file copy based initial sync done successfully.
+        set_at: startup
+        cpp_vartype: int
+        cpp_varname: fileBasedInitialSyncMaxLagSec
+        # TODO (SERVER-59729): determine the best default value.
+        default: 
+                expr: 5 * 60 * 60
+        validator:
+            gte: 0
+    
+    fileBasedInitialSyncMaxCyclesWithoutProgress:
+        description: >-
+            Specifies the max number of cycles that file copy based initial sync runs trying to
+            clone updates while the lag between the syncing node and the sync source is higher than 
+            fileBasedInitialSyncMaxLagSec.
+        set_at: startup
+        cpp_vartype: int
+        cpp_varname: fileBasedInitialSyncMaxCyclesWithoutProgress
+        # TODO (SERVER-59729): determine the best default value.
+        default: 5
+        validator:
+            gte: 1
+    
+    fileBasedInitialSyncExtendCursorTimeoutMS:
+        description: >-
+            Period of time, in milliseconds, syncing node may wait for the sync source to have the
+            full oplog history up to the backup point in time.
+        set_at: startup
+        cpp_vartype: int
+        cpp_varname: fileBasedInitialSyncExtendCursorTimeoutMS
+        default:
+            expr: 180 * 1000
+        validator:
+            gte: 1
 
+
+feature_flags:
     featureFlagRetryableFindAndModify:
         description: >-
             When enabled, storeFindAndModifyImagesInOplog=false will change the location of any
@@ -552,16 +583,13 @@ feature_flags:
         default: true
         version: 5.1
 
-    featureFlagDefaultReadConcernLocal:
-        description: >-
-            When enabled, default read concern will be set to local if there is no cluster wide
-            read concern (CWRC).
-        cpp_varname: feature_flags::gDefaultRCLocal
-        default: true
-        version: 5.0
-
     featureFlagFileCopyBasedInitialSync:
         description: >-
             When enabled, file copy based initial sync will be supported in Enterprise Server.
         cpp_varname: feature_flags::gFileCopyBasedInitialSync
+        default: false
+
+    featureFlagSliceMerge:
+        description: When enabled, multitenant migration uses the "slice merge" protocol.
+        cpp_varname: feature_flags::gSliceMerge
         default: false

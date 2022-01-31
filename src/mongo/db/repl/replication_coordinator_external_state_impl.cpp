@@ -525,6 +525,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     // exclusive mode.
     _replicationProcess->getConsistencyMarkers()->clearAppliedThrough(opCtx, Timestamp());
 
+    LOGV2(6015309, "Logging transition to primary to oplog on stepup");
     writeConflictRetry(opCtx, "logging transition to primary to oplog", "local.oplog.rs", [&] {
         AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
         WriteUnitOfWork wuow(opCtx);
@@ -685,6 +686,11 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
 
         Status status =
             writeConflictRetry(opCtx, "save replica set lastVote", lastVoteCollectionName, [&] {
+                // Writes to non-replicated collections do not need concurrency control with the
+                // OplogApplier that never accesses them. Skip taking the PBWM.
+                ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
+                    opCtx->lockState());
+
                 AutoGetCollection coll(opCtx, NamespaceString(lastVoteCollectionName), MODE_IX);
                 WriteUnitOfWork wunit(opCtx);
 
@@ -989,6 +995,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
 void ReplicationCoordinatorExternalStateImpl::clearCommittedSnapshot() {
     if (auto manager = _service->getStorageEngine()->getSnapshotManager())
         manager->clearCommittedSnapshot();
+    FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp();
 }
 
 void ReplicationCoordinatorExternalStateImpl::updateCommittedSnapshot(

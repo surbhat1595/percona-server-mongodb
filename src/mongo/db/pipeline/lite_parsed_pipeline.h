@@ -118,10 +118,13 @@ public:
      * Returns false if at least one of the stages does not allow the involved namespace 'nss' to be
      * sharded.
      */
-    bool allowShardedForeignCollection(NamespaceString nss) const {
-        return std::all_of(_stageSpecs.begin(), _stageSpecs.end(), [&nss](auto&& spec) {
-            return spec->allowShardedForeignCollection(nss);
-        });
+    bool allowShardedForeignCollection(NamespaceString nss, bool isMultiDocumentTransaction) const {
+        return std::all_of(_stageSpecs.begin(),
+                           _stageSpecs.end(),
+                           [&nss, isMultiDocumentTransaction](auto&& spec) {
+                               return spec->allowShardedForeignCollection(
+                                   nss, isMultiDocumentTransaction);
+                           });
     }
 
     /**
@@ -131,6 +134,13 @@ public:
                                                  bool isImplicitDefault,
                                                  boost::optional<ExplainOptions::Verbosity> explain,
                                                  bool enableMajorityReadConcern) const;
+
+    /**
+     * Checks that all of the stages in this pipeline are allowed to run with the specified read
+     * concern level. Does not do any pipeline global checks.
+     */
+    ReadConcernSupportResult sourcesSupportReadConcern(repl::ReadConcernLevel level,
+                                                       bool isImplicitDefault) const;
 
     /**
      * Verifies that this pipeline is allowed to run in a multi-document transaction. This ensures

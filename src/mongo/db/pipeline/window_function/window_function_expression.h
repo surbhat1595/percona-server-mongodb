@@ -46,21 +46,33 @@ class WindowFunctionExec;
 class PartitionIterator;
 }  // namespace mongo
 
-#define REGISTER_WINDOW_FUNCTION(name, parser)                                   \
-    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                     \
-                              ("BeginWindowFunctionRegistration"),               \
-                              ("EndWindowFunctionRegistration"))                 \
-    (InitializerContext*) {                                                      \
-        ::mongo::window_function::Expression::registerParser("$" #name, parser); \
+#define REGISTER_WINDOW_FUNCTION(name, parser) \
+    REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, boost::none, true)
+
+#define REGISTER_WINDOW_FUNCTION_WITH_MIN_VERSION(name, parser, minVersion) \
+    REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, minVersion, true)
+
+#define REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, minVersion, ...)                \
+    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                                 \
+                              ("BeginWindowFunctionRegistration"),                           \
+                              ("EndWindowFunctionRegistration"))                             \
+    (InitializerContext*) {                                                                  \
+        if (!(__VA_ARGS__)) {                                                                \
+            return;                                                                          \
+        }                                                                                    \
+        ::mongo::window_function::Expression::registerParser("$" #name, parser, minVersion); \
     }
 
-#define REGISTER_REMOVABLE_WINDOW_FUNCTION(name, accumClass, wfClass)                              \
-    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                                       \
-                              ("BeginWindowFunctionRegistration"),                                 \
-                              ("EndWindowFunctionRegistration"))                                   \
-    (InitializerContext*) {                                                                        \
-        ::mongo::window_function::Expression::registerParser(                                      \
-            "$" #name, ::mongo::window_function::ExpressionRemovable<accumClass, wfClass>::parse); \
+
+#define REGISTER_REMOVABLE_WINDOW_FUNCTION(name, accumClass, wfClass)                  \
+    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                           \
+                              ("BeginWindowFunctionRegistration"),                     \
+                              ("EndWindowFunctionRegistration"))                       \
+    (InitializerContext*) {                                                            \
+        ::mongo::window_function::Expression::registerParser(                          \
+            "$" #name,                                                                 \
+            ::mongo::window_function::ExpressionRemovable<accumClass, wfClass>::parse, \
+            boost::none);                                                              \
     }
 
 
@@ -107,7 +119,12 @@ public:
      * described above, because some parsers need to switch on the function name.
      */
     using Parser = std::function<decltype(parse)>;
-    static void registerParser(std::string functionName, Parser parser);
+    using ExpressionParserRegistration =
+        std::pair<Parser, boost::optional<multiversion::FeatureCompatibilityVersion>>;
+    static void registerParser(
+        std::string functionName,
+        Parser parser,
+        boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion);
 
     /**
      * Is this a function that the parser knows about?
@@ -181,7 +198,7 @@ protected:
      * In these cases, this field is ignored.
      */
     WindowBounds _bounds;
-    static StringMap<Parser> parserMap;
+    static StringMap<ExpressionParserRegistration> parserMap;
 };
 
 template <typename NonRemovableType>
@@ -720,4 +737,27 @@ public:
     }
 };
 
+template <AccumulatorMinMax::Sense S>
+class ExpressionMinMaxN : public Expression {
+public:
+    ExpressionMinMaxN(ExpressionContext* expCtx,
+                      boost::intrusive_ptr<::mongo::Expression> input,
+                      std::string name,
+                      WindowBounds bounds,
+                      boost::intrusive_ptr<::mongo::Expression> nExpr)
+        : Expression(expCtx, std::move(name), std::move(input), std::move(bounds)),
+          _nExpr(std::move(nExpr)) {}
+    static boost::intrusive_ptr<Expression> parse(BSONObj obj,
+                                                  const boost::optional<SortPattern>& sortBy,
+                                                  ExpressionContext* expCtx);
+
+    boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final;
+
+    std::unique_ptr<WindowFunctionState> buildRemovable() const final;
+
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain) const final;
+
+private:
+    boost::intrusive_ptr<::mongo::Expression> _nExpr;
+};
 }  // namespace mongo::window_function

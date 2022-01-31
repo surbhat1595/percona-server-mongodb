@@ -45,6 +45,7 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/session_catalog_mongod.h"
@@ -59,7 +60,9 @@ Date_t getDeadline(OperationContext* opCtx) {
         Milliseconds(resharding::gReshardingOplogApplierMaxLockRequestTimeoutMillis.load());
 }
 
-void runWithTransaction(OperationContext* opCtx, unique_function<void(OperationContext*)> func) {
+void runWithTransaction(OperationContext* opCtx,
+                        const NamespaceString& nss,
+                        unique_function<void(OperationContext*)> func) {
     AlternativeSessionRegion asr(opCtx);
     auto* const client = asr.opCtx()->getClient();
     {
@@ -73,10 +76,17 @@ void runWithTransaction(OperationContext* opCtx, unique_function<void(OperationC
     asr.opCtx()->setTxnNumber(txnNumber);
     asr.opCtx()->setInMultiDocumentTransaction();
 
+    // ReshardingOpObserver depends on the collection metadata being known when processing writes to
+    // the temporary resharding collection. We attach shard version IGNORED to the write operations
+    // and leave it to ReshardingOplogBatchApplier::applyBatch() to retry on a StaleConfig exception
+    // to allow the collection metadata information to be recovered.
+    auto& oss = OperationShardingState::get(asr.opCtx());
+    oss.initializeClientRoutingVersions(nss, ChunkVersion::IGNORED(), boost::none);
+
     MongoDOperationContextSession ocs(asr.opCtx());
     auto txnParticipant = TransactionParticipant::get(asr.opCtx());
 
-    auto guard = makeGuard([opCtx = asr.opCtx(), &txnParticipant] {
+    ScopeGuard guard([opCtx = asr.opCtx(), &txnParticipant] {
         try {
             txnParticipant.abortTransaction(opCtx);
         } catch (DBException& e) {
@@ -86,7 +96,11 @@ void runWithTransaction(OperationContext* opCtx, unique_function<void(OperationC
         }
     });
 
-    txnParticipant.beginOrContinue(asr.opCtx(), txnNumber, false, true);
+    txnParticipant.beginOrContinue(asr.opCtx(),
+                                   txnNumber,
+                                   false /* autocommit */,
+                                   true /* startTransaction */,
+                                   boost::none /* txnRetryCounter */);
     txnParticipant.unstashTransactionResources(asr.opCtx(), "reshardingOplogApplication");
 
     func(asr.opCtx());
@@ -419,7 +433,7 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
     // We must run 'findByIdAndNoopUpdate' in the same storage transaction as the ops run in the
     // single replica set transaction that is executed if we apply rule #4, so we therefore must run
     // 'findByIdAndNoopUpdate' as a part of the single replica set transaction.
-    runWithTransaction(opCtx, [this, idQuery](OperationContext* opCtx) {
+    runWithTransaction(opCtx, _outputNss, [this, idQuery](OperationContext* opCtx) {
         AutoGetCollection autoCollOutput(opCtx,
                                          _outputNss,
                                          MODE_IX,

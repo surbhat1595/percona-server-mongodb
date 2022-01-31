@@ -39,13 +39,13 @@
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
+#include "mongo/db/pipeline/document_source_change_stream_add_pre_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_invalidate.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_topology_change.h"
 #include "mongo/db/pipeline/document_source_change_stream_close_cursor.h"
 #include "mongo/db/pipeline/document_source_change_stream_ensure_resume_token_present.h"
 #include "mongo/db/pipeline/document_source_change_stream_handle_topology_change.h"
-#include "mongo/db/pipeline/document_source_change_stream_lookup_pre_image.h"
 #include "mongo/db/pipeline/document_source_change_stream_oplog_match.h"
 #include "mongo/db/pipeline/document_source_change_stream_transform.h"
 #include "mongo/db/pipeline/document_source_change_stream_unwind_transaction.h"
@@ -61,19 +61,6 @@
 #include "mongo/db/vector_clock.h"
 
 namespace mongo {
-namespace {
-std::string regexEscape(StringData source) {
-    std::string result = "";
-    std::string escapes = "*+|()^?[]./\\$";
-    for (const char& c : source) {
-        if (escapes.find(c) != std::string::npos) {
-            result.append("\\");
-        }
-        result += c;
-    }
-    return result;
-}
-}  // namespace
 
 using boost::intrusive_ptr;
 using boost::optional;
@@ -144,11 +131,12 @@ std::string DocumentSourceChangeStream::getNsRegexForChangeStream(const Namespac
     switch (type) {
         case ChangeStreamType::kSingleCollection:
             // Match the target namespace exactly.
-            return "^" + regexEscape(nss.ns()) + "$";
+            return "^" + regexEscapeNsForChangeStream(nss.ns()) + "$";
         case ChangeStreamType::kSingleDatabase:
             // Match all namespaces that start with db name, followed by ".", then NOT followed by
             // '$' or 'system.'
-            return "^" + regexEscape(nss.db().toString()) + "\\." + kRegexAllCollections;
+            return "^" + regexEscapeNsForChangeStream(nss.db().toString()) + "\\." +
+                kRegexAllCollections;
         case ChangeStreamType::kAllChangesForCluster:
             // Match all namespaces that start with any db name other than admin, config, or local,
             // followed by ".", then NOT followed by '$' or 'system.'.
@@ -163,7 +151,7 @@ std::string DocumentSourceChangeStream::getCollRegexForChangeStream(const Namesp
     switch (type) {
         case ChangeStreamType::kSingleCollection:
             // Match the target collection exactly.
-            return "^" + regexEscape(nss.coll()) + "$";
+            return "^" + regexEscapeNsForChangeStream(nss.coll()) + "$";
         case ChangeStreamType::kSingleDatabase:
         case ChangeStreamType::kAllChangesForCluster:
             // Match any collection; database filtering will be done elsewhere.
@@ -179,13 +167,25 @@ std::string DocumentSourceChangeStream::getCmdNsRegexForChangeStream(const Names
         case ChangeStreamType::kSingleCollection:
         case ChangeStreamType::kSingleDatabase:
             // Match the target database command namespace exactly.
-            return "^" + regexEscape(nss.getCommandNS().ns()) + "$";
+            return "^" + regexEscapeNsForChangeStream(nss.getCommandNS().ns()) + "$";
         case ChangeStreamType::kAllChangesForCluster:
             // Match all command namespaces on any database.
             return kRegexAllDBs + "\\." + kRegexCmdColl;
         default:
             MONGO_UNREACHABLE;
     }
+}
+
+std::string DocumentSourceChangeStream::regexEscapeNsForChangeStream(StringData source) {
+    std::string result = "";
+    std::string escapes = "*+|()^?[]./\\$";
+    for (const char& c : source) {
+        if (escapes.find(c) != std::string::npos) {
+            result.append("\\");
+        }
+        result += c;
+    }
+    return result;
 }
 
 ResumeTokenData DocumentSourceChangeStream::resolveResumeTokenFromSpec(
@@ -360,7 +360,7 @@ void DocumentSourceChangeStream::assertIsLegalSpecification(
             !(shouldAddPreImage && (expCtx->inMongos || expCtx->needsMerge)));
 
     // TODO SERVER-58584: remove the feature flag.
-    if (!feature_flags::gFeatureFlagChangeStreamsPreAndPostImages.isEnabled(
+    if (!feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
             serverGlobalParams.featureCompatibility)) {
         uassert(ErrorCodes::BadValue,
                 str::stream() << "Specified value '"

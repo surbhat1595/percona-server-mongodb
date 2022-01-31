@@ -255,6 +255,18 @@ void DocumentSourceGroup::doDispose() {
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceGroup::optimize() {
+    // Optimizing a 'DocumentSourceGroup' might modify its expressions to become incompatible with
+    // SBE. We temporarily highjack the context's 'sbeCompatible' flag to communicate the situation
+    // back to the 'DocumentSourceGroup'. Notice, that while a particular 'DocumentSourceGroup'
+    // might become incompatible with SBE, other groups in the pipeline and the collection access
+    // could be still eligible for lowering to SBE, thus we must reset the context's 'sbeCompatible'
+    // flag back to its original value at the end of the 'optimize()' call.
+    //
+    // TODO SERVER-XXXXX: replace this hack with a proper per-stage tracking of SBE compatibility.
+    auto expCtx = _idExpressions[0]->getExpressionContext();
+    auto orgSbeCompatible = expCtx->sbeCompatible;
+    expCtx->sbeCompatible = true;
+
     // TODO: If all _idExpressions are ExpressionConstants after optimization, then we know there
     // will be only one group. We should take advantage of that to avoid going through the hash
     // table.
@@ -266,6 +278,9 @@ intrusive_ptr<DocumentSource> DocumentSourceGroup::optimize() {
         accumulatedField.expr.initializer = accumulatedField.expr.initializer->optimize();
         accumulatedField.expr.argument = accumulatedField.expr.argument->optimize();
     }
+
+    _sbeCompatible = _sbeCompatible && expCtx->sbeCompatible;
+    expCtx->sbeCompatible = orgSbeCompatible;
 
     return this;
 }
@@ -406,7 +421,8 @@ DocumentSourceGroup::DocumentSourceGroup(const intrusive_ptr<ExpressionContext>&
               : nullptr),
       _initialized(false),
       _groups(expCtx->getValueComparator().makeUnorderedValueMap<Accumulators>()),
-      _spilled(false) {}
+      _spilled(false),
+      _sbeCompatible(false) {}
 
 void DocumentSourceGroup::addAccumulator(AccumulationStatement accumulationStatement) {
     _accumulatedFields.push_back(accumulationStatement);
@@ -445,6 +461,9 @@ intrusive_ptr<Expression> parseIdExpression(const intrusive_ptr<ExpressionContex
 void DocumentSourceGroup::setIdExpression(const boost::intrusive_ptr<Expression> idExpression) {
 
     if (auto object = dynamic_cast<ExpressionObject*>(idExpression.get())) {
+        // We don't support document _id spec yet.
+        pExpCtx->sbeGroupCompatible = false;
+
         auto& childExpressions = object->getChildExpressions();
         invariant(!childExpressions.empty());  // We expect to have converted an empty object into a
                                                // constant expression.
@@ -470,6 +489,7 @@ intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBson(
     BSONObj groupObj(elem.Obj());
     BSONObjIterator groupIterator(groupObj);
     VariablesParseState vps = expCtx->variablesParseState;
+    expCtx->sbeGroupCompatible = true;
     while (groupIterator.more()) {
         BSONElement groupField(groupIterator.next());
         StringData pFieldName = groupField.fieldNameStringData();
@@ -490,6 +510,7 @@ intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBson(
             groupStage->_memoryTracker.set(pFieldName, 0);
         }
     }
+    groupStage->_sbeCompatible = expCtx->sbeGroupCompatible && expCtx->sbeCompatible;
 
     uassert(
         15955, "a group specification must include an _id", !groupStage->_idExpressions.empty());
@@ -829,7 +850,9 @@ DocumentSourceGroup::rewriteGroupAsTransformOnFirstDocument() const {
         // each document has a unique _id, it will just return the entire collection). We only
         // apply the rewrite when grouping by a single field, so we cannot apply it in this case,
         // where we are grouping by the entire document.
-        invariant(fieldPath.getFieldName(0) == "CURRENT" || fieldPath.getFieldName(0) == "ROOT");
+        tassert(5943200,
+                "Optimization attempted on group by always-dissimilar system variable",
+                fieldPath.getFieldName(0) == "CURRENT" || fieldPath.getFieldName(0) == "ROOT");
         return nullptr;
     }
 

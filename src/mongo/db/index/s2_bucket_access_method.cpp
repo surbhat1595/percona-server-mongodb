@@ -109,6 +109,12 @@ StatusWith<BSONObj> S2BucketAccessMethod::fixSpec(const BSONObj& specObj) {
     return specObj;
 }
 
+void S2BucketAccessMethod::validateDocument(const CollectionPtr& collection,
+                                            const BSONObj& obj,
+                                            const BSONObj& keyPattern) const {
+    ExpressionKeysPrivate::validateDocumentCommon(collection, obj, keyPattern);
+}
+
 void S2BucketAccessMethod::doGetKeys(OperationContext* opCtx,
                                      const CollectionPtr& collection,
                                      SharedBufferFragmentBuilder& pooledBufferBuilder,
@@ -118,15 +124,15 @@ void S2BucketAccessMethod::doGetKeys(OperationContext* opCtx,
                                      KeyStringSet* multikeyMetadataKeys,
                                      MultikeyPaths* multikeyPaths,
                                      boost::optional<RecordId> id) const {
-    ExpressionKeysPrivate::getS2BucketKeys(pooledBufferBuilder,
-                                           obj,
-                                           _descriptor->keyPattern(),
-                                           _params,
-                                           keys,
-                                           multikeyPaths,
-                                           getSortedDataInterface()->getKeyStringVersion(),
-                                           getSortedDataInterface()->getOrdering(),
-                                           id);
+    ExpressionKeysPrivate::getS2Keys(pooledBufferBuilder,
+                                     obj,
+                                     _descriptor->keyPattern(),
+                                     _params,
+                                     keys,
+                                     multikeyPaths,
+                                     getSortedDataInterface()->getKeyStringVersion(),
+                                     getSortedDataInterface()->getOrdering(),
+                                     id);
 }
 
 }  // namespace mongo

@@ -41,10 +41,12 @@ static constexpr StringData kBucketIdFieldName = "_id"_sd;
 static constexpr StringData kBucketDataFieldName = "data"_sd;
 static constexpr StringData kBucketMetaFieldName = "meta"_sd;
 static constexpr StringData kBucketControlFieldName = "control"_sd;
+static constexpr StringData kBucketControlVersionFieldName = "version"_sd;
 static constexpr StringData kBucketControlMinFieldName = "min"_sd;
 static constexpr StringData kBucketControlMaxFieldName = "max"_sd;
 static constexpr StringData kControlMaxFieldNamePrefix = "control.max."_sd;
 static constexpr StringData kControlMinFieldNamePrefix = "control.min."_sd;
+static constexpr StringData kDataFieldNamePrefix = "data."_sd;
 
 // These are hard-coded field names in create collection for time-series collections.
 static constexpr StringData kTimeFieldName = "timeField"_sd;
@@ -53,6 +55,9 @@ static constexpr StringData kMetaFieldName = "metaField"_sd;
 // These are hard-coded field names in index specs.
 static constexpr StringData kKeyFieldName = "key"_sd;
 static constexpr StringData kOriginalSpecFieldName = "originalSpec"_sd;
+
+static constexpr int kTimeseriesControlDefaultVersion = 1;
+static constexpr int kTimeseriesControlCompressedVersion = 2;
 
 static const StringDataSet kAllowedCollectionCreationOptions{
     CreateCommand::kStorageEngineFieldName,

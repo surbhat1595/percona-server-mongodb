@@ -32,7 +32,9 @@
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_explainer_factory.h"
+#include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 
 namespace mongo {
@@ -156,7 +158,7 @@ void updatePlanCache(
 
     // Store the choice we just made in the cache, if the query is of a type that is safe to
     // cache.
-    if (PlanCache::shouldCacheQuery(query) && canCache) {
+    if (shouldCacheQuery(query) && canCache) {
         // Create list of candidate solutions for the cache with the best solution at the front.
         std::vector<QuerySolution*> solutions;
 
@@ -180,13 +182,55 @@ void updatePlanCache(
             }
         }
 
-        if (validSolutions) {
+        auto cacheClassicPlan = [&]() {
+            // The caller of this constructor is responsible for ensuring that the QuerySolution
+            // has valid cacheData. If there's no data to cache you shouldn't be trying to
+            // construct a PlanCacheEntry.
+            //
+            // The first solution is the winner, so we can discard the cache data from all
+            // subsequent solutions.
+            invariant(!solutions.empty());
+            invariant(solutions[0]->cacheData);
+            auto plannerDataForCache = solutions[0]->cacheData->clone();
+
+            PlanCacheLoggingCallbacks<PlanCacheKey, SolutionCacheData> callbacks{query};
             uassertStatusOK(CollectionQueryInfo::get(collection)
                                 .getPlanCache()
-                                ->set(query,
+                                ->set(plan_cache_key_factory::make<PlanCacheKey>(query, collection),
+                                      std::move(plannerDataForCache),
                                       solutions,
                                       std::move(ranking),
-                                      opCtx->getServiceContext()->getPreciseClockSource()->now()));
+                                      opCtx->getServiceContext()->getPreciseClockSource()->now(),
+                                      boost::none, /* worksGrowthCoefficient */
+                                      &callbacks));
+        };
+
+        if (validSolutions) {
+            if constexpr (std::is_same_v<PlanStageType, std::unique_ptr<sbe::PlanStage>>) {
+                if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+                    // Clone the winning SBE plan and its auxiliary data.
+                    auto cachedPlan = std::make_unique<sbe::CachedSbePlan>(
+                        candidates[winnerIdx].root->clone(), candidates[winnerIdx].data);
+
+                    PlanCacheLoggingCallbacks<sbe::PlanCacheKey, sbe::CachedSbePlan> callbacks{
+                        query};
+                    uassertStatusOK(sbe::getPlanCache(opCtx).set(
+                        plan_cache_key_factory::make<sbe::PlanCacheKey>(query, collection),
+                        std::move(cachedPlan),
+                        solutions,
+                        std::move(ranking),
+                        opCtx->getServiceContext()->getPreciseClockSource()->now(),
+                        boost::none, /* worksGrowthCoefficient */
+                        &callbacks));
+                } else {
+                    // Fall back to use the classic plan cache. Remove this branch after
+                    // "gFeatureFlagSbePlanCache" is removed.
+                    cacheClassicPlan();
+                }
+            } else {
+                static_assert(std::is_same_v<PlanStageType, PlanStage*>);
+                cacheClassicPlan();
+            }
         }
     }
 }

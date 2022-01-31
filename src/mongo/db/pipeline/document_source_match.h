@@ -43,7 +43,7 @@ namespace mongo {
 
 class DocumentSourceMatch : public DocumentSource {
 public:
-    virtual boost::intrusive_ptr<DocumentSourceMatch> clone() const {
+    virtual boost::intrusive_ptr<DocumentSource> clone() const {
         // Raw new is needed to access non-public constructors.
         return new auto(*this);
     }
@@ -130,7 +130,7 @@ public:
 
     /**
      * Attempts to combine with any subsequent $match stages, joining the query objects with a
-     * $and.
+     * $and and flattening top-level $and's in the process.
      */
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
                                                      Pipeline::SourceContainer* container) override;

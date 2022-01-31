@@ -56,8 +56,10 @@
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/coll_mod_reply_validation.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -78,6 +80,7 @@
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/optime.h"
@@ -89,12 +92,14 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/storage_engine_init.h"
+#include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/async_request_executor.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/grid.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -105,6 +110,9 @@
 namespace mongo {
 namespace {
 
+// Will cause 'CmdDatasize' to hang as it starts executing.
+MONGO_FAIL_POINT_DEFINE(hangBeforeDatasizeCount);
+
 /**
  * Returns a CollMod on the underlying buckets collection of the time-series collection.
  * Returns null if 'origCmd' is not for a time-series collection.
@@ -113,7 +121,10 @@ std::unique_ptr<CollMod> makeTimeseriesBucketsCollModCommand(OperationContext* o
                                                              const CollMod& origCmd) {
     const auto& origNs = origCmd.getNamespace();
 
-    auto timeseriesOptions = timeseries::getTimeseriesOptions(opCtx, origNs);
+    auto isCommandOnTimeseriesBucketNamespace =
+        origCmd.getIsTimeseriesNamespace() && *origCmd.getIsTimeseriesNamespace();
+    auto timeseriesOptions =
+        timeseries::getTimeseriesOptions(opCtx, origNs, !isCommandOnTimeseriesBucketNamespace);
 
     // Return early with null if we are not working with a time-series collection.
     if (!timeseriesOptions) {
@@ -133,7 +144,8 @@ std::unique_ptr<CollMod> makeTimeseriesBucketsCollModCommand(OperationContext* o
         index->setKeyPattern(std::move(bucketsIndexSpecWithStatus.getValue()));
     }
 
-    auto ns = origNs.makeTimeseriesBucketsNamespace();
+    auto ns =
+        isCommandOnTimeseriesBucketNamespace ? origNs : origNs.makeTimeseriesBucketsNamespace();
     auto cmd = std::make_unique<CollMod>(ns);
     cmd->setIndex(index);
     cmd->setValidator(origCmd.getValidator());
@@ -142,6 +154,7 @@ std::unique_ptr<CollMod> makeTimeseriesBucketsCollModCommand(OperationContext* o
     cmd->setViewOn(origCmd.getViewOn());
     cmd->setPipeline(origCmd.getPipeline());
     cmd->setRecordPreImages(origCmd.getRecordPreImages());
+    cmd->setChangeStreamPreAndPostImages(origCmd.getChangeStreamPreAndPostImages());
     cmd->setExpireAfterSeconds(origCmd.getExpireAfterSeconds());
     cmd->setTimeseries(origCmd.getTimeseries());
 
@@ -157,7 +170,10 @@ std::unique_ptr<CollMod> makeTimeseriesViewCollModCommand(OperationContext* opCt
                                                           const CollMod& origCmd) {
     const auto& ns = origCmd.getNamespace();
 
-    auto timeseriesOptions = timeseries::getTimeseriesOptions(opCtx, ns);
+    auto isCommandOnTimeseriesBucketNamespace =
+        origCmd.getIsTimeseriesNamespace() && *origCmd.getIsTimeseriesNamespace();
+    auto timeseriesOptions =
+        timeseries::getTimeseriesOptions(opCtx, ns, !isCommandOnTimeseriesBucketNamespace);
 
     // Return early with null if we are not working with a time-series collection.
     if (!timeseriesOptions) {
@@ -435,7 +451,7 @@ public:
                 return 1;
             }
             exec = InternalPlanner::collectionScan(
-                opCtx, &collection.getCollection(), PlanYieldPolicy::YieldPolicy::NO_YIELD);
+                opCtx, &collection.getCollection(), PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
         } else if (min.isEmpty() || max.isEmpty()) {
             errmsg = "only one of min or max specified";
             return false;
@@ -466,8 +482,11 @@ public:
                                               min,
                                               max,
                                               BoundInclusion::kIncludeStartKeyOnly,
-                                              PlanYieldPolicy::YieldPolicy::NO_YIELD);
+                                              PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
         }
+
+        CurOpFailpointHelpers::waitWhileFailPointEnabled(
+            &hangBeforeDatasizeCount, opCtx, "hangBeforeDatasizeCount", []() {});
 
         long long avgObjSize = collection->dataSize(opCtx) / numRecords;
 
@@ -606,6 +625,36 @@ public:
                               const RequestParser& requestParser,
                               BSONObjBuilder& result) final {
         const auto* cmd = &requestParser.request();
+
+        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            const auto isRecordPreImagesEnabled = cmd->getRecordPreImages().get_value_or(false);
+            uassert(ErrorCodes::InvalidOptions,
+                    "recordPreImages and changeStreamPreAndPostImages can not be set to true "
+                    "simultaneously",
+                    !(cmd->getChangeStreamPreAndPostImages() && isRecordPreImagesEnabled));
+        } else {
+            uassert(5846901,
+                    "BSON field 'changeStreamPreAndPostImages' is an unknown field.",
+                    !cmd->getChangeStreamPreAndPostImages().has_value());
+        }
+
+        // Updating granularity on sharded time-series collections is not allowed.
+        if (Grid::get(opCtx)->catalogClient() && cmd->getTimeseries() &&
+            cmd->getTimeseries()->getGranularity()) {
+            auto& nss = cmd->getNamespace();
+            auto bucketNss =
+                nss.isTimeseriesBucketsCollection() ? nss : nss.makeTimeseriesBucketsNamespace();
+            try {
+                auto coll = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, bucketNss);
+                uassert(ErrorCodes::NotImplemented,
+                        str::stream()
+                            << "Cannot update granularity of a sharded time-series collection.",
+                        !coll.getTimeseriesFields());
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                // Collection is not sharded, skip check.
+            }
+        }
 
         // If the target namespace refers to a time-series collection, we will redirect the
         // collection modification request to the underlying bucket collection.

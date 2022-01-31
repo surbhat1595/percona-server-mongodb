@@ -40,10 +40,12 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/transaction_validation.h"
+#include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
@@ -244,6 +246,18 @@ std::string commitTypeToString(TransactionRouter::CommitType state) {
     MONGO_UNREACHABLE;
 }
 
+std::string actionTypeToString(TransactionRouter::TransactionActions action) {
+    switch (action) {
+        case TransactionRouter::TransactionActions::kStart:
+            return "start";
+        case TransactionRouter::TransactionActions::kContinue:
+            return "continue";
+        case TransactionRouter::TransactionActions::kCommit:
+            return "commit";
+    }
+    MONGO_UNREACHABLE;
+}
+
 }  // unnamed namespace
 
 TransactionRouter::TransactionRouter() = default;
@@ -427,7 +441,9 @@ BSONObj TransactionRouter::Participant::attachTxnFieldsIfNeeded(
     bool mustStartTransaction = isFirstStatementInThisParticipant && !isTransactionCommand(cmdName);
 
     if (!mustStartTransaction) {
-        dassert(!cmd.hasField(repl::ReadConcernArgs::kReadConcernFieldName));
+        auto readConcernFieldName = repl::ReadConcernArgs::kReadConcernFieldName;
+        dassert(!cmd.hasField(readConcernFieldName) ||
+                cmd.getObjectField(readConcernFieldName).isEmpty());
     }
 
     BSONObjBuilder newCmd = mustStartTransaction
@@ -451,6 +467,12 @@ BSONObj TransactionRouter::Participant::attachTxnFieldsIfNeeded(
         auto osi =
             OperationSessionInfoFromClient::parse("OperationSessionInfo"_sd, newCmd.asTempObj());
         invariant(sharedOptions.txnNumber == *osi.getTxnNumber());
+    }
+
+    if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        newCmd.append(OperationSessionInfoFromClient::kTxnRetryCounterFieldName,
+                      sharedOptions.txnRetryCounter);
     }
 
     return newCmd.obj();
@@ -634,6 +656,7 @@ TransactionRouter::Participant& TransactionRouter::Router::_createParticipant(
 
     SharedTransactionOptions sharedOptions = {
         o().txnNumber,
+        o().txnRetryCounter,
         o().apiParameters,
         o().readConcernArgs,
         o().atClusterTime ? boost::optional<LogicalTime>(o().atClusterTime->getTime())
@@ -893,31 +916,26 @@ void TransactionRouter::Router::_setAtClusterTime(
     o(lk).atClusterTime->setTime(candidateTime, p().latestStmtId);
 }
 
-void TransactionRouter::Router::beginOrContinueTxn(OperationContext* opCtx,
-                                                   TxnNumber txnNumber,
-                                                   TransactionActions action) {
-    if (txnNumber < o().txnNumber) {
-        // This transaction is older than the transaction currently in progress, so throw an error.
-        uasserted(ErrorCodes::TransactionTooOld,
-                  str::stream() << "txnNumber " << txnNumber << " is less than last txnNumber "
-                                << o().txnNumber << " seen in session " << _sessionId());
-    } else if (txnNumber == o().txnNumber) {
-        // This is the same transaction as the one in progress.
-        auto apiParamsFromClient = APIParameters::get(opCtx);
-        if (action == TransactionActions::kContinue || action == TransactionActions::kCommit) {
-            uassert(
-                ErrorCodes::APIMismatchError,
-                "API parameter mismatch: transaction-continuing command used {}, the transaction's"
-                " first command used {}"_format(apiParamsFromClient.toBSON().toString(),
-                                                o().apiParameters.toBSON().toString()),
-                apiParamsFromClient == o().apiParameters);
-        }
+void TransactionRouter::Router::_beginOrContinueActiveTxnNumber(OperationContext* opCtx,
+                                                                TxnNumber txnNumber,
+                                                                TransactionActions action,
+                                                                TxnRetryCounter txnRetryCounter) {
+    invariant(txnNumber == o().txnNumber);
 
+    if (txnRetryCounter < o().txnRetryCounter) {
+        uasserted(TxnRetryCounterTooOldInfo(o().txnRetryCounter),
+                  str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
+                                << txnNumber << " on session " << _sessionId()
+                                << " using txnRetryCounter " << txnRetryCounter
+                                << " because the transaction has already been restarted using"
+                                << " a higher txnRetryCounter " << o().txnRetryCounter);
+    } else if (txnRetryCounter == o().txnRetryCounter) {
         switch (action) {
             case TransactionActions::kStart: {
                 uasserted(ErrorCodes::ConflictingOperationInProgress,
                           str::stream() << "txnNumber " << o().txnNumber << " for session "
                                         << _sessionId() << " already started");
+                break;
             }
             case TransactionActions::kContinue: {
                 uassert(ErrorCodes::InvalidOptions,
@@ -936,62 +954,83 @@ void TransactionRouter::Router::beginOrContinueTxn(OperationContext* opCtx,
                 _onContinue(opCtx);
                 break;
         }
-    } else if (txnNumber > o().txnNumber) {
+    } else {
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
+                              << txnNumber << " on session " << _sessionId()
+                              << " using txnRetryCounter " << txnRetryCounter
+                              << " because it is using a lower txnRetryCounter "
+                              << o().txnRetryCounter,
+                action == TransactionActions::kStart);
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "Cannot restart transaction " << txnNumber << " on session "
+                              << _sessionId() << " using txnRetryCounter " << txnRetryCounter
+                              << " because it has already started to commit",
+                o().commitType == CommitType::kNotInitiated || !o().abortCause.empty());
+        _resetRouterStateForStartTransaction(opCtx, txnNumber, txnRetryCounter);
+    }
+}
+
+void TransactionRouter::Router::_beginNewTxnNumber(OperationContext* opCtx,
+                                                   TxnNumber txnNumber,
+                                                   TransactionActions action,
+                                                   TxnRetryCounter txnRetryCounter) {
+    invariant(txnNumber > o().txnNumber);
+
+    switch (action) {
+        case TransactionActions::kStart: {
+            _resetRouterStateForStartTransaction(opCtx, txnNumber, txnRetryCounter);
+            break;
+        }
+        case TransactionActions::kContinue: {
+            uasserted(ErrorCodes::NoSuchTransaction,
+                      str::stream() << "cannot continue txnId " << o().txnNumber << " for session "
+                                    << _sessionId() << " with txnId " << txnNumber);
+        }
+        case TransactionActions::kCommit: {
+            _resetRouterState(opCtx, txnNumber, txnRetryCounter);
+            // If the first action seen by the router for this transaction is to commit, that
+            // means that the client is attempting to recover a commit decision.
+            p().isRecoveringCommit = true;
+
+            LOGV2_DEBUG(22890,
+                        3,
+                        "{sessionId}:{txnNumber} Commit recovery started",
+                        "Commit recovery started",
+                        "sessionId"_attr = _sessionId().getId(),
+                        "txnNumber"_attr = o().txnNumber);
+
+            break;
+        }
+    };
+}
+
+void TransactionRouter::Router::beginOrContinueTxn(OperationContext* opCtx,
+                                                   TxnNumber txnNumber,
+                                                   TransactionActions action,
+                                                   TxnRetryCounter txnRetryCounter) {
+    invariant(txnRetryCounter >= 0, "Cannot specify a negative txnRetryCounter");
+
+    if (txnNumber < o().txnNumber) {
+        // This transaction is older than the transaction currently in progress, so throw an error.
+        uasserted(ErrorCodes::TransactionTooOld,
+                  str::stream() << "txnNumber " << txnNumber << " is less than last txnNumber "
+                                << o().txnNumber << " seen in session " << _sessionId());
+    } else if (txnNumber == o().txnNumber) {
+        // This is the same transaction as the one in progress.
+        auto apiParamsFromClient = APIParameters::get(opCtx);
+        if (action == TransactionActions::kContinue || action == TransactionActions::kCommit) {
+            uassert(
+                ErrorCodes::APIMismatchError,
+                "API parameter mismatch: transaction-continuing command used {}, the transaction's"
+                " first command used {}"_format(apiParamsFromClient.toBSON().toString(),
+                                                o().apiParameters.toBSON().toString()),
+                apiParamsFromClient == o().apiParameters);
+        }
+        _beginOrContinueActiveTxnNumber(opCtx, txnNumber, action, txnRetryCounter);
+    } else {
         // This is a newer transaction.
-        switch (action) {
-            case TransactionActions::kStart: {
-                auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-                uassert(
-                    ErrorCodes::InvalidOptions,
-                    "The first command in a transaction cannot specify a readConcern level other "
-                    "than local, majority, or snapshot",
-                    !readConcernArgs.hasLevel() ||
-                        isReadConcernLevelAllowedInTransaction(readConcernArgs.getLevel()));
-
-                _resetRouterState(opCtx, txnNumber);
-
-                {
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    o(lk).apiParameters = APIParameters::get(opCtx);
-                    o(lk).readConcernArgs = readConcernArgs;
-                }
-
-                if (o().readConcernArgs.getLevel() ==
-                    repl::ReadConcernLevel::kSnapshotReadConcern) {
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    o(lk).atClusterTime.emplace();
-                }
-
-                LOGV2_DEBUG(22889,
-                            3,
-                            "{sessionId}:{txnNumber} New transaction started",
-                            "New transaction started",
-                            "sessionId"_attr = _sessionId().getId(),
-                            "txnNumber"_attr = o().txnNumber);
-                break;
-            }
-            case TransactionActions::kContinue: {
-                uasserted(ErrorCodes::NoSuchTransaction,
-                          str::stream()
-                              << "cannot continue txnId " << o().txnNumber << " for session "
-                              << _sessionId() << " with txnId " << txnNumber);
-            }
-            case TransactionActions::kCommit: {
-                _resetRouterState(opCtx, txnNumber);
-                // If the first action seen by the router for this transaction is to commit, that
-                // means that the client is attempting to recover a commit decision.
-                p().isRecoveringCommit = true;
-
-                LOGV2_DEBUG(22890,
-                            3,
-                            "{sessionId}:{txnNumber} Commit recovery started",
-                            "Commit recovery started",
-                            "sessionId"_attr = _sessionId().getId(),
-                            "txnNumber"_attr = o().txnNumber);
-
-                break;
-            }
-        };
+        _beginNewTxnNumber(opCtx, txnNumber, action, txnRetryCounter);
     }
 
     _updateLastClientInfo(opCtx->getClient());
@@ -1184,7 +1223,7 @@ BSONObj TransactionRouter::Router::abortTransaction(OperationContext* opCtx) {
 
     // Update stats on scope exit so the transaction is considered "active" while waiting on abort
     // responses.
-    auto updateStatsGuard = makeGuard([&] { _onExplicitAbort(opCtx); });
+    ScopeGuard updateStatsGuard([&] { _onExplicitAbort(opCtx); });
 
     // The router has yet to send any commands to a remote shard for this transaction.
     // Return the same error that would have been returned by a shard.
@@ -1260,7 +1299,7 @@ void TransactionRouter::Router::implicitlyAbortTransaction(OperationContext* opC
 
     // Update stats on scope exit so the transaction is considered "active" while waiting on abort
     // responses.
-    auto updateStatsGuard = makeGuard([&] { _onImplicitAbort(opCtx, status); });
+    ScopeGuard updateStatsGuard([&] { _onImplicitAbort(opCtx, status); });
 
     if (o().participants.empty()) {
         return;
@@ -1326,9 +1365,11 @@ void TransactionRouter::Router::appendRecoveryToken(BSONObjBuilder* builder) con
 }
 
 void TransactionRouter::Router::_resetRouterState(OperationContext* opCtx,
-                                                  const TxnNumber& txnNumber) {
+                                                  const TxnNumber& txnNumber,
+                                                  const TxnRetryCounter& txnRetryCounter) {
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     o(lk).txnNumber = txnNumber;
+    o(lk).txnRetryCounter = txnRetryCounter;
     o(lk).commitType = CommitType::kNotInitiated;
     p().isRecoveringCommit = false;
     o(lk).participants.clear();
@@ -1348,6 +1389,37 @@ void TransactionRouter::Router::_resetRouterState(OperationContext* opCtx,
     // of the command that started the transaction, if one was included.
     p().latestStmtId = kDefaultFirstStmtId;
     p().firstStmtId = kDefaultFirstStmtId;
+};
+
+void TransactionRouter::Router::_resetRouterStateForStartTransaction(
+    OperationContext* opCtx, const TxnNumber& txnNumber, const TxnRetryCounter& txnRetryCounter) {
+    auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    uassert(ErrorCodes::InvalidOptions,
+            "The first command in a transaction cannot specify a readConcern level "
+            "other than local, majority, or snapshot",
+            !readConcernArgs.hasLevel() ||
+                isReadConcernLevelAllowedInTransaction(readConcernArgs.getLevel()));
+
+    _resetRouterState(opCtx, txnNumber, txnRetryCounter);
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        o(lk).apiParameters = APIParameters::get(opCtx);
+        o(lk).readConcernArgs = readConcernArgs;
+    }
+
+    if (o().readConcernArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern) {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        o(lk).atClusterTime.emplace();
+    }
+
+    LOGV2_DEBUG(22889,
+                3,
+                "{sessionId}:{txnNumber} New transaction started",
+                "New transaction started",
+                "sessionId"_attr = _sessionId().getId(),
+                "txnNumber"_attr = o().txnNumber,
+                "txnRetryCounter"_attr = txnRetryCounter);
 };
 
 BSONObj TransactionRouter::Router::_commitWithRecoveryToken(OperationContext* opCtx,

@@ -113,13 +113,8 @@ public:
     // Name of the collections collection in the config server.
     static const NamespaceString ConfigNS;
 
-    CollectionType(NamespaceString nss, OID epoch, Date_t updatedAt, UUID uuid);
-
-    CollectionType(NamespaceString nss,
-                   OID epoch,
-                   boost::optional<Timestamp> creationTime,
-                   Date_t updatedAt,
-                   UUID uuid);
+    CollectionType(
+        NamespaceString nss, OID epoch, Timestamp creationTime, Date_t updatedAt, UUID uuid);
 
     explicit CollectionType(const BSONObj& obj);
 
@@ -150,7 +145,7 @@ public:
     void setMaxChunkSizeBytes(int64_t value);
 
     bool getAllowAutoSplit() const {
-        return !getNoAutoSplit();
+        return !getNoAutoSplit().get_value_or(false);
     }
 
     bool getAllowBalance() const {

@@ -31,6 +31,8 @@
 
 #include "mongo/db/exec/sbe/stages/project.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
+
 namespace mongo {
 namespace sbe {
 ProjectStage::ProjectStage(std::unique_ptr<PlanStage> input,
@@ -145,8 +147,15 @@ std::vector<DebugPrinter::Block> ProjectStage::debugPrint() const {
     return ret;
 }
 
-void ProjectStage::doSaveState() {
-    if (!slotsAccessible()) {
+size_t ProjectStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_projects);
+    return size;
+}
+
+void ProjectStage::doSaveState(bool relinquishCursor) {
+    if (!slotsAccessible() || !relinquishCursor) {
         return;
     }
 

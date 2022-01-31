@@ -112,6 +112,7 @@ struct CollModRequest {
     boost::optional<ValidationActionEnum> collValidationAction;
     boost::optional<ValidationLevelEnum> collValidationLevel;
     bool recordPreImages = false;
+    OptionalBool changeStreamPreAndPostImagesEnabled;
 };
 
 StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
@@ -121,6 +122,7 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                                                BSONObjBuilder* oplogEntryBuilder) {
 
     bool isView = !coll;
+    bool isTimeseries = coll && coll->getTimeseriesOptions() != boost::none;
 
     CollModRequest cmr;
 
@@ -178,6 +180,12 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                 return Status(ErrorCodes::InvalidOptions, "no expireAfterSeconds or hidden field");
             }
             if (!cmr.indexExpireAfterSeconds.eoo()) {
+                if (isTimeseries) {
+                    return Status(ErrorCodes::InvalidOptions,
+                                  "TTL indexes are not supported for time-series collections. "
+                                  "Please refer to the documentation and use the top-level "
+                                  "'expireAfterSeconds' option instead");
+                }
                 if (auto status = index_key_validate::validateExpireAfterSeconds(
                         cmr.indexExpireAfterSeconds.safeNumberLong());
                     !status.isOK()) {
@@ -260,17 +268,17 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                     return Status(ErrorCodes::BadValue, "can't hide _id index");
                 }
             }
-        } else if (fieldName == "validator" && !isView) {
+        } else if (fieldName == "validator" && !isView && !isTimeseries) {
             // If the feature compatibility version is not kLatest, and we are validating features
             // as primary, ban the use of new agg features introduced in kLatest to prevent them
             // from being persisted in the catalog.
-            boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
+            boost::optional<multiversion::FeatureCompatibilityVersion>
                 maxFeatureCompatibilityVersion;
             // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-            ServerGlobalParams::FeatureCompatibility::Version fcv;
+            multiversion::FeatureCompatibilityVersion fcv;
             if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
                 serverGlobalParams.featureCompatibility.isLessThan(
-                    ServerGlobalParams::FeatureCompatibility::kLatest, &fcv)) {
+                    multiversion::GenericFCV::kLatest, &fcv)) {
                 maxFeatureCompatibilityVersion = fcv;
             }
             cmr.collValidator = coll->parseValidator(opCtx,
@@ -280,13 +288,13 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
             if (!cmr.collValidator->isOK()) {
                 return cmr.collValidator->getStatus();
             }
-        } else if (fieldName == "validationLevel" && !isView) {
+        } else if (fieldName == "validationLevel" && !isView && !isTimeseries) {
             try {
                 cmr.collValidationLevel = ValidationLevel_parse({"validationLevel"}, e.String());
             } catch (const DBException& exc) {
                 return exc.toStatus();
             }
-        } else if (fieldName == "validationAction" && !isView) {
+        } else if (fieldName == "validationAction" && !isView && !isTimeseries) {
             try {
                 cmr.collValidationAction = ValidationAction_parse({"validationAction"}, e.String());
             } catch (const DBException& exc) {
@@ -310,13 +318,15 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                 return Status(ErrorCodes::InvalidOptions, "'viewOn' option must be a string");
             }
             cmr.viewOn = e.str();
-        } else if (fieldName == "recordPreImages") {
-            if (isView) {
+        } else if (fieldName == "recordPreImages" && !isView && !isTimeseries) {
+            cmr.recordPreImages = e.trueValue();
+        } else if (fieldName == "changeStreamPreAndPostImages" && !isView && !isTimeseries) {
+            if (e.type() != mongo::Bool) {
                 return {ErrorCodes::InvalidOptions,
-                        str::stream() << "option not supported on a view: " << fieldName};
+                        "'changeStreamPreAndPostImages' option must be a boolean"};
             }
 
-            cmr.recordPreImages = e.trueValue();
+            cmr.changeStreamPreAndPostImagesEnabled = e.trueValue();
         } else if (fieldName == "expireAfterSeconds") {
             if (coll->getRecordStore()->keyFormat() != KeyFormat::String) {
                 return Status(ErrorCodes::InvalidOptions,
@@ -340,16 +350,21 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             cmr.clusteredIndexExpireAfterSeconds = e;
-        } else if (fieldName == "timeseries" && !isView) {
-            auto tsOptions = coll->getTimeseriesOptions();
-            if (!tsOptions) {
+        } else if (fieldName == "timeseries") {
+            if (!isTimeseries) {
                 return Status(ErrorCodes::InvalidOptions,
-                              str::stream() << "option only supported on a timeseries collection: "
+                              str::stream() << "option only supported on a time-series collection: "
                                             << fieldName);
             }
 
             cmr.timeseries = e;
         } else {
+            if (isTimeseries) {
+                return Status(ErrorCodes::InvalidOptions,
+                              str::stream() << "option not supported on a time-series collection: "
+                                            << fieldName);
+            }
+
             if (isView) {
                 return Status(ErrorCodes::InvalidOptions,
                               str::stream() << "option not supported on a view: " << fieldName);
@@ -476,8 +491,15 @@ Status _collModInternal(OperationContext* opCtx,
             .throwIfReshardingInProgress(nss);
     }
 
+
     // If db/collection/view does not exist, short circuit and return.
     if (!db || (!coll && !view)) {
+        if (nss.isTimeseriesBucketsCollection()) {
+            // If a sharded time-series collection is dropped, it's possible that a stale mongos
+            // sends the request on the buckets namespace instead of the view namespace. Ensure that
+            // the shardVersion is upto date before throwing an error.
+            CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
+        }
         return Status(ErrorCodes::NamespaceNotFound, "ns does not exist");
     }
 
@@ -513,6 +535,10 @@ Status _collModInternal(OperationContext* opCtx,
     auto idx = cmrNew.idx;
     auto ts = cmrNew.timeseries;
 
+    if (!serverGlobalParams.quiet.load()) {
+        LOGV2(5324200, "CMD: collMod", "cmdObj"_attr = cmdObj);
+    }
+
     return writeConflictRetry(opCtx, "collMod", nss.ns(), [&] {
         WriteUnitOfWork wunit(opCtx);
 
@@ -545,6 +571,20 @@ Status _collModInternal(OperationContext* opCtx,
         // options so we save the relevant TTL index data in a separate object.
 
         const CollectionOptions& oldCollOptions = coll->getCollectionOptions();
+
+        // TODO SERVER-58584: remove the feature flag.
+        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledAndIgnoreFCV()) {
+            // If 'changeStreamPreAndPostImagesEnabled' is set to true, 'recordPreImages' must be
+            // set to false. If 'recordPreImages' is set to true,
+            // 'changeStreamPreAndPostImagesEnabled' must be set to false.
+            if (cmrNew.changeStreamPreAndPostImagesEnabled) {
+                cmrNew.recordPreImages = false;
+            }
+
+            if (cmrNew.recordPreImages) {
+                cmrNew.changeStreamPreAndPostImagesEnabled = false;
+            }
+        }
 
         boost::optional<IndexCollModInfo> indexCollModInfo;
 
@@ -634,6 +674,15 @@ Status _collModInternal(OperationContext* opCtx,
             coll.getWritableCollection()->setRecordPreImages(opCtx, cmrNew.recordPreImages);
         }
 
+        // TODO SERVER-58584: remove the feature flag.
+        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledAndIgnoreFCV() &&
+            cmrNew.changeStreamPreAndPostImagesEnabled.has_value() &&
+            cmrNew.changeStreamPreAndPostImagesEnabled !=
+                oldCollOptions.changeStreamPreAndPostImagesEnabled) {
+            coll.getWritableCollection()->setChangeStreamPreAndPostImages(
+                opCtx, cmrNew.changeStreamPreAndPostImagesEnabled);
+        }
+
         if (ts.isABSONObj()) {
             auto res = timeseries::applyTimeseriesOptionsModifications(*oldCollOptions.timeseries,
                                                                        ts.Obj());
@@ -642,6 +691,19 @@ Status _collModInternal(OperationContext* opCtx,
             if (changed) {
                 coll.getWritableCollection()->setTimeseriesOptions(opCtx, newOptions);
             }
+        }
+
+        // Remove any invalid index options for indexes belonging to this collection.
+        std::vector<std::string> indexesWithInvalidOptions =
+            coll.getWritableCollection()->removeInvalidIndexOptions(opCtx);
+        for (const auto& indexWithInvalidOptions : indexesWithInvalidOptions) {
+            const IndexDescriptor* desc =
+                coll->getIndexCatalog()->findIndexByName(opCtx, indexWithInvalidOptions);
+            invariant(desc);
+
+            // Notify the index catalog that the definition of this index changed.
+            coll.getWritableCollection()->getIndexCatalog()->refreshEntry(
+                opCtx, coll.getWritableCollection(), desc);
         }
 
         // Only observe non-view collMods, as view operations are observed as operations on the

@@ -154,6 +154,12 @@ public:
 
     ReadSource getTimestampReadSource() const override;
 
+    void pinReadSource() override;
+
+    void unpinReadSource() override;
+
+    bool isReadSourcePinned() const override;
+
     virtual void setOrderedCommit(bool orderedCommit) override {
         _orderedCommit = orderedCommit;
     }
@@ -222,6 +228,9 @@ public:
 
     static void appendGlobalStats(BSONObjBuilder& b);
 
+    bool gatherWriteContextForDebugging() const;
+    void storeWriteContextForDebugging(const BSONObj& info);
+
 private:
     void doCommitUnitOfWork() override;
     void doAbortUnitOfWork() override;
@@ -289,6 +298,8 @@ private:
     // When 'true', data read from disk should not be kept in the storage engine cache.
     bool _readOnce = false;
 
+    bool _readSourcePinned = false;
+
     // The behavior of handling prepare conflicts.
     PrepareConflictBehavior _prepareConflictBehavior{PrepareConflictBehavior::kEnforce};
     // Dictates whether to round up prepare and commit timestamp of a prepared transaction.
@@ -302,6 +313,8 @@ private:
     std::unique_ptr<Timer> _timer;
     bool _isOplogReader = false;
     boost::optional<int64_t> _oplogVisibleTs = boost::none;
+    bool _gatherWriteContextForDebugging = false;
+    std::vector<BSONObj> _writeContextForDebugging;
 };
 
 }  // namespace mongo

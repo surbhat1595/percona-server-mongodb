@@ -39,9 +39,23 @@
 #include "mongo/logv2/log_domain_internal.h"
 #include "mongo/logv2/log_options.h"
 #include "mongo/logv2/log_source.h"
+#include "mongo/util/static_immortal.h"
 #include "mongo/util/testing_proctor.h"
 
 namespace mongo::logv2::detail {
+namespace {
+GetTenantIDFn& getTenantID() {
+    // Ensure that we avoid undefined initialization ordering
+    // when logging occurs during process init and shutdown.
+    // See logv2_test.cpp
+    static StaticImmortal<GetTenantIDFn> fn;
+    return *fn;
+}
+}  // namespace
+
+void setGetTenantIDCallback(GetTenantIDFn&& fn) {
+    getTenantID() = std::move(fn);
+}
 
 struct UnstructuredValueExtractor {
     void operator()(const char* name, CustomAttributeValue const& val) {
@@ -158,6 +172,15 @@ void doLogImpl(int32_t id,
             boost::log::attribute_value(
                 new boost::log::attributes::attribute_value_impl<TypeErasedAttributeStorage>(
                     attrs)));
+
+        if (auto fn = getTenantID()) {
+            if (auto tenant = fn()) {
+                record.attribute_values().insert(
+                    attributes::tenant(),
+                    boost::log::attribute_value(
+                        new boost::log::attributes::attribute_value_impl<OID>(tenant.get())));
+            }
+        }
 
         source.push_record(std::move(record));
     }

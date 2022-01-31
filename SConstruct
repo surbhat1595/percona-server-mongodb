@@ -2603,6 +2603,14 @@ if get_option("system-boost-lib-search-suffixes") is not None:
 # discover modules, and load the (python) module for each module's build.py
 mongo_modules = moduleconfig.discover_modules('src/mongo/db/modules', get_option('modules'))
 
+if get_option('ninja') != 'disabled':
+    for module in mongo_modules:
+        if hasattr(module, 'NinjaFile'):
+            env.FatalError(textwrap.dedent("""\
+                ERROR: Ninja tool option '--ninja' should not be used with the ninja module.
+                    Remove the ninja module directory or use '--modules= ' to select no modules.
+                    If using enterprise module, explicitly set '--modules=<name-of-enterprise-module>' to exclude the ninja module."""))
+
 # --- check system ---
 ssl_provider = None
 free_monitoring = get_option("enable-free-mon")
@@ -2994,6 +3002,18 @@ def doConfigure(myenv):
         # likely to catch these errors early, add the (currently clang
         # only) flag that turns it on.
         AddToCXXFLAGSIfSupported(myenv, "-Wunused-exception-parameter")
+
+        # TODO(SERVER-60151): Avoid the dilemma identified in
+        # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100493. Unfortunately,
+        # we don't have a more targeted warning suppression we can use
+        # other than disabling all deprecation warnings. We will
+        # revisit this once we are fully on C++20 and can commit the
+        # C++20 style code.
+        #
+        # TODO(SERVER-60175): In fact we will want to explicitly opt
+        # in to -Wdeprecated, since clang doesn't include it in -Wall.
+        if get_option('cxx-std') == "20":
+            AddToCXXFLAGSIfSupported(myenv, '-Wno-deprecated')
 
         # Check if we can set "-Wnon-virtual-dtor" when "-Werror" is set. The only time we can't set it is on
         # clang 3.4, where a class with virtual function(s) and a non-virtual destructor throws a warning when
@@ -5105,6 +5125,35 @@ if get_option('legacy-tarball') == 'true':
 
 module_sconscripts = moduleconfig.get_module_sconscripts(mongo_modules)
 
+# This generates a numeric representation of the version string so that
+# you can easily compare versions of MongoDB without having to parse
+# the version string.
+#
+# Examples:
+# 5.1.1-123 =>        ['5', '1', '1', '123', None, None] =>          [5, 1, 2, -100]
+# 5.1.1-rc2 =>        ['5', '1', '1', 'rc2', 'rc', '2'] =>           [5, 1, 1, -23]
+# 5.1.1-rc2-123 =>    ['5', '1', '1', 'rc2-123', 'rc', '2'] =>       [5, 1, 1, -23]
+# 5.1.0-alpha-123 =>  ['5', '1', '0', 'alpha-123', 'alpha', ''] =>   [5, 1, 0, -50]
+# 5.1.0-alpha1-123 => ['5', '1', '0', 'alpha1-123', 'alpha', '1'] => [5, 1, 0, -49]
+# 5.1.1 =>            ['5', '1', '1', '', None, None] =>             [5, 1, 1, 0]
+
+version_parts = [ x for x in re.match(r'^(\d+)\.(\d+)\.(\d+)-?((?:(rc|alpha)(\d?))?.*)?',
+    env['MONGO_VERSION']).groups() ]
+version_extra = version_parts[3] if version_parts[3] else ""
+if version_parts[4] == 'rc':
+    version_parts[3] = int(version_parts[5]) + -25
+elif version_parts[4] == 'alpha':
+        if version_parts[5] == '':
+            version_parts[3] = -50
+        else:
+            version_parts[3] = int(version_parts[5]) + -50
+elif version_parts[3]:
+    version_parts[2] = int(version_parts[2]) + 1
+    version_parts[3] = -100
+else:
+    version_parts[3] = 0
+version_parts = [ int(x) for x in version_parts[:4]]
+
 # The following symbols are exported for use in subordinate SConscript files.
 # Ideally, the SConscript files would be purely declarative.  They would only
 # import build environment objects, and would contain few or no conditional
@@ -5131,6 +5180,8 @@ Export([
     'use_system_version_of_library',
     'use_vendored_libunwind',
     'usemozjs',
+    'version_extra',
+    'version_parts',
     'wiredtiger',
 ])
 

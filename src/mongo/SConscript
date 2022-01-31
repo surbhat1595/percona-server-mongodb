@@ -7,40 +7,13 @@ Import([
     "has_option",
     "get_option",
     "use_libunwind",
+    "version_extra",
+    "version_parts",
 ])
 
 env = env.Clone()
 
 env.InjectMongoIncludePaths()
-
-# This generates a numeric representation of the version string so that
-# you can easily compare versions of MongoDB without having to parse
-# the version string.
-#
-# The rules for this are
-# {major}{minor}{release}{pre/rc/final}
-# If the version is pre-release and not an rc, the final number is 0
-# If the version is an RC, the final number of 1 + rc number
-# If the version is pre-release between RC's, the final number is 1 + rc number
-# If the version is a final release, the final number is 99
-#
-# Examples:
-# 3.1.1-123     = 3010100
-# 3.1.1-rc2     = 3010103
-# 3.1.1-rc2-123 = 3010103
-# 3.1.1         = 3010199
-#
-version_parts = [ x for x in re.match(r'^(\d+)\.(\d+)\.(\d+)-?((?:(rc)(\d+))?.*)?',
-    env['MONGO_VERSION']).groups() ]
-version_extra = version_parts[3] if version_parts[3] else ""
-if version_parts[4] == 'rc':
-    version_parts[3] = int(version_parts[5]) + -50
-elif version_parts[3]:
-    version_parts[2] = int(version_parts[2]) + 1
-    version_parts[3] = -100
-else:
-    version_parts[3] = 0
-version_parts = [ int(x) for x in version_parts[:4]]
 
 env.AppendUnique(
     FORCEINCLUDES=[
@@ -75,8 +48,6 @@ env.SConscript(
     ],
     exports=[
         'env',
-        'version_extra',
-        'version_parts',
     ],
 )
 

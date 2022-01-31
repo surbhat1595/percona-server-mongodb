@@ -29,23 +29,20 @@
 
 #pragma once
 
+#include <set>
+
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops_gen.h"
 
 namespace mongo::timeseries {
 
-
 /**
- * Returns true if the given query only modifies the time-series collection's given metaField, false
- * otherwise.
+ * Returns true if the given query, represented by its dependent fields, only modifies the
+ * time-series collection's given metaField, false otherwise.
  */
-bool queryOnlyDependsOnMetaField(OperationContext* opCtx,
-                                 const NamespaceString& ns,
-                                 const BSONObj& query,
-                                 boost::optional<StringData> metaField,
-                                 const LegacyRuntimeConstants& runtimeConstants,
-                                 const boost::optional<BSONObj>& letParams);
+bool queryOnlyDependsOnMetaField(boost::optional<StringData> metaField,
+                                 const std::set<std::string>& dependencyFieldNames);
 
 /**
  * Returns true if the given update modification only modifies the time-series collection's given
@@ -54,7 +51,6 @@ bool queryOnlyDependsOnMetaField(OperationContext* opCtx,
  * document).
  */
 bool updateOnlyModifiesMetaField(OperationContext* opCtx,
-                                 const NamespaceString& ns,
                                  const write_ops::UpdateModification& updateMod,
                                  StringData metaField);
 
@@ -67,7 +63,7 @@ bool updateOnlyModifiesMetaField(OperationContext* opCtx,
 BSONObj translateQuery(const BSONObj& query, StringData metaField);
 
 
-/*
+/**
  * Translates the given update on the time-series collection to an update on the time-series
  * collection's underlying buckets collection. Creates and returns a translated UpdateModification
  * where all occurrences of metaField in updateMod are replaced with the literal "meta". Requires
@@ -75,4 +71,9 @@ BSONObj translateQuery(const BSONObj& query, StringData metaField);
  */
 write_ops::UpdateModification translateUpdate(const write_ops::UpdateModification& updateMod,
                                               StringData metaField);
+
+/**
+ * Returns the function to use to count the number of documents updated or deleted.
+ */
+std::function<size_t(const BSONObj&)> numMeasurementsForBucketCounter(StringData timeField);
 }  // namespace mongo::timeseries

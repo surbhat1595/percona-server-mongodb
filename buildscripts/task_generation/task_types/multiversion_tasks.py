@@ -5,7 +5,7 @@ import inject
 from shrub.v2 import Task, FunctionCall, TaskDependency
 
 from buildscripts.resmokelib.multiversionconstants import REQUIRES_FCV_TAG
-from buildscripts.task_generation.constants import ARCHIVE_DIST_TEST_TASK
+from buildscripts.task_generation.constants import ARCHIVE_DIST_TEST_DEBUG_TASK
 from buildscripts.task_generation.suite_split import GeneratedSuite
 from buildscripts.task_generation.task_types.gentask_options import GenTaskOptions
 
@@ -67,7 +67,7 @@ class MultiversionGenTaskService:
         """
         sub_tasks = set()
         for version_config in params.mixed_version_configs:
-            for sub_suite in suite.sub_suites:
+            for index, sub_suite in enumerate(suite.sub_suites):
                 # Generate the newly divided test suites
                 sub_suite_name = sub_suite.name(len(suite))
                 sub_task_name = f"{sub_suite_name}_{version_config}_{suite.build_variant}"
@@ -75,41 +75,41 @@ class MultiversionGenTaskService:
                     sub_task_name = f"{params.name_prefix}:{sub_task_name}"
 
                 sub_tasks.add(
-                    self._generate_task(sub_task_name, sub_suite_name, version_config, params,
-                                        suite.build_variant))
+                    self._generate_task(sub_task_name, version_config, params, suite, index))
 
             if params.create_misc_suite:
                 # Also generate the misc task.
                 misc_suite_name = f"{params.origin_suite}_misc"
                 misc_task_name = f"{misc_suite_name}_{version_config}_{suite.build_variant}"
                 sub_tasks.add(
-                    self._generate_task(misc_task_name, misc_suite_name, version_config, params,
-                                        suite.build_variant))
+                    self._generate_task(misc_task_name, version_config, params, suite, None))
 
         return sub_tasks
 
     # pylint: disable=too-many-arguments
-    def _generate_task(self, sub_task_name: str, sub_suite_name: str, mixed_version_config: str,
-                       params: MultiversionGenTaskParams, build_variant: str) -> Task:
+    def _generate_task(self, sub_task_name: str, mixed_version_config: str,
+                       params: MultiversionGenTaskParams, suite: GeneratedSuite,
+                       index: Optional[int]) -> Task:
         """
         Generate a sub task to be run with the provided suite and  mixed version config.
 
         :param sub_task_name: Name of task being generated.
-        :param sub_suite_name: Name of suite to run.
         :param mixed_version_config: Versions task is being generated for.
         :param params: Parameters for how tasks should be generated.
         :return: Shrub configuration for task specified.
         """
-        suite_file = self.gen_task_options.suite_location(f"{sub_suite_name}_{build_variant}.yml")
+        suite_file = self.gen_task_options.suite_location(suite.sub_suite_config_file(index))
 
         run_tests_vars = {
             "resmoke_args": self._build_resmoke_args(suite_file, mixed_version_config, params),
             "task": params.parent_task_name,
             "gen_task_config_location": params.config_location,
+            "require_multiversion": True,
         }
 
         commands = [
             FunctionCall("git get project no modules"),
+            FunctionCall("add git tag"),
             FunctionCall("do setup"),
             # Fetch and download the proper mongod binaries before running multiversion tests.
             FunctionCall("configure evergreen api credentials"),
@@ -117,7 +117,7 @@ class MultiversionGenTaskService:
             FunctionCall("run generated tests", run_tests_vars),
         ]
 
-        return Task(sub_task_name, commands, {TaskDependency(ARCHIVE_DIST_TEST_TASK)})
+        return Task(sub_task_name, commands, {TaskDependency(ARCHIVE_DIST_TEST_DEBUG_TASK)})
 
     def _build_resmoke_args(self, suite_file: str, mixed_version_config: str,
                             params: MultiversionGenTaskParams) -> str:
@@ -129,11 +129,12 @@ class MultiversionGenTaskService:
         :param params: Parameters for how tasks should be generated.
         :return: Arguments to pass to resmoke to run the generated task.
         """
+
         tag_file_location = self.gen_task_options.generated_file_location(EXCLUDE_TAGS_FILE)
 
         return (
             f"{params.resmoke_args} "
-            f" --suite={suite_file} "
+            f" --suite={suite_file}.yml "
             f" --mixedBinVersions={mixed_version_config}"
             f" --excludeWithAnyTags={EXCLUDE_TAGS},{params.parent_task_name}_{BACKPORT_REQUIRED_TAG} "
             f" --tagFile={tag_file_location} "

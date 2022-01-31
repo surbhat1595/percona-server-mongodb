@@ -28,57 +28,91 @@
  */
 
 #include "mongo/db/pipeline/accumulator_multi.h"
+#include "mongo/util/version/releases.h"
 
 namespace mongo {
 using FirstLastSense = AccumulatorFirstLastN::Sense;
 using MinMaxSense = AccumulatorMinMax::Sense;
 
-REGISTER_ACCUMULATOR_WITH_MIN_VERSION(
+// TODO SERVER-52247 Replace boost::none with 'gFeatureFlagExactTopNAccumulator.getVersion()' below
+// once 'gFeatureFlagExactTopNAccumulator' is set to true by default and is configured with an FCV.
+REGISTER_ACCUMULATOR_CONDITIONALLY(
     maxN,
     AccumulatorMinMaxN::parseMinMaxN<MinMaxSense::kMax>,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion51);
-REGISTER_ACCUMULATOR_WITH_MIN_VERSION(
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_ACCUMULATOR_CONDITIONALLY(
     minN,
     AccumulatorMinMaxN::parseMinMaxN<MinMaxSense::kMin>,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion51);
-REGISTER_EXPRESSION_WITH_MIN_VERSION(maxN,
-                                     AccumulatorMinMaxN::parseExpression<MinMaxSense::kMax>,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion51);
-REGISTER_EXPRESSION_WITH_MIN_VERSION(minN,
-                                     AccumulatorMinMaxN::parseExpression<MinMaxSense::kMin>,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     ServerGlobalParams::FeatureCompatibility::Version::kVersion51);
-REGISTER_ACCUMULATOR_WITH_MIN_VERSION(
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_EXPRESSION_CONDITIONALLY(
+    maxN,
+    AccumulatorMinMaxN::parseExpression<MinMaxSense::kMax>,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_EXPRESSION_CONDITIONALLY(
+    minN,
+    AccumulatorMinMaxN::parseExpression<MinMaxSense::kMin>,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_ACCUMULATOR_CONDITIONALLY(
     firstN,
     AccumulatorFirstLastN::parseFirstLastN<FirstLastSense::kFirst>,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion51);
-REGISTER_ACCUMULATOR_WITH_MIN_VERSION(
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_ACCUMULATOR_CONDITIONALLY(
     lastN,
     AccumulatorFirstLastN::parseFirstLastN<FirstLastSense::kLast>,
-    ServerGlobalParams::FeatureCompatibility::Version::kVersion51);
-// TODO SERVER-57881 Add $firstN/$lastN as expressions.
-// TODO SERVER-57885 Add $minN/$maxN as window functions.
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_EXPRESSION_CONDITIONALLY(
+    firstN,
+    AccumulatorFirstLastN::parseExpression<FirstLastSense::kFirst>,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_EXPRESSION_CONDITIONALLY(
+    lastN,
+    AccumulatorFirstLastN::parseExpression<FirstLastSense::kLast>,
+    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithClientType::kAny,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 // TODO SERVER-57884 Add $firstN/$lastN as window functions.
 
 AccumulatorN::AccumulatorN(ExpressionContext* const expCtx)
     : AccumulatorState(expCtx), _maxMemUsageBytes(internalQueryMaxNAccumulatorBytes.load()) {}
 
-void AccumulatorN::startNewGroup(const Value& input) {
+long long AccumulatorN::validateN(const Value& input) {
     // Obtain the value for 'n' and error if it's not a positive integral.
     uassert(5787902,
             str::stream() << "Value for 'n' must be of integral type, but found "
                           << input.toString(),
-            isNumericBSONType(input.getType()));
+            input.numeric());
     auto n = input.coerceToLong();
     uassert(5787903,
             str::stream() << "Value for 'n' must be of integral type, but found "
                           << input.toString(),
             n == input.coerceToDouble());
     uassert(5787908, str::stream() << "'n' must be greater than 0, found " << n, n > 0);
-    _n = n;
+    return n;
+}
+void AccumulatorN::startNewGroup(const Value& input) {
+    _n = validateN(input);
 }
 
 void AccumulatorN::processInternal(const Value& input, bool merging) {
@@ -164,6 +198,7 @@ template <MinMaxSense s>
 AccumulationExpression AccumulatorMinMaxN::parseMinMaxN(ExpressionContext* const expCtx,
                                                         BSONElement elem,
                                                         VariablesParseState vps) {
+    expCtx->sbeGroupCompatible = false;
     auto name = [] {
         if constexpr (s == MinMaxSense::kMin) {
             return AccumulatorMinN::getName();
@@ -172,11 +207,6 @@ AccumulationExpression AccumulatorMinMaxN::parseMinMaxN(ExpressionContext* const
         }
     }();
 
-    // TODO SERVER-58379 Remove this uassert once the FCV constants are upgraded and the REGISTER
-    // macros above are updated accordingly.
-    uassert(5787909,
-            str::stream() << "Cannot create " << name << " accumulator if feature flag is disabled",
-            feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
     uassert(5787900,
             str::stream() << "specification must be an object; found " << elem,
             elem.type() == BSONType::Object);
@@ -259,6 +289,7 @@ template <FirstLastSense v>
 AccumulationExpression AccumulatorFirstLastN::parseFirstLastN(ExpressionContext* const expCtx,
                                                               BSONElement elem,
                                                               VariablesParseState vps) {
+    expCtx->sbeGroupCompatible = false;
     auto name = [] {
         if constexpr (v == Sense::kFirst) {
             return AccumulatorFirstN::getName();
@@ -267,11 +298,6 @@ AccumulationExpression AccumulatorFirstLastN::parseFirstLastN(ExpressionContext*
         }
     }();
 
-    // TODO SERVER-58379 Remove this uassert once the FCV constants are upgraded and the REGISTER
-    // macros above are updated accordingly.
-    uassert(5787800,
-            str::stream() << "Cannot create " << name << " accumulator if feature flag is disabled",
-            feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
     uassert(5787801,
             str::stream() << "specification must be an object; found " << elem,
             elem.type() == BSONType::Object);
@@ -324,6 +350,19 @@ Document AccumulatorFirstLastN::serialize(boost::intrusive_ptr<Expression> initi
     MutableDocument args;
     AccumulatorN::serializeHelper(initializer, argument, explain, args);
     return DOC(getOpName() << args.freeze());
+}
+
+template <FirstLastSense s>
+boost::intrusive_ptr<Expression> AccumulatorFirstLastN::parseExpression(
+    ExpressionContext* expCtx, BSONElement exprElement, const VariablesParseState& vps) {
+    auto accExpr = AccumulatorFirstLastN::parseFirstLastN<s>(expCtx, exprElement, vps);
+    if constexpr (s == FirstLastSense::kFirst) {
+        return make_intrusive<ExpressionFromAccumulatorN<AccumulatorFirstN>>(
+            expCtx, std::move(accExpr.initializer), std::move(accExpr.argument));
+    } else {
+        return make_intrusive<ExpressionFromAccumulatorN<AccumulatorLastN>>(
+            expCtx, std::move(accExpr.initializer), std::move(accExpr.argument));
+    }
 }
 
 void AccumulatorFirstLastN::reset() {

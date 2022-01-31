@@ -55,9 +55,11 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeAllMeasurementFields) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
     // This source will produce two buckets.
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
-         "{meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
+         "{control: {'version': 1}, meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'0':3, '1':4}, "
+         "time: {'0':3, '1':4}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -90,182 +92,6 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeAllMeasurementFields) {
     ASSERT_TRUE(next.isEOF());
 }
 
-TEST_F(InternalUnpackBucketExecTest, UnpackIncludeBucketIdRowIndexInvalidRowIndex) {
-    auto expCtx = getExpCtx();
-
-    auto spec = BSON(
-        DocumentSourceInternalUnpackBucket::kStageNameInternal
-        << BSON(DocumentSourceInternalUnpackBucket::kInclude
-                << BSON_ARRAY("_id" << kUserDefinedTimeName << kUserDefinedMetaName << "a"
-                                    << "b")
-                << timeseries::kTimeFieldName << kUserDefinedTimeName << timeseries::kMetaFieldName
-                << kUserDefinedMetaName << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
-                << 3600 << "includeBucketIdAndRowIndex" << true));
-    auto unpack =
-        DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    // This source will produce two buckets with invalid timeField indices.
-    auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'a':1,'b':2}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 0}",
-         "{meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'0':3, '1':4}, time: {'c':3, "
-         "'d':4}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 1}"},
-        expCtx);
-    unpack->setSource(source.get());
-    // The first result throws a FailedToParse exception.
-    ASSERT_THROWS_CODE(unpack->getNext(), DBException, ErrorCodes::FailedToParse);
-}
-
-TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeBucketIdRowIndexTrue) {
-    auto expCtx = getExpCtx();
-
-    auto spec = BSON(
-        DocumentSourceInternalUnpackBucket::kStageNameInternal
-        << BSON(DocumentSourceInternalUnpackBucket::kInclude
-                << BSON_ARRAY("_id" << kUserDefinedTimeName << kUserDefinedMetaName << "a"
-                                    << "b")
-                << timeseries::kTimeFieldName << kUserDefinedTimeName << timeseries::kMetaFieldName
-                << kUserDefinedMetaName << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
-                << 3600 << "includeBucketIdAndRowIndex" << true));
-    auto unpack =
-        DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    // This source will produce two buckets.
-    auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 0}",
-         "{meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 1}"},
-        expCtx);
-    unpack->setSource(source.get());
-    // The first result exists and is as expected.
-    auto next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 0, rowIndex: 0, rowData: {time: 1, myMeta: "
-                                         "{m1: 999, m2: 9999}, _id: 1, a: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 0, rowIndex: 1, rowData: {time: 2, myMeta: "
-                                         "{m1: 999, m2: 9999}, _id: 2, a: 2, b: 1}}")));
-
-    // Second bucket
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 1, rowIndex: 0, rowData: {time: 3, myMeta: "
-                                         "{m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 1, rowIndex: 1, rowData: {time: 4, myMeta: "
-                                         "{m1: 9, m2: 9, m3: 9}, _id: 4, a: 2, b: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isEOF());
-}
-
-TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeBucketIdRowIndexFalse) {
-    auto expCtx = getExpCtx();
-
-    auto spec = BSON(
-        DocumentSourceInternalUnpackBucket::kStageNameInternal
-        << BSON(DocumentSourceInternalUnpackBucket::kInclude
-                << BSON_ARRAY("_id" << kUserDefinedTimeName << kUserDefinedMetaName << "a"
-                                    << "b")
-                << timeseries::kTimeFieldName << kUserDefinedTimeName << timeseries::kMetaFieldName
-                << kUserDefinedMetaName << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
-                << 3600 << "includeBucketIdAndRowIndex" << false));
-    auto unpack =
-        DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    // This source will produce two buckets.
-    auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 0}",
-         "{meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 1}"},
-        expCtx);
-    unpack->setSource(source.get());
-    // The first result exists and is as expected.
-    auto next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{time: 1, myMeta: {m1: 999, m2: 9999}, _id: 1, a: 1}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{time: 2, myMeta: {m1: 999, "
-                                         "m2: 9999}, _id: 2, a: 2, b: 1}")));
-
-    // Second bucket
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(
-        next.getDocument(),
-        Document(fromjson("{time: 3, myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{time: 4, myMeta: {m1: 9, m2: "
-                                         "9, m3: 9}, _id: 4, a: 2, b: 1}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isEOF());
-}
-
-TEST_F(InternalUnpackBucketExecTest, UnpackExcludeASingleFieldIncludeBucketIdRowIndex) {
-    auto expCtx = getExpCtx();
-    auto spec = BSON(DocumentSourceInternalUnpackBucket::kStageNameInternal << BSON(
-                         DocumentSourceInternalUnpackBucket::kExclude
-                         << BSON_ARRAY("b") << timeseries::kTimeFieldName << kUserDefinedTimeName
-                         << timeseries::kMetaFieldName << kUserDefinedMetaName
-                         << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600
-                         << "includeBucketIdAndRowIndex" << true));
-
-    auto unpack =
-        DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-
-    auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 0}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
-         "a:{'0':1, '1':2}, b:{'1':1}}, _id: 1}"},
-        expCtx);
-    unpack->setSource(source.get());
-    // The first result exists and is as expected.
-    auto next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 0, rowIndex: 0, rowData: {time: 1, myMeta: "
-                                         "{m1: 999, m2: 9999}, _id: 1, a: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 0, rowIndex: 1, rowData: {time: 2, myMeta: "
-                                         "{m1: 999, m2: 9999}, _id: 2, a: 2}}")));
-
-    // Second bucket
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 1, rowIndex: 0, rowData: {time: 3, myMeta: "
-                                         "{m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 1, rowIndex: 1, rowData: {time: 4, myMeta: "
-                                         "{m1: 9, m2: 9, m3: 9}, _id: 4, a: 2}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isEOF());
-}
-
 TEST_F(InternalUnpackBucketExecTest, UnpackExcludeASingleField) {
     auto expCtx = getExpCtx();
     auto spec = BSON(DocumentSourceInternalUnpackBucket::kStageNameInternal << BSON(
@@ -278,9 +104,11 @@ TEST_F(InternalUnpackBucketExecTest, UnpackExcludeASingleField) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
+         "{control: {'version': 1}, meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: "
+         "{'0':3, '1':4}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -323,9 +151,11 @@ TEST_F(InternalUnpackBucketExecTest, UnpackEmptyInclude) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
+         "{control: {'version': 1}, meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: "
+         "{'0':3, '1':4}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -358,9 +188,11 @@ TEST_F(InternalUnpackBucketExecTest, UnpackEmptyExclude) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
+         "{control: {'version': 1}, meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: "
+         "{'0':3, '1':4}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -406,6 +238,7 @@ TEST_F(InternalUnpackBucketExecTest, UnpackNeitherIncludeNorExcludeDefaultsToEmp
     auto source = DocumentSourceMock::createForTest(
         {
             R"({
+    control: {'version': 1}, 
     meta: {'m1': 999, 'm2': 9999},
     data: {
         _id: {'0':1, '1':2},
@@ -415,6 +248,7 @@ TEST_F(InternalUnpackBucketExecTest, UnpackNeitherIncludeNorExcludeDefaultsToEmp
     }
 })",
             R"({
+    control: {'version': 1}, 
     meta: {m1: 9, m2: 9, m3: 9},
     data: {
         _id: {'0':3, '1':4},
@@ -465,7 +299,8 @@ TEST_F(InternalUnpackBucketExecTest, SparseColumnsWhereOneColumnIsExhaustedBefor
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}, "
          "a:{'0':1}, b:{'1':1}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -498,9 +333,11 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeWithDollarPrefix) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
     // This source will produce two buckets.
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}, "
          "$a:{'0':1, '1':2}, b:{'1':1}}}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
+         "{control: {'version': 1}, meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: "
+         "{'0':3, '1':4}, "
          "$a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -533,57 +370,6 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeWithDollarPrefix) {
     ASSERT_TRUE(next.isEOF());
 }
 
-TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeWithDollarPrefixIncludeBucketIdRowIndex) {
-    auto expCtx = getExpCtx();
-
-    auto spec = BSON(
-        DocumentSourceInternalUnpackBucket::kStageNameInternal
-        << BSON(DocumentSourceInternalUnpackBucket::kInclude
-                << BSON_ARRAY("_id" << kUserDefinedTimeName << kUserDefinedMetaName << "$a"
-                                    << "b")
-                << timeseries::kTimeFieldName << kUserDefinedTimeName << timeseries::kMetaFieldName
-                << kUserDefinedMetaName << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
-                << 3600 << "includeBucketIdAndRowIndex" << true));
-    auto unpack =
-        DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    // This source will produce two buckets.
-    auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}, "
-         "$a:{'0':1, '1':2}, b:{'1':1}}, _id: 0}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}, "
-         "$a:{'0':1, '1':2}, b:{'1':1}}, _id: 1}"},
-        expCtx);
-    unpack->setSource(source.get());
-    // The first result exists and is as expected.
-    auto next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 0, rowIndex: 0, rowData: {time: 1, myMeta: "
-                                         "{m1: 999, m2: 9999}, _id: 1, $a: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 0, rowIndex: 1, rowData: {time: 2, myMeta: "
-                                         "{m1: 999, m2: 9999}, _id: 2, $a: 2, b: 1}}")));
-
-    // Second bucket
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 1, rowIndex: 0, rowData: {time: 3, myMeta: "
-                                         "{m1: 9, m2: 9, m3: 9}, _id: 3, $a: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.getDocument(),
-                       Document(fromjson("{bucketId: 1, rowIndex: 1, rowData: {time: 4, myMeta: "
-                                         "{m1: 9, m2: 9, m3: 9}, _id: 4, $a: 2, b: 1}}")));
-
-    next = unpack->getNext();
-    ASSERT_TRUE(next.isEOF());
-}
-
 TEST_F(InternalUnpackBucketExecTest, UnpackMetadataOnly) {
     auto expCtx = getExpCtx();
     auto spec = BSON(DocumentSourceInternalUnpackBucket::kStageNameInternal
@@ -595,8 +381,10 @@ TEST_F(InternalUnpackBucketExecTest, UnpackMetadataOnly) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, time: {'0':1, '1':2}}}",
-         "{meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: {'0':3, '1':4}}}"},
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
+         "time: {'0':1, '1':2}}}",
+         "{control: {'version': 1}, meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: "
+         "{'0':3, '1':4}}}"},
         expCtx);
     unpack->setSource(source.get());
 
@@ -636,9 +424,9 @@ TEST_F(InternalUnpackBucketExecTest, UnpackWithStrangeTimestampOrdering) {
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
-         "{meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'1':4, "
+         "{control: {'version': 1}, meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
         expCtx);
     unpack->setSource(source.get());
@@ -687,9 +475,9 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesMissingMetadataWhenMet
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
     auto source =
-        DocumentSourceMock::createForTest({"{data: {_id: {'1':1, "
+        DocumentSourceMock::createForTest({"{control: {'version': 1}, data: {_id: {'1':1, "
                                            "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
-                                           "{data: {_id: {'1':4, "
+                                           "{control: {'version': 1}, data: {_id: {'1':4, "
                                            "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
                                           expCtx);
 
@@ -735,9 +523,9 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesExcludedMetadataWhenBu
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
     auto source = DocumentSourceMock::createForTest(
-        {"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
-         "{meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'1':4, "
+         "{control: {'version': 1}, meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
         expCtx);
 
@@ -782,10 +570,10 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerThrowsOnUndefinedMetadata) {
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
-    auto source =
-        DocumentSourceMock::createForTest({"{meta: undefined, data: {_id: {'1':1, "
-                                           "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}"},
-                                          expCtx);
+    auto source = DocumentSourceMock::createForTest(
+        {"{control: {'version': 1}, meta: undefined, data: {_id: {'1':1, "
+         "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}"},
+        expCtx);
     unpack->setSource(source.get());
     ASSERT_THROWS_CODE(unpack->getNext(), AssertionException, 5369600);
 }
@@ -799,12 +587,12 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerThrowsWhenMetadataIsPresentUn
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
-    auto source =
-        DocumentSourceMock::createForTest({"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
-                                           "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
-                                           "{meta: null, data: {_id: {'1':4, "
-                                           "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
-                                          expCtx);
+    auto source = DocumentSourceMock::createForTest(
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
+         "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
+         "{control: {'version': 1}, meta: null, data: {_id: {'1':4, "
+         "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
+        expCtx);
     unpack->setSource(source.get());
 
     ASSERT_THROWS_CODE(unpack->getNext(), AssertionException, 5369601);
@@ -820,12 +608,12 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesNullMetadata) {
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
 
-    auto source =
-        DocumentSourceMock::createForTest({"{meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
-                                           "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
-                                           "{meta: null, data: {_id: {'1':4, "
-                                           "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
-                                          expCtx);
+    auto source = DocumentSourceMock::createForTest(
+        {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
+         "'0':2, '2': 3}, time: {'1':1, '0': 2, '2': 3}}}",
+         "{control: {'version': 1}, meta: null, data: {_id: {'1':4, "
+         "'0':5, '2':6}, time: {'1':4, '0': 5, '2': 6}}}"},
+        expCtx);
     unpack->setSource(source.get());
 
     auto next = unpack->getNext();
@@ -874,6 +662,7 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesMissingMetadata) {
         {
             R"(
 {
+    control: {'version': 1}, 
     meta: {
         'm1': 999, 'm2': 9999
     },
@@ -884,6 +673,7 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesMissingMetadata) {
 })",
             R"(
 {
+    control: {'version': 1}, 
     data: {
         _id: {'1':4, '0':5, '2':6},
         time: {'1':4, '0': 5, '2': 6}

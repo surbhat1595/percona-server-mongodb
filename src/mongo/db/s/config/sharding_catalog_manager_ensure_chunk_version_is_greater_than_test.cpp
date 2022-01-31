@@ -59,7 +59,6 @@ ChunkType generateChunkType(const NamespaceString& nss,
     ChunkType chunkType;
     chunkType.setName(OID::gen());
     chunkType.setCollectionUUID(collUuid);
-    chunkType.setNS(nss);
     chunkType.setVersion(chunkVersion);
     chunkType.setShard(shardId);
     chunkType.setMin(minKey);
@@ -86,25 +85,23 @@ void assertChunkVersionWasBumpedTo(const ChunkType& chunkTypeBefore,
 
     // None of the chunk's other fields should have been changed.
     ASSERT_EQ(chunkTypeBefore.getName(), chunkTypeAfter.getName());
-    ASSERT_EQ(chunkTypeBefore.getNS(), chunkTypeAfter.getNS());
+    ASSERT_EQ(chunkTypeBefore.getCollectionUUID(), chunkTypeAfter.getCollectionUUID());
     ASSERT_BSONOBJ_EQ(chunkTypeBefore.getMin(), chunkTypeAfter.getMin());
     ASSERT_BSONOBJ_EQ(chunkTypeBefore.getMax(), chunkTypeAfter.getMax());
     ASSERT(chunkTypeBefore.getHistory() == chunkTypeAfter.getHistory());
 }
 
 TEST_F(EnsureChunkVersionIsGreaterThanTest, IfNoCollectionFoundReturnsSuccess) {
-    const auto requestedChunkType =
-        generateChunkType(_nss,
-                          _collUuid,
-                          ChunkVersion(10, 2, OID::gen(), boost::none /* timestamp */),
-                          ShardId(_shardName),
-                          BSON("a" << 1),
-                          BSON("a" << 10));
+    const auto requestedChunkType = generateChunkType(_nss,
+                                                      _collUuid,
+                                                      ChunkVersion(10, 2, OID::gen(), Timestamp()),
+                                                      ShardId(_shardName),
+                                                      BSON("a" << 1),
+                                                      BSON("a" << 10));
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          boost::none,
-                                          boost::none,
+                                          _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),
                                           requestedChunkType.getVersion());
@@ -112,7 +109,7 @@ TEST_F(EnsureChunkVersionIsGreaterThanTest, IfNoCollectionFoundReturnsSuccess) {
 
 TEST_F(EnsureChunkVersionIsGreaterThanTest, IfNoChunkWithMatchingMinKeyFoundReturnsSuccess) {
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(42);
 
     const auto requestedChunkType = generateChunkType(_nss,
                                                       _collUuid,
@@ -128,8 +125,7 @@ TEST_F(EnsureChunkVersionIsGreaterThanTest, IfNoChunkWithMatchingMinKeyFoundRetu
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          boost::none,
-                                          boost::none,
+                                          _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),
                                           requestedChunkType.getVersion());
@@ -157,7 +153,6 @@ TEST_F(EnsureChunkVersionIsGreaterThanTest, IfNoChunkWithMatchingMaxKeyFoundRetu
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          _nss,
                                           _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),
@@ -171,7 +166,7 @@ TEST_F(EnsureChunkVersionIsGreaterThanTest, IfNoChunkWithMatchingMaxKeyFoundRetu
 TEST_F(EnsureChunkVersionIsGreaterThanTest,
        IfChunkMatchingRequestedChunkFoundBumpsChunkVersionAndReturnsSuccess) {
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(42);
 
     const auto requestedChunkType = generateChunkType(_nss,
                                                       _collUuid,
@@ -191,8 +186,7 @@ TEST_F(EnsureChunkVersionIsGreaterThanTest,
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          boost::none,
-                                          boost::none,
+                                          _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),
                                           requestedChunkType.getVersion());
@@ -227,7 +221,6 @@ TEST_F(EnsureChunkVersionIsGreaterThanTest,
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          _nss,
                                           _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),
@@ -244,7 +237,7 @@ TEST_F(
     EnsureChunkVersionIsGreaterThanTest,
     IfChunkMatchingRequestedChunkFoundAndHasHigherChunkVersionReturnsSuccessWithoutBumpingChunkVersion) {
     const auto collEpoch = OID::gen();
-    const auto collTimestamp = boost::none;
+    const auto collTimestamp = Timestamp(42);
 
     const auto requestedChunkType = generateChunkType(_nss,
                                                       _collUuid,
@@ -259,8 +252,7 @@ TEST_F(
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          boost::none,
-                                          boost::none,
+                                          _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),
                                           requestedChunkType.getVersion());
@@ -289,7 +281,6 @@ TEST_F(
 
     ShardingCatalogManager::get(operationContext())
         ->ensureChunkVersionIsGreaterThan(operationContext(),
-                                          _nss,
                                           _collUuid,
                                           requestedChunkType.getMin(),
                                           requestedChunkType.getMax(),

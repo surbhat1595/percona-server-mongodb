@@ -87,6 +87,7 @@ MONGO_FAIL_POINT_DEFINE(throwWCEDuringTxnCollCreate);
 MONGO_FAIL_POINT_DEFINE(hangBeforeLoggingCreateCollection);
 MONGO_FAIL_POINT_DEFINE(hangAndFailAfterCreateCollectionReservesOpTime);
 MONGO_FAIL_POINT_DEFINE(openCreateCollectionWindowFp);
+MONGO_FAIL_POINT_DEFINE(allowSystemViewsDrop);
 
 Status validateDBNameForWindows(StringData dbname) {
     const std::vector<std::string> windowsReservedNames = {
@@ -361,11 +362,20 @@ Status DatabaseImpl::dropCollection(OperationContext* opCtx,
             if (CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_name) != 0)
                 return Status(ErrorCodes::IllegalOperation,
                               "turn off profiling before dropping system.profile collection");
-        } else if (!(nss.isSystemDotViews() || nss.isHealthlog() ||
-                     nss == NamespaceString::kLogicalSessionsNamespace ||
+        } else if (nss.isSystemDotViews()) {
+            if (!MONGO_unlikely(allowSystemViewsDrop.shouldFail())) {
+                const auto viewCatalog =
+                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, nss.db());
+                const auto viewStats = viewCatalog->getStats();
+                uassert(ErrorCodes::CommandFailed,
+                        str::stream() << "cannot drop collection " << nss
+                                      << " when time-series collections are present.",
+                        viewStats.userTimeseries == 0);
+            }
+        } else if (!(nss.isHealthlog() || nss == NamespaceString::kLogicalSessionsNamespace ||
                      nss == NamespaceString::kKeysCollectionNamespace ||
-                     nss.isTemporaryReshardingCollection() ||
-                     nss.isTimeseriesBucketsCollection())) {
+                     nss.isTemporaryReshardingCollection() || nss.isTimeseriesBucketsCollection() ||
+                     nss.isChangeStreamPreImagesCollection())) {
             return Status(ErrorCodes::IllegalOperation,
                           str::stream() << "can't drop system collection " << nss);
         }
@@ -926,10 +936,10 @@ Status DatabaseImpl::userCreateNS(OperationContext* opCtx,
         // primary, ban the use of new agg features introduced in kLatest to prevent them from being
         // persisted in the catalog.
         // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-        ServerGlobalParams::FeatureCompatibility::Version fcv;
+        multiversion::FeatureCompatibilityVersion fcv;
         if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
-            serverGlobalParams.featureCompatibility.isLessThan(
-                ServerGlobalParams::FeatureCompatibility::kLatest, &fcv)) {
+            serverGlobalParams.featureCompatibility.isLessThan(multiversion::GenericFCV::kLatest,
+                                                               &fcv)) {
             expCtx->maxFeatureCompatibilityVersion = fcv;
         }
 

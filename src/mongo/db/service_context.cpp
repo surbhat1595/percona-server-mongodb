@@ -39,7 +39,6 @@
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/locker_noop.h"
 #include "mongo/db/default_baton.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
@@ -49,6 +48,7 @@
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/str.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/system_tick_source.h"
@@ -242,18 +242,17 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
         _numCurrentOps.addAndFetch(1);
     }
 
-    auto numOpsGuard = makeGuard([&] {
+    ScopeGuard numOpsGuard([&] {
         if (client->session()) {
             _numCurrentOps.subtractAndFetch(1);
         }
     });
 
     onCreate(opCtx.get(), _clientObservers);
-    auto onCreateGuard = makeGuard([&] { onDestroy(opCtx.get(), _clientObservers); });
+    ScopeGuard onCreateGuard([&] { onDestroy(opCtx.get(), _clientObservers); });
 
-    if (!opCtx->lockState()) {
-        opCtx->setLockState(std::make_unique<LockerNoop>());
-    }
+    invariant(opCtx->lockState(), ProcessInfo().getProcessName());
+
     if (!opCtx->recoveryUnit()) {
         opCtx->setRecoveryUnit(std::make_unique<RecoveryUnitNoop>(),
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
@@ -265,7 +264,7 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
         makeBaton(opCtx.get());
     }
 
-    auto batonGuard = makeGuard([&] { opCtx->getBaton()->detach(); });
+    ScopeGuard batonGuard([&] { opCtx->getBaton()->detach(); });
 
     {
         stdx::lock_guard<Client> lk(*client);

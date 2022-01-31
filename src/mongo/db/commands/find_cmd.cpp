@@ -59,9 +59,12 @@
 #include "mongo/db/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(allowExternalReadsForReverseOplogScanRule);
 
 const auto kTermField = "term"_sd;
 
@@ -82,7 +85,7 @@ std::unique_ptr<FindCommandRequest> translateNtoReturnToLimitOrBatchSize(
             "the ntoreturn find command parameter is not supported when FCV >= 5.1",
             !(fcvState.isVersionInitialized() &&
               fcvState.isGreaterThanOrEqualTo(
-                  ServerGlobalParams::FeatureCompatibility::Version::kVersion51) &&
+                  multiversion::FeatureCompatibilityVersion::kVersion_5_1) &&
               findCmd->getNtoreturn()));
 
     const auto ntoreturn = findCmd->getNtoreturn().get_value_or(0);
@@ -354,7 +357,11 @@ public:
             // Get the execution plan for the query.
             bool permitYield = true;
             auto exec =
-                uassertStatusOK(getExecutorFind(opCtx, &collection, std::move(cq), permitYield));
+                uassertStatusOK(getExecutorFind(opCtx,
+                                                &collection,
+                                                std::move(cq),
+                                                nullptr /* extractAndAttachPipelineStages */,
+                                                permitYield));
 
             auto bodyBuilder = result->getBodyBuilder();
             // Got the execution tree. Explain it.
@@ -418,6 +425,37 @@ public:
                 // data reaching secondaries in order to proceed; and secondaries may get stalled
                 // replicating because of an inability to acquire a read ticket.
                 opCtx->lockState()->skipAcquireTicket();
+            }
+
+            // If this read represents a reverse oplog scan, we want to bypass oplog visibility
+            // rules in the case of secondaries. We normally only read from these nodes at batch
+            // boundaries, but in this specific case we should fetch all new entries, to be
+            // consistent with any catalog changes that might be observable before the batch is
+            // finalized. This special rule for reverse oplog scans is needed by replication
+            // initial sync, for the purposes of calculating the stopTimestamp correctly.
+            boost::optional<PinReadSourceBlock> pinReadSourceBlock;
+            if (isOplogNss) {
+                auto reverseScan = false;
+
+                auto cmdSort = findCommand->getSort();
+                if (!cmdSort.isEmpty()) {
+                    BSONElement natural = cmdSort[query_request_helper::kNaturalSortField];
+                    if (natural) {
+                        reverseScan = natural.safeNumberInt() < 0;
+                    }
+                }
+
+                auto isInternal = (opCtx->getClient()->session() &&
+                                   (opCtx->getClient()->session()->getTags() &
+                                    transport::Session::kInternalClient));
+
+                if (MONGO_unlikely(allowExternalReadsForReverseOplogScanRule.shouldFail())) {
+                    isInternal = true;
+                }
+
+                if (reverseScan && isInternal) {
+                    pinReadSourceBlock.emplace(opCtx->recoveryUnit());
+                }
             }
 
             // Acquire locks. If the query is on a view, we release our locks and convert the query
@@ -489,7 +527,11 @@ public:
             // Get the execution plan for the query.
             bool permitYield = true;
             auto exec =
-                uassertStatusOK(getExecutorFind(opCtx, &collection, std::move(cq), permitYield));
+                uassertStatusOK(getExecutorFind(opCtx,
+                                                &collection,
+                                                std::move(cq),
+                                                nullptr /* extractAndAttachPipelineStages */,
+                                                permitYield));
 
             {
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -580,6 +622,7 @@ public:
                      APIParameters::get(opCtx),
                      opCtx->getWriteConcern(),
                      repl::ReadConcernArgs::get(opCtx),
+                     ReadPreferenceSetting::get(opCtx),
                      _request.body,
                      {Privilege(ResourcePattern::forExactNamespace(nss), ActionType::find)}});
                 cursorId = pinnedCursor.getCursor()->cursorid();

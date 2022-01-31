@@ -21,6 +21,7 @@
 
 load('jstests/libs/profiler.js');
 load('jstests/sharding/libs/last_lts_mongos_commands.js');
+load('jstests/sharding/libs/shard_versioning_util.js');
 
 let db = "test";
 let coll = "foo";
@@ -46,7 +47,6 @@ let testCases = {
     _configsvrBalancerStatus: {skip: "primary only"},
     _configsvrBalancerStop: {skip: "primary only"},
     _configsvrClearJumboFlag: {skip: "primary only"},
-    _configsvrCommitChunkMerge: {skip: "primary only"},
     _configsvrCommitChunksMerge: {skip: "primary only"},
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
@@ -479,8 +479,8 @@ for (let command of commands) {
             profileDB: recipientShardSecondary.getDB(db),
             filter: Object.extend({
                 "command.shardVersion": {"$exists": true},
-                "command.shardVersion.0": {$ne: Timestamp(0, 0)},
-                "command.shardVersion.1": {$ne: ObjectId("00000000ffffffffffffffff")},
+                "command.shardVersion.0": {$ne: ShardVersioningUtil.kIgnoredShardVersion[0]},
+                "command.shardVersion.1": {$ne: ShardVersioningUtil.kIgnoredShardVersion[1]},
                 "command.$readPreference": {"mode": "secondary"},
                 "command.readConcern": {"level": "local"},
                 "errCode": {"$ne": ErrorCodes.StaleConfig},

@@ -30,7 +30,7 @@
 #pragma once
 
 #include "mongo/db/commands.h"
-#include "mongo/db/query/plan_cache.h"
+#include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/query_settings.h"
 
 namespace mongo {
@@ -142,9 +142,9 @@ public:
      * Removes corresponding entries from plan cache.
      */
     static Status clear(OperationContext* opCtx,
+                        const CollectionPtr& collection,
                         QuerySettings* querySettings,
                         PlanCache* planCache,
-                        const std::string& ns,
                         const BSONObj& cmdObj);
 };
 
@@ -174,9 +174,9 @@ public:
      * Removes entry for query shape from plan cache.
      */
     static Status set(OperationContext* opCtx,
+                      const CollectionPtr& collection,
                       QuerySettings* querySettings,
                       PlanCache* planCache,
-                      const std::string& ns,
                       const BSONObj& cmdObj);
 };
 

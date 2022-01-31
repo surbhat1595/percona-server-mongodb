@@ -103,6 +103,7 @@ DIRECTIO
 DNE
 DOI
 DONTNEED
+DS
 DSK
 DUPLICATEV
 DataSet
@@ -113,6 +114,7 @@ Decrement
 Decrypt
 DeleteFileW
 Destructor
+Deterministically
 EACCES
 EAGAIN
 EB
@@ -151,6 +153,7 @@ FTRUNCATE
 FULLFSYNC
 FUNCSIG
 Facebook
+Failpoint
 FindClose
 FindFirstFile
 FindNextFileW
@@ -330,6 +333,7 @@ Pre
 Preload
 Prepend
 Prev
+QQQS
 Qsort
 RCS
 RDNOLOCK
@@ -457,6 +461,7 @@ WTPERF
 WaitForSingleObject
 WakeAllConditionVariable
 Wconditional
+Wduplicated
 WeakHashLen
 Werror
 Wformat
@@ -783,6 +788,7 @@ extern
 extlist
 fadvise
 fahrenheit
+failpoint
 fallocate
 fallthrough
 fblocks
@@ -1130,6 +1136,7 @@ numSymbols
 numbare
 objs
 offpage
+ofh
 ok
 oldv
 ondisk
@@ -1482,6 +1489,7 @@ vsnprintf
 vtype
 vunpack
 vxr
+vz
 waitpid
 waker
 wakeup

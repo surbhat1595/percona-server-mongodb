@@ -70,17 +70,15 @@ void assertCanExtractShardKeyFromDocs(OperationContext* opCtx,
                                       const NamespaceString& nss,
                                       std::vector<InsertStatement>::const_iterator begin,
                                       std::vector<InsertStatement>::const_iterator end) {
-    const auto metadata = CollectionShardingRuntime::get(opCtx, nss)->getCurrentMetadataIfKnown();
+    const auto collDesc = CollectionShardingState::get(opCtx, nss)->getCollectionDescription(opCtx);
     // A user can manually create a 'db.system.resharding.' collection that isn't guaranteed to be
     // sharded outside of running reshardCollection.
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << "Temporary resharding collection " << nss.toString()
                           << " is not sharded",
-            metadata && metadata->isSharded());
+            collDesc.isSharded());
 
-    auto chunkManager = *metadata->getChunkManager();
-    const auto& shardKeyPattern = chunkManager.getShardKeyPattern();
-
+    const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
     for (auto it = begin; it != end; ++it) {
         shardKeyPattern.extractShardKeyFromDocThrows(it->doc);
     }
@@ -100,7 +98,7 @@ boost::optional<Timestamp> _calculatePin(OperationContext* opCtx) {
 
     // If the RecoveryUnit already had an open snapshot, keep the snapshot open. Otherwise abandon
     // the snapshot when exitting the function.
-    auto scopeGuard = makeGuard([&] { opCtx->recoveryUnit()->abandonSnapshot(); });
+    ScopeGuard scopeGuard([&] { opCtx->recoveryUnit()->abandonSnapshot(); });
     if (opCtx->recoveryUnit()->isActive()) {
         scopeGuard.dismiss();
     }

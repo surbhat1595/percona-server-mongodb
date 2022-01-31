@@ -280,7 +280,7 @@ public:
     Validator parseValidator(OperationContext* opCtx,
                              const BSONObj& validator,
                              MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-                             boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
+                             boost::optional<multiversion::FeatureCompatibilityVersion>
                                  maxFeatureCompatibilityVersion = boost::none) const final;
 
     /**
@@ -314,6 +314,9 @@ public:
 
     bool getRecordPreImages() const final;
     void setRecordPreImages(OperationContext* opCtx, bool val) final;
+
+    bool isChangeStreamPreAndPostImagesEnabled() const final;
+    void setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) final;
 
     bool isTemporary() const final;
 
@@ -418,6 +421,8 @@ public:
                           long long newExpireSeconds) final;
 
     void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) final;
+
+    std::vector<std::string> removeInvalidIndexOptions(OperationContext* opCtx) final;
 
     void setIsTemp(OperationContext* opCtx, bool isTemp) final;
 

@@ -62,17 +62,17 @@ CollectionMetadata makeCollectionMetadataImpl(
 
     std::vector<ChunkType> allChunks;
     auto nextMinKey = shardKeyPattern.globalMin();
-    ChunkVersion version{1, 0, epoch, boost::none /* timestamp */};
+    ChunkVersion version{1, 0, epoch, timestamp};
     for (const auto& myNextChunk : thisShardsChunks) {
         if (SimpleBSONObjComparator::kInstance.evaluate(nextMinKey < myNextChunk.first)) {
             // Need to add a chunk to the other shard from nextMinKey to myNextChunk.first.
             allChunks.emplace_back(
-                kNss, ChunkRange{nextMinKey, myNextChunk.first}, version, kOtherShard);
+                uuid, ChunkRange{nextMinKey, myNextChunk.first}, version, kOtherShard);
             allChunks.back().setHistory({ChunkHistory(kRouting, kOtherShard)});
             version.incMajor();
         }
         allChunks.emplace_back(
-            kNss, ChunkRange{myNextChunk.first, myNextChunk.second}, version, kThisShard);
+            uuid, ChunkRange{myNextChunk.first, myNextChunk.second}, version, kThisShard);
         allChunks.back().setHistory({ChunkHistory(kRouting, kThisShard)});
         version.incMajor();
         nextMinKey = myNextChunk.second;
@@ -80,7 +80,7 @@ CollectionMetadata makeCollectionMetadataImpl(
 
     if (SimpleBSONObjComparator::kInstance.evaluate(nextMinKey < shardKeyPattern.globalMax())) {
         allChunks.emplace_back(
-            kNss, ChunkRange{nextMinKey, shardKeyPattern.globalMax()}, version, kOtherShard);
+            uuid, ChunkRange{nextMinKey, shardKeyPattern.globalMax()}, version, kOtherShard);
         allChunks.back().setHistory({ChunkHistory(kRouting, kOtherShard)});
     }
 
@@ -94,7 +94,7 @@ CollectionMetadata makeCollectionMetadataImpl(
                                                       nullptr,
                                                       false,
                                                       epoch,
-                                                      boost::none /* timestamp */,
+                                                      timestamp,
                                                       boost::none /* timeseriesFields */,
                                                       std::move(reshardingFields),
                                                       boost::none /* chunkSizeBytes */,

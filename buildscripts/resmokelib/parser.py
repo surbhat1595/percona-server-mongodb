@@ -4,12 +4,14 @@ import argparse
 import shlex
 
 from buildscripts.resmokelib import configure_resmoke
+from buildscripts.resmokelib.generate_fcv_constants import GenerateFCVConstantsPlugin
 from buildscripts.resmokelib.hang_analyzer import HangAnalyzerPlugin
 from buildscripts.resmokelib.powercycle import PowercyclePlugin
 from buildscripts.resmokelib.run import RunPlugin
 from buildscripts.resmokelib.setup_multiversion import SetupMultiversionPlugin
 from buildscripts.resmokelib.symbolizer import SymbolizerPlugin
 from buildscripts.resmokelib.undodb import UndoDbPlugin
+from buildscripts.resmokelib.bisect import BisectPlugin
 
 _PLUGINS = [
     RunPlugin(),
@@ -18,6 +20,8 @@ _PLUGINS = [
     SetupMultiversionPlugin(),
     PowercyclePlugin(),
     SymbolizerPlugin(),
+    BisectPlugin(),
+    GenerateFCVConstantsPlugin(),
 ]
 
 

@@ -220,7 +220,7 @@ Status queryAuthzDocument(OperationContext* opCtx,
                           const std::function<void(const BSONObj&)>& resultProcessor) {
     try {
         DBDirectClient client(opCtx);
-        client.query(resultProcessor, collectionName, query, &projection);
+        client.query(resultProcessor, collectionName, query, Query(), &projection);
         return Status::OK();
     } catch (const DBException& e) {
         return e.toStatus();
@@ -918,6 +918,7 @@ struct UMCStdParams {
     static constexpr bool adminOnly = false;
     static constexpr bool supportsWriteConcern = true;
     static constexpr auto allowedOnSecondary = BasicCommand::AllowedOnSecondary::kNever;
+    static constexpr bool skipApiVersionCheck = false;
 };
 
 // Used by {usersInfo:...} and {rolesInfo:...}
@@ -925,14 +926,25 @@ struct UMCInfoParams {
     static constexpr bool adminOnly = false;
     static constexpr bool supportsWriteConcern = false;
     static constexpr auto allowedOnSecondary = BasicCommand::AllowedOnSecondary::kOptIn;
+    static constexpr bool skipApiVersionCheck = false;
 };
 
-// Used by {invalidateUserCache:...} and {_getUserCacheGeneration:...}
-struct UMCCacheParams {
+// Used by {invalidateUserCache:...}
+struct UMCInvalidateUserCacheParams {
+    static constexpr bool adminOnly = false;
+    static constexpr bool supportsWriteConcern = false;
+    static constexpr auto allowedOnSecondary = BasicCommand::AllowedOnSecondary::kAlways;
+    static constexpr bool skipApiVersionCheck = false;
+};
+
+// Used by {_getUserCacheGeneration:...}
+struct UMCGetUserCacheGenParams {
     static constexpr bool adminOnly = true;
     static constexpr bool supportsWriteConcern = false;
     static constexpr auto allowedOnSecondary = BasicCommand::AllowedOnSecondary::kAlways;
+    static constexpr bool skipApiVersionCheck = true;
 };
+
 
 template <typename RequestT, typename Params = UMCStdParams>
 class CmdUMCTyped : public TypedCommand<CmdUMCTyped<RequestT, Params>> {
@@ -962,6 +974,10 @@ public:
         }
     };
 
+    bool skipApiVersionCheck() const final {
+        return Params::skipApiVersionCheck;
+    }
+
     bool adminOnly() const final {
         return Params::adminOnly;
     }
@@ -970,6 +986,7 @@ public:
         return Params::allowedOnSecondary;
     }
 };
+
 
 class CmdCreateUser : public CmdUMCTyped<CreateUserCommand> {
 public:
@@ -1836,7 +1853,7 @@ void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx)
     uassertStatusOK(authzManager->rolesExist(opCtx, {roleName}));
 
     // From here on, we always want to invalidate the user cache before returning.
-    auto invalidateGuard = makeGuard([&] {
+    ScopeGuard invalidateGuard([&] {
         try {
             authzManager->invalidateUserCache(opCtx);
         } catch (const AssertionException& ex) {
@@ -1896,7 +1913,7 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
     auto lk = uassertStatusOK(requireWritableAuthSchema28SCRAM(opCtx, authzManager));
 
     // From here on, we always want to invalidate the user cache before returning.
-    auto invalidateGuard = makeGuard([opCtx, authzManager] {
+    ScopeGuard invalidateGuard([opCtx, authzManager] {
         try {
             authzManager->invalidateUserCache(opCtx);
         } catch (const AssertionException& ex) {
@@ -2027,24 +2044,26 @@ RolesInfoReply CmdUMCTyped<RolesInfoCommand, UMCInfoParams>::Invocation::typedRu
     return reply;
 }
 
-CmdUMCTyped<InvalidateUserCacheCommand, UMCCacheParams> cmdInvalidateUserCache;
+CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams> cmdInvalidateUserCache;
 template <>
-void CmdUMCTyped<InvalidateUserCacheCommand, UMCCacheParams>::Invocation::typedRun(
+void CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>::Invocation::typedRun(
     OperationContext* opCtx) {
     auto* authzManager = AuthorizationManager::get(opCtx->getServiceContext());
     auto lk = requireReadableAuthSchema26Upgrade(opCtx, authzManager);
     authzManager->invalidateUserCache(opCtx);
 }
 
-CmdUMCTyped<GetUserCacheGenerationCommand, UMCCacheParams> cmdGetUserCacheGeneration;
+CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams> cmdGetUserCacheGeneration;
+
 template <>
 GetUserCacheGenerationReply
-CmdUMCTyped<GetUserCacheGenerationCommand, UMCCacheParams>::Invocation::typedRun(
+CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>::Invocation::typedRun(
     OperationContext* opCtx) {
     uassert(ErrorCodes::IllegalOperation,
             "_getUserCacheGeneration can only be run on config servers",
             serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
 
+    cmdGetUserCacheGeneration.skipApiVersionCheck();
     GetUserCacheGenerationReply reply;
     auto* authzManager = AuthorizationManager::get(opCtx->getServiceContext());
     reply.setCacheGeneration(authzManager->getCacheGeneration());
@@ -2394,7 +2413,7 @@ void CmdMergeAuthzCollections::Invocation::typedRun(OperationContext* opCtx) {
     auto lk = uassertStatusOK(requireWritableAuthSchema28SCRAM(opCtx, authzManager));
 
     // From here on, we always want to invalidate the user cache before returning.
-    auto invalidateGuard = makeGuard([&] { authzManager->invalidateUserCache(opCtx); });
+    ScopeGuard invalidateGuard([&] { authzManager->invalidateUserCache(opCtx); });
     const auto db = cmd.getDb();
     const bool drop = cmd.getDrop();
 

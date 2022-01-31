@@ -38,6 +38,7 @@ if (!TimeseriesTest.shardedtimeseriesCollectionsEnabled(st.shard0)) {
 }
 
 // Databases.
+assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
 const mainDB = mongos.getDB(dbName);
 
 // Helpers.
@@ -64,23 +65,14 @@ function getDocumentsFromShard(shard, id) {
 }
 
 function runTest() {
-    mainDB.dropDatabase();
-
-    assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
-
-    // Create timeseries collection.
-    assert.commandWorked(mainDB.createCollection(
-        collName,
-        {timeseries: {timeField: timeField, metaField: metaField, granularity: "hours"}}));
-    const coll = mainDB.getCollection(collName);
-
-    // Shard timeseries collection.
+    // Create and shard timeseries collection.
     const shardKey = {[timeField]: 1};
-    assert.commandWorked(coll.createIndex(shardKey));
     assert.commandWorked(mongos.adminCommand({
         shardCollection: `${dbName}.${collName}`,
         key: shardKey,
+        timeseries: {timeField, metaField, granularity: "hours"}
     }));
+    const coll = mainDB.getCollection(collName);
 
     // Insert initial set of documents.
     const timeValues = [
@@ -141,6 +133,8 @@ function runTest() {
         const result = coll.find({[timeField]: document[timeField]}).toArray();
         assert.docEq([document], result);
     }
+
+    assert(coll.drop());
 }
 
 try {

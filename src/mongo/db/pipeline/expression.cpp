@@ -60,10 +60,8 @@ namespace mongo {
 using Parser = Expression::Parser;
 
 using boost::intrusive_ptr;
-using std::map;
 using std::move;
 using std::pair;
-using std::set;
 using std::string;
 using std::vector;
 
@@ -112,7 +110,7 @@ struct ParserRegistration {
     Parser parser;
     AllowedWithApiStrict allowedWithApiStrict;
     AllowedWithClientType allowedWithClientType;
-    boost::optional<ServerGlobalParams::FeatureCompatibility::Version> requiredMinVersion;
+    boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion;
 };
 
 /**
@@ -175,7 +173,7 @@ void Expression::registerExpression(
     Parser parser,
     AllowedWithApiStrict allowedWithApiStrict,
     AllowedWithClientType allowedWithClientType,
-    boost::optional<ServerGlobalParams::FeatureCompatibility::Version> requiredMinVersion) {
+    boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion) {
     auto op = parserMap.find(key);
     massert(17064,
             str::stream() << "Duplicate expression (" << key << ") registered.",
@@ -845,7 +843,9 @@ intrusive_ptr<ExpressionCoerceToBool> ExpressionCoerceToBool::create(
 
 ExpressionCoerceToBool::ExpressionCoerceToBool(ExpressionContext* const expCtx,
                                                intrusive_ptr<Expression> pExpression)
-    : Expression(expCtx, {std::move(pExpression)}), pExpression(_children[0]) {}
+    : Expression(expCtx, {std::move(pExpression)}), pExpression(_children[0]) {
+    expCtx->sbeCompatible = false;
+}
 
 intrusive_ptr<Expression> ExpressionCoerceToBool::optimize() {
     /* optimize the operand */
@@ -2346,7 +2346,14 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::createVarFromString(
 ExpressionFieldPath::ExpressionFieldPath(ExpressionContext* const expCtx,
                                          const string& theFieldPath,
                                          Variables::Id variable)
-    : Expression(expCtx), _fieldPath(theFieldPath), _variable(variable) {}
+    : Expression(expCtx), _fieldPath(theFieldPath), _variable(variable) {
+    const auto varName = theFieldPath.substr(0, theFieldPath.find('.'));
+    tassert(5943201,
+            std::string{"Variable with $$ROOT's id is not $$CURRENT or $$ROOT as expected, "
+                        "field path is actually '"} +
+                theFieldPath + "'",
+            _variable != Variables::kRootId || varName == "CURRENT" || varName == "ROOT");
+}
 
 intrusive_ptr<Expression> ExpressionFieldPath::optimize() {
     if (_variable == Variables::kRemoveId) {
@@ -3216,10 +3223,14 @@ boost::intrusive_ptr<Expression> ExpressionIfNull::optimize() {
             getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
     }
 
-    // Remove all null constants, unless it is the only child.
-    // If one of the operands is a non-null constant expression, remove any operands that follow it.
+    // Remove all null constants, unless it is the only child or it is the last parameter
+    // (<replacement-expression-if-null>). If one of the operands is a non-null constant expression,
+    // remove any operands that follow it.
     auto it = _children.begin();
-    while (it != _children.end() && _children.size() > 1) {
+    tassert(5868001,
+            str::stream() << "$ifNull needs at least two arguments, had: " << _children.size(),
+            _children.size() > 1);
+    while (it != _children.end() - 1) {
         if (auto constExpression = dynamic_cast<ExpressionConstant*>(it->get())) {
             if (constExpression->getValue().nullish()) {
                 it = _children.erase(it);
@@ -7388,7 +7399,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(
     ExpressionGetField::parse,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
+    multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
 intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const expCtx,
                                                     BSONElement expr,
@@ -7500,7 +7511,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(
     ExpressionSetField::parse,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
+    multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
 // $unsetField is syntactic sugar for $setField where value is set to $$REMOVE.
 REGISTER_EXPRESSION_WITH_MIN_VERSION(
@@ -7508,7 +7519,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(
     ExpressionSetField::parse,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
+    multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
 intrusive_ptr<Expression> ExpressionSetField::parse(ExpressionContext* const expCtx,
                                                     BSONElement expr,
@@ -7644,7 +7655,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(
     ExpressionTsSecond::parse,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
+    multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
 /* ------------------------- ExpressionTsIncrement ----------------------------- */
 
@@ -7668,7 +7679,7 @@ REGISTER_EXPRESSION_WITH_MIN_VERSION(
     ExpressionTsIncrement::parse,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50);
+    multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

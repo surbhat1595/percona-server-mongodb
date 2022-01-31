@@ -74,47 +74,12 @@ void appendChunk(const SplitPolicyParams& params,
                  const Timestamp& creationTimestamp,
                  const ShardId& shardId,
                  std::vector<ChunkType>* chunks) {
-    switch (params.configFormat) {
-        case ChunkEntryFormat::kNamespaceOnlyNoTimestamps:
-            chunks->emplace_back(params.nss,
-                                 ChunkRange(min, max),
-                                 ChunkVersion(version->majorVersion(),
-                                              version->minorVersion(),
-                                              version->epoch(),
-                                              boost::none),
-                                 shardId);
-            break;
-        case ChunkEntryFormat::kNamespaceAndUUIDNoTimestamps:
-            chunks->emplace_back(params.nss,
-                                 params.collectionUUID,
-                                 ChunkRange(min, max),
-                                 ChunkVersion(version->majorVersion(),
-                                              version->minorVersion(),
-                                              version->epoch(),
-                                              boost::none),
-                                 shardId);
-            break;
-        case ChunkEntryFormat::kNamespaceAndUUIDWithTimestamps:
-            chunks->emplace_back(params.nss,
-                                 params.collectionUUID,
-                                 ChunkRange(min, max),
-                                 ChunkVersion(version->majorVersion(),
-                                              version->minorVersion(),
-                                              version->epoch(),
-                                              creationTimestamp),
-                                 shardId);
-            break;
-        case ChunkEntryFormat::kUUIDOnlyWithTimestamps:
-            chunks->emplace_back(params.collectionUUID,
-                                 ChunkRange(min, max),
-                                 ChunkVersion(version->majorVersion(),
-                                              version->minorVersion(),
-                                              version->epoch(),
-                                              creationTimestamp),
-                                 shardId);
-            break;
-    }
-
+    chunks->emplace_back(
+        params.collectionUUID,
+        ChunkRange(min, max),
+        ChunkVersion(
+            version->majorVersion(), version->minorVersion(), version->epoch(), creationTimestamp),
+        shardId);
     auto& chunk = chunks->back();
     chunk.setHistory({ChunkHistory(creationTimestamp, shardId)});
     version->incMinor();
@@ -380,15 +345,16 @@ InitialSplitPolicy::ShardCollectionConfig UnoptimizedSplitPolicy::createFirstChu
     // the splitVector command and affects the number of chunks returned, has been loaded.
     const auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
     uassertStatusOK(balancerConfig->refreshAndCheck(opCtx));
+    auto optNss = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, params.collectionUUID);
+    invariant(optNss);
     const auto shardSelectedSplitPoints = uassertStatusOK(
         shardutil::selectChunkSplitPoints(opCtx,
                                           params.primaryShardId,
-                                          params.nss,
+                                          *optNss,
                                           shardKeyPattern,
                                           ChunkRange(shardKeyPattern.getKeyPattern().globalMin(),
                                                      shardKeyPattern.getKeyPattern().globalMax()),
-                                          balancerConfig->getMaxChunkSizeBytes(),
-                                          0));
+                                          balancerConfig->getMaxChunkSizeBytes()));
 
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     return generateShardCollectionInitialChunks(params,
@@ -467,8 +433,7 @@ InitialSplitPolicy::ShardCollectionConfig AbstractTagsBasedSplitPolicy::createFi
         invariant(it != tagToShards.end());
         uassert(50973,
                 str::stream()
-                    << "Cannot shard collection " << params.nss.ns() << " due to zone "
-                    << tag.getTag()
+                    << "Cannot shard collection " << tag.getNS() << " due to zone " << tag.getTag()
                     << " which is not assigned to a shard. Please assign this zone to a shard.",
                 !it->second.empty());
 

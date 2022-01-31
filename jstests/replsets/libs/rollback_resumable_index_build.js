@@ -59,10 +59,6 @@ const RollbackResumableIndexBuildTest = class {
      *   fixture should be expected to be completed when this function returns. If false, this
      *   function returns the collections, buildUUIDs, and index names of the index builds started
      *   by the test fixture.
-     *
-     * 'skipDataConsistencyChecks' is a boolean which determines whether data consistency checks
-     *   should be skipped by the rollback test fixture when transitioning to steady state
-     *   operations.
      */
     static run(rollbackTest,
                dbName,
@@ -78,26 +74,21 @@ const RollbackResumableIndexBuildTest = class {
                resumeChecks,
                insertsToBeRolledBack,
                sideWrites = [],
-               {shouldComplete = true, skipDataConsistencyChecks = false} = {}) {
+               {shouldComplete = true} = {}) {
         const originalPrimary = rollbackTest.getPrimary();
 
         rollbackTest.awaitLastOpCommitted();
 
-        assert.commandWorked(
-            originalPrimary.adminCommand({setParameter: 1, logComponentVerbosity: {index: 1}}));
+        assert.commandWorked(originalPrimary.adminCommand(
+            {setParameter: 1, logComponentVerbosity: {index: 1, replication: {heartbeats: 0}}}));
 
         // Set internalQueryExecYieldIterations to 0, internalIndexBuildBulkLoadYieldIterations to
         // 1, and maxIndexBuildDrainBatchSize to 1 so that the index builds are guaranteed to yield
         // their locks between the rollback end and start failpoints.
         assert.commandWorked(
             originalPrimary.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 0}));
-        // TODO (SERVER-59042): Remove special handling of index build bulk load lock yielding for
-        // multiversion tests after backports.
-        let res = originalPrimary.adminCommand(
-            {setParameter: 1, internalIndexBuildBulkLoadYieldIterations: 1});
-        if (res.ok || !res.errmsg.includes("unrecognized parameter")) {
-            assert.commandWorked(res);
-        }
+        assert.commandWorked(originalPrimary.adminCommand(
+            {setParameter: 1, internalIndexBuildBulkLoadYieldIterations: 1}));
         assert.commandWorked(
             originalPrimary.adminCommand({setParameter: 1, maxIndexBuildDrainBatchSize: 1}));
 
@@ -221,7 +212,8 @@ const RollbackResumableIndexBuildTest = class {
 
         // Wait until the parallel shells have all started.
         assert.soon(() => {
-            return (rawMongoProgramOutput().match(/5113600/g) || []).length === buildUUIDs.length;
+            return (rawMongoProgramOutput().match(/"id":5113600/g) || []).length ===
+                buildUUIDs.length;
         });
         getLogFp.off();
 
@@ -239,8 +231,7 @@ const RollbackResumableIndexBuildTest = class {
             });
         }
 
-        rollbackTest.transitionToSteadyStateOperations(
-            {skipDataConsistencyChecks: skipDataConsistencyChecks});
+        rollbackTest.transitionToSteadyStateOperations();
 
         if (shouldComplete) {
             // Ensure that the index builds completed after rollback.

@@ -70,6 +70,29 @@ Status getStatusFromWriteCommandResponse(const BSONObj& commandResult) {
     return batchResponse.toStatus();
 }
 
+/**
+ * Returns the namespace of the shard server's chunks collection correspoding to the collection
+ * namespace. The actual chunks collection namespace is based on the collection namespace or UUID
+ * depending on the current collection configuration.
+ */
+NamespaceString getShardChunksNss(const NamespaceString& collectionNss,
+                                  const UUID& collectionUuid,
+                                  SupportingLongNameStatusEnum supportingLongName) {
+    const auto chunksNsPostfix{supportingLongName == SupportingLongNameStatusEnum::kDisabled ||
+                                       collectionNss.isTemporaryReshardingCollection()
+                                   ? collectionNss.ns()
+                                   : collectionUuid.toString()};
+    return NamespaceString{ChunkType::ShardNSPrefix + chunksNsPostfix};
+}
+
+Status setPersistedRefreshFlags(OperationContext* opCtx, const NamespaceString& nss) {
+    return updateShardCollectionsEntry(
+        opCtx,
+        BSON(ShardCollectionType::kNssFieldName << nss.ns()),
+        BSON("$set" << BSON(ShardCollectionType::kRefreshingFieldName << true)),
+        false /*upsert*/);
+}
+
 }  // namespace
 
 QueryAndSort createShardChunkDiffQuery(const ChunkVersion& collectionVersion) {
@@ -137,12 +160,13 @@ StatusWith<RefreshState> getPersistedRefreshFlags(OperationContext* opCtx,
 StatusWith<ShardCollectionType> readShardCollectionsEntry(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
 
-    Query fullQuery(BSON(ShardCollectionType::kNssFieldName << nss.ns()));
-
     try {
         DBDirectClient client(opCtx);
         std::unique_ptr<DBClientCursor> cursor =
-            client.query(NamespaceString::kShardConfigCollectionsNamespace, fullQuery, 1);
+            client.query(NamespaceString::kShardConfigCollectionsNamespace,
+                         BSON(ShardCollectionType::kNssFieldName << nss.ns()),
+                         Query(),
+                         1);
         if (!cursor) {
             return Status(ErrorCodes::OperationFailed,
                           str::stream() << "Failed to establish a cursor for reading "
@@ -165,12 +189,13 @@ StatusWith<ShardCollectionType> readShardCollectionsEntry(OperationContext* opCt
 }
 
 StatusWith<ShardDatabaseType> readShardDatabasesEntry(OperationContext* opCtx, StringData dbName) {
-    Query fullQuery(BSON(ShardDatabaseType::name() << dbName.toString()));
-
     try {
         DBDirectClient client(opCtx);
         std::unique_ptr<DBClientCursor> cursor =
-            client.query(NamespaceString::kShardConfigDatabasesNamespace, fullQuery, 1);
+            client.query(NamespaceString::kShardConfigDatabasesNamespace,
+                         BSON(ShardDatabaseType::name() << dbName.toString()),
+                         Query(),
+                         1);
         if (!cursor) {
             return Status(ErrorCodes::OperationFailed,
                           str::stream() << "Failed to establish a cursor for reading "
@@ -282,21 +307,14 @@ StatusWith<std::vector<ChunkType>> readShardChunks(OperationContext* opCtx,
                                                    const BSONObj& sort,
                                                    boost::optional<long long> limit,
                                                    const OID& epoch,
-                                                   const boost::optional<Timestamp>& timestamp) {
-    const auto chunksNsPostfix{supportingLongName == SupportingLongNameStatusEnum::kDisabled ||
-                                       nss.isTemporaryReshardingCollection()
-                                   ? nss.ns()
-                                   : uuid.toString()};
-    const NamespaceString chunksNss{ChunkType::ShardNSPrefix + chunksNsPostfix};
+                                                   const Timestamp& timestamp) {
+    const auto chunksNss = getShardChunksNss(nss, uuid, supportingLongName);
 
     try {
         DBDirectClient client(opCtx);
 
-        Query fullQuery(query);
-        fullQuery.sort(sort);
-
         std::unique_ptr<DBClientCursor> cursor =
-            client.query(chunksNss, fullQuery, limit.get_value_or(0));
+            client.query(chunksNss, query, Query().sort(sort), limit.get_value_or(0));
         uassert(ErrorCodes::OperationFailed,
                 str::stream() << "Failed to establish a cursor for reading " << chunksNss.ns()
                               << " from local storage",
@@ -328,11 +346,7 @@ Status updateShardChunks(OperationContext* opCtx,
                          const OID& currEpoch) {
     invariant(!chunks.empty());
 
-    const auto chunksNsPostfix{supportingLongName == SupportingLongNameStatusEnum::kDisabled ||
-                                       nss.isTemporaryReshardingCollection()
-                                   ? nss.ns()
-                                   : uuid.toString()};
-    const NamespaceString chunksNss{ChunkType::ShardNSPrefix + chunksNsPostfix};
+    const auto chunksNss = getShardChunksNss(nss, uuid, supportingLongName);
 
     try {
         DBDirectClient client(opCtx);
@@ -421,38 +435,36 @@ void updateSupportingLongNameOnShardCollections(OperationContext* opCtx,
     uassertStatusOK(getStatusFromWriteCommandReply(commandResponse->getCommandReply()));
 }
 
-void updateTimestampOnShardCollections(OperationContext* opCtx,
-                                       const NamespaceString& nss,
-                                       const boost::optional<Timestamp>& timestamp) {
-    write_ops::UpdateCommandRequest clearFields(
-        NamespaceString::kShardConfigCollectionsNamespace, [&] {
-            write_ops::UpdateOpEntry u;
-            u.setQ(BSON(ShardCollectionType::kNssFieldName << nss.ns()));
-            BSONObj updateOp = (timestamp)
-                ? BSON("$set" << BSON(CollectionType::kTimestampFieldName << *timestamp))
-                : BSON("$unset" << BSON(CollectionType::kTimestampFieldName << ""));
-            u.setU(write_ops::UpdateModification::parseFromClassicUpdate(updateOp));
-            return std::vector{u};
-        }());
-
-    DBDirectClient client(opCtx);
-    const auto commandResult = client.runCommand(clearFields.serialize({}));
-
-    uassertStatusOK(getStatusFromWriteCommandResponse(commandResult->getCommandReply()));
-}
-
 Status dropChunksAndDeleteCollectionsEntry(OperationContext* opCtx, const NamespaceString& nss) {
-    // TODO (SERVER-58361): Reduce the access to local collections.
+    // Retrieve the collection entry from 'config.cache.collections' if available, otherwise return
+    // immediately
     const auto statusWithCollectionEntry = readShardCollectionsEntry(opCtx, nss);
-    if (statusWithCollectionEntry.getStatus() == ErrorCodes::NamespaceNotFound) {
-        return Status::OK();
+    if (!statusWithCollectionEntry.isOK()) {
+        const auto status = statusWithCollectionEntry.getStatus();
+        if (status == ErrorCodes::NamespaceNotFound) {
+            return Status::OK();
+        }
+
+        LOGV2_ERROR(5966300,
+                    "Failed to read persisted collection entry",
+                    "namespace"_attr = nss,
+                    "error"_attr = redact(status));
+
+        return status;
     }
-    uassertStatusOKWithContext(statusWithCollectionEntry,
-                               str::stream() << "Failed to read persisted collection entry for '"
-                                             << nss.ns() << "'.");
     const auto& collectionEntry = statusWithCollectionEntry.getValue();
 
     try {
+        // Mark the collection entry as refreshing to indicate that the persisted metadata is about
+        // to be dropped
+        if (!collectionEntry.getRefreshing() || !*collectionEntry.getRefreshing()) {
+            uassertStatusOK(setPersistedRefreshFlags(opCtx, nss));
+        }
+
+        // Drop the 'config.cache.chunks.<ns/uuid>' collection
+        dropChunks(opCtx, nss, collectionEntry.getUuid(), collectionEntry.getSupportingLongName());
+
+        // Delete the collection entry from 'config.cache.collections'
         DBDirectClient client(opCtx);
         auto deleteCommandResponse = client.runCommand([&] {
             write_ops::DeleteCommandRequest deleteOp(
@@ -467,29 +479,29 @@ Status dropChunksAndDeleteCollectionsEntry(OperationContext* opCtx, const Namesp
         }());
         uassertStatusOK(
             getStatusFromWriteCommandResponse(deleteCommandResponse->getCommandReply()));
-
-        dropChunks(opCtx, nss, collectionEntry.getUuid(), collectionEntry.getSupportingLongName());
-
-        LOGV2(3463200,
-              "Dropped chunks and collection caches",
-              "collectionNamespace"_attr = nss,
-              "collectionUUID"_attr = collectionEntry.getUuid());
-
-        return Status::OK();
     } catch (const DBException& ex) {
+        LOGV2_ERROR(5966301,
+                    "Failed to drop chunks and collection entry",
+                    "namespace"_attr = nss,
+                    "uuid"_attr = collectionEntry.getUuid(),
+                    "error"_attr = redact(ex.toStatus()));
+
         return ex.toStatus();
     }
+
+    LOGV2(5966302,
+          "Dropped chunks and collection entry",
+          "namespace"_attr = nss,
+          "uuid"_attr = collectionEntry.getUuid());
+
+    return Status::OK();
 }
 
 void dropChunks(OperationContext* opCtx,
                 const NamespaceString& nss,
                 const UUID& uuid,
                 SupportingLongNameStatusEnum supportingLongName) {
-    const auto chunksNsPostfix{supportingLongName == SupportingLongNameStatusEnum::kDisabled ||
-                                       nss.isTemporaryReshardingCollection()
-                                   ? nss.ns()
-                                   : uuid.toString()};
-    const NamespaceString chunksNss{ChunkType::ShardNSPrefix + chunksNsPostfix};
+    const auto chunksNss = getShardChunksNss(nss, uuid, supportingLongName);
 
     DBDirectClient client(opCtx);
     BSONObj result;

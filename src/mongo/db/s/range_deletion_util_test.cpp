@@ -105,14 +105,14 @@ public:
             nullptr,
             false,
             epoch,
-            boost::none /* timestamp */,
+            Timestamp(),
             boost::none /* timeseriesFields */,
             boost::none,
             boost::none /* chunkSizeBytes */,
             true,
-            {ChunkType{kNss,
+            {ChunkType{uuid,
                        ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
-                       ChunkVersion(1, 0, epoch, boost::none /* timestamp */),
+                       ChunkVersion(1, 0, epoch, Timestamp()),
                        ShardId("dummyShardId")}});
 
         AutoGetDb autoDb(operationContext(), kNss.db(), MODE_IX);
@@ -189,7 +189,7 @@ RangeDeletionTask insertRangeDeletionTask(OperationContext* opCtx, UUID uuid, Ch
     // Document should be in the store.
     ASSERT_EQUALS(countDocsInConfigRangeDeletions(store, opCtx), 1);
 
-    auto query = QUERY(RangeDeletionTask::kIdFieldName << migrationId);
+    auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
     t.setPending(boost::none);
     auto update = t.toBSON();
     store.update(opCtx, query, update);

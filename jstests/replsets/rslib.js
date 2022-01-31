@@ -23,7 +23,6 @@ var waitForNewlyAddedRemovalForNodeToBeCommitted;
 var assertVoteCount;
 var disconnectSecondaries;
 var reconnectSecondaries;
-var isDefaultReadConcernLocalFlagEnabled;
 
 (function() {
 "use strict";
@@ -697,6 +696,11 @@ stopReplicationAndEnforceNewPrimaryToCatchUp = function(rst, node) {
     const oldSecondaries = rst.getSecondaries();
     const oldPrimary = rst.getPrimary();
 
+    // In the case that the old primary has just stepped up and is running internal writes from
+    // PrimaryOnlyService, wait for those to be replicated. This is because there could be a race
+    // between stopping one of the secondaries, while the other secondary is still able to replicate
+    // the internal writes from PrimaryOnlyService before stopping replication.
+    rst.awaitReplication();
     stopServerReplication(oldSecondaries);
     for (let i = 0; i < 3; i++) {
         assert.commandWorked(oldPrimary.getDB("test").foo.insert({x: i}));
@@ -831,21 +835,5 @@ reconnectSecondaries = function(rst) {
             }
         }
     }
-};
-
-/**
- * Returns whether featureFlagDefaultReadConcernLocal is enabled. Returns false if the node is
- * running an older version with no knowledge of the flag.
- */
-isDefaultReadConcernLocalFlagEnabled = function(conn) {
-    let res = conn.adminCommand({getParameter: 1, featureFlagDefaultReadConcernLocal: 1});
-    if (!res.ok) {
-        // Running with old version which doesn't have the flag.
-        if (res.errmsg == "no option found to get")
-            return false;
-        assert(false);
-    }
-
-    return res.featureFlagDefaultReadConcernLocal.value;
 };
 }());

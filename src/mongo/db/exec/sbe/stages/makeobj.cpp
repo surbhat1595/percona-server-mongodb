@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/makeobj.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/util/str.h"
 
@@ -350,7 +351,7 @@ std::unique_ptr<PlanStageStats> MakeObjStageBase<O>::getStats(bool includeDebugI
         }
         bob.append("fields", _fields);
         bob.append("projectFields", _projectFields);
-        bob.append("projectSlots", _projectVars);
+        bob.append("projectSlots", _projectVars.begin(), _projectVars.end());
         bob.append("forceNewObject", _forceNewObject);
         bob.append("returnOldObject", _returnOldObject);
         ret->debugInfo = bob.obj();
@@ -409,8 +410,18 @@ std::vector<DebugPrinter::Block> MakeObjStageBase<O>::debugPrint() const {
 }
 
 template <MakeObjOutputType O>
-void MakeObjStageBase<O>::doSaveState() {
-    if (!slotsAccessible()) {
+size_t MakeObjStageBase<O>::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_fields);
+    size += size_estimator::estimate(_projectFields);
+    size += size_estimator::estimate(_projectVars);
+    return size;
+}
+
+template <MakeObjOutputType O>
+void MakeObjStageBase<O>::doSaveState(bool relinquishCursor) {
+    if (!slotsAccessible() || !relinquishCursor) {
         return;
     }
 

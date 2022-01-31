@@ -62,6 +62,12 @@ static StringData keyStringVersionToString(Version version) {
 
 static const Ordering ALL_ASCENDING = Ordering::make(BSONObj());
 
+// Encode the size of a RecordId binary string using up to 4 bytes, 7 bits per byte.
+// This supports encoding sizes that fit into 28 bits, which largely covers the
+// maximum BSON size.
+static const int kRecordIdStrEncodedSizeMaxBytes = 4;
+MONGO_STATIC_ASSERT(RecordId::kBigStrMaxSize < 1 << (7 * kRecordIdStrEncodedSizeMaxBytes));
+
 /**
  * Encodes info needed to restore the original BSONTypes from a KeyString. They cannot be
  * stored in place since we don't want them to affect the ordering (1 and 1.0 compare as
@@ -1026,6 +1032,18 @@ int Value::compareWithoutRecordIdLong(const T& other) const {
         !isEmpty() ? sizeWithoutRecordIdLongAtEnd(getBuffer(), getSize()) : 0,
         !other.isEmpty() ? sizeWithoutRecordIdLongAtEnd(other.getBuffer(), other.getSize()) : 0);
 }
+
+/**
+ * Takes key string and key pattern information and uses it to present human-readable information
+ * about an index or collection entry.
+ *
+ * 'logPrefix' addes a logging prefix. Useful for differentiating callers.
+ */
+void logKeyString(const RecordId& recordId,
+                  const Value& keyStringValue,
+                  const BSONObj& keyPatternBson,
+                  const BSONObj& keyStringBson,
+                  std::string callerLogPrefix);
 
 }  // namespace KeyString
 

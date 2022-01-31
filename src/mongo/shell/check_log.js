@@ -67,7 +67,7 @@ checkLog = (function() {
                 throw ex;
             }
 
-            if (_compareLogs(obj, id, severity, attrsDict)) {
+            if (_compareLogs(obj, id, severity, null, attrsDict)) {
                 return true;
             }
         }
@@ -76,15 +76,26 @@ checkLog = (function() {
     };
 
     /*
-     * Acts just like checkContainsOnceJson but introduces the `expectedCount and `isRelaxed params.
-     * `isRelaxed` is used to determine how object attributes are handled for matching purposes. If
-     * `isRelaxed` is true, then only the fields included in the object in attrsDict will be checked
-     * for in the corresponding object in the log. Otherwise, the objects will be checked for
-     * complete equality. In addition, the `expectedCount` param ensures that the log appears
-     * exactly as many times as expected.
+     * Acts just like checkContainsOnceJson but introduces the `expectedCount`, `isRelaxed`,
+     * `comparator`, and `context` params. `isRelaxed` is used to determine how object attributes
+     * are handled for matching purposes. If `isRelaxed` is true, then only the fields included in
+     * the object in attrsDict will be checked for in the corresponding object in the log.
+     * Otherwise, the objects will be checked for complete equality. After counting the total number
+     * of logs that match `id` and `attrsDict` based on `isRelaxed`, the `comparator` function is
+     * applied to appropriately compare the count with `expectedCount`. `context` allows to check
+     * the `ctx` field of the logs.
      */
-    const checkContainsWithCountJson = function(
-        conn, id, attrsDict, expectedCount, severity = null, isRelaxed = false) {
+    const checkContainsWithCountJson = function(conn,
+                                                id,
+                                                attrsDict,
+                                                expectedCount,
+                                                severity = null,
+                                                isRelaxed = false,
+                                                comparator =
+                                                    (actual, expected) => {
+                                                        return actual === expected;
+                                                    },
+                                                context = null) {
         const logMessages = getGlobalLog(conn);
         if (logMessages === null) {
             return false;
@@ -101,11 +112,12 @@ checkLog = (function() {
                 throw ex;
             }
 
-            if (_compareLogs(obj, id, severity, attrsDict, isRelaxed)) {
+            if (_compareLogs(obj, id, severity, context, attrsDict, isRelaxed)) {
                 count++;
             }
         }
-        return count === expectedCount;
+
+        return comparator(count, expectedCount);
     };
 
     /*
@@ -162,15 +174,26 @@ checkLog = (function() {
 
     /*
      * Calls checkContainsWithCountJson with the `isRelaxed` parameter set to true at regular
-     * intervals on the provided connection 'conn' until a log with id 'id' and all of the
-     * attributes in 'attrsDict' is found `expectedCount` times or the timeout (in ms) is reached.
+     * intervals on the provided connection 'conn'. It terminates when a log with id 'id', ctx
+     * 'context', and all of the attributes in 'attrsDict' is found at least, at most, or exactly
+     * `expectedCount` times based on the `comparator` function passed in or the timeout (in ms) is
+     * reached.
      */
-    let containsRelaxedJson = function(
-        conn, id, attrsDict, expectedCount = 1, timeoutMillis = 5 * 60 * 1000) {
+    let containsRelaxedJson = function(conn,
+                                       id,
+                                       attrsDict,
+                                       expectedCount = 1,
+                                       timeoutMillis = 5 * 60 * 1000,
+                                       comparator =
+                                           (actual, expected) => {
+                                               return actual === expected;
+                                           },
+                                       context = null) {
         // Don't run the hang analyzer because we don't expect contains() to always succeed.
         assert.soon(
             function() {
-                return checkContainsWithCountJson(conn, id, attrsDict, expectedCount, null, true);
+                return checkContainsWithCountJson(
+                    conn, id, attrsDict, expectedCount, null, true, comparator, context);
             },
             'Could not find log entries containing the following id: ' + id +
                 ', and attrs: ' + tojson(attrsDict),
@@ -333,18 +356,31 @@ checkLog = (function() {
      * fields specified in the attrsDict attribute are equal to those in the corresponding attribute
      * of obj. Otherwise, `_deepEqual()` checks that both subobjects are identical.
      */
-    const _compareLogs = function(obj, id, severity, attrsDict, isRelaxed = false) {
+    const _compareLogs = function(obj, id, severity, context, attrsDict, isRelaxed = false) {
         if (obj.id !== id) {
             return false;
         }
         if (severity !== null && obj.s !== severity) {
             return false;
         }
+        if (context !== null) {
+            if (context instanceof RegExp) {
+                if (!context.test(obj.ctx)) {
+                    return false;
+                }
+            } else if (context !== obj.ctx) {
+                return false;
+            }
+        }
 
         for (let attrKey in attrsDict) {
             const attrValue = attrsDict[attrKey];
             if (attrValue instanceof Function) {
                 if (!attrValue(obj.attr[attrKey])) {
+                    return false;
+                }
+            } else if (attrValue instanceof RegExp) {
+                if (!attrValue.test(obj.attr[attrKey])) {
                     return false;
                 }
             } else if (obj.attr[attrKey] !== attrValue && typeof obj.attr[attrKey] == "object") {

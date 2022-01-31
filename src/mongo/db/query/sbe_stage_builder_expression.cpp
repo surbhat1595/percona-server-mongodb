@@ -330,9 +330,7 @@ public:
     void visit(const ExpressionCoerceToBool* expr) final {}
     void visit(const ExpressionCompare* expr) final {}
     void visit(const ExpressionConcat* expr) final {}
-    void visit(const ExpressionConcatArrays* expr) final {
-        _context->evalStack.emplaceFrame(EvalStage{});
-    }
+    void visit(const ExpressionConcatArrays* expr) final {}
     void visit(const ExpressionCond* expr) final {
         _context->evalStack.emplaceFrame(EvalStage{});
     }
@@ -440,6 +438,8 @@ public:
     void visit(const ExpressionFromAccumulator<AccumulatorAvg>* expr) final {}
     void visit(const ExpressionFromAccumulator<AccumulatorMax>* expr) final {}
     void visit(const ExpressionFromAccumulator<AccumulatorMin>* expr) final {}
+    void visit(const ExpressionFromAccumulatorN<AccumulatorFirstN>* expr) final {}
+    void visit(const ExpressionFromAccumulatorN<AccumulatorLastN>* expr) final {}
     void visit(const ExpressionFromAccumulatorN<AccumulatorMaxN>* expr) final {}
     void visit(const ExpressionFromAccumulatorN<AccumulatorMinN>* expr) final {}
     void visit(const ExpressionFromAccumulator<AccumulatorStdDevPop>* expr) final {}
@@ -500,9 +500,7 @@ public:
     void visit(const ExpressionCoerceToBool* expr) final {}
     void visit(const ExpressionCompare* expr) final {}
     void visit(const ExpressionConcat* expr) final {}
-    void visit(const ExpressionConcatArrays* expr) final {
-        _context->evalStack.emplaceFrame(EvalStage{});
-    }
+    void visit(const ExpressionConcatArrays* expr) final {}
     void visit(const ExpressionCond* expr) final {
         _context->evalStack.emplaceFrame(EvalStage{});
     }
@@ -645,6 +643,8 @@ public:
     void visit(const ExpressionFromAccumulator<AccumulatorAvg>* expr) final {}
     void visit(const ExpressionFromAccumulator<AccumulatorMax>* expr) final {}
     void visit(const ExpressionFromAccumulator<AccumulatorMin>* expr) final {}
+    void visit(const ExpressionFromAccumulatorN<AccumulatorFirstN>* expr) final {}
+    void visit(const ExpressionFromAccumulatorN<AccumulatorLastN>* expr) final {}
     void visit(const ExpressionFromAccumulatorN<AccumulatorMaxN>* expr) final {}
     void visit(const ExpressionFromAccumulatorN<AccumulatorMinN>* expr) final {}
     void visit(const ExpressionFromAccumulator<AccumulatorStdDevPop>* expr) final {}
@@ -787,10 +787,10 @@ public:
             _context->pushExpr(
                 sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(addExpr)));
         } else {
-            std::vector<std::unique_ptr<sbe::EExpression>> binds;
-            std::vector<std::unique_ptr<sbe::EExpression>> argVars;
-            std::vector<std::unique_ptr<sbe::EExpression>> checkExprsNull;
-            std::vector<std::unique_ptr<sbe::EExpression>> checkExprsNotNumberOrDate;
+            sbe::EExpression::Vector binds;
+            sbe::EExpression::Vector argVars;
+            sbe::EExpression::Vector checkExprsNull;
+            sbe::EExpression::Vector checkExprsNotNumberOrDate;
             binds.reserve(arity);
             argVars.reserve(arity);
             checkExprsNull.reserve(arity);
@@ -809,7 +809,7 @@ public:
             // precision errors from floating point types.
             std::reverse(std::begin(binds), std::end(binds));
 
-            using iter_t = std::vector<std::unique_ptr<sbe::EExpression>>::iterator;
+            using iter_t = sbe::EExpression::Vector::iterator;
             auto checkNullAllArguments = std::accumulate(
                 std::move_iterator<iter_t>(checkExprsNull.begin() + 1),
                 std::move_iterator<iter_t>(checkExprsNull.end()),
@@ -845,7 +845,40 @@ public:
         visitMultiBranchLogicExpression(expr, sbe::EPrimBinary::logicAnd);
     }
     void visit(const ExpressionAnyElementTrue* expr) final {
-        unsupportedExpression(expr->getOpName());
+        auto [inputSlot, stage] = projectEvalExpr(_context->popEvalExpr(),
+                                                  _context->extractCurrentEvalStage(),
+                                                  _context->planNodeId,
+                                                  _context->state.slotIdGenerator);
+
+        auto fromBranch = makeFilter<false>(
+            std::move(stage),
+            makeBinaryOp(sbe::EPrimBinary::logicOr,
+                         makeFillEmptyFalse(makeFunction("isArray", makeVariable(inputSlot))),
+                         makeFail(5159200, "$anyElementTrue's argument must be an array")),
+            _context->planNodeId);
+
+        auto innerOutputSlot = _context->state.slotId();
+        auto innerBranch = makeProject(makeLimitCoScanStage(_context->planNodeId),
+                                       _context->planNodeId,
+                                       innerOutputSlot,
+                                       generateCoerceToBoolExpression(inputSlot));
+
+        auto traverseSlot = _context->state.slotId();
+        auto traverseStage = makeTraverse(std::move(fromBranch),
+                                          std::move(innerBranch),
+                                          inputSlot,
+                                          traverseSlot,
+                                          innerOutputSlot,
+                                          makeBinaryOp(sbe::EPrimBinary::logicOr,
+                                                       makeVariable(traverseSlot),
+                                                       makeVariable(innerOutputSlot)),
+                                          makeVariable(traverseSlot),
+                                          _context->planNodeId,
+                                          1,
+                                          _context->getLexicalEnvironment());
+
+        _context->pushExpr(makeFillEmptyFalse(makeVariable(traverseSlot)),
+                           std::move(traverseStage));
     }
     void visit(const ExpressionArray* expr) final {
         unsupportedExpression(expr->getOpName());
@@ -954,7 +987,7 @@ public:
     }
     void visit(const ExpressionCompare* expr) final {
         _context->ensureArity(2);
-        std::vector<std::unique_ptr<sbe::EExpression>> operands(2);
+        sbe::EExpression::Vector operands(2);
         for (auto it = operands.rbegin(); it != operands.rend(); ++it) {
             *it = _context->popExpr();
         }
@@ -1023,10 +1056,10 @@ public:
         _context->ensureArity(arity);
         auto frameId = _context->state.frameId();
 
-        std::vector<std::unique_ptr<sbe::EExpression>> binds;
-        std::vector<std::unique_ptr<sbe::EExpression>> checkNullArg;
-        std::vector<std::unique_ptr<sbe::EExpression>> checkStringArg;
-        std::vector<std::unique_ptr<sbe::EExpression>> argVars;
+        sbe::EExpression::Vector binds;
+        sbe::EExpression::Vector checkNullArg;
+        sbe::EExpression::Vector checkStringArg;
+        sbe::EExpression::Vector argVars;
         sbe::value::SlotId slot{0};
         for (size_t idx = 0; idx < arity; ++idx, ++slot) {
             sbe::EVariable var(frameId, slot);
@@ -1037,7 +1070,7 @@ public:
         }
         std::reverse(std::begin(binds), std::end(binds));
 
-        using iter_t = std::vector<std::unique_ptr<sbe::EExpression>>::iterator;
+        using iter_t = sbe::EExpression::Vector::iterator;
 
         auto checkNullAnyArgument = std::accumulate(
             std::move_iterator<iter_t>(checkNullArg.begin() + 1),
@@ -1068,98 +1101,59 @@ public:
     }
 
     void visit(const ExpressionConcatArrays* expr) final {
-        // Pop eval frames pushed by pre and in visitors off the stack.
-        std::vector<EvalExprStagePair> branches;
         auto numChildren = expr->getChildren().size();
-        branches.reserve(numChildren);
+        _context->ensureArity(numChildren);
+
+        sbe::EExpression::Vector nullChecks;
+        std::vector<EvalStage> unionBranches;
+        std::vector<sbe::value::SlotVector> unionInputSlots;
+        sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projections;
+
+        nullChecks.reserve(numChildren);
+        unionBranches.reserve(numChildren);
+        unionInputSlots.reserve(numChildren);
         for (size_t idx = 0; idx < numChildren; ++idx) {
-            auto [branchExpr, branchEvalStage] = _context->popFrame();
-            branches.emplace_back(std::move(branchExpr), std::move(branchEvalStage));
-        }
-        std::reverse(branches.begin(), branches.end());
-
-        auto getUnionOutputSlot = [](EvalExpr& unionEvalExpr) {
-            auto slot = *(unionEvalExpr.getSlot());
-            invariant(slot);
-            return slot;
-        };
-
-        auto makeNullLimitCoscanTree = [&]() {
             auto outputSlot = _context->state.slotId();
-            auto nullEvalStage =
-                makeProject({makeLimitCoScanTree(_context->planNodeId), sbe::makeSV()},
-                            _context->planNodeId,
-                            outputSlot,
-                            sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0));
-            return std::make_pair(outputSlot, std::move(nullEvalStage));
-        };
+            projections.emplace(outputSlot, _context->popExpr());
+            unionBranches.emplace_back(
+                EvalStage{makeLimitCoScanTree(_context->planNodeId), sbe::makeSV()});
+            unionInputSlots.emplace_back(sbe::makeSV(outputSlot));
+            nullChecks.emplace_back(generateNullOrMissing(outputSlot));
+        }
+
+        // Build a project to capture our child expressions.
+        std::reverse(std::begin(unionInputSlots), std::end(unionInputSlots));
+        auto project = makeProject(
+            _context->extractCurrentEvalStage(), std::move(projections), _context->planNodeId);
 
         // Build a union stage to consolidate array input branches into a stream.
-        auto [unionEvalExpr, unionEvalStage] = generateUnion(
-            std::move(branches), {}, _context->planNodeId, _context->state.slotIdGenerator);
-        auto unionSlot = getUnionOutputSlot(unionEvalExpr);
-        sbe::EVariable unionVar{unionSlot};
+        auto unionOutputSlot = _context->state.slotId();
+        auto unionStage = makeUnion(std::move(unionBranches),
+                                    std::move(unionInputSlots),
+                                    sbe::makeSV(unionOutputSlot),
+                                    _context->planNodeId);
 
-        // Filter stage to EFail if an element is not an array, null, or missing, and EOF if an
-        // element is null or missing: not(isNullOrMissing) && (isArray || EFail).
-        auto filterExpr = makeBinaryOp(
-            sbe::EPrimBinary::logicAnd,
-            makeNot(generateNullOrMissing(unionVar)),
-            makeBinaryOp(sbe::EPrimBinary::logicOr,
-                         makeFunction("isArray", unionVar.clone()),
-                         sbe::makeE<sbe::EFail>(ErrorCodes::Error{5153400},
-                                                "$concatArrays only supports arrays")));
-        auto filter = makeFilter<false, true>(
-            std::move(unionEvalStage), std::move(filterExpr), _context->planNodeId);
-
-        // Create a union stage to replace any values filtered out by the previous stage with null.
-        // For example, [a, b, null, c, d] would become [a, b, null].
-        std::vector<EvalExprStagePair> unionWithNullBranches;
-        unionWithNullBranches.emplace_back(sbe::makeE<sbe::EVariable>(unionSlot),
-                                           std::move(filter));
-        unionWithNullBranches.emplace_back(makeNullLimitCoscanTree());
-        auto [unionWithNullExpr, unionWithNullStage] =
-            generateUnion(std::move(unionWithNullBranches),
-                          {},
-                          _context->planNodeId,
-                          _context->state.slotIdGenerator);
-        auto unionWithNullSlot = getUnionOutputSlot(unionWithNullExpr);
-
-        // Create a limit stage to EOF once numChildren results have been obtained.
-        auto limitNumChildren =
-            makeLimitSkip(std::move(unionWithNullStage), _context->planNodeId, numChildren);
-
-        // Create a group stage to aggregate elements into a single array.
         auto collatorSlot = _context->state.env->getSlotIfExists("collator"_sd);
-        auto addToArrayExpr =
-            makeFunction("addToArray", sbe::makeE<sbe::EVariable>(unionWithNullSlot));
-        auto groupSlot = _context->state.slotId();
-        auto groupStage = makeHashAgg(std::move(limitNumChildren),
-                                      sbe::makeSV(),
-                                      sbe::makeEM(groupSlot, std::move(addToArrayExpr)),
-                                      collatorSlot,
-                                      _context->planNodeId);
+
+        // Build a filter that will throw an 'EFail' if any element coming from the union is NOT
+        // an array.
+        auto filter = makeFilter<false, false>(
+            std::move(unionStage),
+            makeBinaryOp(sbe::EPrimBinary::logicOr,
+                         makeFunction("isArray", makeVariable(unionOutputSlot)),
+                         sbe::makeE<sbe::EFail>(ErrorCodes::Error{5153400},
+                                                "$concatArrays only supports arrays")),
+            _context->planNodeId);
 
         // Build subtree to handle nulls. If an input is null, return null. Otherwise, unwind the
-        // input twice, and concatenate it into an array using addToArray. This is necessary to
-        // implement the MQL behavior where one null or missing input results in a null output.
-
-        // Create two unwind stages to unwind the array that was built from inputs
-        // and unwind each input array into its constituent elements. We need a limit 1/coscan stage
-        // here to call getNext() on, but we use the output slot of groupStage to obtain the array
-        // of inputs.
-        auto unwindEvalStage = makeUnwind(
-            makeUnwind({makeLimitCoScanStage(_context->planNodeId).stage, sbe::makeSV(groupSlot)},
-                       _context->state.slotIdGenerator,
-                       _context->planNodeId),
-            _context->state.slotIdGenerator,
-            _context->planNodeId);
+        // input and concatenate it into an array using addToArray.
+        auto unwindEvalStage =
+            makeUnwind(std::move(filter), _context->state.slotIdGenerator, _context->planNodeId);
         auto unwindSlot = unwindEvalStage.outSlots.front();
 
         // Create a group stage to append all streamed elements into one array. This is the final
         // output when the input consists entirely of arrays.
-        auto finalAddToArrayExpr =
-            makeFunction("addToArray", sbe::makeE<sbe::EVariable>(unwindSlot));
+        auto finalAddToArrayExpr = makeFunction("addToArray", makeVariable(unwindSlot));
         auto finalGroupSlot = _context->state.slotId();
         auto finalGroupStage =
             makeHashAgg(std::move(unwindEvalStage),
@@ -1168,35 +1162,44 @@ public:
                         collatorSlot,
                         _context->planNodeId);
 
+        // Returns true if any of our input expressions return null.
+        using iter_t = sbe::EExpression::Vector::iterator;
+        auto checkPartsForNull = std::accumulate(
+            std::move_iterator<iter_t>(nullChecks.begin() + 1),
+            std::move_iterator<iter_t>(nullChecks.end()),
+            std::move(nullChecks.front()),
+            [](auto&& acc, auto&& b) {
+                return makeBinaryOp(sbe::EPrimBinary::logicOr, std::move(acc), std::move(b));
+            });
+
         // Create a branch stage to select between the branch that produces one null if any elements
         // in the original input were null or missing, or otherwise select the branch that unwinds
         // and concatenates elements into the output array.
-        auto [nullSlot, nullStage] = makeNullLimitCoscanTree();
-        auto nullIsMemberExpr =
-            makeIsMember(sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0),
-                         sbe::makeE<sbe::EVariable>(groupSlot));
+        auto [nullSlot, nullStage] = [&] {
+            auto outputSlot = _context->state.slotId();
+            auto nullEvalStage =
+                makeProject({makeLimitCoScanTree(_context->planNodeId), sbe::makeSV()},
+                            _context->planNodeId,
+                            outputSlot,
+                            makeConstant(sbe::value::TypeTags::Null, 0));
+            return std::make_pair(outputSlot, std::move(nullEvalStage));
+        }();
+
         auto branchSlot = _context->state.slotId();
         auto branchNullEvalStage = makeBranch(std::move(nullStage),
                                               std::move(finalGroupStage),
-                                              std::move(nullIsMemberExpr),
+                                              std::move(checkPartsForNull),
                                               sbe::makeSV(nullSlot),
                                               sbe::makeSV(finalGroupSlot),
                                               sbe::makeSV(branchSlot),
                                               _context->planNodeId);
 
-        // Create nlj to connect outer group with inner branch that handles null input.
-        auto nljStage = makeLoopJoin(std::move(groupStage),
-                                     std::move(branchNullEvalStage),
-                                     _context->planNodeId,
-                                     _context->getLexicalEnvironment());
-
-        // Top level nlj to inject input slots.
-        auto finalNljStage = makeLoopJoin(_context->extractCurrentEvalStage(),
-                                          std::move(nljStage),
-                                          _context->planNodeId,
-                                          _context->getLexicalEnvironment());
-
-        _context->pushExpr(branchSlot, std::move(finalNljStage));
+        // Create nlj to connect outer project with inner branch that handles null input.
+        _context->pushExpr(branchSlot,
+                           makeLoopJoin(std::move(project),
+                                        std::move(branchNullEvalStage),
+                                        _context->planNodeId,
+                                        _context->getLexicalEnvironment()));
     }
     void visit(const ExpressionCond* expr) final {
         visitConditionalExpression(expr);
@@ -1204,8 +1207,8 @@ public:
     void visit(const ExpressionDateDiff* expr) final {
         using namespace std::literals;
         auto frameId = _context->state.frameId();
-        std::vector<std::unique_ptr<sbe::EExpression>> arguments;
-        std::vector<std::unique_ptr<sbe::EExpression>> bindings;
+        sbe::EExpression::Vector arguments;
+        sbe::EExpression::Vector bindings;
         sbe::EVariable startDateRef(frameId, 0);
         sbe::EVariable endDateRef(frameId, 1);
         sbe::EVariable unitRef(frameId, 2);
@@ -1457,7 +1460,7 @@ public:
             boundChecks;  // checks for lower and upper bounds of date fields.
 
         // Operands is for the outer let bindings.
-        std::vector<std::unique_ptr<sbe::EExpression>> operands;
+        sbe::EExpression::Vector operands;
         if (isIsoWeekYear) {
             if (!eIsoWeekYear) {
                 eIsoWeekYear = sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
@@ -1575,17 +1578,16 @@ public:
         // Make a disjunction of null checks for each date part by over this vector. These checks
         // are necessary after the initial conversion computation because we need have the outer let
         // binding evaluate to null if any field is null.
-        auto nullExprs =
-            makeVector<std::unique_ptr<sbe::EExpression>>(generateNullOrMissing(frameId, 7),
-                                                          generateNullOrMissing(frameId, 6),
-                                                          generateNullOrMissing(frameId, 5),
-                                                          generateNullOrMissing(frameId, 4),
-                                                          generateNullOrMissing(frameId, 3),
-                                                          generateNullOrMissing(frameId, 2),
-                                                          generateNullOrMissing(frameId, 1),
-                                                          generateNullOrMissing(frameId, 0));
+        auto nullExprs = sbe::makeEs(generateNullOrMissing(frameId, 7),
+                                     generateNullOrMissing(frameId, 6),
+                                     generateNullOrMissing(frameId, 5),
+                                     generateNullOrMissing(frameId, 4),
+                                     generateNullOrMissing(frameId, 3),
+                                     generateNullOrMissing(frameId, 2),
+                                     generateNullOrMissing(frameId, 1),
+                                     generateNullOrMissing(frameId, 0));
 
-        using iter_t = std::vector<std::unique_ptr<sbe::EExpression>>::iterator;
+        using iter_t = sbe::EExpression::Vector::iterator;
         auto checkPartsForNull = std::accumulate(
             std::move_iterator<iter_t>(nullExprs.begin() + 1),
             std::move_iterator<iter_t>(nullExprs.end()),
@@ -1638,9 +1640,9 @@ public:
         auto children = expr->getChildren();
         std::unique_ptr<sbe::EExpression> date, timezone, isoflag;
         std::unique_ptr<sbe::EExpression> totalExprDateToParts;
-        std::vector<std::unique_ptr<sbe::EExpression>> args;
-        std::vector<std::unique_ptr<sbe::EExpression>> isoargs;
-        std::vector<std::unique_ptr<sbe::EExpression>> operands;
+        sbe::EExpression::Vector args;
+        sbe::EExpression::Vector isoargs;
+        sbe::EExpression::Vector operands;
         sbe::EVariable dateRef(frameId, 0);
         sbe::EVariable timezoneRef(frameId, 1);
         sbe::EVariable isoflagRef(frameId, 2);
@@ -2153,10 +2155,10 @@ public:
         _context->ensureArity(arity);
         auto frameId = _context->state.frameId();
 
-        std::vector<std::unique_ptr<sbe::EExpression>> binds;
-        std::vector<std::unique_ptr<sbe::EExpression>> variables;
-        std::vector<std::unique_ptr<sbe::EExpression>> checkExprsNull;
-        std::vector<std::unique_ptr<sbe::EExpression>> checkExprsNumber;
+        sbe::EExpression::Vector binds;
+        sbe::EExpression::Vector variables;
+        sbe::EExpression::Vector checkExprsNull;
+        sbe::EExpression::Vector checkExprsNumber;
         binds.reserve(arity);
         variables.reserve(arity);
         checkExprsNull.reserve(arity);
@@ -2177,7 +2179,7 @@ public:
         // precision errors from floating point types.
         std::reverse(std::begin(binds), std::end(binds));
 
-        using iter_t = std::vector<std::unique_ptr<sbe::EExpression>>::iterator;
+        using iter_t = sbe::EExpression::Vector::iterator;
         auto checkNullAnyArgument = std::accumulate(
             std::move_iterator<iter_t>(checkExprsNull.begin() + 1),
             std::move_iterator<iter_t>(checkExprsNull.end()),
@@ -2440,8 +2442,8 @@ public:
     }
     void visit(const ExpressionSplit* expr) final {
         auto frameId = _context->state.frameId();
-        std::vector<std::unique_ptr<sbe::EExpression>> args;
-        std::vector<std::unique_ptr<sbe::EExpression>> binds;
+        sbe::EExpression::Vector args;
+        sbe::EExpression::Vector binds;
         sbe::EVariable stringExpressionRef(frameId, 0);
         sbe::EVariable delimiterRef(frameId, 1);
 
@@ -2677,6 +2679,12 @@ public:
         unsupportedExpression("$year");
     }
     void visit(const ExpressionFromAccumulator<AccumulatorAvg>* expr) final {
+        unsupportedExpression(expr->getOpName());
+    }
+    void visit(const ExpressionFromAccumulatorN<AccumulatorFirstN>* expr) final {
+        unsupportedExpression(expr->getOpName());
+    }
+    void visit(const ExpressionFromAccumulatorN<AccumulatorLastN>* expr) final {
         unsupportedExpression(expr->getOpName());
     }
     void visit(const ExpressionFromAccumulator<AccumulatorMax>* expr) final {
@@ -2922,8 +2930,8 @@ private:
 
     void generateDayOfExpression(StringData exprName, const Expression* expr) {
         auto frameId = _context->state.frameId();
-        std::vector<std::unique_ptr<sbe::EExpression>> args;
-        std::vector<std::unique_ptr<sbe::EExpression>> binds;
+        sbe::EExpression::Vector args;
+        sbe::EExpression::Vector binds;
         sbe::EVariable dateRef(frameId, 0);
         sbe::EVariable timezoneRef(frameId, 1);
 
@@ -3128,8 +3136,8 @@ private:
         auto frameId = _context->state.frameId();
         auto children = expr->getChildren();
         auto operandSize = children.size() <= 3 ? 3 : 4;
-        std::vector<std::unique_ptr<sbe::EExpression>> operands(operandSize);
-        std::vector<std::unique_ptr<sbe::EExpression>> bindings;
+        sbe::EExpression::Vector operands(operandSize);
+        sbe::EExpression::Vector bindings;
         sbe::EVariable strRef(frameId, 0);
         sbe::EVariable substrRef(frameId, 1);
         boost::optional<sbe::EVariable> startIndexRef;
@@ -3249,10 +3257,10 @@ private:
             return makeNot(makeFunction("isArray", var.clone()));
         };
 
-        std::vector<std::unique_ptr<sbe::EExpression>> binds;
-        std::vector<std::unique_ptr<sbe::EExpression>> argVars;
-        std::vector<std::unique_ptr<sbe::EExpression>> checkExprsNull;
-        std::vector<std::unique_ptr<sbe::EExpression>> checkExprsNotArray;
+        sbe::EExpression::Vector binds;
+        sbe::EExpression::Vector argVars;
+        sbe::EExpression::Vector checkExprsNull;
+        sbe::EExpression::Vector checkExprsNotArray;
         binds.reserve(arity);
         argVars.reserve(arity);
         checkExprsNull.reserve(arity);
@@ -3293,7 +3301,7 @@ private:
         // operations, such as $setDifference, are not commutative.
         std::reverse(std::begin(binds), std::end(binds));
 
-        using iter_t = std::vector<std::unique_ptr<sbe::EExpression>>::iterator;
+        using iter_t = sbe::EExpression::Vector::iterator;
         auto checkNullAnyArgument = std::accumulate(
             std::move_iterator<iter_t>(checkExprsNull.begin() + 1),
             std::move_iterator<iter_t>(checkExprsNull.end()),
@@ -3533,7 +3541,7 @@ private:
         auto unitExpr = _context->popExpr();
         auto startDateExpr = _context->popExpr();
 
-        std::vector<std::unique_ptr<sbe::EExpression>> binds;
+        sbe::EExpression::Vector binds;
         binds.push_back(std::move(startDateExpr));
         binds.push_back(std::move(unitExpr));
         binds.push_back(std::move(amountExpr));
@@ -3560,7 +3568,7 @@ private:
         }();
         binds.push_back(std::move(convertedAmountInt64));
 
-        std::vector<std::unique_ptr<sbe::EExpression>> args;
+        sbe::EExpression::Vector args;
         auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
         args.push_back(sbe::makeE<sbe::EVariable>(timeZoneDBSlot));
         args.push_back(startDateRef.clone());
@@ -3568,13 +3576,13 @@ private:
         args.push_back(amountRef.clone());
         args.push_back(tzRef.clone());
 
-        std::vector<std::unique_ptr<sbe::EExpression>> checkNullArg;
+        sbe::EExpression::Vector checkNullArg;
         sbe::value::SlotId slot{0};
         for (size_t idx = 0; idx < arity; ++idx, ++slot) {
             checkNullArg.push_back(generateNullOrMissing(frameId, slot));
         }
 
-        using iter_t = std::vector<std::unique_ptr<sbe::EExpression>>::iterator;
+        using iter_t = sbe::EExpression::Vector::iterator;
         auto checkNullAnyArgument = std::accumulate(
             std::move_iterator<iter_t>(checkNullArg.begin() + 1),
             std::move_iterator<iter_t>(checkNullArg.end()),

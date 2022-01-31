@@ -169,10 +169,9 @@ bool WiredTigerFileVersion::shouldDowngrade(bool readOnly,
             _startupVersion == StartupVersion::IS_42;
     }
 
-    if (serverGlobalParams.featureCompatibility.isGreaterThan(
-            ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo44)) {
-        // Only consider downgrading when FCV is set to kFullyDowngraded.
-        // (This FCV gate must remain across binary version releases.)
+    // (Generic FCV reference): Only consider downgrading when FCV is set to the last LTS
+    // release. This FCV gate must remain across binary version releases.
+    if (serverGlobalParams.featureCompatibility.isGreaterThan(multiversion::GenericFCV::kLastLTS)) {
         return false;
     }
 
@@ -620,6 +619,14 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
     ss << "cache_size=" << cacheSizeMB << "M,";
     ss << "session_max=33000,";
     ss << "eviction=(threads_min=4,threads_max=4),";
+
+    if (gWiredTigerEvictionDirtyTargetGB)
+        ss << "eviction_dirty_target="
+           << static_cast<size_t>(gWiredTigerEvictionDirtyTargetGB * 1024) << "MB,";
+    if (gWiredTigerEvictionDirtyMaxGB)
+        ss << "eviction_dirty_trigger=" << static_cast<size_t>(gWiredTigerEvictionDirtyMaxGB * 1024)
+           << "MB,";
+
     ss << "config_base=false,";
     ss << "statistics=(fast),";
 
@@ -647,9 +654,9 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
     }
 
     if (kDebugBuild) {
-        // Enable debug write-ahead logging for all tables under debug build. Do not abort the
-        // process when corruption is found in debug builds, which supports increased test coverage.
-        ss << "debug_mode=(table_logging=true,corruption_abort=false,";
+        // Do not abort the process when corruption is found in debug builds, which supports
+        // increased test coverage.
+        ss << "debug_mode=(corruption_abort=false,";
         // For select debug builds, support enabling WiredTiger eviction debug mode. This uses
         // more aggressive eviction tactics, but may have a negative performance impact.
         if (gWiredTigerEvictionDebugMode) {
@@ -674,10 +681,12 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         ss << "debug_mode=(cursor_copy=true),";
     }
     if (TestingProctor::instance().isEnabled()) {
+        // Enable debug write-ahead logging for all tables when testing is enabled.
+        //
         // If MongoDB startup fails, there may be clues from the previous run still left in the WT
         // log files that can provide some insight into how the system got into a bad state. When
         // testing is enabled, keep around some of these files for investigative purposes.
-        ss << "debug_mode=(checkpoint_retention=4),";
+        ss << "debug_mode=(table_logging=true,checkpoint_retention=4),";
     }
 
     ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())
@@ -1518,7 +1527,7 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
     // Oplog truncation thread won't remove oplog since the checkpoint pinned by the backup cursor.
     stdx::lock_guard<Latch> lock(_oplogPinnedByBackupMutex);
     _oplogPinnedByBackup = Timestamp(_oplogNeededForCrashRecovery.load());
-    auto pinOplogGuard = makeGuard([&] { _oplogPinnedByBackup = boost::none; });
+    ScopeGuard pinOplogGuard([&] { _oplogPinnedByBackup = boost::none; });
 
     // Persist the sizeStorer information to disk before opening the backup cursor. We aren't
     // guaranteed to have the most up-to-date size information after the backup as writes can still

@@ -43,6 +43,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/is_mongos.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 
@@ -100,6 +101,9 @@ Status LogicalSessionCacheImpl::vivify(OperationContext* opCtx, const LogicalSes
                 "Internal transactions are not enabled",
                 feature_flags::gFeatureFlagInternalTransactions.isEnabled(
                     serverGlobalParams.featureCompatibility));
+        uassert(ErrorCodes::InvalidOptions,
+                "Internal transactions are only supported in sharded clusters",
+                isMongos() || serverGlobalParams.clusterRole != ClusterRole::None);
     }
 
     stdx::lock_guard lg(_mutex);
@@ -258,7 +262,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
     }
 
     // This will finish timing _refresh for our stats no matter when we return.
-    const auto timeRefreshJob = makeGuard([this] {
+    const ScopeGuard timeRefreshJob([this] {
         stdx::lock_guard<Latch> lk(_mutex);
         auto millis = _service->now() - _stats.getLastSessionsCollectionJobTimestamp();
         _stats.setLastSessionsCollectionJobDurationMillis(millis.count());
@@ -299,9 +303,9 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
             member.emplace(it);
         }
     };
-    auto activeSessionsBackSwapper = makeGuard([&] { backSwap(_activeSessions, activeSessions); });
+    ScopeGuard activeSessionsBackSwapper([&] { backSwap(_activeSessions, activeSessions); });
     auto explicitlyEndingBackSwaper =
-        makeGuard([&] { backSwap(_endingSessions, explicitlyEndingSessions); });
+        ScopeGuard([&] { backSwap(_endingSessions, explicitlyEndingSessions); });
 
     // remove all explicitlyEndingSessions from activeSessions
     for (const auto& lsid : explicitlyEndingSessions) {

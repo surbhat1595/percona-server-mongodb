@@ -73,6 +73,16 @@ ReadConcernSupportResult LiteParsedPipeline::supportsReadConcern(
 
     // 3. If either the specified or default readConcern have not already been rejected, determine
     // whether the pipeline stages support them. If not, we record the first error we encounter.
+    result.merge(sourcesSupportReadConcern(level, isImplicitDefault));
+
+    return result;
+}
+
+ReadConcernSupportResult LiteParsedPipeline::sourcesSupportReadConcern(
+    repl::ReadConcernLevel level, bool isImplicitDefault) const {
+    // Start by assuming that we will support both readConcern and cluster-wide default.
+    ReadConcernSupportResult result = ReadConcernSupportResult::allSupportedAndDefaultPermitted();
+
     for (auto&& spec : _stageSpecs) {
         // If both result statuses are already not OK, stop checking further stages.
         if (!result.readConcernSupport.isOK() && !result.defaultReadConcernPermit.isOK()) {
@@ -102,14 +112,16 @@ void LiteParsedPipeline::verifyIsSupported(
     const boost::optional<ExplainOptions::Verbosity> explain,
     bool enableMajorityReadConcern) const {
     // Verify litePipe can be run in a transaction.
-    if (opCtx->inMultiDocumentTransaction()) {
+    const bool inMultiDocumentTransaction = opCtx->inMultiDocumentTransaction();
+    if (inMultiDocumentTransaction) {
         assertSupportsMultiDocumentTransaction(explain);
     }
     // Verify that no involved namespace is sharded unless allowed by the pipeline.
     for (const auto& nss : getInvolvedNamespaces()) {
         uassert(28769,
                 str::stream() << nss.ns() << " cannot be sharded",
-                allowShardedForeignCollection(nss) || !isSharded(opCtx, nss));
+                allowShardedForeignCollection(nss, inMultiDocumentTransaction) ||
+                    !isSharded(opCtx, nss));
     }
 }
 

@@ -27,13 +27,16 @@
  *    it in the license file.
  */
 
+#include "mongo/db/ops/write_ops_parsers.h"
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 
+#include <algorithm>
 #include <tuple>
+#include <vector>
 
 #include "mongo/db/auth/authorization_session_impl.h"
 #include "mongo/db/dbdirectclient.h"
@@ -42,8 +45,8 @@
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/s/balancer/balancer_command_document_gen.h"
 #include "mongo/db/s/balancer/type_migration.h"
-#include "mongo/db/s/sharding_ddl_50_upgrade_downgrade.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/type_lockpings.h"
 #include "mongo/db/s/type_locks.h"
@@ -59,6 +62,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/long_collection_names_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/transport/service_entry_point.h"
@@ -96,6 +100,20 @@ OpMsg runCommandInLocalTxn(OperationContext* opCtx,
                             OpMsgRequest::fromDBAndBody(db.toString(), bob.obj()).serialize())
             .get()
             .response);
+}
+
+/**
+ * Runs the BatchedCommandRequest 'request' on namespace 'nss' It transforms the request to BSON
+ * and then uses a DBDirectClient to run the command locally.
+ */
+BSONObj executeConfigRequest(OperationContext* opCtx,
+                             const NamespaceString& nss,
+                             const BatchedCommandRequest& request) {
+    invariant(nss.db() == NamespaceString::kConfigDb);
+    DBDirectClient client(opCtx);
+    BSONObj result;
+    client.runCommand(nss.db().toString(), request.toBSON(), result);
+    return result;
 }
 
 void startTransactionWithNoopFind(OperationContext* opCtx,
@@ -208,6 +226,41 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
 
     return Status::OK();
 }
+
+// creates a vector of a vector of BSONObj (one for each batch) from the docs vector
+// each batch can only be as big as the maximum BSON Object size and be below the maximum
+// document count
+std::vector<std::vector<BSONObj>> createBulkWriteBatches(const std::vector<BSONObj>& docs,
+                                                         int documentOverhead) {
+
+    const auto maxBatchSize = write_ops::kMaxWriteBatchSize;
+
+    // creates a vector of a vector of BSONObj (one for each batch) from the docs vector
+    // each batch can only be as big as the maximum BSON Object size and be below the maximum
+    // document count
+    std::vector<std::vector<BSONObj>> out;
+    size_t batchIndex = 0;
+    int workingBatchDocSize = 0;
+
+    std::for_each(docs.begin(), docs.end(), [&](const BSONObj& doc) {
+        if (out.size() == batchIndex) {
+            out.emplace_back(std::vector<BSONObj>());
+        }
+
+        auto currentBatchBSONSize = workingBatchDocSize + doc.objsize() + documentOverhead;
+
+        if (currentBatchBSONSize > BSONObjMaxUserSize ||
+            out[batchIndex].size() + 1 > maxBatchSize) {
+            ++batchIndex;
+            workingBatchDocSize = 0;
+            out.emplace_back(std::vector<BSONObj>());
+        }
+        out[batchIndex].emplace_back(doc);
+        workingBatchDocSize += doc.objsize() + documentOverhead;
+    });
+
+    return out;
+};
 }  // namespace
 
 void ShardingCatalogManager::create(ServiceContext* serviceContext,
@@ -375,6 +428,18 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
         return result.withContext("couldn't create ns_1_min_1 index on config.migrations");
     }
 
+    result =
+        configShard->createIndexOnConfig(opCtx,
+                                         NamespaceString::kConfigBalancerCommandsNamespace,
+                                         BSON(PersistedBalancerCommand::kRequestIdFieldName << 1),
+                                         unique);
+    if (!result.isOK()) {
+        return result.withContext(
+            "couldn't create requestId_1 index on "
+            "config.balancerCommandsSchedulerOngoingOperations");
+    }
+
+
     result = configShard->createIndexOnConfig(
         opCtx, ShardType::ConfigNS, BSON(ShardType::host() << 1), unique);
     if (!result.isOK()) {
@@ -478,6 +543,175 @@ Status ShardingCatalogManager::setFeatureCompatibilityVersionOnShards(OperationC
     return Status::OK();
 }
 
+void _updateConfigDocument(OperationContext* opCtx,
+                           const mongo::NamespaceString& nss,
+                           const BSONObj& query,
+                           const BSONObj& update,
+                           bool upsert,
+                           bool multi) {
+    invariant(nss.db() == "config");
+
+    write_ops::UpdateCommandRequest commandRequest(nss, [&] {
+        write_ops::UpdateOpEntry updateOp;
+        updateOp.setQ(query);
+        updateOp.setU(write_ops::UpdateModification::parseFromClassicUpdate(update));
+        updateOp.setMulti(multi);
+        updateOp.setUpsert(upsert);
+        return std::vector{updateOp};
+    }());
+    commandRequest.setWriteCommandRequestBase([] {
+        write_ops::WriteCommandRequestBase commandRequestBase;
+        commandRequestBase.setOrdered(false);
+        return commandRequestBase;
+    }());
+
+    DBDirectClient dbClient(opCtx);
+    const auto commandResponse =
+        dbClient.runCommand(OpMsgRequest::fromDBAndBody(nss.db(), commandRequest.toBSON({})));
+
+    const auto commandReply = commandResponse->getCommandReply();
+    uassertStatusOK([&] {
+        BatchedCommandResponse response;
+        std::string unusedErrMsg;
+        response.parseBSON(commandReply, &unusedErrMsg);
+        return response.toStatus();
+    }());
+    uassertStatusOK(getWriteConcernStatusFromCommandResult(commandReply));
+}
+
+void ShardingCatalogManager::_enableSupportForLongCollectionName(OperationContext* opCtx) {
+    // List all collections for which the long name support is disabled.
+    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    const auto collectionDocs =
+        uassertStatusOK(
+            configShard->exhaustiveFindOnConfig(
+                opCtx,
+                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                repl::ReadConcernLevel::kLocalReadConcern,
+                CollectionType::ConfigNS,
+                BSON(CollectionType::kSupportingLongNameFieldName << BSON("$exists" << false)),
+                BSONObj(),
+                boost::none))
+            .docs;
+
+    // Implicitly enable the long name support on all collections for which it is disabled.
+    _updateConfigDocument(
+        opCtx,
+        CollectionType::ConfigNS,
+        BSON(CollectionType::kSupportingLongNameFieldName << BSON("$exists" << false)),
+        BSON("$set" << BSON(CollectionType::kSupportingLongNameFieldName
+                            << SupportingLongNameStatus_serializer(
+                                   SupportingLongNameStatusEnum::kImplicitlyEnabled))),
+        false /* upsert */,
+        true /* multi */);
+
+    // Wait until the last operation is majority-committed.
+    WriteConcernResult ignoreResult;
+    const auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    uassertStatusOK(waitForWriteConcern(
+        opCtx, latestOpTime, ShardingCatalogClient::kMajorityWriteConcern, &ignoreResult));
+
+    // Force the catalog cache refresh of updated collections on each shard.
+    const auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    const auto fixedExecutor = Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor();
+    for (const auto& doc : collectionDocs) {
+        const CollectionType coll(doc);
+        const auto collNss = coll.getNss();
+
+        try {
+            sharding_util::tellShardsToRefreshCollection(opCtx, shardIds, collNss, fixedExecutor);
+        } catch (const ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& e) {
+            LOGV2_ERROR(5857400,
+                        "Failed to refresh collection on shards after enabling long name support",
+                        "nss"_attr = collNss.ns(),
+                        "error"_attr = redact(e));
+        }
+    }
+}
+
+void ShardingCatalogManager::_disableSupportForLongCollectionName(OperationContext* opCtx) {
+    // List all collections for which the long name support is implicitly enabled.
+    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    const auto collectionDocs =
+        uassertStatusOK(configShard->exhaustiveFindOnConfig(
+                            opCtx,
+                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                            repl::ReadConcernLevel::kLocalReadConcern,
+                            CollectionType::ConfigNS,
+                            BSON(CollectionType::kSupportingLongNameFieldName
+                                 << SupportingLongNameStatus_serializer(
+                                        SupportingLongNameStatusEnum::kImplicitlyEnabled)),
+                            BSONObj(),
+                            boost::none))
+            .docs;
+
+    // Disable the long name support on all collections for which it is implicitly enabled.
+    _updateConfigDocument(
+        opCtx,
+        CollectionType::ConfigNS,
+        BSON(CollectionType::kSupportingLongNameFieldName << SupportingLongNameStatus_serializer(
+                 SupportingLongNameStatusEnum::kImplicitlyEnabled)),
+        BSON("$unset" << BSON(CollectionType::kSupportingLongNameFieldName << 1)),
+        false /* upsert */,
+        true /* multi */);
+
+    // Wait until the last operation is majority-committed.
+    WriteConcernResult ignoreResult;
+    const auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    uassertStatusOK(waitForWriteConcern(
+        opCtx, latestOpTime, ShardingCatalogClient::kMajorityWriteConcern, &ignoreResult));
+
+    // Force the catalog cache refresh of updated collections on each shard.
+    const auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    const auto fixedExecutor = Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor();
+    for (const auto& doc : collectionDocs) {
+        const CollectionType coll(doc);
+        const auto collNss = coll.getNss();
+
+        try {
+            sharding_util::tellShardsToRefreshCollection(opCtx, shardIds, collNss, fixedExecutor);
+        } catch (const ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& e) {
+            LOGV2_ERROR(5857401,
+                        "Failed to refresh collection on shards after disabling long name support",
+                        "nss"_attr = collNss.ns(),
+                        "error"_attr = redact(e));
+        }
+    }
+}
+
+void ShardingCatalogManager::upgradeMetadataTo51Phase2(OperationContext* opCtx) {
+    LOGV2(5857402, "Starting metadata upgrade to FCV 5.1 (phase 2)");
+
+    try {
+        if (feature_flags::gFeatureFlagLongCollectionNames.isEnabledAndIgnoreFCV()) {
+            _enableSupportForLongCollectionName(opCtx);
+        }
+    } catch (const DBException& e) {
+        LOGV2_ERROR(
+            5857403, "Failed to upgrade metadata to FCV 5.1 (phase 2)", "error"_attr = redact(e));
+        throw;
+    }
+
+    LOGV2(5857404, "Successfully upgraded metadata to FCV 5.1 (phase 2)");
+}
+
+void ShardingCatalogManager::downgradeMetadataToPre51Phase2(OperationContext* opCtx) {
+    LOGV2(5857405, "Starting metadata downgrade to pre FCV 5.1 (phase 2)");
+
+    try {
+        if (feature_flags::gFeatureFlagLongCollectionNames.isEnabledAndIgnoreFCV()) {
+            _disableSupportForLongCollectionName(opCtx);
+        }
+    } catch (const DBException& e) {
+        LOGV2_ERROR(5857406,
+                    "Failed to downgrade metadata to pre FCV 5.1 (phase 2)",
+                    "error"_attr = redact(e));
+        throw;
+    }
+
+    LOGV2(5857407, "Successfully downgraded metadata to pre FCV 5.1 (phase 2)");
+}
+
 StatusWith<bool> ShardingCatalogManager::_isShardRequiredByZoneStillInUse(
     OperationContext* opCtx,
     const ReadPreferenceSetting& readPref,
@@ -549,49 +783,62 @@ BSONObj ShardingCatalogManager::writeToConfigDocumentInTxn(OperationContext* opC
     return response;
 }
 
-void ShardingCatalogManager::insertConfigDocumentsInTxn(OperationContext* opCtx,
-                                                        const NamespaceString& nss,
-                                                        std::vector<BSONObj> docs,
-                                                        TxnNumber txnNumber) {
+void ShardingCatalogManager::insertConfigDocuments(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   std::vector<BSONObj> docs,
+                                                   boost::optional<TxnNumber> txnNumber) {
     invariant(nss.db() == NamespaceString::kConfigDb);
 
-    std::vector<BSONObj> workingBatch;
-    size_t workingBatchItemSize = 0;
-    int workingBatchDocSize = 0;
+    // if the operation is in a transaction then the overhead for each document is different.
+    const auto documentOverhead = txnNumber
+        ? write_ops::kWriteCommandBSONArrayPerElementOverheadBytes
+        : write_ops::kRetryableAndTxnBatchWriteBSONSizeOverhead;
 
-    auto doBatchInsert = [&]() {
-        BatchedCommandRequest request([&] {
+    std::vector<std::vector<BSONObj>> batches = createBulkWriteBatches(docs, documentOverhead);
+
+    std::for_each(batches.begin(), batches.end(), [&](const std::vector<BSONObj>& batch) {
+        BatchedCommandRequest request([nss, batch] {
             write_ops::InsertCommandRequest insertOp(nss);
-            insertOp.setDocuments(workingBatch);
+            insertOp.setDocuments(batch);
             return insertOp;
         }());
 
-        writeToConfigDocumentInTxn(opCtx, nss, request, txnNumber);
-    };
-
-    while (!docs.empty()) {
-        BSONObj toAdd = docs.back();
-        docs.pop_back();
-
-        const int docSizePlusOverhead =
-            toAdd.objsize() + write_ops::kRetryableAndTxnBatchWriteBSONSizeOverhead;
-        // Check if pushing this object will exceed the batch size limit or the max object size
-        if ((workingBatchItemSize + 1 > write_ops::kMaxWriteBatchSize) ||
-            (workingBatchDocSize + docSizePlusOverhead > BSONObjMaxUserSize)) {
-            doBatchInsert();
-
-            workingBatch.clear();
-            workingBatchItemSize = 0;
-            workingBatchDocSize = 0;
+        if (txnNumber) {
+            writeToConfigDocumentInTxn(opCtx, nss, request, txnNumber.get());
+        } else {
+            uassertStatusOK(
+                getStatusFromWriteCommandReply(executeConfigRequest(opCtx, nss, request)));
         }
+    });
+}
 
-        workingBatch.push_back(toAdd);
-        ++workingBatchItemSize;
-        workingBatchDocSize += docSizePlusOverhead;
+boost::optional<BSONObj> ShardingCatalogManager::findOneConfigDocumentInTxn(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    TxnNumber txnNumber,
+    const BSONObj& query) {
+
+    invariant(nss.db() == NamespaceString::kConfigDb);
+
+    FindCommandRequest findCommand(nss);
+    findCommand.setFilter(query);
+    findCommand.setSingleBatch(true);
+    findCommand.setLimit(1);
+
+    auto res =
+        runCommandInLocalTxn(
+            opCtx, nss.db(), false /*startTransaction*/, txnNumber, findCommand.toBSON(BSONObj()))
+            .body;
+    uassertStatusOK(getStatusFromCommandResult(res));
+
+    auto cursor = uassertStatusOK(CursorResponse::parseFromBSON(res));
+    auto result = cursor.releaseBatch();
+
+    if (result.empty()) {
+        return boost::none;
     }
 
-    if (!workingBatch.empty())
-        doBatchInsert();
+    return result.front().getOwned();
 }
 
 void ShardingCatalogManager::withTransaction(
@@ -608,7 +855,7 @@ void ShardingCatalogManager::withTransaction(
     AuthorizationSession::get(client)->grantInternalAuthorization(client);
     TxnNumber txnNumber = 0;
 
-    auto guard = makeGuard([opCtx = asr.opCtx(), &txnNumber] {
+    ScopeGuard guard([opCtx = asr.opCtx(), &txnNumber] {
         try {
             abortTransaction(opCtx, txnNumber);
         } catch (DBException& e) {
@@ -620,10 +867,10 @@ void ShardingCatalogManager::withTransaction(
 
     size_t attempt = 1;
     while (true) {
-        // Some ErrorCategory::Interruption errors are also considered transient transaction errors.
-        // We don't attempt to enumerate them explicitly. Instead, we retry on all
-        // ErrorCategory::Interruption errors (e.g. LockTimeout) and detect whether asr.opCtx() was
-        // killed by explicitly checking if it has been interrupted.
+        // Some ErrorCategory::Interruption errors are also considered transient transaction
+        // errors. We don't attempt to enumerate them explicitly. Instead, we retry on all
+        // ErrorCategory::Interruption errors (e.g. LockTimeout) and detect whether asr.opCtx()
+        // was killed by explicitly checking if it has been interrupted.
         asr.opCtx()->checkForInterrupt();
         ++txnNumber;
 
@@ -668,10 +915,10 @@ void ShardingCatalogManager::withTransaction(
         }
 
         uassertStatusOK(cmdStatus);
-        // commitTransaction() specifies {writeConcern: {w: "majority"}} without a wtimeout, so it
-        // isn't expected to have a write concern error unless the primary is stepping down or
-        // shutting down or asr.opCtx() is killed. We throw because all of those cases are terminal
-        // for the caller running a local replica set transaction anyway.
+        // commitTransaction() specifies {writeConcern: {w: "majority"}} without a wtimeout, so
+        // it isn't expected to have a write concern error unless the primary is stepping down
+        // or shutting down or asr.opCtx() is killed. We throw because all of those cases are
+        // terminal for the caller running a local replica set transaction anyway.
         uassertStatusOK(wcStatus);
 
         guard.dismiss();

@@ -69,11 +69,12 @@ public:
     void open(bool reOpen) final;
     PlanState getNext() final;
     void close() final;
-    void doSaveState() final;
+    void doSaveState(bool relinquishCursor) final;
 
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
     std::vector<DebugPrinter::Block> debugPrint() const final;
+    size_t estimateCompileTimeSize() const final;
 
 private:
     PlanState getNextOuterSide() {

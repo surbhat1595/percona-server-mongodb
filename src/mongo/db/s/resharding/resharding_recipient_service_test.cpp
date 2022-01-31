@@ -78,9 +78,9 @@ public:
 
         const OID epoch = OID::gen();
         std::vector<ChunkType> chunks = {ChunkType{
-            nss,
+            _sourceUUID,
             ChunkRange{BSON(_currentShardKey << MINKEY), BSON(_currentShardKey << MAXKEY)},
-            ChunkVersion(100, 0, epoch, boost::none /* timestamp */),
+            ChunkVersion(100, 0, epoch, Timestamp()),
             _someDonorId}};
 
         auto rt = RoutingTableHistory::makeNew(_sourceNss,
@@ -89,7 +89,7 @@ public:
                                                nullptr /* defaultCollator */,
                                                false /* unique */,
                                                std::move(epoch),
-                                               boost::none /* timestamp */,
+                                               Timestamp(),
                                                boost::none /* timeseriesFields */,
                                                boost::none /* reshardingFields */,
                                                boost::none /* chunkSizeBytes */,
@@ -627,8 +627,8 @@ TEST_F(ReshardingRecipientServiceTest, TruncatesXLErrorOnRecipientDocument) {
             PersistentTaskStore<ReshardingRecipientDocument> store(
                 NamespaceString::kRecipientReshardingOperationsNamespace);
             store.forEach(opCtx.get(),
-                          QUERY(ReshardingRecipientDocument::kReshardingUUIDFieldName
-                                << doc.getReshardingUUID()),
+                          BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName
+                               << doc.getReshardingUUID()),
                           [&](const auto& recipientDocument) {
                               persistedRecipientDocument.emplace(recipientDocument);
                               return false;

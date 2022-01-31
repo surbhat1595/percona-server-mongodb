@@ -156,14 +156,15 @@ public:
     Accessor* getAccessor(value::SlotId slot);
 
     /**
-     * Make a copy of his environment. The new environment will have its own set of SlotAccessors
+     * Make a copy of this environment. The new environment will have its own set of SlotAccessors
      * pointing to the same shared data holding slot values.
      *
-     * To create a copy of the runtime environment for a parallel execution plan, the 'isSmp' flag
-     * must be set to 'true'. This will result in this environment being unconverted to a parallel
-     * environment, as well as the newly created copy.
+     * To create a copy of the runtime environment for a parallel execution plan, please use
+     * makeCopyForParallelUse() method. This will result in this environment being converted to a
+     * parallel environment, as well as the newly created copy.
      */
-    std::unique_ptr<RuntimeEnvironment> makeCopy(bool isSmp);
+    std::unique_ptr<RuntimeEnvironment> makeCopyForParallelUse();
+    std::unique_ptr<RuntimeEnvironment> makeCopy() const;
 
     /**
      * Dumps all the slots currently defined in this environment into the given string builder.
@@ -226,7 +227,15 @@ struct CompileCtx {
     void pushCorrelated(value::SlotId slot, value::SlotAccessor* accessor);
     void popCorrelated();
 
-    CompileCtx makeCopy(bool isSmp);
+    /**
+     * Make a copy of this CompileCtx. The underlying RuntimeEnvironment will also be copied.
+     *
+     * To create a copy of the underlying runtime environment for a parallel execution plan, please
+     * use makeCopyForParallelUse() method. This will result in the environment in this CompileCtx
+     * being converted to a parallel environment, as well as the newly created copy.
+     */
+    CompileCtx makeCopyForParallelUse();
+    CompileCtx makeCopy() const;
 
     PlanStage* root{nullptr};
     value::SlotAccessor* accumulator{nullptr};
@@ -253,6 +262,11 @@ private:
  */
 class EExpression {
 public:
+    /**
+     * Let's optimistically assume a nice binary tree.
+     */
+    using Vector = absl::InlinedVector<std::unique_ptr<EExpression>, 2>;
+
     virtual ~EExpression() = default;
 
     /**
@@ -264,12 +278,21 @@ public:
     /**
      * Returns bytecode directly executable by VM.
      */
-    virtual std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const = 0;
+    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const {
+        return std::make_unique<vm::CodeFragment>(compileDirect(ctx));
+    }
+
+    virtual vm::CodeFragment compileDirect(CompileCtx& ctx) const = 0;
 
     virtual std::vector<DebugPrinter::Block> debugPrint() const = 0;
 
+    /**
+     * Estimates the size of the current expression node and its children.
+     */
+    virtual size_t estimateSize() const = 0;
+
 protected:
-    std::vector<std::unique_ptr<EExpression>> _nodes;
+    Vector _nodes;
 
     /**
      * Expressions can never be constructed with nullptr children.
@@ -287,8 +310,8 @@ inline std::unique_ptr<EExpression> makeE(Args&&... args) {
 }
 
 template <typename... Ts>
-inline std::vector<std::unique_ptr<EExpression>> makeEs(Ts&&... pack) {
-    std::vector<std::unique_ptr<EExpression>> exprs;
+inline auto makeEs(Ts&&... pack) {
+    EExpression::Vector exprs;
 
     (exprs.emplace_back(std::forward<Ts>(pack)), ...);
 
@@ -349,9 +372,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+    size_t estimateSize() const final;
+
 
 private:
     value::TypeTags _tag;
@@ -371,9 +396,12 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+    size_t estimateSize() const final {
+        return sizeof(*this);
+    }
 
 private:
     value::SlotId _var;
@@ -435,9 +463,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     Op _op;
@@ -460,9 +490,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     Op _op;
@@ -475,16 +507,18 @@ private:
  */
 class EFunction final : public EExpression {
 public:
-    EFunction(StringData name, std::vector<std::unique_ptr<EExpression>> args) : _name(name) {
+    EFunction(StringData name, EExpression::Vector args) : _name(name) {
         _nodes = std::move(args);
         validateNodes();
     }
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     std::string _name;
@@ -506,9 +540,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 };
 
 /**
@@ -516,9 +552,7 @@ public:
  */
 class ELocalBind final : public EExpression {
 public:
-    ELocalBind(FrameId frameId,
-               std::vector<std::unique_ptr<EExpression>> binds,
-               std::unique_ptr<EExpression> in)
+    ELocalBind(FrameId frameId, EExpression::Vector binds, std::unique_ptr<EExpression> in)
         : _frameId(frameId) {
         _nodes = std::move(binds);
         _nodes.emplace_back(std::move(in));
@@ -527,9 +561,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     FrameId _frameId;
@@ -547,9 +583,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     FrameId _frameId;
@@ -570,9 +608,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     ErrorCodes::Error _code;
@@ -602,9 +642,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     value::TypeTags _target;
@@ -624,9 +666,11 @@ public:
 
     std::unique_ptr<EExpression> clone() const override;
 
-    std::unique_ptr<vm::CodeFragment> compile(CompileCtx& ctx) const override;
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
 
     std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
 
 private:
     uint32_t _typeMask;

@@ -175,7 +175,7 @@ StatusWith<std::vector<ChunkType>> readShardChunks(OperationContext* opCtx,
                                                    const BSONObj& sort,
                                                    boost::optional<long long> limit,
                                                    const OID& epoch,
-                                                   const boost::optional<Timestamp>& timestamp);
+                                                   const Timestamp& timestamp);
 
 /**
  * Takes a vector of 'chunks' and updates the shard's chunks collection for 'nss' or 'uuid'. Any
@@ -187,9 +187,9 @@ StatusWith<std::vector<ChunkType>> readShardChunks(OperationContext* opCtx,
  * collection data!
  *
  * nss - the collection namespace for which chunk metadata is being updated.
- * supportingLongName - when enabled, chunk metadata is accessed by collection 'uuid' rather than
- *                      'nss'.
  * uuid - the collection UUID for which chunk metadata is being updated.
+ * supportingLongName - when enabled, chunks metadata is accessed by collection 'uuid' rather than
+ *                      collection 'nss'.
  * chunks - chunks retrieved from the config server, sorted in ascending chunk version order.
  * currEpoch - what this shard server expects the collection epoch to be.
  *
@@ -211,13 +211,6 @@ Status updateShardChunks(OperationContext* opCtx,
 void updateSupportingLongNameOnShardCollections(OperationContext* opCtx,
                                                 const NamespaceString& nss,
                                                 SupportingLongNameStatusEnum supportingLongName);
-
-/**
- * Adds/removes the timestamp of the 'nss' entry in config.cache.collections
- */
-void updateTimestampOnShardCollections(OperationContext* opCtx,
-                                       const NamespaceString& nss,
-                                       const boost::optional<Timestamp>& timestamp);
 
 /**
  * Deletes locally persisted chunk metadata associated with 'nss': drops the chunks collection

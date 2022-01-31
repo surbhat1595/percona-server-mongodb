@@ -119,10 +119,11 @@ public:
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
     std::vector<DebugPrinter::Block> debugPrint() const final;
+    size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState() override;
-    void doRestoreState() override;
+    void doSaveState(bool fullSave) override;
+    void doRestoreState(bool fullSave) override;
     void doDetachFromOperationContext() override;
     void doAttachToOperationContext(OperationContext* opCtx) override;
     void doDetachFromTrialRunTracker() override;
@@ -228,10 +229,11 @@ public:
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
     std::vector<DebugPrinter::Block> debugPrint() const final;
+    size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState() final;
-    void doRestoreState() final;
+    void doSaveState(bool fullSave) final;
+    void doRestoreState(bool fullSave) final;
     void doDetachFromOperationContext() final;
     void doAttachToOperationContext(OperationContext* opCtx) final;
 

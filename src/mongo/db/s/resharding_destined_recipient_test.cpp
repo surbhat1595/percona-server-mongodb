@@ -40,10 +40,10 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/resharding_util.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
@@ -70,7 +70,11 @@ void runInTransaction(OperationContext* opCtx, Callable&& func) {
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
     ASSERT(txnParticipant);
-    txnParticipant.beginOrContinue(opCtx, txnNum, false, true);
+    txnParticipant.beginOrContinue(opCtx,
+                                   txnNum,
+                                   false /* autocommit */,
+                                   true /* startTransaction */,
+                                   boost::none /* txnRetryCounter */);
     txnParticipant.unstashTransactionResources(opCtx, "SetDestinedRecipient");
 
     func();
@@ -155,18 +159,17 @@ public:
     }
 
 protected:
-    std::vector<ChunkType> createChunks(const OID& epoch, const std::string& shardKey) {
+    std::vector<ChunkType> createChunks(const OID& epoch,
+                                        const UUID& uuid,
+                                        const Timestamp& timestamp,
+                                        const std::string& shardKey) {
         auto range1 = ChunkRange(BSON(shardKey << MINKEY), BSON(shardKey << 5));
-        ChunkType chunk1(kNss,
-                         range1,
-                         ChunkVersion(1, 0, epoch, boost::none /* timestamp */),
-                         kShardList[0].getName());
+        ChunkType chunk1(
+            uuid, range1, ChunkVersion(1, 0, epoch, timestamp), kShardList[0].getName());
 
         auto range2 = ChunkRange(BSON(shardKey << 5), BSON(shardKey << MAXKEY));
-        ChunkType chunk2(kNss,
-                         range2,
-                         ChunkVersion(1, 0, epoch, boost::none /* timestamp */),
-                         kShardList[1].getName());
+        ChunkType chunk2(
+            uuid, range2, ChunkVersion(1, 0, epoch, timestamp), kShardList[1].getName());
 
         return {chunk1, chunk2};
     }
@@ -195,7 +198,7 @@ protected:
 
         ReshardingEnv env(CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, kNss).value());
         env.destShard = kShardList[1].getName();
-        env.version = ChunkVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+        env.version = ChunkVersion(1, 0, OID::gen(), Timestamp());
         env.tempNss =
             NamespaceString(kNss.db(),
                             fmt::format("{}{}",
@@ -213,7 +216,8 @@ protected:
             {ShardId{kShardList[0].getName()}, ShardId{kShardList[1].getName()}}});
         reshardingFields.setState(CoordinatorStateEnum::kPreparingToDonate);
 
-        CollectionType coll(kNss, env.version.epoch(), Date_t::now(), UUID::gen());
+        CollectionType coll(
+            kNss, env.version.epoch(), env.version.getTimestamp(), Date_t::now(), UUID::gen());
         coll.setKeyPattern(BSON(kShardKey << 1));
         coll.setUnique(false);
         coll.setAllowMigrations(false);
@@ -221,9 +225,16 @@ protected:
         _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(
             DatabaseType(kNss.db().toString(), kShardList[0].getName(), true, env.dbVersion));
         _mockCatalogCacheLoader->setCollectionRefreshValues(
-            kNss, coll, createChunks(env.version.epoch(), kShardKey), reshardingFields);
+            kNss,
+            coll,
+            createChunks(
+                env.version.epoch(), env.sourceUuid, env.version.getTimestamp(), kShardKey),
+            reshardingFields);
         _mockCatalogCacheLoader->setCollectionRefreshValues(
-            env.tempNss, coll, createChunks(env.version.epoch(), "y"), boost::none);
+            env.tempNss,
+            coll,
+            createChunks(env.version.epoch(), env.sourceUuid, env.version.getTimestamp(), "y"),
+            boost::none);
 
         forceDatabaseRefresh(opCtx, kNss.db());
         forceShardFilteringMetadataRefresh(opCtx, kNss);
@@ -287,11 +298,10 @@ TEST_F(DestinedRecipientTest, TestGetDestinedRecipient) {
     AutoGetCollection coll(opCtx, kNss, MODE_IX);
     OperationShardingState::get(opCtx).initializeClientRoutingVersions(
         kNss, env.version, env.dbVersion);
-    auto* const css = CollectionShardingState::get(opCtx, kNss);
-    auto collDesc = css->getCollectionDescription(opCtx);
+    ShardingWriteRouter shardingWriteRouter(opCtx, kNss, Grid::get(opCtx)->catalogCache());
 
     auto destShardId =
-        getDestinedRecipient(opCtx, kNss, BSON("x" << 2 << "y" << 10), css, collDesc);
+        shardingWriteRouter.getReshardingDestinedRecipient(BSON("x" << 2 << "y" << 10));
     ASSERT(destShardId);
     ASSERT_EQ(*destShardId, env.destShard);
 }
@@ -304,18 +314,16 @@ TEST_F(DestinedRecipientTest, TestGetDestinedRecipientThrowsOnBlockedRefresh) {
         AutoGetCollection coll(opCtx, kNss, MODE_IX);
         OperationShardingState::get(opCtx).initializeClientRoutingVersions(
             kNss, env.version, env.dbVersion);
-        auto* const css = CollectionShardingState::get(opCtx, kNss);
-        auto collDesc = css->getCollectionDescription(opCtx);
 
         FailPointEnableBlock failPoint("blockCollectionCacheLookup");
-        ASSERT_THROWS_WITH_CHECK(
-            getDestinedRecipient(opCtx, kNss, BSON("x" << 2 << "y" << 10), css, collDesc),
-            ShardCannotRefreshDueToLocksHeldException,
-            [&](const ShardCannotRefreshDueToLocksHeldException& ex) {
-                const auto refreshInfo = ex.extraInfo<ShardCannotRefreshDueToLocksHeldInfo>();
-                ASSERT(refreshInfo);
-                ASSERT_EQ(refreshInfo->getNss(), env.tempNss);
-            });
+        ASSERT_THROWS_WITH_CHECK(ShardingWriteRouter(opCtx, kNss, Grid::get(opCtx)->catalogCache()),
+                                 ShardCannotRefreshDueToLocksHeldException,
+                                 [&](const ShardCannotRefreshDueToLocksHeldException& ex) {
+                                     const auto refreshInfo =
+                                         ex.extraInfo<ShardCannotRefreshDueToLocksHeldInfo>();
+                                     ASSERT(refreshInfo);
+                                     ASSERT_EQ(refreshInfo->getNss(), env.tempNss);
+                                 });
     }
 
     auto sw = catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, env.tempNss);
@@ -391,7 +399,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnMultiUpdates)
     OperationShardingState::get(opCtx).initializeClientRoutingVersions(
         kNss, ChunkVersion::IGNORED(), env.dbVersion);
     client.update(kNss.ns(),
-                  Query{BSON("x" << 0)},
+                  BSON("x" << 0),
                   BSON("$set" << BSON("z" << 5)),
                   false /*upsert*/,
                   true /*multi*/);

@@ -15,6 +15,20 @@ env.SConscript(
 )
 
 env.Library(
+    target='clustered_collection_options',
+    source=[
+        'clustered_collection_options.idl',
+        'clustered_collection_util.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/idl/basic_types',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
     target='collection_options',
     source=[
         'collection_options.cpp',
@@ -24,9 +38,12 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_idl',
+        '$BUILD_DIR/mongo/db/query/query_knobs',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/basic_types',
+        '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/idl/idl_parser',
+        'clustered_collection_options',
     ],
 )
 
@@ -340,7 +357,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/durable_catalog_impl',
         '$BUILD_DIR/mongo/db/storage/execution_context',
         '$BUILD_DIR/mongo/db/storage/key_string',
-        '$BUILD_DIR/mongo/db/storage/storage_debug_util',
         '$BUILD_DIR/mongo/db/storage/storage_engine_common',
         '$BUILD_DIR/mongo/db/storage/storage_engine_impl',
         '$BUILD_DIR/mongo/db/storage/storage_util',
@@ -349,7 +365,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/vector_clock',
         '$BUILD_DIR/mongo/db/views/views_mongod',
+        'catalog_helpers',
         'catalog_stats',
+        'clustered_collection_options',
         'collection',
         'collection_options',
         'database_holder',
@@ -383,9 +401,11 @@ env.Library(
     source=[
         'collection_validation.cpp',
         'validate_adaptor.cpp',
+        'validate_results.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/index_key_validate',
         '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
         '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/db_raii',
@@ -401,19 +421,8 @@ env.Library(
         'collection_options',
         'index_catalog',
         'throttle_cursor',
-        'validate_results',
         'validate_state',
     ]
-)
-
-env.Library(
-    target='validate_results',
-    source=[
-        'validate_results.cpp',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
-    ],
 )
 
 env.Library(
@@ -460,12 +469,14 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/db_raii',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/index_commands_idl',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/views/views',
         '$BUILD_DIR/mongo/db/write_ops',
+        'clustered_collection_options',
         'collection',
         'collection_options',
         'database_holder',
@@ -481,7 +492,12 @@ env.Library(
     source=[
         "$BUILD_DIR/mongo/db/query/collection_query_info.cpp",
         "$BUILD_DIR/mongo/db/query/collection_index_usage_tracker_decoration.cpp",
+        "$BUILD_DIR/mongo/db/query/plan_cache_key_factory.cpp",
         "$BUILD_DIR/mongo/db/query/query_settings_decoration.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/query_planner',
+        '$BUILD_DIR/mongo/db/update_index_data',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -490,9 +506,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/fts/base_fts',
-        '$BUILD_DIR/mongo/db/query/query_planner',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/db/update_index_data',
     ],
 )
 

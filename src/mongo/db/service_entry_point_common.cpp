@@ -43,6 +43,7 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/impersonation_session.h"
+#include "mongo/db/auth/ldap_cumulative_operation_stats.h"
 #include "mongo/db/client.h"
 #include "mongo/db/command_can_run_here.h"
 #include "mongo/db/commands.h"
@@ -313,12 +314,8 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
                     ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
                 const auto rcDefault = rwcDefaults.getDefaultReadConcern();
                 if (rcDefault) {
-                    const bool isDefaultRCLocalFeatureFlagEnabled =
-                        serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-                        repl::feature_flags::gDefaultRCLocal.isEnabled(
-                            serverGlobalParams.featureCompatibility);
                     const auto readConcernSource = rwcDefaults.getDefaultReadConcernSource();
-                    customDefaultWasApplied = !isDefaultRCLocalFeatureFlagEnabled ||
+                    customDefaultWasApplied =
                         (readConcernSource &&
                          readConcernSource.get() == DefaultReadConcernSourceEnum::kGlobal);
 
@@ -438,7 +435,8 @@ LogicalTime computeOperationTime(OperationContext* opCtx, LogicalTime startOpera
 
         // Note: ReadConcernArgs::getLevel returns kLocal if none was set.
         if (readConcernArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern) {
-            operationTime = LogicalTime(replCoord->getLastCommittedOpTime().getTimestamp());
+            operationTime =
+                LogicalTime(replCoord->getCurrentCommittedSnapshotOpTime().getTimestamp());
         } else {
             operationTime = LogicalTime(replCoord->getMyLastAppliedOpTime().getTimestamp());
         }
@@ -866,7 +864,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
                 _txnParticipant->beginOrContinue(opCtx,
                                                  *sessionOptions.getTxnNumber(),
                                                  sessionOptions.getAutocommit(),
-                                                 sessionOptions.getStartTransaction());
+                                                 sessionOptions.getStartTransaction(),
+                                                 sessionOptions.getTxnRetryCounter());
                 beganOrContinuedTxn = true;
             } catch (const ExceptionFor<ErrorCodes::PreparedTransactionInProgress>&) {
                 auto prepareCompleted = _txnParticipant->onExitPrepare();
@@ -901,7 +900,7 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
         // transactions on failure to unstash the transaction resources to opCtx. We don't want to
         // have this error guard for beginOrContinue as it can abort the transaction for any
         // accidental invalid statements in the transaction.
-        auto abortOnError = makeGuard([&] {
+        ScopeGuard abortOnError([&] {
             if (_txnParticipant->transactionIsInProgress()) {
                 _txnParticipant->abortTransaction(opCtx);
             }
@@ -1508,7 +1507,18 @@ void ExecCommandDatabase::_initiateCommand() {
     if (!opCtx->getClient()->isInDirectClient() &&
         readConcernArgs.getLevel() != repl::ReadConcernLevel::kAvailableReadConcern &&
         (iAmPrimary || (readConcernArgs.hasLevel() || readConcernArgs.getArgsAfterClusterTime()))) {
-        oss.initializeClientRoutingVersionsFromCommand(_invocation->ns(), request.body);
+        // If a timeseries collection is sharded, only the buckets collection would be sharded. We
+        // expect all versioned commands to be sent over 'system.buckets' namespace. But it is
+        // possible that a stale mongos may send the request over a view namespace. In this case, we
+        // initialize the 'OperationShardingState' with buckets namespace.
+        auto bucketNss = _invocation->ns().makeTimeseriesBucketsNamespace();
+        auto namespaceForSharding = CollectionCatalog::get(opCtx)
+                                        ->lookupCollectionByNamespaceForRead(opCtx, bucketNss)
+                                        .get()
+            ? bucketNss
+            : _invocation->ns();
+
+        oss.initializeClientRoutingVersionsFromCommand(namespaceForSharding, request.body);
 
         auto const shardingState = ShardingState::get(opCtx);
         if (OperationShardingState::isOperationVersioned(opCtx) || oss.hasDbVersion()) {
@@ -2084,6 +2094,15 @@ void HandleRequest::completeOperation(DbResponse& response) {
     }
 
     recordCurOpMetrics(opCtx);
+
+    const auto& stats =
+        CurOp::get(opCtx)->getReadOnlyUserAcquisitionStats()->getLdapOperationStats();
+    if (stats.shouldReport()) {
+        auto ldapCumulativeOperationsStats = LDAPCumulativeOperationStats::get();
+        if (nullptr != ldapCumulativeOperationsStats) {
+            ldapCumulativeOperationsStats->recordOpStats(stats, false);
+        }
+    }
 }
 
 }  // namespace

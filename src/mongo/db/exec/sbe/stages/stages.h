@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/config.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
@@ -124,18 +125,30 @@ public:
      * before the first call to open(), before execution of the plan has begun.
      *
      * Propagates to all children, then calls doSaveState().
+     *
+     * The 'relinquishCursor' parameter indicates whether cursors should be reset and all data
+     * should be copied.
+     *
+     * TODO SERVER-59620: Remove the 'relinquishCursor' parameter once all callers pass 'false'.
      */
-    void saveState() {
+    void saveState(bool relinquishCursor) {
         auto stage = static_cast<T*>(this);
         stage->_commonStats.yields++;
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+        invariant(_saveState == SaveState::kNotSaved);
+#endif
 
-        stage->doSaveState();
+        stage->doSaveState(relinquishCursor);
         // Save the children in a right to left order so dependent stages (i.e. one using correlated
         // slots) are saved first.
         auto& children = stage->_children;
         for (auto it = children.rbegin(); it != children.rend(); it++) {
-            (*it)->saveState();
+            (*it)->saveState(relinquishCursor);
         }
+
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+        _saveState = relinquishCursor ? SaveState::kSavedFull : SaveState::kSavedNotFull;
+#endif
     }
 
     /**
@@ -148,16 +161,41 @@ public:
      * Throws a UserException on failure to restore due to a conflicting event such as a
      * collection drop. May throw a WriteConflictException, in which case the caller may choose to
      * retry.
+     *
+     * The 'relinquishCursor' parameter indicates whether the stages are recovering from a "full
+     * save" or not, as discussed in saveState(). It is the caller's responsibility to pass the same
+     * value for 'relinquishCursor' as was passed in the previous call to saveState().
      */
-    void restoreState() {
+    void restoreState(bool relinquishCursor) {
         auto stage = static_cast<T*>(this);
         stage->_commonStats.unyields++;
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+        if (relinquishCursor) {
+            invariant(_saveState == SaveState::kSavedFull);
+        } else {
+            invariant(_saveState == SaveState::kSavedNotFull);
+        }
+#endif
+
         for (auto&& child : stage->_children) {
-            child->restoreState();
+            child->restoreState(relinquishCursor);
         }
 
-        stage->doRestoreState();
+        stage->doRestoreState(relinquishCursor);
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+        stage->_saveState = SaveState::kNotSaved;
+#endif
     }
+
+protected:
+    // We do not want to incur the overhead of tracking information about saved-ness
+    // per stage. This information is only used for sanity checking, so we only run these
+    // checks in debug builds.
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+    // TODO SERVER-59620: Remove this.
+    enum class SaveState { kNotSaved, kSavedFull, kSavedNotFull };
+    SaveState _saveState{SaveState::kNotSaved};
+#endif
 };
 
 /**
@@ -358,6 +396,8 @@ class PlanStage : public CanSwitchOperationContext<PlanStage>,
                   public CanTrackStats<PlanStage>,
                   public CanInterrupt {
 public:
+    using Vector = absl::InlinedVector<std::unique_ptr<PlanStage>, 2>;
+
     PlanStage(StringData stageType, PlanYieldPolicy* yieldPolicy, PlanNodeId nodeId)
         : CanTrackStats{stageType, nodeId}, CanInterrupt{yieldPolicy} {}
 
@@ -411,25 +451,42 @@ public:
         return {DebugPrinter::Block(str)};
     }
 
+    /**
+     * Estimates the compile-time size of the current plan stage and its children (SBE Plan
+     * subtree). The compile-time size is the size of the SBE subtree before it has been prepared or
+     * executed.
+     */
+    virtual size_t estimateCompileTimeSize() const = 0;
+
     friend class CanSwitchOperationContext<PlanStage>;
     friend class CanChangeState<PlanStage>;
     friend class CanTrackStats<PlanStage>;
 
 protected:
     // Derived classes can optionally override these methods.
-    virtual void doSaveState() {}
-    virtual void doRestoreState() {}
+    virtual void doSaveState(bool relinquishCursor) {}
+    virtual void doRestoreState(bool relinquishCursor) {}
     virtual void doDetachFromOperationContext() {}
     virtual void doAttachToOperationContext(OperationContext* opCtx) {}
     virtual void doDetachFromTrialRunTracker() {}
     virtual void doAttachToTrialRunTracker(TrialRunTracker* tracker) {}
 
-    std::vector<std::unique_ptr<PlanStage>> _children;
+    Vector _children;
 };
 
 template <typename T, typename... Args>
 inline std::unique_ptr<PlanStage> makeS(Args&&... args) {
     return std::make_unique<T>(std::forward<Args>(args)...);
 }
+
+template <typename... Ts>
+inline auto makeSs(Ts&&... pack) {
+    PlanStage::Vector stages;
+
+    (stages.emplace_back(std::forward<Ts>(pack)), ...);
+
+    return stages;
+}
+
 }  // namespace sbe
 }  // namespace mongo

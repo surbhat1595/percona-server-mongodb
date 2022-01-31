@@ -67,8 +67,6 @@ const JSFunctionSpec MongoBase::methods[] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getDataKeyCollection, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(encrypt, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(decrypt, MongoExternalInfo),
-    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getClientRPCProtocols, MongoExternalInfo),
-    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getServerRPCProtocols, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isReplicaSetConnection, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_markNodeAsFailed, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(logout, MongoExternalInfo),
@@ -367,8 +365,10 @@ void MongoBase::Functions::find::call(JSContext* cx, JS::CallArgs args) {
     int batchSize = ValueWriter(cx, args.get(5)).toInt32();
     int options = ValueWriter(cx, args.get(6)).toInt32();
 
+    const Query query = Query::fromBSONDeprecated(q);
     std::unique_ptr<DBClientCursor> cursor(conn->query(NamespaceString(ns),
-                                                       q,
+                                                       query.getFilter(),
+                                                       query,
                                                        limit,
                                                        nToSkip,
                                                        haveFields ? &fields : nullptr,
@@ -463,34 +463,6 @@ void MongoBase::Functions::cursorHandleFromId::call(JSContext* cx, JS::CallArgs 
     setCursorHandle(scope, c, NamespaceString(ns), cursorId, args);
 
     args.rval().setObjectOrNull(c);
-}
-
-void MongoBase::Functions::getClientRPCProtocols::call(JSContext* cx, JS::CallArgs args) {
-    auto conn = getConnection(args);
-
-    if (args.length() != 0)
-        uasserted(ErrorCodes::BadValue, "getClientRPCProtocols takes no args");
-
-    auto clientRPCProtocols = rpc::toString(conn->getClientRPCProtocols());
-    uassertStatusOK(clientRPCProtocols);
-
-    auto protoStr = clientRPCProtocols.getValue().toString();
-
-    ValueReader(cx, args.rval()).fromStringData(protoStr);
-}
-
-void MongoBase::Functions::getServerRPCProtocols::call(JSContext* cx, JS::CallArgs args) {
-    auto conn = getConnection(args);
-
-    if (args.length() != 0)
-        uasserted(ErrorCodes::BadValue, "getServerRPCProtocols takes no args");
-
-    auto serverRPCProtocols = rpc::toString(conn->getServerRPCProtocols());
-    uassertStatusOK(serverRPCProtocols);
-
-    auto protoStr = serverRPCProtocols.getValue().toString();
-
-    ValueReader(cx, args.rval()).fromStringData(protoStr);
 }
 
 void MongoBase::Functions::isReplicaSetConnection::call(JSContext* cx, JS::CallArgs args) {

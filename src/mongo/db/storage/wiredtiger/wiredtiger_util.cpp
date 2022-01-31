@@ -44,6 +44,7 @@
 #include "mongo/db/snapshot_window_options_gen.h"
 #include "mongo/db/storage/storage_file_util.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_parameters_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/logv2/log.h"
@@ -227,8 +228,9 @@ StatusWith<std::string> WiredTigerUtil::getMetadataCreate(OperationContext* opCt
         LOGV2_FATAL_NOTRACE(51257, "Cursor not found", "error"_attr = ex);
     }
     invariant(cursor);
-    auto releaser = makeGuard(
-        [&] { session->releaseCursor(WiredTigerSession::kMetadataCreateTableId, cursor, ""); });
+    ScopeGuard releaser = [&] {
+        session->releaseCursor(WiredTigerSession::kMetadataCreateTableId, cursor, "");
+    };
 
     return _getMetadata(cursor, uri);
 }
@@ -257,8 +259,9 @@ StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx, Str
         LOGV2_FATAL_NOTRACE(31293, "Cursor not found", "error"_attr = ex);
     }
     invariant(cursor);
-    auto releaser =
-        makeGuard([&] { session->releaseCursor(WiredTigerSession::kMetadataTableId, cursor, ""); });
+    ScopeGuard releaser = [&] {
+        session->releaseCursor(WiredTigerSession::kMetadataTableId, cursor, "");
+    };
 
     return _getMetadata(cursor, uri);
 }
@@ -695,7 +698,15 @@ bool WiredTigerUtil::useTableLogging(NamespaceString ns, bool replEnabled) {
         return false;
     }
 
-    // The remainder of local gets logged. In particular, the oplog and user created collections.
+    // Change stream pre-image collections are not logged.
+    // TODO SERVER-59607: remove this line when the preimages collection move to the config
+    // database.
+    if (ns.isChangeStreamPreImagesCollection()) {
+        return false;
+    }
+
+    // The remainder of local gets logged. In particular, the oplog and user created
+    // collections.
     return true;
 }
 
@@ -728,6 +739,29 @@ Status WiredTigerUtil::setTableLogging(WT_SESSION* session, const std::string& u
     // for all tables as a safety precaution, or if repair mode is running.
     if (_tableLoggingInfo.isFirstTable && hasPreviouslyIncompleteTableChecks()) {
         _tableLoggingInfo.hasPreviouslyIncompleteTableChecks = true;
+    }
+
+    if (gWiredTigerSkipTableLoggingChecksOnStartup) {
+        if (_tableLoggingInfo.hasPreviouslyIncompleteTableChecks) {
+            LOGV2_FATAL_NOTRACE(
+                5548300,
+                "Cannot use the 'wiredTigerSkipTableLoggingChecksOnStartup' startup parameter when "
+                "there are previously incomplete table checks");
+        }
+
+        // Only log this warning once.
+        if (_tableLoggingInfo.isFirstTable) {
+            _tableLoggingInfo.isFirstTable = false;
+            LOGV2_WARNING_OPTIONS(
+                5548301,
+                {logv2::LogTag::kStartupWarnings},
+                "Skipping table logging checks for all existing WiredTiger tables on startup",
+                "wiredTigerSkipTableLoggingChecksOnStartup"_attr =
+                    gWiredTigerSkipTableLoggingChecksOnStartup);
+        }
+
+        LOGV2_DEBUG(5548302, 1, "Skipping table logging check", "uri"_attr = uri);
+        return Status::OK();
     }
 
     if (storageGlobalParams.repair || _tableLoggingInfo.hasPreviouslyIncompleteTableChecks) {

@@ -60,6 +60,8 @@
 #include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/ops/write_ops_retryability.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
@@ -104,6 +106,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeChildRemoveOpIsPopped);
 MONGO_FAIL_POINT_DEFINE(hangAfterAllChildRemoveOpsArePopped);
 MONGO_FAIL_POINT_DEFINE(hangDuringBatchInsert);
 MONGO_FAIL_POINT_DEFINE(hangDuringBatchUpdate);
+MONGO_FAIL_POINT_DEFINE(hangAfterBatchUpdate);
 MONGO_FAIL_POINT_DEFINE(hangDuringBatchRemove);
 MONGO_FAIL_POINT_DEFINE(hangAndFailAfterDocumentInsertsReserveOpTimes);
 // The withLock fail points are for testing interruptability of these operations, so they will not
@@ -579,6 +582,7 @@ SingleWriteResult makeWriteResultForInsertOrDeleteRetry() {
     res.setNModified(0);
     return res;
 }
+
 }  // namespace
 
 WriteResult performInserts(OperationContext* opCtx,
@@ -670,15 +674,16 @@ WriteResult performInserts(OperationContext* opCtx,
                 continue;  // Add more to batch before inserting.
         }
 
-        bool canContinue =
+        out.canContinue =
             insertBatchAndHandleErrors(opCtx, wholeOp, batch, &lastOpFixer, &out, source);
         batch.clear();  // We won't need the current batch any more.
         bytesInBatch = 0;
 
         // If the batch had an error and decides to not continue, do not process a current doc that
         // was unsuccessfully "fixed" or an already executed retryable write.
-        if (!canContinue)
+        if (!out.canContinue) {
             break;
+        }
 
         // Revisit any conditions that may have caused the batch to be flushed. In those cases,
         // append the appropriate result to the output.
@@ -690,15 +695,15 @@ WriteResult performInserts(OperationContext* opCtx,
                 uassertStatusOK(fixedDoc.getStatus());
                 MONGO_UNREACHABLE;
             } catch (const DBException& ex) {
-                canContinue = handleError(opCtx,
-                                          ex,
-                                          wholeOp.getNamespace(),
-                                          wholeOp.getWriteCommandRequestBase(),
-                                          false /* multiUpdate */,
-                                          &out);
+                out.canContinue = handleError(opCtx,
+                                              ex,
+                                              wholeOp.getNamespace(),
+                                              wholeOp.getWriteCommandRequestBase(),
+                                              false /* multiUpdate */,
+                                              &out);
             }
 
-            if (!canContinue) {
+            if (!out.canContinue) {
                 break;
             }
         } else if (wasAlreadyExecuted) {
@@ -756,6 +761,8 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         makeCollection(opCtx, ns);
     }
 
+    UpdateStageParams::DocumentCounter documentCounter = nullptr;
+
     if (source == OperationSource::kTimeseriesUpdate) {
         uassert(ErrorCodes::NamespaceNotFound,
                 "Could not find time-series buckets collection for update",
@@ -767,46 +774,34 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                 timeseriesOptions);
 
         auto metaField = timeseriesOptions->getMetaField();
-        uassert(ErrorCodes::InvalidOptions,
-                "Cannot perform an update on a time-series collection with no metaField",
-                metaField);
-
         uassert(
             ErrorCodes::InvalidOptions,
-            str::stream() << "multi:false updates are not supported for time-series collections: "
-                          << ns,
-            updateRequest->isMulti());
+            "Cannot perform an update on a time-series collection that does not have a metaField",
+            metaField);
 
-        uassert(
-            ErrorCodes::InvalidOptions,
-            str::stream() << "upsert:true updates are not supported for time-series collections: "
-                          << ns,
-            !updateRequest->isUpsert());
-
-        // Get the original update query and check that it only depends on the metaField.
-        const auto& updateQuery = updateRequest->getQuery();
         uassert(ErrorCodes::InvalidOptions,
-                str::stream() << "Cannot perform an update on a time-series collection "
-                                 "when querying on a field that is not the metaField "
-                              << *metaField << ": " << ns,
-                timeseries::queryOnlyDependsOnMetaField(opCtx,
-                                                        ns,
-                                                        updateQuery,
-                                                        *metaField,
-                                                        *updateRequest->getLegacyRuntimeConstants(),
-                                                        updateRequest->getLetParameters()));
+                "Cannot perform a non-multi update on a time-series collection",
+                updateRequest->isMulti());
 
-        // Get the original set of modifications to apply and check that they only
-        // modify the metaField.
-        const auto& updateMod = updateRequest->getUpdateModification();
         uassert(ErrorCodes::InvalidOptions,
-                str::stream() << "Update on a time-series collection must only "
-                                 "modify the metaField "
-                              << *metaField << ": " << ns,
-                timeseries::updateOnlyModifiesMetaField(opCtx, ns, updateMod, *metaField));
+                "Cannot perform an upsert on a time-series collection",
+                !updateRequest->isUpsert());
 
-        updateRequest->setQuery(timeseries::translateQuery(updateQuery, *metaField));
-        updateRequest->setUpdateModification(timeseries::translateUpdate(updateMod, *metaField));
+        // Only translate the hint (if there is one) if it is specified with an index specification
+        // document.
+        if (!updateRequest->getHint().isEmpty() &&
+            updateRequest->getHint().firstElement().fieldNameStringData() != "$hint"_sd) {
+            updateRequest->setHint(
+                uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+                    *timeseriesOptions, updateRequest->getHint())));
+        }
+
+        updateRequest->setQuery(timeseries::translateQuery(updateRequest->getQuery(), *metaField));
+        updateRequest->setUpdateModification(
+            timeseries::translateUpdate(updateRequest->getUpdateModification(), *metaField));
+
+        documentCounter =
+            timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
     if (const auto& coll = collection->getCollection()) {
@@ -833,7 +828,8 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         getExecutorUpdate(&curOp.debug(),
                           collection ? &collection->getCollection() : &CollectionPtr::null,
                           &parsedUpdate,
-                          boost::none /* verbosity */));
+                          boost::none /* verbosity */,
+                          std::move(documentCounter)));
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -866,6 +862,9 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
     result.setN(nMatchedOrInserted);
     result.setNModified(updateResult.numDocsModified);
     result.setUpsertedId(updateResult.upsertedId);
+
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(
+        &hangAfterBatchUpdate, opCtx, "hangAfterBatchUpdate");
 
     if (containsDotsAndDollarsField && updateResult.containsDotsAndDollarsField) {
         *containsDotsAndDollarsField = true;
@@ -959,16 +958,21 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 WriteResult performUpdates(OperationContext* opCtx,
                            const write_ops::UpdateCommandRequest& wholeOp,
                            OperationSource source) {
+    auto ns = wholeOp.getNamespace();
+    if (source == OperationSource::kTimeseriesUpdate && !ns.isTimeseriesBucketsCollection()) {
+        ns = ns.makeTimeseriesBucketsNamespace();
+    }
+
     // Update performs its own retries, so we should not be in a WriteUnitOfWork unless run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
     invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
-    uassertStatusOK(userAllowedWriteNS(opCtx, wholeOp.getNamespace()));
+    uassertStatusOK(userAllowedWriteNS(opCtx, ns));
 
     DisableDocumentSchemaValidationIfTrue docSchemaValidationDisabler(
         opCtx, wholeOp.getWriteCommandRequestBase().getBypassDocumentValidation());
-    LastOpFixer lastOpFixer(opCtx, wholeOp.getNamespace());
+    LastOpFixer lastOpFixer(opCtx, ns);
 
     bool containsRetry = false;
     ON_BLOCK_EXIT([&] { updateRetryStats(opCtx, containsRetry); });
@@ -1021,25 +1025,14 @@ WriteResult performUpdates(OperationContext* opCtx,
                 : std::vector<StmtId>{stmtId};
 
             out.results.emplace_back(performSingleUpdateOpWithDupKeyRetry(
-                opCtx,
-                source == OperationSource::kTimeseriesUpdate
-                    ? wholeOp.getNamespace().makeTimeseriesBucketsNamespace()
-                    : wholeOp.getNamespace(),
-                stmtIds,
-                singleOp,
-                runtimeConstants,
-                wholeOp.getLet(),
-                source));
+                opCtx, ns, stmtIds, singleOp, runtimeConstants, wholeOp.getLet(), source));
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
-            const bool canContinue = handleError(opCtx,
-                                                 ex,
-                                                 wholeOp.getNamespace(),
-                                                 wholeOp.getWriteCommandRequestBase(),
-                                                 singleOp.getMulti(),
-                                                 &out);
-            if (!canContinue)
+            out.canContinue = handleError(
+                opCtx, ex, ns, wholeOp.getWriteCommandRequestBase(), singleOp.getMulti(), &out);
+            if (!out.canContinue) {
                 break;
+            }
         }
     }
 
@@ -1097,6 +1090,8 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 
     AutoGetCollection collection(opCtx, ns, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
 
+    DeleteStageParams::DocumentCounter documentCounter = nullptr;
+
     if (source == OperationSource::kTimeseriesDelete) {
         uassert(ErrorCodes::NamespaceNotFound,
                 "Could not find time-series buckets collection for write",
@@ -1107,31 +1102,28 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                 timeseriesOptions);
 
         // Only translate the hint if it is specified by index spec.
-        if (request.getHint().firstElement().fieldNameStringData() != "$hint"_sd ||
-            request.getHint().firstElement().type() != BSONType::String) {
+        if (!request.getHint().isEmpty() &&
+            (request.getHint().firstElement().fieldNameStringData() != "$hint"_sd ||
+             request.getHint().firstElement().type() != BSONType::String)) {
             request.setHint(
                 uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
                     *timeseriesOptions, request.getHint())));
         }
 
         uassert(ErrorCodes::InvalidOptions,
-                str::stream() << "Cannot perform a delete on a time-series collection "
-                                 "when querying on a field that is not the metaField: "
-                              << ns,
-                timeseries::queryOnlyDependsOnMetaField(opCtx,
-                                                        ns,
-                                                        request.getQuery(),
-                                                        timeseriesOptions->getMetaField(),
-                                                        runtimeConstants,
-                                                        letParams));
+                "Cannot perform a delete with a non-empty query on a time-series collection that "
+                "does not have a metaField",
+                timeseriesOptions->getMetaField() || request.getQuery().isEmpty());
+
         uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Cannot perform a delete with limit: 1 on a "
-                                 "time-series collection: "
-                              << ns,
+                "Cannot perform a non-multi delete on a time-series collection",
                 request.getMulti());
         if (auto metaField = timeseriesOptions->getMetaField()) {
             request.setQuery(timeseries::translateQuery(request.getQuery(), *metaField));
         }
+
+        documentCounter =
+            timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
     ParsedDelete parsedDelete(opCtx, &request);
@@ -1146,8 +1138,11 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangWithLockDuringBatchRemove, opCtx, "hangWithLockDuringBatchRemove");
 
-    auto exec = uassertStatusOK(getExecutorDelete(
-        &curOp.debug(), &collection.getCollection(), &parsedDelete, boost::none /* verbosity */));
+    auto exec = uassertStatusOK(getExecutorDelete(&curOp.debug(),
+                                                  &collection.getCollection(),
+                                                  &parsedDelete,
+                                                  boost::none /* verbosity */,
+                                                  std::move(documentCounter)));
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -1178,16 +1173,21 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 WriteResult performDeletes(OperationContext* opCtx,
                            const write_ops::DeleteCommandRequest& wholeOp,
                            OperationSource source) {
+    auto ns = wholeOp.getNamespace();
+    if (source == OperationSource::kTimeseriesDelete && !ns.isTimeseriesBucketsCollection()) {
+        ns = ns.makeTimeseriesBucketsNamespace();
+    }
+
     // Delete performs its own retries, so we should not be in a WriteUnitOfWork unless we are in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
     invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
-    uassertStatusOK(userAllowedWriteNS(opCtx, wholeOp.getNamespace()));
+    uassertStatusOK(userAllowedWriteNS(opCtx, ns));
 
     DisableDocumentSchemaValidationIfTrue docSchemaValidationDisabler(
         opCtx, wholeOp.getWriteCommandRequestBase().getBypassDocumentValidation());
-    LastOpFixer lastOpFixer(opCtx, wholeOp.getNamespace());
+    LastOpFixer lastOpFixer(opCtx, ns);
 
     bool containsRetry = false;
     ON_BLOCK_EXIT([&] { updateRetryStats(opCtx, containsRetry); });
@@ -1235,25 +1235,13 @@ WriteResult performDeletes(OperationContext* opCtx,
         });
         try {
             lastOpFixer.startingOp();
-            out.results.push_back(
-                performSingleDeleteOp(opCtx,
-                                      source == OperationSource::kTimeseriesDelete
-                                          ? wholeOp.getNamespace().makeTimeseriesBucketsNamespace()
-                                          : wholeOp.getNamespace(),
-                                      stmtId,
-                                      singleOp,
-                                      runtimeConstants,
-                                      wholeOp.getLet(),
-                                      source));
+            out.results.push_back(performSingleDeleteOp(
+                opCtx, ns, stmtId, singleOp, runtimeConstants, wholeOp.getLet(), source));
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
-            const bool canContinue = handleError(opCtx,
-                                                 ex,
-                                                 wholeOp.getNamespace(),
-                                                 wholeOp.getWriteCommandRequestBase(),
-                                                 false /* multiUpdate */,
-                                                 &out);
-            if (!canContinue)
+            out.canContinue = handleError(
+                opCtx, ex, ns, wholeOp.getWriteCommandRequestBase(), false /* multiUpdate */, &out);
+            if (!out.canContinue)
                 break;
         }
     }

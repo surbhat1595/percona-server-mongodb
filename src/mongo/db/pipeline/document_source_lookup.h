@@ -75,10 +75,11 @@ public:
         /**
          * Lookup from a sharded collection may not be allowed.
          */
-        bool allowShardedForeignCollection(NamespaceString nss) const override final {
+        bool allowShardedForeignCollection(NamespaceString nss,
+                                           bool inMultiDocumentTransaction) const override final {
             const bool foreignShardedAllowed = feature_flags::gFeatureFlagShardedLookup.isEnabled(
                 serverGlobalParams.featureCompatibility);
-            if (foreignShardedAllowed) {
+            if (foreignShardedAllowed && !inMultiDocumentTransaction) {
                 return true;
             }
             auto involvedNss = getInvolvedNamespaces();
@@ -102,18 +103,15 @@ public:
         bool _hasInternalCollation = false;
     };
 
+    /**
+     * Copy constructor used for clone().
+     */
+    DocumentSourceLookUp(const DocumentSourceLookUp&);
+
     const char* getSourceName() const final;
     void serializeToArray(
         std::vector<Value>& array,
         boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
-
-    /**
-     * This function utilizes both pipeline and field syntax; this implementation should replace the
-     * one in serializeToArray() when this combined syntax is enabled by default.
-     */
-    void serializeToArrayWithBothSyntaxes(
-        std::vector<Value>& array,
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const;
 
     /**
      * Returns the 'as' path, and possibly fields modified by an absorbed $unwind.
@@ -175,7 +173,7 @@ public:
     }
 
     bool hasPipeline() const {
-        return _userPipeline.size() > 0;
+        return _userPipeline != boost::none;
     }
 
     boost::optional<FieldPath> getForeignField() const {
@@ -217,6 +215,8 @@ public:
         return buildPipeline(inputDoc);
     }
 
+    boost::intrusive_ptr<DocumentSource> clone() const final;
+
 protected:
     GetNextResult doGetNext() final;
     void doDispose() final;
@@ -237,7 +237,6 @@ private:
                          std::string as,
                          boost::optional<std::unique_ptr<CollatorInterface>> fromCollator,
                          const boost::intrusive_ptr<ExpressionContext>& expCtx);
-
     /**
      * Constructor used for a $lookup stage specified using the {from: ..., localField: ...,
      * foreignField: ..., as: ...} syntax.
@@ -314,6 +313,12 @@ private:
     void recordPlanSummaryStats(const Pipeline& pipeline);
 
     /**
+     * Method to add a DocumentSourceSequentialDocumentCache stage and optimize the pipeline to
+     * move the cache to its final position.
+     */
+    void addCacheStageAndOptimize(Pipeline& pipeline);
+
+    /**
      * Given a mutable document, appends execution stats such as 'totalDocsExamined',
      * 'totalKeysExamined', 'collectionScans', 'indexesUsed', etc. to it.
      */
@@ -363,8 +368,8 @@ private:
     // namespaces have been resolved.
     std::vector<BSONObj> _resolvedPipeline;
     // The aggregation pipeline defined with the user request, prior to optimization and view
-    // resolution.
-    std::vector<BSONObj> _userPipeline;
+    // resolution. If the user did not define a pipeline this will be 'boost::none'.
+    boost::optional<std::vector<BSONObj>> _userPipeline;
     // A pipeline parsed from _resolvedPipeline at creation time, intended to support introspective
     // functions. If sub-$lookup stages are present, their pipelines are constructed recursively.
     std::unique_ptr<Pipeline, PipelineDeleter> _resolvedIntrospectionPipeline;

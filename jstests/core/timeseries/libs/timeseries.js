@@ -1,5 +1,7 @@
 // Helper functions for testing time-series collections.
 
+load("jstests/libs/feature_flag_util.js");
+
 var TimeseriesTest = class {
     /**
      * Returns whether time-series collections are supported.
@@ -8,6 +10,13 @@ var TimeseriesTest = class {
         return assert
             .commandWorked(conn.adminCommand({getParameter: 1, featureFlagTimeseriesCollection: 1}))
             .featureFlagTimeseriesCollection.value;
+    }
+
+    /**
+     * Returns whether time-series bucket compression are supported.
+     */
+    static timeseriesBucketCompressionEnabled(conn) {
+        return FeatureFlagUtil.isEnabled(conn, "TimeseriesBucketCompression");
     }
 
     /**
@@ -20,10 +29,27 @@ var TimeseriesTest = class {
             .featureFlagTimeseriesUpdatesAndDeletes.value;
     }
 
+    /**
+     * Returns whether sharded time-series updates and deletes are supported.
+     */
+    static shardedTimeseriesUpdatesAndDeletesEnabled(conn) {
+        return assert
+            .commandWorked(
+                conn.adminCommand({getParameter: 1, featureFlagShardedTimeSeriesUpdateDelete: 1}))
+            .featureFlagShardedTimeSeriesUpdateDelete.value;
+    }
+
     static shardedtimeseriesCollectionsEnabled(conn) {
         return assert
             .commandWorked(conn.adminCommand({getParameter: 1, featureFlagShardedTimeSeries: 1}))
             .featureFlagShardedTimeSeries.value;
+    }
+
+    static shardedTimeseriesUpdatesAndDeletesEnabled(conn) {
+        return assert
+            .commandWorked(
+                conn.adminCommand({getParameter: 1, featureFlagShardedTimeSeriesUpdateDelete: 1}))
+            .featureFlagShardedTimeSeriesUpdateDelete.value;
     }
 
     static timeseriesMetricIndexesEnabled(conn) {

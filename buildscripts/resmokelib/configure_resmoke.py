@@ -236,7 +236,8 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.MONGOD_EXECUTABLE = _expand_user(config.pop("mongod_executable"))
 
     mongod_set_parameters = config.pop("mongod_set_parameters")
-    if _config.ENABLED_FEATURE_FLAGS:
+    # TODO: This should eventually be migrated entirely to _builder.py
+    if _config.ENABLED_FEATURE_FLAGS and not _config.MIXED_BIN_VERSIONS:
         feature_flag_dict = {ff: "true" for ff in _config.ENABLED_FEATURE_FLAGS}
         mongod_set_parameters.append(str(feature_flag_dict))
 
@@ -255,7 +256,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.MONGOS_EXECUTABLE = _expand_user(config.pop("mongos_executable"))
 
     mongos_set_parameters = config.pop("mongos_set_parameters")
-    if _config.ENABLED_FEATURE_FLAGS:
+    if _config.ENABLED_FEATURE_FLAGS and not _config.MIXED_BIN_VERSIONS:
         feature_flag_dict = {ff: "true" for ff in _config.ENABLED_FEATURE_FLAGS}
         mongos_set_parameters.append(str(feature_flag_dict))
 
@@ -316,10 +317,8 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     if not _config.EVERGREEN_TASK_ID:
         _config.ARCHIVE_FILE = None
     else:
-        # Enable archival globally for all required mainline builders.
-        if (_config.EVERGREEN_VARIANT_NAME is not None
-                and "-required" in _config.EVERGREEN_VARIANT_NAME
-                and not _config.EVERGREEN_PATCH_BUILD):
+        # Enable archival globally for all mainline variants.
+        if _config.EVERGREEN_VARIANT_NAME is not None and not _config.EVERGREEN_PATCH_BUILD:
             _config.FORCE_ARCHIVE_ALL_DATA_FILES = True
 
     _config.ARCHIVE_LIMIT_MB = config.pop("archive_limit_mb")
@@ -375,8 +374,6 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
             _config.TEST_FILES = test_files
 
     configure_tests(config.pop("test_files"), config.pop("replay_file"))
-
-    _config.NAMED_SUITES = SuiteFinder.get_named_suites(_config.CONFIG_DIR)
 
     _config.LOGGER_DIR = os.path.join(_config.CONFIG_DIR, "loggers")
 

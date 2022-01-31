@@ -428,7 +428,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
     // again. For example, if the WUOW gets aborted within a writeConflictRetry loop, we need to
     // reset the OpTime to null so a new OpTime will be assigned on retry.
     OplogSlot slot = oplogEntry->getOpTime();
-    auto resetOpTimeGuard = makeGuard([&, resetOpTimeOnExit = bool(slot.isNull())] {
+    ScopeGuard resetOpTimeGuard([&, resetOpTimeOnExit = bool(slot.isNull())] {
         if (resetOpTimeOnExit)
             oplogEntry->setOpTime(OplogSlot());
     });
@@ -1153,7 +1153,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
         requestNss == NamespaceString::kServerConfigurationNamespace) {
         std::string oID;
         auto status = bsonExtractStringField(o, "_id", &oID);
-        if (status.isOK() && oID == FeatureCompatibilityVersionParser::kParameterName) {
+        if (status.isOK() && oID == multiversion::kParameterName) {
             return Status(ErrorCodes::OplogOperationUnsupported,
                           str::stream() << "Applying operation on feature compatibility version "
                                            "document not supported in initial sync: "
@@ -1431,18 +1431,6 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 options.mustCheckExistenceForInsertOperations = false;
             }
             auto updateMod = write_ops::UpdateModification::parseFromOplogEntry(o, options);
-
-            // TODO SERVER-51075: Remove FCV checks for $v:2 delta oplog entries.
-            if (updateMod.type() == write_ops::UpdateModification::Type::kDelta) {
-                // If we are validating features as primary, only allow $v:2 delta entries if we are
-                // at FCV 4.7 or newer to prevent them from being written to the oplog.
-                if (serverGlobalParams.validateFeaturesAsPrimary.load()) {
-                    uassert(4773100,
-                            "Delta oplog entries may not be used in FCV below 4.7",
-                            serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-                                ServerGlobalParams::FeatureCompatibility::Version::kVersion47));
-                }
-            }
 
             request.setUpdateModification(std::move(updateMod));
             request.setUpsert(upsert);
@@ -1967,8 +1955,11 @@ void setNewTimestamp(ServiceContext* service, const Timestamp& newTime) {
 void initTimestampFromOplog(OperationContext* opCtx, const NamespaceString& oplogNss) {
     DBDirectClient c(opCtx);
     static const BSONObj reverseNaturalObj = BSON("$natural" << -1);
-    BSONObj lastOp =
-        c.findOne(oplogNss.ns(), Query().sort(reverseNaturalObj), nullptr, QueryOption_SecondaryOk);
+    BSONObj lastOp = c.findOne(oplogNss.ns(),
+                               BSONObj{},
+                               Query().sort(reverseNaturalObj),
+                               nullptr,
+                               QueryOption_SecondaryOk);
 
     if (!lastOp.isEmpty()) {
         LOGV2_DEBUG(21256, 1, "replSet setting last Timestamp");

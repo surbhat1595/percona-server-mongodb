@@ -35,6 +35,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/not_primary_error_tracker',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         'query/cluster_query',
         'write_ops/cluster_write_ops',
@@ -64,6 +65,7 @@ env.Library(
         'grid',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/internal_transactions_feature_flag',
         '$BUILD_DIR/mongo/db/sessions_collection',
     ],
 )
@@ -130,6 +132,30 @@ env.Library(
 )
 
 env.Library(
+    target="load_balancer_feature_flag",
+    source=[
+        'load_balancer_feature_flag.idl'
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/feature_flag',
+    ]
+)
+
+env.Library(
+    target="load_balancer_support",
+    source=[
+        'load_balancer_support.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/idl/feature_flag',
+        "load_balancer_feature_flag",
+    ],
+)
+
+# Sharding code needed by both mongos and mongod.
+env.Library(
     target='common_s',
     source=[
         'cannot_implicitly_create_collection_info.cpp',
@@ -148,11 +174,12 @@ env.Library(
         'chunk_version.idl',
         'database_version.cpp',
         'database_version.idl',
-        'load_balancer_feature_flag.idl',
+        'long_collection_names.idl',
         'mongod_and_mongos_server_parameters.idl',
         'request_types/abort_reshard_collection.idl',
         'request_types/add_shard_request_type.cpp',
         'request_types/add_shard_to_zone_request_type.cpp',
+        'request_types/auto_split_vector.idl',
         'request_types/balance_chunk_request_type.cpp',
         'request_types/balancer_collection_status.idl',
         'request_types/cleanup_reshard_collection.idl',
@@ -162,6 +189,7 @@ env.Library(
         'request_types/commit_chunk_migration_request_type.cpp',
         'request_types/commit_reshard_collection.idl',
         'request_types/configure_collection_auto_split.idl',
+        'request_types/drop_collection_if_uuid_not_matching.idl',
         'request_types/ensure_chunk_version_is_greater_than.idl',
         'request_types/flush_database_cache_updates.idl',
         'request_types/flush_resharding_state_change.idl',
@@ -200,10 +228,13 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/db/repl/optime',
         '$BUILD_DIR/mongo/db/server_options',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_idl',
         '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/idl/idl_parser',
-    ]
+        "load_balancer_feature_flag",
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+    ],
 )
 
 env.Library(
@@ -211,6 +242,7 @@ env.Library(
     source=[
         'sharding_test_fixture_common.cpp',
         'catalog_cache_loader_mock.cpp',
+        'catalog_cache_mock.cpp'
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/remote_command_targeter_mock',
@@ -576,13 +608,13 @@ env.CppUnitTest(
         'comparable_chunk_version_test.cpp',
         'comparable_database_version_test.cpp',
         'hedge_options_util_test.cpp',
+        'load_balancer_support_test.cpp',
         'mock_ns_targeter.cpp',
         'mongos_topology_coordinator_test.cpp',
         'request_types/add_shard_request_test.cpp',
         'request_types/add_shard_to_zone_request_test.cpp',
         'request_types/balance_chunk_request_test.cpp',
         'request_types/commit_chunk_migration_request_test.cpp',
-        'request_types/merge_chunk_request_test.cpp',
         'request_types/merge_chunks_request_test.cpp',
         'request_types/migration_secondary_throttle_options_test.cpp',
         'request_types/move_chunk_request_test.cpp',
@@ -608,19 +640,21 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers_test_helpers',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongos_process_interface_factory',
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_index_schema_conversion_functions',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/dbtests/mocklib',
+        '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_mock',
+        '$BUILD_DIR/mongo/s/write_ops/batch_write_types',
+        '$BUILD_DIR/mongo/s/write_ops/cluster_write_ops',
         '$BUILD_DIR/mongo/util/net/network',
-        'catalog/sharding_catalog_client_mock',
         'chunk_writes_tracker',
         'coreshard',
+        'load_balancer_support',
         'mongos_topology_coordinator',
         'sessions_collection_sharded',
         'sharding_api',
         'sharding_router_test_fixture',
         'sharding_task_executor',
         'vector_clock_mongos',
-        'write_ops/batch_write_types',
-        'write_ops/cluster_write_ops',
     ],
 )

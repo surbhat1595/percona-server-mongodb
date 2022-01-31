@@ -43,6 +43,7 @@
 #include "mongo/db/update/delta_executor.h"
 #include "mongo/db/update/modifier_table.h"
 #include "mongo/db/update/object_replace_executor.h"
+#include "mongo/db/update/object_transform_executor.h"
 #include "mongo/db/update/path_support.h"
 #include "mongo/db/update/storage_validation.h"
 #include "mongo/db/update/update_oplog_entry_version.h"
@@ -165,6 +166,18 @@ void UpdateDriver::parse(
         return;
     }
 
+    if (updateMod.type() == write_ops::UpdateModification::Type::kTransform) {
+        uassert(5857811, "multi update is not supported for transform-style update", !multi);
+
+        uassert(5857812,
+                "arrayFilters may not be specified for transform-syle updates",
+                arrayFilters.empty());
+
+        _updateType = UpdateType::kTransform;
+        _updateExecutor = std::make_unique<ObjectTransformExecutor>(updateMod.getTransform());
+        return;
+    }
+
     invariant(_updateType == UpdateType::kOperator);
 
     // By this point we are expecting a "classic" update. This version of mongod only supports $v:
@@ -258,6 +271,7 @@ Status UpdateDriver::update(OperationContext* opCtx,
     applyParams.matchedField = matchedField;
     applyParams.insert = isInsert;
     applyParams.fromOplogApplication = _fromOplogApplication;
+    applyParams.skipDotsDollarsCheck = _skipDotsDollarsCheck;
     applyParams.validateForStorage = validateForStorage;
     applyParams.indexData = _indexedFields;
     applyParams.modifiedPaths = modifiedPaths;
@@ -265,18 +279,7 @@ Status UpdateDriver::update(OperationContext* opCtx,
     invariant(!modifiedPaths || modifiedPaths->empty());
 
     if (_logOp && logOpRec) {
-        const auto& fcvState = serverGlobalParams.featureCompatibility;
-
-        // Updates may be run as part of the startup sequence, before the global FCV state has been
-        // initialized. We conservatively do not permit the use of $v:2 oplog entries in these
-        // situations.
-
-        // TODO SERVER-51075: Remove FCV check for $v:2 delta oplog entries.
-        const bool fcvAllowsV2Entries = fcvState.isVersionInitialized() &&
-            fcvState.isGreaterThanOrEqualTo(
-                ServerGlobalParams::FeatureCompatibility::Version::kVersion47);
-
-        applyParams.logMode = fcvAllowsV2Entries && internalQueryEnableLoggingV2OplogEntries.load()
+        applyParams.logMode = internalQueryEnableLoggingV2OplogEntries.load()
             ? ApplyParams::LogMode::kGenerateOplogEntry
             : ApplyParams::LogMode::kGenerateOnlyV1OplogEntry;
 

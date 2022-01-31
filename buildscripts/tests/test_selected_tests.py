@@ -17,7 +17,6 @@ from buildscripts.patch_builds.selected_tests.selected_tests_client import Selec
     TaskMapping
 from buildscripts.selected_tests import EvgExpansions
 from buildscripts.task_generation.gen_config import GenerationConfiguration
-from buildscripts.task_generation.resmoke_proxy import ResmokeProxyConfig
 from buildscripts.task_generation.suite_split import SuiteSplitConfig
 from buildscripts.task_generation.suite_split_strategies import SplitStrategy, greedy_division, \
     FallbackStrategy, round_robin_fallback
@@ -59,7 +58,6 @@ def configure_dependencies(evg_api, evg_expansions, evg_project_config, selected
         binder.bind(GenTaskOptions, evg_expansions.build_gen_task_options())
         binder.bind(EvergreenApi, evg_api)
         binder.bind(GenerationConfiguration, GenerationConfiguration.from_yaml_file())
-        binder.bind(ResmokeProxyConfig, ResmokeProxyConfig(resmoke_suite_dir=test_suites_dir))
         binder.bind(SelectedTestsClient, selected_test_client)
 
     inject.clear_and_configure(dependencies)
@@ -136,7 +134,7 @@ class TestAcceptance(unittest.TestCase):
 
         # assert that generated suite files have the suite name and the variant name in the
         # filename, to prevent tasks on different variants from using the same suite file
-        self.assertIn("auth_0_enterprise-rhel-80-64-bit-dynamic-required.yml", files_to_generate)
+        self.assertIn("auth_enterprise-rhel-80-64-bit-dynamic-required_0.yml", files_to_generate)
 
         generated_evg_config_raw = [
             gen_file.content for gen_file in generated_config.file_list

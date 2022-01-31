@@ -62,6 +62,12 @@ CollectionType ShardingCatalogClientMock::getCollection(OperationContext* opCtx,
     uasserted(ErrorCodes::InternalError, "Method not implemented");
 }
 
+CollectionType ShardingCatalogClientMock::getCollection(OperationContext* opCtx,
+                                                        const UUID& uuid,
+                                                        repl::ReadConcernLevel readConcernLevel) {
+    uasserted(ErrorCodes::InternalError, "Method not implemented");
+}
+
 std::vector<CollectionType> ShardingCatalogClientMock::getCollections(
     OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcernLevel) {
     uasserted(ErrorCodes::InternalError, "Method not implemented");
@@ -84,7 +90,7 @@ StatusWith<std::vector<ChunkType>> ShardingCatalogClientMock::getChunks(
     boost::optional<int> limit,
     repl::OpTime* opTime,
     const OID& epoch,
-    const boost::optional<Timestamp>& timestamp,
+    const Timestamp& timestamp,
     repl::ReadConcernLevel readConcern,
     const boost::optional<BSONObj>& hint) {
     return {ErrorCodes::InternalError, "Method not implemented"};
@@ -118,7 +124,7 @@ bool ShardingCatalogClientMock::runUserManagementReadCommand(OperationContext* o
 Status ShardingCatalogClientMock::applyChunkOpsDeprecated(OperationContext* opCtx,
                                                           const BSONArray& updateOps,
                                                           const BSONArray& preCondition,
-                                                          const NamespaceStringOrUUID& nsOrUUID,
+                                                          const UUID& uuid,
                                                           const NamespaceString& nss,
                                                           const ChunkVersion& lastChunkVersion,
                                                           const WriteConcernOptions& writeConcern,

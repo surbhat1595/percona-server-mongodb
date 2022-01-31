@@ -133,8 +133,14 @@ public:
     // Namespace for view on local.oplog.rs for tenant migrations.
     static const NamespaceString kTenantMigrationOplogView;
 
+    // Namespace for storing the persisted state of tenant split donors.
+    static const NamespaceString kTenantSplitDonorsNamespace;
+
     // Namespace for replica set configuration settings.
     static const NamespaceString kSystemReplSetNamespace;
+
+    // Namespace for change stream pre-images collection.
+    static const NamespaceString kChangeStreamPreImagesNamespace;
 
     // Namespace for index build entries.
     static const NamespaceString kIndexBuildEntryNamespace;
@@ -162,6 +168,9 @@ public:
 
     // Namespace for balancer settings and default read and write concerns.
     static const NamespaceString kConfigSettingsNamespace;
+
+    // Namespace with information on commands sent by the balancer (thru BalancerCommandsScheduler).
+    static const NamespaceString kConfigBalancerCommandsNamespace;
 
     // Namespace for vector clock state.
     static const NamespaceString kVectorClockNamespace;
@@ -360,6 +369,11 @@ public:
      * Returns whether the specified namespace is <database>.system.buckets.<>.
      */
     bool isTimeseriesBucketsCollection() const;
+
+    /**
+     * Returns whether the specified namespace is local.system.preimages.
+     */
+    bool isChangeStreamPreImagesCollection() const;
 
     /**
      * Returns the time-series buckets namespace for this view.

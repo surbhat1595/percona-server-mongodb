@@ -1,17 +1,28 @@
 'use strict';
 
+load("jstests/libs/fixture_helpers.js");  // For isSharded.
+
 /**
  * view_catalog_cycle_lookup.js
  *
  * Creates views which may include $lookup and $graphlookup stages and continually remaps those
  * views against other eachother and the underlying collection. We are looking to expose situations
  * where a $lookup or $graphLookup view that forms a cycle is created successfully.
+ *
+ * @tags: [requires_fcv_51]
  */
 
 var $config = (function() {
     // Use the workload name as a prefix for the view names, since the workload name is assumed
     // to be unique.
     const prefix = 'view_catalog_cycle_lookup_';
+
+    // Track if the test is not allowed to run on sharded collections.
+    var isShardedAndShardedLookupDisabled = false;
+
+    // Store the default value of the max sub pipeline view depth so it can be reset at the end of
+    // the test.
+    var oldMaxSubPipelineViewDepth;
 
     var data = {
         viewList: ['viewA', 'viewB', 'viewC', 'viewD', 'viewE'].map(viewName => prefix + viewName),
@@ -77,6 +88,10 @@ var $config = (function() {
          * is expected at view create/modification time.
          */
         function remapViewToView(db, collName) {
+            if (this.isShardedAndShardedLookupDisabled) {
+                return;
+            }
+
             const fromName = this.getRandomView(this.viewList);
             const toName = this.getRandomView(this.viewList);
             const res = db.runCommand(
@@ -90,6 +105,10 @@ var $config = (function() {
          * error as it is expected at view create/modification time.
          */
         function remapViewToCollection(db, collName) {
+            if (this.isShardedAndShardedLookupDisabled) {
+                return;
+            }
+
             const fromName = this.getRandomView(this.viewList);
             const res = db.runCommand(
                 {collMod: fromName, viewOn: collName, pipeline: this.getRandomViewPipeline()});
@@ -97,6 +116,10 @@ var $config = (function() {
         }
 
         function readFromView(db, collName) {
+            if (this.isShardedAndShardedLookupDisabled) {
+                return;
+            }
+
             const viewName = this.getRandomView(this.viewList);
             const res = db.runCommand({find: viewName});
             // When initializing an aggregation on a view, the server briefly releases its
@@ -105,7 +128,8 @@ var $config = (function() {
             // replaced with a view.
             // TODO (SERVER-35635): It would be more appropriate for the server to return
             // OperationFailed, as CommandNotSupportedOnView is misleading.
-            assertAlways(res.ok === 1 || res.code === ErrorCodes.CommandNotSupportedOnView,
+            assertAlways(res.ok === 1 || res.code === ErrorCodes.CommandNotSupportedOnView ||
+                             res.code === ErrorCodes.CommandOnShardedViewNotSupportedOnMongod,
                          () => tojson(res));
         }
 
@@ -126,6 +150,20 @@ var $config = (function() {
     function setup(db, collName, cluster) {
         const coll = db[collName];
 
+        // Do not run the rest of the tests if the foreign collection is implicitly sharded but the
+        // flag to allow $lookup/$graphLookup into a sharded collection is disabled.
+        const getShardedLookupParam =
+            db.adminCommand({getParameter: 1, featureFlagShardedLookup: 1});
+        const isShardedLookupEnabled =
+            getShardedLookupParam.hasOwnProperty("featureFlagShardedLookup") &&
+            getShardedLookupParam.featureFlagShardedLookup.value;
+        if (FixtureHelpers.isSharded(coll) && !isShardedLookupEnabled) {
+            jsTestLog(
+                "Skipping test because the sharded lookup feature flag is disabled and we have sharded collections");
+            this.isShardedAndShardedLookupDisabled = true;
+            return;
+        }
+
         assertAlways.commandWorked(coll.insert({a: 1, b: 2}));
         assertAlways.commandWorked(coll.insert({a: 2, b: 3}));
         assertAlways.commandWorked(coll.insert({a: 3, b: 4}));
@@ -133,6 +171,34 @@ var $config = (function() {
 
         for (let viewName of this.viewList) {
             assertAlways.commandWorked(db.createView(viewName, collName, []));
+        }
+
+        // We need to increase the maximum sub-pipeline view depth for this test since sharded view
+        // resolution of views with pipelines containing $lookups on other views can result in deep
+        // nesting of subpipelines. For the purposes of this test, the limit needs to be higher than
+        // the default.
+        cluster.executeOnMongodNodes((db) => {
+            // Store the old value of the max subpipeline view depth so we can restore it at the end
+            // of the test.
+            const maxSubPipelineViewDepthParam =
+                db.adminCommand({getParameter: 1, internalMaxSubPipelineViewDepth: 1});
+            assert(maxSubPipelineViewDepthParam.hasOwnProperty("internalMaxSubPipelineViewDepth"));
+            this.oldMaxSubPipelineViewDepth =
+                maxSubPipelineViewDepthParam.internalMaxSubPipelineViewDepth;
+            assertAlways.commandWorked(
+                db.adminCommand({setParameter: 1, internalMaxSubPipelineViewDepth: 100}));
+        });
+    }
+
+    function teardown(db, collName, cluster) {
+        // Restore the old max subpipeline view depth.
+        if (this.oldMaxSubPipelineViewDepth) {
+            cluster.executeOnMongodNodes((db) => {
+                assertAlways.commandWorked(db.adminCommand({
+                    setParameter: 1,
+                    internalMaxSubPipelineViewDepth: this.oldMaxSubPipelineViewDepth
+                }));
+            });
         }
     }
 
@@ -144,5 +210,6 @@ var $config = (function() {
         startState: 'readFromView',
         transitions: transitions,
         setup: setup,
+        teardown: teardown,
     };
 })();

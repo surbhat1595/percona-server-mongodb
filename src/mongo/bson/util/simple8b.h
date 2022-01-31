@@ -177,13 +177,19 @@ private:
     /**
      * Appends a value to the Simple8b chain of words.
      * Return true if successfully appended and false otherwise.
+     *
+     * 'tryRle' indicates if we are allowed to put this skip in RLE count or not. Should only be set
+     * to true when terminating RLE and we are flushing excess values.
      */
     bool _appendValue(T value, bool tryRle);
 
     /**
      * Appends a skip to _pendingValues and forms a new Simple8b word if there is no space.
+     *
+     * 'tryRle' indicates if we are allowed to put this value in RLE count or not. Should only be
+     * set to true when terminating RLE and we are flushing excess values.
      */
-    void _appendSkip();
+    void _appendSkip(bool tryRle);
 
     /**
      * When an RLE ends because of inconsecutive values, check if there are enough
@@ -322,7 +328,7 @@ public:
         bool operator!=(const Iterator& rhs) const;
 
     private:
-        Iterator(const uint64_t* pos, const uint64_t* end);
+        Iterator(const char* pos, const char* end);
 
         /**
          * Loads the current Simple8b block into the iterator
@@ -335,8 +341,8 @@ public:
          */
         uint16_t _rleCountInCurrent(uint8_t selectorExtension) const;
 
-        const uint64_t* _pos;
-        const uint64_t* _end;
+        const char* _pos;
+        const char* _end;
 
         // Current Simple8b block in native endian
         uint64_t _current;

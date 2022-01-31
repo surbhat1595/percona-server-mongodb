@@ -27,9 +27,11 @@
  *    it in the license file.
  */
 
+#include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/commands/plan_cache_commands.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/plan_cache.h"
+#include "mongo/db/query/classic_plan_cache.h"
+#include "mongo/db/query/plan_cache_key_factory.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
 
@@ -37,6 +39,11 @@ namespace mongo {
 namespace {
 
 static const NamespaceString nss{"test.collection"_sd};
+
+PlanCacheKey makeKey(const CanonicalQuery& cq) {
+    CollectionMock coll(nss);
+    return plan_cache_key_factory::make<PlanCacheKey>(cq, &coll);
+}
 
 TEST(PlanCacheCommandsTest, CannotCanonicalizeWithMissingQueryField) {
     QueryTestServiceContext serviceContext;
@@ -85,7 +92,7 @@ TEST(PlanCacheCommandsTest, CannotCanonicalizeWhenSortObjectIsMalformed) {
 }
 
 TEST(PlanCacheCommandsTest, CanCanonicalizeWithValidQuery) {
-    PlanCache planCache;
+    PlanCache planCache(5000);
 
     QueryTestServiceContext serviceContext;
     auto opCtx = serviceContext.makeOperationContext();
@@ -99,11 +106,11 @@ TEST(PlanCacheCommandsTest, CanCanonicalizeWithValidQuery) {
         plan_cache_commands::canonicalize(opCtx.get(), nss.ns(), fromjson("{query: {b: 3, a: 4}}"));
     ASSERT_OK(statusWithCQ.getStatus());
     std::unique_ptr<CanonicalQuery> equivQuery = std::move(statusWithCQ.getValue());
-    ASSERT_EQUALS(planCache.computeKey(*query), planCache.computeKey(*equivQuery));
+    ASSERT_EQUALS(makeKey(*query), makeKey(*equivQuery));
 }
 
 TEST(PlanCacheCommandsTest, SortQueryResultsInDifferentPlanCacheKeyFromUnsorted) {
-    PlanCache planCache;
+    PlanCache planCache(5000);
 
     QueryTestServiceContext serviceContext;
     auto opCtx = serviceContext.makeOperationContext();
@@ -117,12 +124,12 @@ TEST(PlanCacheCommandsTest, SortQueryResultsInDifferentPlanCacheKeyFromUnsorted)
         opCtx.get(), nss.ns(), fromjson("{query: {a: 1, b: 1}, sort: {a: 1, b: 1}}"));
     ASSERT_OK(statusWithCQ.getStatus());
     std::unique_ptr<CanonicalQuery> sortQuery = std::move(statusWithCQ.getValue());
-    ASSERT_NOT_EQUALS(planCache.computeKey(*query), planCache.computeKey(*sortQuery));
+    ASSERT_NOT_EQUALS(makeKey(*query), makeKey(*sortQuery));
 }
 
 // Regression test for SERVER-17158.
 TEST(PlanCacheCommandsTest, SortsAreProperlyDelimitedInPlanCacheKey) {
-    PlanCache planCache;
+    PlanCache planCache(5000);
 
     QueryTestServiceContext serviceContext;
     auto opCtx = serviceContext.makeOperationContext();
@@ -136,11 +143,11 @@ TEST(PlanCacheCommandsTest, SortsAreProperlyDelimitedInPlanCacheKey) {
         opCtx.get(), nss.ns(), fromjson("{query: {a: 1, b: 1}, sort: {aab: 1}}"));
     ASSERT_OK(statusWithCQ.getStatus());
     std::unique_ptr<CanonicalQuery> sortQuery2 = std::move(statusWithCQ.getValue());
-    ASSERT_NOT_EQUALS(planCache.computeKey(*sortQuery1), planCache.computeKey(*sortQuery2));
+    ASSERT_NOT_EQUALS(makeKey(*sortQuery1), makeKey(*sortQuery2));
 }
 
 TEST(PlanCacheCommandsTest, ProjectQueryResultsInDifferentPlanCacheKeyFromUnprojected) {
-    PlanCache planCache;
+    PlanCache planCache(5000);
 
     QueryTestServiceContext serviceContext;
     auto opCtx = serviceContext.makeOperationContext();
@@ -153,7 +160,7 @@ TEST(PlanCacheCommandsTest, ProjectQueryResultsInDifferentPlanCacheKeyFromUnproj
         opCtx.get(), nss.ns(), fromjson("{query: {a: 1, b: 1}, projection: {_id: 0, a: 1}}"));
     ASSERT_OK(statusWithCQ.getStatus());
     std::unique_ptr<CanonicalQuery> projectionQuery = std::move(statusWithCQ.getValue());
-    ASSERT_NOT_EQUALS(planCache.computeKey(*query), planCache.computeKey(*projectionQuery));
+    ASSERT_NOT_EQUALS(makeKey(*query), makeKey(*projectionQuery));
 }
 
 }  // namespace

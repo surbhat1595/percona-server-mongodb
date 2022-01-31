@@ -69,7 +69,10 @@ private:
         return !replicationCoordinator ||
             (replicationCoordinator->getReplicationMode() ==
                  repl::ReplicationCoordinator::modeReplSet &&
-             replicationCoordinator->getMemberState().readable());
+             // Check repl status without locks to prevent deadlocks. This is a best effort check
+             // as the repl state can change right after this check even when inspected under a
+             // lock or mutex.
+             replicationCoordinator->isInPrimaryOrSecondaryState_UNSAFE());
     }
 
     bool _permitRefreshDuringGossipOut() const override {
@@ -330,7 +333,7 @@ Future<void> VectorClockMongoD::_doWhileQueueNotEmptyOrError(ServiceContext* ser
                     NamespaceString::kVectorClockNamespace);
                 store.forEach(
                     opCtx,
-                    QUERY(VectorClockDocument::k_idFieldName << durableVectorClock.get_id()),
+                    BSON(VectorClockDocument::k_idFieldName << durableVectorClock.get_id()),
                     [&, numDocsFound = 0](const auto& doc) mutable {
                         invariant(++numDocsFound == 1);
                         durableVectorClock = doc;
@@ -348,7 +351,7 @@ Future<void> VectorClockMongoD::_doWhileQueueNotEmptyOrError(ServiceContext* ser
 
             PersistentTaskStore<VectorClockDocument> store(NamespaceString::kVectorClockNamespace);
             store.upsert(opCtx,
-                         QUERY(VectorClockDocument::k_idFieldName << vcd.get_id()),
+                         BSON(VectorClockDocument::k_idFieldName << vcd.get_id()),
                          vcd.toBSON(),
                          WriteConcerns::kMajorityWriteConcern);
             return vectorTime;

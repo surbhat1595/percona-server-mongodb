@@ -40,6 +40,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/pipeline/accumulator.h"
+#include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
@@ -52,10 +53,8 @@ namespace ExpressionTests {
 
 using boost::intrusive_ptr;
 using std::initializer_list;
-using std::list;
 using std::numeric_limits;
 using std::pair;
-using std::set;
 using std::sort;
 using std::string;
 using std::vector;
@@ -141,6 +140,33 @@ Document fromBson(BSONObj obj) {
 Value valueFromBson(BSONObj obj) {
     BSONElement element = obj.firstElement();
     return Value(element);
+}
+
+/** Asserts that the Expression parsed from 'spec' returns a BSONArray and is equal to 'expected'.
+ */
+void assertExpectedArray(const BSONObj& spec, const BSONArray& expected) {
+    auto expCtx = ExpressionContextForTest{};
+    VariablesParseState vps = expCtx.variablesParseState;
+    auto expression = Expression::parseExpression(&expCtx, spec, vps);
+    auto result = expression->evaluate({}, &expCtx.variables);
+    ASSERT_EQ(result.getType(), BSONType::Array);
+    ASSERT_VALUE_EQ(result, Value(expected));
+};
+
+/**
+ * Given 'parseFn', parses and evaluates 'spec' and verifies that the result is equal to
+ * 'expected'. Useful when the parser for an expression is unavailable in certain contexts (for
+ * instance, when evaluating an expression that's guarded by a feature flag that's off by default).
+ */
+void parseAndVerifyResults(
+    const std::function<boost::intrusive_ptr<Expression>(
+        ExpressionContext* const, BSONElement, const VariablesParseState&)>& parseFn,
+    const BSONElement& elem,
+    Value expected) {
+    auto expCtx = ExpressionContextForTest{};
+    VariablesParseState vps = expCtx.variablesParseState;
+    auto expr = parseFn(&expCtx, elem, vps);
+    ASSERT_VALUE_EQ(expr->evaluate({}, &expCtx.variables), expected);
 }
 
 /* ------------------------- ExpressionArrayToObject -------------------------- */
@@ -719,6 +745,41 @@ TEST(ExpressionFromAccumulators, Avg) {
                            {{}, Value(BSONNULL)}});
 }
 
+TEST(ExpressionFromAccumulators, FirstNLastN) {
+    using Sense = AccumulatorFirstLastN::Sense;
+
+    // $firstN
+    auto firstNFn = [&](const BSONObj& spec, const BSONArray& expected) {
+        parseAndVerifyResults(AccumulatorFirstLastN::parseExpression<Sense::kFirst>,
+                              spec.firstElement(),
+                              Value(expected));
+    };
+    firstNFn(fromjson("{$firstN: {n: 3, output: [19, 7, 28, 3, 5]}}"),
+             BSONArray(fromjson("[19, 7, 28]")));
+    firstNFn(fromjson("{$firstN: {n: 6, output: [19, 7, 28, 3, 5]}}"),
+             BSONArray(fromjson("[19, 7, 28, 3, 5]")));
+    firstNFn(fromjson("{$firstN: {n: 3, output: [1,2,3,4,5,6]}}"), BSONArray(fromjson("[1,2,3]")));
+    firstNFn(fromjson("{$firstN: {n: 3, output: [1,2,null,null]}}"),
+             BSONArray(fromjson("[1,2,null]")));
+    firstNFn(fromjson("{$firstN: {n: 3, output: [1.1, 2.713, 3, 3.4]}}"),
+             BSONArray(fromjson("[1.1, 2.713, 3]")));
+
+    // $lastN
+    auto lastNFn = [&](const BSONObj& spec, const BSONArray& expected) {
+        parseAndVerifyResults(AccumulatorFirstLastN::parseExpression<Sense::kLast>,
+                              spec.firstElement(),
+                              Value(expected));
+    };
+    lastNFn(fromjson("{$lastN: {n: 3, output: [19, 7, 28, 3, 5]}}"),
+            BSONArray(fromjson("[28,3,5]")));
+    lastNFn(fromjson("{$lastN: {n: 6, output: [19, 7, 28, 3, 5]}}"),
+            BSONArray(fromjson("[19, 7, 28, 3, 5]")));
+    lastNFn(fromjson("{$lastN: {n: 3, output: [3,2,1,4,5,6]}}"), BSONArray(fromjson("[4,5,6]")));
+    lastNFn(fromjson("{$lastN: {n: 3, output: [1,2,null,3]}}"), BSONArray(fromjson("[2,null,3]")));
+    lastNFn(fromjson("{$lastN: {n: 3, output: [3, 2.713, 1.1, 2.7]}}"),
+            BSONArray(fromjson("[2.713, 1.1, 2.7]")));
+}
+
 TEST(ExpressionFromAccumulators, Max) {
     assertExpectedResults("$max",
                           {// $max treats non-numeric inputs as valid arguments.
@@ -743,36 +804,35 @@ TEST(ExpressionFromAccumulators, Min) {
 }
 
 TEST(ExpressionFromAccumulators, MinNMaxN) {
-    auto assertEq = [](const BSONObj& spec, const BSONArray& expected) {
-        auto expCtx = ExpressionContextForTest{};
-        VariablesParseState vps = expCtx.variablesParseState;
-        auto expression = Expression::parseExpression(&expCtx, spec, vps);
-        auto result = expression->evaluate({}, &expCtx.variables);
-        ASSERT_EQ(result.getType(), BSONType::Array);
-        ASSERT_VALUE_EQ(result, Value(expected));
+    using Sense = AccumulatorMinMax::Sense;
+    auto maxNFn = [&](const BSONObj& spec, const BSONArray& expected) {
+        parseAndVerifyResults(
+            AccumulatorMinMaxN::parseExpression<Sense::kMax>, spec.firstElement(), Value(expected));
     };
 
-    RAIIServerParameterControllerForTest controller("featureFlagExactTopNAccumulator", true);
-
     // $maxN
-    assertEq(fromjson("{$maxN: {n: 3, output: [19, 7, 28, 3, 5]}}"),
-             BSONArray(fromjson("[28, 19, 7]")));
-    assertEq(fromjson("{$maxN: {n: 6, output: [19, 7, 28, 3, 5]}}"),
-             BSONArray(fromjson("[28, 19, 7, 5, 3]")));
-    assertEq(fromjson("{$maxN: {n: 3, output: [1,2,3]}}"), BSONArray(fromjson("[3,2,1]")));
-    assertEq(fromjson("{$maxN: {n: 3, output: [1,2,null]}}"), BSONArray(fromjson("[2,1]")));
-    assertEq(fromjson("{$maxN: {n: 3, output: [1.1, 2.713, 3]}}"),
-             BSONArray(fromjson("[3, 2.713, 1.1]")));
+    maxNFn(fromjson("{$maxN: {n: 3, output: [19, 7, 28, 3, 5]}}"),
+           BSONArray(fromjson("[28, 19, 7]")));
+    maxNFn(fromjson("{$maxN: {n: 6, output: [19, 7, 28, 3, 5]}}"),
+           BSONArray(fromjson("[28, 19, 7, 5, 3]")));
+    maxNFn(fromjson("{$maxN: {n: 3, output: [1,2,3]}}"), BSONArray(fromjson("[3,2,1]")));
+    maxNFn(fromjson("{$maxN: {n: 3, output: [1,2,null]}}"), BSONArray(fromjson("[2,1]")));
+    maxNFn(fromjson("{$maxN: {n: 3, output: [1.1, 2.713, 3]}}"),
+           BSONArray(fromjson("[3, 2.713, 1.1]")));
+
+    auto minNFn = [&](const BSONObj& spec, const BSONArray& expected) {
+        parseAndVerifyResults(
+            AccumulatorMinMaxN::parseExpression<Sense::kMin>, spec.firstElement(), Value(expected));
+    };
 
     // $minN
-    assertEq(fromjson("{$minN: {n: 3, output: [19, 7, 28, 3, 5]}}"),
-             BSONArray(fromjson("[3,5,7]")));
-    assertEq(fromjson("{$minN: {n: 6, output: [19, 7, 28, 3, 5]}}"),
-             BSONArray(fromjson("[3,5,7,19,28]")));
-    assertEq(fromjson("{$minN: {n: 3, output: [3,2,1]}}"), BSONArray(fromjson("[1,2,3]")));
-    assertEq(fromjson("{$minN: {n: 3, output: [1,2,null]}}"), BSONArray(fromjson("[1,2]")));
-    assertEq(fromjson("{$minN: {n: 3, output: [3, 2.713, 1.1]}}"),
-             BSONArray(fromjson("[1.1, 2.713, 3]")));
+    minNFn(fromjson("{$minN: {n: 3, output: [19, 7, 28, 3, 5]}}"), BSONArray(fromjson("[3,5,7]")));
+    minNFn(fromjson("{$minN: {n: 6, output: [19, 7, 28, 3, 5]}}"),
+           BSONArray(fromjson("[3,5,7,19, 28]")));
+    minNFn(fromjson("{$minN: {n: 3, output: [3,2,1]}}"), BSONArray(fromjson("[1,2,3]")));
+    minNFn(fromjson("{$minN: {n: 3, output: [1,2,null]}}"), BSONArray(fromjson("[1,2]")));
+    minNFn(fromjson("{$minN: {n: 3, output: [3, 2.713, 1.1]}}"),
+           BSONArray(fromjson("[1.1, 2.713, 3]")));
 }
 
 TEST(ExpressionFromAccumulators, Sum) {
@@ -3394,13 +3454,14 @@ TEST(ExpressionIfNullTest,
     ASSERT_VALUE_EQ(optimizedNullRemoved->serialize(false), Value("$a"_sd));
 }
 
-TEST(ExpressionIfNullTest, OptimizedExpressionIfNullShouldRemoveAllNullConstants) {
+TEST(ExpressionIfNullTest, OptimizedExpressionIfNullShouldRemoveAllNullConstantsButLast) {
     auto expCtx = ExpressionContextForTest{};
     auto vps = expCtx.variablesParseState;
     auto expr = fromjson("{$ifNull: [null, \"$a\", null, null]}");
     auto exprIfNull = ExpressionIfNull::parse(&expCtx, expr.firstElement(), vps);
     auto optimizedNullRemoved = exprIfNull->optimize();
-    ASSERT_VALUE_EQ(optimizedNullRemoved->serialize(false), Value("$a"_sd));
+    auto expectedResult = fromjson("{$ifNull: [\"$a\", {$const: null}]}");
+    ASSERT_BSONOBJ_BINARY_EQ(expectedResult, expressionToBson(optimizedNullRemoved));
 }
 
 TEST(ExpressionIfNullTest,

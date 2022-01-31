@@ -63,6 +63,7 @@
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_remote_gen.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/set_shard_version_request.h"
@@ -429,8 +430,26 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
             stream() << "collection " << nss.ns() << " not found",
             !collDoc.empty());
 
-    CollectionType coll(collDoc[0]);
-    return coll;
+    return CollectionType(collDoc[0]);
+}
+
+CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
+                                                        const UUID& uuid,
+                                                        repl::ReadConcernLevel readConcernLevel) {
+    auto collDoc =
+        uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
+                                                kConfigReadSelector,
+                                                readConcernLevel,
+                                                CollectionType::ConfigNS,
+                                                BSON(CollectionType::kUuidFieldName << uuid),
+                                                BSONObj(),
+                                                1))
+            .value;
+    uassert(ErrorCodes::NamespaceNotFound,
+            stream() << "Collection with UUID '" << uuid << "' not found",
+            !collDoc.empty());
+
+    return CollectionType(collDoc[0]);
 }
 
 std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
@@ -574,7 +593,7 @@ StatusWith<std::vector<ChunkType>> ShardingCatalogClientImpl::getChunks(
     boost::optional<int> limit,
     OpTime* opTime,
     const OID& epoch,
-    const boost::optional<Timestamp>& timestamp,
+    const Timestamp& timestamp,
     repl::ReadConcernLevel readConcern,
     const boost::optional<BSONObj>& hint) {
     invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
@@ -630,6 +649,12 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
     }();
 
     aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
+
+    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+        const Milliseconds maxTimeMS = std::min(opCtx->getRemainingMaxTimeMillis(),
+                                                Milliseconds(gFindChunksOnConfigTimeoutMS.load()));
+        aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
+    }
 
     // Run the aggregation
     std::vector<BSONObj> aggResult;
@@ -865,7 +890,7 @@ bool ShardingCatalogClientImpl::runUserManagementReadCommand(OperationContext* o
 Status ShardingCatalogClientImpl::applyChunkOpsDeprecated(OperationContext* opCtx,
                                                           const BSONArray& updateOps,
                                                           const BSONArray& preCondition,
-                                                          const NamespaceStringOrUUID& nsOrUUID,
+                                                          const UUID& uuid,
                                                           const NamespaceString& nss,
                                                           const ChunkVersion& lastChunkVersion,
                                                           const WriteConcernOptions& writeConcern,
@@ -912,11 +937,8 @@ Status ShardingCatalogClientImpl::applyChunkOpsDeprecated(OperationContext* opCt
         // mod made it to the config server, then transaction was successful.
         BSONObjBuilder query;
         lastChunkVersion.appendLegacyWithField(&query, ChunkType::lastmod());
-        if (nsOrUUID.uuid()) {
-            query.append(ChunkType::collectionUUID(), nsOrUUID.uuid()->toBSON());
-        } else {
-            query.append(ChunkType::ns(), nsOrUUID.nss()->ns());
-        }
+        query.append(ChunkType::collectionUUID(), uuid.toBSON());
+
         auto chunkWithStatus = getChunks(opCtx,
                                          query.obj(),
                                          BSONObj(),

@@ -34,6 +34,7 @@
 #include <boost/optional/optional.hpp>
 #include <boost/optional/optional_io.hpp>
 
+#include "mongo/client/read_preference.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/cursor_manager.h"
@@ -43,6 +44,7 @@
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor_factory.h"
+#include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/dbtests/dbtests.h"
@@ -103,6 +105,7 @@ public:
             APIParameters(),
             opCtx->getWriteConcern(),
             repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
             BSONObj(),
             PrivilegeVector(),
         };
@@ -154,6 +157,7 @@ TEST_F(CursorManagerTest, ShouldBeAbleToKillPinnedCursor) {
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
 
@@ -180,6 +184,7 @@ TEST_F(CursorManagerTest, ShouldBeAbleToKillPinnedCursorMultiClient) {
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
 
@@ -217,6 +222,7 @@ TEST_F(CursorManagerTest, InactiveCursorShouldTimeout) {
                                    APIParameters(),
                                    {},
                                    repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+                                   ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                                    BSONObj(),
                                    PrivilegeVector()});
 
@@ -233,6 +239,7 @@ TEST_F(CursorManagerTest, InactiveCursorShouldTimeout) {
                                    APIParameters(),
                                    {},
                                    repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+                                   ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                                    BSONObj(),
                                    PrivilegeVector()});
     ASSERT_EQ(1UL, cursorManager->timeoutCursors(_opCtx.get(), Date_t::max()));
@@ -254,6 +261,7 @@ TEST_F(CursorManagerTest, InactivePinnedCursorShouldNotTimeout) {
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
 
@@ -279,6 +287,7 @@ TEST_F(CursorManagerTest, MarkedAsKilledCursorsShouldBeDeletedOnCursorPin) {
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
     auto cursorId = cursorPin->cursorid();
@@ -313,6 +322,7 @@ TEST_F(CursorManagerTest, InactiveKilledCursorsShouldTimeout) {
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
 
@@ -346,6 +356,7 @@ TEST_F(CursorManagerTest, UsingACursorShouldUpdateTimeOfLastUse) {
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
     auto usedCursorId = cursorPin.getCursor()->cursorid();
@@ -360,6 +371,7 @@ TEST_F(CursorManagerTest, UsingACursorShouldUpdateTimeOfLastUse) {
                                    APIParameters(),
                                    {},
                                    repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+                                   ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                                    BSONObj(),
                                    PrivilegeVector()});
 
@@ -398,6 +410,7 @@ TEST_F(CursorManagerTest, CursorShouldNotTimeOutUntilIdleForLongEnoughAfterBeing
          APIParameters(),
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
 
@@ -440,6 +453,7 @@ TEST_F(CursorManagerTest, CursorStoresAPIParameters) {
          apiParams,
          {},
          repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
          BSONObj(),
          PrivilegeVector()});
 

@@ -34,13 +34,16 @@
 #include <algorithm>
 
 #include "mongo/base/string_data.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection_options_validation.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/create_gen.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/util/str.h"
+#include "mongo/util/visit_helper.h"
 
 namespace mongo {
 namespace {
@@ -133,6 +136,8 @@ StatusWith<CollectionOptions> CollectionOptions::parse(const BSONObj& options, P
             collectionOptions.temp = e.trueValue();
         } else if (fieldName == "recordPreImages") {
             collectionOptions.recordPreImages = e.trueValue();
+        } else if (fieldName == "changeStreamPreAndPostImages") {
+            collectionOptions.changeStreamPreAndPostImagesEnabled = e.trueValue();
         } else if (fieldName == "storageEngine") {
             if (e.type() != mongo::Object) {
                 return {ErrorCodes::TypeMismatch, "'storageEngine' must be a document"};
@@ -194,11 +199,11 @@ StatusWith<CollectionOptions> CollectionOptions::parse(const BSONObj& options, P
 
             collectionOptions.collation = e.Obj().getOwned();
         } else if (fieldName == "clusteredIndex") {
-            if (e.type() != mongo::Bool) {
-                return Status(ErrorCodes::BadValue, "'clusteredIndex' has to be a boolean.");
+            try {
+                collectionOptions.clusteredIndex = clustered_util::parseClusteredInfo(e);
+            } catch (const DBException& ex) {
+                return ex.toStatus();
             }
-
-            collectionOptions.clusteredIndex = e.Bool();
         } else if (fieldName == "expireAfterSeconds") {
             if (e.type() != mongo::NumberLong) {
                 return {ErrorCodes::BadValue, "'expireAfterSeconds' must be a number."};
@@ -300,11 +305,26 @@ CollectionOptions CollectionOptions::fromCreateCommand(const CreateCommand& cmd)
     if (auto recordPreImages = cmd.getRecordPreImages()) {
         options.recordPreImages = *recordPreImages;
     }
+    if (cmd.getChangeStreamPreAndPostImages().has_value()) {
+        options.changeStreamPreAndPostImagesEnabled = cmd.getChangeStreamPreAndPostImages();
+    }
     if (auto timeseries = cmd.getTimeseries()) {
         options.timeseries = std::move(*timeseries);
     }
     if (auto clusteredIndex = cmd.getClusteredIndex()) {
-        options.clusteredIndex = *clusteredIndex;
+        stdx::visit(
+            visit_helper::Overloaded{
+                [&](bool isClustered) {
+                    if (isClustered) {
+                        options.clusteredIndex =
+                            clustered_util::makeCanonicalClusteredInfoForLegacyFormat();
+                    }
+                },
+                [&](const ClusteredIndexSpec clusteredIndexSpec) {
+                    options.clusteredIndex =
+                        clustered_util::makeCanonicalClusteredInfo(clusteredIndexSpec);
+                }},
+            *clusteredIndex);
     }
     if (auto expireAfterSeconds = cmd.getExpireAfterSeconds()) {
         options.expireAfterSeconds = expireAfterSeconds;
@@ -351,6 +371,13 @@ void CollectionOptions::appendBSON(BSONObjBuilder* builder,
         builder->appendBool(CreateCommand::kRecordPreImagesFieldName, true);
     }
 
+    // TODO SERVER-58584: remove the feature flag.
+    if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledAndIgnoreFCV() &&
+        changeStreamPreAndPostImagesEnabled &&
+        shouldAppend(CreateCommand::kChangeStreamPreAndPostImagesFieldName)) {
+        builder->appendBool(CreateCommand::kChangeStreamPreAndPostImagesFieldName, true);
+    }
+
     if (!storageEngine.isEmpty() && shouldAppend(CreateCommand::kStorageEngineFieldName)) {
         builder->append(CreateCommand::kStorageEngineFieldName, storageEngine);
     }
@@ -379,7 +406,13 @@ void CollectionOptions::appendBSON(BSONObjBuilder* builder,
     }
 
     if (clusteredIndex && shouldAppend(CreateCommand::kClusteredIndexFieldName)) {
-        builder->append(CreateCommand::kClusteredIndexFieldName, true);
+        if (clusteredIndex->getLegacyFormat()) {
+            builder->append(CreateCommand::kClusteredIndexFieldName, true);
+        } else {
+            // Only append the user defined collection options.
+            builder->append(CreateCommand::kClusteredIndexFieldName,
+                            clusteredIndex->getIndexSpec().toBSON());
+        }
     }
 
     if (expireAfterSeconds && shouldAppend(CreateCommand::kExpireAfterSecondsFieldName)) {
@@ -422,6 +455,10 @@ bool CollectionOptions::matchesStorageOptions(const CollectionOptions& other,
     }
 
     if (recordPreImages != other.recordPreImages) {
+        return false;
+    }
+
+    if (changeStreamPreAndPostImagesEnabled != other.changeStreamPreAndPostImagesEnabled) {
         return false;
     }
 
@@ -475,7 +512,9 @@ bool CollectionOptions::matchesStorageOptions(const CollectionOptions& other,
         return false;
     }
 
-    if (clusteredIndex != other.clusteredIndex) {
+    if ((clusteredIndex && other.clusteredIndex &&
+         clusteredIndex->toBSON().woCompare(other.clusteredIndex->toBSON()) != 0) ||
+        (clusteredIndex == boost::none) != (other.clusteredIndex == boost::none)) {
         return false;
     }
 

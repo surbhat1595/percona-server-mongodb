@@ -106,6 +106,7 @@ var authErrCode = 13;
 var commandNotSupportedCode = 115;
 var shard0name = "shard0000";
 const migrationCertificates = TenantMigrationUtil.makeMigrationCertificatesForTest();
+const isSliceMergeEnabled = TestData.setParameters.featureFlagSliceMerge;
 
 // useful shorthand when defining the tests below
 var roles_write =
@@ -2948,20 +2949,6 @@ var authCommandsLib = {
           ]
         },
         {
-          testname: "_configsvrCommitChunkMerge",
-          command: {_configsvrCommitChunkMerge: "x.y", shard: "shard0000", collEpoch: ObjectId(), chunkBoundaries:[{a:1}, {a:5}, {a:10}]},
-          skipSharded: true,
-          expectFail: true,
-          testcases: [
-              {
-                runOnDb: adminDbName,
-                roles: {__system: 1},
-                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
-                expectFail: true
-              },
-          ]
-        },
-        {
           testname: "_configsvrCommitChunkMigration",
           command: {_configsvrCommitChunkMigration: "x.y"},
           skipSharded: true,
@@ -3545,6 +3532,7 @@ var authCommandsLib = {
           testname: "donorStartMigration",
           command: {
               donorStartMigration: 1,
+              protocol: isSliceMergeEnabled ? "slice merge" : "multitenant migrations",
               tenantId: "testTenantId",
               migrationId: UUID(),
               recipientConnectionString: "recipient-rs/localhost:1234",
@@ -3731,8 +3719,24 @@ var authCommandsLib = {
           testname: "features",
           command: {features: 1},
           testcases: [
-              {runOnDb: firstDbName, roles: roles_all, privilegesRequired: []},
-              {runOnDb: secondDbName, roles: roles_all, privilegesRequired: []}
+              {runOnDb: firstDbName, roles: roles_all, privileges: []},
+              {runOnDb: secondDbName, roles: roles_all, privileges: []}
+          ]
+        },
+        {
+          testname: "features_oidReset",
+          command: {features: 1, oidReset: true},
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: roles_hostManager,
+                privileges: [{resource: {cluster: true}, actions: ["oidReset"]}],
+              },
+              {
+                runOnDb: secondDbName,
+                roles: roles_hostManager,
+                privileges: [{resource: {cluster: true}, actions: ["oidReset"]}],
+              }
           ]
         },
         {

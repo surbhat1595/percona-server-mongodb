@@ -255,6 +255,7 @@ variables:
 # variants
 - &enterprise-windows-nopush-template
   name: enterprise-windows-nopush-template
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - windows-vsCurrent-small
   modules:
@@ -289,7 +290,7 @@ variables:
   - name: external_auth_aws
   - name: external_auth_windows
     distros:
-    - windows-64-2016
+    - windows-2016-dc
   - name: .jscore .common !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache
@@ -500,6 +501,22 @@ functions:
       bucket: mciuploads
       extract_to: src
 
+  "fetch venv": &fetch_venv
+    command: s3.get
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      remote_file: ${project}/${build_variant}/${revision}/venv/${build_id}.tgz
+      bucket: mciuploads
+      extract_to: "."
+
+  "adjust venv": &adjust_venv
+    command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/functions/venv_adjust.sh"
+
   "fetch packages": &fetch_packages
     command: s3.get
     params:
@@ -629,6 +646,15 @@ functions:
       binary: bash
       args:
         - "./src/evergreen/functions/system_resource_info_collect.sh"
+
+  "collect ulimit info": &collect_ulimit_info
+    command: subprocess.exec
+    params:
+      background: true
+      system_log: true
+      binary: bash
+      args:
+        - "./src/evergreen/functions/ulimit_info_collect.sh"
 
   # Run a monitor process as a background, system task to periodically
   # display how many threads interesting processes are using.
@@ -848,9 +874,9 @@ functions:
   - *fetch_artifacts
   - *kill_processes
   - *cleanup_environment
+  - *fetch_venv
+  - *adjust_venv
   - *fetch_binaries
-  - *set_up_venv
-  - *upload_pip_requirements
   - *extract_binaries
   - *check_binary_version
   - *get_buildnumber
@@ -859,6 +885,7 @@ functions:
   - *run_diskstats
   - *monitor_process_threads
   - *collect_system_resource_info
+  - *collect_ulimit_info
 
   "do non-compile setup":
   - command: manifest.load
@@ -1088,8 +1115,8 @@ functions:
     - *f_expansions_write
     - *kill_processes
     - *cleanup_environment
-    - *set_up_venv
-    - *upload_pip_requirements
+    - *fetch_venv
+    - *adjust_venv
     - *f_expansions_write
     - *configure_evergreen_api_credentials
 
@@ -1228,6 +1255,62 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/do_jepsen_setup/move_binaries.sh"
+
+  "do jepsen docker setup":
+    - *f_expansions_write
+    - command: subprocess.exec
+      type: system
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/jepsen_docker/setup.sh"
+  "run jepsen docker test":
+    - *f_expansions_write
+    - command: subprocess.exec
+      type: setup
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/jepsen_docker/docker-up.sh"
+    - command: archive.targz_pack
+      params:
+        target: jepsen-docker-log.tgz
+        source_dir: jepsen/docker
+        include:
+          - "docker.log"
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: jepsen-docker-log.tgz
+        remote_file: ${project}/${build_variant}/${revision}/jstestfuzz/jepsen-docker-log-${task_id}-${execution}.tgz
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        content_type: application/gzip
+        display_name: Jepsen Docker Build Log - Execution ${execution}
+
+    - command: subprocess.exec
+      type: test
+      timeout_secs: 2700 # Timeout test if there is no output for more than 45 minutes.
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/jepsen_docker/list-append.sh"
+    - command: subprocess.exec
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/jepsen_test_fail.sh"
+
+  "cleanup jepsen docker test":
+    - *f_expansions_write
+    - command: subprocess.exec
+      type: system
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/jepsen_docker/cleanup.sh"
 
   "run jepsen test":
     - *f_expansions_write
@@ -1422,6 +1505,30 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/powercycle_setup_host.sh"
+
+  "run selinux tests":
+    - command: host.create
+      params:
+        provider: ec2
+        distro: ${distro}
+        timeout_teardown_secs: 86400 # 1 day
+    - command: host.list
+      params:
+        wait: true
+        timeout_seconds: 900 # 15 min
+        num_hosts: 1
+        path: src/hosts.yml
+    - *f_expansions_write
+    - command: subprocess.exec
+      type: test
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/selinux_run_test.sh"
+        env:
+          test_list: ${test_list}
+          user: ec2-user
+
 
   ### Process & archive remote EC2 artifacts ###
   "save powercycle artifacts": &save_powercycle_artifacts
@@ -1891,6 +1998,7 @@ post:
   - func: "umount shared scons directory"
   - func: "cleanup FUSE watchdog"
   - func: "cleanup environment"
+  - func: "cleanup jepsen docker test"
 
 # Timeout steps
 timeout:
@@ -1961,11 +2069,21 @@ tasks:
         args:
           - "src/evergreen/gen_feature_flags.sh"
 
+    - *f_expansions_write
+    - command: subprocess.exec
+      type: test
+      params:
+        binary: bash
+        args:
+          - "src/evergreen/get_bin_and_fcv_versions.sh"
+
     - command: archive.targz_pack
       params:
         target: "artifacts.tgz"
         source_dir: "src"
         include:
+          - ".resmoke_mongo_version.yml"
+          - ".resmoke_mongo_release_values.yml"
           - "patch_test_tags.tgz"
           - "./build/**.gcno"
           - "./etc/*san.suppressions"
@@ -1974,7 +2092,6 @@ tasks:
           - "./etc/pip/**"
           - "./etc/repo_config.yaml"
           - "./etc/scons/**"
-          - "artifacts.json"
           - "buildscripts/**"
           - "compile_expansions.yml"
           - "all_feature_flags.txt"  # Must correspond to the definition in buildscripts/idl/lib.py.
@@ -2006,20 +2123,25 @@ tasks:
         content_type: application/tar
         display_name: Artifacts
 
-    # For patch builds that bypass compile, we upload links to pre-existing tarballs, except for the
-    # artifacts.tgz.
-    - command: attach.artifacts
+    - command: archive.targz_pack
       params:
-        optional: true
-        ignore_artifacts_for_spawn: false
-        files:
-          - src/artifacts.json
+        target: "venv.tgz"
+        source_dir: "./"
+        include:
+          - "./venv/**"
+          - "./venv_readme.txt"
 
-# Dummy task to activate `archive_dist_test_debug` since it can't be activated directly (not a generated task).
-- name: activate_archive_dist_test_debug
-  tags: []
-  depends_on:
-    - name: archive_dist_test_debug
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: venv.tgz
+        remote_file: ${project}/${build_variant}/${revision}/venv/${build_id}.tgz
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        content_type: application/tar
+        display_name: Python venv (see included venv_readme.txt)
 
 - name: archive_dist_test_debug
   tags: []
@@ -2041,6 +2163,7 @@ tasks:
     - func: "scons compile"
       vars:
         generating_for_ninja: true
+        separate_debug: off
         task_install_action:
           default
         task_compile_flags: >-
@@ -2060,6 +2183,7 @@ tasks:
     - func: "scons compile"
       vars:
         generating_for_ninja: true
+        separate_debug: off
         task_install_action:
           default
         task_compile_flags: >-
@@ -2499,7 +2623,6 @@ tasks:
       vars:
         targets: install-stitch-support install-stitch-support-debug install-stitch-support-dev
         task_compile_flags: >-
-          --dbg=off
           --link-model=dynamic-sdk
           --enable-free-mon=off
           --ssl=off
@@ -2533,7 +2656,6 @@ tasks:
         targets: install-stitch-support-test
         compiling_for_test: true
         task_compile_flags: >-
-          --dbg=off
           --enable-free-mon=off
           --ssl=off
           --enable-http-client=off
@@ -2806,13 +2928,6 @@ tasks:
 
   - command: archive.targz_pack
     params:
-      target: src/burn_in_tests_multiversion_gen.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-        - burn_in_tests_multiversion_gen.json
-
-  - command: archive.targz_pack
-    params:
       target: src/generate_tasks_config.tgz
       source_dir: src/generated_resmoke_config
       include:
@@ -2823,23 +2938,11 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: src/generate_tasks_config.tgz
-      remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen-${build_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/gzip
-      optional: true
-      display_name: Generated Multiversion Resmoke.py Suite Config - Execution ${execution}
-
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/burn_in_tests_multiversion_gen.tgz
       remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen_config-${build_id}.tgz
       bucket: mciuploads
       permissions: public-read
       content_type: application/gzip
-      display_name: Burn_in_tests Task Config - Execution ${execution}
+      display_name: Generated Multiversion Resmoke.py Suite Config - Execution ${execution}
 
   - command: generate.tasks
     params:
@@ -2958,10 +3061,18 @@ tasks:
       jepsen_test_name: read-concern-majority
       jepsen_write_concern: --write-concern w1
 
+- <<: *run_jepsen_template
+  name: jepsen_list-append
+  tags: ["jepsen_docker"]
+  commands:
+  - func: "do setup"
+  - func: "do jepsen docker setup"
+  - func: "run jepsen docker test"
+
 ## initial sync multiversion fuzzer ##
 - <<: *jstestfuzz_template
   name: initial_sync_multiversion_fuzzer_gen
-  tags: ["multiversion_fuzzer"]
+  tags: ["multiversion_fuzzer", "require-npm", "random-name", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -2977,7 +3088,7 @@ tasks:
 ## initial sync generational fuzzer ##
 - <<: *jstestfuzz_template
   name: initial_sync_fuzzer_gen
-  tags: []
+  tags: ["require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -2992,8 +3103,7 @@ tasks:
 ## Standalone generational fuzzer for multiversion aggregation pipelines ##
 - <<: *jstestfuzz_template
   name: aggregation_multiversion_fuzzer_gen
-  # TODO SERVER-58718: Re-enable this suite by un-commenting the 'tags' line.
-  # tags: ["aggfuzzer", "common", "multiversion"]
+  tags: ["aggfuzzer", "common", "multiversion", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3009,7 +3119,7 @@ tasks:
 ## Standalone generational fuzzer for multiversion aggregation expressions ##
 - <<: *jstestfuzz_template
   name: aggregation_expression_multiversion_fuzzer_gen
-  tags: ["aggfuzzer", "multiversion"]
+  tags: ["aggfuzzer", "multiversion", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3025,7 +3135,7 @@ tasks:
 ## Standalone generational fuzzer for checking optimized and unoptimized expression equivalence
 - <<: *jstestfuzz_template
   name: aggregation_expression_optimization_fuzzer_gen
-  tags: ["aggfuzzer"]
+  tags: ["aggfuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3041,7 +3151,7 @@ tasks:
 ## Standalone generational fuzzer for checking optimized and unoptimized aggregation pipelines
 - <<: *jstestfuzz_template
   name: aggregation_optimization_fuzzer_gen
-  tags: ["aggfuzzer"]
+  tags: ["aggfuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3057,7 +3167,7 @@ tasks:
 ## Standalone fuzzer for checking wildcard index correctness ##
 - <<: *jstestfuzz_template
   name: aggregation_wildcard_fuzzer_gen
-  tags: ["aggfuzzer", "common", "wildcard"]
+  tags: ["aggfuzzer", "common", "wildcard", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3073,7 +3183,7 @@ tasks:
 ## Standalone fuzzer for checking timeseries optimizations correctness ##
 - <<: *jstestfuzz_template
   name: aggregation_timeseries_fuzzer_gen
-  tags: ["aggfuzzer", "common", "timeseries"]
+  tags: ["aggfuzzer", "common", "timeseries", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3089,7 +3199,7 @@ tasks:
 ## Standalone generational fuzzer for checking optimized and unoptimized change stream pipelines ##
 - <<: *jstestfuzz_template
   name: change_stream_optimization_fuzzer_gen
-  tags: ["change_stream_fuzzer"]
+  tags: ["change_stream_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3105,7 +3215,7 @@ tasks:
 ## jstestfuzz standalone fuzzer for checking find and aggregate equivalence ##
 - <<: *jstestfuzz_template
   name: query_fuzzer_standalone_gen
-  tags: ["query_fuzzer"]
+  tags: ["query_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3121,7 +3231,7 @@ tasks:
 ## jstestfuzz sharded fuzzer for checking find and aggregate equivalence ##
 - <<: *jstestfuzz_template
   name: query_fuzzer_sharded_gen
-  tags: ["query_fuzzer"]
+  tags: ["query_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3137,7 +3247,7 @@ tasks:
 ## jstestfuzz standalone update generational fuzzer ##
 - <<: *jstestfuzz_template
   name: update_fuzzer_gen
-  tags: ["updatefuzzer"]
+  tags: ["updatefuzzer", "require-npm", "random-name", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3153,7 +3263,7 @@ tasks:
 ## jstestfuzz replication update generational fuzzer ##
 - <<: *jstestfuzz_template
   name: update_fuzzer_replication_gen
-  tags: ["updatefuzzer"]
+  tags: ["updatefuzzer", "require-npm", "random-name", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3169,7 +3279,7 @@ tasks:
 ## rollback multiversion fuzzer ##
 - <<: *jstestfuzz_template
   name: rollback_multiversion_fuzzer_gen
-  tags: ["multiversion_fuzzer"]
+  tags: ["multiversion_fuzzer", "require-npm", "random-name", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3187,7 +3297,7 @@ tasks:
 ## rollback generational fuzzer ##
 - <<: *jstestfuzz_template
   name: rollback_fuzzer_gen
-  tags: ["rollbackfuzzer"]
+  tags: ["rollbackfuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3204,7 +3314,7 @@ tasks:
 ## rollback generational fuzzer with clean shutdowns ##
 - <<: *jstestfuzz_template
   name: rollback_fuzzer_clean_shutdowns_gen
-  tags: ["rollbackfuzzer"]
+  tags: ["rollbackfuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3222,7 +3332,7 @@ tasks:
 ## rollback generational fuzzer with unclean shutdowns ##
 - <<: *jstestfuzz_template
   name: rollback_fuzzer_unclean_shutdowns_gen
-  tags: ["rollbackfuzzer"]
+  tags: ["rollbackfuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3240,7 +3350,7 @@ tasks:
 ## jstestfuzz ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_gen
-  tags: ["jstestfuzz", "common"]
+  tags: ["jstestfuzz", "common", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3254,7 +3364,7 @@ tasks:
 ## jstestfuzz concurrent ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_gen
-  tags: ["jstestfuzz", "common"]
+  tags: ["jstestfuzz", "common", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3269,7 +3379,7 @@ tasks:
 ## jstestfuzz concurrent replica set ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_replication_gen
-  tags: ["jstestfuzz", "common", "repl"]
+  tags: ["jstestfuzz", "common", "repl", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3284,7 +3394,7 @@ tasks:
 ## jstestfuzz concurrent replica set with logical session ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_replication_session_gen
-  tags: ["jstestfuzz", "session"]
+  tags: ["jstestfuzz", "session", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3299,7 +3409,7 @@ tasks:
 ## jstestfuzz concurrent sharded cluster ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_sharded_gen
-  tags: ["jstestfuzz", "common", "sharding"]
+  tags: ["jstestfuzz", "common", "sharding", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3314,7 +3424,7 @@ tasks:
 ## jstestfuzz concurrent sharded cluster causal consistency ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_sharded_causal_consistency_gen
-  tags: ["jstestfuzz", "causal"]
+  tags: ["jstestfuzz", "causal", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3329,7 +3439,7 @@ tasks:
 ## jstestfuzz concurrent sharded cluster continuous stepdown ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_sharded_continuous_stepdown_gen
-  tags: ["jstestfuzz", "stepdowns"]
+  tags: ["jstestfuzz", "stepdowns", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3344,7 +3454,7 @@ tasks:
 ## jstestfuzz concurrent sharded cluster with logical session ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_sharded_session_gen
-  tags: ["jstestfuzz", "session"]
+  tags: ["jstestfuzz", "session", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3359,7 +3469,7 @@ tasks:
 # jstestfuzz interrupt #
 - <<: *jstestfuzz_template
   name: jstestfuzz_interrupt_gen
-  tags: ["jstestfuzz", "interrupt"]
+  tags: ["jstestfuzz", "interrupt", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3372,7 +3482,7 @@ tasks:
 # jstestfuzz interrupt #
 - <<: *jstestfuzz_template
   name: jstestfuzz_interrupt_replication_gen
-  tags: ["jstestfuzz", "interrupt"]
+  tags: ["jstestfuzz", "interrupt", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3385,7 +3495,7 @@ tasks:
 # jstestfuzz write conflict #
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_write_conflicts_gen
-  tags: ["jstestfuzz", "write_conflict"]
+  tags: ["jstestfuzz", "write_conflict", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3398,7 +3508,7 @@ tasks:
 # jstestfuzz concurrent conflict #
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_replication_write_conflicts_gen
-  tags: ["jstestfuzz", "write_conflict"]
+  tags: ["jstestfuzz", "write_conflict", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3411,7 +3521,7 @@ tasks:
 # jstestfuzz interrupt with flow control engaged #
 - <<: *jstestfuzz_template
   name: jstestfuzz_interrupt_replication_flow_control_gen
-  tags: ["jstestfuzz", "interrupt", "flow_control"]
+  tags: ["jstestfuzz", "interrupt", "flow_control", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3426,7 +3536,7 @@ tasks:
 ## jstestfuzz sharded cluster continuous stepdown with flow control engaged ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_sharded_continuous_stepdown_flow_control_gen
-  tags: ["jstestfuzz", "flow_control", "stepdowns"]
+  tags: ["jstestfuzz", "flow_control", "stepdowns", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3444,7 +3554,7 @@ tasks:
 ## jstestfuzz concurrent sharded cluster continuous stepdown with flow control engaged ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_sharded_continuous_stepdown_flow_control_gen
-  tags: ["jstestfuzz", "flow_control", "stepdowns"]
+  tags: ["jstestfuzz", "flow_control", "stepdowns", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3462,7 +3572,7 @@ tasks:
 # jstestfuzz replication continuous stepdown with flow control engaged #
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_continuous_stepdown_flow_control_gen
-  tags: ["jstestfuzz", "repl", "flow_control", "stepdowns"]
+  tags: ["jstestfuzz", "repl", "flow_control", "stepdowns", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3480,7 +3590,7 @@ tasks:
 ## jstestfuzz concurrent replication continuous stepdown with flow control engaged ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_replication_continuous_stepdown_flow_control_gen
-  tags: ["jstestfuzz", "repl", "flow_control", "stepdowns"]
+  tags: ["jstestfuzz", "repl", "flow_control", "stepdowns", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3498,7 +3608,7 @@ tasks:
 ## jstestfuzz replica set ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_gen
-  tags: ["jstestfuzz", "common", "repl"]
+  tags: ["jstestfuzz", "common", "repl", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3511,7 +3621,7 @@ tasks:
 ## jstestfuzz replica set ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_multiversion_passthrough_gen
-  tags: ["jstestfuzz_multiversion_passthrough_gen"]
+  tags: ["jstestfuzz_multiversion_passthrough_gen", "require-npm", "random-name", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3527,7 +3637,7 @@ tasks:
 ## jstestfuzz initial sync replica set ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_initsync_gen
-  tags: ["jstestfuzz", "initsync"]
+  tags: ["jstestfuzz", "initsync", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3542,7 +3652,7 @@ tasks:
 ## jstestfuzz replica set with logical session ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_session_gen
-  tags: ["jstestfuzz", "session"]
+  tags: ["jstestfuzz", "session", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3555,7 +3665,7 @@ tasks:
 ## jstestfuzz sharded cluster ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_sharded_gen
-  tags: ["jstestfuzz", "common", "sharding"]
+  tags: ["jstestfuzz", "common", "sharding", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3568,7 +3678,7 @@ tasks:
 ## jstestfuzz sharded multiversion cluster ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_sharded_multiversion_passthrough_gen
-  tags: [jstestfuzz_multiversion_passthrough_gen]
+  tags: ["jstestfuzz_multiversion_passthrough_gen", "require-npm", "random-name", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3584,7 +3694,7 @@ tasks:
 ## jstestfuzz sharded cluster causal consistency ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_sharded_causal_consistency_gen
-  tags: ["jstestfuzz", "causal"]
+  tags: ["jstestfuzz", "causal", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3597,7 +3707,7 @@ tasks:
 ## jstestfuzz sharded cluster continuous stepdown ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_sharded_continuous_stepdown_gen
-  tags: ["jstestfuzz", "stepdowns"]
+  tags: ["jstestfuzz", "stepdowns", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3612,7 +3722,7 @@ tasks:
 ## jstestfuzz sharded cluster with logical session ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_sharded_session_gen
-  tags: ["jstestfuzz", "session"]
+  tags: ["jstestfuzz", "session", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3625,7 +3735,7 @@ tasks:
 ## resharding generational fuzzer ##
 - <<: *jstestfuzz_template
   name: resharding_fuzzer_inplace_gen
-  tags: ["resharding_fuzzer"]
+  tags: ["resharding_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3640,7 +3750,7 @@ tasks:
 
 - <<: *jstestfuzz_template
   name: resharding_fuzzer_split_gen
-  tags: ["resharding_fuzzer"]
+  tags: ["resharding_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3655,7 +3765,7 @@ tasks:
 
 - <<: *jstestfuzz_template
   name: resharding_fuzzer_merge_gen
-  tags: ["resharding_fuzzer"]
+  tags: ["resharding_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3670,7 +3780,7 @@ tasks:
 
 - <<: *jstestfuzz_template
   name: resharding_fuzzer_shuffle_gen
-  tags: ["resharding_fuzzer"]
+  tags: ["resharding_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3685,7 +3795,7 @@ tasks:
 
 - <<: *jstestfuzz_template
   name: resharding_fuzzer_idempotency_gen
-  tags: ["resharding_fuzzer"]
+  tags: ["resharding_fuzzer", "require-npm", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3702,7 +3812,7 @@ tasks:
 ## Tests that the multiversion test generation logic is not broken.
 - <<: *gen_task_template
   name: multiversion_sanity_check_passthrough_gen
-  tags: []
+  tags: ["multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3713,7 +3823,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_jscore_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3963,7 +4073,7 @@ tasks:
 
 - <<: *gen_task_template
   name: change_streams_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3974,7 +4084,7 @@ tasks:
 
 - <<: *gen_task_template
   name: change_streams_multiversion_downgrade_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4038,7 +4148,7 @@ tasks:
 
 - <<: *gen_task_template
   name: change_streams_sharded_collections_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4561,14 +4671,13 @@ tasks:
     vars:
       resmoke_args: --storageEngine=wiredTiger
 
-- <<: *task_template
-  name: replica_sets_reconfig_kill_primary_jscore_passthrough
+- <<: *gen_task_template
+  name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
   tags: []
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=replica_sets_reconfig_kill_primary_jscore_passthrough --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
 
 - <<: *gen_task_template
   name: replica_sets_api_version_jscore_passthrough_gen
@@ -4615,14 +4724,13 @@ tasks:
       use_large_distro: "true"
       resmoke_args: --storageEngine=wiredTiger
 
-- <<: *task_template
-  name: replica_sets_multi_stmt_txn_kill_primary_jscore_passthrough
+- <<: *gen_task_template
+  name: replica_sets_multi_stmt_txn_kill_primary_jscore_passthrough_gen
   tags: ["replica_sets", "non_maj_read", "non_live_record"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=replica_sets_multi_stmt_txn_kill_primary_jscore_passthrough --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
 
 - <<: *task_template
   name: replica_sets_multi_stmt_txn_terminate_primary_jscore_passthrough
@@ -4658,14 +4766,13 @@ tasks:
     vars:
       resmoke_args: --suites=replica_sets_initsync_static_jscore_passthrough --storageEngine=wiredTiger
 
-- <<: *task_template
-  name: replica_sets_kill_primary_jscore_passthrough
+- <<: *gen_task_template
+  name: replica_sets_kill_primary_jscore_passthrough_gen
   tags: ["replica_sets", "large", "non_maj_read", "non_live_record"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=replica_sets_kill_primary_jscore_passthrough --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
 
 - <<: *task_template
   name: replica_sets_terminate_primary_jscore_passthrough
@@ -4705,7 +4812,7 @@ tasks:
 
 - <<: *gen_task_template
   name: multiversion_gen
-  tags: []
+  tags: ["multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4717,7 +4824,7 @@ tasks:
 # build variants that enable this task.
 - <<: *gen_task_template
   name: feature_flag_multiversion_gen
-  tags: []
+  tags: ["multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4794,7 +4901,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharded_collections_jscore_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4814,7 +4921,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_jscore_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4960,14 +5067,13 @@ tasks:
       resmoke_args: --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency
+- <<: *gen_task_template
+  name: concurrency_gen
   tags: ["concurrency", "common"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=concurrency --storageEngine=wiredTiger
+      resmoke_args: "--storageEngine=wiredTiger"
       resmoke_jobs_max: 1
 
 - <<: *task_template
@@ -4982,7 +5088,7 @@ tasks:
 
 - <<: *task_template
   name: concurrency_replication_metrics
-  tags: ["concurrency", "repl"]
+  tags: ["concurrency", "repl", "disabled_on_code_coverage"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -5001,7 +5107,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_multiversion_passthrough_gen
-  tags: [multiversion_passthrough]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5090,7 +5196,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_replication_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough", "sharded"]
+  tags: ["multiversion_passthrough", "sharded", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5273,7 +5379,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_simultaneous_gen
-  tags: ["concurrency", "common"]
+  tags: ["concurrency", "common", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5282,7 +5388,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_simultaneous_replication_gen
-  tags: ["concurrency", "common", "large", "repl"]
+  tags: ["concurrency", "common", "large", "repl", "random-name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5291,7 +5397,7 @@ tasks:
 
 - <<: *task_template
   name: concurrency_simultaneous_replication_wiredtiger_cursor_sweeps
-  tags: ["concurrency", "repl"]
+  tags: ["concurrency", "repl", "random-name"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -5301,7 +5407,7 @@ tasks:
 
 - <<: *task_template
   name: concurrency_simultaneous_replication_wiredtiger_eviction_debug
-  tags: ["concurrency", "repl", "debug_only"]
+  tags: ["concurrency", "repl", "debug_only", "random-name"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -5433,7 +5539,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_multiversion_gen
-  tags: ["random_multiversion_ds"]
+  tags: ["random_multiversion_ds", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5461,7 +5567,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_multiversion_gen
-  tags: ["random_multiversion_ds"]
+  tags: ["random_multiversion_ds", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5679,11 +5785,21 @@ tasks:
 
 - <<: *gen_task_template
   name: retryable_writes_downgrade_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: retryable_writes_downgrade_passthrough
+      resmoke_args: --storageEngine=wiredTiger
+      require_multiversion: true
+
+- <<: *gen_task_template
+  name: sharded_retryable_writes_downgrade_passthrough_gen
+  tags: ["multiversion_passthrough", "multiversion"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: sharded_retryable_writes_downgrade_passthrough
       resmoke_args: --storageEngine=wiredTiger
       require_multiversion: true
       implicit_multiversion: true
@@ -5792,14 +5908,13 @@ tasks:
     vars:
       resmoke_args: --storageEngine=wiredTiger
 
-- <<: *task_template
-  name: retryable_writes_jscore_stepdown_passthrough
+- <<: *gen_task_template
+  name: retryable_writes_jscore_stepdown_passthrough_gen
   tags: ["retry"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=retryable_writes_jscore_stepdown_passthrough --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
 
 - <<: *task_template
   name: watchdog_wiredtiger
@@ -6021,6 +6136,69 @@ tasks:
   - func: "set up EC2 instance"
   - func: "run powercycle test"
     timeout_secs: 1800 # 30 minute timeout for no output
+
+
+- name: selinux_rhel8_org
+  tags: []
+  depends_on:
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "run selinux tests"
+    vars:
+      distro: rhel80-selinux
+      test_list: jstests/selinux/*.js
+
+- name: selinux_rhel8_enterprise
+  tags: []
+  depends_on:
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "run selinux tests"
+    vars:
+      distro: rhel80-selinux
+      test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
+
+- name: selinux_rhel7_org
+  tags: []
+  depends_on:
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "run selinux tests"
+    vars:
+      user: root
+      distro: rhel76-selinux
+      test_list: jstests/selinux/*.js
+
+- name: selinux_rhel7_enterprise
+  tags: []
+  depends_on:
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "run selinux tests"
+    vars:
+      user: root
+      distro: rhel76-selinux
+      test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
 
 - name: idl_tests
   tags: []
@@ -7113,11 +7291,11 @@ task_groups:
   - compile_unittests
   - run_unittests
 
-- <<: *compile_task_group_template
-  name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
-  tasks:
-    - compile_unittests_for_recorded_unittest
-    - run_unittests_with_recording
+#- <<: *compile_task_group_template
+#  name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
+#  tasks:
+#    - compile_unittests_for_recorded_unittest
+#    - run_unittests_with_recording
 
 - <<: *compile_task_group_template
   name: compile_test_and_package_parallel_dbtest_stream_TG
@@ -7257,6 +7435,7 @@ buildvariants:
 - name: linux-64-repeated-execution
   stepback: false
   display_name: ~ Linux Repeated Execution
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel80-small
   expansions:
@@ -7283,8 +7462,7 @@ buildvariants:
   - name: jsCore_txns
   - name: .logical_session_cache
   - name: parallel_gen
-  # TODO(SERVER-58778): Re-enable concurrency_replication_multi_stmt_txn by removing !.txn
-  - name: .concurrency .common !.kill_terminate !.txn
+  - name: .concurrency .common !.kill_terminate
     distros:
       - rhel80-medium
   - name: concurrency_replication_causal_consistency_gen
@@ -7292,7 +7470,7 @@ buildvariants:
 - &linux-64-debug-required-template
   name: linux-64-debug-required
   display_name: "! Shared Library Linux DEBUG"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
   - rhel80-medium
   expansions:
@@ -7353,7 +7531,7 @@ buildvariants:
 - <<: *linux-64-debug-required-template
   name: linux-64-debug-wtdevelop
   display_name: "~ Linux DEBUG WiredTiger develop"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - wtdevelop
   expansions:
@@ -7365,6 +7543,7 @@ buildvariants:
 
 - name: linux-64-duroff
   display_name: Linux (No Journal)
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel80-small
   expansions: &linux-64-required-duroff-expansions
@@ -7387,7 +7566,7 @@ buildvariants:
   - name: aggregation_auth
   - name: auth_gen
   - name: .misc_js !.sharded
-  - name: concurrency
+  - name: concurrency_gen
   - name: concurrency_simultaneous_gen
   - name: disk_wiredtiger
   - name: failpoints_auth
@@ -7396,6 +7575,7 @@ buildvariants:
 
 - name: ubuntu1804
   display_name: Ubuntu 18.04
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu1804-test
   expansions:
@@ -7453,6 +7633,7 @@ buildvariants:
 
 - name: enterprise-ubuntu1804-64
   display_name: Enterprise Ubuntu 18.04
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -7527,7 +7708,7 @@ buildvariants:
   display_name: TLA+
   run_on:
   - ubuntu1804-build
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   stepback: false
   expansions:
     timeout_secs: 345600 # 4 days
@@ -7536,6 +7717,7 @@ buildvariants:
 
 - name: enterprise-ubuntu1804-arm64
   display_name: Enterprise Ubuntu 18.04 arm64
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -7589,6 +7771,7 @@ buildvariants:
 
 - name: ubuntu1804-arm64
   display_name: Ubuntu 18.04 arm64
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu1804-arm64-build
   expansions:
@@ -7624,6 +7807,7 @@ buildvariants:
 
 - name: ubuntu2004
   display_name: Ubuntu 20.04
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu2004-small
   expansions:
@@ -7675,6 +7859,7 @@ buildvariants:
 
 - name: enterprise-ubuntu2004-64
   display_name: Enterprise Ubuntu 20.04
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -7727,6 +7912,7 @@ buildvariants:
 
 - name: enterprise-ubuntu2004-arm64
   display_name: Enterprise Ubuntu 20.04 arm64
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -7779,6 +7965,7 @@ buildvariants:
 
 - name: ubuntu2004-arm64
   display_name: Ubuntu 20.04 arm64
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu2004-arm64-large
   expansions:
@@ -7814,14 +8001,14 @@ buildvariants:
 - &enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
   name: enterprise-ubuntu2104-dynamic-gcc11-debug-experimental
   display_name: "~ Shared Library Enterprise Ubuntu 21.04 GCC11 DEBUG"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
   - ubuntu2104-small
   expansions: &enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11 --disable-warnings-as-errors
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11
     has_packages: false
     scons_cache_scope: shared
     scons_cache_mode: all
@@ -7843,24 +8030,25 @@ buildvariants:
   display_name: "~ Shared Library Enterprise Ubuntu 21.04 clang12 DEBUG"
   expansions:
     <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/clang-12 CXX=/usr/bin/clang++-12 --disable-warnings-as-errors
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/clang-12 CXX=/usr/bin/clang++-12
 
 - <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
   name: enterprise-ubuntu2104-dynamic-gcc11-cxx20-debug-experimental
   display_name: "~ Shared Library Enterprise Ubuntu 21.04 GCC11 C++20 DEBUG"
   expansions:
     <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11 --disable-warnings-as-errors --cxx-std=20
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11 --cxx-std=20
 
 - <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-template
   name: enterprise-ubuntu2104-dynamic-clang12-cxx20-debug-experimental
   display_name: "~ Shared Library Enterprise Ubuntu 21.04 clang12 C++20 DEBUG"
   expansions:
     <<: *enterprise-ubuntu2104-dynamic-gcc11-debug-experimental-expansions
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/clang-12 CXX=/usr/bin/clang++-12 --disable-warnings-as-errors --cxx-std=20
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic CC=/usr/bin/clang-12 CXX=/usr/bin/clang++-12 --cxx-std=20
 
 - name: enterprise-linux-64-amazon-ami
   display_name: "Enterprise Amazon Linux"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -7917,6 +8105,7 @@ buildvariants:
 
 - name: amazon
   display_name: Amazon Linux
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - amazon1-2018-test
   expansions:
@@ -7971,14 +8160,16 @@ buildvariants:
 
 - name: enterprise-amazon2
   display_name: "Enterprise Amazon Linux 2"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
   - amazon2-test
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
     test_flags: >-
-      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux
+      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux,uses_pykmip
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -8026,6 +8217,7 @@ buildvariants:
 
 - name: amazon2
   display_name: Amazon Linux 2
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - amazon2-test
   expansions:
@@ -8080,6 +8272,7 @@ buildvariants:
 
 - name: enterprise-amazon2-arm64
   display_name: "Enterprise Amazon Linux 2 arm64"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -8091,7 +8284,8 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-enterprise-amazon2
     compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: aarch64
@@ -8135,6 +8329,7 @@ buildvariants:
 
 - name: amazon2-arm64
   display_name: Amazon Linux 2 arm64
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - amazon2-arm64-small
   expansions:
@@ -8186,6 +8381,7 @@ buildvariants:
   modules:
   - enterprise
   display_name: "~ STM Daily Cron"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel80-small
   expansions:
@@ -8199,7 +8395,7 @@ buildvariants:
 
 - name: stm-hourly-cron
   display_name: "~ STM Hourly Cron"
-  batchtime: 60
+  cron: "0 * * * *" # Every hour
   run_on:
     - rhel80-small
   stepback: false
@@ -8210,6 +8406,7 @@ buildvariants:
   modules:
   - enterprise
   display_name: "~ Security Daily Cron"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel80-small
   stepback: false
@@ -8222,7 +8419,7 @@ buildvariants:
 
 - name: windows-debug-suggested
   display_name: "* Windows DEBUG"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -8278,7 +8475,7 @@ buildvariants:
     - windows-vsCurrent-large
   - name: .resharding_fuzzer
   - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
     distros:
     - windows-vsCurrent-large
   - name: session_jscore_passthrough
@@ -8290,7 +8487,7 @@ buildvariants:
 - &enterprise-windows-required-template
   name: enterprise-windows-required
   display_name: "! Enterprise Windows"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - enterprise
   run_on:
@@ -8337,7 +8534,7 @@ buildvariants:
 - <<: *enterprise-windows-required-template
   name: enterprise-windows-all-feature-flags-required
   display_name: "! Enterprise Windows (all feature flags)"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   expansions:
     burn_in_tests_build_variant: enterprise-windows-suggested
     exe: ".exe"
@@ -8381,7 +8578,7 @@ buildvariants:
 - &enterprise-windows-suggested-template
   name: enterprise-windows-suggested
   display_name: "* Enterprise Windows"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
     - enterprise
   run_on:
@@ -8422,7 +8619,7 @@ buildvariants:
     - name: external_auth_aws
     - name: external_auth_windows
       distros:
-        - windows-64-2016
+        - windows-2016-dc
     - name: .jscore .common !.sharding
     - name: jsCore_auth
     - name: jsCore_ese
@@ -8447,7 +8644,7 @@ buildvariants:
 - <<: *enterprise-windows-suggested-template
   name: enterprise-windows-all-feature-flags-suggested
   display_name: "* Enterprise Windows (all feature flags)"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   expansions:
     exe: ".exe"
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug msi archive-mh archive-mh-debug
@@ -8483,7 +8680,7 @@ buildvariants:
     - name: external_auth_aws
     - name: external_auth_windows
       distros:
-        - windows-64-2016
+        - windows-2016-dc
     - name: .jscore .common !.sharding
     - name: jsCore_auth
     - name: jsCore_ese
@@ -8511,6 +8708,7 @@ buildvariants:
 - <<: *enterprise-windows-nopush-template
   name: enterprise-windows-benchmarks
   display_name: "~ Enterprise Windows (Benchmarks)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   tasks:
   - name: compile_benchmarks
     distros:
@@ -8520,7 +8718,7 @@ buildvariants:
 - <<: *enterprise-windows-nopush-template
   name: enterprise-windows-wtdevelop
   display_name: "~ Enterprise Windows WiredTiger develop"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - enterprise
   - wtdevelop
@@ -8530,6 +8728,7 @@ buildvariants:
 
 - name: enterprise-windows-inmem
   display_name: Enterprise Windows (inMemory)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -8577,6 +8776,7 @@ buildvariants:
 
 - name: windows
   display_name: Windows
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -8637,6 +8837,7 @@ buildvariants:
 
 - name: enterprise-windows
   display_name: "Enterprise Windows"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
     - enterprise
   run_on:
@@ -8701,6 +8902,7 @@ buildvariants:
 
 - name: enterprise-windows-debug-unoptimized
   display_name: Enterprise Windows DEBUG (Unoptimized)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -8737,6 +8939,7 @@ buildvariants:
 
 - name: macos
   display_name: macOS
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - macos-1014
   expansions:
@@ -8789,7 +8992,7 @@ buildvariants:
 - &macos-debug-template
   name: macos-debug-suggested
   display_name: "* Shared Library macOS DEBUG"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
   - macos-1014
   expansions: &macos-debug-expansions
@@ -8818,6 +9021,7 @@ buildvariants:
 
 - name: enterprise-macos
   display_name: Enterprise macOS
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -8855,6 +9059,7 @@ buildvariants:
 
 - name: enterprise-macos-xcode-current
   display_name: "~ Enterprise macOS Xcode Current"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -8862,7 +9067,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8882,6 +9087,7 @@ buildvariants:
 
 - name: enterprise-macos-rosetta-2
   display_name: "Enterprise macOS Via Rosetta 2"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -8889,7 +9095,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8915,7 +9121,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
+    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --link-model=dynamic --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -8929,7 +9135,7 @@ buildvariants:
   display_name: "Embedded SDK - macOS"
   run_on:
   - macos-1014
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   expansions:
     test_flags: --excludeWithAnyTags=uses_transactions,incompatible_with_macos
     cmake_path: /Applications/cmake-3.11.0-Darwin-x86_64/CMake.app/Contents/bin/cmake
@@ -8954,6 +9160,7 @@ buildvariants:
 
 - name: embedded-sdk-ubuntu-1804-x86_64
   display_name: "Embedded SDK - Ubuntu 18.04 x86_64"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu1804-build
   expansions:
@@ -8979,7 +9186,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-64-bit
   display_name: "Enterprise RHEL 8.0"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -9004,7 +9211,6 @@ buildvariants:
     target_resmoke_time: 10
     max_sub_suites: 3
     large_distro_name: rhel80-medium
-    spawn_resmoke_using: jasper
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -9054,12 +9260,12 @@ buildvariants:
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-medium
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
     distros:
     - rhel80-medium
   - name: .resharding_fuzzer
   - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-medium
   - name: .read_only
@@ -9086,12 +9292,13 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
+  - name: selinux_rhel8_enterprise
   - name: .publish
 
 - &enterprise-rhel-80-64-bit-dynamic-required-template
   name: enterprise-rhel-80-64-bit-dynamic-required
   display_name: "! Shared Library Enterprise RHEL 8.0"
-  batchtime: 240 # 4 hour
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - enterprise
   run_on:
@@ -9115,9 +9322,9 @@ buildvariants:
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
       - rhel80-xlarge
-  - name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
-    distros:
-      - rhel80-xlarge
+#  - name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
+#    distros:
+#      - rhel80-xlarge
   - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
       - rhel80-xlarge
@@ -9183,11 +9390,11 @@ buildvariants:
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-xlarge
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
     distros:
     - rhel80-xlarge
   - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-medium
   - name: .read_only
@@ -9216,7 +9423,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required
   display_name: "! Shared Library Enterprise RHEL 8.0 (all feature flags)"
-  batchtime: 240 # 4 hour
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   stepback: false
   modules:
   - enterprise
@@ -9240,8 +9447,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --runAllFeatureFlagTests
-      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
-      --additionalFeatureFlags=featureFlagSbePlanCache
   tasks: &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-tasks
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
@@ -9304,11 +9509,11 @@ buildvariants:
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-medium
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
     distros:
     - rhel80-medium
   - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-medium
   - name: .read_only
@@ -9336,16 +9541,16 @@ buildvariants:
 #    distros:
 #      - rhel80-large
 
-- &enterprise-rhel-80-64-bit-dynamic-sbe-engine
-  name: enterprise-rhel-80-64-bit-dynamic-sbe-engine
-  display_name: "Shared Library Enterprise RHEL 8.0 (SBE Engine)"
-  batchtime: 1440 # 1 day
+- &enterprise-rhel-80-64-bit-dynamic-classic-engine
+  name: enterprise-rhel-80-64-bit-dynamic-classic-engine
+  display_name: "Shared Library Enterprise RHEL 8.0 (Classic Engine)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   stepback: false
   modules:
   - enterprise
   run_on:
   - rhel80-small
-  expansions: &enterprise-rhel-80-64-bit-dynamic-sbe-engine-expansions
+  expansions: &enterprise-rhel-80-64-bit-dynamic-classic-engine-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: rhel80
@@ -9358,69 +9563,105 @@ buildvariants:
     target_resmoke_time: 10
     max_sub_suites: 5
     large_distro_name: rhel80-medium
+    burn_in_tag_buildvariants: enterprise-rhel-80-64-bit-inmem linux-64-duroff enterprise-rhel-80-64-bit-multiversion
     num_scons_link_jobs_available: 0.99
     test_flags: >-
-      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
-      --additionalFeatureFlags=featureFlagTimeseriesCollection,featureFlagSbePlanCache
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
   tasks:
-  - name: compile_and_archive_dist_test_TG
-    distros:
-      - rhel80-large
-# Disable the following tests as they are not aware of feature flags.
-#  - name: compile_test_and_package_parallel_unittest_stream_TG
-#    distros:
-#      - rhel80-large
-#  - name: compile_test_and_package_parallel_dbtest_stream_TG
-#    distros:
-#    - rhel80-medium
-  - name: build_variant_gen
   - name: .aggfuzzer
-  - name: .aggregation !.no_async !.secondary_reads !.sharded !.unwind !aggregation_disabled_optimization
-  - name: .change_streams
+  - name: .aggregation
+  - name: .auth
+  - name: .causally_consistent !.sharding
   - name: .change_stream_fuzzer
-  - name: .concurrency !.large !.ubsan !.debug_only
-  - name: .lint
-  - name: .jscore !.sharding !.decimal !cst_jscore_passthrough
-  - name: .jstestfuzz !.flow_control
-  - name: .query_fuzzer
-  - name: .read_write_concern
-  - name: .replica_sets
-  - name: .rollbackfuzzer
-  - name: causally_consistent_hedged_reads_jscore_passthrough_gen
-  - name: causally_consistent_jscore_passthrough_auth_gen
-  - name: causally_consistent_jscore_passthrough_gen
-  - name: causally_consistent_read_concern_snapshot_passthrough_gen
-  - name: initial_sync_fuzzer_gen
-  - name: multi_shard_multi_stmt_txn_jscore_passthrough_gen
-  - name: multi_shard_multi_stmt_txn_kill_primary_jscore_passthrough_gen
-  - name: multi_shard_multi_stmt_txn_stepdown_primary_jscore_passthrough_gen
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: noPassthrough_gen
-  - name: noPassthroughWithMongod_gen
-  - name: replica_sets_api_version_jscore_passthrough_gen
-  - name: replica_sets_multiversion_gen
-  - name: replica_sets_reconfig_jscore_passthrough_gen
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
-  - name: session_jscore_passthrough
-  - name: sharded_causally_consistent_jscore_passthrough_gen
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharding_ese_gcm_gen
-  - name: sharding_ese_gen
-  - name: sharding_gen
-  - name: sharding_jscore_passthrough
-  - name: sharding_api_version_jscore_passthrough_gen
-  - name: sharding_update_v1_oplog_jscore_passthrough
-  - name: sharding_last_lts_mongos_and_mixed_shards_gen
-  - name: sharding_max_mirroring_gen
-  - name: sharding_multiversion_gen
-  - name: sharding_update_v1_oplog_gen
-  - name: ese
+  - name: .change_streams
+  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
     distros:
     - rhel80-medium
+  - name: .encrypt
+  - name: .integration
+    distros:
+    - rhel80-medium
+  - name: .jscore .common !jsCore
+  - name: .jstestfuzz !.flow_control
+  - name: .lint
+  - name: .misc_js
+  - name: .multi_shard
+  - name: .query_fuzzer
+  - name: .random_multiversion_ds
+  - name: .read_only
+  - name: .read_write_concern !.large
+  - name: .read_write_concern .large
+    distros:
+    - rhel80-medium
+  - name: .replica_sets !.encrypt !.auth
+    distros:
+    - rhel80-xlarge
+  - name: .rollbackfuzzer
+  - name: .sharding .common
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .txns
+  - name: .stitch
+  - name: .tenant_migration
+    distros:
+      - rhel80-xlarge
+  - name: .updatefuzzer
+  - name: audit
+  - name: build_variant_gen
+  - name: burn_in_tags_gen
+  - name: burn_in_tests_gen
+  - name: burn_in_tests_multiversion_gen
+  - name: check_feature_flag_tags
+  - name: check_for_todos
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+      - rhel80-xlarge
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+      - rhel80-xlarge
+#  - name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
+#    distros:
+#      - rhel80-xlarge
+  - name: disk_wiredtiger
+  - name: initial_sync_fuzzer_gen
+  - name: jsCore
+    distros:
+    - rhel80-xlarge
+  - name: jsCore_minimum_batch_size
+  - name: jsCore_txns_large_txns_format
+  - name: jsonSchema
+  - name: lint_fuzzer_sanity_patch
+  - name: mqlrun
+  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+  - name: multiversion_gen
+  - name: multiversion_sanity_check_passthrough_gen
+  - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_ssl
+  - name: secondary_reads_passthrough_gen
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_selection_json_test_TG
+    distros:
+      - rhel80-xlarge
+  - name: session_jscore_passthrough
+  - name: sharding_api_version_jscore_passthrough_gen
+  - name: snmp
+  - name: test_api_version_compatibility
+  - name: unittest_shell_hang_analyzer_gen
 
 - name: enterprise-rhel-80-64-bit-large-txns-format
   display_name: "Enterprise RHEL 8.0 (large transactions format)"
@@ -9428,7 +9669,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel80-small
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     compile_flags: >-
@@ -9495,15 +9736,19 @@ buildvariants:
 
 # This build variant is used to run multiversion tests as part of burn_in_tags as these tests are
 # currently only run on our daily builders.
-- name: enterprise-rhel-80-64-bit-multiversion
+- &enterprise-rhel-80-64-bit-multiversion-template
+  name: enterprise-rhel-80-64-bit-multiversion
   display_name: "Enterprise RHEL 8.0 (implicit multiversion)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
   - rhel80-small
-  expansions: &enterprise-rhel-80-64-bit-multiversion
+  expansions: &enterprise-rhel-80-64-bit-multiversion-expansions-template
+    # TODO (SERVER-55857): Remove 'requires_fcv_51' once tests are filtered out using the
+    # 'REQUIRES_FCV_TAG' list in 'multiversion_constants.py'.
     test_flags: >-
-      --excludeWithAnyTags=requires_fcv_51,multiversion_incompatible,disabled_due_to_server_58295
+      --excludeWithAnyTags=requires_fcv_51,multiversion_incompatible
     compile_flags: >-
       -j$(grep -c ^processor /proc/cpuinfo)
       --ssl
@@ -9526,11 +9771,23 @@ buildvariants:
   - name: .multiversion_passthrough
   - name: .random_multiversion_ds
 
+- <<: *enterprise-rhel-80-64-bit-multiversion-template
+  name: enterprise-rhel-80-64-bit-multiversion-all-feature-flags
+  display_name: "Enterprise RHEL 8.0 (implicit multiversion & all feature flags)"
+  cron: "0 0 * * *" # Every day starting at 00:00
+  expansions:
+    <<: *enterprise-rhel-80-64-bit-multiversion-expansions-template
+    # TODO (SERVER-55857): Remove 'requires_fcv_51' once tests are filtered out using the
+    # 'REQUIRES_FCV_TAG' list in 'multiversion_constants.py'.
+    test_flags: >-
+      --excludeWithAnyTags=requires_fcv_51,multiversion_incompatible
+      --runAllFeatureFlagTests
+
 - name: rhel-80-64-bit-nossl
   display_name: "RHEL 8.0 Shared Library (No SSL)"
   run_on:
   - rhel80-small
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   expansions:
     compile_flags: >-
       -j$(grep -c ^processor /proc/cpuinfo)
@@ -9556,7 +9813,7 @@ buildvariants:
     - enterprise
   run_on:
     - rhel80-medium
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -9582,7 +9839,7 @@ buildvariants:
     - name: causally_consistent_jscore_txns_passthrough
     - name: .change_streams
     - name: .misc_js
-    - name: .concurrency !.ubsan !.no_txns !.stepdowns !.kill_terminate
+    - name: .concurrency !.ubsan !.no_txns !.stepdowns !.kill_terminate !.disabled_on_code_coverage
     - name: disk_wiredtiger
     - name: .encrypt
     - name: initial_sync_fuzzer_gen
@@ -9619,7 +9876,7 @@ buildvariants:
 # are spending when we split tasks into multiple sub-tasks.
 - name: enterprise-rhel-80-64-bit-single-task-baseline
   display_name: "Enterprise RHEL 8.0 (Single Task Baseline)"
-  batchtime: 10080  # 1 week.
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   modules:
     - enterprise
   run_on:
@@ -9661,6 +9918,7 @@ buildvariants:
 - &enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit
   display_name: "Enterprise RHEL 7.0"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -9725,12 +9983,14 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
+  - name: selinux_rhel7_enterprise
   - name: .publish
     distros:
     - rhel70-small
 
 - name: ubi8
   display_name: "UBI 8"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubi8
   expansions:
@@ -9753,7 +10013,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-suggested-template
   name: enterprise-rhel-80-64-bit-suggested
   display_name: "* Enterprise RHEL 8.0"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - enterprise
   run_on:
@@ -9806,12 +10066,14 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
+  - name: selinux_rhel8_enterprise
   - name: .publish
     distros:
     - rhel80-small
 
 - name: enterprise-rhel-82-arm64
   display_name: "Enterprise RHEL 8.2 arm64"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -9860,6 +10122,7 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
+  - name: selinux_rhel8_org
   - name: .publish
     distros:
     - rhel80-small
@@ -9868,7 +10131,7 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit-kitchen-sink
   display_name: "~ Enterprise RHEL 7.0"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   expansions:
     <<: *enterprise-rhel-70-64-bit-expansions-template
     compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
@@ -9881,7 +10144,7 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: hot_backups-rhel-70-64-bit
   display_name: "hot_backups RHEL 7.0"
-  batchtime: 1440  # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel70
   expansions:
@@ -9898,7 +10161,7 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit-no-libunwind
   display_name: "~ Enterprise RHEL 7.0 (no-libunwind)"
-  batchtime: 10080  # 1 week
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   run_on:
   - rhel70
   expansions:
@@ -9938,7 +10201,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-suggested
   display_name: "* Shared Library Ubuntu 18.04 DEBUG"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
   - ubuntu1804-test
   expansions:
@@ -9974,6 +10237,7 @@ buildvariants:
 
 - name: ubuntu1804-container
   display_name: "Ubuntu 18.04 Container"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu1804-container-server
   expansions:
@@ -9995,6 +10259,7 @@ buildvariants:
 
 - name: rhel70
   display_name: RHEL 7.0
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel70-small
   expansions:
@@ -10040,12 +10305,14 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
+  - name: selinux_rhel7_org
   - name: .publish
     distros:
     - rhel70-small
 
 - name: rhel80
   display_name: RHEL 8.0
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel80-build
   expansions:
@@ -10097,6 +10364,7 @@ buildvariants:
 
 - name: rhel-82-arm64
   display_name: RHEL 8.2 arm64
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel82-arm64-small
   expansions:
@@ -10146,6 +10414,7 @@ buildvariants:
 # This variant compiles on RHEL 7.0 and runs tests on RHEL 7.6
 - name: rhel76_compile_rhel70
   display_name: RHEL 7.0/7.6 Cross-ABI
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel76-test
   expansions:
@@ -10165,7 +10434,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel81-power8-small
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -10216,7 +10485,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -10246,7 +10515,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  batchtime: 525600 # 365 days
+  cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -10297,7 +10566,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  batchtime: 525600 # 365 days
+  cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -10326,7 +10595,7 @@ buildvariants:
 
 - name: rhel-72-s390x
   display_name: RHEL 7.2 s390x
-  batchtime: 525600 # 365 days
+  cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
   run_on:
   - rhel72-zseries-test
   expansions:
@@ -10358,7 +10627,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1804-clang-tidy-required
   display_name: "! Enterprise Clang Tidy"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - enterprise
   run_on:
@@ -10384,6 +10653,7 @@ buildvariants:
 
 - name: enterprise-suse12-64
   display_name: Enterprise SLES 12
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -10430,6 +10700,7 @@ buildvariants:
 
 - name: suse12
   display_name: SUSE 12
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - suse12-test
   expansions:
@@ -10480,6 +10751,7 @@ buildvariants:
 
 - name: enterprise-suse15-64
   display_name: Enterprise SLES 15
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -10521,6 +10793,7 @@ buildvariants:
 
 - name: suse15
   display_name: SUSE 15
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - suse15-test
   expansions:
@@ -10529,8 +10802,10 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-suse15
     compile_flags: --ssl MONGO_DISTMOD=suse15 --use-libunwind=off -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    multiversion_platform: suse15
-    multiversion_edition: targeted
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: suse15
+    multiversion_edition_42_or_later: targeted
     has_packages: true
     packager_script: packager.py
     packager_arch: x86_64
@@ -10572,6 +10847,7 @@ buildvariants:
 
 - name: enterprise-debian92-64
   display_name: Enterprise Debian 9.2
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -10619,6 +10895,7 @@ buildvariants:
 
 - name: debian92
   display_name: Debian 9.2
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - debian92-test
   expansions:
@@ -10670,6 +10947,7 @@ buildvariants:
 
 - name: enterprise-debian10-64
   display_name: Enterprise Debian 10
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -10681,8 +10959,10 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-debian10
     compile_flags: --ssl MONGO_DISTMOD=debian10 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    multiversion_platform: debian10
-    multiversion_edition: enterprise
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: debian10
+    multiversion_edition_42_or_later: enterprise
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: x86_64
@@ -10699,6 +10979,9 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
+  - name: .jepsen_docker
+    distros:
+    - debian10-large
   - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -10717,6 +11000,7 @@ buildvariants:
 
 - name: debian10
   display_name: Debian 10
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - debian10-test
   expansions:
@@ -10725,8 +11009,10 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-debian10
     compile_flags: --ssl MONGO_DISTMOD=debian10 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    multiversion_platform: debian10
-    multiversion_edition: targeted
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: debian10
+    multiversion_edition_42_or_later: targeted
     has_packages: true
     packager_script: packager.py
     packager_arch: x86_64
@@ -10772,6 +11058,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-benchmarks
   display_name: Enterprise RHEL 8.0 (Benchmarks)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -10784,6 +11071,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-64-bit-inmem
   display_name: Enterprise RHEL 8.0 (inMemory)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -10847,6 +11135,7 @@ buildvariants:
 
 - name: linux-64-ephemeralForTest
   display_name: Linux (ephemeralForTest)
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - rhel80-medium
   expansions:
@@ -10873,7 +11162,7 @@ buildvariants:
   # SERVER-58597: Re-enable parallel
   - name: .misc_js !.parallel
   # SERVER-50296: Investigate concurrency test failures.
-  # - name: concurrency
+  # - name: concurrency_gen
   # - name: concurrency_replication_gen
   # - name: concurrency_replication_causal_consistency_gen
   # - name: concurrency_simultaneous_gen
@@ -10899,7 +11188,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  batchtime: 525600 # 365 days
+  cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -10937,6 +11226,7 @@ buildvariants:
 - &ubuntu1804-debug-asan-template
   name: ubuntu1804-debug-asan
   display_name: ~ ASAN Enterprise Ubuntu 18.04 DEBUG
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11012,6 +11302,7 @@ buildvariants:
 - <<: *ubuntu1804-debug-asan-template
   name: ubuntu1804-debug-asan-all-feature-flags
   display_name: "~ Shared Library ASAN Enterprise Ubuntu 18.04 DEBUG (all feature flags)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11083,8 +11374,9 @@ buildvariants:
 #  - name: server_selection_json_test_TG
 
 - <<: *ubuntu1804-debug-asan-template
-  name: ubuntu1804-debug-asan-sbe-engine
-  display_name: ~ ASAN Enterprise Ubuntu 18.04 DEBUG (SBE Engine)
+  name: ubuntu1804-debug-asan-classic-engine
+  display_name: ~ ASAN Enterprise Ubuntu 18.04 DEBUG (Classic Engine)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11098,8 +11390,7 @@ buildvariants:
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
-      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
-      --additionalFeatureFlags=featureFlagSbePlanCache
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
       --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
@@ -11158,6 +11449,7 @@ buildvariants:
 
 - name: ubuntu1804-asan
   display_name: ~ ASAN Ubuntu 18.04
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu1804-build
   stepback: true
@@ -11182,6 +11474,7 @@ buildvariants:
 - &ubuntu1804-debug-ubsan-template
   name: ubuntu1804-debug-ubsan
   display_name: ~ UBSAN Enterprise Ubuntu 18.04 DEBUG
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11251,6 +11544,7 @@ buildvariants:
 - <<: *ubuntu1804-debug-ubsan-template
   name: ubuntu1804-debug-ubsan-all-feature-flags
   display_name: "~ Shared Library UBSAN Enterprise Ubuntu 18.04 DEBUG (all feature flags)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11319,8 +11613,9 @@ buildvariants:
 #  - name: server_selection_json_test_TG
 
 - <<: *ubuntu1804-debug-ubsan-template
-  name: ubuntu1804-debug-ubsan-sbe-engine
-  display_name: ~ UBSAN Enterprise Ubuntu 18.04 DEBUG (SBE Engine)
+  name: ubuntu1804-debug-ubsan-classic-engine
+  display_name: ~ UBSAN Enterprise Ubuntu 18.04 DEBUG (Classic Engine)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11334,8 +11629,7 @@ buildvariants:
     san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
-      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
-      --additionalFeatureFlags=featureFlagSbePlanCache
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
       --excludeWithAnyTags=requires_ocsp_stapling
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
@@ -11389,7 +11683,7 @@ buildvariants:
 - &ubuntu1804-debug-aubsan-lite-required-template
   name: ubuntu1804-debug-aubsan-lite-required
   display_name: "! Shared Library {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   modules:
   - enterprise
   run_on:
@@ -11428,7 +11722,7 @@ buildvariants:
 - <<: *ubuntu1804-debug-aubsan-lite-required-template
   name: ubuntu1804-debug-aubsan-lite-all-feature-flags-required
   display_name: "! Shared Library {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG (all feature flags)"
-  batchtime: 240 # 4 hours
+  cron: "0 */4 * * *" # Every 4 hours starting at midnight
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     lang_environment: LANG=C
@@ -11466,6 +11760,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-aubsan-lite_fuzzer
   display_name: "{A,UB}SAN Enterprise Ubuntu 18.04 FUZZER"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   run_on:
@@ -11490,6 +11785,7 @@ buildvariants:
 
 - name: enterprise-ubuntu2004-debug-tsan
   display_name: ~ TSAN Enterprise Ubuntu 20.04 DEBUG (ephemeralForTest)
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
     - enterprise
   run_on:
@@ -11524,7 +11820,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-unoptimized-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (without Diagnostic Latches)"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   expansions:
@@ -11536,6 +11832,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-no-latch-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 DEBUG (Unoptimized)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   modules:
   - enterprise
   expansions:
@@ -11548,7 +11845,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-fixed-service-executor-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with FixedServiceExecutor)"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
     - ubuntu1804-test
   modules:
@@ -11581,7 +11878,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-sdam-replica-set-monitor-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with SdamReplicaSetMonitor)"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
     - ubuntu1804-test
   modules:
@@ -11613,7 +11910,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-task-executor-pool-size-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {taskExecutorPoolSize: 4})"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
     - ubuntu1804-test
   modules:
@@ -11643,7 +11940,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-sharding-task-executor-pool-rsm-matchPrimary-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {ShardingTaskExecutorPoolReplicaSetMatching: \"matchPrimaryNode\"})"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
     - ubuntu1804-test
   modules:
@@ -11674,7 +11971,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-sharding-task-executor-pool-rsm-matchBusiest-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {ShardingTaskExecutorPoolReplicaSetMatching: \"matchBusiestNode\"})"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
     - ubuntu1804-test
   modules:
@@ -11705,7 +12002,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-sharding-task-executor-pool-rsm-disabled-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {ShardingTaskExecutorPoolReplicaSetMatching: \"disabled\"})"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
     - ubuntu1804-test
   modules:
@@ -11736,6 +12033,7 @@ buildvariants:
 
 - name: shared-scons-cache-pruning
   display_name: "Shared SCons Cache Pruning"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - ubuntu1604-test
   stepback: false
@@ -11744,6 +12042,7 @@ buildvariants:
 
 - name: windows-shared-scons-cache-pruning
   display_name: "Windows shared SCons Cache Pruning"
+  cron: "0 0 * * *" # Every day starting at 00:00
   run_on:
   - windows-vsCurrent-small
   stepback: false
@@ -11758,7 +12057,7 @@ buildvariants:
     - enterprise
   run_on:
     - rhel80-small
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   stepback: false
   expansions:
     selected_tests_buildvariants: enterprise-windows-required linux-64-debug-required enterprise-ubuntu-dynamic-1604-clang ubuntu1804-debug-aubsan-lite-required
@@ -11768,7 +12067,7 @@ buildvariants:
 - <<: *enterprise-rhel-80-64-bit-dynamic-required-template
   name: commit-queue
   display_name: "~ Commit Queue"
-  batchtime: 10080 # 7 days
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   stepback: false
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
@@ -11790,7 +12089,7 @@ buildvariants:
 
 - name: live-record
   display_name: "~ RHEL 8.0 Shared Library (with UndoDB live-record)"
-  batchtime: 1440 # 1 day
+  cron: "0 0 * * *" # Every day starting at 00:00
   stepback: false
   modules:
   - enterprise
@@ -11838,7 +12137,7 @@ buildvariants:
 #  - name: replica_sets_reconfig_jscore_passthrough_gen
 #  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
   - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
 #  - name: .read_only
 #  - name: .rollbackfuzzer
   - name: sasl
@@ -11854,6 +12153,7 @@ buildvariants:
 
 - name: windows-dynamic-visibility-test
   display_name: "~ Shared Library Windows (visibility test)"
+  cron: "0 0 * * *" # Every day starting at 00:00
   expansions:
     compile_flags: CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
     python: '/cygdrive/c/python/python37/python.exe'
@@ -11867,30 +12167,32 @@ buildvariants:
     - windows-vsCurrent-large
 
 ### QO & QE Patch-Specific Build Variants ###
-- <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine
-  name: enterprise-rhel-80-64-bit-dynamic-sbe-engine-query-patch-only
-  display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (SBE Execution Engine)"
-  batchtime: 10080 # 7 days. This is a patch-only variant but we run on mainline to pick up task history.
+- <<: *enterprise-rhel-80-64-bit-dynamic-classic-engine
+  name: enterprise-rhel-80-64-bit-dynamic-classic-engine-query-patch-only
+  display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (Classic Engine)"
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday . This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
-    <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine-expansions
+    <<: *enterprise-rhel-80-64-bit-dynamic-classic-engine-expansions
     jstestfuzz_num_generated_files: 20
     jstestfuzz_concurrent_num_files: 5
     target_resmoke_time: 30
     max_sub_suites: 3
     test_flags: >-
-      --mongodSetParameters="{internalQueryEnableSlotBasedExecutionEngine: true}"
-      --additionalFeatureFlags=featureFlagTimeseriesCollection,featureFlagSbePlanCache
+      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
       --excludeWithAnyTags=resource_intensive
 
 # Intentionally derive from SBE to run the SBE tests with all feature flags.
 - <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-query-patch-only
   display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (all feature flags)"
-  batchtime: 10080 # 7 days. This is a patch-only variant but we run on mainline to pick up task history.
+  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday . This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
     <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     jstestfuzz_num_generated_files: 20
     jstestfuzz_concurrent_num_files: 5
     target_resmoke_time: 30
     max_sub_suites: 3
-    test_flags: --runAllFeatureFlagTests --excludeWithAnyTags=resource_intensive
+    test_flags: >-
+      --runAllFeatureFlagTests
+      --additionalFeatureFlags=featureFlagSbePlanCache
+      --excludeWithAnyTags=resource_intensive

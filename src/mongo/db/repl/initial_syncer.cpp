@@ -76,6 +76,7 @@
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+#include "mongo/util/version/releases.h"
 
 namespace mongo {
 namespace repl {
@@ -268,6 +269,10 @@ bool InitialSyncer::isActive() const {
 
 bool InitialSyncer::_isActive_inlock() const {
     return State::kRunning == _state || State::kShuttingDown == _state;
+}
+
+std::string InitialSyncer::getInitialSyncMethod() const {
+    return "logical";
 }
 
 Status InitialSyncer::startup(OperationContext* opCtx,
@@ -1060,7 +1065,7 @@ void InitialSyncer::_lastOplogEntryFetcherCallbackForBeginApplyingTimestamp(
     BSONObjBuilder queryBob;
     queryBob.append("find", NamespaceString::kServerConfigurationNamespace.coll());
     auto filterBob = BSONObjBuilder(queryBob.subobjStart("filter"));
-    filterBob.append("_id", FeatureCompatibilityVersionParser::kParameterName);
+    filterBob.append("_id", multiversion::kParameterName);
     filterBob.done();
     // As part of reading the FCV, we ensure the source node's all_durable timestamp has advanced
     // to at least the timestamp of the last optime that we found in the lastOplogEntryFetcher.
@@ -1140,7 +1145,7 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
             lock,
             Status(ErrorCodes::IncompatibleServerVersion,
                    str::stream() << "Sync source had unsafe feature compatibility version: "
-                                 << FeatureCompatibilityVersionParser::toString(version)));
+                                 << multiversion::toString(version)));
         return;
     }
 
@@ -1699,7 +1704,7 @@ void InitialSyncer::_finishInitialSyncAttempt(const StatusWith<OpTimeAndWallTime
     // if the task scheduling fails and we have to invoke _finishCallback() synchronously), we
     // declare the scope guard before the lock guard.
     auto result = lastApplied;
-    auto finishCallbackGuard = makeGuard([this, &result] {
+    ScopeGuard finishCallbackGuard([this, &result] {
         auto scheduleResult = _exec->scheduleWork(
             [=](const mongo::executor::TaskExecutor::CallbackArgs&) { _finishCallback(result); });
         if (!scheduleResult.isOK()) {

@@ -37,8 +37,8 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
+#include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/plan_enumerator_explain_info.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/util/id_generator.h"
@@ -363,11 +363,23 @@ public:
     }
 
     /**
+     * Extends the solution's tree by attaching it to the tree rooted at 'extensionRoot'. The
+     * extension tree must contain exactly one 'SentinelNode' node that denotes the attachment
+     * point. The sentinel node will be replaces with the '_root' node.
+     */
+    void extendWith(std::unique_ptr<QuerySolutionNode> extensionRoot);
+
+    /**
      * Assigns the QuerySolutionNode rooted at 'root' to this QuerySolution. Also assigns a unique
      * identifying integer to each node in the tree, which can subsequently be displayed in debug
      * output (e.g. explain).
      */
     void setRoot(std::unique_ptr<QuerySolutionNode> root);
+
+    /**
+     * Extracts the root of the QuerySolutionNode rooted at `_root`.
+     */
+    std::unique_ptr<QuerySolutionNode> extractRoot();
 
     // There are two known scenarios in which a query solution might potentially block:
     //
@@ -1261,13 +1273,27 @@ struct TextMatchNode : public QuerySolutionNodeWithSortSet {
 
 struct GroupNode : public QuerySolutionNode {
     GroupNode(std::unique_ptr<QuerySolutionNode> child,
-              StringMap<boost::intrusive_ptr<Expression>> groupByExpressions,
-              std::vector<AccumulationStatement> accumulators,
-              bool doingMerge)
+              StringMap<boost::intrusive_ptr<Expression>> groupByExprs,
+              std::vector<AccumulationStatement> accs,
+              bool merging)
         : QuerySolutionNode(std::move(child)),
-          groupByExpressions(std::move(groupByExpressions)),
-          accumulators(std::move(accumulators)),
-          doingMerge(doingMerge) {}
+          groupByExpressions(std::move(groupByExprs)),
+          accumulators(std::move(accs)),
+          doingMerge(merging) {
+        // Use the DepsTracker to extract the fields that the 'groupByExpressions' and accumulator
+        // expressions depend on.
+        for (auto&& [field, expr] : groupByExpressions) {
+            for (auto& groupByExprField : expr->getDependencies().fields) {
+                requiredFields.insert(groupByExprField);
+            }
+        }
+        for (auto&& acc : accumulators) {
+            auto argExpr = acc.expr.argument;
+            for (auto& argExprField : argExpr->getDependencies().fields) {
+                requiredFields.insert(argExprField);
+            }
+        }
+    }
 
     StageType getType() const override {
         return STAGE_GROUP;
@@ -1295,6 +1321,11 @@ struct GroupNode : public QuerySolutionNode {
     StringMap<boost::intrusive_ptr<Expression>> groupByExpressions;
     std::vector<AccumulationStatement> accumulators;
     bool doingMerge;
+
+    // Carries the fields this GroupNode depends on. Namely, 'requiredFields' contains the union of
+    // the fields in the 'groupByExpressions' and the fields in the input Expressions of the
+    // 'accumulators'.
+    StringSet requiredFields;
 };
 
 struct SentinelNode : public QuerySolutionNode {

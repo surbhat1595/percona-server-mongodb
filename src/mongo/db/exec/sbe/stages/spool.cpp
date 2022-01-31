@@ -128,7 +128,7 @@ std::unique_ptr<PlanStageStats> SpoolEagerProducerStage::getStats(bool includeDe
     if (includeDebugInfo) {
         BSONObjBuilder bob;
         bob.appendNumber("spoolId", static_cast<long long>(_spoolId));
-        bob.append("outputSlots", _vals);
+        bob.append("outputSlots", _vals.begin(), _vals.end());
         ret->debugInfo = bob.obj();
     }
 
@@ -158,6 +158,13 @@ std::vector<DebugPrinter::Block> SpoolEagerProducerStage::debugPrint() const {
     DebugPrinter::addNewLine(ret);
     DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
     return ret;
+}
+
+size_t SpoolEagerProducerStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_vals);
+    return size;
 }
 
 SpoolLazyProducerStage::SpoolLazyProducerStage(std::unique_ptr<PlanStage> input,
@@ -266,8 +273,8 @@ PlanState SpoolLazyProducerStage::getNext() {
     return trackPlanState(state);
 }
 
-void SpoolLazyProducerStage::doSaveState() {
-    if (!slotsAccessible()) {
+void SpoolLazyProducerStage::doSaveState(bool relinquishCursor) {
+    if (!slotsAccessible() || !relinquishCursor) {
         return;
     }
 
@@ -291,7 +298,7 @@ std::unique_ptr<PlanStageStats> SpoolLazyProducerStage::getStats(bool includeDeb
     if (includeDebugInfo) {
         BSONObjBuilder bob;
         bob.appendNumber("spoolId", static_cast<long long>(_spoolId));
-        bob.append("outputSlots", _vals);
+        bob.append("outputSlots", _vals.begin(), _vals.end());
         if (_predicate) {
             bob.append("filter", DebugPrinter{}.print(_predicate->debugPrint()));
         }
@@ -330,5 +337,13 @@ std::vector<DebugPrinter::Block> SpoolLazyProducerStage::debugPrint() const {
     DebugPrinter::addNewLine(ret);
     DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
     return ret;
+}
+
+size_t SpoolLazyProducerStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_vals);
+    size += _predicate ? _predicate->estimateSize() : 0;
+    return size;
 }
 }  // namespace mongo::sbe

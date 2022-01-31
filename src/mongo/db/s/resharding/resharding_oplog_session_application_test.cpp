@@ -79,7 +79,11 @@ public:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(opCtx, txnNumber, boost::none, boost::none);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       boost::none /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
 
         WriteUnitOfWork wuow(opCtx);
         auto opTime = repl::getNextOpTime(opCtx);
@@ -102,8 +106,11 @@ public:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, txnNumber, false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       false /* autocommit */,
+                                       true /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
 
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
@@ -123,18 +130,23 @@ public:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, txnNumber, false /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       false /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
 
         txnParticipant.unstashTransactionResources(opCtx, "abortTransaction");
         txnParticipant.abortTransaction(opCtx);
         txnParticipant.stashTransactionResources(opCtx);
     }
 
-    repl::OplogEntry makeUpdateOp(BSONObj document,
-                                  LogicalSessionId lsid,
-                                  TxnNumber txnNumber,
-                                  const std::vector<StmtId>& stmtIds) {
+    repl::OplogEntry makeUpdateOp(
+        BSONObj document,
+        LogicalSessionId lsid,
+        TxnNumber txnNumber,
+        const std::vector<StmtId>& stmtIds,
+        boost::optional<repl::RetryImageEnum> needsRetryImage = boost::none) {
         repl::MutableOplogEntry op;
         op.setOpType(repl::OpTypeEnum::kUpdate);
         op.setObject2(document["_id"].wrap().getOwned());
@@ -142,6 +154,7 @@ public:
         op.setSessionId(std::move(lsid));
         op.setTxnNumber(std::move(txnNumber));
         op.setStatementIds(stmtIds);
+        op.setNeedsRetryImage(needsRetryImage);
 
         // These are unused by ReshardingOplogSessionApplication but required by IDL parsing.
         op.setNss({});
@@ -174,7 +187,7 @@ public:
         std::vector<repl::DurableOplogEntry> result;
 
         PersistentTaskStore<repl::OplogEntryBase> store(NamespaceString::kRsOplogNamespace);
-        store.forEach(opCtx, QUERY("ts" << BSON("$gt" << ts)), [&](const auto& oplogEntry) {
+        store.forEach(opCtx, BSON("ts" << BSON("$gt" << ts)), [&](const auto& oplogEntry) {
             result.emplace_back(
                 unittest::assertGet(repl::DurableOplogEntry::parse(oplogEntry.toBSON())));
             return true;
@@ -190,7 +203,7 @@ public:
         PersistentTaskStore<SessionTxnRecord> store(
             NamespaceString::kSessionTransactionsTableNamespace);
         store.forEach(opCtx,
-                      QUERY(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()),
+                      BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()),
                       [&](const auto& sessionTxnRecord) {
                           result.emplace(sessionTxnRecord);
                           return false;
@@ -255,7 +268,11 @@ public:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(opCtx, txnNumber, boost::none, boost::none);
+        txnParticipant.beginOrContinue(opCtx,
+                                       txnNumber,
+                                       boost::none /* autocommit */,
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
         ASSERT_TRUE(bool(txnParticipant.checkStatementExecuted(opCtx, stmtId)));
     }
 };
@@ -685,6 +702,53 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasPostImage
         auto sessionTxnRecord = findSessionRecord(opCtx.get(), lsid);
         ASSERT_TRUE(bool(sessionTxnRecord));
         checkSessionTxnRecord(*sessionTxnRecord, foundOps[1]);
+    }
+
+    {
+        auto opCtx = makeOperationContext();
+        checkStatementExecuted(opCtx.get(), lsid, incomingTxnNumber, incomingStmtId);
+    }
+}
+
+// Resharding converts oplog with retry image to old style no-op oplog pairs in normal cases. But
+// if it was not able to extract the document from the image collection, it will return the oplog
+// entry as is. This is how resharding oplog application can encounter oplog with needsRetryImage.
+TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasNeedsRetryImage) {
+    auto lsid = makeLogicalSessionIdForTest();
+
+    TxnNumber incomingTxnNumber = 100;
+    StmtId incomingStmtId = 2;
+
+    auto opTime = [&] {
+        auto opCtx = makeOperationContext();
+        return insertSessionRecord(opCtx.get(), makeLogicalSessionIdForTest(), 100, {3});
+    }();
+
+    auto oplogEntry = makeUpdateOp(BSON("_id" << 1),
+                                   lsid,
+                                   incomingTxnNumber,
+                                   {incomingStmtId},
+                                   repl::RetryImageEnum::kPreImage);
+
+    {
+        auto opCtx = makeOperationContext();
+        ReshardingOplogSessionApplication applier;
+        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(hitPreparedTxn));
+    }
+
+    {
+        auto opCtx = makeOperationContext();
+        auto foundOps = findOplogEntriesNewerThan(opCtx.get(), opTime.getTimestamp());
+        ASSERT_EQ(foundOps.size(), 1U);
+        checkGeneratedNoop(foundOps[0], lsid, incomingTxnNumber, {incomingStmtId});
+        ASSERT_FALSE(foundOps[0].getPostImageOpTime());
+        ASSERT_FALSE(foundOps[0].getPreImageOpTime());
+        ASSERT_FALSE(foundOps[0].getNeedsRetryImage());
+
+        auto sessionTxnRecord = findSessionRecord(opCtx.get(), lsid);
+        ASSERT_TRUE(bool(sessionTxnRecord));
+        checkSessionTxnRecord(*sessionTxnRecord, foundOps[0]);
     }
 
     {

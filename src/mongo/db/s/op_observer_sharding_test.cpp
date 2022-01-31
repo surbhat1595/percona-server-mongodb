@@ -62,19 +62,18 @@ protected:
      * DeleteState::documentKey.
      */
     static CollectionMetadata makeAMetadata(BSONObj const& keyPattern) {
+        const UUID uuid = UUID::gen();
         const OID epoch = OID::gen();
         auto range = ChunkRange(BSON("key" << MINKEY), BSON("key" << MAXKEY));
-        auto chunk = ChunkType(kTestNss,
-                               std::move(range),
-                               ChunkVersion(1, 0, epoch, boost::none /* timestamp */),
-                               ShardId("other"));
+        auto chunk = ChunkType(
+            uuid, std::move(range), ChunkVersion(1, 0, epoch, Timestamp()), ShardId("other"));
         auto rt = RoutingTableHistory::makeNew(kTestNss,
-                                               UUID::gen(),
+                                               uuid,
                                                KeyPattern(keyPattern),
                                                nullptr,
                                                false,
                                                epoch,
-                                               boost::none /* timestamp */,
+                                               Timestamp(),
                                                boost::none /* timeseriesFields */,
                                                boost::none,
                                                boost::none /* chunkSizeBytes */,

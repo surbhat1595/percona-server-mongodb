@@ -103,32 +103,44 @@ class TestGetGenericBuildvariantName(unittest.TestCase):
 
 
 class TestGetEvergreenProjectAndVersion(unittest.TestCase):
-    def setUp(self):
-        raw_yaml = {"evergreen_projects": [
-            "mongodb-mongo-master",
-            "mongodb-mongo-v4.4",
-        ]}
-        self.config = SetupMultiversionConfig(raw_yaml)
+    @patch("evergreen.version.Version")
+    @patch("evergreen.api.EvergreenApi")
+    def test_version_by_commit_hash_found(self, mock_evg_api, mock_version):
+        commit_hash = "2b0d538db8c0c9b9d7992d4489ba7171c721dfb7"
+        expected_evergreen_version_id = "mongodb_mongo_master_" + commit_hash
+
+        def version_by_id_side_effect(ref):
+            if ref == expected_evergreen_version_id:
+                mock_version.version_id = expected_evergreen_version_id
+                return mock_version
+            raise HTTPError()
+
+        mock_evg_api.version_by_id.side_effect = version_by_id_side_effect
+        evg_version = evergreen_conn.get_evergreen_version(mock_evg_api, commit_hash)
+        self.assertEqual(mock_version, evg_version)
+        self.assertEqual(mock_version.version_id, expected_evergreen_version_id)
 
     @patch("evergreen.version.Version")
-    @patch("evergreen.api.EvergreenApi.version_by_id")
     @patch("evergreen.api.EvergreenApi")
-    def test_version_found(self, mock_evg_api, mock_version_by_id, mock_version):
-        expected_evg_project = "mongodb-mongo-master"
-        mock_version_by_id.return_value = mock_version
+    def test_version_by_evergreen_version_id_found(self, mock_evg_api, mock_version):
+        evergreen_version_id = "61419efc61837d4ce457132b"
 
-        evg_project, evg_version = evergreen_conn.get_evergreen_project_and_version(
-            self.config, mock_evg_api, "commit_hash")
-        self.assertEqual(expected_evg_project, evg_project)
+        def version_by_id_side_effect(ref):
+            if ref == evergreen_version_id:
+                mock_version.version_id = evergreen_version_id
+                return mock_version
+            raise HTTPError()
+
+        mock_evg_api.version_by_id.side_effect = version_by_id_side_effect
+        evg_version = evergreen_conn.get_evergreen_version(mock_evg_api, evergreen_version_id)
         self.assertEqual(mock_version, evg_version)
+        self.assertEqual(mock_version.version_id, evergreen_version_id)
 
-    @patch("evergreen.api.EvergreenApi.version_by_id")
     @patch("evergreen.api.EvergreenApi")
-    def test_version_not_found(self, mock_evg_api, mock_version_by_id):
-        mock_version_by_id.side_effect = HTTPError
-        self.assertRaises(evergreen_conn.EvergreenConnError,
-                          evergreen_conn.get_evergreen_project_and_version, self.config,
-                          mock_evg_api, "commit_hash")
+    def test_version_not_found(self, mock_evg_api):
+        mock_evg_api.version_by_id.side_effect = HTTPError
+        evg_version = evergreen_conn.get_evergreen_version(mock_evg_api, "dummy")
+        self.assertIsNone(evg_version)
 
 
 class TestGetCompileArtifactUrls(unittest.TestCase):
@@ -150,12 +162,12 @@ class TestGetCompileArtifactUrls(unittest.TestCase):
     def test_urls_found(self, mock_evg_api, mock_version, mock_build, mock_compile_task,
                         mock_push_task, mock_artifact):
 
-        mock_compile_task.project_id = "dummy project id"
+        mock_compile_task.project_identifier = "dummy project id"
 
         expected_urls = {
             "Binaries":
                 "https://mciuploads.s3.amazonaws.com/mongodb-mongo-master/ubuntu1804/90f767adbb1901d007ee4dd8714f53402d893669/binaries/mongo-mongodb_mongo_master_ubuntu1804_90f767adbb1901d007ee4dd8714f53402d893669_20_11_30_03_14_30.tgz",
-            "project_id":
+            "project_identifier":
                 "dummy project id"
         }
         mock_evg_api.build_by_id.return_value = mock_build

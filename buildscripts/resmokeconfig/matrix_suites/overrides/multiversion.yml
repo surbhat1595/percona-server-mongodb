@@ -12,6 +12,9 @@
         num_shards: 2
         num_rs_nodes_per_shard: 2
 
+- name: test_kind
+  value:
+    test_kind: all_versions_js_test
 
 ### Suite-specific overrides ###
 - name: multiversion_sanity_check_selector
@@ -19,3 +22,11 @@
     selector:
       include_with_any_tags:
         - multiversion_sanity_check
+
+- name: concurrency_sharded_replication_multiversion_mongod_options
+  value:
+    executor:
+      fixture:
+        mongod_options:
+          set_parameters:
+            receiveChunkWaitForRangeDeleterTimeoutMS:

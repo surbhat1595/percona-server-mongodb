@@ -232,11 +232,9 @@ void onShardVersionMismatch(OperationContext* opCtx,
             // Check if the current shard version is fresh enough
             if (shardVersionReceived) {
                 const auto currentShardVersion = metadata->getShardVersion();
-                // Don't need to remotely reload if we're in the same epoch and the requested
-                // version is smaller than the known one. This means that the remote side is behind.
-                if (shardVersionReceived->isOlderThan(currentShardVersion) ||
-                    (*shardVersionReceived == currentShardVersion &&
-                     shardVersionReceived->getTimestamp() == currentShardVersion.getTimestamp())) {
+                // Don't need to remotely reload if the requested version is smaller than the known
+                // one. This means that the remote side is behind.
+                if (shardVersionReceived->isOlderOrEqualThan(currentShardVersion)) {
                     return;
                 }
             }
@@ -258,91 +256,6 @@ void onShardVersionMismatch(OperationContext* opCtx,
     }
 
     inRecoverOrRefresh->get(opCtx);
-}
-
-ScopedShardVersionCriticalSection::ScopedShardVersionCriticalSection(OperationContext* opCtx,
-                                                                     NamespaceString nss,
-                                                                     BSONObj reason)
-    : _opCtx(opCtx), _nss(std::move(nss)), _reason(std::move(reason)) {
-
-    while (true) {
-        uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Namespace " << nss << " is not a valid collection name",
-                _nss.isValid());
-
-        // This acquisition is performed with collection lock MODE_S in order to ensure that any
-        // ongoing writes have completed and become visible.
-        //
-        // DBLock and CollectionLock are used here to avoid throwing further recursive stale config
-        // errors.
-        boost::optional<Lock::DBLock> dbLock;
-        boost::optional<Lock::CollectionLock> collLock;
-        auto deadline = _opCtx->getServiceContext()->getPreciseClockSource()->now() +
-            Milliseconds(migrationLockAcquisitionMaxWaitMS.load());
-        dbLock.emplace(_opCtx, _nss.db(), MODE_IS, deadline);
-        collLock.emplace(_opCtx, _nss, MODE_S, deadline);
-
-        auto* const csr = CollectionShardingRuntime::get(_opCtx, _nss);
-        boost::optional<CollectionShardingRuntime::CSRLock> csrLock =
-            CollectionShardingRuntime::CSRLock::lockShared(_opCtx, csr);
-
-        if (joinShardVersionOperation(_opCtx, csr, &dbLock, &collLock, &csrLock)) {
-            continue;
-        }
-
-        // Make sure metadata are not unknown before entering the critical section
-        auto metadata = csr->getCurrentMetadataIfKnown();
-        if (!metadata) {
-            csrLock.reset();
-            collLock.reset();
-            dbLock.reset();
-            onShardVersionMismatch(_opCtx, _nss, boost::none);
-            continue;
-        }
-
-        csrLock.reset();
-        csrLock.emplace(CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr));
-
-        if (!joinShardVersionOperation(_opCtx, csr, &dbLock, &collLock, &csrLock)) {
-            CollectionShardingRuntime::get(_opCtx, _nss)
-                ->enterCriticalSectionCatchUpPhase(*csrLock, _reason);
-            break;
-        }
-    }
-
-    try {
-        forceShardFilteringMetadataRefresh(_opCtx, _nss);
-    } catch (const DBException&) {
-        _cleanup();
-        throw;
-    }
-}
-
-ScopedShardVersionCriticalSection::~ScopedShardVersionCriticalSection() {
-    _cleanup();
-}
-
-void ScopedShardVersionCriticalSection::enterCommitPhase() {
-    auto deadline = _opCtx->getServiceContext()->getPreciseClockSource()->now() +
-        Milliseconds(migrationLockAcquisitionMaxWaitMS.load());
-    // DBLock and CollectionLock are used here to avoid throwing further recursive stale config
-    // errors.
-    Lock::DBLock dbLock(_opCtx, _nss.db(), MODE_IS, deadline);
-    Lock::CollectionLock collLock(_opCtx, _nss, MODE_IS, deadline);
-    auto* const csr = CollectionShardingRuntime::get(_opCtx, _nss);
-    auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
-    csr->enterCriticalSectionCommitPhase(csrLock, _reason);
-}
-
-void ScopedShardVersionCriticalSection::_cleanup() {
-    UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-    // DBLock and CollectionLock are used here to avoid throwing further recursive stale config
-    // errors.
-    Lock::DBLock dbLock(_opCtx, _nss.db(), MODE_IX);
-    Lock::CollectionLock collLock(_opCtx, _nss, MODE_IX);
-    auto* const csr = CollectionShardingRuntime::get(_opCtx, _nss);
-    auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
-    csr->exitCriticalSection(csrLock, _reason);
 }
 
 Status onShardVersionMismatchNoExcept(OperationContext* opCtx,
@@ -432,9 +345,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
         if (optMetadata) {
             const auto& metadata = *optMetadata;
             if (metadata.isSharded() &&
-                (cm.getVersion().isOlderThan(metadata.getCollVersion()) ||
-                 (cm.getVersion() == metadata.getCollVersion() &&
-                  cm.getVersion().getTimestamp() == metadata.getCollVersion().getTimestamp()))) {
+                (cm.getVersion().isOlderOrEqualThan(metadata.getCollVersion()))) {
                 LOGV2_DEBUG(
                     22063,
                     1,
@@ -466,9 +377,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
         if (optMetadata) {
             const auto& metadata = *optMetadata;
             if (metadata.isSharded() &&
-                (cm.getVersion().isOlderThan(metadata.getCollVersion()) ||
-                 (cm.getVersion() == metadata.getCollVersion() &&
-                  cm.getVersion().getTimestamp() == metadata.getCollVersion().getTimestamp()))) {
+                (cm.getVersion().isOlderOrEqualThan(metadata.getCollVersion()))) {
                 LOGV2_DEBUG(
                     22064,
                     1,

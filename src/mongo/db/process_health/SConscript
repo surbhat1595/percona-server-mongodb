@@ -1,0 +1,45 @@
+# -*- mode: python -*-
+
+Import('env')
+
+env = env.Clone()
+
+env.Library(
+    target='fault_manager',
+    source=[
+        'fault_impl.cpp',
+        'fault_manager.cpp',
+        'health_observer_base.cpp',
+        'health_observer_registration.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/executor/network_interface',
+        '$BUILD_DIR/mongo/executor/network_interface_factory',
+        '$BUILD_DIR/mongo/executor/network_interface_thread_pool',
+        '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/process_health_feature_flag',
+    ],
+)
+
+env.CppUnitTest(
+    target='fault_base_classes_test',
+    source=[
+        'fault_impl_test.cpp',
+        'fault_facet_test.cpp',
+        'fault_manager_test.cpp',
+        'fault_state_machine_test.cpp',
+        'health_observer_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/executor/network_interface_mock',
+        '$BUILD_DIR/mongo/executor/task_executor_test_fixture',
+        '$BUILD_DIR/mongo/executor/thread_pool_task_executor_test_fixture',
+        '$BUILD_DIR/mongo/util/clock_source_mock',
+        'fault_manager',
+    ],
+)

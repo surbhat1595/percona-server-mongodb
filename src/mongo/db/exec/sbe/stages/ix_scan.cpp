@@ -33,6 +33,7 @@
 
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/index/index_access_method.h"
@@ -154,32 +155,34 @@ value::SlotAccessor* IndexScanStage::getAccessor(CompileCtx& ctx, value::SlotId 
     return ctx.getAccessor(slot);
 }
 
-void IndexScanStage::doSaveState() {
-    if (slotsAccessible()) {
-        if (_recordAccessor) {
-            _recordAccessor->makeOwned();
+void IndexScanStage::doSaveState(bool relinquishCursor) {
+    if (relinquishCursor) {
+        if (slotsAccessible()) {
+            if (_recordAccessor) {
+                _recordAccessor->makeOwned();
+            }
+            if (_recordIdAccessor) {
+                _recordIdAccessor->makeOwned();
+            }
+            for (auto& accessor : _accessors) {
+                accessor.makeOwned();
+            }
         }
-        if (_recordIdAccessor) {
-            _recordIdAccessor->makeOwned();
-        }
-        for (auto& accessor : _accessors) {
-            accessor.makeOwned();
-        }
-    }
 
-    // Seek points are external to the index scan and must be accessible no matter what as long as
-    // the index scan is opened.
-    if (_open) {
-        if (_seekKeyLowHolder) {
-            _seekKeyLowHolder->makeOwned();
+        // Seek points are external to the index scan and must be accessible no matter what as long
+        // as the index scan is opened.
+        if (_open) {
+            if (_seekKeyLowHolder) {
+                _seekKeyLowHolder->makeOwned();
+            }
+            if (_seekKeyHighHolder) {
+                _seekKeyHighHolder->makeOwned();
+            }
         }
-        if (_seekKeyHighHolder) {
-            _seekKeyHighHolder->makeOwned();
-        }
-    }
 
-    if (_cursor) {
-        _cursor->save();
+        if (_cursor) {
+            _cursor->save();
+        }
     }
 
     _coll.reset();
@@ -195,7 +198,7 @@ void IndexScanStage::restoreCollectionAndIndex() {
             indexCatalogEntry && !indexCatalogEntry->isDropped());
 }
 
-void IndexScanStage::doRestoreState() {
+void IndexScanStage::doRestoreState(bool relinquishCursor) {
     invariant(_opCtx);
     invariant(!_coll);
 
@@ -205,7 +208,7 @@ void IndexScanStage::doRestoreState() {
     }
     restoreCollectionAndIndex();
 
-    if (_cursor) {
+    if (_cursor && relinquishCursor) {
         _cursor->restore();
     }
 
@@ -424,7 +427,7 @@ std::unique_ptr<PlanStageStats> IndexScanStage::getStats(bool includeDebugInfo) 
         if (_seekKeySlotHigh) {
             bob.appendNumber("seekKeySlotHigh", static_cast<long long>(*_seekKeySlotHigh));
         }
-        bob.append("outputSlots", _vars);
+        bob.append("outputSlots", _vars.begin(), _vars.end());
         bob.append("indexKeysToInclude", _indexKeysToInclude.to_string());
         ret->debugInfo = bob.obj();
     }
@@ -494,4 +497,14 @@ std::vector<DebugPrinter::Block> IndexScanStage::debugPrint() const {
 
     return ret;
 }
+
+size_t IndexScanStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_vars);
+    size += size_estimator::estimate(_indexName);
+    size += size_estimator::estimate(_valuesBuffer);
+    size += size_estimator::estimate(_specificStats);
+    return size;
+}
+
 }  // namespace mongo::sbe

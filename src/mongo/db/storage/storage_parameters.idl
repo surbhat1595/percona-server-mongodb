@@ -79,7 +79,19 @@ server_parameters:
         validator:
             gte: 1
 
+    storageGlobalParams.directoryperdb:
+        description: 'Read-only view of directory per db config parameter'
+        # Actually, never.  TODO(SERVER-59813): Use correct IDL for this once support is added.
+        set_at: startup
+        cpp_class:
+            name: StorageDirectoryPerDbParameter
+            override_ctor: true
+
 feature_flags:
+    featureFlagClusteredIndexes:
+        description: "When enabled, support non time-series collections with clustered indexes"
+        cpp_varname: feature_flags::gClusteredIndexes
+        default: false
     featureFlagTimeseriesCollection:
         description: "When enabled, support for time-series collections"
         cpp_varname: feature_flags::gTimeseriesCollection
@@ -88,8 +100,17 @@ feature_flags:
     featureFlagTimeseriesUpdatesAndDeletes:
         description: "When enabled, support for updates and deletes on time-series collections"
         cpp_varname: feature_flags::gTimeseriesUpdatesAndDeletes
-        default: false
+        default: true
+        version: 5.1
     featureFlagTimeseriesMetricIndexes:
         description: "When enabled, support secondary indexes on time-series measurements"
         cpp_varname: feature_flags::gTimeseriesMetricIndexes
+        default: false
+    featureFlagTimeseriesBucketCompression:
+        description: "Enable bucket compression on time-series collections"
+        cpp_varname: feature_flags::gTimeseriesBucketCompression
+        default: false
+    featureFlagYieldingSupportForSBE:
+        description: "Enable retaining valid cursor across query yield"
+        cpp_varname: feature_flags::gYieldingSupportForSBE
         default: false

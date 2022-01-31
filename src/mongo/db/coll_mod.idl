@@ -136,6 +136,10 @@ commands:
                               document in the oplog"
                 optional: true
                 type: safeBool
+            changeStreamPreAndPostImages:
+                description: "Determines whether pre- and post-images of documents are available in the change stream events."
+                type: optionalBool
+                unstable: true
             expireAfterSeconds:
                 description: "The number of seconds after which old data should be deleted. This can
                               be disabled by passing in 'off' as a value"
@@ -146,4 +150,10 @@ commands:
                 description: "Adjusts parameters for timeseries collections"
                 optional: true
                 type: CollModTimeseries
+            isTimeseriesNamespace:
+                description: "This flag is set to true when the command was originally sent to
+                              mongos on the time-series view, but got rewritten to target
+                              time-series buckets namespace before being sent to shards."
+                optional: true
+                type: bool
         reply_type: CollModReply

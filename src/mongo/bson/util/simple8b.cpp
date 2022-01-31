@@ -103,8 +103,9 @@ constexpr std::array<uint8_t, 4> kMaxSelector = {14, 9, 7, 13};
 // The min selector value for each extension
 constexpr std::array<uint8_t, 4> kMinSelector = {1, 1, 1, 8};
 
-// The max amount of meaningful bits each selector can store
-constexpr std::array<uint8_t, 4> kMaxDataBits = {60, 56, 56, 56};
+// The max amount of data bits each selector type can store. This is the amount of bits in the 64bit
+// word that are not used for selector values.
+constexpr std::array<uint8_t, 4> kDataBits = {60, 56, 56, 56};
 
 // The amount of bits allocated to store a set of trailing zeros
 constexpr std::array<uint8_t, 4> kTrailingZeroBitSize = {0, 4, 4, 5};
@@ -212,11 +213,12 @@ constexpr std::array<std::array<uint64_t, 16>, 4> kDecodeMask = {
         0}};
 
 // The number of meaningful bits for each selector. This does not include any trailing zero bits.
+// We use 64 bits for all invalid selectors, this is to make sure iteration does not get stuck.
 constexpr std::array<std::array<uint8_t, 16>, 4> kBitsPerIntForSelector = {
-    std::array<uint8_t, 16>{0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 30, 60, 0},
-    std::array<uint8_t, 16>{0, 2, 3, 4, 5, 7, 10, 14, 24, 52, 0, 0, 0, 0, 0, 0},
-    std::array<uint8_t, 16>{0, 4, 5, 7, 10, 14, 24, 52, 0, 0, 0, 0, 0, 0, 0, 0},
-    std::array<uint8_t, 16>{0, 0, 0, 0, 0, 0, 0, 0, 4, 6, 9, 13, 23, 51, 0, 0}};
+    std::array<uint8_t, 16>{64, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 30, 60, 64},
+    std::array<uint8_t, 16>{64, 2, 3, 4, 5, 7, 10, 14, 24, 52, 64, 64, 64, 64, 64, 64},
+    std::array<uint8_t, 16>{64, 4, 5, 7, 10, 14, 24, 52, 0, 0, 64, 64, 64, 64, 64, 64},
+    std::array<uint8_t, 16>{64, 0, 0, 0, 0, 0, 0, 0, 4, 6, 9, 13, 23, 51, 64, 64}};
 
 // The number of integers coded for each selector.
 constexpr std::array<std::array<uint8_t, 16>, 4> kIntsStoreForSelector = {
@@ -409,7 +411,7 @@ void Simple8bBuilder<T>::skip() {
     }
 
     _handleRleTermination();
-    _appendSkip();
+    _appendSkip(true /* tryRle */);
 }
 
 template <typename T>
@@ -468,9 +470,15 @@ bool Simple8bBuilder<T>::_appendValue(T value, bool tryRle) {
     } else if (trailingZerosCount == kTrailingZerosMaxCount[kEightSelectorSmall]) {
         meaningfulValueBitsStoredWithEightSmall =
             _countBitsWithoutLeadingZeros(value >> trailingZerosCount);
-    } else if (trailingZerosCount == kTrailingZerosMaxCount[kEightSelectorLarge]) {
-        meaningfulValueBitsStoredWithEightLarge =
-            _countBitsWithoutLeadingZeros(value >> trailingZerosCount);
+    }
+
+    // This case is specifically for 128 bit types where we have 124 zeros or max zeros
+    // count. We do not need to even check this for 64 bit types
+    if constexpr (std::is_same<T, uint128_t>::value) {
+        if (trailingZerosCount == kTrailingZerosMaxCount[kEightSelectorLarge]) {
+            meaningfulValueBitsStoredWithEightLarge =
+                _countBitsWithoutLeadingZeros(value >> trailingZerosCount);
+        }
     }
 
     std::array<uint8_t, 4> zeroCount = {0,
@@ -479,15 +487,15 @@ bool Simple8bBuilder<T>::_appendValue(T value, bool tryRle) {
                                         trailingZerosStoredInCountEightLarge};
 
     // Check if the amount of bits needed is more than we can store using all selector combinations.
-    // Check in order of most feasible to least feasible with or for efficiency. Add 3 to
-    // eightSelectors as they are using a nibble shift which can encode 3 more zeros in the actual
-    // value.
-    if ((bitCountWithoutLeadingZeros > kMaxDataBits[kBaseSelector]) &&
-        (meaningfulValueBitsStoredWithSeven > kMaxDataBits[kSevenSelector]) &&
-        (meaningfulValueBitsStoredWithEightSmall > kMaxDataBits[kEightSelectorSmall]) &&
-        (meaningfulValueBitsStoredWithEightLarge > kMaxDataBits[kEightSelectorLarge]))
+    if ((bitCountWithoutLeadingZeros > kDataBits[kBaseSelector]) &&
+        (meaningfulValueBitsStoredWithSeven + kTrailingZeroBitSize[kSevenSelector] >
+         kDataBits[kSevenSelector]) &&
+        (meaningfulValueBitsStoredWithEightSmall + kTrailingZeroBitSize[kEightSelectorSmall] >
+         kDataBits[kEightSelectorSmall]) &&
+        (meaningfulValueBitsStoredWithEightLarge + kTrailingZeroBitSize[kEightSelectorLarge] >
+         kDataBits[kEightSelectorLarge])) {
         return false;
-
+    }
 
     PendingValue pendingValue(value,
                               {bitCountWithoutLeadingZeros,
@@ -528,7 +536,7 @@ bool Simple8bBuilder<T>::_appendValue(T value, bool tryRle) {
 }
 
 template <typename T>
-void Simple8bBuilder<T>::_appendSkip() {
+void Simple8bBuilder<T>::_appendSkip(bool tryRle) {
     if (!_pendingValues.empty()) {
         bool isLastValueSkip = _pendingValues.back().isSkip();
 
@@ -542,7 +550,7 @@ void Simple8bBuilder<T>::_appendSkip() {
             _lastValidExtensionType = kBaseSelector;
         }
 
-        if (_pendingValues.empty() && isLastValueSkip) {
+        if (_pendingValues.empty() && isLastValueSkip && tryRle) {
             // It is possible to start rle
             _rleCount = 1;
             _lastValueInPrevWord = {boost::none, {0, 0, 0, 0}, {0, 0, 0, 0}};
@@ -564,7 +572,7 @@ void Simple8bBuilder<T>::_handleRleTermination() {
     // Add any values that could not be encoded in RLE.
     while (_rleCount > 0) {
         if (_lastValueInPrevWord.isSkip()) {
-            _appendSkip();
+            _appendSkip(false /* tryRle */);
         } else {
             _appendValue(_lastValueInPrevWord.value(), false);
         }
@@ -628,7 +636,7 @@ bool Simple8bBuilder<T>::_doesIntegerFitInCurrentWordWithGivenSelectorType(
     // If the numBitswithValue is greater than max bits or we cannot fit the trailingZeros we update
     // this selector as false and return false. Special case for baseSelector where we never add
     // trailingZeros so we always pass the zeros comparison.
-    if (kMaxDataBits[extensionType] < numBitsWithValue) {
+    if (kDataBits[extensionType] < numBitsWithValue) {
         isSelectorPossible[extensionType] = false;
         return false;
     }
@@ -717,7 +725,7 @@ void Simple8bBuilder<T>::setWriteCallback(Simple8bWriteFn writer) {
 }
 
 template <typename T>
-Simple8b<T>::Iterator::Iterator(const uint64_t* pos, const uint64_t* end)
+Simple8b<T>::Iterator::Iterator(const char* pos, const char* end)
     : _pos(pos), _end(end), _value(0), _rleRemaining(0), _shift(0) {
     if (pos != end) {
         _loadBlock();
@@ -726,7 +734,7 @@ Simple8b<T>::Iterator::Iterator(const uint64_t* pos, const uint64_t* end)
 
 template <typename T>
 void Simple8b<T>::Iterator::_loadBlock() {
-    _current = LittleEndian<uint64_t>::load(*_pos);
+    _current = ConstDataView(_pos).read<LittleEndian<uint64_t>>();
 
     _selector = _current & kBaseSelectorMask;
     uint8_t selectorExtension = ((_current >> kSelectorBits) & kBaseSelectorMask);
@@ -817,7 +825,7 @@ typename Simple8b<T>::Iterator& Simple8b<T>::Iterator::operator++() {
 
 template <typename T>
 typename Simple8b<T>::Iterator& Simple8b<T>::Iterator::advanceBlock() {
-    ++_pos;
+    _pos += sizeof(uint64_t);
     if (_pos == _end) {
         _rleRemaining = 0;
         _shift = 0;
@@ -839,18 +847,18 @@ bool Simple8b<T>::Iterator::operator!=(const Simple8b::Iterator& rhs) const {
 }
 
 template <typename T>
-Simple8b<T>::Simple8b(const char* buffer, int size) : _buffer(buffer), _size(size) {}
+Simple8b<T>::Simple8b(const char* buffer, int size) : _buffer(buffer), _size(size) {
+    invariant(size % sizeof(uint64_t) == 0);
+}
 
 template <typename T>
 typename Simple8b<T>::Iterator Simple8b<T>::begin() const {
-    return {reinterpret_cast<const uint64_t*>(_buffer),
-            reinterpret_cast<const uint64_t*>(_buffer + _size)};
+    return {_buffer, _buffer + _size};
 }
 
 template <typename T>
 typename Simple8b<T>::Iterator Simple8b<T>::end() const {
-    return {reinterpret_cast<const uint64_t*>(_buffer + _size),
-            reinterpret_cast<const uint64_t*>(_buffer + _size)};
+    return {_buffer + _size, _buffer + _size};
 }
 
 template class Simple8b<uint64_t>;

@@ -35,7 +35,6 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/s/sharding_ddl_50_upgrade_downgrade.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/shard_id.h"
@@ -45,11 +44,8 @@
 namespace mongo {
 
 struct SplitPolicyParams {
-    NamespaceString nss;
     UUID collectionUUID;
     ShardId primaryShardId;
-
-    ChunkEntryFormat::Format configFormat;
 };
 
 class InitialSplitPolicy {

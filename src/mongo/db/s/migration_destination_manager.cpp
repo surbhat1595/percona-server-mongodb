@@ -108,7 +108,8 @@ void checkOutSessionAndVerifyTxnState(OperationContext* opCtx) {
     TransactionParticipant::get(opCtx).beginOrContinue(opCtx,
                                                        *opCtx->getTxnNumber(),
                                                        boost::none /* autocommit */,
-                                                       boost::none /* startTransaction */);
+                                                       boost::none /* startTransaction */,
+                                                       boost::none /* txnRetryCounter */);
 }
 
 template <typename Callable>
@@ -470,7 +471,7 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
         auto applicationOpCtx = CancelableOperationContext(
             cc().makeOperationContext(), opCtx->getCancellationToken(), executor);
 
-        auto consumerGuard = makeGuard([&] {
+        ScopeGuard consumerGuard([&] {
             batches.closeConsumerEnd();
             lastOpApplied =
                 repl::ReplClientInfo::forClient(applicationOpCtx->getClient()).getLastOp();
@@ -495,7 +496,7 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
 
 
     {
-        auto applicationThreadJoinGuard = makeGuard([&] {
+        ScopeGuard applicationThreadJoinGuard([&] {
             batches.closeProducerEnd();
             applicationThread.join();
         });
@@ -921,7 +922,8 @@ void MigrationDestinationManager::_migrateThread() {
         txnParticipant.beginOrContinue(opCtx,
                                        *opCtx->getTxnNumber(),
                                        boost::none /* autocommit */,
-                                       boost::none /* startTransaction */);
+                                       boost::none /* startTransaction */,
+                                       boost::none /* txnRetryCounter */);
         _migrateDriver(opCtx);
     } catch (...) {
         _setStateFail(str::stream() << "migrate failed: " << redact(exceptionToStatus()));
@@ -982,8 +984,12 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
 
     // 1. Ensure any data which might have been left orphaned in the range being moved has been
     // deleted.
-    if (migrationutil::checkForConflictingDeletions(
-            outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid)) {
+    const auto rangeDeletionWaitDeadline =
+        outerOpCtx->getServiceContext()->getFastClockSource()->now() +
+        Milliseconds(receiveChunkWaitForRangeDeleterTimeoutMS.load());
+
+    while (migrationutil::checkForConflictingDeletions(
+        outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid)) {
         uassert(ErrorCodes::ResumableRangeDeleterDisabled,
                 "Failing migration because the disableResumableRangeDeleter server "
                 "parameter is set to true on the recipient shard, which contains range "
@@ -999,14 +1005,27 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
               "range"_attr = redact(range.toString()),
               "migrationId"_attr = _migrationId->toBSON());
 
-        auto waitTime = Milliseconds(receiveChunkWaitForRangeDeleterTimeoutMS.load());
-        auto status = CollectionShardingRuntime::waitForClean(
-            outerOpCtx, _nss, donorCollectionOptionsAndIndexes.uuid, range, waitTime);
+        auto status = CollectionShardingRuntime::waitForClean(outerOpCtx,
+                                                              _nss,
+                                                              donorCollectionOptionsAndIndexes.uuid,
+                                                              range,
+                                                              rangeDeletionWaitDeadline);
 
         if (!status.isOK()) {
             _setStateFail(redact(status.toString()));
             return;
         }
+
+        uassert(ErrorCodes::ExceededTimeLimit,
+                "Exceeded deadline waiting for overlapping range deletion to finish",
+                outerOpCtx->getServiceContext()->getFastClockSource()->now() <
+                    rangeDeletionWaitDeadline);
+
+        // If the filtering metadata was cleared while the range deletion task was ongoing, then
+        // 'waitForClean' would return immediately even though there really is an ongoing range
+        // deletion task. For that case, we loop again until there is no conflicting task in
+        // config.rangeDeletions
+        outerOpCtx->sleepFor(Milliseconds(1000));
     }
 
     timing.done(1);

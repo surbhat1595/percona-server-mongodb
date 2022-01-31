@@ -1,11 +1,15 @@
 """Helper functions to interact with evergreen."""
 import os
+import pathlib
+from typing import Optional, List
 
 import requests
 import structlog
 from requests import HTTPError
 
-from evergreen import RetryingEvergreenApi, Patch
+from evergreen import RetryingEvergreenApi, Patch, Version
+
+from buildscripts.resmokelib.setup_multiversion.config import SetupMultiversionConfig
 
 EVERGREEN_HOST = "https://evergreen.mongodb.com"
 EVERGREEN_CONFIG_LOCATIONS = (
@@ -28,23 +32,46 @@ class EvergreenConnError(Exception):
     pass
 
 
+def _find_evergreen_yaml_candidates() -> List[str]:
+    # Common for machines in Evergreen
+    candidates = [os.getcwd()]
+
+    cwd = pathlib.Path(os.getcwd())
+    # add every path that is the parent of CWD as well
+    for parent in cwd.parents:
+        candidates.append(parent)
+
+    # Common for local machines
+    candidates.append(os.path.expanduser(os.path.join("~", ".evergreen.yml")))
+
+    out = []
+    for path in candidates:
+        file = os.path.join(path, ".evergreen.yml")
+        if os.path.isfile(file):
+            out.append(file)
+
+    return out
+
+
 def get_evergreen_api(evergreen_config=None):
     """Return evergreen API."""
-    config_to_pass = evergreen_config
-    if not config_to_pass:
-        # Pickup the first config file found in common locations.
-        for file in EVERGREEN_CONFIG_LOCATIONS:
-            if os.path.isfile(file):
-                config_to_pass = file
-                break
-    try:
-        evg_api = RetryingEvergreenApi.get_api(config_file=config_to_pass)
-    except Exception as ex:
-        LOGGER.error("Most likely something is wrong with evergreen config file.",
-                     config_file=config_to_pass)
-        raise ex
+    if evergreen_config:
+        possible_configs = [evergreen_config]
     else:
-        return evg_api
+        possible_configs = _find_evergreen_yaml_candidates()
+
+    last_ex = None
+    for config in possible_configs:
+        try:
+            return RetryingEvergreenApi.get_api(config_file=config)
+        #
+        except Exception as ex:  # pylint: disable=broad-except
+            last_ex = ex
+            continue
+
+    LOGGER.error("Most likely something is wrong with evergreen config file.",
+                 config_file_candidates=possible_configs)
+    raise last_ex
 
 
 def get_buildvariant_name(config, edition, platform, architecture, major_minor_version):
@@ -109,37 +136,27 @@ def get_generic_buildvariant_name(config, major_minor_version):
     return generic_buildvariant_name
 
 
-def get_evergreen_project_and_version(config, evg_api, commit_hash):
-    """Return evergreen project and version by commit hash."""
+def get_evergreen_version(evg_api: RetryingEvergreenApi, evg_ref: str) -> Optional[Version]:
+    """Return evergreen version by reference (commit_hash or evergreen_version_id)."""
+    from buildscripts.resmokelib import multiversionconstants
 
-    for evg_project in config.evergreen_projects:
+    # Evergreen reference as evergreen_version_id
+    evg_refs = [evg_ref]
+    # Evergreen reference as {project_name}_{commit_hash}
+    evg_refs.extend(
+        f"{proj.replace('-', '_')}_{evg_ref}" for proj in multiversionconstants.EVERGREEN_PROJECTS)
+
+    for ref in evg_refs:
         try:
-            version_id = evg_project.replace("-", "_") + "_" + commit_hash
-            evg_version = evg_api.version_by_id(version_id)
+            evg_version = evg_api.version_by_id(ref)
         except HTTPError:
             continue
         else:
             LOGGER.debug("Found evergreen version.",
                          evergreen_version=f"{EVERGREEN_HOST}/version/{evg_version.version_id}")
-            return evg_project, evg_version
+            return evg_version
 
-    raise EvergreenConnError(f"Evergreen version for commit hash {commit_hash} not found.")
-
-
-def get_evergreen_project(config, evg_api, evergreen_version_id):
-    """Return evergreen project for a given Evergreen version."""
-
-    for evg_project in config.evergreen_projects:
-        try:
-            evg_version = evg_api.version_by_id(evergreen_version_id)
-        except HTTPError:
-            continue
-        else:
-            LOGGER.debug("Found evergreen version.",
-                         evergreen_version=f"{EVERGREEN_HOST}/version/{evg_version.version_id}")
-            return evg_project, evg_version
-
-    raise EvergreenConnError(f"Evergreen version {evergreen_version_id} not found.")
+    return None
 
 
 def get_evergreen_versions(evg_api, evg_project):
@@ -193,7 +210,7 @@ def _get_multiversion_urls(tasks_wrapper):
                            archive_symbols_task=f"{EVERGREEN_HOST}/task/{symbols.task_id}")
 
         # Tack on the project id for generating a friendly decompressed name for the artifacts.
-        compile_artifact_urls["project_id"] = binary.project_id
+        compile_artifact_urls["project_identifier"] = binary.project_identifier
 
     elif all(task for task in required_tasks):
         LOGGER.warning("Required Evergreen task(s) were not successful.",

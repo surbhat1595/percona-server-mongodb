@@ -272,8 +272,8 @@ Status CommonMongodProcessInterface::appendQueryExecStats(OperationContext* opCt
     return Status::OK();
 }
 
-BSONObj CommonMongodProcessInterface::getCollectionOptions(OperationContext* opCtx,
-                                                           const NamespaceString& nss) {
+BSONObj CommonMongodProcessInterface::getCollectionOptionsLocally(OperationContext* opCtx,
+                                                                  const NamespaceString& nss) {
     AutoGetCollectionForReadCommand collection(opCtx, nss);
     BSONObj collectionOptions = {};
     if (!collection.getDb()) {
@@ -287,14 +287,25 @@ BSONObj CommonMongodProcessInterface::getCollectionOptions(OperationContext* opC
     return collectionOptions;
 }
 
+BSONObj CommonMongodProcessInterface::getCollectionOptions(OperationContext* opCtx,
+                                                           const NamespaceString& nss) {
+    return getCollectionOptionsLocally(opCtx, nss);
+}
+
 std::unique_ptr<Pipeline, PipelineDeleter>
 CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline* ownedPipeline) {
     auto expCtx = ownedPipeline->getContext();
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline(ownedPipeline,
                                                         PipelineDeleter(expCtx->opCtx));
 
-    invariant(pipeline->getSources().empty() ||
-              !dynamic_cast<DocumentSourceCursor*>(pipeline->getSources().front().get()));
+    boost::optional<DocumentSource*> firstStage = pipeline->getSources().empty()
+        ? boost::optional<DocumentSource*>{}
+        : pipeline->getSources().front().get();
+    invariant(!firstStage || !dynamic_cast<DocumentSourceCursor*>(*firstStage));
+    if (firstStage && !(*firstStage)->constraints().requiresInputDocSource) {
+        // There's no need to attach a cursor here.
+        return pipeline;
+    }
 
     boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> autoColl;
     const NamespaceStringOrUUID nsOrUUID = expCtx->uuid
@@ -338,6 +349,11 @@ boost::optional<Document> CommonMongodProcessInterface::doLookupSingleDocument(
             nss,
             collectionUUID,
             _getCollectionDefaultCollator(expCtx->opCtx, nss.db(), collectionUUID));
+
+        // If we are here, we are either executing the pipeline normally or running in one of the
+        // execution stat explain verbosities. In either case, we disable explain on the foreign
+        // context so that we actually retrieve the document.
+        foreignExpCtx->explain = boost::none;
 
         pipeline = Pipeline::makePipeline({BSON("$match" << documentKey)}, foreignExpCtx, opts);
     } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {

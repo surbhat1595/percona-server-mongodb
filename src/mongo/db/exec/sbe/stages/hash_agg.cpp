@@ -33,6 +33,8 @@
 
 #include "mongo/util/str.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
+
 namespace mongo {
 namespace sbe {
 HashAggStage::HashAggStage(std::unique_ptr<PlanStage> input,
@@ -154,6 +156,9 @@ void HashAggStage::open(bool reOpen) {
 
         _seekKeys.resize(_seekKeysAccessors.size());
 
+        // A counter to check memory usage periodically.
+        auto memoryUseCheckCounter = 0;
+
         while (_children[0]->getNext() == PlanState::ADVANCED) {
             value::MaterializedRow key{_inKeyAccessors.size()};
             // Copy keys in order to do the lookup.
@@ -176,6 +181,19 @@ void HashAggStage::open(bool reOpen) {
             for (size_t idx = 0; idx < _outAggAccessors.size(); ++idx) {
                 auto [owned, tag, val] = _bytecode.run(_aggCodes[idx].get());
                 _outAggAccessors[idx]->reset(owned, tag, val);
+            }
+
+            // Track memory usage.
+            auto shouldCalculateEstimatedSize =
+                _pseudoRandom.nextCanonicalDouble() < _memoryUseSampleRate;
+            if (shouldCalculateEstimatedSize || ++memoryUseCheckCounter % 100 == 0) {
+                memoryUseCheckCounter = 0;
+                long estimatedSizeForOneRow =
+                    it->first.memUsageForSorter() + it->second.memUsageForSorter();
+                long long estimatedTotalSize = _ht->size() * estimatedSizeForOneRow;
+                uassert(5859000,
+                        "Need to spill to disk",
+                        estimatedTotalSize < _approxMemoryUseInBytesBeforeSpill);
             }
         }
 
@@ -228,7 +246,7 @@ std::unique_ptr<PlanStageStats> HashAggStage::getStats(bool includeDebugInfo) co
     if (includeDebugInfo) {
         DebugPrinter printer;
         BSONObjBuilder bob;
-        bob.append("groupBySlots", _gbs);
+        bob.append("groupBySlots", _gbs.begin(), _gbs.end());
         if (!_aggs.empty()) {
             BSONObjBuilder childrenBob(bob.subobjStart("expressions"));
             for (auto&& [slot, expr] : _aggs) {
@@ -310,5 +328,15 @@ std::vector<DebugPrinter::Block> HashAggStage::debugPrint() const {
 
     return ret;
 }
+
+size_t HashAggStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_gbs);
+    size += size_estimator::estimate(_aggs);
+    size += size_estimator::estimate(_seekKeysSlots);
+    return size;
+}
+
 }  // namespace sbe
 }  // namespace mongo

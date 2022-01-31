@@ -3,7 +3,7 @@
  *
  * @tags: [
  *   requires_fcv_51,
- *   requires_find_command
+ *   requires_find_command,
  * ]
  */
 
@@ -36,7 +36,8 @@ if (!TimeseriesTest.shardedtimeseriesCollectionsEnabled(st.shard0)) {
     return;
 }
 
-// Databases.
+// Databases and collections.
+assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
 const mainDB = mongos.getDB(dbName);
 
 // Helpers.
@@ -78,14 +79,23 @@ function verifyBucketsOnShard(shard, expectedBuckets) {
 }
 
 function runTest(getShardKey, insert) {
-    mainDB.dropDatabase();
-
-    assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
-
-    // Create timeseries collection.
     assert.commandWorked(mainDB.createCollection(
         collName, {timeseries: {timeField: timeField, metaField: metaField}}));
     const coll = mainDB.getCollection(collName);
+
+    // The 'isTimeseriesNamespace' parameter is not allowed on mongos.
+    assert.commandFailedWithCode(mainDB.runCommand({
+        insert: `system.buckets.${collName}`,
+        documents: [{[timeField]: ISODate()}],
+        isTimeseriesNamespace: true
+    }),
+                                 5916401);
+
+    // On a mongod node, 'isTimeseriesNamespace' can only be used on time-series buckets namespace.
+    assert.commandFailedWithCode(
+        st.shard0.getDB(dbName).runCommand(
+            {insert: collName, documents: [{[timeField]: ISODate()}], isTimeseriesNamespace: true}),
+        5916400);
 
     // Shard timeseries collection.
     const shardKey = getShardKey(1, 1);
@@ -155,16 +165,16 @@ function runTest(getShardKey, insert) {
     // Ensure that after chunk migration all documents are still available.
     assert.docEq(firstBatch, coll.find().sort({_id: 1}).toArray());
 
-    // Insert more documents with the same meta value range. These inserts should modify existing
-    // buckets, hence no new buckets are created.
+    // Insert more documents with the same meta value range. These inserts should create new buckets
+    // because we cannot update any bucket after a chunk migration.
     const secondBatch = generateBatch(numDocs);
     assert.commandWorked(insert(coll, secondBatch));
 
     const thirdBatch = generateBatch(numDocs);
     assert.commandWorked(insert(coll, thirdBatch));
 
-    // Primary shard should still contain only 2 buckets.
-    verifyBucketsOnShard(primaryShard, primaryBuckets);
+    // Primary shard should contain 4 (2 + 2) buckets.
+    verifyBucketsOnShard(primaryShard, primaryBuckets.concat(primaryBuckets));
 
     // During chunk migration, we have moved 2 buckets into the other shard. These migrated buckets
     // cannot be modified, so after insertion of second and third batches, two more buckets are
@@ -184,6 +194,8 @@ function runTest(getShardKey, insert) {
                 .toArray();
         assert.docEq(expectedDocuments, actualDocuments);
     }
+
+    assert(coll.drop());
 }
 
 try {

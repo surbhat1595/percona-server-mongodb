@@ -34,6 +34,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/spool.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/util/str.h"
@@ -46,19 +47,18 @@ namespace sbe {
  * The test is appended to the 'code' parameter.
  */
 template <typename F>
-std::unique_ptr<vm::CodeFragment> wrapNothingTest(std::unique_ptr<vm::CodeFragment> code,
-                                                  F&& generator) {
-    auto inner = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment wrapNothingTest(vm::CodeFragment&& code, F&& generator) {
+    vm::CodeFragment inner;
     inner = generator(std::move(inner));
 
-    invariant(inner->stackSize() == 0);
+    invariant(inner.stackSize() == 0);
 
     // Append the jump that skips around the inner block.
-    code->appendJumpNothing(inner->instrs().size());
+    code.appendJumpNothing(inner.instrs().size());
 
-    code->append(std::move(inner));
+    code.append(std::move(inner));
 
-    return code;
+    return std::move(code);
 }
 
 std::unique_ptr<EExpression> EConstant::clone() const {
@@ -66,10 +66,10 @@ std::unique_ptr<EExpression> EConstant::clone() const {
     return std::make_unique<EConstant>(tag, val);
 }
 
-std::unique_ptr<vm::CodeFragment> EConstant::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment EConstant::compileDirect(CompileCtx& ctx) const {
+    vm::CodeFragment code;
 
-    code->appendConstVal(_tag, _val);
+    code.appendConstVal(_tag, _val);
 
     return code;
 }
@@ -84,23 +84,30 @@ std::vector<DebugPrinter::Block> EConstant::debugPrint() const {
     return ret;
 }
 
+size_t EConstant::estimateSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_tag, _val);
+    size += size_estimator::estimate(_nodes);
+    return size;
+}
+
 std::unique_ptr<EExpression> EVariable::clone() const {
     return _frameId ? std::make_unique<EVariable>(*_frameId, _var)
                     : std::make_unique<EVariable>(_var);
 }
 
-std::unique_ptr<vm::CodeFragment> EVariable::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment EVariable::compileDirect(CompileCtx& ctx) const {
+    vm::CodeFragment code;
 
     if (_frameId) {
         int offset = -_var - 1;
-        code->appendLocalVal(*_frameId, offset, _moveFrom);
+        code.appendLocalVal(*_frameId, offset, _moveFrom);
     } else {
         auto accessor = ctx.root->getAccessor(ctx, _var);
         if (_moveFrom) {
-            code->appendMoveVal(accessor);
+            code.appendMoveVal(accessor);
         } else {
-            code->appendAccessVal(accessor);
+            code.appendAccessVal(accessor);
         }
     }
 
@@ -129,90 +136,90 @@ std::unique_ptr<EExpression> EPrimBinary::clone() const {
     }
 }
 
-std::unique_ptr<vm::CodeFragment> EPrimBinary::compile(CompileCtx& ctx) const {
+vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
     const bool hasCollatorArg = (_nodes.size() == 3);
-    auto code = std::make_unique<vm::CodeFragment>();
+    vm::CodeFragment code;
 
     invariant(!hasCollatorArg || isComparisonOp(_op));
 
-    auto lhs = _nodes[0]->compile(ctx);
-    auto rhs = _nodes[1]->compile(ctx);
+    auto lhs = _nodes[0]->compileDirect(ctx);
+    auto rhs = _nodes[1]->compileDirect(ctx);
 
     if (_op == EPrimBinary::logicAnd) {
-        auto codeFalseBranch = std::make_unique<vm::CodeFragment>();
-        codeFalseBranch->appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
+        vm::CodeFragment codeFalseBranch;
+        codeFalseBranch.appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
 
         // Jump to the merge point that will be right after the thenBranch (rhs).
-        codeFalseBranch->appendJump(rhs->instrs().size());
+        codeFalseBranch.appendJump(rhs.instrs().size());
 
-        code->append(std::move(lhs));
-        code = wrapNothingTest(std::move(code), [&](std::unique_ptr<vm::CodeFragment> code) {
-            code->appendJumpTrue(codeFalseBranch->instrs().size());
-            code->append(std::move(codeFalseBranch), std::move(rhs));
+        code.append(std::move(lhs));
+        code = wrapNothingTest(std::move(code), [&](vm::CodeFragment&& code) {
+            code.appendJumpTrue(codeFalseBranch.instrs().size());
+            code.append(std::move(codeFalseBranch), std::move(rhs));
 
-            return code;
+            return std::move(code);
         });
 
         return code;
     } else if (_op == EPrimBinary::logicOr) {
-        auto codeTrueBranch = std::make_unique<vm::CodeFragment>();
-        codeTrueBranch->appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
+        vm::CodeFragment codeTrueBranch;
+        codeTrueBranch.appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
 
         // Jump to the merge point that will be right after the thenBranch (true branch).
-        rhs->appendJump(codeTrueBranch->instrs().size());
+        rhs.appendJump(codeTrueBranch.instrs().size());
 
-        code->append(std::move(lhs));
-        code = wrapNothingTest(std::move(code), [&](std::unique_ptr<vm::CodeFragment> code) {
-            code->appendJumpTrue(rhs->instrs().size());
-            code->append(std::move(rhs), std::move(codeTrueBranch));
+        code.append(std::move(lhs));
+        code = wrapNothingTest(std::move(code), [&](vm::CodeFragment&& code) {
+            code.appendJumpTrue(rhs.instrs().size());
+            code.append(std::move(rhs), std::move(codeTrueBranch));
 
-            return code;
+            return std::move(code);
         });
 
         return code;
     }
 
     if (hasCollatorArg) {
-        auto collator = _nodes[2]->compile(ctx);
-        code->append(std::move(collator));
+        auto collator = _nodes[2]->compileDirect(ctx);
+        code.append(std::move(collator));
     }
 
-    code->append(std::move(lhs));
-    code->append(std::move(rhs));
+    code.append(std::move(lhs));
+    code.append(std::move(rhs));
 
     switch (_op) {
         case EPrimBinary::add:
-            code->appendAdd();
+            code.appendAdd();
             break;
         case EPrimBinary::sub:
-            code->appendSub();
+            code.appendSub();
             break;
         case EPrimBinary::mul:
-            code->appendMul();
+            code.appendMul();
             break;
         case EPrimBinary::div:
-            code->appendDiv();
+            code.appendDiv();
             break;
         case EPrimBinary::less:
-            hasCollatorArg ? code->appendCollLess() : code->appendLess();
+            hasCollatorArg ? code.appendCollLess() : code.appendLess();
             break;
         case EPrimBinary::lessEq:
-            hasCollatorArg ? code->appendCollLessEq() : code->appendLessEq();
+            hasCollatorArg ? code.appendCollLessEq() : code.appendLessEq();
             break;
         case EPrimBinary::greater:
-            hasCollatorArg ? code->appendCollGreater() : code->appendGreater();
+            hasCollatorArg ? code.appendCollGreater() : code.appendGreater();
             break;
         case EPrimBinary::greaterEq:
-            hasCollatorArg ? code->appendCollGreaterEq() : code->appendGreaterEq();
+            hasCollatorArg ? code.appendCollGreaterEq() : code.appendGreaterEq();
             break;
         case EPrimBinary::eq:
-            hasCollatorArg ? code->appendCollEq() : code->appendEq();
+            hasCollatorArg ? code.appendCollEq() : code.appendEq();
             break;
         case EPrimBinary::neq:
-            hasCollatorArg ? code->appendCollNeq() : code->appendNeq();
+            hasCollatorArg ? code.appendCollNeq() : code.appendNeq();
             break;
         case EPrimBinary::cmp3w:
-            hasCollatorArg ? code->appendCollCmp3w() : code->appendCmp3w();
+            hasCollatorArg ? code.appendCollCmp3w() : code.appendCmp3w();
             break;
         default:
             MONGO_UNREACHABLE;
@@ -283,23 +290,24 @@ std::vector<DebugPrinter::Block> EPrimBinary::debugPrint() const {
     return ret;
 }
 
+size_t EPrimBinary::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
+
 std::unique_ptr<EExpression> EPrimUnary::clone() const {
     return std::make_unique<EPrimUnary>(_op, _nodes[0]->clone());
 }
 
-std::unique_ptr<vm::CodeFragment> EPrimUnary::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
-
-    auto operand = _nodes[0]->compile(ctx);
+vm::CodeFragment EPrimUnary::compileDirect(CompileCtx& ctx) const {
+    auto code = _nodes[0]->compileDirect(ctx);
 
     switch (_op) {
         case negate:
-            code->append(std::move(operand));
-            code->appendNegate();
+            code.appendNegate();
             break;
         case EPrimUnary::logicNot:
-            code->append(std::move(operand));
-            code->appendNot();
+            code.appendNot();
             break;
         default:
             MONGO_UNREACHABLE;
@@ -326,8 +334,12 @@ std::vector<DebugPrinter::Block> EPrimUnary::debugPrint() const {
     return ret;
 }
 
+size_t EPrimUnary::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
 std::unique_ptr<EExpression> EFunction::clone() const {
-    std::vector<std::unique_ptr<EExpression>> args;
+    Vector args;
     args.reserve(_nodes.size());
     for (auto& a : _nodes) {
         args.emplace_back(a->clone());
@@ -526,6 +538,11 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"isTimestamp",
      InstrFn{[](size_t n) { return n == 1; }, &vm::CodeFragment::appendIsTimestamp, false}},
     {"sum", InstrFn{[](size_t n) { return n == 1; }, &vm::CodeFragment::appendSum, true}},
+    {"aggDoubleDoubleSum",
+     InstrFn{[](size_t n) { return n == 1; }, &vm::CodeFragment::appendDoubleDoubleSum, true}},
+    {"doubleDoubleSumFinalize",
+     InstrFn{
+         [](size_t n) { return n == 1; }, &vm::CodeFragment::appendDoubleDoubleSumFinalize, false}},
     {"min", InstrFn{[](size_t n) { return n == 1; }, &vm::CodeFragment::appendMin, true}},
     {"max", InstrFn{[](size_t n) { return n == 1; }, &vm::CodeFragment::appendMax, true}},
     {"first", InstrFn{[](size_t n) { return n == 1; }, &vm::CodeFragment::appendFirst, true}},
@@ -536,17 +553,17 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
 };
 }  // namespace
 
-std::unique_ptr<vm::CodeFragment> EFunction::compile(CompileCtx& ctx) const {
+vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
     if (auto it = kBuiltinFunctions.find(_name); it != kBuiltinFunctions.end()) {
         auto arity = _nodes.size();
         if (!it->second.arityTest(arity)) {
             uasserted(4822843,
                       str::stream() << "function call: " << _name << " has wrong arity: " << arity);
         }
-        auto code = std::make_unique<vm::CodeFragment>();
+        vm::CodeFragment code;
 
         for (size_t idx = arity; idx-- > 0;) {
-            code->append(_nodes[idx]->compile(ctx));
+            code.append(_nodes[idx]->compileDirect(ctx));
         }
 
         if (it->second.aggregate) {
@@ -555,11 +572,11 @@ std::unique_ptr<vm::CodeFragment> EFunction::compile(CompileCtx& ctx) const {
                                   << " occurs in the non-aggregate context.",
                     ctx.aggExpression);
 
-            code->appendMoveVal(ctx.accumulator);
+            code.appendMoveVal(ctx.accumulator);
             ++arity;
         }
 
-        code->appendFunction(it->second.builtin, arity);
+        code.appendFunction(it->second.builtin, arity);
 
         return code;
     }
@@ -570,7 +587,7 @@ std::unique_ptr<vm::CodeFragment> EFunction::compile(CompileCtx& ctx) const {
                       str::stream()
                           << "function call: " << _name << " has wrong arity: " << _nodes.size());
         }
-        auto code = std::make_unique<vm::CodeFragment>();
+        vm::CodeFragment code;
 
         if (it->second.aggregate) {
             uassert(4822846,
@@ -578,15 +595,15 @@ std::unique_ptr<vm::CodeFragment> EFunction::compile(CompileCtx& ctx) const {
                                   << " occurs in the non-aggregate context.",
                     ctx.aggExpression);
 
-            code->appendAccessVal(ctx.accumulator);
+            code.appendAccessVal(ctx.accumulator);
         }
 
         // The order of evaluation is flipped for instruction functions. We may want to change the
         // evaluation code for those functions so we have the same behavior for all functions.
         for (size_t idx = 0; idx < _nodes.size(); ++idx) {
-            code->append(_nodes[idx]->compile(ctx));
+            code.append(_nodes[idx]->compileDirect(ctx));
         }
-        (*code.*(it->second.generate))();
+        (code.*(it->second.generate))();
 
         return code;
     }
@@ -611,32 +628,34 @@ std::vector<DebugPrinter::Block> EFunction::debugPrint() const {
     return ret;
 }
 
+size_t EFunction::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_name) + size_estimator::estimate(_nodes);
+}
+
 std::unique_ptr<EExpression> EIf::clone() const {
     return std::make_unique<EIf>(_nodes[0]->clone(), _nodes[1]->clone(), _nodes[2]->clone());
 }
 
-std::unique_ptr<vm::CodeFragment> EIf::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment EIf::compileDirect(CompileCtx& ctx) const {
+    auto thenBranch = _nodes[1]->compileDirect(ctx);
 
-    auto thenBranch = _nodes[1]->compile(ctx);
-
-    auto elseBranch = _nodes[2]->compile(ctx);
+    auto elseBranch = _nodes[2]->compileDirect(ctx);
 
     // The then and else branches must be balanced.
-    invariant(thenBranch->stackSize() == elseBranch->stackSize());
+    invariant(thenBranch.stackSize() == elseBranch.stackSize());
 
     // Jump to the merge point that will be right after the thenBranch.
-    elseBranch->appendJump(thenBranch->instrs().size());
+    elseBranch.appendJump(thenBranch.instrs().size());
 
     // Compile the condition.
-    code->append(_nodes[0]->compile(ctx));
-    code = wrapNothingTest(std::move(code), [&](std::unique_ptr<vm::CodeFragment> code) {
+    auto code = _nodes[0]->compileDirect(ctx);
+    code = wrapNothingTest(std::move(code), [&](vm::CodeFragment&& code) {
         // Jump around the elseBranch.
-        code->appendJumpTrue(elseBranch->instrs().size());
+        code.appendJumpTrue(elseBranch.instrs().size());
         // Append else and then branches.
-        code->append(std::move(elseBranch), std::move(thenBranch));
+        code.append(std::move(elseBranch), std::move(thenBranch));
 
-        return code;
+        return std::move(code);
     });
     return code;
 }
@@ -661,8 +680,12 @@ std::vector<DebugPrinter::Block> EIf::debugPrint() const {
     return ret;
 }
 
+size_t EIf::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
 std::unique_ptr<EExpression> ELocalBind::clone() const {
-    std::vector<std::unique_ptr<EExpression>> binds;
+    Vector binds;
     binds.reserve(_nodes.size() - 1);
     for (size_t idx = 0; idx < _nodes.size() - 1; ++idx) {
         binds.emplace_back(_nodes[idx]->clone());
@@ -670,26 +693,25 @@ std::unique_ptr<EExpression> ELocalBind::clone() const {
     return std::make_unique<ELocalBind>(_frameId, std::move(binds), _nodes.back()->clone());
 }
 
-std::unique_ptr<vm::CodeFragment> ELocalBind::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment ELocalBind::compileDirect(CompileCtx& ctx) const {
+    vm::CodeFragment code;
 
     // Generate bytecode for local variables and the 'in' expression. The 'in' expression is in the
     // last position of _nodes.
     for (size_t idx = 0; idx < _nodes.size(); ++idx) {
-        auto c = _nodes[idx]->compile(ctx);
-        code->append(std::move(c));
+        code.append(_nodes[idx]->compileDirect(ctx));
     }
 
     // After the execution we have to cleanup the stack; i.e. local variables go out of scope.
     // However, note that the top of the stack holds the overall result (i.e. the 'in' expression)
     // and it cannot be destroyed. So we 'bubble' it down with a series of swap/pop instructions.
     for (size_t idx = 0; idx < _nodes.size() - 1; ++idx) {
-        code->appendSwap();
-        code->appendPop();
+        code.appendSwap();
+        code.appendPop();
     }
 
     // Local variables are no longer accessible after this point so remove any fixup information.
-    code->removeFixup(_frameId);
+    code.removeFixup(_frameId);
     return code;
 }
 
@@ -715,30 +737,34 @@ std::vector<DebugPrinter::Block> ELocalBind::debugPrint() const {
     return ret;
 }
 
+size_t ELocalBind::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
 std::unique_ptr<EExpression> ELocalLambda::clone() const {
     return std::make_unique<ELocalLambda>(_frameId, _nodes.back()->clone());
 }
 
-std::unique_ptr<vm::CodeFragment> ELocalLambda::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
+    vm::CodeFragment code;
 
     // Compile the body first so we know its size.
-    auto body = _nodes.back()->compile(ctx);
-    body->appendRet();
-    invariant(body->stackSize() == 1);
-    body->fixup(1);
+    auto body = _nodes.back()->compileDirect(ctx);
+    body.appendRet();
+    invariant(body.stackSize() == 1);
+    body.fixup(1);
     // Lambda parameter is no longer accessible after this point so remove any fixup information.
-    body->removeFixup(_frameId);
+    body.removeFixup(_frameId);
 
     // Jump around the body.
-    code->appendJump(body->instrs().size());
+    code.appendJump(body.instrs().size());
 
     // Remember the position and append the body.
-    auto bodyPosition = code->instrs().size();
-    code->appendNoStack(std::move(body));
+    auto bodyPosition = code.instrs().size();
+    code.appendNoStack(std::move(body));
 
     // Push the lambda value on the stack
-    code->appendLocalLambda(bodyPosition);
+    code.appendLocalLambda(bodyPosition);
 
     return code;
 }
@@ -754,20 +780,24 @@ std::vector<DebugPrinter::Block> ELocalLambda::debugPrint() const {
     return ret;
 }
 
+size_t ELocalLambda::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
 
 std::unique_ptr<EExpression> EFail::clone() const {
     return std::make_unique<EFail>(_code, getStringView(_messageTag, _messageVal));
 }
 
-std::unique_ptr<vm::CodeFragment> EFail::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
+vm::CodeFragment EFail::compileDirect(CompileCtx& ctx) const {
+    vm::CodeFragment code;
 
-    code->appendConstVal(value::TypeTags::NumberInt64,
-                         value::bitcastFrom<int64_t>(static_cast<int64_t>(_code)));
+    code.appendConstVal(value::TypeTags::NumberInt64,
+                        value::bitcastFrom<int64_t>(static_cast<int64_t>(_code)));
 
-    code->appendConstVal(_messageTag, _messageVal);
+    code.appendConstVal(_messageTag, _messageVal);
 
-    code->appendFail();
+    code.appendFail();
 
     return code;
 }
@@ -787,16 +817,18 @@ std::vector<DebugPrinter::Block> EFail::debugPrint() const {
     return ret;
 }
 
+size_t EFail::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_messageTag, _messageVal) +
+        size_estimator::estimate(_nodes);
+}
+
 std::unique_ptr<EExpression> ENumericConvert::clone() const {
     return std::make_unique<ENumericConvert>(_nodes[0]->clone(), _target);
 }
 
-std::unique_ptr<vm::CodeFragment> ENumericConvert::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
-
-    auto operand = _nodes[0]->compile(ctx);
-    code->append(std::move(operand));
-    code->appendNumericConvert(_target);
+vm::CodeFragment ENumericConvert::compileDirect(CompileCtx& ctx) const {
+    auto code = _nodes[0]->compileDirect(ctx);
+    code.appendNumericConvert(_target);
 
     return code;
 }
@@ -833,16 +865,17 @@ std::vector<DebugPrinter::Block> ENumericConvert::debugPrint() const {
     return ret;
 }
 
+size_t ENumericConvert::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
 std::unique_ptr<EExpression> ETypeMatch::clone() const {
     return std::make_unique<ETypeMatch>(_nodes[0]->clone(), _typeMask);
 }
 
-std::unique_ptr<vm::CodeFragment> ETypeMatch::compile(CompileCtx& ctx) const {
-    auto code = std::make_unique<vm::CodeFragment>();
-
-    auto variable = _nodes[0]->compile(ctx);
-    code->append(std::move(variable));
-    code->appendTypeMatch(_typeMask);
+vm::CodeFragment ETypeMatch::compileDirect(CompileCtx& ctx) const {
+    auto code = _nodes[0]->compileDirect(ctx);
+    code.appendTypeMatch(_typeMask);
 
     return code;
 }
@@ -864,6 +897,11 @@ std::vector<DebugPrinter::Block> ETypeMatch::debugPrint() const {
 
     return ret;
 }
+
+size_t ETypeMatch::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
 
 RuntimeEnvironment::RuntimeEnvironment(const RuntimeEnvironment& other)
     : _state{other._state}, _isSmp{other._isSmp} {
@@ -940,14 +978,17 @@ RuntimeEnvironment::Accessor* RuntimeEnvironment::getAccessor(value::SlotId slot
     uasserted(4946301, str::stream() << "undefined slot accessor:" << slot);
 }
 
-std::unique_ptr<RuntimeEnvironment> RuntimeEnvironment::makeCopy(bool isSmp) {
+
+std::unique_ptr<RuntimeEnvironment> RuntimeEnvironment::makeCopy() const {
+    return std::unique_ptr<RuntimeEnvironment>(new RuntimeEnvironment(*this));
+}
+
+std::unique_ptr<RuntimeEnvironment> RuntimeEnvironment::makeCopyForParallelUse() {
     // Once this environment is used to create a copy for a parallel plan execution, it becomes
     // a parallel environment itself.
-    if (isSmp) {
-        _isSmp = isSmp;
-    }
+    _isSmp = true;
 
-    return std::unique_ptr<RuntimeEnvironment>(new RuntimeEnvironment(*this));
+    return makeCopy();
 }
 
 void RuntimeEnvironment::debugString(StringBuilder* builder) {
@@ -1004,8 +1045,12 @@ void CompileCtx::popCorrelated() {
     correlated.pop_back();
 }
 
-CompileCtx CompileCtx::makeCopy(bool isSmp) {
-    return {env->makeCopy(isSmp)};
+CompileCtx CompileCtx::makeCopyForParallelUse() {
+    return {env->makeCopyForParallelUse()};
+}
+
+CompileCtx CompileCtx::makeCopy() const {
+    return {env->makeCopy()};
 }
 }  // namespace sbe
 }  // namespace mongo

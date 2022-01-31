@@ -29,6 +29,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_project.h"
@@ -42,33 +43,56 @@
 #include "mongo/db/pipeline/window_function/window_function_exec_derivative.h"
 #include "mongo/db/pipeline/window_function/window_function_exec_first_last.h"
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
+#include "mongo/db/pipeline/window_function/window_function_min_max.h"
 
 using boost::intrusive_ptr;
 using boost::optional;
 
 namespace mongo::window_function {
 using namespace std::string_literals;
+using MinMaxSense = AccumulatorMinMax::Sense;
 REGISTER_WINDOW_FUNCTION(derivative, ExpressionDerivative::parse);
 REGISTER_WINDOW_FUNCTION(first, ExpressionFirst::parse);
 REGISTER_WINDOW_FUNCTION(last, ExpressionLast::parse);
 
-StringMap<Expression::Parser> Expression::parserMap;
+// TODO SERVER-52247 Replace boost::none with 'gFeatureFlagExactTopNAccumulator.getVersion()' below
+// once 'gFeatureFlagExactTopNAccumulator' is set to true by default and is configured with an FCV.
+REGISTER_WINDOW_FUNCTION_CONDITIONALLY(
+    minN,
+    ExpressionMinMaxN<MinMaxSense::kMin>::parse,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+REGISTER_WINDOW_FUNCTION_CONDITIONALLY(
+    maxN,
+    ExpressionMinMaxN<MinMaxSense::kMax>::parse,
+    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
+
+StringMap<Expression::ExpressionParserRegistration> Expression::parserMap;
 
 intrusive_ptr<Expression> Expression::parse(BSONObj obj,
                                             const optional<SortPattern>& sortBy,
                                             ExpressionContext* expCtx) {
-
     for (const auto& field : obj) {
         // Check if window function is $-prefixed.
         auto fieldName = field.fieldNameStringData();
 
         if (fieldName.startsWith("$"_sd)) {
-
-            if (auto parser = parserMap.find(field.fieldNameStringData());
-                parser != parserMap.end()) {
+            auto exprName = field.fieldNameStringData();
+            if (auto parserFCV = parserMap.find(exprName); parserFCV != parserMap.end()) {
                 // Found one valid window function. If there are multiple window functions they will
                 // be caught as invalid arguments to the Expression parser later.
-                return parser->second(obj, sortBy, expCtx);
+                const auto& parser = parserFCV->second.first;
+                auto fcv = parserFCV->second.second;
+                uassert(ErrorCodes::QueryFeatureNotAllowed,
+                        str::stream()
+                            << exprName
+                            << " is not allowed in the current feature compatibility version. See "
+                            << feature_compatibility_version_documentation::kCompatibilityLink
+                            << " for more information.",
+                        !expCtx->maxFeatureCompatibilityVersion || !fcv ||
+                            (*fcv <= *expCtx->maxFeatureCompatibilityVersion));
+                return parser(obj, sortBy, expCtx);
             }
             // The window function provided in the window function expression is invalid.
 
@@ -95,9 +119,13 @@ intrusive_ptr<Expression> Expression::parse(BSONObj obj,
                        : ", "s + obj.firstElementFieldNameStringData()));
 }
 
-void Expression::registerParser(std::string functionName, Parser parser) {
+void Expression::registerParser(
+    std::string functionName,
+    Parser parser,
+    boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion) {
     invariant(parserMap.find(functionName) == parserMap.end());
-    parserMap.emplace(std::move(functionName), std::move(parser));
+    ExpressionParserRegistration r(parser, requiredMinVersion);
+    parserMap.emplace(std::move(functionName), std::move(r));
 }
 
 
@@ -213,6 +241,94 @@ boost::intrusive_ptr<Expression> ExpressionFirstLast::parse(
                       str::stream() << accumulatorName << " is not $first or $last");
             return nullptr;
     }
+}
+
+template <AccumulatorMinMax::Sense S>
+boost::intrusive_ptr<Expression> ExpressionMinMaxN<S>::parse(
+    BSONObj obj, const boost::optional<SortPattern>& sortBy, ExpressionContext* expCtx) {
+    auto name = [] {
+        if constexpr (S == MinMaxSense::kMin) {
+            return AccumulatorMinN::getName();
+        } else {
+            return AccumulatorMaxN::getName();
+        }
+    }();
+
+    boost::intrusive_ptr<::mongo::Expression> nExpr;
+    boost::intrusive_ptr<::mongo::Expression> outputExpr;
+    boost::optional<WindowBounds> bounds;
+    for (auto&& elem : obj) {
+        auto fieldName = elem.fieldNameStringData();
+        if (fieldName == name) {
+            uassert(ErrorCodes::FailedToParse,
+                    str::stream() << "saw multiple specifications for '" << name << "' expression",
+                    !(nExpr || outputExpr));
+            auto accExpr =
+                AccumulatorMinMaxN::parseMinMaxN<S>(expCtx, elem, expCtx->variablesParseState);
+            nExpr = accExpr.initializer;
+            outputExpr = accExpr.argument;
+        } else if (fieldName == kWindowArg) {
+            uassert(ErrorCodes::FailedToParse,
+                    "'window' field must be an object",
+                    obj[kWindowArg].type() == BSONType::Object);
+            uassert(ErrorCodes::FailedToParse,
+                    str::stream() << "saw multiple 'window' fields in '" << name << "' expression",
+                    bounds == boost::none);
+            bounds = WindowBounds::parse(elem.embeddedObject(), sortBy, expCtx);
+        } else {
+            uasserted(ErrorCodes::FailedToParse,
+                      str::stream() << name << " got unexpected argument: " << fieldName);
+        }
+    }
+
+    // The default window bounds are [unbounded, unbounded].
+    if (!bounds) {
+        bounds = WindowBounds::defaultBounds();
+    }
+    tassert(5788500,
+            str::stream() << "missing accumulator specification for " << name,
+            nExpr && outputExpr);
+    return make_intrusive<ExpressionMinMaxN<S>>(
+        expCtx, std::move(outputExpr), name, *bounds, std::move(nExpr));
+}
+
+template <AccumulatorMinMax::Sense S>
+boost::intrusive_ptr<AccumulatorState> ExpressionMinMaxN<S>::buildAccumulatorOnly() const {
+    boost::intrusive_ptr<AccumulatorState> acc;
+    if constexpr (S == AccumulatorMinMax::Sense::kMin) {
+        acc = AccumulatorMinN::create(_expCtx);
+    } else {
+        acc = AccumulatorMaxN::create(_expCtx);
+    }
+
+    // Initialize 'n' for our accumulator. Note that 'n' must be a constant.
+    auto nVal = _nExpr->evaluate({}, &_expCtx->variables);
+    uassert(5788501,
+            str::stream() << "Expression for 'n' " << _nExpr->serialize(false).toString()
+                          << " must evaluate to a numeric constant when used in $setWindowFields",
+            nVal.numeric());
+    acc->startNewGroup(nVal);
+    return acc;
+}
+
+template <AccumulatorMinMax::Sense S>
+std::unique_ptr<WindowFunctionState> ExpressionMinMaxN<S>::buildRemovable() const {
+    return WindowFunctionMinMaxN<S>::create(
+        _expCtx, AccumulatorN::validateN(_nExpr->evaluate({}, &_expCtx->variables)));
+}
+
+template <AccumulatorMinMax::Sense S>
+Value ExpressionMinMaxN<S>::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
+    MutableDocument result;
+
+    MutableDocument exprSpec;
+    AccumulatorN::serializeHelper(_nExpr, _input, static_cast<bool>(explain), exprSpec);
+    result[_accumulatorName] = exprSpec.freezeToValue();
+
+    MutableDocument windowField;
+    _bounds.serialize(windowField);
+    result[kWindowArg] = windowField.freezeToValue();
+    return result.freezeToValue();
 }
 
 MONGO_INITIALIZER_GROUP(BeginWindowFunctionRegistration,

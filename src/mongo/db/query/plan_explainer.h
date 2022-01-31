@@ -30,8 +30,8 @@
 #pragma once
 
 #include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/plan_enumerator_explain_info.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_solution.h"
@@ -119,7 +119,8 @@ public:
      * the plan cache.
      */
     virtual std::vector<PlanStatsDetails> getCachedPlanStats(
-        const PlanCacheEntry::DebugInfo& debugInfo, ExplainOptions::Verbosity verbosity) const = 0;
+        const plan_cache_debug_info::DebugInfo& debugInfo,
+        ExplainOptions::Verbosity verbosity) const = 0;
 
     /**
      * Returns an object containing what query knobs the planner hit during plan enumeration.

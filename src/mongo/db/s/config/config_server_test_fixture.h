@@ -107,14 +107,14 @@ protected:
                          const std::vector<ChunkType>& chunks);
 
     /**
-     * Retrieves the chunk document <nssOrUuid, minKey> from the config server.
+     * Retrieves the chunk document <uuid, minKey> from the config server.
      * This is the recommended way to get a chunk document.
      */
     StatusWith<ChunkType> getChunkDoc(OperationContext* opCtx,
-                                      const NamespaceStringOrUUID& nssOrUuid,
+                                      const UUID& uuid,
                                       const BSONObj& minKey,
                                       const OID& collEpoch,
-                                      const boost::optional<Timestamp>& collTimestamp);
+                                      const Timestamp& collTimestamp);
 
     /**
      * Retrieves the chunk document <minKey> from the config server.
@@ -125,7 +125,7 @@ protected:
     StatusWith<ChunkType> getChunkDoc(OperationContext* opCtx,
                                       const BSONObj& minKey,
                                       const OID& collEpoch,
-                                      const boost::optional<Timestamp>& collTimestamp);
+                                      const Timestamp& collTimestamp);
 
     /**
      * Returns the collection version.
@@ -193,6 +193,9 @@ protected:
     std::unique_ptr<ClusterCursorManager> makeClusterCursorManager() override;
 
     std::unique_ptr<BalancerConfiguration> makeBalancerConfiguration() override;
+
+protected:
+    void setupOpObservers() override;
 
 private:
     /**

@@ -65,6 +65,7 @@
 
 namespace mongo {
 namespace {
+using startup_recovery::StartupRecoveryMode;
 
 // Exit after repair has started, but before data is repaired.
 MONGO_FAIL_POINT_DEFINE(exitBeforeDataRepair);
@@ -99,7 +100,7 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
         LOGV2(4926905,
               "Re-creating featureCompatibilityVersion document that was deleted. Creating new "
               "document with last LTS version.",
-              "version"_attr = FeatureCompatibilityVersionParser::kLastLTS);
+              "version"_attr = multiversion::toString(multiversion::GenericFCV::kLastLTS));
         uassertStatusOK(
             createCollection(opCtx, fcvNss.db().toString(), BSON("create" << fcvNss.coll())));
     }
@@ -112,19 +113,17 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
     BSONObj featureCompatibilityVersion;
     if (!Helpers::findOne(opCtx,
                           fcvColl,
-                          BSON("_id" << FeatureCompatibilityVersionParser::kParameterName),
+                          BSON("_id" << multiversion::kParameterName),
                           featureCompatibilityVersion)) {
         // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
         LOGV2(21000,
               "Re-creating featureCompatibilityVersion document that was deleted. Creating new "
-              "document with version "
-              "{FeatureCompatibilityVersionParser_kLastLTS}.",
-              "Re-creating featureCompatibilityVersion document that was deleted",
-              "version"_attr = FeatureCompatibilityVersionParser::kLastLTS);
+              "document with version ",
+              "version"_attr = multiversion::toString(multiversion::GenericFCV::kLastLTS));
 
         FeatureCompatibilityVersionDocument fcvDoc;
         // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
-        fcvDoc.setVersion(ServerGlobalParams::FeatureCompatibility::kLastLTS);
+        fcvDoc.setVersion(multiversion::GenericFCV::kLastLTS);
 
         writeConflictRetry(opCtx, "insertFCVDocument", fcvNss.ns(), [&] {
             WriteUnitOfWork wunit(opCtx);
@@ -135,10 +134,8 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
         });
     }
 
-    invariant(Helpers::findOne(opCtx,
-                               fcvColl,
-                               BSON("_id" << FeatureCompatibilityVersionParser::kParameterName),
-                               featureCompatibilityVersion));
+    invariant(Helpers::findOne(
+        opCtx, fcvColl, BSON("_id" << multiversion::kParameterName), featureCompatibilityVersion));
 
     return Status::OK();
 }
@@ -163,7 +160,7 @@ bool checkIdIndexExists(OperationContext* opCtx, const CollectionPtr& coll) {
 Status buildMissingIdIndex(OperationContext* opCtx, Collection* collection) {
     LOGV2(4805002, "Building missing _id index", logAttrs(*collection));
     MultiIndexBlock indexer;
-    auto abortOnExit = makeGuard([&] {
+    ScopeGuard abortOnExit([&] {
         CollectionWriter collWriter(collection);
         indexer.abortIndexBuild(opCtx, collWriter, MultiIndexBlock::kNoopOnCleanUpFn);
     });
@@ -423,7 +420,15 @@ void reconcileCatalogAndRebuildUnfinishedIndexes(
  * Sets the appropriate flag on the service context decorable 'replSetMemberInStandaloneMode' to
  * 'true' if this is a replica set node running in standalone mode, otherwise 'false'.
  */
-void setReplSetMemberInStandaloneMode(OperationContext* opCtx) {
+void setReplSetMemberInStandaloneMode(OperationContext* opCtx, StartupRecoveryMode mode) {
+    if (mode == StartupRecoveryMode::kReplicaSetMember) {
+        setReplSetMemberInStandaloneMode(opCtx->getServiceContext(), false);
+        return;
+    } else if (mode == StartupRecoveryMode::kReplicaSetMemberInStandalone) {
+        setReplSetMemberInStandaloneMode(opCtx->getServiceContext(), true);
+        return;
+    }
+
     const repl::ReplSettings& replSettings =
         repl::ReplicationCoordinator::get(opCtx)->getSettings();
 
@@ -460,7 +465,7 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
     // document.
     // If we fail to load the FCV document due to upgrade problems, we need to abort the repair in
     // order to allow downgrading to older binary versions.
-    auto abortRepairOnFCVErrors = makeGuard(
+    ScopeGuard abortRepairOnFCVErrors(
         [&] { StorageRepairObserver::get(opCtx->getServiceContext())->onRepairDone(opCtx); });
     if (auto fcvColl = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
             opCtx, NamespaceString::kServerConfigurationNamespace)) {
@@ -483,7 +488,7 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
         fassertNoTrace(4805001, repair::repairDatabase(opCtx, storageEngine, *it));
 
         // This must be set before rebuilding index builds on replicated collections.
-        setReplSetMemberInStandaloneMode(opCtx);
+        setReplSetMemberInStandaloneMode(opCtx, StartupRecoveryMode::kAuto);
         dbNames.erase(it);
     }
 
@@ -531,7 +536,7 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
 void startupRecoveryReadOnly(OperationContext* opCtx, StorageEngine* storageEngine) {
     invariant(!storageGlobalParams.repair);
 
-    setReplSetMemberInStandaloneMode(opCtx);
+    setReplSetMemberInStandaloneMode(opCtx, StartupRecoveryMode::kAuto);
 
     FeatureCompatibilityVersion::initializeForStartup(opCtx);
 
@@ -544,12 +549,13 @@ void startupRecoveryReadOnly(OperationContext* opCtx, StorageEngine* storageEngi
 // Perform routine startup recovery procedure.
 void startupRecovery(OperationContext* opCtx,
                      StorageEngine* storageEngine,
-                     StorageEngine::LastShutdownState lastShutdownState) {
+                     StorageEngine::LastShutdownState lastShutdownState,
+                     StartupRecoveryMode mode) {
     invariant(!storageGlobalParams.readOnly && !storageGlobalParams.repair);
 
     // Determine whether this is a replica set node running in standalone mode. This must be set
     // before determining whether to restart index builds.
-    setReplSetMemberInStandaloneMode(opCtx);
+    setReplSetMemberInStandaloneMode(opCtx, mode);
 
     // Initialize FCV before rebuilding indexes that may have features dependent on FCV.
     FeatureCompatibilityVersion::initializeForStartup(opCtx);
@@ -614,8 +620,28 @@ void repairAndRecoverDatabases(OperationContext* opCtx,
     } else if (storageGlobalParams.readOnly) {
         startupRecoveryReadOnly(opCtx, storageEngine);
     } else {
-        startupRecovery(opCtx, storageEngine, lastShutdownState);
+        startupRecovery(opCtx, storageEngine, lastShutdownState, StartupRecoveryMode::kAuto);
     }
+}
+
+/**
+ * Runs startup recovery after system startup, either in replSet mode (will
+ * restart index builds) or replSet standalone mode (will not restart index builds).  In no
+ * case will it create an FCV document nor run repair or read-only recovery.
+ */
+void runStartupRecoveryInMode(OperationContext* opCtx,
+                              StorageEngine::LastShutdownState lastShutdownState,
+                              StartupRecoveryMode mode) {
+    auto const storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    Lock::GlobalWrite lk(opCtx);
+
+    invariant(isWriteableStorageEngine() && !storageGlobalParams.readOnly);
+    invariant(!storageGlobalParams.repair);
+    const auto& replSettings = repl::ReplicationCoordinator::get(opCtx)->getSettings();
+    invariant(replSettings.usingReplSets());
+    invariant(mode == StartupRecoveryMode::kReplicaSetMember ||
+              mode == StartupRecoveryMode::kReplicaSetMemberInStandalone);
+    startupRecovery(opCtx, storageEngine, lastShutdownState, mode);
 }
 
 }  // namespace startup_recovery

@@ -31,6 +31,7 @@
 
 #include <boost/optional.hpp>
 
+#include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
@@ -96,8 +97,11 @@ enum WireVersion {
     // Supports features available from 5.0 and onwards.
     WIRE_VERSION_50 = 13,
 
-    // Calculate the latest wire version using the number of releases since 4.4.
-    LATEST_WIRE_VERSION = RESUMABLE_INITIAL_SYNC + multiversion::kSince_4_4,
+    // Supports features available from 5.1 and onwards.
+    WIRE_VERSION_51 = 14,
+
+    // Calculate the latest wire version using the number of releases since 4.0.
+    LATEST_WIRE_VERSION = REPLICA_SET_TRANSACTIONS + multiversion::kSince_4_0,
 
     // Set this to LATEST_WIRE_VERSION - 1.
     LAST_CONT_WIRE_VERSION = LATEST_WIRE_VERSION - 1,
@@ -156,7 +160,7 @@ public:
 
         // outgoing.maxWireVersion - Latest version allowed on remote nodes when the server sends
         // requests.
-        WireVersionInfo outgoing = {RELEASE_2_4_AND_BEFORE, LATEST_WIRE_VERSION};
+        WireVersionInfo outgoing = {SUPPORTS_OP_MSG, LATEST_WIRE_VERSION};
 
         // Set to true if the client is internal to the cluster---this is a mongod or mongos
         // connecting to another mongod.
@@ -217,4 +221,18 @@ private:
     std::shared_ptr<const Specification> _spec;
 };
 
+namespace wire_version {
+
+/**
+ * Validates client and server wire version. The server's wire version is returned from
+ * hello/isMaster, and the client is from WireSpec.instance().
+ */
+Status validateWireVersion(WireVersionInfo client, WireVersionInfo server);
+
+/**
+ * Determines the min/max wire version of a remote server from a hello/isMaster command reply.
+ */
+StatusWith<WireVersionInfo> parseWireVersionFromHelloReply(const BSONObj& helloReply);
+
+}  // namespace wire_version
 }  // namespace mongo

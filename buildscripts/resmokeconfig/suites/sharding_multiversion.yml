@@ -1,4 +1,4 @@
-test_kind: js_test
+test_kind: all_versions_js_test
 
 selector:
   roots:
@@ -7,10 +7,11 @@ selector:
   - jstests/sharding/query/*.js
   exclude_with_any_tags:
   - multiversion_incompatible
+  # TODO (SERVER-55857): Remove this hardcoded tag once tests are filtered out using the
+  # 'REQUIRES_FCV_TAG' list in 'multiversion_constants.py'.
   - requires_fcv_51
   - backport_required_multiversion
   - replica_sets_multiversion_backport_required_multiversion
-  - disabled_due_to_server_58295
   exclude_files:
   # Enable when 4.6 becomes last stable
   - jstests/sharding/query/merge_command_options.js
@@ -29,5 +30,5 @@ executor:
       nodb: ''
       global_vars:
         TestData:
-          useRandomBinVersionsWithinReplicaSet: true
+          useRandomBinVersionsWithinReplicaSet: 'last-lts'
           mongosBinVersion: 'last-lts'

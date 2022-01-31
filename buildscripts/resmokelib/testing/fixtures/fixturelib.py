@@ -8,7 +8,6 @@ from buildscripts.resmokelib import logging
 from buildscripts.resmokelib.core import network
 from buildscripts.resmokelib.utils.history import make_historic as _make_historic
 from buildscripts.resmokelib.testing.fixtures import _builder
-from buildscripts.resmokelib.multiversionconstants import LAST_LTS_MONGOD_BINARY, LAST_LTS_MONGOS_BINARY, LAST_CONTINUOUS_MONGOD_BINARY, LAST_CONTINUOUS_MONGOS_BINARY
 
 
 class FixtureLib(object):
@@ -101,6 +100,8 @@ class _FixtureConfig(object):  # pylint: disable=too-many-instance-attributes
 
     def __init__(self):
         """Initialize FixtureConfig, setting values."""
+        from buildscripts.resmokelib.multiversionconstants import LAST_LTS_MONGOD_BINARY, LAST_LTS_MONGOS_BINARY, LAST_CONTINUOUS_MONGOD_BINARY, LAST_CONTINUOUS_MONGOS_BINARY
+
         # pylint: disable=invalid-name
         self.MONGOD_EXECUTABLE = config.MONGOD_EXECUTABLE
         self.DEFAULT_MONGOD_EXECUTABLE = config.DEFAULT_MONGOD_EXECUTABLE
@@ -132,6 +133,3 @@ class _FixtureConfig(object):  # pylint: disable=too-many-instance-attributes
         self.MONGOS_SET_PARAMETERS = config.MONGOS_SET_PARAMETERS
         self.DBPATH_PREFIX = config.DBPATH_PREFIX
         self.DEFAULT_DBPATH_PREFIX = config.DEFAULT_DBPATH_PREFIX
-        # Config servers have to be upgraded first. We hardcode the value here since there's
-        # no way to set it on the command line.
-        self.CONFIG_SVR_MIXED_BIN_VERSIONS = ["new", "new"]

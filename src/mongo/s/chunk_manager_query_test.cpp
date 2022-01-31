@@ -502,23 +502,24 @@ TEST_F(ChunkManagerQueryTest, SimpleCollationNumbersMultiShard) {
 }
 
 TEST_F(ChunkManagerQueryTest, SnapshotQueryWithMoreShardsThanLatestMetadata) {
+    const auto uuid = UUID::gen();
     const auto epoch = OID::gen();
-    ChunkVersion version(1, 0, epoch, boost::none /* timestamp */);
+    ChunkVersion version(1, 0, epoch, Timestamp());
 
-    ChunkType chunk0(kNss, {BSON("x" << MINKEY), BSON("x" << 0)}, version, ShardId("0"));
+    ChunkType chunk0(uuid, {BSON("x" << MINKEY), BSON("x" << 0)}, version, ShardId("0"));
     chunk0.setName(OID::gen());
 
     version.incMajor();
-    ChunkType chunk1(kNss, {BSON("x" << 0), BSON("x" << MAXKEY)}, version, ShardId("1"));
+    ChunkType chunk1(uuid, {BSON("x" << 0), BSON("x" << MAXKEY)}, version, ShardId("1"));
     chunk1.setName(OID::gen());
 
     auto oldRoutingTable = RoutingTableHistory::makeNew(kNss,
-                                                        boost::none,
+                                                        uuid,
                                                         BSON("x" << 1),
                                                         nullptr,
                                                         false,
                                                         epoch,
-                                                        boost::none /* timestamp */,
+                                                        Timestamp(),
                                                         boost::none /* timeseriesFields */,
                                                         boost::none,
                                                         boost::none /* chunkSizeBytes */,
@@ -532,11 +533,12 @@ TEST_F(ChunkManagerQueryTest, SnapshotQueryWithMoreShardsThanLatestMetadata) {
     chunk1.setHistory({ChunkHistory(Timestamp(20, 0), ShardId("0")),
                        ChunkHistory(Timestamp(1, 0), ShardId("1"))});
 
-    ChunkManager chunkManager(ShardId("0"),
-                              DatabaseVersion(UUID::gen(), Timestamp()),
-                              makeStandaloneRoutingTableHistory(oldRoutingTable.makeUpdated(
-                                  boost::none, boost::none, true, {chunk1})),
-                              Timestamp(5, 0));
+    ChunkManager chunkManager(
+        ShardId("0"),
+        DatabaseVersion(UUID::gen(), Timestamp()),
+        makeStandaloneRoutingTableHistory(oldRoutingTable.makeUpdated(
+            boost::none /* timeseriesFields */, boost::none, boost::none, true, {chunk1})),
+        Timestamp(5, 0));
 
     std::set<ShardId> shardIds;
     chunkManager.getShardIdsForRange(BSON("x" << MINKEY), BSON("x" << MAXKEY), &shardIds);

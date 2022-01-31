@@ -83,7 +83,6 @@ let testCases = {
     _configsvrBalancerStop: {skip: "internal command"},
     _configsvrCleanupReshardCollection: {skip: "internal command"},
     _configsvrClearJumboFlag: {skip: "internal command"},
-    _configsvrCommitChunkMerge: {skip: "internal command"},
     _configsvrCommitChunksMerge: {skip: "internal command"},
     _configsvrCommitChunkMigration: {skip: "internal command"},
     _configsvrCommitChunkSplit: {skip: "internal command"},
@@ -136,6 +135,7 @@ let testCases = {
     _shardsvrCreateCollection: {skip: "internal command"},
     _shardsvrCreateCollectionParticipant: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
+    _shardsvrDropCollectionIfUUIDNotMatching: {skip: "internal command"},
     _shardsvrDropCollectionParticipant: {skip: "internal command"},
     _shardsvrDropDatabase: {skip: "internal command"},
     _shardsvrDropDatabaseParticipant: {skip: "internal command"},
@@ -198,6 +198,7 @@ let testCases = {
     applyOps: {skip: "internal command"},
     auditGetOptions: {skip: "does not accept read or write concern"},
     authenticate: {skip: "does not accept read or write concern"},
+    autoSplitVector: {skip: "internal command"},
     availableQueryOptions: {skip: "internal command"},
     balancerCollectionStatus: {skip: "does not accept read or write concern"},
     balancerStart: {skip: "does not accept read or write concern"},
@@ -335,6 +336,9 @@ let testCases = {
     donorForgetMigration: {skip: "does not accept read or write concern"},
     donorStartMigration: {skip: "does not accept read or write concern"},
     donorWaitForMigrationToCommit: {skip: "does not accept read or write concern"},
+    donorAbortSplit: {skip: "does not accept read or write concern"},
+    donorForgetSplit: {skip: "does not accept read or write concern"},
+    donorStartSplit: {skip: "does not accept read or write concern"},
     driverOIDTest: {skip: "internal command"},
     drop: {
         setUp: function(conn) {

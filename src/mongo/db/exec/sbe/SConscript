@@ -35,6 +35,7 @@ sbeEnv.Library(
     target='query_sbe',
     source=[
         'expressions/expression.cpp',
+        'size_estimator.cpp',
         'stages/branch.cpp',
         'stages/bson_scan.cpp',
         'stages/check_bounds.cpp',
@@ -115,6 +116,9 @@ env.Library(
         '$BUILD_DIR/mongo/unittest/unittest',
         'query_sbe',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
+    ],
 )
 
 env.CppUnitTest(
@@ -155,12 +159,14 @@ env.CppUnitTest(
         'sbe_merge_join_test.cpp',
         'sbe_mkobj_test.cpp',
         'sbe_numeric_convert_test.cpp',
+        'sbe_plan_size_test.cpp',
         'sbe_sort_test.cpp',
         'sbe_sorted_merge_test.cpp',
         'sbe_spool_test.cpp',
         'sbe_test.cpp',
         'sbe_unique_test.cpp',
         'values/value_serialize_for_sorter_test.cpp',
+        "values/value_test.cpp",
         'values/write_value_to_stream_test.cpp'
     ],
     LIBDEPS=[

@@ -56,11 +56,12 @@ TEST(CommitChunkMigrationRequest, WithoutControlChunk) {
     BSONObjBuilder builder;
 
     ChunkType migratedChunk;
+    migratedChunk.setCollectionUUID(UUID::gen());
     migratedChunk.setMin(kKey0);
     migratedChunk.setMax(kKey1);
-    migratedChunk.setVersion({12, 7, OID::gen(), boost::none /* timestamp */});
+    migratedChunk.setVersion({12, 7, OID::gen(), Timestamp()});
 
-    ChunkVersion fromShardCollectionVersion(1, 2, OID::gen(), boost::none /* timestamp */);
+    ChunkVersion fromShardCollectionVersion(1, 2, OID::gen(), Timestamp());
 
     Timestamp validAfter{1};
 
@@ -82,6 +83,9 @@ TEST(CommitChunkMigrationRequest, WithoutControlChunk) {
     ASSERT_EQ(kShardId1, request.getToShard());
     ASSERT_BSONOBJ_EQ(kKey0, request.getMigratedChunk().getMin());
     ASSERT_BSONOBJ_EQ(kKey1, request.getMigratedChunk().getMax());
+    ASSERT_TRUE(request.getMigratedChunk().isVersionSet() &&
+                request.getMigratedChunk().getVersion().isSet() &&
+                request.getMigratedChunk().getVersion().epoch().isSet());
     ASSERT_EQ(fromShardCollectionVersion.epoch(), request.getCollectionEpoch());
 }
 

@@ -3,7 +3,6 @@
  * phase completes properly after being interrupted for rollback during the bulk load phase.
  *
  * @tags: [
- *   requires_fcv_51,
  *   requires_majority_read_concern,
  *   requires_persistence,
  * ]
@@ -15,16 +14,17 @@ load('jstests/replsets/libs/rollback_resumable_index_build.js');
 
 const dbName = "test";
 
-const numDocuments = 100;
+const numDocuments = 200;
 const maxIndexBuildMemoryUsageMB = 50;
 
 const rollbackTest = new RollbackTest(jsTestName());
 
-// Insert enough data so that the collection scan spills to disk.
+// Insert enough data so that the collection scan spills to disk. Keep the size of each document
+// small enough to report for validation, in case there are index inconsistencies.
 const docs = [];
 for (let i = 0; i < numDocuments; i++) {
-    // Each document is at least 1 MB.
-    docs.push({a: i.toString().repeat(1024 * 1024)});
+    // Since most integers will take two or three bytes, almost all documents are at least 0.5 MB.
+    docs.push({a: i.toString().repeat(1024 * 256)});
 }
 
 const runRollbackTo = function(rollbackEndFailPoint) {
@@ -38,7 +38,7 @@ const runRollbackTo = function(rollbackEndFailPoint) {
         docs,
         [[{a: 1}]],
         [{name: "hangIndexBuildDuringBulkLoadPhase", logIdWithIndexName: 4924400}],
-        // Each document is at least 1 MB, so the index build must have spilled to disk by this
+        // Most documents are at least 0.5 MB, so the index build must have spilled to disk by this
         // point.
         maxIndexBuildMemoryUsageMB,  // rollbackStartFailPointsIteration
         [rollbackEndFailPoint],
@@ -46,9 +46,7 @@ const runRollbackTo = function(rollbackEndFailPoint) {
         ["hangDuringIndexBuildBulkLoadYield"],
         ["bulk load"],
         [{skippedPhaseLogID: 20391}],
-        [{a: 1}, {a: 2}],
-        [],
-        {skipDataConsistencyChecks: true});
+        [{a: 1}, {a: 2}]);
 };
 
 // Rollback to before the indexes begin to be built.

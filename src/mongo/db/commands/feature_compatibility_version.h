@@ -69,7 +69,7 @@ public:
     static void validateSetFeatureCompatibilityVersionRequest(
         OperationContext* opCtx,
         const SetFeatureCompatibilityVersion& setFCVRequest,
-        ServerGlobalParams::FeatureCompatibility::Version fromVersion);
+        multiversion::FeatureCompatibilityVersion fromVersion);
 
     /**
      * Updates the on-disk feature compatibility version document for the transition fromVersion ->
@@ -77,8 +77,8 @@ public:
      */
     static void updateFeatureCompatibilityVersionDocument(
         OperationContext* opCtx,
-        ServerGlobalParams::FeatureCompatibility::Version fromVersion,
-        ServerGlobalParams::FeatureCompatibility::Version newVersion,
+        multiversion::FeatureCompatibilityVersion fromVersion,
+        multiversion::FeatureCompatibilityVersion newVersion,
         bool isFromConfigServer,
         boost::optional<Timestamp> timestamp,
         bool setTargetVersion);
@@ -120,6 +120,8 @@ public:
     /**
      * Used by the FCV OpObserver at rollback time.  The rollback FCV is always in the
      * majority snapshot, so it is safe to clear the lastFCVUpdateTimestamp then.
+     *
+     * Also used in rare cases when the replication coordinator majority snapshot is cleared.
      */
     static void clearLastFCVUpdateTimestamp();
 };
@@ -132,8 +134,8 @@ public:
     explicit FixedFCVRegion(OperationContext* opCtx);
     ~FixedFCVRegion();
 
-    bool operator==(const ServerGlobalParams::FeatureCompatibility::Version& other) const;
-    bool operator!=(const ServerGlobalParams::FeatureCompatibility::Version& other) const;
+    bool operator==(const multiversion::FeatureCompatibilityVersion& other) const;
+    bool operator!=(const multiversion::FeatureCompatibilityVersion& other) const;
 
     const ServerGlobalParams::FeatureCompatibility& operator*() const;
     const ServerGlobalParams::FeatureCompatibility* operator->() const;

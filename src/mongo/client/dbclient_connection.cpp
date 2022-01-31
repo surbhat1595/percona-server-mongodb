@@ -269,9 +269,6 @@ Status DBClientConnection::connect(const HostAndPort& serverAddress,
         return connectStatus;
     }
 
-    // Clear the auto-detected protocols from any previous connection.
-    _setServerRPCProtocols(rpc::supports::kOpMsgOnly);
-
     // NOTE: If the 'applicationName' parameter is a view of the '_applicationName' member, as
     // happens, for instance, in the call to DBClientConnection::connect from
     // DBClientConnection::_checkConnection then the following line will invalidate the
@@ -297,9 +294,9 @@ Status DBClientConnection::connect(const HostAndPort& serverAddress,
         return isMasterStatus;
     }
 
-    auto swProtocolSet = rpc::parseProtocolSetFromIsMasterReply(swIsMasterReply.data);
-    if (!swProtocolSet.isOK()) {
-        return swProtocolSet.getStatus();
+    auto replyWireVersion = wire_version::parseWireVersionFromHelloReply(swIsMasterReply.data);
+    if (!replyWireVersion.isOK()) {
+        return replyWireVersion.getStatus();
     }
 
     {
@@ -329,7 +326,7 @@ Status DBClientConnection::connect(const HostAndPort& serverAddress,
 
     auto wireSpec = WireSpec::instance().get();
     auto validateStatus =
-        rpc::validateWireVersion(wireSpec->outgoing, swProtocolSet.getValue().version);
+        wire_version::validateWireVersion(wireSpec->outgoing, replyWireVersion.getValue());
     if (!validateStatus.isOK()) {
         LOGV2_WARNING(20126,
                       "Remote host has incompatible wire version: {error}",
@@ -337,15 +334,6 @@ Status DBClientConnection::connect(const HostAndPort& serverAddress,
                       "error"_attr = validateStatus);
 
         return validateStatus;
-    }
-
-    _setServerRPCProtocols(swProtocolSet.getValue().protocolSet);
-
-    auto negotiatedProtocol =
-        rpc::negotiate(getServerRPCProtocols(), rpc::computeProtocolSet(wireSpec->outgoing));
-
-    if (!negotiatedProtocol.isOK()) {
-        return negotiatedProtocol.getStatus();
     }
 
     if (_hook) {
@@ -631,22 +619,36 @@ uint64_t DBClientConnection::getSockCreationMicroSec() const {
 
 unsigned long long DBClientConnection::query(std::function<void(DBClientCursorBatchIterator&)> f,
                                              const NamespaceStringOrUUID& nsOrUuid,
-                                             Query query,
+                                             const BSONObj& filter,
+                                             const Query& querySettings,
                                              const BSONObj* fieldsToReturn,
                                              int queryOptions,
                                              int batchSize,
                                              boost::optional<BSONObj> readConcernObj) {
     if (!(queryOptions & QueryOption_Exhaust) || !(availableOptions() & QueryOption_Exhaust)) {
-        return DBClientBase::query(
-            f, nsOrUuid, query, fieldsToReturn, queryOptions, batchSize, readConcernObj);
+        return DBClientBase::query(f,
+                                   nsOrUuid,
+                                   filter,
+                                   querySettings,
+                                   fieldsToReturn,
+                                   queryOptions,
+                                   batchSize,
+                                   readConcernObj);
     }
 
     // mask options
     queryOptions &=
         (int)(QueryOption_NoCursorTimeout | QueryOption_SecondaryOk | QueryOption_Exhaust);
 
-    unique_ptr<DBClientCursor> c(this->query(
-        nsOrUuid, query, 0, 0, fieldsToReturn, queryOptions, batchSize, readConcernObj));
+    unique_ptr<DBClientCursor> c(this->query(nsOrUuid,
+                                             filter,
+                                             querySettings,
+                                             0,
+                                             0,
+                                             fieldsToReturn,
+                                             queryOptions,
+                                             batchSize,
+                                             readConcernObj));
     // Note that this->query will throw for network errors, so it is OK to return a numeric
     // error code here.
     uassert(13386, "socket error for mapping query", c.get());
@@ -690,7 +692,7 @@ DBClientConnection::DBClientConnection(bool _autoReconnect,
 
 void DBClientConnection::say(Message& toSend, bool isRetry, string* actualServer) {
     checkConnection();
-    auto killSessionOnError = makeGuard([this] { _markFailed(kEndSession); });
+    ScopeGuard killSessionOnError([this] { _markFailed(kEndSession); });
 
     toSend.header().setId(nextMessageId());
     toSend.header().setResponseToMsgId(0);
@@ -709,7 +711,7 @@ void DBClientConnection::say(Message& toSend, bool isRetry, string* actualServer
 }
 
 Status DBClientConnection::recv(Message& m, int lastRequestId) {
-    auto killSessionOnError = makeGuard([this] { _markFailed(kEndSession); });
+    ScopeGuard killSessionOnError([this] { _markFailed(kEndSession); });
     auto swm = _session->sourceMessage();
     if (!swm.isOK()) {
         return swm.getStatus();
@@ -733,7 +735,7 @@ bool DBClientConnection::call(Message& toSend,
                               bool assertOk,
                               string* actualServer) {
     checkConnection();
-    auto killSessionOnError = makeGuard([this] { _markFailed(kEndSession); });
+    ScopeGuard killSessionOnError([this] { _markFailed(kEndSession); });
     auto maybeThrow = [&](const auto& errStatus) {
         if (assertOk)
             uassertStatusOKWithContext(errStatus,

@@ -95,10 +95,14 @@ bool hasNode(const MatchExpression* root, MatchExpression::MatchType type) {
 
 // TODO SERVER-49852: Currently SBE cannot handle match expressions with numeric path
 // components due to some of the complexity around how arrays are handled.
-void disableSBEForNumericPathComponent(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       const MatchExpression* node) {
+//
+// TODO SERVER-59757: We also currently fall back to classic engine when encountering match
+// expressions on empty field names due to complexity in how an empty string currently has
+// multiple special meanings & which we do not wish to emulate in SBE.
+void disableSBEForUnsupportedExpressions(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                         const MatchExpression* node) {
     auto fieldRef = node->fieldRef();
-    if (fieldRef && fieldRef->hasNumericPathComponents()) {
+    if (fieldRef && (fieldRef->empty() || fieldRef->hasNumericPathComponents())) {
         expCtx->sbeCompatible = false;
         return;
     }
@@ -106,8 +110,8 @@ void disableSBEForNumericPathComponent(const boost::intrusive_ptr<ExpressionCont
         // For some match expressions trees, there could be a path associated with a node deeper in
         // the tree. This is true in particular for negations. For example, {a: {$not: {$gt: 0}}}
         // will be converted to a NOT => GT tree, but it is the GT node that carries the path,
-        // rather than the NOT node.
-        disableSBEForNumericPathComponent(expCtx, node->getChild(i));
+        // rather than the NOT node. We recursively process these nodes here.
+        disableSBEForUnsupportedExpressions(expCtx, node->getChild(i));
         if (!expCtx->sbeCompatible)
             return;
     }
@@ -116,7 +120,7 @@ void disableSBEForNumericPathComponent(const boost::intrusive_ptr<ExpressionCont
 void addExpressionToRoot(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                          AndMatchExpression* root,
                          std::unique_ptr<MatchExpression> newNode) {
-    disableSBEForNumericPathComponent(expCtx, newNode.get());
+    disableSBEForUnsupportedExpressions(expCtx, newNode.get());
     root->add(std::move(newNode));
 }
 }  // namespace
@@ -299,7 +303,7 @@ StatusWithMatchExpression parse(const BSONObj& obj,
                 const auto dotsAndDollarsHint =
                     serverGlobalParams.featureCompatibility.isVersionInitialized() &&
                         serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-                            FeatureCompatibilityParams::Version::kFullyDowngradedTo50)
+                            multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0)
                     ? ". If you have a field name that starts with a '$' symbol, consider using "
                       "$getField or $setField."
                     : "";
@@ -1075,11 +1079,20 @@ StatusWithMatchExpression parseInternalBucketGeoWithinMatchExpression(
 
     auto subobj = elem.embeddedObject();
 
-    // Parse the region field, 'withinRegion', to a GeometryContainer.
     std::shared_ptr<GeometryContainer> geoContainer = std::make_shared<GeometryContainer>();
-    tassert(5776200,
-            "$_internalBucketGeoWithin expression must contain 'withinRegion' field",
-            subobj.hasField("withinRegion"));
+    if (!subobj.hasField("withinRegion") || !subobj.hasField("field")) {
+        return {ErrorCodes::FailedToParse,
+                str::stream() << InternalBucketGeoWithinMatchExpression::kName
+                              << " requires both 'withinRegion' and 'field' field"};
+    }
+
+    if (subobj["withinRegion"].type() != BSONType::Object) {
+        return {ErrorCodes::TypeMismatch,
+                str::stream() << InternalBucketGeoWithinMatchExpression::kName
+                              << "'s 'withinRegion' field must be an object"};
+    }
+
+    // Parse the region field, 'withinRegion', to a GeometryContainer.
     BSONObjIterator geoIt(subobj["withinRegion"].embeddedObject());
     while (geoIt.more()) {
         BSONElement elt = geoIt.next();
@@ -1089,10 +1102,13 @@ StatusWithMatchExpression parseInternalBucketGeoWithinMatchExpression(
             return status;
     }
 
+    if (subobj["field"].type() != BSONType::String) {
+        return {ErrorCodes::TypeMismatch,
+                str::stream() << InternalBucketGeoWithinMatchExpression::kName
+                              << "'s 'field' field must be a string"};
+    }
+
     // Parse the field.
-    tassert(5776201,
-            "$_internalBucketGeoWithin expression must contain 'field' field with a string value",
-            subobj.hasField("field") && subobj["field"].type() == BSONType::String);
     std::string field = subobj["field"].String();
 
     expCtx->sbeCompatible = false;

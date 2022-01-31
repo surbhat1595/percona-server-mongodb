@@ -295,9 +295,6 @@ void shardedRenameMetadata(OperationContext* opCtx,
         // The TO collection is not sharded or doesn't exist
     }
 
-    // Delete TO tags, even if the TO collection is not sharded or doesn't exist
-    removeTagsMetadataFromConfig_notIdempotent(opCtx, toNss, writeConcern);
-
     // Delete FROM collection entry
     deleteCollection(opCtx, fromNss, fromUUID, writeConcern);
 
@@ -313,7 +310,7 @@ void shardedRenameMetadata(OperationContext* opCtx,
         // Only bump the epoch if the whole cluster is in FCV 5.0, so chunks do not contain epochs.
         FixedFCVRegion fixedFCVRegion(opCtx);
         if (serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-                ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo50)) {
+                multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0)) {
             fromCollType.setEpoch(OID::gen());
         }
     }

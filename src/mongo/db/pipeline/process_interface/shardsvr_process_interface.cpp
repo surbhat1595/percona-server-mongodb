@@ -44,6 +44,7 @@
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -220,7 +221,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
         // internalRenameIfOptionsAndIndexesMatch is adminOnly.
         NamespaceString::kAdminDb,
         cachedDbInfo,
-        // Only unsharded collections can be renamed.
+        // $out target collection must not exist or not be sharded.
         _versionCommandIfAppropriate(newCmdObj, cachedDbInfo, ChunkVersion::UNSHARDED()),
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         Shard::RetryPolicy::kNoRetry);
@@ -235,6 +236,10 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
 
 BSONObj ShardServerProcessInterface::getCollectionOptions(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
+    if (nss.isNamespaceAlwaysUnsharded()) {
+        return getCollectionOptionsLocally(opCtx, nss);
+    }
+
     auto cachedDbInfo =
         uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.db()));
     auto shard = uassertStatusOK(
@@ -402,6 +407,29 @@ ShardServerProcessInterface::attachCursorSourceToPipeline(Pipeline* ownedPipelin
         ownedPipeline, shardTargetingPolicy, std::move(readConcern));
 }
 
+void ShardServerProcessInterface::unsetExpectedDbVersion(OperationContext* opCtx,
+                                                         const NamespaceString& nss) {
+    auto& oss = OperationShardingState::get(opCtx);
+    oss.unsetExpectedDbVersion_Only_For_Aggregation_Local_Reads(nss.db());
+}
+
+bool ShardServerProcessInterface::setExpectedDbVersion(OperationContext* opCtx,
+                                                       const NamespaceString& nss,
+                                                       DatabaseVersion dbVersion) {
+    auto& oss = OperationShardingState::get(opCtx);
+
+    if (auto knownDBVersion = oss.getDbVersion(nss.db())) {
+        uassert(ErrorCodes::IllegalOperation,
+                "Expected db version must match known db version",
+                knownDBVersion == dbVersion);
+    } else if (_opIsVersioned) {
+        oss.initializeClientRoutingVersions(nss, boost::none, dbVersion);
+        return true;
+    }
+
+    return false;
+}
+
 void ShardServerProcessInterface::setExpectedShardVersion(
     OperationContext* opCtx,
     const NamespaceString& nss,
@@ -412,6 +440,11 @@ void ShardServerProcessInterface::setExpectedShardVersion(
     } else if (_opIsVersioned) {
         oss.initializeClientRoutingVersions(nss, chunkVersion, boost::none);
     }
+}
+
+void ShardServerProcessInterface::checkOnPrimaryShardForDb(OperationContext* opCtx,
+                                                           const NamespaceString& nss) {
+    DatabaseShardingState::checkIsPrimaryShardForDb(opCtx, nss.db());
 }
 
 BSONObj ShardServerProcessInterface::_versionCommandIfAppropriate(

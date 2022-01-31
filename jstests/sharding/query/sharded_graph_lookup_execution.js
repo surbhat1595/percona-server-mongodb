@@ -3,7 +3,7 @@
  * include when the local collection is sharded and unsharded, when the $graphLookup can target
  * shards or is scatter-gather, and when the $graphLookup is not top-level.
  *
- * @tags: [requires_fcv_51, featureFlagShardedLookup]
+ * @tags: [requires_fcv_51]
  */
 
 (function() {
@@ -299,11 +299,13 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_to_unsharded"
         collName: airportsColl.getName(),
         fromCollName: airfieldsColl.getName(),
         // When executing the subpipeline, the nested $graphLookup stage will stay on the merging
-        // half of the pipeline and execute on the merging node, sending requests over the network
-        // to execute the nested $matches on the primary shard (where the unsharded 'airfields'
-        // collection is). The $graphLookups cannot share a cache because they run indepedently.
+        // half of the pipeline and execute on the merging node, sending requests to execute the
+        // nested $matches on the primary shard (where the unsharded 'airfields' collection is).
+        // Only the $graphLookup on the non-primary shard needs to send requests over the network;
+        // the rest can be done via a local read and are not logged. The $graphLookups cannot share
+        // a cache because they run indepedently.
         toplevelExec: [0, 0],
-        recursiveMatchExec: [6, 0]
+        recursiveMatchExec: [2, 0]
     }
 ]);
 
@@ -363,6 +365,181 @@ assertGraphLookupExecution(
             recursiveMatchExec: [6, 6]
         }
     ]);
+
+// Test sharded local collection where the foreign namespace is a sharded view with another
+// $graphLookup against a sharded collection. Note that the $graphLookup in the view should be
+// treated as a "nested" $graphLookup and should execute on the merging node.
+st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
+st.shardColl(
+    travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+
+assert.commandWorked(mongosDB.createView("airportsView", airportsColl.getName(),
+    [{$graphLookup: {
+        from: "airfields",
+        startWith: "$airport",
+        connectFromField: "connects",
+        connectToField: "airfield",
+        maxDepth: 1,
+        as: "nearbyAirfields"
+    }}]
+));
+pipeline = [
+    {$graphLookup: {
+        from: "airportsView",
+        startWith: "$nearestAirport",
+        connectFromField: "connects",
+        connectToField: "airport",
+        maxDepth: 0,
+        as: "destinations"
+    }},
+    {$unwind: "$destinations"},
+    {$project: {firstName: 1, 'destinations.airport' : 1, 'destinations.nearbyAirfields.airfield' : 1}}
+];
+
+assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_view_to_sharded"}, expectedRes, [
+    {
+        // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
+        // on every shard that contains the local collection.
+        toplevelExec: [1, 1],
+        // Each node executing the $graphLookup will, for every document that flows through the
+        // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
+        recursiveMatchExec: [0, 3],
+    },
+    {
+        collName: airportsColl.getName(),
+        fromCollName: airfieldsColl.getName(),
+        // When executing the subpipeline, the "nested" $graphLookup stage contained in the view
+        // pipeline will stay on the merging half of the pipeline and execute on the merging node,
+        // targeting shards to execute the nested $matches.
+        toplevelExec: [0, 0],
+        recursiveMatchExec: [1, 5]
+    }
+]);
+mongosDB.airportsView.drop();
+
+// Test top-level $lookup on a sharded local collection where the foreign namespace is a sharded
+// view with a $graphLookup against a sharded collection. Note that the $graphLookup in the view
+// should be treated as a "nested" $graphLookup and should execute on the merging node.
+st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
+st.shardColl(
+    travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+
+assert.commandWorked(mongosDB.createView("airportsView", airportsColl.getName(),
+    [{$graphLookup: {
+        from: "airfields",
+        startWith: "$airport",
+        connectFromField: "connects",
+        connectToField: "airfield",
+        maxDepth: 1,
+        as: "nearbyAirfields"
+    }}]
+));
+pipeline = [
+    {$lookup: {
+        from: "airportsView",
+        localField: "nearestAirport",
+        foreignField: "airport",
+        as: "destinations"
+    }},
+    {$unwind: "$destinations"},
+    {$project: {firstName: 1, 'destinations.airport' : 1, 'destinations.nearbyAirfields.airfield' : 1}}
+];
+
+assertGraphLookupExecution(
+    pipeline, {comment: "sharded_lookup_to_sharded_view_to_sharded"}, expectedRes, [
+        {
+            // The 'travelers' collection is sharded, but mongos does not know that the foreign
+            // namespace is a view on a sharded collection. It is instead treated as an unsharded
+            // collection, and the top-level $lookup is only on the primary.
+            toplevelExec: [1, 0],
+            // Each node executing the $lookup will, for every document that flows through the stage
+            // target the shard(s) that holds the relevant data for the sharded foreign view.
+            subpipelineExec: [0, 3],
+        },
+        {
+            collName: airportsColl.getName(),
+            fromCollName: airfieldsColl.getName(),
+            // When executing the subpipeline, the "nested" $graphLookup stage contained in the view
+            // pipeline will stay on the merging half of the pipeline and execute on the merging
+            // node, targeting shards to execute the nested $matches.
+            toplevelExec: [0, 0],
+            recursiveMatchExec: [1, 5]
+        }
+    ]);
+mongosDB.airportsView.drop();
+
+// Test sharded local collection where the foreign namespace is a sharded view with a $lookup
+// against a sharded collection. Note that the $lookup in the view should be treated as a "nested"
+// $lookup and should execute on the merging node.
+st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
+st.shardColl(
+    travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+
+assert.commandWorked(mongosDB.createView("airportsView", airportsColl.getName(), 
+    [{$lookup: {
+        from: "airfields",
+        localField: "airport",
+        foreignField: "airfield",
+        as: "nearbyAirfields"
+    }}]
+));
+pipeline = [
+    {$graphLookup: {
+        from: "airportsView",
+        startWith: "$nearestAirport",
+        connectFromField: "connects",
+        connectToField: "airport",
+        maxDepth: 0,
+        as: "destinations"
+    }},
+    {$unwind: "$destinations"},
+    {$project: {firstName: 1, 'destinations.airport' : 1, 'destinations.nearbyAirfields.airfield' : 1}}
+];
+expectedRes = [
+    {
+        _id: 1,
+        firstName: "Alice",
+        destinations: {airport: "LHR", nearbyAirfields: [{airfield: "LHR"}]},
+    },
+    {
+        _id: 2,
+        firstName: "Alice",
+        destinations: {airport: "ORD", nearbyAirfields: [{airfield: "ORD"}]},
+    },
+    {
+        _id: 3,
+        firstName: "Bob",
+        destinations: {airport: "JFK", nearbyAirfields: [{airfield: "JFK"}]},
+    }
+];
+
+assertGraphLookupExecution(
+    pipeline, {comment: "sharded_to_sharded_lookup_view_to_sharded"}, expectedRes, [
+        {
+            // The 'travelers' collection is sharded, so the $graphLookup stage is executed in
+            // parallel on every shard that contains the local collection.
+            toplevelExec: [1, 1],
+            // Each node executing the $graphLookup will, for every document that flows through the
+            // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
+            recursiveMatchExec: [0, 3],
+        },
+        {
+            collName: airportsColl.getName(),
+            fromCollName: airfieldsColl.getName(),
+            // When executing the subpipeline, the "nested" $lookup stage contained in the view
+            // pipeline will stay on the merging half of the pipeline and execute on the merging
+            // node, targeting shards to execute the nested subpipelines.
+            toplevelExec: [0, 0],
+            subpipelineExec: [1, 2]
+        }
+    ]);
+mongosDB.airportsView.drop();
 
 // Test that a targeted $graphLookup on a sharded collection can execute correctly on mongos.
 st.shardColl(airportsColl, {airport: 1}, {airport: "LHR"}, {airport: "LHR"}, mongosDB.getName());

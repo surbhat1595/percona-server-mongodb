@@ -43,15 +43,45 @@ namespace mongo {
  * you would add this line:
  * REGISTER_ACCUMULATOR(foo, AccumulatorFoo::create);
  */
-#define REGISTER_ACCUMULATOR(key, factory) \
-    REGISTER_ACCUMULATOR_WITH_MIN_VERSION(key, factory, boost::none)
+#define REGISTER_ACCUMULATOR(key, factory)                            \
+    REGISTER_ACCUMULATOR_CONDITIONALLY(key,                           \
+                                       factory,                       \
+                                       AllowedWithApiStrict::kAlways, \
+                                       AllowedWithClientType::kAny,   \
+                                       boost::none,                   \
+                                       true)
 
-#define REGISTER_ACCUMULATOR_WITH_MIN_VERSION(key, factory, minVersion)                \
-    MONGO_INITIALIZER_GENERAL(addToAccumulatorFactoryMap_##key,                        \
-                              ("BeginAccumulatorRegistration"),                        \
-                              ("EndAccumulatorRegistration"))                          \
-    (InitializerContext*) {                                                            \
-        AccumulationStatement::registerAccumulator("$" #key, (factory), (minVersion)); \
+#define REGISTER_ACCUMULATOR_WITH_MIN_VERSION(key, factory, minVersion) \
+    REGISTER_ACCUMULATOR_CONDITIONALLY(key,                             \
+                                       factory,                         \
+                                       AllowedWithApiStrict::kAlways,   \
+                                       AllowedWithClientType::kAny,     \
+                                       minVersion,                      \
+                                       true)
+
+/**
+ * Like REGISTER_ACCUMULATOR_WITH_MIN_VERSION, except you can also specify a condition,
+ * evaluated during startup, that decides whether to register the parser.
+ *
+ * For example, you could check a feature flag, and register the parser only when it's enabled.
+ *
+ * Note that the condition is evaluated only once, during a MONGO_INITIALIZER. Don't specify
+ * a condition that can change at runtime, such as FCV. (Feature flags are ok, because they
+ * cannot be toggled at runtime.)
+ *
+ * This is the most general REGISTER_ACCUMULATOR* macro, which all others should delegate to.
+ */
+#define REGISTER_ACCUMULATOR_CONDITIONALLY(                                                  \
+    key, factory, allowedWithApiStrict, allowedClientType, minVersion, ...)                  \
+    MONGO_INITIALIZER_GENERAL(addToAccumulatorFactoryMap_##key,                              \
+                              ("BeginAccumulatorRegistration"),                              \
+                              ("EndAccumulatorRegistration"))                                \
+    (InitializerContext*) {                                                                  \
+        if (!(__VA_ARGS__)) {                                                                \
+            return;                                                                          \
+        }                                                                                    \
+        AccumulationStatement::registerAccumulator(                                          \
+            "$" #key, (factory), (allowedWithApiStrict), (allowedClientType), (minVersion)); \
     }
 
 /**
@@ -142,6 +172,17 @@ AccumulationExpression genericParseSingleExpressionAccumulator(ExpressionContext
 }
 
 /**
+ * A parser for any SBE unsupported accumulator that only takes a single expression as an argument.
+ * Returns the expression to be evaluated by the accumulator and an AccumulatorState::Factory.
+ */
+template <class AccName>
+AccumulationExpression genericParseSBEUnsupportedSingleExpressionAccumulator(
+    ExpressionContext* const expCtx, BSONElement elem, VariablesParseState vps) {
+    expCtx->sbeGroupCompatible = false;
+    return genericParseSingleExpressionAccumulator<AccName>(expCtx, elem, vps);
+}
+
+/**
  * A parser that desugars { $count: {} } to { $sum: 1 }.
  */
 inline AccumulationExpression parseCountAccumulator(ExpressionContext* const expCtx,
@@ -168,6 +209,16 @@ public:
     using Parser = std::function<AccumulationExpression(
         ExpressionContext* const, BSONElement, VariablesParseState)>;
 
+    /**
+     * Associates a Parser with information regarding which contexts it can be used in, including
+     * API Version and FCV.
+     */
+    using ParserRegistration =
+        std::tuple<Parser,
+                   AllowedWithApiStrict,
+                   AllowedWithClientType,
+                   boost::optional<multiversion::FeatureCompatibilityVersion>>;
+
     AccumulationStatement(std::string fieldName, AccumulationExpression expr)
         : fieldName(std::move(fieldName)), expr(std::move(expr)) {}
 
@@ -175,7 +226,9 @@ public:
      * Parses a BSONElement that is an accumulated field, and returns an AccumulationStatement for
      * that accumulated field.
      *
-     * Throws an AssertionException if parsing fails.
+     * Throws an AssertionException if parsing fails, if the configured API version is not
+     * compatible with this AccumulationStatement, or if the Parser is registered under an FCV
+     * greater than the specified maximum allowed FCV.
      */
     static AccumulationStatement parseAccumulationStatement(ExpressionContext* expCtx,
                                                             const BSONElement& elem,
@@ -192,16 +245,15 @@ public:
     static void registerAccumulator(
         std::string name,
         Parser parser,
-        boost::optional<ServerGlobalParams::FeatureCompatibility::Version> requiredMinVersion);
+        AllowedWithApiStrict allowedWithApiStrict,
+        AllowedWithClientType allowedWithClientType,
+        boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion);
 
     /**
      * Retrieves the Parser for the accumulator specified by the given name, and raises an error if
-     * there is no such Parser registered, or the Parser is registered under an FCV greater than the
-     * specified maximum allowed FCV.
+     * there is no such Parser registered.
      */
-    static Parser& getParser(
-        StringData name,
-        boost::optional<ServerGlobalParams::FeatureCompatibility::Version> allowedMaxVersion);
+    static ParserRegistration& getParser(StringData name);
 
     // The field name is used to store the results of the accumulation in a result document.
     std::string fieldName;

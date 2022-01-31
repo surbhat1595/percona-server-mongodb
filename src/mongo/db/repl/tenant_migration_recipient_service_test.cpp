@@ -352,7 +352,7 @@ protected:
                          const std::string& nss,
                          const std::vector<HostAndPort>& hosts) {
         for (const auto& host : hosts) {
-            replSet->getNode(host.toString())->remove(nss, Query());
+            replSet->getNode(host.toString())->remove(nss, BSONObj{} /*filter*/);
         }
     }
 
@@ -445,9 +445,9 @@ protected:
      * Sets the FCV on the donor so that it can respond to FCV requests appropriately.
      * (Generic FCV reference): This FCV reference should exist across LTS binary versions.
      */
-    void setDonorFCV(const TenantMigrationRecipientService::Instance* instance,
-                     ServerGlobalParams::FeatureCompatibility::Version version =
-                         ServerGlobalParams::FeatureCompatibility::kLatest) {
+    void setDonorFCV(
+        const TenantMigrationRecipientService::Instance* instance,
+        multiversion::FeatureCompatibilityVersion version = multiversion::GenericFCV::kLatest) {
         auto fcvDoc = FeatureCompatibilityVersionDocument(version);
         auto client = getClient(instance);
         client->insert(NamespaceString::kServerConfigurationNamespace.ns(), fcvDoc.toBSON());
@@ -1560,7 +1560,7 @@ TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientStartsCloner
     stopFailPointEnableBlock fp("fpAfterCollectionClonerDone");
 
     auto taskFp = globalFailPointRegistry().find("hangBeforeTaskCompletion");
-    auto taskFpGuard = makeGuard([&taskFp] { taskFp->setMode(FailPoint::off); });
+    ScopeGuard taskFpGuard([&taskFp] { taskFp->setMode(FailPoint::off); });
 
     auto initialTimesEntered = taskFp->setMode(FailPoint::alwaysOn);
 
@@ -3203,8 +3203,7 @@ TEST_F(TenantMigrationRecipientServiceTest,
     // Add an FCV value as if it was from a previous attempt, making sure we set a different
     // version from the one we currently have.
     // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
-    initialStateDocument.setRecipientPrimaryStartingFCV(
-        ServerGlobalParams::FeatureCompatibility::kLastLTS);
+    initialStateDocument.setRecipientPrimaryStartingFCV(multiversion::GenericFCV::kLastLTS);
 
     // Create and start the instance.
     auto opCtx = makeOperationContext();
@@ -3257,7 +3256,7 @@ TEST_F(TenantMigrationRecipientServiceTest,
     // Set the donor FCV to be different from 'latest'.
     // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
     connFp->waitForTimesEntered(initialTimesEntered + 1);
-    setDonorFCV(instance.get(), ServerGlobalParams::FeatureCompatibility::kLastContinuous);
+    setDonorFCV(instance.get(), multiversion::GenericFCV::kLastContinuous);
     connFp->setMode(FailPoint::off);
 
     // Wait for task completion failure.

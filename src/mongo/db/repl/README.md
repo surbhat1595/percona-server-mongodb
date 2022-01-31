@@ -76,18 +76,17 @@ known as the implicit default write concern (IDWC). For most cases, the IDWC wil
 
 The IDWC is calculated on startup using the **Default Write Concern Formula (DWCF)**:
 
-`implicitDefaultWriteConcern = if [(#arbiters > 0) AND (#arbiters >= ½(#voting nodes) - 1)] then {w:1} else {w:majority}`
+`implicitDefaultWriteConcern = if ((#arbiters > 0) AND (#non-arbiters <= majority(#voting nodes)) then {w:1} else {w:majority}`
 
-In replica sets with arbiters, there are cases where the set can lose a majority of data-bearing
-nodes, but the primary would stay primary due to arbiters' votes. The primary is unable to fulfill
-majority writes, as it cannot reach a majority of data-bearing nodes. To prevent the primary from
-hanging while trying to acknowledge majority writes, the server will set the implicit default to
-`{w: 1}`.
+This formula specifies that for replica sets with arbiters, we want to ensure that we set the
+implicit default to a value that the set can satisfy in the event of one data-bearing node
+going down. That is, the number of data-bearing nodes must be strictly greater than the majority
+of voting nodes for the set to set `{w: "majority"}`.
 
-As an example, if we have a PSA replica set, and the secondary goes down, the primary cannot
-successfully acknowledge a majority write. However, the primary will remain primary with the
-arbiter's vote. In this case, the DWCF will have preemptively set the IDWC to `{w: 1}`
-so the user can still perform writes to the replica set.
+For example, if we have a PSA replica set, and the secondary goes down, the primary cannot
+successfully acknowledge a majority write as the majority for the set is two nodes. However, the
+primary will remain primary with the arbiter's vote. In this case, the DWCF will have preemptively
+set the IDWC to `{w: 1}` so the user can still perform writes to the replica set.
 
  #### Implicit Default Write Concern and Sharded Clusters
 
@@ -137,7 +136,8 @@ satisfy write concerns.
 
 A secondary keeps its data synchronized with its sync source by fetching oplog entries from its sync
 source. This is done via the
-[`OplogFetcher`](https://github.com/mongodb/mongo/blob/929cd5af6623bb72f05d3364942e84d053ddea0d/src/mongo/db/repl/oplog_fetcher.h).
+[`OplogFetcher`](https://github.com/mongodb/mongo/blob/929cd5af6623bb72f05d3364942e84d053ddea0d/src/mongo/db/repl/oplog_fetcher.h) which
+runs in its own separate thread, communicating via [a dedicated connection (DBClientConnection)](https://github.com/mongodb/mongo/blob/90e4270e9b22071c7d0367195c56bf2c5b50e56f/src/mongo/db/repl/oplog_fetcher.cpp#L190) with that instance.
 
 The `OplogFetcher` does not directly apply the operations it retrieves from the sync source.
 Rather, it puts them into a buffer (the **`OplogBuffer`**) and another thread is in charge of
@@ -458,8 +458,9 @@ change sync sources.
 
 At a default of every 2 seconds, the `HeartbeatInterval`, every node sends a heartbeat to every
 other node with the `replSetHeartbeat` command. This means that the number of heartbeats increases
-quadratically with the number of nodes and is the reasoning behind the 50 member limit in a replica
-set. The data, `ReplSetHeartbeatArgsV1` that accompanies every heartbeat is:
+quadratically with the number of nodes and is the reasoning behind the
+[50 member limit](https://github.com/mongodb/mongo/blob/r4.4.0-rc6/src/mongo/db/repl/repl_set_config.h#L133)
+in a replica set. The data, `ReplSetHeartbeatArgsV1` that accompanies every heartbeat is:
 
 1. `ReplicaSetConfig` version
 2. `ReplicaSetConfig` term
@@ -473,11 +474,11 @@ response back. First, the remote node makes sure the heartbeat is compatible wit
 name. Otherwise it sends an error.
 
 The receiving node's `TopologyCoordinator` updates the last time it received a heartbeat from the
-sending node for liveness checking in its `MemberHeartbeatData` list.
+sending node for liveness checking in its `MemberData` list.
 
 If the sending node's config is newer than the receiving node's, then the receiving node schedules a
-heartbeat to get the config. The receiving node's `ReplicationCoordinator` also updates its
-`SlaveInfo` with the last update from the sending node and marks it as being up. See more details on
+heartbeat to get the config. The receiving node's `TopologyCoordinator` also updates its
+`MemberData` with the last update from the sending node and marks it as being up. See more details on
 config propagation via heartbeats in the [Reconfiguration](#Reconfiguration) section.
 
 It then creates a `ReplSetHeartbeatResponse` object. This includes:
@@ -491,18 +492,19 @@ It then creates a `ReplSetHeartbeatResponse` object. This includes:
 7. The receiving node's sync source
 8. The receiving node's `ReplicaSetConfig` version and term
 9. Whether the receiving node is primary
+10. Whether the receiving node is electable
 
 When the sending node receives the response to the heartbeat, it first processes its
 `ReplSetMetadata` like before.
 
 The sending node postpones its election timeout if it sees a primary.
 
-The `TopologyCoordinator` updates its `HeartbeatData`. It marks if the receiving node is up or down.
+The `TopologyCoordinator` updates its `MemberData`. It marks if the receiving node is up or down.
 
 The sending node's `TopologyCoordinator` then looks at the response and decides the next action to
 take: no action, priority takeover, or reconfig,
 
-The `ReplicationCoordinator` then updates the `SlaveInfo` for the receiving node with its most
+The `TopologyCoordinator` then updates the `MemberData` for the receiving node with its most
 recently acquired OpTimes.
 
 The next heartbeat is scheduled and then the next action set by the `TopologyCoordinator` is
@@ -512,6 +514,12 @@ If the action was a priority takeover, then the node ranks all of the priorities
 assigns itself a priority takeover timeout proportional to its rank. After that timeout expires the
 node will check if it's eligible to run for election and if so will begin an election. The timeout
 is simply: `(election timeout) * (priority rank + 1)`.
+
+Heartbeat threads belong to the 
+[`ReplCoordThreadPool`](https://github.com/mongodb/mongo/blob/674d57fc70d80dedbfd634ce00ca4b967ea89646/src/mongo/db/mongod_main.cpp#L944)
+connection pool started by the
+[`ReplicationCoordinator`](https://github.com/mongodb/mongo/blob/674d57fc70d80dedbfd634ce00ca4b967ea89646/src/mongo/db/mongod_main.cpp#L986).
+Note that this connection pool is separate from the dedicated connection used by the [Oplog fetcher](#oplog-fetching).
 
 ### Commit Point Propagation
 
@@ -560,7 +568,7 @@ nodes, it will still stay primary.
 The `replSetUpdatePosition` command contains the following information:
 
 1. An `optimes` array containing an object for each live replica set member. This information is
-   filled in by the `ReplicationCoordinator` with information from its `SlaveInfo`. Nodes that are
+   filled in by the `TopologyCoordinator` with information from its `MemberData`. Nodes that are
    believed to be down are not included. Each node contains:
 
     1. last durable OpTime
@@ -1923,7 +1931,8 @@ written to the oplog.
 
 Feature compatibility version (FCV) is the versioning mechanism for a MongoDB cluster that provides
 safety guarantees when upgrading and downgrading between versions. The FCV determines the version of
-the feature set exposed by the cluster.
+the feature set exposed by the cluster and is often set in lockstep with the binary version as a
+part of [upgrading or downgrading the cluster's binary version](https://docs.mongodb.com/v5.0/release-notes/5.0-upgrade-replica-set/#upgrade-a-replica-set-to-5.0).
 
 FCV is used to disable features that may be problematic when active in a mixed version cluster.
 For example, incompatibility issues can arise if a newer version node accepts an instance of a new
@@ -1931,9 +1940,9 @@ feature *f* while there are still older version nodes in the cluster that are un
 *f*.
 
 FCV is persisted as a document in the `admin.system.version` collection. It will look something like
-the following if a node were to be in FCV 4.4:
+the following if a node were to be in FCV 5.0:
 <pre><code>
-   { "_id" : "featureCompatibilityVersion", "version" : "4.4" }</code></pre>
+   { "_id" : "featureCompatibilityVersion", "version" : "5.0" }</code></pre>
 
 This document is present in every mongod in the cluster and is replicated to other members of the
 replica set whenever it is updated via writes to the `admin.system.version` collection. The FCV
@@ -1949,16 +1958,16 @@ shard server, then the server will set its FCV to the latest version by default.
 As part of a startup with an existing FCV document, the server caches an in-memory value of the FCV
 from disk. The `FcvOpObserver` keeps this in-memory value in sync with the on-disk FCV document
 whenever an update to the document is made. In the period of time during startup where the in-memory
-value has yet to be loaded from disk, the FCV is set to `kUnsetDefault{Last-LTS}Behavior`. This 
+value has yet to be loaded from disk, the FCV is set to `kUnsetDefaultLastLTSBehavior`. This
 indicates that the server will be using the last-LTS feature set as to ensure compatibility with
 other nodes in the replica set.
 
 As part of initial sync, the in-memory FCV value is always initially set to be 
-`kUnsetDefault{Last-LTS}Behavior`. This is to ensure compatibility between the sync source and sync
+`kUnsetDefaultLastLTSBehavior`. This is to ensure compatibility between the sync source and sync
 target. If the sync source is actually in a different feature compatibility version, we will find
 out when we clone the `admin.system.version` collection.
 
-A node that starts with `--replSet` will also have an FCV value of `kUnsetDefault{Last-LTS}Behavior`
+A node that starts with `--replSet` will also have an FCV value of `kUnsetDefaultLastLTSBehavior`
 if it has not yet received the `replSetInitiate` command.
 
 ## setFeatureCompatibilityVersion
@@ -1979,36 +1988,39 @@ non-data bearing, they do not have an FCV.
 Each `mongod` release will support the following upgrade/downgrade paths:
 * Last-Continuous ←→ Latest
 * Last-LTS ←→ Latest
+* Last-LTS → Last-Continuous
+  * This upgrade-only transition is only possible when requested by the [config server](https://docs.mongodb.com/manual/core/sharded-cluster-config-servers/).
+Additionally, the last LTS must not be equal to the last continuous release.
 
 As part of an upgrade/downgrade, the FCV will transition through three states:
 <pre><code>
 Upgrade:
-   kVersionX → kUpgradingFromXToY → kVersionY
+   kVersion_X → kUpgradingFrom_X_To_Y → kVersion_Y
 
 Downgrade:
-   kVersionX → kDowngradingFromXToY → kVersionY
+   kVersion_X → kDowngradingFrom_X_To_Y → kVersion_Y
 </code></pre>
 In above, X will be the source version that we are upgrading/downgrading from while Y is the target
 version that we are upgrading/downgrading to.
 
-Transitioning to one of the `kUpgradingFromXToY`/`kDowngradingFromXToY` states updates
+Transitioning to one of the `kUpgradingFrom_X_To_Y`/`kDowngradingFrom_X_To_Y` states updates
 the FCV document in `admin.system.version` with a new `targetVersion` field. Transitioning to a
-`kDowngradingFromXtoY` state in particular will also add a `previousVersion` field along with the
+`kDowngradingFrom_X_to_Y` state in particular will also add a `previousVersion` field along with the
 `targetVersion` field. These updates are done with `writeConcern: majority`.
 
 Some examples of on-disk representations of the upgrading and downgrading states:
 <pre><code>
-kUpgradingFrom44To47:
+kUpgradingFrom_5_0_To_5_1:
 {
-    version: 4.4,
-    targetVersion: 4.7
+    version: 5.0,
+    targetVersion: 5.1
 }
 
-kDowngradingFrom47To44:
+kDowngradingFrom_5_1_To_5_0:
 { 
-    version: 4.4, 
-    targetVersion: 4.4,
-    previousVersion: 4.7
+    version: 5.0, 
+    targetVersion: 5.0,
+    previousVersion: 5.1
 }
 </code></pre>
 
@@ -2019,15 +2031,19 @@ and acquire the global lock prior to the FCV change, they will proceed in the co
 FCV, and will guarantee to finish before the FCV change takes place. For the operations that begin
 after the FCV change, they will see the updated FCV and behave accordingly.
 
-Transitioning to one of the `kUpgradingFromXToY`/`kDowngradingFromXtoY`/`kVersionY`(on upgrade)
-states sets the `minWireVersion` to `WireVersion::LATEST_WIRE_VERSION` and also closes all incoming
-connections from internal clients with lower binary versions.
+Transitioning to one of the `kUpgradingFrom_X_To_Y`/`kDowngradingFrom_X_to_Y`/`kVersion_Y`(on
+upgrade) states sets the `minWireVersion` to `WireVersion::LATEST_WIRE_VERSION` and also closes all
+incoming connections from internal clients with lower binary versions.
 
-Finally, as part of transitioning to the `kVersionY` state, the `targetVersion` and the
+Finally, as part of transitioning to the `kVersion_Y` state, the `targetVersion` and the
 `previousVersion` (if applicable) fields of the FCV document are deleted while the `version` field
 is updated to reflect the new upgraded or downgraded state. This update is also done using
 `writeConcern: majority`. The new in-memory FCV value will be updated to reflect the on-disk
 changes.
+
+_Code spelunking starting points:_
+* [The template file used to generate the FCV constants](https://github.com/mongodb/mongo/blob/c4d2ed3292b0e113135dd85185c27a8235ea1814/src/mongo/util/version/releases.h.tpl#L1)
+* [The `FCVTransitions` class, that determines valid FCV transitions](https://github.com/mongodb/mongo/blob/c4d2ed3292b0e113135dd85185c27a8235ea1814/src/mongo/db/commands/feature_compatibility_version.cpp#L75)
 
 # System Collections
 

@@ -160,7 +160,8 @@ public:
      * allow by default and stages should opt-out if foreign collections are not allowed to be
      * sharded.
      */
-    virtual bool allowShardedForeignCollection(NamespaceString nss) const {
+    virtual bool allowShardedForeignCollection(NamespaceString nss,
+                                               bool inMultiDocumentTransaction) const {
         return true;
     }
 
@@ -287,11 +288,19 @@ public:
 
     bool allowedToPassthroughFromMongos() const override;
 
-    bool allowShardedForeignCollection(NamespaceString nss) const override;
+    bool allowShardedForeignCollection(NamespaceString nss,
+                                       bool inMultiDocumentTransaction) const override;
 
     const std::vector<LiteParsedPipeline>& getSubPipelines() const override {
         return _pipelines;
     }
+
+    /**
+     * Check the read concern constraints of all sub-pipelines. If the stage that owns the
+     * sub-pipelines has its own constraints this should be overridden to take those into account.
+     */
+    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
+                                                 bool isImplicitDefault) const override;
 
 protected:
     boost::optional<NamespaceString> _foreignNss;

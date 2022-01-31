@@ -30,7 +30,6 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/rpc/protocol.h"
 
 namespace mongo {
 class BSONObj;
@@ -53,6 +52,9 @@ public:
      */
     Status writeToMetadata(BSONObjBuilder* metadataBob) const;
 
+    ShardingMetadata(repl::OpTime lastOpTime, OID lastElectionId);
+
+private:
     /**
      * Gets the OpTime of the oplog entry of the last successful write operation executed by the
      * server that produced the metadata.
@@ -64,9 +66,6 @@ public:
      */
     const OID& getLastElectionId() const;
 
-    ShardingMetadata(repl::OpTime lastOpTime, OID lastElectionId);
-
-private:
     repl::OpTime _lastOpTime;
     OID _lastElectionId;
 };

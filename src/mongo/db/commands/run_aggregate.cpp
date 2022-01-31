@@ -86,7 +86,6 @@
 namespace mongo {
 
 using boost::intrusive_ptr;
-using std::endl;
 using std::shared_ptr;
 using std::string;
 using std::stringstream;
@@ -313,7 +312,7 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
         // If 'ns' refers to a view namespace, then we resolve its definition.
         auto resolveViewDefinition = [&](const NamespaceString& ns,
                                          std::shared_ptr<const ViewCatalog> vcp) -> Status {
-            auto resolvedView = vcp->resolveView(opCtx, ns);
+            auto resolvedView = vcp->resolveView(opCtx, ns, boost::none);
             if (!resolvedView.isOK()) {
                 return resolvedView.getStatus().withContext(
                     str::stream() << "Failed to resolve view '" << involvedNs.ns());
@@ -418,27 +417,11 @@ Status collatorCompatibleWithPipeline(OperationContext* opCtx,
         }
         if (!CollatorInterface::collatorsMatch(view->defaultCollator(), collator)) {
             return {ErrorCodes::OptionNotSupportedOnView,
-                    str::stream() << "Cannot override default collation of view "
+                    str::stream() << "Cannot override a view's default collation"
                                   << potentialViewNs.ns()};
         }
     }
     return Status::OK();
-}
-
-// A 4.7+ mongoS issues $mergeCursors pipelines with ChunkVersion::IGNORED. On the shard, this will
-// skip the versioning check but also marks the operation as versioned, so the shard knows that any
-// sub-operations executed by the merging pipeline should also be versioned. We manually set the
-// IGNORED version here if we are running a $mergeCursors pipeline and the operation is not already
-// versioned. This can happen in the case where we are running in a cluster with a 4.4 mongoS, which
-// does not set any shard version on a $mergeCursors pipeline.
-void setIgnoredShardVersionForMergeCursors(OperationContext* opCtx,
-                                           const AggregateCommandRequest& request) {
-    auto isMergeCursors = request.getFromMongos() && request.getPipeline().size() > 0 &&
-        request.getPipeline().front().firstElementFieldNameStringData() == "$mergeCursors"_sd;
-    if (isMergeCursors && !OperationShardingState::isOperationVersioned(opCtx)) {
-        OperationShardingState::get(opCtx).initializeClientRoutingVersions(
-            request.getNamespace(), ChunkVersion::IGNORED(), boost::none);
-    }
 }
 
 boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
@@ -447,7 +430,6 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     std::unique_ptr<CollatorInterface> collator,
     boost::optional<UUID> uuid,
     ExpressionContext::CollationMatchesDefault collationMatchesDefault) {
-    setIgnoredShardVersionForMergeCursors(opCtx, request);
     boost::intrusive_ptr<ExpressionContext> expCtx =
         new ExpressionContext(opCtx,
                               request,
@@ -699,16 +681,23 @@ Status runAggregate(OperationContext* opCtx,
             if (!request.getCollation().get_value_or(BSONObj()).isEmpty()) {
                 invariant(collatorToUse);  // Should already be resolved at this point.
                 if (!CollatorInterface::collatorsMatch(ctx->getView()->defaultCollator(),
-                                                       collatorToUse->get())) {
+                                                       collatorToUse->get()) &&
+                    !ctx->getView()->timeseries()) {
+
                     return {ErrorCodes::OptionNotSupportedOnView,
                             "Cannot override a view's default collation"};
                 }
             }
 
-
+            // Queries on timeseries views may specify non-default collation whereas queries
+            // on all other types of views must match the default collator (the collation use
+            // to originally create that collections). Thus in the case of operations on TS
+            // views, we use the request's collation.
+            auto timeSeriesCollator =
+                ctx->getView()->timeseries() ? request.getCollation() : boost::none;
             auto resolvedView = uassertStatusOK(DatabaseHolder::get(opCtx)
                                                     ->getViewCatalog(opCtx, nss.db())
-                                                    ->resolveView(opCtx, nss));
+                                                    ->resolveView(opCtx, nss, timeSeriesCollator));
 
             // With the view & collation resolved, we can relinquish locks.
             ctx.reset();
@@ -790,20 +779,8 @@ Status runAggregate(OperationContext* opCtx,
             dynamic_cast<DocumentSourceGeoNear*>(pipeline->peekFront());
 
         // Prepare a PlanExecutor to provide input into the pipeline, if needed.
-        std::pair<PipelineD::AttachExecutorCallback,
-                  std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-            attachExecutorCallback;
-        if (liteParsedPipeline.hasChangeStream()) {
-            // If we are using a change stream, the cursor stage should have a simple collation,
-            // regardless of what the user's collation was.
-            std::unique_ptr<CollatorInterface> collatorForCursor = nullptr;
-            auto collatorStash = expCtx->temporarilyChangeCollator(std::move(collatorForCursor));
-            attachExecutorCallback =
-                PipelineD::buildInnerQueryExecutor(collection, nss, &request, pipeline.get());
-        } else {
-            attachExecutorCallback =
-                PipelineD::buildInnerQueryExecutor(collection, nss, &request, pipeline.get());
-        }
+        auto attachExecutorCallback =
+            PipelineD::buildInnerQueryExecutor(collection, nss, &request, pipeline.get());
 
         if (canOptimizeAwayPipeline(pipeline.get(),
                                     attachExecutorCallback.second.get(),
@@ -861,7 +838,7 @@ Status runAggregate(OperationContext* opCtx,
     std::vector<ClientCursorPin> pins;
     std::vector<ClientCursor*> cursors;
 
-    auto cursorFreer = makeGuard([&] {
+    ScopeGuard cursorFreer([&] {
         for (auto& p : pins) {
             p.deleteUnderlying();
         }
@@ -874,6 +851,7 @@ Status runAggregate(OperationContext* opCtx,
             APIParameters::get(opCtx),
             opCtx->getWriteConcern(),
             repl::ReadConcernArgs::get(opCtx),
+            ReadPreferenceSetting::get(opCtx),
             cmdObj,
             privileges);
         if (expCtx->tailableMode == TailableModeEnum::kTailable) {

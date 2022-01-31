@@ -29,6 +29,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/traverse.h"
 
 namespace mongo::sbe {
@@ -275,7 +276,7 @@ void TraverseStage::close() {
     _children[0]->close();
 }
 
-void TraverseStage::doSaveState() {
+void TraverseStage::doSaveState(bool relinquishCursor) {
     if (_isReadingLeftSide) {
         // If we yield while reading the left side, there is no need to makeOwned() data held in
         // the right side, since we will have to re-open it anyway.
@@ -287,14 +288,14 @@ void TraverseStage::doSaveState() {
         _outFieldOutputAccessor.reset();
     }
 
-    if (!slotsAccessible()) {
+    if (!slotsAccessible() || !relinquishCursor) {
         return;
     }
 
     _outFieldOutputAccessor.makeOwned();
 }
 
-void TraverseStage::doRestoreState() {
+void TraverseStage::doRestoreState(bool relinquishCursor) {
     if (!slotsAccessible()) {
         return;
     }
@@ -316,7 +317,7 @@ std::unique_ptr<PlanStageStats> TraverseStage::getStats(bool includeDebugInfo) c
         bob.appendNumber("inputSlot", static_cast<long long>(_inField));
         bob.appendNumber("outputSlot", static_cast<long long>(_outField));
         bob.appendNumber("outputSlotInner", static_cast<long long>(_outFieldInner));
-        bob.append("correlatedSlots", _correlatedSlots);
+        bob.append("correlatedSlots", _correlatedSlots.begin(), _correlatedSlots.end());
         if (_nestedArraysDepth) {
             bob.appendNumber("nestedArraysDepth", static_cast<long long>(*_nestedArraysDepth));
         }
@@ -380,5 +381,15 @@ std::vector<DebugPrinter::Block> TraverseStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     return ret;
+}
+
+size_t TraverseStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_correlatedSlots);
+    size += _fold ? _fold->estimateSize() : 0;
+    size += _final ? _final->estimateSize() : 0;
+    size += size_estimator::estimate(_specificStats);
+    return size;
 }
 }  // namespace mongo::sbe

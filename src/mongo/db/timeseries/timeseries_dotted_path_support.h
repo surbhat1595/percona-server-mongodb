@@ -69,7 +69,41 @@ void extractAllElementsAlongBucketPath(const BSONObj& obj,
                                        bool expandArrayOnTrailingField = true,
                                        MultikeyComponents* arrayComponents = nullptr);
 
+/**
+ * Finds arrays in individual metrics along the specified data path.
+ *
+ * The 'path' can be specified using a dotted notation in order to traverse through embedded objects
+ * and array elements. It must point to path like 'data.a.b', referring to the data that would be
+ * stored at 'a.b' in each of the documents resulting from calling $_internalUnpackBucket on the
+ * original document. Note that the caller should include the 'data' prefix, but omit the depth-2
+ * numeric path entry that results from pivoting the data into the bucketed format. That is, if the
+ * caller is interested in the field `a.b` in the original user-facing document, they should specify
+ * `data.a.b`, and not worry about the fact that the bucket actually contains entries like
+ * `data.a.0.b` and `data.a.3.b`.
+ *
+ * In the example above, with 'data.a.b', the function will return true if any individual
+ * measurement contained in the bucket has an array value for 'a' or for 'a.b', and false otherwise.
+ */
+bool haveArrayAlongBucketDataPath(const BSONObj& bucketObj, StringData path);
 
+// Indicates the truthy outcome of a decision-making process. The 'Undecided' value is for internal
+// use only, and should not be returned to a caller outside this namespace.
+enum class Decision { Yes, Maybe, No, Undecided };
+std::ostream& operator<<(std::ostream& s, const Decision& i);
+
+/**
+ * Identifies if measurements in the given bucket contains array data in 'userField'.
+ *
+ * This function is meant to be used as an optimized check in indexing to see if we must examine the
+ * full 'data.'-prefixed field contents. The function guarantees that if it returns Yes there is
+ * definitely an array, and if it returns No there is definitely not an array. If it returns Maybe,
+ * the caller must scan the actual data. It should never return Undecided.
+ *
+ * The 'userField' should be specified without any bucket field prefix. That is, if the
+ * user defines an index on 'a.b.c', 'userField' should be 'a.b.c' and not 'data.a.b.c',
+ * 'control.min.a.b.c', etc.
+ */
+Decision fieldContainsArrayData(const BSONObj& bucketObj, StringData userField);
 }  // namespace dotted_path_support
 }  // namespace timeseries
 }  // namespace mongo

@@ -81,6 +81,7 @@
 #include "mongo/s/client/sharding_connection_hook.h"
 #include "mongo/s/commands/kill_sessions_remote.h"
 #include "mongo/s/committed_optime_metadata_hook.h"
+#include "mongo/s/concurrency/locker_mongos_client_observer.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
@@ -869,8 +870,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
                                      ("EndStartupOptionStorage"))
 // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
 (InitializerContext* context) {
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(
-        ServerGlobalParams::FeatureCompatibility::kLatest);
+    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
 }
 
 #ifdef MONGO_CONFIG_SSL
@@ -903,7 +903,10 @@ ExitCode mongos_main(int argc, char* argv[]) {
     }
 
     try {
-        setGlobalServiceContext(ServiceContext::make());
+        auto serviceContextHolder = ServiceContext::make();
+        serviceContextHolder->registerClientObserver(
+            std::make_unique<LockerMongosClientObserver>());
+        setGlobalServiceContext(std::move(serviceContextHolder));
     } catch (...) {
         auto cause = exceptionToStatus();
         LOGV2_FATAL_OPTIONS(

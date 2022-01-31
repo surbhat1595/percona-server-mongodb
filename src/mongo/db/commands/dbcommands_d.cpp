@@ -302,6 +302,7 @@ public:
             auto exec = uassertStatusOK(getExecutor(opCtx,
                                                     &coll,
                                                     std::move(cq),
+                                                    nullptr /* extractAndAttachPipelineStages */,
                                                     PlanYieldPolicy::YieldPolicy::YIELD_MANUAL,
                                                     QueryPlannerParams::NO_TABLE_SCAN));
 
@@ -410,9 +411,8 @@ public:
                     const BSONObj& query,
                     const BSONObj& sort) {
         DBDirectClient client(opCtx);
-        Query q(query);
-        q.sort(sort);
-        std::unique_ptr<DBClientCursor> c = client.query(NamespaceString(ns), q);
+        std::unique_ptr<DBClientCursor> c =
+            client.query(NamespaceString(ns), query, Query().sort(sort));
         while (c->more()) {
             LOGV2(20454, "Chunk: {chunk}", "Dumping chunks", "chunk"_attr = c->nextSafe());
         }

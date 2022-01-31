@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 
+#include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/util/str.h"
 
 namespace mongo::sbe {
@@ -161,7 +162,7 @@ void LoopJoinStage::close() {
     _children[0]->close();
 }
 
-void LoopJoinStage::doSaveState() {
+void LoopJoinStage::doSaveState(bool relinquishCursor) {
     if (_isReadingLeftSide || _outerGetNext) {
         // If we yield while reading the left side, there is no need to makeOwned() data held in
         // the right side, since we will have to re-open it anyway.
@@ -177,8 +178,8 @@ std::unique_ptr<PlanStageStats> LoopJoinStage::getStats(bool includeDebugInfo) c
         BSONObjBuilder bob;
         bob.appendNumber("innerOpens", static_cast<long long>(_specificStats.innerOpens));
         bob.appendNumber("innerCloses", static_cast<long long>(_specificStats.innerCloses));
-        bob.append("outerProjects", _outerProjects);
-        bob.append("outerCorrelated", _outerCorrelated);
+        bob.append("outerProjects", _outerProjects.begin(), _outerProjects.end());
+        bob.append("outerCorrelated", _outerCorrelated.begin(), _outerCorrelated.end());
         if (_predicate) {
             bob.append("predicate", DebugPrinter{}.print(_predicate->debugPrint()));
         }
@@ -240,5 +241,15 @@ std::vector<DebugPrinter::Block> LoopJoinStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     return ret;
+}
+
+size_t LoopJoinStage::estimateCompileTimeSize() const {
+    size_t size = sizeof(*this);
+    size += size_estimator::estimate(_children);
+    size += size_estimator::estimate(_outerProjects);
+    size += size_estimator::estimate(_outerCorrelated);
+    size += _predicate ? _predicate->estimateSize() : 0;
+    size += size_estimator::estimate(_specificStats);
+    return size;
 }
 }  // namespace mongo::sbe

@@ -73,6 +73,7 @@ const OperationContext::Decoration<bool> operationBlockedBehindCatalogCacheRefre
 
 }  // namespace
 
+AtomicWord<uint64_t> ComparableDatabaseVersion::_disambiguatingSequenceNumSource{1ULL};
 AtomicWord<uint64_t> ComparableDatabaseVersion::_forcedRefreshSequenceNumSource{1ULL};
 
 CachedDatabaseInfo::CachedDatabaseInfo(DatabaseTypeValueHandle&& dbt) : _dbt(std::move(dbt)){};
@@ -95,12 +96,15 @@ DatabaseVersion CachedDatabaseInfo::databaseVersion() const {
 
 ComparableDatabaseVersion ComparableDatabaseVersion::makeComparableDatabaseVersion(
     const boost::optional<DatabaseVersion>& version) {
-    return ComparableDatabaseVersion(version, _forcedRefreshSequenceNumSource.load());
+    return ComparableDatabaseVersion(version,
+                                     _disambiguatingSequenceNumSource.fetchAndAdd(1),
+                                     _forcedRefreshSequenceNumSource.load());
 }
 
 ComparableDatabaseVersion
 ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh() {
     return ComparableDatabaseVersion(boost::none /* version */,
+                                     _disambiguatingSequenceNumSource.fetchAndAdd(1),
                                      _forcedRefreshSequenceNumSource.addAndFetch(2) - 1);
 }
 
@@ -114,6 +118,9 @@ BSONObj ComparableDatabaseVersion::toBSONForLogging() const {
         builder.append("dbVersion"_sd, _dbVersion->toBSON());
     else
         builder.append("dbVersion"_sd, "None");
+
+    builder.append("disambiguatingSequenceNum"_sd,
+                   static_cast<int64_t>(_disambiguatingSequenceNum));
 
     builder.append("forcedRefreshSequenceNum"_sd, static_cast<int64_t>(_forcedRefreshSequenceNum));
 
@@ -142,7 +149,13 @@ bool ComparableDatabaseVersion::operator<(const ComparableDatabaseVersion& other
     if (_forcedRefreshSequenceNum == 0)
         return false;  // Only default constructed values have _forcedRefreshSequenceNum == 0 and
                        // they are always equal
-    return _dbVersion < other._dbVersion;
+
+    // If both versions are valid we rely on the underlying DatabaseVersion comparison
+    if (_dbVersion && other._dbVersion)
+        return _dbVersion < other._dbVersion;
+
+    // Finally, we do a disambiguating sequence number comparison
+    return _disambiguatingSequenceNum < other._disambiguatingSequenceNum;
 }
 
 CatalogCache::CatalogCache(ServiceContext* const service, CatalogCacheLoader& cacheLoader)
@@ -261,19 +274,15 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionRoutingInfoAt(
                                     dbInfo.databaseVersion(),
                                     std::move(collEntry),
                                     atClusterTime);
-            } catch (ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& ex) {
-                LOGV2_FOR_CATALOG_REFRESH(5310501,
-                                          0,
-                                          "Collection refresh failed",
-                                          "namespace"_attr = nss,
-                                          "exception"_attr = redact(ex));
-                _stats.totalRefreshWaitTimeMicros.addAndFetch(t.micros());
-                acquireTries++;
-                if (acquireTries == kMaxInconsistentRoutingInfoRefreshAttempts) {
+            } catch (const DBException& ex) {
+                bool isCatalogCacheRetriableError = ex.isA<ErrorCategory::SnapshotError>() ||
+                    ex.code() == ErrorCodes::ConflictingOperationInProgress ||
+                    ex.code() == ErrorCodes::QueryPlanKilled;
+                if (!isCatalogCacheRetriableError) {
                     return ex.toStatus();
                 }
-            } catch (ExceptionForCat<ErrorCategory::SnapshotError>& ex) {
-                LOGV2_FOR_CATALOG_REFRESH(5487402,
+
+                LOGV2_FOR_CATALOG_REFRESH(4086500,
                                           0,
                                           "Collection refresh failed",
                                           "namespace"_attr = nss,
@@ -663,20 +672,11 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
             // updating. Otherwise, we're making a whole new routing table.
             if (isIncremental &&
                 existingHistory->optRt->getVersion().epoch() == collectionAndChunks.epoch) {
-                if (existingHistory->optRt->getVersion().getTimestamp().is_initialized() !=
-                    collectionAndChunks.creationTime.is_initialized()) {
-                    return existingHistory->optRt
-                        ->makeUpdatedReplacingTimestamp(collectionAndChunks.creationTime)
-                        .makeUpdated(collectionAndChunks.reshardingFields,
-                                     maxChunkSize,
-                                     collectionAndChunks.allowMigrations,
-                                     collectionAndChunks.changedChunks);
-                } else {
-                    return existingHistory->optRt->makeUpdated(collectionAndChunks.reshardingFields,
-                                                               maxChunkSize,
-                                                               collectionAndChunks.allowMigrations,
-                                                               collectionAndChunks.changedChunks);
-                }
+                return existingHistory->optRt->makeUpdated(collectionAndChunks.timeseriesFields,
+                                                           collectionAndChunks.reshardingFields,
+                                                           maxChunkSize,
+                                                           collectionAndChunks.allowMigrations,
+                                                           collectionAndChunks.changedChunks);
             }
 
             auto defaultCollator = [&]() -> std::unique_ptr<CollatorInterface> {

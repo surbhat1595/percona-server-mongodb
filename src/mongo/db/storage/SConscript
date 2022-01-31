@@ -243,6 +243,7 @@ env.Library(
         'record_store_test_updatewithdamages.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/service_context',
@@ -262,18 +263,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/unittest/unittest',
-    ],
-)
-
-env.Library(
-    target='storage_debug_util',
-    source=[
-        'storage_debug_util.cpp',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/catalog/index_catalog',
-        '$BUILD_DIR/mongo/db/catalog/validate_results',
-        '$BUILD_DIR/mongo/db/db_raii',
     ],
 )
 
@@ -318,7 +307,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/server_status',
-        '$BUILD_DIR/mongo/db/server_options_core',
         'backup_cursor_hooks'
     ]
 )

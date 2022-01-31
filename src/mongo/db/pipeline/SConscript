@@ -15,6 +15,17 @@ env.SConscript(
 )
 
 env.Library(
+    target="change_stream_preimage",
+    source=[
+        "change_stream_preimage.idl",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
     target='aggregation',
     source=[
         'aggregation.cpp',
@@ -352,8 +363,8 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/query/projection_ast',
         '$BUILD_DIR/mongo/db/repl/image_collection_entry',
         '$BUILD_DIR/mongo/db/sorter/sorter_idl',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_idl',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_index_schema_conversion_functions',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/rpc/command_status',
     ]
 )
@@ -373,15 +384,18 @@ env.Library(
         'document_source_change_stream_close_cursor.cpp',
         'document_source_change_stream_ensure_resume_token_present.cpp',
         'document_source_change_stream_handle_topology_change.cpp',
-        'document_source_change_stream_lookup_pre_image.cpp',
+        'document_source_change_stream_add_pre_image.cpp',
         'document_source_change_stream_oplog_match.cpp',
         'document_source_change_stream_transform.cpp',
         'document_source_change_stream_unwind_transaction.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
         '$BUILD_DIR/mongo/db/pipeline/pipeline',
         '$BUILD_DIR/mongo/db/pipeline/sharded_agg_helpers',
+        '$BUILD_DIR/mongo/db/update/update_driver',
         '$BUILD_DIR/mongo/s/query/router_exec_stage',
+        'change_stream_preimage',
     ],
 )
 
@@ -524,6 +538,7 @@ env.CppUnitTest(
         'window_function/window_function_exec_removable_test.cpp',
         'window_function/window_function_integral_test.cpp',
         'window_function/window_function_min_max_test.cpp',
+        'window_function/window_function_n_test.cpp',
         'window_function/window_function_push_test.cpp',
         'window_function/window_function_std_dev_test.cpp',
         'window_function/window_function_exec_first_last_test.cpp',

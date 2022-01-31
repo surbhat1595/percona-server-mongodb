@@ -95,6 +95,7 @@ struct CollectionUpdateArgs {
 
     StoreDocOption storeDocOption = StoreDocOption::None;
     bool preImageRecordingEnabledForCollection = false;
+    bool changeStreamPreAndPostImagesEnabledForCollection = false;
 
     // Set if an OpTime was reserved for the update ahead of time.
     boost::optional<OplogSlot> oplogSlot = boost::none;
@@ -485,12 +486,11 @@ public:
     /**
      * Returns a non-ok Status if validator is not legal for this collection.
      */
-    virtual Validator parseValidator(
-        OperationContext* opCtx,
-        const BSONObj& validator,
-        MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-        boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
-            maxFeatureCompatibilityVersion) const = 0;
+    virtual Validator parseValidator(OperationContext* opCtx,
+                                     const BSONObj& validator,
+                                     MatchExpressionParser::AllowedFeatureSet allowedFeatures,
+                                     boost::optional<multiversion::FeatureCompatibilityVersion>
+                                         maxFeatureCompatibilityVersion) const = 0;
 
     /**
      * Sets the validator for this collection.
@@ -515,6 +515,9 @@ public:
 
     virtual bool getRecordPreImages() const = 0;
     virtual void setRecordPreImages(OperationContext* opCtx, bool val) = 0;
+
+    virtual bool isChangeStreamPreAndPostImagesEnabled() const = 0;
+    virtual void setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) = 0;
 
     /**
      * Returns true if this is a temporary collection.
@@ -561,6 +564,12 @@ public:
      * query planner.
      */
     virtual void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) = 0;
+
+    /**
+     * Removes invalid index options on all indexes in this collection. Returns a list of index
+     * names that contained invalid index options.
+     */
+    virtual std::vector<std::string> removeInvalidIndexOptions(OperationContext* opCtx) = 0;
 
     /**
      * Updates the 'temp' setting for this collection.
@@ -824,6 +833,14 @@ public:
 
     void yield() const override;
     void restore() const override;
+
+    RestoreFn detachRestoreFn() {
+        return std::move(_restoreFn);
+    }
+
+    void attachRestoreFn(RestoreFn newRestoreFn) {
+        _restoreFn = std::move(newRestoreFn);
+    }
 
     friend std::ostream& operator<<(std::ostream& os, const CollectionPtr& coll);
 

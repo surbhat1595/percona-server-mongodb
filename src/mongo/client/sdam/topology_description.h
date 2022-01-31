@@ -36,6 +36,7 @@
 
 #include "mongo/bson/oid.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/client/sdam/election_id_set_version_pair.h"
 #include "mongo/client/sdam/sdam_configuration.h"
 #include "mongo/client/sdam/sdam_datatypes.h"
 #include "mongo/client/sdam/server_description.h"
@@ -58,17 +59,19 @@ public:
     static TopologyDescriptionPtr create(SdamConfiguration config);
 
     /**
-     * Copy the given TopologyDescription and set the topologyDescription of all contained server
-     * descriptions to point to this instance.
+     * Deep copy the given TopologyDescription. The copy constructor won't work in this scenario
+     * because shared_from_this cannot be used from within a constructor.
      */
-    static TopologyDescriptionPtr clone(TopologyDescriptionPtr source);
+    static TopologyDescriptionPtr clone(const TopologyDescription& source);
 
     const UUID& getId() const;
     TopologyType getType() const;
     const boost::optional<std::string>& getSetName() const;
 
+    // TODO(SERVER-59409): remove next 2 methods and keep only pair getter.
     const boost::optional<int>& getMaxSetVersion() const;
     const boost::optional<OID>& getMaxElectionId() const;
+    const ElectionIdSetVersionPair getMaxElectionIdSetVersionPair() const;
 
     const std::vector<ServerDescriptionPtr>& getServers() const;
 
@@ -143,8 +146,6 @@ private:
      * https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#logical-session-timeout
      */
     void calculateLogicalSessionTimeout();
-
-    static void associateServerDescriptions(const TopologyDescriptionPtr& topologyDescription);
 
     // unique id for this topology
     UUID _id = UUID::gen();

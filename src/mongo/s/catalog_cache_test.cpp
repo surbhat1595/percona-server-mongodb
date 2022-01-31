@@ -151,7 +151,7 @@ protected:
     }
 
     std::vector<ChunkType> makeChunks(ChunkVersion version) {
-        ChunkType chunk(kNss,
+        ChunkType chunk(kUUID,
                         {kShardKeyPattern.getKeyPattern().globalMin(),
                          kShardKeyPattern.getKeyPattern().globalMax()},
                         version,
@@ -162,13 +162,14 @@ protected:
 
     CollectionType makeCollectionType(const ChunkVersion& collVersion) {
         CollectionType coll(
-            kNss, collVersion.epoch(), collVersion.getTimestamp(), Date_t::now(), UUID::gen());
+            kNss, collVersion.epoch(), collVersion.getTimestamp(), Date_t::now(), kUUID);
         coll.setKeyPattern(kShardKeyPattern.getKeyPattern());
         coll.setUnique(false);
         return coll;
     }
 
     const NamespaceString kNss{"catalgoCacheTestDB.foo"};
+    const UUID kUUID = UUID::gen();
     const std::string kPattern{"_id"};
     const ShardKeyPattern kShardKeyPattern{BSON(kPattern << 1)};
     const int kDummyPort{12345};
@@ -210,6 +211,34 @@ TEST_F(CatalogCacheTest, GetCachedDatabase) {
     ASSERT_EQ(cachedDb.databaseVersion().getLastMod(), dbVersion.getLastMod());
 }
 
+TEST_F(CatalogCacheTest, GetDatabaseDrop) {
+    const auto dbName = "testDB";
+    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
+
+    _catalogCacheLoader->setDatabaseRefreshReturnValue(
+        DatabaseType(dbName, kShards[0], true, dbVersion));
+
+    // The CatalogCache doesn't have any valid info about this DB and finds a new DatabaseType
+    auto swDatabase = _catalogCache->getDatabase(operationContext(), dbName);
+    ASSERT_OK(swDatabase.getStatus());
+    const auto cachedDb = swDatabase.getValue();
+    ASSERT_TRUE(cachedDb.shardingEnabled());
+    ASSERT_EQ(cachedDb.databaseVersion().getUuid(), dbVersion.getUuid());
+    ASSERT_EQ(cachedDb.databaseVersion().getLastMod(), dbVersion.getLastMod());
+
+    // Advancing the timeInStore, e.g. because of a movePrimary
+    _catalogCache->onStaleDatabaseVersion(dbName, dbVersion.makeUpdated());
+
+    // However, when this CatalogCache asks to the loader for the new info associated to dbName it
+    // didn't find any (i.e. the database was dropped)
+    _catalogCacheLoader->setDatabaseRefreshReturnValue(
+        Status(ErrorCodes::NamespaceNotFound, "dummy errmsg"));
+
+    // Finally, the CatalogCache shouldn't find the Database
+    swDatabase = _catalogCache->getDatabase(operationContext(), dbName);
+    ASSERT_EQUALS(ErrorCodes::NamespaceNotFound, swDatabase.getStatus());
+}
+
 TEST_F(CatalogCacheTest, InvalidateSingleDbOnShardRemoval) {
     const auto dbName = "testDB";
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
@@ -238,7 +267,7 @@ TEST_F(CatalogCacheTest, OnStaleDatabaseVersionNoVersion) {
 
 TEST_F(CatalogCacheTest, OnStaleShardVersionWithSameVersion) {
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), Timestamp());
 
     loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
     loadCollection(cachedCollVersion);
@@ -249,7 +278,7 @@ TEST_F(CatalogCacheTest, OnStaleShardVersionWithSameVersion) {
 
 TEST_F(CatalogCacheTest, OnStaleShardVersionWithNoVersion) {
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), Timestamp());
 
     loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
     loadCollection(cachedCollVersion);
@@ -262,7 +291,7 @@ TEST_F(CatalogCacheTest, OnStaleShardVersionWithNoVersion) {
 
 TEST_F(CatalogCacheTest, OnStaleShardVersionWithGraterVersion) {
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), boost::none /* timestamp */);
+    const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), Timestamp());
     const auto wantedCollVersion =
         ChunkVersion(2, 0, cachedCollVersion.epoch(), cachedCollVersion.getTimestamp());
 
@@ -275,168 +304,6 @@ TEST_F(CatalogCacheTest, OnStaleShardVersionWithGraterVersion) {
     ASSERT(status == ErrorCodes::InternalError);
 }
 
-TEST_F(CatalogCacheTest, GetDatabaseWithMetadataFormatChange) {
-    const auto dbName = "testDB";
-    const auto uuid = UUID::gen();
-    const DatabaseVersion versionWithoutTimestamp(uuid, Timestamp());
-    const DatabaseVersion versionWithTimestamp(uuid, Timestamp(42));
-
-    auto getDatabaseWithRefreshAndCheckResults = [&](const DatabaseVersion& version) {
-        _catalogCacheLoader->setDatabaseRefreshReturnValue(
-            DatabaseType(dbName, kShards[0], true, version));
-        const auto cachedDb =
-            _catalogCache->getDatabaseWithRefresh(operationContext(), dbName).getValue();
-        const auto cachedDbVersion = cachedDb.databaseVersion();
-        ASSERT_EQ(cachedDbVersion.getTimestamp(), version.getTimestamp());
-    };
-
-    // The CatalogCache is refreshed and it finds a DatabaseType using uuids.
-    getDatabaseWithRefreshAndCheckResults(versionWithoutTimestamp);
-    // The CatalogCache is forced to refresh and it finds a metadata format missmatch: we are using
-    // uuids locally but the loader returns a version with uuid and timestamp. The catalog cache
-    // returns a new DatabaseType with the new format.
-    getDatabaseWithRefreshAndCheckResults(versionWithTimestamp);
-    // The CatalogCache is forced to refresh and it finds a metadata format missmatch: we are using
-    // uuids and timestamps locally but the loader returns a version with only uuid. The catalog
-    // cache returns a new DatabaseType with the new format.
-    getDatabaseWithRefreshAndCheckResults(versionWithoutTimestamp);
-}
-
-TEST_F(CatalogCacheTest, GetCollectionWithMetadataFormatChange) {
-    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto epoch = OID::gen();
-    const auto collVersionWithoutTimestamp = ChunkVersion(1, 0, epoch, boost::none /* timestamp */);
-    const auto collVersionWithTimestamp = ChunkVersion(1, 0, epoch, Timestamp(42));
-
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
-
-    auto getCollectionWithRefreshAndCheckResults = [this](const ChunkVersion& version) {
-        const auto coll = makeCollectionType(version);
-        const auto scopedCollProv = scopedCollectionProvider(coll);
-        const auto scopedChunksProv = scopedChunksProvider(makeChunks(version));
-
-        const auto swChunkManager =
-            _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
-        ASSERT_OK(swChunkManager.getStatus());
-
-        const auto& chunkManager = swChunkManager.getValue();
-        const auto collectionVersion = chunkManager.getVersion();
-
-        ASSERT_EQ(collectionVersion.getTimestamp(), version.getTimestamp());
-        chunkManager.forEachChunk([&](const Chunk& chunk) {
-            ASSERT_EQ(chunk.getLastmod().getTimestamp(), version.getTimestamp());
-            return true;
-        });
-    };
-    // The CatalogCache is refreshed and it finds a Collection using epochs.
-    getCollectionWithRefreshAndCheckResults(collVersionWithoutTimestamp);
-    // The CatalogCache is forced to refresh and it finds a metadata format mismatch: we are using
-    // epochs locally but the loader returns a version with uuid and timestamp. The catalog cache
-    // returns a new ChunkManager with the new format.
-    getCollectionWithRefreshAndCheckResults(collVersionWithTimestamp);
-    // The CatalogCache is forced to refresh and it finds a metadata format mismatch: we are using
-    // epochs and timestamps locally but the loader returns a version with just epochs. The catalog
-    // cache returns a new ChunkManager with the new format.
-    getCollectionWithRefreshAndCheckResults(collVersionWithoutTimestamp);
-}
-
-TEST_F(CatalogCacheTest,
-       GetCollectionWithRefreshDuringUpgradeWithMetadataFormatChangeChunksDontMatchCollection) {
-    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto epoch = OID::gen();
-    const auto timestamp = Timestamp(42);
-
-    const auto collVersionWithoutTimestamp = ChunkVersion(1, 0, epoch, boost::none /* timestamp */);
-    const auto collVersionWithTimestamp = ChunkVersion(1, 0, epoch, timestamp);
-
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
-
-    const auto coll = makeCollectionType(collVersionWithoutTimestamp);
-    const auto scopedCollProv = scopedCollectionProvider(coll);
-    const auto scopedChunksProv = scopedChunksProvider(makeChunks(collVersionWithTimestamp));
-
-    const auto swChunkManager =
-        _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
-    ASSERT_OK(swChunkManager.getStatus());
-
-    const auto& chunkManager = swChunkManager.getValue();
-    const auto collectionVersion = chunkManager.getVersion();
-
-    ASSERT_EQ(collectionVersion.getTimestamp(), boost::none);
-
-    chunkManager.forEachChunk([&](const Chunk& chunk) {
-        ASSERT_EQ(chunk.getLastmod().getTimestamp(), timestamp);
-        return true;
-    });
-}
-
-TEST_F(CatalogCacheTest,
-       GetCollectionWithRefreshDuringUpgradeWithMetadataFormatChangeSomeChunksMatchCollection) {
-    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto epoch = OID::gen();
-    const auto timestamp = Timestamp(42);
-
-    const auto collVersionWithoutTimestamp = ChunkVersion(1, 0, epoch, boost::none /* timestamp */);
-    const auto collVersionWithTimestamp = ChunkVersion(1, 1, epoch, timestamp);
-
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
-
-    const auto coll = makeCollectionType(collVersionWithoutTimestamp);
-    const auto scopedCollProv = scopedCollectionProvider(coll);
-
-    ChunkType chunk1(kNss,
-                     {kShardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 100)},
-                     collVersionWithTimestamp,
-                     {"0"});
-    chunk1.setName(OID::gen());
-
-    ChunkType chunk2(kNss,
-                     {BSON("_id" << 100), kShardKeyPattern.getKeyPattern().globalMax()},
-                     collVersionWithoutTimestamp,
-                     {"0"});
-    chunk2.setName(OID::gen());
-
-    const auto scopedChunksProv = scopedChunksProvider(std::vector{chunk1, chunk2});
-
-    const auto swChunkManager =
-        _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
-    ASSERT_OK(swChunkManager.getStatus());
-
-    const auto& chunkManager = swChunkManager.getValue();
-    const auto collectionVersion = chunkManager.getVersion();
-
-    ASSERT_EQ(collectionVersion.getTimestamp(), boost::none);
-}
-
-TEST_F(CatalogCacheTest, GetCollectionWithRefreshDuringDowngradeWithMetadataFormatChange) {
-    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
-    const auto epoch = OID::gen();
-    const auto timestamp = Timestamp(42);
-
-    const auto collVersionWithoutTimestamp = ChunkVersion(1, 0, epoch, boost::none /* timestamp */);
-    const auto collVersionWithTimestamp = ChunkVersion(1, 0, epoch, timestamp);
-
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
-
-    const auto coll = makeCollectionType(collVersionWithTimestamp);
-    const auto scopedCollProv = scopedCollectionProvider(coll);
-    const auto scopedChunksProv = scopedChunksProvider(makeChunks(collVersionWithoutTimestamp));
-
-    const auto swChunkManager =
-        _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
-    ASSERT_OK(swChunkManager.getStatus());
-
-    const auto& chunkManager = swChunkManager.getValue();
-    const auto collectionVersion = chunkManager.getVersion();
-
-    ASSERT_EQ(collectionVersion.getTimestamp(), timestamp);
-
-    chunkManager.forEachChunk([&](const Chunk& chunk) {
-        ASSERT_EQ(chunk.getLastmod().getTimestamp(), boost::none);
-        return true;
-    });
-}
-
 TEST_F(CatalogCacheTest, TimeseriesFieldsAreProperlyPropagatedOnCC) {
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
     const auto epoch = OID::gen();
@@ -445,19 +312,52 @@ TEST_F(CatalogCacheTest, TimeseriesFieldsAreProperlyPropagatedOnCC) {
     loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
 
     auto coll = makeCollectionType(version);
-    TypeCollectionTimeseriesFields tsFields;
-    tsFields.setTimeseriesOptions(TimeseriesOptions("fieldName"));
-    coll.setTimeseriesFields(tsFields);
+    auto chunks = makeChunks(version);
+    auto timeseriesOptions = TimeseriesOptions("fieldName");
 
-    const auto scopedCollProv = scopedCollectionProvider(coll);
-    const auto scopedChunksProv = scopedChunksProvider(makeChunks(version));
+    // 1st refresh: we should find a bucket granularity of seconds (default)
+    {
+        TypeCollectionTimeseriesFields tsFields;
+        tsFields.setTimeseriesOptions(timeseriesOptions);
+        coll.setTimeseriesFields(tsFields);
 
-    const auto swChunkManager =
-        _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
-    ASSERT_OK(swChunkManager.getStatus());
+        const auto scopedCollProv = scopedCollectionProvider(coll);
+        const auto scopedChunksProv = scopedChunksProvider(chunks);
 
-    const auto& chunkManager = swChunkManager.getValue();
-    ASSERT(chunkManager.getTimeseriesFields().is_initialized());
+        const auto swChunkManager =
+            _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
+        ASSERT_OK(swChunkManager.getStatus());
+
+        const auto& chunkManager = swChunkManager.getValue();
+        ASSERT(chunkManager.getTimeseriesFields().is_initialized());
+        ASSERT(chunkManager.getTimeseriesFields()->getGranularity() ==
+               BucketGranularityEnum::Seconds);
+    }
+
+    // 2nd refresh: we should find a bucket granularity of hours
+    {
+        TypeCollectionTimeseriesFields tsFields;
+        timeseriesOptions.setGranularity(BucketGranularityEnum::Hours);
+        tsFields.setTimeseriesOptions(timeseriesOptions);
+        coll.setTimeseriesFields(tsFields);
+
+        auto& lastChunk = chunks.back();
+        ChunkVersion newCollectionVersion = lastChunk.getVersion();
+        newCollectionVersion.incMinor();
+        lastChunk.setVersion(newCollectionVersion);
+
+        const auto scopedCollProv = scopedCollectionProvider(coll);
+        const auto scopedChunksProv = scopedChunksProvider(std::vector{lastChunk});
+
+        const auto swChunkManager =
+            _catalogCache->getCollectionRoutingInfoWithRefresh(operationContext(), coll.getNss());
+        ASSERT_OK(swChunkManager.getStatus());
+
+        const auto& chunkManager = swChunkManager.getValue();
+        ASSERT(chunkManager.getTimeseriesFields().is_initialized());
+        ASSERT(chunkManager.getTimeseriesFields()->getGranularity() ==
+               BucketGranularityEnum::Hours);
+    }
 }
 
 TEST_F(CatalogCacheTest, LookupCollectionWithInvalidOptions) {

@@ -30,6 +30,11 @@
 #raw
 #pragma once
 
+#include <array>
+#include <fmt/format.h>
+#include <utility>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/util/assert_util.h"
 #end raw
@@ -50,13 +55,13 @@
 #set mvc_file = open(releases_yml_path, 'r')
 #set mvc_doc = yaml.safe_load(mvc_file)
 #set mvc_fcvs = mvc_doc['featureCompatibilityVersions']
-#set mvc_majors = mvc_doc['majorReleases']
+#set mvc_majors = mvc_doc['longTermSupportReleases']
 ##
 ## Transform strings to versions.
 #set global fcvs = list(map(Version, mvc_fcvs))
 #set majors = list(map(Version, mvc_majors))
 
-#set global latest = Version(re.sub(r'-.*', '', mongo_version))
+#set global latest = Version(re.match(r'^[0-9]+\.[0-9]+', $mongo_version).group(0))
 ## Highest release less than latest.
 #set global last_continuous = $fcvs[bisect_left($fcvs, $latest) - 1]
 ## Highest LTS release less than latest.
@@ -66,6 +71,7 @@
 ##
 ## Format a Version as `{major}_{minor}`.
 #def underscores(v): ${'{}_{}'.format(v.major, v.minor)}
+#def dotted(v): ${'{}.{}'.format(v.major, v.minor)}
 #def fcv_prefix(v): ${'kFullyDowngradedTo_' if v == $last_lts else 'kVersion_'}
 #def fcv_cpp_name(v): ${'{}{}'.format($fcv_prefix(v), $underscores(v))}
 ##
@@ -79,47 +85,98 @@ fcvs = self.getVar('fcvs')
 last_lts, last_continuous, latest = self.getVar('last_lts'), self.getVar('last_continuous'), self.getVar('latest')
 generic_fcvs = self.getVar('generic_fcvs')
 
+# The 'latest' version must be one of the versions listed in releases.yml.
+assert(latest in fcvs)
+
 # The transition when used as a cpp variable.
 down = 'DowngradingFrom'
 up = 'UpgradingFrom'
 
-# A list of (FCV enum name, FCV string) tuples.
+# A list of (FCV enum name, FCV string) tuples, for FCVs of the form 'X.Y'.
+# The ordering of the FCV enums matters; the FCVs must appear in ascending order, ordered by version
+# number, with the transition FCVs appearing interwoven between the version FCVs.
 fcv_list = []
 
+# A list of (FCV enum name, FCV string) tuples for all the transitioning FCV values.
+transition_fcvs = []
+
 for fcv_x in fcvs[bisect_left(fcvs, last_lts):bisect_right(fcvs, latest)]:
-    fcv_list.append((self.fcv_cpp_name(fcv_x), fcv_x))
+    fcv_list.append((self.fcv_cpp_name(fcv_x), self.dotted(fcv_x)))
     if fcv_x in generic_fcvs.values():
+        up_transitions = []
+        down_transitions = []
         for fcv_y in filter(lambda y : y > fcv_x, generic_fcvs.values()):
-            fcv_list.extend([(self.transition_enum_name(up, fcv_x, fcv_y),
-                              f'upgrading from {fcv_x} to {fcv_y}'),
-                             (self.transition_enum_name(down, fcv_y, fcv_x),
-                              f'downgrading from {fcv_y} to {fcv_x}')])
+            up_transitions.append((self.transition_enum_name(up, fcv_x, fcv_y),
+                            f'upgrading from {self.dotted(fcv_x)} to {self.dotted(fcv_y)}')) 
+            down_transitions.append((self.transition_enum_name(down, fcv_y, fcv_x),
+                            f'downgrading from {self.dotted(fcv_y)} to {self.dotted(fcv_x)}'))
+        # The downgrading transitions need to appear first when generating enums.
+        fcv_list.extend(down_transitions + up_transitions)
+        transition_fcvs.extend(down_transitions + up_transitions)
 %>
 ##
 ##
+/**
+ * The combination of the fields (version, targetVersion, previousVersion) in the
+ * featureCompatibilityVersion document in the server configuration collection
+ * (admin.system.version) are represented by this enum and determine this node's behavior.
+ *
+ * Features can be gated for specific versions, or ranges of versions above or below some
+ * minimum or maximum version, respectively.
+ *
+ * While upgrading from version X to Y or downgrading from Y to X, the server supports the
+ * features of the older of the two versions.
+ *
+ * For versions X and Y, the legal enums and featureCompatibilityVersion documents are:
+ *
+ * kFullyDowngradedTo_X
+ * (X, Unset, Unset): Only version X features are available, and new and existing storage
+ *                    engine entries use the X format
+ *
+ * kUpgradingFrom_X_To_Y
+ * (X, Y, Unset): Only version X features are available, but new storage engine entries
+ *                use the Y format, and existing entries may have either the X or
+ *                Y format
+ *
+ * kVersion_X
+ * (X, Unset, Unset): X features are available, and new and existing storage engine
+ *                    entries use the X format
+ *
+ * kDowngradingFrom_X_To_Y
+ * (Y, Y, X): Only Y features are available and new storage engine entries use the
+ *            Y format, but existing entries may have either the Y or X format
+ *
+ * kUnsetDefaultLastLTSBehavior
+ * (Unset, Unset, Unset): This is the case on startup before the fCV document is loaded into
+ *                        memory. isVersionInitialized() will return false, and getVersion()
+ *                        will return the default (kUnsetDefaultLastLTSBehavior).
+ *
+ */
 enum class FeatureCompatibilityVersion {
     kInvalid,
-    kUnsetDefaultBehavior_$underscores($last_lts),
+    kUnsetDefaultLastLTSBehavior,
 
 #for fcv, _ in fcv_list:
     $fcv,
 #end for
 };
 
-## Calculate number of versions since v4.4.
-constexpr size_t kSince_$underscores(Version('4.4')) = ${bisect_left(fcvs, latest)};
+## Calculate number of versions since v4.0.
+constexpr size_t kSince_$underscores(Version('4.0')) = ${bisect_left(fcvs, latest)};
 
 // Last LTS was "$last_lts".
 constexpr size_t kSinceLastLTS = ${bisect_left(fcvs, latest) - bisect_left(fcvs, last_lts)};
+
+constexpr inline StringData kParameterName = "featureCompatibilityVersion"_sd;
 
 class GenericFCV {
 #def define_fcv_alias(id, v):
 static constexpr auto $id = FeatureCompatibilityVersion::$fcv_cpp_name(v);#slurp
 #end def
 ##
-#def define_generic_transition_alias(transition, first_name, first_value, second_name, second_value):
-static constexpr auto k$transition$(first_name)To$(second_name) = #slurp
-FeatureCompatibilityVersion::$transition_enum_name(transition, first_value, second_value);#slurp
+#def define_generic_transition_alias(transition, first, second):
+static constexpr auto k$transition$(first)To$(second) = #slurp
+FeatureCompatibilityVersion::$transition_enum_name(transition, $generic_fcvs[first], $generic_fcvs[second]);#slurp
 #end def
 ##
 #def define_generic_invalid_alias(transition, first, second):
@@ -127,23 +184,20 @@ static constexpr auto k$transition$(first)To$(second) = FeatureCompatibilityVers
 #end def
 ##
 <%
-generic_transitions = []
-for fcv_x, fcv_y in itertools.permutations(generic_fcvs.items(), 2):
-    if fcv_x[1] >= fcv_y[1]:
-        continue
-    generic_transitions.extend([
-        self.define_generic_transition_alias(up, fcv_x[0], fcv_x[1], fcv_y[0], fcv_y[1]),
-        self.define_generic_transition_alias(down, fcv_y[0], fcv_y[1], fcv_x[0], fcv_x[1])
-    ])
-
-# Generate "invalid" definitions for LastLTS <=> LastContinuous.
 lts = 'LastLTS'
 cont = 'LastContinuous'
-if generic_fcvs[cont] == generic_fcvs[lts]:
-    generic_transitions.extend([
-        self.define_generic_invalid_alias(up, lts, cont),
-        self.define_generic_invalid_alias(down, cont, lts)
-    ])
+lat = 'Latest'
+generic_transitions = [
+    # LastLTS <=> Latest
+    self.define_generic_transition_alias(up, lts, lat),
+    self.define_generic_transition_alias(down, lat, lts),
+    # LastContinuous <=> Latest
+    self.define_generic_transition_alias(up, cont, lat),
+    self.define_generic_transition_alias(down, lat, cont),
+    # LastLTS => LastContinuous, when LastLTS != LastContinuous
+    self.define_generic_transition_alias(up, lts, cont) if generic_fcvs[lts] != generic_fcvs[cont]
+        else self.define_generic_invalid_alias(up, lts, cont)
+]
 %>
 public:
     $define_fcv_alias('kLatest', latest)
@@ -155,19 +209,62 @@ public:
 #end for
 };
 
-inline StringData toString(FeatureCompatibilityVersion v) {
-    switch (v) {
-        case FeatureCompatibilityVersion::kInvalid:
-            return "invalid"_sd;
-        case FeatureCompatibilityVersion::kUnsetDefaultBehavior_$underscores(last_lts):
-            return "unset"_sd;
+/**
+ * A table with mappings between versions of the type 'X.Y', as well as versions that are not of the
+ * type 'X.Y' (i.e. the transition FCVs, 'kInvalid', and 'kUnsetDefaultLastLTSBehavior') and their
+ * corresponding strings.
+ */
+inline constexpr std::array extendedFCVTable {
+    // The table's entries must appear in the same order in which the enums were defined.
+    std::pair{FeatureCompatibilityVersion::kInvalid, "invalid"_sd},
+    std::pair{FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior, "unset"_sd},
 #for fcv, fcv_string in fcv_list:
-        case FeatureCompatibilityVersion::$fcv:
-            return "$fcv_string"_sd;
+    std::pair{FeatureCompatibilityVersion::$fcv, "$fcv_string"_sd},
 #end for
-    }
+};
 
-    MONGO_UNREACHABLE;
+constexpr decltype(auto) findExtended(FeatureCompatibilityVersion v) {
+    return extendedFCVTable[static_cast<size_t>(v)];
+}
+
+constexpr StringData toString(FeatureCompatibilityVersion v) {
+    return findExtended(v).second;
+}
+
+/**
+ * Pointers to nodes of the extended table that represent numbered software versions.
+ * Other FCV enum members, such as those representing transitions, are excluded.
+ */
+inline constexpr std::array standardFCVTable {
+#for fcv, _ in filter(lambda p: p not in transition_fcvs, fcv_list):
+    &findExtended(FeatureCompatibilityVersion::$fcv),
+#end for
+};
+
+/**
+ * Parses 'versionString', of the form "X.Y", to its corresponding FCV enum. For example, "5.1"
+ * will be parsed as FeatureCompatibilityVersion::$fcv_cpp_name(Version("5.1")).
+ * Throws 'ErrorCodes::BadValue' when 'versionString' is not of the form "X.Y", and has no matching
+ * enum.
+ */
+inline FeatureCompatibilityVersion parseVersionForFeatureFlags(StringData versionString) {
+    for (auto ptr : standardFCVTable)
+        if (ptr->second == versionString)
+            return ptr->first;
+    uasserted(ErrorCodes::BadValue,
+              fmt::format("Invalid FCV version {} for feature flag.", versionString));
+}
+
+/*
+ * Returns whether the given FCV is a standard FCV enum, i.e. an enum that corresponds to a numbered
+ * version of the form 'X.Y'. Non-standard enums are transition enums, 'kInvalid' and
+ * 'kUnsetDefaultLastLTSBehavior'.
+ */
+constexpr bool isStandardFCV(FeatureCompatibilityVersion v) {
+    for (auto ptr : standardFCVTable)
+        if (ptr->first == v)
+            return true;
+    return false;
 }
 
 }  // namespace mongo::multiversion

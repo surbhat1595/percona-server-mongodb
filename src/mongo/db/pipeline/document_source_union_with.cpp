@@ -26,6 +26,7 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
@@ -35,6 +36,7 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/pipeline/document_source_documents.h"
 #include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_queue.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
 #include "mongo/db/pipeline/document_source_union_with_gen.h"
@@ -70,7 +72,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> buildPipelineFromViewDefinition(
     opts.optimize = !resolvedNs.pipeline.empty();
     opts.validator = validatorCallback;
 
-    return Pipeline::makePipelineFromViewDefinition(expCtx, resolvedNs, currentPipeline, opts);
+    return Pipeline::makePipelineFromViewDefinition(
+        expCtx->copyForSubPipeline(expCtx->ns), resolvedNs, currentPipeline, opts);
 }
 
 }  // namespace
@@ -84,11 +87,30 @@ DocumentSourceUnionWith::~DocumentSourceUnionWith() {
 
 void validateUnionWithCollectionlessPipeline(
     const boost::optional<std::vector<mongo::BSONObj>>& pipeline) {
+    const auto errMsg =
+        "$unionWith stage without explicit collection must have a pipeline with $documents as "
+        "first stage";
+
+    uassert(ErrorCodes::FailedToParse, errMsg, pipeline && pipeline->size() > 0);
+    const auto firstStageBson = (*pipeline)[0];
+    LOGV2_DEBUG(5909700,
+                4,
+                "$unionWith validating collectionless pipeline",
+                "pipeline"_attr = pipeline,
+                "first"_attr = firstStageBson);
     uassert(ErrorCodes::FailedToParse,
-            "$unionWith stage without explicit collection must have a pipeline with $documents as "
-            "first stage",
-            pipeline && pipeline->size() > 0 &&
-                !(*pipeline)[0].getField(DocumentSourceDocuments::kStageName).eoo());
+            errMsg,
+            // TODO SERVER-59628 replace with constraints check
+            (firstStageBson.hasField(DocumentSourceDocuments::kStageName) ||
+             firstStageBson.hasField(DocumentSourceQueue::kStageName))
+
+    );
+}
+
+boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::clone() const {
+    // At this point the ExpressionContext already has info about any resolved namespaces, so there
+    // is no need to resolve them again when creating the clone.
+    return make_intrusive<DocumentSourceUnionWith>(*this);
 }
 
 std::unique_ptr<DocumentSourceUnionWith::LiteParsed> DocumentSourceUnionWith::LiteParsed::parse(
@@ -198,6 +220,14 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
     if (_executionState == ExecutionProgress::kStartingSubPipeline) {
         auto serializedPipe = _pipeline->serializeToBson();
         logStartingSubPipeline(serializedPipe);
+        // $$SEARCH_META can be set during runtime earlier in the pipeline, and therefore must be
+        // copied to the subpipeline manually.
+        if (pExpCtx->variables.hasConstantValue(Variables::kSearchMetaId)) {
+            _pipeline->getContext()->variables.setReservedValue(
+                Variables::kSearchMetaId,
+                pExpCtx->variables.getValue(Variables::kSearchMetaId, Document()),
+                true);
+        }
         try {
             _pipeline =
                 pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(_pipeline.release());
@@ -211,6 +241,11 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
             return doGetNext();
         }
     }
+
+    // The $unionWith stage takes responsibility for disposing of its Pipeline. When the outer
+    // Pipeline that contains the $unionWith is disposed of, it will propagate dispose() to its
+    // subpipeline.
+    _pipeline.get_deleter().dismissDisposal();
 
     auto res = _pipeline->getNext();
     if (res)
@@ -280,6 +315,7 @@ bool DocumentSourceUnionWith::usedDisk() {
 
 void DocumentSourceUnionWith::doDispose() {
     if (_pipeline) {
+        _pipeline.get_deleter().dismissDisposal();
         _stats.planSummaryStats.usedDisk =
             _stats.planSummaryStats.usedDisk || _pipeline->usedDisk();
         recordPlanSummaryStats(*_pipeline);

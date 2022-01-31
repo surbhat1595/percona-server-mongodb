@@ -78,12 +78,6 @@ class DropIndex : public Base {
 public:
     DropIndex() : Base("dropindex") {}
     void run() {
-        // TODO (SERVER-57194): enable lock-free reads.
-        bool disableLockFreeReadsOriginalValue = storageGlobalParams.disableLockFreeReads;
-        storageGlobalParams.disableLockFreeReads = true;
-        ON_BLOCK_EXIT(
-            [&] { storageGlobalParams.disableLockFreeReads = disableLockFreeReadsOriginalValue; });
-
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
         DBDirectClient db(&opCtx);
@@ -165,7 +159,7 @@ public:
         ASSERT_OK(dbtests::createIndex(&opCtx, ns(), BSON("a" << 1 << "b" << 1)));
 
         unique_ptr<DBClientCursor> c =
-            db.query(NamespaceString(ns()), Query().sort(BSON("a" << 1 << "b" << 1)));
+            db.query(NamespaceString(ns()), BSONObj{}, Query().sort(BSON("a" << 1 << "b" << 1)));
         ASSERT_EQUALS(1111, c->itcount());
     }
 };
@@ -183,7 +177,7 @@ public:
         }
 
         unique_ptr<DBClientCursor> c =
-            db.query(NamespaceString(ns()), Query().sort(BSON("i" << 1)));
+            db.query(NamespaceString(ns()), BSONObj{}, Query().sort(BSON("i" << 1)));
 
         BSONObj o = c->next();
         ASSERT(c->more());

@@ -62,7 +62,8 @@ public:
                                                         const CollectionOptions& options);
 
     virtual std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
-                                                                  StringData ident) override;
+                                                                  StringData ident,
+                                                                  KeyFormat keyFormat) override;
 
     virtual Status createSortedDataInterface(OperationContext* opCtx,
                                              const CollectionOptions& collOptions,
@@ -159,6 +160,8 @@ public:
     }
 
     virtual void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) {}
+
+    void dump() const override {}
 
     // This sets the results of the backup cursor for unit tests.
     void setBackupBlocks_forTest(std::vector<StorageEngine::BackupBlock> newBackupBlocks) {

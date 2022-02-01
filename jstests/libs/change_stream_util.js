@@ -15,12 +15,14 @@ const ChangeStreamWatchMode = Object.freeze({
 });
 
 /**
- * Returns true if feature flag 'featureFlagChangeStreamsOptimization' is enabled, false otherwise.
+ * Returns true if server version is 5.1 or above. Version 5.1 and above optimizes the change stream
+ * pipeline.
+ *
+ * TODO SERVER-60736: remove this function and update all call-sites.
  */
 function isChangeStreamsOptimizationEnabled(db) {
-    const getParam = db.adminCommand({getParameter: 1, featureFlagChangeStreamsOptimization: 1});
-    return getParam.hasOwnProperty("featureFlagChangeStreamsOptimization") &&
-        getParam.featureFlagChangeStreamsOptimization.value;
+    return MongoRunner.compareBinVersions(db.getSiblingDB("admin").serverStatus().version, "5.1") !=
+        -1;
 }
 
 /**
@@ -40,6 +42,19 @@ function isChangeStreamsRewriteEnabled(db) {
     const getParam = db.adminCommand({getParameter: 1, featureFlagChangeStreamsRewrite: 1});
     return getParam.hasOwnProperty("featureFlagChangeStreamsRewrite") &&
         getParam.featureFlagChangeStreamsRewrite.value;
+}
+
+/**
+ * Returns true if pre-images can be recorded in 'system.preimages' collection, false otherwise.
+ */
+function canRecordPreImagesInConfigDatabase(db) {
+    // Clustered index feature must be enabled to record pre-images in 'system.preimages'
+    // collection.
+    const clusteredIndexesEnabled =
+        assert.commandWorked(db.adminCommand({getParameter: 1, featureFlagClusteredIndexes: 1}))
+            .featureFlagClusteredIndexes.value;
+
+    return isChangeStreamPreAndPostImagesEnabled(db) && clusteredIndexesEnabled;
 }
 
 /**
@@ -546,4 +561,21 @@ function assertInvalidChangeStreamNss(dbName, collName = "test", options) {
         options,
         (res) => assert.commandFailedWithCode(
             res, [ErrorCodes.InvalidNamespace, ErrorCodes.InvalidOptions]));
+}
+
+/**
+ * Asserts that 'changeStreamPreAndPostImages' collection option is present and is enabled for
+ * collection.
+ */
+function assertChangeStreamPreAndPostImagesCollectionOptionIsEnabled(db, collName) {
+    const collectionInfos = db.getCollectionInfos({name: collName});
+    assert(collectionInfos[0].options["changeStreamPreAndPostImages"]["enabled"] === true);
+}
+
+/**
+ * Asserts that 'changeStreamPreAndPostImages' collection option is absent in the collection.
+ */
+function assertChangeStreamPreAndPostImagesCollectionOptionIsAbsent(db, collName) {
+    const collectionInfos = db.getCollectionInfos({name: collName});
+    assert(!collectionInfos[0].options.hasOwnProperty("changeStreamPreAndPostImages"));
 }

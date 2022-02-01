@@ -59,6 +59,7 @@
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/client.h"
+#include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
@@ -96,6 +97,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/op_msg.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/elapsed_tracker.h"
@@ -135,6 +137,7 @@ void abortIndexBuilds(OperationContext* opCtx,
     } else if (commandType == OplogEntry::CommandType::kDrop ||
                commandType == OplogEntry::CommandType::kDropIndexes ||
                commandType == OplogEntry::CommandType::kCollMod ||
+               commandType == OplogEntry::CommandType::kEmptyCapped ||
                commandType == OplogEntry::CommandType::kRenameCollection) {
         const boost::optional<UUID> collUUID =
             CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss);
@@ -157,7 +160,7 @@ void applyImportCollectionDefault(OperationContext* opCtx,
                         "Applying importCollection is not supported with MongoDB Community "
                         "Edition, please use MongoDB Enterprise Edition",
                         "importUUID"_attr = importUUID,
-                        "nss"_attr = nss,
+                        logAttrs(nss),
                         "numRecords"_attr = numRecords,
                         "dataSize"_attr = dataSize,
                         "catalogEntry"_attr = redact(catalogEntry),
@@ -223,7 +226,7 @@ void createIndexForApplyOps(OperationContext* opCtx,
         if (ErrorCodes::IndexBuildAlreadyInProgress == prepareSpecResult) {
             LOGV2(4924900,
                   "Index build: already in progress during initial sync",
-                  "ns"_attr = indexNss,
+                  logAttrs(indexNss),
                   "uuid"_attr = indexCollection->uuid(),
                   "spec"_attr = indexSpec);
             return;
@@ -913,26 +916,19 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"collMod",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
-          const auto nss([&] {
+          auto opMsg = OpMsgRequest::fromDBAndBody(entry.getNss().db(), cmd);
+          auto collModCmd = CollMod::parse(IDLParserErrorContext("collModOplogEntry"), opMsg);
+          const auto nssOrUUID([&collModCmd, &entry, mode]() -> NamespaceStringOrUUID {
               // Oplog entries from secondary oplog application will allways have the Uuid set and
               // it is only invocations of applyOps directly that may omit it
               if (!entry.getUuid()) {
                   invariant(mode == OplogApplication::Mode::kApplyOpsCmd);
-                  return extractNs(entry.getNss().db(), cmd);
+                  return collModCmd.getNamespace();
               }
 
-              const auto& uuid = *entry.getUuid();
-              auto catalog = CollectionCatalog::get(opCtx);
-              const auto nsByUUID = catalog->lookupNSSByUUID(opCtx, uuid);
-              uassert(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "Failed to apply operation due to missing collection ("
-                                    << uuid << "): " << redact(cmd.toString()),
-                      nsByUUID);
-              return *nsByUUID;
+              return {collModCmd.getDbName().toString(), *entry.getUuid()};
           }());
-
-          BSONObjBuilder resultWeDontCareAbout;
-          return collMod(opCtx, nss, cmd, &resultWeDontCareAbout);
+          return processCollModCommandForApplyOps(opCtx, nssOrUUID, collModCmd, mode);
       },
       {ErrorCodes::IndexNotFound, ErrorCodes::NamespaceNotFound}}},
     {"dbCheck", {dbCheckOplogCommand, {}}},
@@ -1825,32 +1821,16 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 throw WriteConflictException();
             }
             case ErrorCodes::BackgroundOperationInProgressForDatabase: {
-                if (mode == OplogApplication::Mode::kInitialSync) {
-                    abortIndexBuilds(opCtx,
-                                     entry.getCommandType(),
-                                     nss,
-                                     "Aborting index builds during initial sync");
-                    LOGV2_DEBUG(4665900,
-                                1,
-                                "Conflicting DDL operation encountered during initial sync; "
-                                "aborting index build and retrying",
-                                "db"_attr = nss.db());
-                }
-
-                Lock::TempRelease release(opCtx->lockState());
-
-                IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(opCtx, nss.db());
-                opCtx->recoveryUnit()->abandonSnapshot();
-                opCtx->checkForInterrupt();
-
-                LOGV2_DEBUG(51774,
+                invariant(mode == OplogApplication::Mode::kInitialSync);
+                abortIndexBuilds(opCtx,
+                                 entry.getCommandType(),
+                                 nss,
+                                 "Aborting index builds during initial sync");
+                LOGV2_DEBUG(4665900,
                             1,
-                            "Acceptable error during oplog application: background operation in "
-                            "progress for DB '{db}' from oplog entry {oplogEntry}",
-                            "Acceptable error during oplog application: background operation in "
-                            "progress for database",
-                            "db"_attr = nss.db(),
-                            "oplogEntry"_attr = redact(entry.toBSONForLogging()));
+                            "Conflicting DDL operation encountered during initial sync; "
+                            "aborting index build and retrying",
+                            "db"_attr = nss.db());
                 break;
             }
             case ErrorCodes::BackgroundOperationInProgressForNamespace: {
@@ -1859,43 +1839,15 @@ Status applyCommand_inlock(OperationContext* opCtx,
 
                 auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db(), o))->ns();
 
-                if (mode == OplogApplication::Mode::kInitialSync) {
-                    abortIndexBuilds(opCtx,
-                                     entry.getCommandType(),
-                                     ns,
-                                     "Aborting index builds during initial sync");
-                    LOGV2_DEBUG(4665901,
-                                1,
-                                "Conflicting DDL operation encountered during initial sync; "
-                                "aborting index build and retrying",
-                                "namespace"_attr = ns);
-                }
-
-                Lock::TempRelease release(opCtx->lockState());
-
-                auto swUUID = entry.getUuid();
-                if (!swUUID) {
-                    LOGV2_ERROR(21261,
-                                "Failed command {command} on {namespace} during oplog application. "
-                                "Expected a UUID.",
-                                "Failed command during oplog application. Expected a UUID",
-                                "command"_attr = redact(o),
-                                "namespace"_attr = ns);
-                }
-                IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
-                    opCtx, swUUID.get());
-
-                opCtx->recoveryUnit()->abandonSnapshot();
-                opCtx->checkForInterrupt();
-
-                LOGV2_DEBUG(51775,
+                invariant(mode == OplogApplication::Mode::kInitialSync);
+                abortIndexBuilds(
+                    opCtx, entry.getCommandType(), ns, "Aborting index builds during initial sync");
+                LOGV2_DEBUG(4665901,
                             1,
-                            "Acceptable error during oplog application: background operation in "
-                            "progress for ns '{namespace}' from oplog entry {oplogEntry}",
-                            "Acceptable error during oplog application: background operation in "
-                            "progress for namespace",
-                            "namespace"_attr = ns,
-                            "oplogEntry"_attr = redact(entry.toBSONForLogging()));
+                            "Conflicting DDL operation encountered during initial sync; "
+                            "aborting index build and retrying",
+                            "namespace"_attr = ns);
+
                 break;
             }
             default: {
@@ -1955,11 +1907,10 @@ void setNewTimestamp(ServiceContext* service, const Timestamp& newTime) {
 void initTimestampFromOplog(OperationContext* opCtx, const NamespaceString& oplogNss) {
     DBDirectClient c(opCtx);
     static const BSONObj reverseNaturalObj = BSON("$natural" << -1);
-    BSONObj lastOp = c.findOne(oplogNss.ns(),
-                               BSONObj{},
-                               Query().sort(reverseNaturalObj),
-                               nullptr,
-                               QueryOption_SecondaryOk);
+    FindCommandRequest findCmd{oplogNss};
+    findCmd.setSort(reverseNaturalObj);
+    BSONObj lastOp =
+        c.findOne(std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
 
     if (!lastOp.isEmpty()) {
         LOGV2_DEBUG(21256, 1, "replSet setting last Timestamp");

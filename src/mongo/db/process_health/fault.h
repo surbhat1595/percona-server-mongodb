@@ -64,15 +64,6 @@ public:
     virtual double getSeverity() const = 0;
 
     /**
-     * Gets the duration of an active fault, if any.
-     * This is the time from the moment the severity reached the 1.0 value
-     * and stayed on or above 1.0.
-     *
-     * Note: each time the severity drops below 1.0 the duration is reset.
-     */
-    virtual Milliseconds getActiveFaultDuration() const = 0;
-
-    /**
      * @return The lifetime of this fault from the moment it was created.
      *         Invariant: getDuration() >= getActiveFaultDuration()
      */

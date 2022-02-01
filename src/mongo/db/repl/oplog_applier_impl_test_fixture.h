@@ -75,7 +75,7 @@ public:
      */
     void onInserts(OperationContext* opCtx,
                    const NamespaceString& nss,
-                   OptionalCollectionUUID uuid,
+                   const UUID& uuid,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    bool fromMigrate) override;
@@ -85,7 +85,7 @@ public:
      */
     void onDelete(OperationContext* opCtx,
                   const NamespaceString& nss,
-                  OptionalCollectionUUID uuid,
+                  const UUID& uuid,
                   StmtId stmtId,
                   const OplogDeleteEntryArgs& args) override;
 
@@ -111,7 +111,7 @@ public:
     void onRenameCollection(OperationContext* opCtx,
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
-                            OptionalCollectionUUID uuid,
+                            const UUID& uuid,
                             OptionalCollectionUUID dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp) override;
@@ -130,7 +130,7 @@ public:
      */
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,
-                     OptionalCollectionUUID uuid,
+                     const UUID& uuid,
                      const std::string& indexName,
                      const BSONObj& idxDescriptor) override;
 
@@ -153,7 +153,7 @@ public:
                        const NamespaceString&,
                        OptionalCollectionUUID,
                        StmtId,
-                       const OpObserver::OplogDeleteEntryArgs&)>
+                       const OplogDeleteEntryArgs&)>
         onDeleteFn;
 
     std::function<void(OperationContext*, const OplogUpdateEntryArgs&)> onUpdateFn;

@@ -110,6 +110,19 @@ var ReshardingTest = class {
 
             rsOptions.setParameter.enableElectionHandoff = 0;
             configOptions.setParameter.enableElectionHandoff = 0;
+
+            // The server conservatively sets the minimum visible timestamp of collections created
+            // after the oldest_timestamp to be the stable_timestamp. Furthermore, there is no
+            // guarantee the oldest_timestamp will advance past the creation timestamp of the source
+            // sharded collection. This means that after a donor shard restarts an atClusterTime
+            // read at the cloneTimestamp on it would fail with SnapshotUnavailable. We enable the
+            // following failpoint so the minimum visible timestamp is set to the oldest_timestamp
+            // regardless. Note that this is safe for resharding tests to do because the source
+            // sharded collection is guaranteed to exist in the collection catalog at the
+            // cloneTimestamp and tests involving elections do not run operations which would bump
+            // the minimum visible timestamp (e.g. creating or dropping indexes).
+            rsOptions.setParameter["failpoint.setMinVisibleForAllCollectionsToOldestOnStartup"] =
+                tojson({mode: "alwaysOn"});
         }
 
         if (this._minimumOperationDurationMS !== undefined) {
@@ -266,6 +279,17 @@ var ReshardingTest = class {
     /** @private */
     _startReshardingInBackgroundAndAllowCommandFailure({newShardKeyPattern, newChunks},
                                                        expectedErrorCode) {
+        for (let disallowedErrorCode of [ErrorCodes.FailedToSatisfyReadPreference,
+                                         ErrorCodes.HostUnreachable,
+        ]) {
+            assert.neq(
+                expectedErrorCode,
+                disallowedErrorCode,
+                `${ErrorCodeStrings[disallowedErrorCode]} error must never be expected as final` +
+                    " reshardCollection command error response because it indicates mongos gave" +
+                    " up retrying and the client must instead retry");
+        }
+
         newChunks = newChunks.map(
             chunk => ({min: chunk.min, max: chunk.max, recipientShardId: chunk.shard}));
 
@@ -285,12 +309,34 @@ var ReshardingTest = class {
             function(
                 host, ns, newShardKeyPattern, newChunks, commandDoneSignal, expectedErrorCode) {
                 const conn = new Mongo(host);
-                const res = conn.adminCommand({
-                    reshardCollection: ns,
-                    key: newShardKeyPattern,
-                    _presetReshardedChunks: newChunks,
-                });
-                commandDoneSignal.countDown();
+
+                // We allow the client to retry the reshardCollection a large but still finite
+                // number of times. This is done because the mongos would also return a
+                // FailedToSatisfyReadPreference error response when the primary of the shard is
+                // permanently down (e.g. due to a bug causing the server to crash) and it would be
+                // preferable to not have the test run indefinitely in that situation.
+                const kMaxNumAttempts = 40;  // = [10 minutes / kDefaultFindHostTimeout]
+
+                let res;
+                for (let i = 1; i <= kMaxNumAttempts; ++i) {
+                    res = conn.adminCommand({
+                        reshardCollection: ns,
+                        key: newShardKeyPattern,
+                        _presetReshardedChunks: newChunks,
+                    });
+
+                    if (res.ok === 1 ||
+                        (res.code !== ErrorCodes.FailedToSatisfyReadPreference &&
+                         res.code !== ErrorCodes.HostUnreachable)) {
+                        commandDoneSignal.countDown();
+                        break;
+                    }
+
+                    if (i < kMaxNumAttempts) {
+                        print("Ignoring error from mongos giving up retrying" +
+                              ` _shardsvrReshardCollection command: ${tojsononeline(res)}`);
+                    }
+                }
 
                 if (expectedErrorCode === ErrorCodes.OK) {
                     assert.commandWorked(res);
@@ -802,6 +848,7 @@ var ReshardingTest = class {
         const SIGKILL = 9;
         const opts = {allowedExitCode: MongoRunner.EXIT_SIGKILL};
         replSet.restart(originalPrimaryConn, opts, SIGKILL);
+        replSet.awaitNodesAgreeOnPrimary();
     }
 
     shutdownAndRestartPrimaryOnShard(shardName) {
@@ -813,6 +860,7 @@ var ReshardingTest = class {
 
         const SIGTERM = 15;
         replSet.restart(originalPrimaryConn, {}, SIGTERM);
+        replSet.awaitNodesAgreeOnPrimary();
     }
 
     /**
@@ -837,10 +885,5 @@ var ReshardingTest = class {
         });
 
         return cloneTimestamp;
-    }
-
-    isMixedVersionCluster() {
-        const clusterVersionInfo = this._st.getClusterVersionInfo();
-        return clusterVersionInfo.isMixedVersion;
     }
 };

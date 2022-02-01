@@ -4,6 +4,8 @@
  * @tags: [
  *   requires_sharding,
  *   does_not_support_stepdowns,
+ *   does_not_support_transactions,
+ *   requires_fcv_51,
  * ]
  */
 'use strict';
@@ -30,8 +32,7 @@ var $config = (function() {
         // Check that necessary feature flags are enabled on each of the mongods.
         let isEnabled = true;
         cluster.executeOnMongodNodes(function(db) {
-            if (!TimeseriesTest.timeseriesCollectionsEnabled(db) ||
-                !TimeseriesTest.shardedtimeseriesCollectionsEnabled(db)) {
+            if (!TimeseriesTest.shardedtimeseriesCollectionsEnabled(db)) {
                 isEnabled = false;
             }
         });

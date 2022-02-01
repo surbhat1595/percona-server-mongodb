@@ -27,7 +27,8 @@ assert.commandWorked(coll.insert([
 
 let assertGroupPushdown = function(coll, pipeline, expectedResults, expectedGroupCountInExplain) {
     const explain = coll.explain().aggregate(pipeline);
-    // When $group isnever pushed down it be present as a stage in the 'winningPlan' of $cursor.
+    // When $group is pushed down it will never be present as a stage in the 'winningPlan' of
+    // $cursor.
     assert.eq(expectedGroupCountInExplain, getAggPlanStages(explain, "GROUP").length, explain);
 
     let results = coll.aggregate(pipeline).toArray();
@@ -79,12 +80,125 @@ assertResultsMatchWithAndWithoutPushdown(coll,
                                          [{_id: "a", c: 0}, {_id: "b", c: 0}, {_id: "c", c: 0}],
                                          1);
 
-// Two group stages both get pushed down.
+// Two group stages both get pushed down and the second $group stage refer to only a top-level field
+// which does not exist.
 assertResultsMatchWithAndWithoutPushdown(
     coll,
     [{$group: {_id: "$item", s: {$sum: "$price"}}}, {$group: {_id: "$quantity", c: {$count: {}}}}],
     [{_id: null, c: 3}],
     2);
+
+// Two group stages both get pushed down and the second $group stage refers to only existing
+// top-level fields of the first $group.
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [
+        {$group: {_id: "$item", qsum: {$sum: "$quantity"}, msum: {$sum: "$price"}}},
+        {$group: {_id: "$_id", ss: {$sum: {$add: ["$qsum", "$msum"]}}}}
+    ],
+    [{_id: "a", ss: 22}, {_id: "b", ss: 41}, {_id: "c", ss: 15}],
+    2);
+
+// The $group stage refers to the same top-level field twice.
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [{$group: {_id: "$item", ps1: {$sum: "$price"}, ps2: {$sum: "$price"}}}],
+    [{_id: "a", ps1: 15, ps2: 15}, {_id: "b", ps1: 30, ps2: 30}, {_id: "c", ps1: 5, ps2: 5}],
+    1);
+
+// The $group stage refers to the same top-level field twice and another top-level field.
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [{
+        $group:
+            {_id: "$item", ps1: {$sum: "$price"}, ps2: {$sum: "$price"}, qs: {$sum: "$quantity"}}
+    }],
+    [
+        {_id: "a", ps1: 15, ps2: 15, qs: 7},
+        {_id: "b", ps1: 30, ps2: 30, qs: 11},
+        {_id: "c", ps1: 5, ps2: 5, qs: 10}
+    ],
+    1);
+
+// The $group stage refers to two existing sub-fields.
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [
+        {$project: {item: 1, price: 1, quantity: 1, dateParts: {$dateToParts: {date: "$date"}}}},
+        {
+            $group: {
+                _id: "$item",
+                hs: {$sum: {$add: ["$dateParts.hour", "$dateParts.hour", "$dateParts.minute"]}}
+            }
+        },
+    ],
+    [{"_id": "a", "hs": 39}, {"_id": "b", "hs": 34}, {"_id": "c", "hs": 23}],
+    1);
+
+// The $group stage refers to a non-existing sub-field twice.
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [{$group: {_id: "$item", hs: {$sum: {$add: ["$date.hour", "$date.hour"]}}}}],
+    [{"_id": "a", "hs": 0}, {"_id": "b", "hs": 0}, {"_id": "c", "hs": 0}],
+    1);
+
+// Two group stages both get pushed down and the second $group stage refers to only existing
+// top-level fields of the first $group. The field name may be one of "result" / "recordId" /
+// "returnKey" / "snapshotId" / "indexId" / "indexKey" / "indexKeyPattern" which are reserved names
+// inside the SBE stage builder. These special names must not hide user-defined field names.
+[[
+    {$group: {_id: "$item", psum: {$sum: "$price"}}},
+    {$group: {_id: "$_id", ss: {$sum: {$add: ["$psum", "$psum"]}}}}
+],
+ [
+     {$group: {_id: "$item", result: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$result", "$result"]}}}}
+ ],
+ [
+     {$group: {_id: "$item", recordId: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$recordId", "$recordId"]}}}}
+ ],
+ [
+     {$group: {_id: "$item", returnKey: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$returnKey", "$returnKey"]}}}}
+ ],
+ [
+     {$group: {_id: "$item", snapshotId: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$snapshotId", "$snapshotId"]}}}}
+ ],
+ [
+     {$group: {_id: "$item", indexId: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$indexId", "$indexId"]}}}}
+ ],
+ [
+     {$group: {_id: "$item", indexKey: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$indexKey", "$indexKey"]}}}}
+ ],
+ [
+     {$group: {_id: "$item", indexKeyPattern: {$sum: "$price"}}},
+     {$group: {_id: "$_id", ss: {$sum: {$add: ["$indexKeyPattern", "$indexKeyPattern"]}}}}
+ ],
+].forEach(pipeline =>
+              assertResultsMatchWithAndWithoutPushdown(
+                  coll, pipeline, [{_id: "a", ss: 30}, {_id: "b", ss: 60}, {_id: "c", ss: 10}], 2));
+
+// The second $group stage refers to both a top-level field and a sub-field twice.
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [
+        {$group: {_id: "$item", ps: {$sum: "$price"}}},
+        {$group: {_id: "$_id", s1: {$sum: "$ps"}, s2: {$sum: {$add: ["$p.a", "$p.a"]}}}}
+    ],
+    [
+        {"_id": "a", "s1": 15, "s2": 0},
+        {"_id": "b", "s1": 30, "s2": 0},
+        {"_id": "c", "s1": 5, "s2": 0}
+    ],
+    2);
+
+// TODO SERVER-59951: Add more test cases that the second $group stage refers to sub-fields when we
+// enable $mergeObject or document id expression. As of now we don't have a way to produce valid
+// subdocuments from a $group stage.
 
 // Run a group with an unsupported accumultor and check that it doesn't get pushed down.
 assertNoGroupPushdown(coll, [{$group: {_id: "$item", s: {$stdDevSamp: "$quantity"}}}], [
@@ -187,13 +301,83 @@ assertNoGroupPushdown(
     [{$sortByCount: "$item"}],
     [{"_id": "a", "count": 2}, {"_id": "b", "count": 2}, {"_id": "c", "count": 1}]);
 
-// When in a sharded environment or we are spilling $doingMerge is set to true. We should bail out
-// and not push down $group stages and the suffix of the pipeline when we encounter a $group stage
-// with this flag set.
+// When at the mongos-side in a sharded environment or we are spilling $doingMerge is set to true.
+// We should bail out and not push down $group stages and the suffix of the pipeline when we
+// encounter a $group stage with this flag set.
 explain = coll.explain().aggregate([
     {$group: {_id: "$item", s: {$sum: "$price"}}},
     {$group: {_id: "$a", s: {$sum: "$b"}, $doingMerge: true}}
 ]);
 assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
 assert(explain.stages[1].hasOwnProperty("$group"));
+
+// In a sharded environment, the mongos splits a $group stage into two different stages. One is a
+// merge $group stage at the mongos-side which does the global aggregation and the other is a $group
+// stage at the shard-side which does the partial aggregation. The shard-side $group stage is
+// requested with 'needsMerge' and 'fromMongos' flags set to true from the mongos, which we should
+// verify that is also pushed down and produces the correct results.
+explain = coll.runCommand({
+    aggregate: coll.getName(),
+    explain: true,
+    pipeline: [{$group: {_id: "$item"}}],
+    needsMerge: true,
+    fromMongos: true,
+    cursor: {}
+});
+assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
+
+const originalClassicEngineStatus =
+    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: true}))
+        .was;
+
+const pipeline1 = [{$group: {_id: "$item", s: {$sum: "$quantity"}}}];
+const classicalRes1 = coll.runCommand({
+                              aggregate: coll.getName(),
+                              pipeline: pipeline1,
+                              needsMerge: true,
+                              fromMongos: true,
+                              cursor: {}
+                          })
+                          .cursor.firstBatch;
+
+// When there's overflow for 'NumberLong', the mongod sends back the partial sum as a doc with
+// 'subTotal' and 'subTotalError' fields. So, we need an overflow case to verify such behavior.
+const tcoll = db.group_pushdown1;
+assert.commandWorked(tcoll.insert([{a: NumberLong("9223372036854775807")}, {a: NumberLong("10")}]));
+const pipeline2 = [{$group: {_id: null, s: {$sum: "$a"}}}];
+const classicalRes2 = tcoll
+                          .runCommand({
+                              aggregate: tcoll.getName(),
+                              pipeline: pipeline2,
+                              needsMerge: true,
+                              fromMongos: true,
+                              cursor: {}
+                          })
+                          .cursor.firstBatch;
+
+assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: false}));
+
+const sbeRes1 = coll.runCommand({
+                        aggregate: coll.getName(),
+                        pipeline: pipeline1,
+                        needsMerge: true,
+                        fromMongos: true,
+                        cursor: {}
+                    })
+                    .cursor.firstBatch;
+assert.sameMembers(sbeRes1, classicalRes1);
+
+const sbeRes2 = tcoll
+                    .runCommand({
+                        aggregate: tcoll.getName(),
+                        pipeline: pipeline2,
+                        needsMerge: true,
+                        fromMongos: true,
+                        cursor: {}
+                    })
+                    .cursor.firstBatch;
+assert.docEq(sbeRes2, classicalRes2);
+
+assert.commandWorked(db.adminCommand(
+    {setParameter: 1, internalQueryForceClassicEngine: originalClassicEngineStatus}));
 })();

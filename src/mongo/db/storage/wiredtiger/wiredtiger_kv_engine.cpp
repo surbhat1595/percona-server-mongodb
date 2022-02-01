@@ -145,9 +145,7 @@ const std::string kPinOldestTimestampAtStartupName = "_wt_startup";
 
 }  // namespace
 
-bool WiredTigerFileVersion::shouldDowngrade(bool readOnly,
-                                            bool repairMode,
-                                            bool hasRecoveryTimestamp) {
+bool WiredTigerFileVersion::shouldDowngrade(bool readOnly, bool hasRecoveryTimestamp) {
     if (readOnly) {
         // A read-only state must not have upgraded. Nor could it downgrade.
         return false;
@@ -993,8 +991,6 @@ void WiredTigerKVEngine::cleanShutdown() {
     ON_BLOCK_EXIT([&] { _encryptionKeyDB.reset(nullptr); });
     WiredTigerUtil::resetTableLoggingInfo();
 
-    if (!_readOnly)
-        syncSizeInfo(true);
     if (!_conn) {
         return;
     }
@@ -1013,8 +1009,17 @@ void WiredTigerKVEngine::cleanShutdown() {
                        "Initial Data Timestamp"_attr = Timestamp(_initialDataTimestamp.load()),
                        "Oldest Timestamp"_attr = Timestamp(_oldestTimestamp.load()));
 
-    _sizeStorer.reset();
     _sessionCache->shuttingDown();
+
+    if (!_readOnly) {
+        syncSizeInfo(/*syncToDisk=*/true);
+    }
+
+    // The size storer has to be destructed after the session cache has shut down. This sets the
+    // shutdown flag internally in the session cache. As operations get interrupted during shutdown,
+    // they release their session back to the session cache. If the shutdown flag has been set,
+    // released sessions will skip flushing the size storer.
+    _sizeStorer.reset();
 
     // We want WiredTiger to leak memory for faster shutdown except when we are running tools to
     // look for memory leaks.
@@ -1049,7 +1054,7 @@ void WiredTigerKVEngine::cleanShutdown() {
     }
 
     bool downgrade = false;
-    if (_fileVersion.shouldDowngrade(_readOnly, _inRepairMode, !_recoveryTimestamp.isNull())) {
+    if (_fileVersion.shouldDowngrade(_readOnly, !_recoveryTimestamp.isNull())) {
         downgrade = true;
         auto startTime = Date_t::now();
         LOGV2(22324,
@@ -1078,16 +1083,6 @@ void WiredTigerKVEngine::cleanShutdown() {
     if (_encryptionKeyDB && downgrade) {
         _encryptionKeyDB->reconfigure(_fileVersion.getDowngradeString().c_str());
     }
-}
-
-Status WiredTigerKVEngine::okToRename(OperationContext* opCtx,
-                                      StringData fromNS,
-                                      StringData toNS,
-                                      StringData ident,
-                                      const RecordStore* originalRecordStore) const {
-    syncSizeInfo(false);
-
-    return Status::OK();
 }
 
 int64_t WiredTigerKVEngine::getIdentSize(OperationContext* opCtx, StringData ident) {
@@ -2578,8 +2573,8 @@ Status WiredTigerKVEngine::createRecordStore(OperationContext* opCtx,
     WT_SESSION* s = session.getSession();
     LOGV2_DEBUG(22331,
                 2,
-                "WiredTigerKVEngine::createRecordStore ns: {ns} uri: {uri} config: {config}",
-                "ns"_attr = ns,
+                "WiredTigerKVEngine::createRecordStore ns: {namespace} uri: {uri} config: {config}",
+                logAttrs(NamespaceString(ns)),
                 "uri"_attr = uri,
                 "config"_attr = config);
     return wtRCToStatus(s->create(s, uri.c_str(), config.c_str()));
@@ -2699,7 +2694,8 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
     params.engineName = _canonicalName;
     params.isCapped = options.capped;
     params.keyFormat = (options.clusteredIndex) ? KeyFormat::String : KeyFormat::Long;
-    // Record stores clustered by _id need to guarantee uniqueness by preventing overwrites.
+    // Record stores for clustered collections need to guarantee uniqueness by preventing
+    // overwrites.
     params.overwrite = options.clusteredIndex ? false : true;
     params.isEphemeral = _ephemeral;
     params.cappedCallback = nullptr;
@@ -2802,18 +2798,19 @@ std::unique_ptr<SortedDataInterface> WiredTigerKVEngine::getSortedDataInterface(
         invariant(!collOptions.clusteredIndex);
         return std::make_unique<WiredTigerIdIndex>(opCtx, _uri(ident), ident, desc, _readOnly);
     }
+    auto keyFormat = (collOptions.clusteredIndex) ? KeyFormat::String : KeyFormat::Long;
     if (desc->unique()) {
-        invariant(!collOptions.clusteredIndex);
-        return std::make_unique<WiredTigerIndexUnique>(opCtx, _uri(ident), ident, desc, _readOnly);
+        return std::make_unique<WiredTigerIndexUnique>(
+            opCtx, _uri(ident), ident, keyFormat, desc, _readOnly);
     }
 
-    auto keyFormat = (collOptions.clusteredIndex) ? KeyFormat::String : KeyFormat::Long;
     return std::make_unique<WiredTigerIndexStandard>(
         opCtx, _uri(ident), ident, keyFormat, desc, _readOnly);
 }
 
 std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,
-                                                                          StringData ident) {
+                                                                          StringData ident,
+                                                                          KeyFormat keyFormat) {
     invariant(!_readOnly || !recoverToOplogTimestamp.empty());
 
     _ensureIdentPath(ident);
@@ -2840,7 +2837,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     params.ident = ident.toString();
     params.engineName = _canonicalName;
     params.isCapped = false;
-    params.keyFormat = KeyFormat::Long;
+    params.keyFormat = keyFormat;
     params.overwrite = true;
     params.isEphemeral = _ephemeral;
     params.cappedCallback = nullptr;
@@ -2856,6 +2853,20 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     rs->postConstructorInit(opCtx);
 
     return std::move(rs);
+}
+
+void WiredTigerKVEngine::alterIdentMetadata(OperationContext* opCtx,
+                                            StringData ident,
+                                            const IndexDescriptor* desc) {
+    WiredTigerSession session(_conn);
+    std::string uri = _uri(ident);
+
+    // Make the alter call to update metadata without taking exclusive lock to avoid conflicts with
+    // concurrent operations.
+    std::string alterString =
+        WiredTigerIndex::generateAppMetadataString(*desc) + "exclusive_refreshed=false,";
+    invariantWTOK(
+        session.getSession()->alter(session.getSession(), uri.c_str(), alterString.c_str()));
 }
 
 Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
@@ -3601,7 +3612,7 @@ Timestamp WiredTigerKVEngine::getPinnedOplog() const {
 
     auto status = getOplogNeededForRollback();
     if (status.isOK()) {
-        return status.getValue();
+        return std::min(status.getValue(), pinned);
     }
 
     // If getOplogNeededForRollback fails, don't truncate any oplog right now.
@@ -3754,6 +3765,16 @@ std::uint64_t WiredTigerKVEngine::_getCheckpointTimestamp() const {
     std::uint64_t tmp;
     fassert(50963, NumberParser().base(16)(buf, &tmp));
     return tmp;
+}
+
+void WiredTigerKVEngine::dump() const {
+    int ret = _conn->debug_info(_conn, "cursors=true,handles=true,log=true,sessions=true,txn=true");
+    auto status = wtRCToStatus(ret, "WiredTigerKVEngine::dump()");
+    if (status.isOK()) {
+        LOGV2(6117700, "WiredTigerKVEngine::dump() completed successfully");
+    } else {
+        LOGV2(6117701, "WiredTigerKVEngine::dump() failed", "error"_attr = status);
+    }
 }
 
 }  // namespace mongo

@@ -139,6 +139,42 @@ StatusWith<const IndexDescriptor*> getDescriptorByKeyPattern(OperationContext* o
 }
 
 /**
+ * It is illegal to drop a collection's clusteredIndex.
+ *
+ * Returns true if 'index' is or contains the clusteredIndex.
+ */
+bool containsClusteredIndex(const CollectionPtr& collection, const IndexArgument& index) {
+    invariant(collection && collection->isClustered());
+
+    auto clusteredIndexSpec = collection->getClusteredInfo()->getIndexSpec();
+    return stdx::visit(
+        visit_helper::Overloaded{[&](const std::string& indexName) -> bool {
+                                     // While the clusteredIndex's name is optional during user
+                                     // creation, it should always be filled in by default on the
+                                     // collection object.
+                                     auto clusteredIndexName = clusteredIndexSpec.getName();
+                                     invariant(clusteredIndexName.is_initialized());
+
+                                     return clusteredIndexName.get() == indexName;
+                                 },
+                                 [&](const std::vector<std::string>& indexNames) -> bool {
+                                     // While the clusteredIndex's name is optional during user
+                                     // creation, it should always be filled in by default on the
+                                     // collection object.
+                                     auto clusteredIndexName = clusteredIndexSpec.getName();
+                                     invariant(clusteredIndexName.is_initialized());
+
+                                     return std::find(indexNames.begin(),
+                                                      indexNames.end(),
+                                                      clusteredIndexName.get()) != indexNames.end();
+                                 },
+                                 [&](const BSONObj& indexKey) -> bool {
+                                     return clusteredIndexSpec.getKey().woCompare(indexKey) == 0;
+                                 }},
+        index);
+}
+
+/**
  * Returns a list of index names that the caller requested to abort/drop. Requires a collection lock
  * to be held to look up the index name from the key pattern.
  */
@@ -333,6 +369,11 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
                   index));
     }
 
+    if ((*collection)->isClustered() &&
+        containsClusteredIndex(collection->getCollection(), index)) {
+        uasserted(5979800, "It is illegal to drop the clusteredIndex");
+    }
+
     DropIndexesReply reply;
     reply.setNIndexesWas((*collection)->getIndexCatalog()->numIndexesTotal(opCtx));
 
@@ -446,9 +487,6 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         invariant((*collection)->getIndexCatalog()->numIndexesInProgress(opCtx) == 0);
     }
 
-    // The index catalog requires that no active index builders are running when dropping ready
-    // indexes.
-    IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(collectionUUID);
     writeConflictRetry(
         opCtx, "dropIndexes", dbAndUUID.toString(), [opCtx, &collection, &indexNames, &reply] {
             WriteUnitOfWork wunit(opCtx);
@@ -486,9 +524,6 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
                   "namespace"_attr = nss,
                   "indexes"_attr = cmdObj[kIndexFieldName].toString(false));
         }
-
-        IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
-            collection->uuid());
 
         auto swIndexNames = getIndexNames(opCtx, collection.getCollection(), parsed.getIndex());
         if (!swIndexNames.isOK()) {

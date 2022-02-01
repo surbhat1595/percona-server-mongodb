@@ -38,9 +38,11 @@
 #include <type_traits>
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
 #include "mongo/db/matcher/expression_internal_expr_comparison.h"
@@ -192,10 +194,8 @@ boost::intrusive_ptr<DocumentSourceSort> createMetadataSortForReorder(
         maxMemoryUsageBytes = sortStatsPtr->maxMemoryUsageBytes;
     }
 
-    return DocumentSourceSort::create(sort.getContext(),
-                                      SortPattern{updatedPattern},
-                                      sort.getLimit().get_value_or(0),
-                                      maxMemoryUsageBytes);
+    return DocumentSourceSort::create(
+        sort.getContext(), SortPattern{updatedPattern}, 0, maxMemoryUsageBytes);
 }
 
 // Optimize the section of the pipeline before the $_internalUnpackBucket stage.
@@ -541,11 +541,61 @@ std::pair<BSONObj, bool> DocumentSourceInternalUnpackBucket::extractOrBuildProje
     return {BSONObj{}, false};
 }
 
+/*
+ * Creates a predicate that ensures that if there exists a subpath of matchExprPath such that the
+ * type of `control.min.subpath` is not the same as `control.max.subpath` then we will match that
+ * document.
+ */
+std::unique_ptr<MatchExpression> createTypeEqualityPredicate(
+    boost::intrusive_ptr<ExpressionContext> pExpCtx, const StringData& matchExprPath) {
+    FieldPath matchExprField(matchExprPath);
+    using namespace timeseries;
+    std::vector<std::unique_ptr<MatchExpression>> typeEqualityPredicates;
+
+    // Assume that we're generating a predicate on "a.b"
+    for (size_t i = 0; i < matchExprField.getPathLength(); i++) {
+        auto minPath = std::string{kControlMinFieldNamePrefix} + matchExprField.getSubpath(i);
+        auto maxPath = std::string{kControlMaxFieldNamePrefix} + matchExprField.getSubpath(i);
+
+        // This whole block adds
+        // {$expr: {$ne: [{$type: "$control.min.a"}, {$type: "$control.max.a"}]}}
+        // in order to ensure that the type of `control.min.a` and `control.max.a` are the same.
+
+        // This produces {$expr: ... }
+        typeEqualityPredicates.push_back(std::make_unique<ExprMatchExpression>(
+            // This produces {$ne: ... }
+            make_intrusive<ExpressionCompare>(
+                pExpCtx.get(),
+                ExpressionCompare::CmpOp::NE,
+                // This produces [...]
+                makeVector<boost::intrusive_ptr<Expression>>(
+                    // This produces {$type: ... }
+                    make_intrusive<ExpressionType>(
+                        pExpCtx.get(),
+                        // This produces [...]
+                        makeVector<boost::intrusive_ptr<Expression>>(
+                            // This produces "$control.min.a"
+                            ExpressionFieldPath::createPathFromString(
+                                pExpCtx.get(), minPath, pExpCtx->variablesParseState))),
+                    // This produces {$type: ... }
+                    make_intrusive<ExpressionType>(
+                        pExpCtx.get(),
+                        // This produces [...]
+                        makeVector<boost::intrusive_ptr<Expression>>(
+                            // This produces "$control.max.a"
+                            ExpressionFieldPath::createPathFromString(
+                                pExpCtx.get(), maxPath, pExpCtx->variablesParseState))))),
+            pExpCtx));
+    }
+    return std::make_unique<OrMatchExpression>(std::move(typeEqualityPredicates));
+}
+
 std::unique_ptr<MatchExpression> createComparisonPredicate(
     const ComparisonMatchExpression* matchExpr,
     const BucketSpec& bucketSpec,
     int bucketMaxSpanSeconds,
-    ExpressionContext::CollationMatchesDefault collationMatchesDefault) {
+    ExpressionContext::CollationMatchesDefault collationMatchesDefault,
+    boost::intrusive_ptr<ExpressionContext> pExpCtx) {
     using namespace timeseries;
     const auto matchExprPath = matchExpr->path();
     const auto matchExprData = matchExpr->getData();
@@ -590,9 +640,11 @@ std::unique_ptr<MatchExpression> createComparisonPredicate(
     }
 
     BSONObj minTime;
+    BSONObj maxTime;
     if (isTimeField) {
         auto timeField = matchExprData.Date();
         minTime = BSON("" << timeField - Seconds(bucketMaxSpanSeconds));
+        maxTime = BSON("" << timeField + Seconds(bucketMaxSpanSeconds));
     }
 
     auto minPath = std::string{kControlMinFieldNamePrefix} + matchExprPath;
@@ -608,15 +660,17 @@ std::unique_ptr<MatchExpression> createComparisonPredicate(
             // is adjusted by the max range for a bucket to approximate the max bucket value given
             // the min. Also include a predicate against the _id field which is converted to the
             // minimum for the range of ObjectIds corresponding to the given date. In
-            // addition, we include a {'control.min' : {$gte: 'time - bucketMaxSpanSeconds'}}
-            // predicate which will be helpful in reducing bounds for index scans on 'time' field
-            // and routing on mongos.
+            // addition, we include a {'control.min' : {$gte: 'time - bucketMaxSpanSeconds'}} and
+            // a {'control.max' : {$lte: 'time + bucketMaxSpanSeconds'}} predicate which will be
+            // helpful in reducing bounds for index scans on 'time' field and routing on mongos.
             return isTimeField
                 ? makePredicate(
                       MatchExprPredicate<InternalExprLTEMatchExpression>(minPath, matchExprData),
                       MatchExprPredicate<InternalExprGTEMatchExpression>(minPath,
                                                                          minTime.firstElement()),
                       MatchExprPredicate<InternalExprGTEMatchExpression>(maxPath, matchExprData),
+                      MatchExprPredicate<InternalExprLTEMatchExpression>(maxPath,
+                                                                         maxTime.firstElement()),
                       MatchExprPredicate<LTEMatchExpression, Value>(
                           kBucketIdFieldName,
                           constructObjectIdValue<LTEMatchExpression>(matchExprData,
@@ -625,9 +679,12 @@ std::unique_ptr<MatchExpression> createComparisonPredicate(
                           kBucketIdFieldName,
                           constructObjectIdValue<GTEMatchExpression>(matchExprData,
                                                                      bucketMaxSpanSeconds)))
-                : makePredicate(
-                      MatchExprPredicate<InternalExprLTEMatchExpression>(minPath, matchExprData),
-                      MatchExprPredicate<InternalExprGTEMatchExpression>(maxPath, matchExprData));
+                : std::make_unique<OrMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
+                      makePredicate(MatchExprPredicate<InternalExprLTEMatchExpression>(
+                                        minPath, matchExprData),
+                                    MatchExprPredicate<InternalExprGTEMatchExpression>(
+                                        maxPath, matchExprData)),
+                      createTypeEqualityPredicate(pExpCtx, matchExprPath)));
 
         case MatchExpression::GT:
             // For $gt, make a $gt predicate against 'control.max'. In addition, if the comparison
@@ -647,8 +704,9 @@ std::unique_ptr<MatchExpression> createComparisonPredicate(
                           kBucketIdFieldName,
                           constructObjectIdValue<GTMatchExpression>(matchExprData,
                                                                     bucketMaxSpanSeconds)))
-                : makePredicate(
-                      MatchExprPredicate<InternalExprGTMatchExpression>(maxPath, matchExprData));
+                : std::make_unique<OrMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
+                      std::make_unique<InternalExprGTMatchExpression>(maxPath, matchExprData),
+                      createTypeEqualityPredicate(pExpCtx, matchExprPath)));
 
         case MatchExpression::GTE:
             // For $gte, make a $gte predicate against 'control.max'. In addition, if the comparison
@@ -668,42 +726,49 @@ std::unique_ptr<MatchExpression> createComparisonPredicate(
                           kBucketIdFieldName,
                           constructObjectIdValue<GTEMatchExpression>(matchExprData,
                                                                      bucketMaxSpanSeconds)))
-                : makePredicate(
-                      MatchExprPredicate<InternalExprGTEMatchExpression>(maxPath, matchExprData));
+                : std::make_unique<OrMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
+                      std::make_unique<InternalExprGTEMatchExpression>(maxPath, matchExprData),
+                      createTypeEqualityPredicate(pExpCtx, matchExprPath)));
 
         case MatchExpression::LT:
             // For $lt, make a $lt predicate against 'control.min'. In addition, if the comparison
             // is against the 'time' field, include a predicate against the _id field which is
             // converted to the minimum for the corresponding range of ObjectIds. In
-            // addition, we include a {'control.min' : {$lt: 'time - bucketMaxSpanSeconds'}}
+            // addition, we include a {'control.max' : {$lt: 'time + bucketMaxSpanSeconds'}}
             // predicate which will be helpful in reducing bounds for index scans on 'time' field
             // and routing on mongos.
             return isTimeField
                 ? makePredicate(
                       MatchExprPredicate<InternalExprLTMatchExpression>(minPath, matchExprData),
+                      MatchExprPredicate<InternalExprLTMatchExpression>(maxPath,
+                                                                        maxTime.firstElement()),
                       MatchExprPredicate<LTMatchExpression, Value>(
                           kBucketIdFieldName,
                           constructObjectIdValue<LTMatchExpression>(matchExprData,
                                                                     bucketMaxSpanSeconds)))
-                : makePredicate(
-                      MatchExprPredicate<InternalExprLTMatchExpression>(minPath, matchExprData));
+                : std::make_unique<OrMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
+                      std::make_unique<InternalExprLTMatchExpression>(minPath, matchExprData),
+                      createTypeEqualityPredicate(pExpCtx, matchExprPath)));
 
         case MatchExpression::LTE:
             // For $lte, make a $lte predicate against 'control.min'. In addition, if the comparison
             // is against the 'time' field, include a predicate against the _id field which is
             // converted to the maximum for the corresponding range of ObjectIds. In
-            // addition, we include a {'control.min' : {$lte: 'time - bucketMaxSpanSeconds'}}
+            // addition, we include a {'control.max' : {$lte: 'time + bucketMaxSpanSeconds'}}
             // predicate which will be helpful in reducing bounds for index scans on 'time' field
             // and routing on mongos.
             return isTimeField
                 ? makePredicate(
                       MatchExprPredicate<InternalExprLTEMatchExpression>(minPath, matchExprData),
+                      MatchExprPredicate<InternalExprLTEMatchExpression>(maxPath,
+                                                                         maxTime.firstElement()),
                       MatchExprPredicate<LTEMatchExpression, Value>(
                           kBucketIdFieldName,
                           constructObjectIdValue<LTEMatchExpression>(matchExprData,
                                                                      bucketMaxSpanSeconds)))
-                : makePredicate(
-                      MatchExprPredicate<InternalExprLTEMatchExpression>(minPath, matchExprData));
+                : std::make_unique<OrMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
+                      std::make_unique<InternalExprLTEMatchExpression>(minPath, matchExprData),
+                      createTypeEqualityPredicate(pExpCtx, matchExprPath)));
 
         default:
             MONGO_UNREACHABLE_TASSERT(5348302);
@@ -731,10 +796,12 @@ DocumentSourceInternalUnpackBucket::createPredicatesOnBucketLevelField(
         return createComparisonPredicate(static_cast<const ComparisonMatchExpression*>(matchExpr),
                                          _bucketUnpacker.bucketSpec(),
                                          _bucketMaxSpanSeconds,
-                                         pExpCtx->collationMatchesDefault);
+                                         pExpCtx->collationMatchesDefault,
+                                         pExpCtx);
     } else if (matchExpr->matchType() == MatchExpression::GEO) {
         auto& geoExpr = static_cast<const GeoMatchExpression*>(matchExpr)->getGeoExpression();
-        if (geoExpr.getPred() == GeoExpression::WITHIN) {
+        if (geoExpr.getPred() == GeoExpression::WITHIN ||
+            geoExpr.getPred() == GeoExpression::INTERSECT) {
             return std::make_unique<InternalBucketGeoWithinMatchExpression>(
                 geoExpr.getGeometryPtr(), geoExpr.getField());
         }
@@ -890,6 +957,13 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
                 // We have a sort on metadata field following this stage. Reorder the two stages
                 // and return a pointer to the preceding stage.
                 auto sortForReorder = createMetadataSortForReorder(*sortPtr);
+
+                // If the original sort had a limit, we will not preserve that in the swapped sort.
+                // Instead we will add a $limit to the end of the pipeline to keep the number of
+                // expected results.
+                if (auto limit = sortPtr->getLimit(); limit && *limit != 0) {
+                    container->push_back(DocumentSourceLimit::create(pExpCtx, *limit));
+                }
 
                 // Reorder sort and current doc.
                 *std::next(itr) = std::move(*itr);

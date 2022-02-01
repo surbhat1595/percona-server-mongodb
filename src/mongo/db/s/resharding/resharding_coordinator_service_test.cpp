@@ -112,7 +112,10 @@ public:
     explicit ReshardingCoordinatorServiceForTest(ServiceContext* serviceContext)
         : ReshardingCoordinatorService(serviceContext) {}
 
-    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override {
+    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(
+        OperationContext* opCtx,
+        BSONObj initialState,
+        const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) override {
         return std::make_shared<ReshardingCoordinator>(
             this,
             ReshardingCoordinatorDocument::parse(
@@ -222,8 +225,7 @@ public:
     ReshardingCoordinatorDocument getCoordinatorDoc(OperationContext* opCtx) {
         DBDirectClient client(opCtx);
 
-        auto doc =
-            client.findOne(NamespaceString::kConfigReshardingOperationsNamespace.ns(), BSONObj{});
+        auto doc = client.findOne(NamespaceString::kConfigReshardingOperationsNamespace, BSONObj{});
         IDLParserErrorContext errCtx("reshardingCoordFromTest");
         return ReshardingCoordinatorDocument::parse(errCtx, doc);
     }
@@ -382,7 +384,7 @@ public:
         DatabaseType dbDoc(coordinatorDoc.getSourceNss().db().toString(),
                            coordinatorDoc.getDonorShards().front().getId(),
                            true,
-                           DatabaseVersion{UUID::gen(), Timestamp()});
+                           DatabaseVersion{UUID::gen(), Timestamp(1, 1)});
         client.insert(DatabaseType::ConfigNS.ns(), dbDoc.toBSON());
 
         return coordinatorDoc;
@@ -876,7 +878,7 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
         // config.collections should not have the document with the old UUID.
         std::vector<ChunkType> foundCollections;
         auto collection =
-            client.findOne(CollectionType::ConfigNS.ns(),
+            client.findOne(CollectionType::ConfigNS,
                            BSON(CollectionType::kNssFieldName << doc.getSourceNss().ns()));
 
         ASSERT_EQUALS(collection.isEmpty(), false);
@@ -921,9 +923,8 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorFailsIfMigrationNo
     // Check that reshardCollection keeps allowMigrations setting intact.
     {
         DBDirectClient client(opCtx);
-        CollectionType collDoc(
-            client.findOne(CollectionType::ConfigNS.ns(),
-                           BSON(CollectionType::kNssFieldName << _originalNss.ns())));
+        CollectionType collDoc(client.findOne(
+            CollectionType::ConfigNS, BSON(CollectionType::kNssFieldName << _originalNss.ns())));
         ASSERT_FALSE(collDoc.getAllowMigrations());
     }
 }

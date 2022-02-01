@@ -52,13 +52,23 @@ class ServiceContext;
 /**
  * Internal secret key info.
  */
-struct AuthInfo {
-    UserHandle user;
+struct SystemAuthInfo {
+    std::shared_ptr<UserHandle> getUser() {
+        return std::atomic_load(&_user);  // NOLINT
+    }
+
+    std::shared_ptr<UserHandle> setUser(std::shared_ptr<UserHandle> user) {
+        return std::atomic_exchange(&_user, user);  // NOLINT
+    }
 
     // Used during keyfile rollover to store the alternate key used to authenticate
+    boost::optional<User::CredentialData> credentials;
     boost::optional<User::CredentialData> alternateCredentials;
+
+private:
+    std::shared_ptr<UserHandle> _user;
 };
-extern AuthInfo internalSecurity;  // set at startup and not changed after initialization.
+extern SystemAuthInfo internalSecurity;
 
 /**
  * How user management functions should structure the BSON representation of privileges and roles.
@@ -318,6 +328,13 @@ public:
      * Invalidates all users who's source is "dbname" and removes them from the user cache.
      */
     virtual void invalidateUsersFromDB(OperationContext* opCtx, StringData dbname) = 0;
+
+    /**
+     * Retrieves all users whose source is "$external" and checks if the corresponding user in the
+     * backing store has a different set of roles now. If so, it updates the cache entry with the
+     * new UserHandle.
+     */
+    virtual Status refreshExternalUsers(OperationContext* opCtx) = 0;
 
     /**
      * Initializes the authorization manager.  Depending on what version the authorization

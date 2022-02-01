@@ -48,8 +48,8 @@ namespace mongo {
 
 using std::string;
 
-WiredTigerServerStatusSection::WiredTigerServerStatusSection(WiredTigerKVEngine* engine)
-    : ServerStatusSection(engine->getCanonicalName()), _engine(engine) {}
+WiredTigerServerStatusSection::WiredTigerServerStatusSection(const std::string& sectionName)
+    : ServerStatusSection(sectionName) {}
 
 bool WiredTigerServerStatusSection::includeByDefault() const {
     return true;
@@ -88,12 +88,14 @@ BSONObj WiredTigerServerStatusSection::generateSection(OperationContext* opCtx,
 
     WiredTigerKVEngine::appendGlobalStats(bob);
 
-    WiredTigerUtil::appendSnapshotWindowSettings(_engine, session, &bob);
+    WiredTigerKVEngine* engine = checked_cast<WiredTigerKVEngine*>(
+        opCtx->getServiceContext()->getStorageEngine()->getEngine());
+    WiredTigerUtil::appendSnapshotWindowSettings(engine, session, &bob);
 
     {
         BSONObjBuilder subsection(bob.subobjStart("oplog"));
         subsection.append("visibility timestamp",
-                          Timestamp(_engine->getOplogManager()->getOplogReadTimestamp()));
+                          Timestamp(engine->getOplogManager()->getOplogReadTimestamp()));
     }
 
     return bob.obj();

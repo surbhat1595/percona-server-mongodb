@@ -38,6 +38,7 @@
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/makeobj.h"
 #include "mongo/db/exec/sbe/stages/project.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/query/sbe_stage_builder_eval_frame.h"
 #include "mongo/db/query/stage_types.h"
 
@@ -106,6 +107,12 @@ std::unique_ptr<sbe::EExpression> generateInfinityCheck(const sbe::EVariable& va
  * _assuming that_ it has already been verified to be numeric.
  */
 std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable& var);
+
+/**
+ * Generates an EExpression that checks if the input expression is a positive number (i.e. > 0)
+ * _assuming that_ it has already been verified to be numeric.
+ */
+std::unique_ptr<sbe::EExpression> generatePositiveCheck(const sbe::EVariable& var);
 
 /**
  * Generates an EExpression that checks if the input expression is a negative (i.e., < 0) number
@@ -805,13 +812,15 @@ struct StageBuilderState {
                       const Variables& variables,
                       sbe::value::SlotIdGenerator* slotIdGenerator,
                       sbe::value::FrameIdGenerator* frameIdGenerator,
-                      sbe::value::SpoolIdGenerator* spoolIdGenerator)
+                      sbe::value::SpoolIdGenerator* spoolIdGenerator,
+                      bool needsMerge)
         : slotIdGenerator{slotIdGenerator},
           frameIdGenerator{frameIdGenerator},
           spoolIdGenerator{spoolIdGenerator},
           opCtx{opCtx},
           env{env},
-          variables{variables} {}
+          variables{variables},
+          needsMerge{needsMerge} {}
 
     StageBuilderState(const StageBuilderState& other) = delete;
 
@@ -838,6 +847,14 @@ struct StageBuilderState {
 
     const Variables& variables;
     stdx::unordered_map<Variables::Id, sbe::value::SlotId> globalVariables;
+    // When the mongos splits $group stage and sends it to shards, it adds 'needsMerge'/'fromMongs'
+    // flags to true so that shards can sends special partial aggregation results to the mongos.
+    bool needsMerge;
+    // This map is used to plumb through pre-generated field expressions ('sbe::EExpression')
+    // corresponding to field paths to 'generateExpression' to avoid repeated expression generation.
+    // Key is expected to represent field paths in form CURRENT.<field_name>[.<field_name>]*.
+    stdx::unordered_map<std::string /*field path*/, std::unique_ptr<sbe::EExpression>>
+        preGeneratedExprs;
 };
 
 }  // namespace mongo::stage_builder

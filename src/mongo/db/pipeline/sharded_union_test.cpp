@@ -168,19 +168,19 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     // Mock the expected config server queries.
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
-    const Timestamp timestamp;
+    const Timestamp timestamp(1, 1);
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
 
     ChunkVersion version(1, 0, epoch, timestamp);
 
-    ChunkType chunk1(*cm.getUUID(),
+    ChunkType chunk1(cm.getUUID(),
                      {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
                      version,
                      {"0"});
     chunk1.setName(OID::gen());
     version.incMinor();
 
-    ChunkType chunk2(*cm.getUUID(),
+    ChunkType chunk2(cm.getUUID(),
                      {BSON("_id" << 0), shardKeyPattern.getKeyPattern().globalMax()},
                      version,
                      {"1"});
@@ -247,12 +247,12 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     // created and moved to the first shard.
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
-    const Timestamp timestamp;
+    const Timestamp timestamp(1, 1);
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
 
     ChunkVersion version(1, 0, epoch, timestamp);
 
-    ChunkType chunk1(*cm.getUUID(),
+    ChunkType chunk1(cm.getUUID(),
                      {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
                      version,
                      {shards[0].getName()});
@@ -260,11 +260,11 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     version.incMinor();
 
     ChunkType chunk2(
-        *cm.getUUID(), {BSON("_id" << 0), BSON("_id" << 10)}, version, {shards[1].getName()});
+        cm.getUUID(), {BSON("_id" << 0), BSON("_id" << 10)}, version, {shards[1].getName()});
     chunk2.setName(OID::gen());
     version.incMinor();
 
-    ChunkType chunk3(*cm.getUUID(),
+    ChunkType chunk3(cm.getUUID(),
                      {BSON("_id" << 10), shardKeyPattern.getKeyPattern().globalMax()},
                      version,
                      {shards[0].getName()});
@@ -337,11 +337,11 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     // the same shard.
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
-    const Timestamp timestamp;
+    const Timestamp timestamp(1, 1);
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
     ChunkVersion version(1, 0, epoch, timestamp);
     ChunkType chunk1(
-        *cm.getUUID(),
+        cm.getUUID(),
         {shardKeyPattern.getKeyPattern().globalMin(), shardKeyPattern.getKeyPattern().globalMax()},
         version,
         {shards[0].getName()});
@@ -397,17 +397,17 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
     const UUID uuid = UUID::gen();
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
 
-    const Timestamp timestamp;
+    const Timestamp timestamp(1, 1);
     ChunkVersion version(1, 0, epoch, timestamp);
 
-    ChunkType chunk1(*cm.getUUID(),
+    ChunkType chunk1(cm.getUUID(),
                      {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
                      version,
                      {"0"});
     chunk1.setName(OID::gen());
     version.incMinor();
 
-    ChunkType chunk2(*cm.getUUID(),
+    ChunkType chunk2(cm.getUUID(),
                      {BSON("_id" << 0), shardKeyPattern.getKeyPattern().globalMax()},
                      version,
                      {"1"});

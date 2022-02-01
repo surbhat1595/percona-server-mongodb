@@ -2047,9 +2047,14 @@ fast:
      */
     if (pages_queued < target_pages / 2 && !urgent_queued)
         btree->evict_walk_period = WT_MIN(WT_MAX(1, 2 * btree->evict_walk_period), 100);
-    else if (pages_queued == target_pages)
+    else if (pages_queued == target_pages) {
         btree->evict_walk_period = 0;
-    else if (btree->evict_walk_period > 0)
+        /*
+         * If there's a chance the Btree was fully evicted, update the evicted flag in the handle.
+         */
+        if (__wt_btree_bytes_evictable(session) == 0)
+            F_SET(session->dhandle, WT_DHANDLE_EVICTED);
+    } else if (btree->evict_walk_period > 0)
         btree->evict_walk_period /= 2;
 
     /*
@@ -2378,6 +2383,8 @@ __wt_cache_eviction_worker(WT_SESSION_IMPL *session, bool busy, bool readonly, d
         if (!F_ISSET(conn, WT_CONN_RECOVERING) && __wt_cache_stuck(session)) {
             ret = __wt_txn_is_blocking(session);
             if (ret == WT_ROLLBACK) {
+                __wt_verbose_debug(
+                  session, WT_VERB_TRANSACTION, "Rollback reason: %s", "Cache full");
                 --cache->evict_aggressive_score;
                 WT_STAT_CONN_INCR(session, txn_fail_cache);
                 if (app_thread)

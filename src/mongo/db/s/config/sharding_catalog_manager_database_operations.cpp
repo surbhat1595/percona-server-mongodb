@@ -61,10 +61,6 @@ ShardId selectShardForNewDatabase(OperationContext* opCtx, ShardRegistry* shardR
     shardRegistry->reload(opCtx);
     auto allShardIds = shardRegistry->getAllShardIds(opCtx);
     uassert(ErrorCodes::ShardNotFound, "No shards found", !allShardIds.empty());
-    // TODO SERVER-54231 stop sorting this vector.
-    // Ideally it should be shuffled so that the we choose a random candidate based only
-    // on shard size and not on their lexical order.
-    std::sort(allShardIds.begin(), allShardIds.end());
 
     ShardId candidateShardId = allShardIds[0];
 
@@ -163,7 +159,7 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
                              (std::string) "^" + pcrecpp::RE::QuoteMeta(dbName.toString()) + "$",
                              "i");
 
-    auto dbDoc = client.findOne(DatabaseType::ConfigNS.ns(), queryBuilder.obj());
+    auto dbDoc = client.findOne(DatabaseType::ConfigNS, queryBuilder.obj());
     auto const [primaryShardPtr, database] = [&] {
         if (!dbDoc.isEmpty()) {
             auto actualDb = uassertStatusOK(DatabaseType::fromBSON(dbDoc));

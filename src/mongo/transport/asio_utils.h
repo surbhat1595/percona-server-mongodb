@@ -39,6 +39,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/base/system_error.h"
 #include "mongo/config.h"
+#include "mongo/logv2/log_severity.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/future.h"
@@ -62,7 +63,7 @@ inline HostAndPort endpointToHostAndPort(const asio::generic::stream_protocol::e
 
 Status errorCodeToStatus(const std::error_code& ec);
 
-/*
+/**
  * The ASIO implementation of poll (i.e. socket.wait()) cannot poll for a mask of events, and
  * doesn't support timeouts.
  *
@@ -77,6 +78,30 @@ StatusWith<unsigned> pollASIOSocket(asio::generic::stream_protocol::socket& sock
                                     unsigned mask,
                                     Milliseconds timeout);
 
+/**
+ * Attempts to fill up the passed in buffer sequence with bytes from the underlying stream
+ * without blocking. Returns the number of bytes we were actually able to fill in. Throws
+ * on failure to read socket for reasons other than blocking.
+ */
+template <typename Stream, typename MutableBufferSequence>
+size_t peekASIOStream(Stream& stream, const MutableBufferSequence& buffers) {
+    std::error_code ec;
+    size_t bytesRead;
+    do {
+        bytesRead = stream.receive(buffers, stream.message_peek, ec);
+    } while (ec == asio::error::interrupted);
+
+    // On a completely empty socket, receive returns 0 bytes read and sets
+    // the error code to either would_block or try_again. Since this isn't
+    // actually an error condition for our purposes, we ignore these two
+    // errors.
+    if (ec != asio::error::would_block && ec != asio::error::try_again) {
+        uassertStatusOK(errorCodeToStatus(ec));
+    }
+
+    return bytesRead;
+}
+
 #ifdef MONGO_CONFIG_SSL
 /**
  * Peeks at a fragment of a client issued TLS handshake packet. Returns a TLS alert
@@ -89,7 +114,10 @@ boost::optional<std::array<std::uint8_t, 7>> checkTLSRequest(const asio::const_b
  * setSocketOption failed. Log the error.
  * This is in the .cpp file just to keep LOGV2 out of this header.
  */
-void failedSetSocketOption(const std::system_error& ex, StringData note, BSONObj optionDescription);
+void failedSetSocketOption(const std::system_error& ex,
+                           StringData note,
+                           BSONObj optionDescription,
+                           logv2::LogSeverity errorLogSeverity);
 
 /**
  * Calls Asio `socket.set_option(opt)` with better failure diagnostics.
@@ -97,16 +125,20 @@ void failedSetSocketOption(const std::system_error& ex, StringData note, BSONObj
  * Emits a log message about what option was attempted and what went wrong with
  * it. The `note` string should uniquely identify the source of the call.
  *
- * Two overloads are provided, matching the Asio `socket.set_option` overloads.
+ * Two overloads are provided matching the Asio `socket.set_option` overloads, with an additional
+ * parameter to indicate the level at which the failure diagnostics should logged.
  *
- *     setSocketOption(socket, opt, note)
- *     setSocketOption(socket, opt, ec, note)
+ *     setSocketOption(socket, opt, note, errorLogSeverity)
+ *     setSocketOption(socket, opt, note, errorLogSeverity, ec)
  *
  * If an `ec` is provided, errors are reported by mutating it.
  * Otherwise, the Asio `std::system_error` exception is rethrown.
  */
 template <typename Socket, typename Option>
-void setSocketOption(Socket& socket, const Option& opt, StringData note) {
+void setSocketOption(Socket& socket,
+                     const Option& opt,
+                     StringData note,
+                     logv2::LogSeverity errorLogSeverity) {
     try {
         socket.set_option(opt);
     } catch (const std::system_error& ex) {
@@ -117,15 +149,27 @@ void setSocketOption(Socket& socket, const Option& opt, StringData note) {
                 .append("data", hexdump(opt.data(p), opt.size(p)))
                 .obj();
         }();
-        failedSetSocketOption(ex, note, optionDescription);
+        auto&& p = socket.local_endpoint().protocol();
+        failedSetSocketOption(ex,
+                              note,
+                              BSONObjBuilder{}
+                                  .append("level", opt.level(p))
+                                  .append("name", opt.name(p))
+                                  .append("data", hexdump(opt.data(p), opt.size(p)))
+                                  .obj(),
+                              errorLogSeverity);
         throw;
     }
 }
 
 template <typename Socket, typename Option>
-void setSocketOption(Socket& socket, const Option& opt, std::error_code& ec, StringData note) {
+void setSocketOption(Socket& socket,
+                     const Option& opt,
+                     StringData note,
+                     logv2::LogSeverity errorLogSeverity,
+                     std::error_code& ec) {
     try {
-        setSocketOption(socket, opt, note);
+        setSocketOption(socket, opt, note, errorLogSeverity);
     } catch (const std::system_error& ex) {
         ec = ex.code();
     }

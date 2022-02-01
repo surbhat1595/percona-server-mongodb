@@ -52,14 +52,14 @@ public:
      * @param factoryCallback creates observer instance when invoked.
      */
     static void registerObserverFactory(
-        std::function<std::unique_ptr<HealthObserver>(ClockSource* clockSource)> factoryCallback);
+        std::function<std::unique_ptr<HealthObserver>(ServiceContext* svcCtx)> factoryCallback);
 
     /**
      * Invokes all registered factories and returns new instances.
      * The ownership of all observers is transferred to the invoker.
      */
     static std::vector<std::unique_ptr<HealthObserver>> instantiateAllObservers(
-        ClockSource* clockSource);
+        ServiceContext* svcCtx);
 
     /**
      * Test-only method to cleanup the list of registered factories.

@@ -81,7 +81,7 @@ numTransactionsCollEntries++;
 const childLsid1 = {
     id: sessionUUID,
     txnNumber: parentTxnNumber1,
-    stmtId: NumberInt(0)
+    txnUUID: UUID()
 };
 
 assert.commandWorked(testDB.runCommand({
@@ -99,7 +99,7 @@ numTransactionsCollEntries++;
 numImageCollEntries++;
 
 assert.eq(numTransactionsCollEntries, transactionsCollOnPrimary.find().itcount());
-// TODO (SERVER-58756): a retryable findAndModify command run inside a retryable internal
+// TODO (SERVER-60540): a retryable findAndModify command run inside a retryable internal
 // transaction should have a config.image_collection entry like a regular retryable write.
 // assert.eq(numImageCollEntries, imageCollOnPrimary.find().itcount());
 

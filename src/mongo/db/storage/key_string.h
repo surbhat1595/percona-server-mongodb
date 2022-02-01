@@ -335,13 +335,21 @@ public:
         return *this;
     }
 
+    /**
+     * Compare with another KeyString::Value or Builder.
+     */
     template <class T>
     int compare(const T& other) const;
 
     int compareWithTypeBits(const Value& other) const;
 
+    /**
+     * Compare with another KeyString::Value or Builder, ignoring the RecordId part of both.
+     */
     template <class T>
     int compareWithoutRecordIdLong(const T& other) const;
+    template <class T>
+    int compareWithoutRecordIdStr(const T& other) const;
 
     // Returns the size of the stored KeyString.
     size_t getSize() const {
@@ -383,11 +391,12 @@ public:
     }
 
     /**
-     * Serializes this Value, excluing the RecordId, into a storable format with TypeBits
+     * Serializes this Value, excluding the RecordId, into a storable format with TypeBits
      * information. The serialized format takes the following form:
      *   [keystring size][keystring encoding][typebits encoding]
      */
     void serializeWithoutRecordIdLong(BufBuilder& buf) const;
+    void serializeWithoutRecordIdStr(BufBuilder& buf) const;
 
     // Deserialize the Value from a serialized format.
     static Value deserialize(BufReader& buf, KeyString::Version version) {
@@ -403,7 +412,10 @@ public:
         } else {
             newBuf.appendBuf(typeBits.getBuffer(), typeBits.getSize());
         }
-        return {version, sizeOfKeystring, SharedBufferFragment(newBuf.release(), newBuf.len())};
+        // Note: this variable is needed to make sure that no method is called on 'newBuf'
+        // after a call on its 'release' method.
+        const size_t newBufLen = newBuf.len();
+        return {version, sizeOfKeystring, SharedBufferFragment(newBuf.release(), newBufLen)};
     }
 
     /// Members for Sorter
@@ -439,6 +451,8 @@ public:
     Version getVersion() const {
         return _version;
     }
+
+    size_t getApproximateSize() const;
 
 private:
     Version _version;
@@ -532,7 +546,10 @@ public:
         } else {
             newBuf.appendBuf(_typeBits.getBuffer(), _typeBits.getSize());
         }
-        return {version, _buffer().len(), SharedBufferFragment(newBuf.release(), newBuf.len())};
+        // Note: this variable is needed to make sure that no method is called on 'newBuf'
+        // after a call on its 'release' method.
+        const size_t newBufLen = newBuf.len();
+        return {version, _buffer().len(), SharedBufferFragment(newBuf.release(), newBufLen)};
     }
 
     void appendRecordId(RecordId loc);
@@ -551,6 +568,7 @@ public:
     void appendBinData(const BSONBinData& data);
     void appendSetAsArray(const BSONElementSet& set, const StringTransformFn& f = nullptr);
     void appendOID(OID oid);
+    void appendDate(Date_t date);
 
     /**
      * Appends a Discriminator byte and kEnd byte to a key string.
@@ -607,11 +625,19 @@ public:
         return _typeBits;
     }
 
+    /**
+     * Compare with another KeyString::Value or Builder.
+     */
     template <class T>
     int compare(const T& other) const;
 
+    /**
+     * Compare with another KeyString::Value or Builder, ignoring the RecordId part of both.
+     */
     template <class T>
     int compareWithoutRecordIdLong(const T& other) const;
+    template <class T>
+    int compareWithoutRecordIdStr(const T& other) const;
 
     /**
      * @return a hex encoding of this key
@@ -814,8 +840,10 @@ public:
         int32_t ksSize = _appendTypeBits();
         _transition(BuildState::kReleased);
 
-        return {
-            version, ksSize, SharedBufferFragment(_bufferBuilder.release(), _bufferBuilder.len())};
+        // Note: this variable is needed to make sure that no method is called on '_bufferBuilder'
+        // after a call on its 'release' method.
+        const size_t bufLen = _bufferBuilder.len();
+        return {version, ksSize, SharedBufferFragment(_bufferBuilder.release(), bufLen)};
     }
 
 protected:
@@ -1019,6 +1047,16 @@ int BuilderBase<BufferT>::compareWithoutRecordIdLong(const T& other) const {
         !other.isEmpty() ? sizeWithoutRecordIdLongAtEnd(other.getBuffer(), other.getSize()) : 0);
 }
 
+template <class BufferT>
+template <class T>
+int BuilderBase<BufferT>::compareWithoutRecordIdStr(const T& other) const {
+    return KeyString::compare(
+        getBuffer(),
+        other.getBuffer(),
+        !isEmpty() ? sizeWithoutRecordIdStrAtEnd(getBuffer(), getSize()) : 0,
+        !other.isEmpty() ? sizeWithoutRecordIdStrAtEnd(other.getBuffer(), other.getSize()) : 0);
+}
+
 template <class T>
 int Value::compare(const T& other) const {
     return KeyString::compare(getBuffer(), other.getBuffer(), getSize(), other.getSize());
@@ -1031,6 +1069,15 @@ int Value::compareWithoutRecordIdLong(const T& other) const {
         other.getBuffer(),
         !isEmpty() ? sizeWithoutRecordIdLongAtEnd(getBuffer(), getSize()) : 0,
         !other.isEmpty() ? sizeWithoutRecordIdLongAtEnd(other.getBuffer(), other.getSize()) : 0);
+}
+
+template <class T>
+int Value::compareWithoutRecordIdStr(const T& other) const {
+    return KeyString::compare(
+        getBuffer(),
+        other.getBuffer(),
+        !isEmpty() ? sizeWithoutRecordIdStrAtEnd(getBuffer(), getSize()) : 0,
+        !other.isEmpty() ? sizeWithoutRecordIdStrAtEnd(other.getBuffer(), other.getSize()) : 0);
 }
 
 /**

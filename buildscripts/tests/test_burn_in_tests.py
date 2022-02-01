@@ -12,7 +12,7 @@ import unittest
 from mock import Mock, patch, MagicMock
 
 import buildscripts.burn_in_tests as under_test
-from buildscripts.ciconfig.evergreen import parse_evergreen_file
+from buildscripts.ciconfig.evergreen import parse_evergreen_file, VariantTask
 import buildscripts.resmokelib.parser as _parser
 _parser.set_run_options()
 
@@ -21,10 +21,10 @@ _parser.set_run_options()
 
 def create_tests_by_task_mock(n_tasks, n_tests):
     return {
-        f"task_{i}_gen":
-        under_test.TaskInfo(display_task_name=f"task_{i}", resmoke_args=f"--suites=suite_{i}",
-                            tests=[f"jstests/tests_{j}" for j in range(n_tests)],
-                            require_multiversion=None, distro=f"distro_{i}")
+        f"task_{i}_gen": under_test.TaskInfo(display_task_name=f"task_{i}", resmoke_args="", tests=[
+            f"jstests/tests_{j}" for j in range(n_tests)
+        ], require_multiversion_setup=False, distro=f"distro_{i}", suite=f"suite_{i}",
+                                             build_variant="dummy_variant")
         for i in range(n_tasks)
     }
 
@@ -165,36 +165,6 @@ class TestGetTaskName(unittest.TestCase):
         self.assertEqual(task_name, under_test._get_task_name(task))
 
 
-class TestSetResmokeArgs(unittest.TestCase):
-    def test__set_resmoke_args(self):
-        resmoke_args = "--suites=suite1 test1.js"
-        task = Mock()
-        task.combined_resmoke_args = resmoke_args
-        task.is_generate_resmoke_task = False
-        self.assertEqual(resmoke_args, under_test._set_resmoke_args(task))
-
-    def test__set_resmoke_args_gen_resmoke_task(self):
-        resmoke_args = "--suites=suite1 test1.js"
-        new_suite = "suite2"
-        new_resmoke_args = "--suites={} test1.js".format(new_suite)
-        task = Mock()
-        task.combined_resmoke_args = resmoke_args
-        task.is_generate_resmoke_task = True
-        task.get_vars_suite_name = lambda cmd_vars: cmd_vars["suite"]
-        task.generate_resmoke_tasks_command = {"vars": {"suite": new_suite}}
-        self.assertEqual(new_resmoke_args, under_test._set_resmoke_args(task))
-
-    def test__set_resmoke_args_gen_resmoke_task_no_suite(self):
-        suite = "suite1"
-        resmoke_args = "--suites={} test1.js".format(suite)
-        task = Mock()
-        task.combined_resmoke_args = resmoke_args
-        task.is_generate_resmoke_task = True
-        task.get_vars_suite_name = lambda cmd_vars: cmd_vars["task"]
-        task.generate_resmoke_tasks_command = {"vars": {"task": suite}}
-        self.assertEqual(resmoke_args, under_test._set_resmoke_args(task))
-
-
 class TestSetResmokeCmd(unittest.TestCase):
     def test__set_resmoke_cmd_no_opts_no_args(self):
         repeat_config = under_test.RepeatConfig()
@@ -318,10 +288,9 @@ def create_variant_task_mock(task_name, suite_name, distro="distro"):
     variant_task = MagicMock()
     variant_task.name = task_name
     variant_task.generated_task_name = task_name
-    variant_task.resmoke_suite = suite_name
-    variant_task.get_vars_suite_name.return_value = suite_name
-    variant_task.combined_resmoke_args = f"--suites={suite_name}"
-    variant_task.require_multiversion = None
+    variant_task.get_suite_name.return_value = suite_name
+    variant_task.resmoke_args = f"--suites={suite_name}"
+    variant_task.require_multiversion_setup.return_value = False
     variant_task.run_on = [distro]
     return variant_task
 
@@ -346,7 +315,7 @@ class TestTaskInfo(unittest.TestCase):
         self.assertIn(suite_name, task_info.resmoke_args)
         for test in test_list:
             self.assertIn(test, task_info.tests)
-        self.assertIsNone(task_info.require_multiversion)
+        self.assertFalse(task_info.require_multiversion_setup)
         self.assertEqual(distro_name, task_info.distro)
 
     def test_generated_task_no_large_on_task(self):
@@ -370,7 +339,7 @@ class TestTaskInfo(unittest.TestCase):
         self.assertIn(suite_name, task_info.resmoke_args)
         for test in test_list:
             self.assertIn(test, task_info.tests)
-        self.assertIsNone(task_info.require_multiversion)
+        self.assertFalse(task_info.require_multiversion_setup)
         self.assertEqual(distro_name, task_info.distro)
 
     def test_generated_task_no_large_on_build_variant(self):
@@ -394,7 +363,7 @@ class TestTaskInfo(unittest.TestCase):
         self.assertIn(suite_name, task_info.resmoke_args)
         for test in test_list:
             self.assertIn(test, task_info.tests)
-        self.assertIsNone(task_info.require_multiversion)
+        self.assertFalse(task_info.require_multiversion_setup)
         self.assertEqual(distro_name, task_info.distro)
 
     def test_generated_task_large_distro(self):
@@ -424,7 +393,7 @@ class TestTaskInfo(unittest.TestCase):
         self.assertIn(suite_name, task_info.resmoke_args)
         for test in test_list:
             self.assertIn(test, task_info.tests)
-        self.assertIsNone(task_info.require_multiversion)
+        self.assertFalse(task_info.require_multiversion_setup)
         self.assertEqual(large_distro_name, task_info.distro)
 
 
@@ -472,7 +441,7 @@ class TestCreateTaskList(unittest.TestCase):
         self.assertIn("suite_1", task_info.resmoke_args)
         for i in range(3):
             self.assertIn(f"test{i}.js", task_info.tests)
-        self.assertIsNone(task_info.require_multiversion)
+        self.assertFalse(task_info.require_multiversion_setup)
         self.assertEqual("distro 1", task_info.distro)
 
     def test_create_task_list_with_excludes(self):

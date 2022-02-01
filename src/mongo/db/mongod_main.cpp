@@ -110,6 +110,7 @@
 #include "mongo/db/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
+#include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
 #include "mongo/db/pipeline/process_interface/replica_set_node_process_interface.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
@@ -326,8 +327,9 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
         services.push_back(std::make_unique<ShardingDDLCoordinatorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingDonorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingRecipientService>(serviceContext));
+        services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
+        services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
     } else {
-        // Tenant migrations are not supported in sharded clusters.
         services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
     }
@@ -486,13 +488,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         uassert(10296, ss.str().c_str(), boost::filesystem::exists(storageGlobalParams.dbpath));
     }
 
-    initializeSNMP();
-
     startWatchdog(serviceContext);
-
-    if (mongodGlobalParams.scriptingEnabled) {
-        ScriptEngine::setup();
-    }
 
     try {
         startup_recovery::repairAndRecoverDatabases(startupOpCtx.get(), lastShutdownState);
@@ -521,7 +517,19 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     // Notify the storage engine that startup is completed before repair exits below, as repair sets
     // the upgrade flag to true.
-    serviceContext->getStorageEngine()->notifyStartupComplete();
+    auto storageEngine = serviceContext->getStorageEngine();
+    invariant(storageEngine);
+    storageEngine->notifyStartupComplete();
+
+    BackupCursorHooks::initialize(serviceContext);
+
+    startMongoDFTDC();
+
+    initializeSNMP();
+
+    if (mongodGlobalParams.scriptingEnabled) {
+        ScriptEngine::setup();
+    }
 
     if (storageGlobalParams.upgrade) {
         LOGV2(20537, "Finished checking dbs");
@@ -636,10 +644,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
     readWriteConcernDefaultsMongodStartupChecks(startupOpCtx.get());
 
-    auto storageEngine = serviceContext->getStorageEngine();
-    invariant(storageEngine);
-    BackupCursorHooks::initialize(serviceContext, storageEngine);
-
     // Perform replication recovery for queryable backup mode if needed.
     if (storageGlobalParams.readOnly) {
         uassert(ErrorCodes::BadValue,
@@ -663,8 +667,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                 !replCoord->isReplEnabled());
         replCoord->startup(startupOpCtx.get(), lastShutdownState);
     }
-
-    startMongoDFTDC();
 
     if (!storageGlobalParams.readOnly) {
 
@@ -742,6 +744,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             OldClientContext ctx(startupOpCtx.get(), NamespaceString::kRsOplogNamespace.ns());
             tenant_migration_util::createOplogViewForTenantMigrations(startupOpCtx.get(), ctx.db());
         }
+
+        storageEngine->startDropPendingIdentReaper();
     }
 
     startClientCursorMonitor();
@@ -772,6 +776,23 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             PeriodicThreadToAbortExpiredTransactions::get(serviceContext)->start();
         } catch (ExceptionFor<ErrorCodes::PeriodicJobIsStopped>&) {
             LOGV2_WARNING(4747501, "Not starting periodic jobs as shutdown is in progress");
+            // Shutdown has already started before initialization is complete. Wait for the
+            // shutdown task to complete and return.
+            MONGO_IDLE_THREAD_BLOCK;
+            return waitForShutdown();
+        }
+    }
+
+    // Start a background task to periodically remove expired pre-images from the 'system.preimages'
+    // collection if not in standalone mode.
+    const auto isStandalone =
+        repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() ==
+        repl::ReplicationCoordinator::modeNone;
+    if (!isStandalone) {
+        try {
+            PeriodicChangeStreamExpiredPreImagesRemover::get(serviceContext)->start();
+        } catch (ExceptionFor<ErrorCodes::PeriodicJobIsStopped>&) {
+            LOGV2_WARNING(5869107, "Not starting periodic jobs as shutdown is in progress");
             // Shutdown has already started before initialization is complete. Wait for the
             // shutdown task to complete and return.
             MONGO_IDLE_THREAD_BLOCK;
@@ -1087,13 +1108,15 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>());
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
+        opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
+        opObserverRegistry->addObserver(
+            std::make_unique<repl::TenantMigrationRecipientOpObserver>());
     } else if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
         opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
     } else {
         opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-        // Tenant migrations are not supported in sharded clusters.
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
         opObserverRegistry->addObserver(
             std::make_unique<repl::TenantMigrationRecipientOpObserver>());
@@ -1232,6 +1255,16 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
             4784907, {LogComponent::kReplication}, "Shutting down the replica set node executor");
         exec->shutdown();
         exec->join();
+    }
+
+    const auto isStandalone =
+        repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() ==
+        repl::ReplicationCoordinator::modeNone;
+    if (!isStandalone) {
+        LOGV2_OPTIONS(5869108,
+                      {LogComponent::kQuery},
+                      "Shutting down the ChangeStreamExpiredPreImagesRemover");
+        PeriodicChangeStreamExpiredPreImagesRemover::get(serviceContext)->stop();
     }
 
     if (auto storageEngine = serviceContext->getStorageEngine()) {
@@ -1409,7 +1442,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     ScriptEngine::dropScopeCache();
 
     // Shutdown Full-Time Data Capture
-    LOGV2_OPTIONS(4784926, {LogComponent::kFTDC}, "Shutting down full-time data capture");
     stopMongoDFTDC();
 
     LOGV2(20565, "Now exiting");
@@ -1483,6 +1515,7 @@ int mongod_main(int argc, char* argv[]) {
         }
     }
 
+    audit::rotateAuditLog();
     setUpCollectionShardingState(service);
     setUpCatalog(service);
     setUpReplication(service);

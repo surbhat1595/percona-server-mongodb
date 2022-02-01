@@ -26,6 +26,7 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
@@ -36,9 +37,12 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
+#include "mongo/logv2/log.h"
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(returnResponseCommittedForDonorStartMigrationCmd);
 
 class DonorStartMigrationCmd : public TypedCommand<DonorStartMigrationCmd> {
 public:
@@ -57,8 +61,9 @@ public:
 
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
-                    "tenant migrations are not available in sharded clusters",
-                    serverGlobalParams.clusterRole == ClusterRole::None);
+                    "tenant migrations are not available on config servers",
+                    serverGlobalParams.clusterRole == ClusterRole::None ||
+                        serverGlobalParams.clusterRole == ClusterRole::ShardServer);
 
             // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
             uassert(
@@ -67,16 +72,11 @@ public:
                 !serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading());
 
             const auto& cmd = request();
+            const auto migrationProtocol = cmd.getProtocol().value_or(kDefaulMigrationProtocol);
 
-            if (cmd.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations) ==
-                MigrationProtocolEnum::kSliceMerge) {
-                uassert(5949300,
-                        "protocol \"slice merge\" not supported",
-                        repl::feature_flags::gSliceMerge.isEnabled(
-                            serverGlobalParams.featureCompatibility));
-            }
+            tenant_migration_util::protocolTenantIdCompatibilityCheck(migrationProtocol,
+                                                                      cmd.getTenantId().toString());
 
-            // TODO (SERVER-59494): tenantId should be optional in the state doc. Include protocol.
             TenantMigrationDonorDocument stateDoc(cmd.getMigrationId(),
                                                   cmd.getRecipientConnectionString().toString(),
                                                   cmd.getReadPreference(),
@@ -95,7 +95,17 @@ public:
                 stateDoc.setRecipientCertificateForDonor(cmd.getRecipientCertificateForDonor());
             }
 
+            stateDoc.setProtocol(migrationProtocol);
+
             const auto stateDocBson = stateDoc.toBSON();
+
+            if (MONGO_unlikely(returnResponseCommittedForDonorStartMigrationCmd.shouldFail())) {
+                LOGV2(5949401,
+                      "Immediately returning committed because "
+                      "'returnResponseCommittedForDonorStartMigrationCmd' failpoint is enabled",
+                      "tenantMigrationDonorInstance"_attr = stateDoc.toBSON());
+                return Response(TenantMigrationDonorStateEnum::kCommitted);
+            }
 
             auto donorService =
                 repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext())
@@ -107,22 +117,7 @@ public:
             // with the same migrationId but different options (e.g. tenantId or
             // recipientConnectionString or readPreference).
             uassertStatusOK(donor->checkIfOptionsConflict(stateDoc));
-
-            auto durableState = [&] {
-                try {
-                    return donor->getDurableState(opCtx);
-                } catch (ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& ex) {
-                    // The conflict is discovered while inserting the donor instance's state doc.
-                    // This implies that there is no other instance with the same migrationId, but
-                    // there is another instance with the same tenantId. Therefore, the instance
-                    // above was created by this command, so remove it.
-                    // The status from this exception will be passed to the instance interrupt()
-                    // method.
-                    donorService->releaseInstance(stateDocBson["_id"].wrap(), ex.toStatus());
-                    throw;
-                }
-            }();
-
+            auto durableState = donor->getDurableState(opCtx);
             auto response = Response(durableState.state);
             if (durableState.abortReason) {
                 BSONObjBuilder bob;
@@ -175,8 +170,9 @@ public:
 
         void typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
-                    "tenant migrations are not available in sharded clusters",
-                    serverGlobalParams.clusterRole == ClusterRole::None);
+                    "tenant migrations are not available on config servers",
+                    serverGlobalParams.clusterRole == ClusterRole::None ||
+                        serverGlobalParams.clusterRole == ClusterRole::ShardServer);
 
             const auto& cmd = request();
 
@@ -243,8 +239,9 @@ public:
 
         void typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
-                    "tenant migrations are not available in sharded clusters",
-                    serverGlobalParams.clusterRole == ClusterRole::None);
+                    "tenant migrations are not available on config servers",
+                    serverGlobalParams.clusterRole == ClusterRole::None ||
+                        serverGlobalParams.clusterRole == ClusterRole::ShardServer);
 
             const RequestType& cmd = request();
 

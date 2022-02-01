@@ -101,12 +101,6 @@ configuration::~configuration()
     }
 }
 
-const std::string &
-configuration::get_config() const
-{
-    return (_config);
-}
-
 std::string
 configuration::get_string(const std::string &key)
 {
@@ -161,12 +155,6 @@ std::vector<std::string>
 configuration::get_list(const std::string &key)
 {
     return get<std::vector<std::string>>(key, false, types::LIST, {}, config_item_to_list);
-}
-
-std::vector<std::string>
-configuration::get_optional_list(const std::string &key)
-{
-    return get<std::vector<std::string>>(key, true, types::LIST, {}, config_item_to_list);
 }
 
 template <typename T>
@@ -258,6 +246,14 @@ configuration::split_config(const std::string &config)
             in_subconfig = !parens.empty();
         }
         if (cut_config[i] == '=' && !in_subconfig) {
+            if (len == 0) {
+                testutil_die(EINVAL, "error parsing config: detected empty key");
+            }
+            if (expect_value) {
+                testutil_die(EINVAL,
+                  "error parsing config: syntax error parsing value for key ['%s']: '%s'",
+                  key.c_str(), cut_config.substr(start, len).c_str());
+            }
             expect_value = true;
             key = cut_config.substr(start, len);
             start += len + 1;
@@ -265,6 +261,15 @@ configuration::split_config(const std::string &config)
             continue;
         }
         if (cut_config[i] == ',' && !in_subconfig) {
+            if (len == 0) {
+                testutil_die(
+                  EINVAL, "error parsing config: detected empty value for key:'%s'", key.c_str());
+            }
+            if (!expect_value) {
+                testutil_die(EINVAL,
+                  "error parsing config: syntax error parsing key value pair: '%s'",
+                  cut_config.substr(start, len).c_str());
+            }
             expect_value = false;
             if (start + len >= cut_config.size())
                 break;

@@ -119,11 +119,6 @@ double DBDirectClient::getSoTimeout() const {
     return 0;
 }
 
-QueryOptions DBDirectClient::_lookupAvailableOptions() {
-    // Exhaust mode is not available in DBDirectClient.
-    return QueryOptions(DBClientBase::_lookupAvailableOptions() & ~QueryOption_Exhaust);
-}
-
 namespace {
 DbResponse loopbackBuildResponse(OperationContext* const opCtx, Message& toSend) {
     DirectClientScope directClientScope(opCtx);
@@ -168,6 +163,24 @@ write_ops::FindAndModifyCommandReply DBDirectClient::findAndModify(
     const write_ops::FindAndModifyCommandRequest& findAndModify) {
     auto response = runCommand(findAndModify.serialize({}));
     return FindAndModifyOp::parseResponse(response->getCommandReply());
+}
+
+write_ops::InsertCommandReply DBDirectClient::insert(
+    const write_ops::InsertCommandRequest& insert) {
+    auto response = runCommand(insert.serialize({}));
+    return InsertOp::parseResponse(response->getCommandReply());
+}
+
+write_ops::UpdateCommandReply DBDirectClient::update(
+    const write_ops::UpdateCommandRequest& update) {
+    auto response = runCommand(update.serialize({}));
+    return UpdateOp::parseResponse(response->getCommandReply());
+}
+
+write_ops::DeleteCommandReply DBDirectClient::remove(
+    const write_ops::DeleteCommandRequest& remove) {
+    auto response = runCommand(remove.serialize({}));
+    return DeleteOp::parseResponse(response->getCommandReply());
 }
 
 long long DBDirectClient::count(const NamespaceStringOrUUID nsOrUuid,

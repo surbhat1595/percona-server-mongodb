@@ -37,7 +37,11 @@ CONFIG_DIRECTORY = "generated_burn_in_tags_config"
 CONFIG_FILE = "burn_in_tags_gen.json"
 EVERGREEN_FILE = "etc/evergreen.yml"
 EVG_CONFIG_FILE = ".evergreen.yml"
+
 COMPILE_TASK = "compile_and_archive_dist_test_TG"
+# Burn in tags requires running on RHEL80 currently.
+COMPILE_TASK_DISTRO = "rhel80-large"
+
 TASK_ID_EXPANSION = "task_id"
 
 ConfigOptions = namedtuple("ConfigOptions", [
@@ -81,18 +85,14 @@ def _get_config_options(expansions_file_data, build_variant, run_build_variant):
                          repeat_tests_max, project)
 
 
-def _create_evg_build_variant_map(expansions_file_data, evergreen_conf):
+def _create_evg_build_variant_map(expansions_file_data):
     """
     Generate relationship of base buildvariant to generated buildvariant.
 
     :param expansions_file_data: Config data file to use.
-    :param evergreen_conf: Evergreen configuration.
     :return: Map of base buildvariants to their generated buildvariants.
     """
-    burn_in_tags_gen_variant = expansions_file_data["build_variant"]
-    burn_in_tags_gen_variant_config = evergreen_conf.get_variant(burn_in_tags_gen_variant)
-    burn_in_tag_build_variants = burn_in_tags_gen_variant_config.expansions.get(
-        "burn_in_tag_buildvariants")
+    burn_in_tag_build_variants = expansions_file_data["burn_in_tag_buildvariants"]
 
     if burn_in_tag_build_variants:
         return {
@@ -125,7 +125,7 @@ def _generate_evg_build_variant(
 
     build_variant = BuildVariant(run_build_variant, display_name, expansions=expansions,
                                  modules=modules, run_on=run_on)
-    build_variant.add_existing_task(ExistingTask(COMPILE_TASK))
+    build_variant.add_existing_task(ExistingTask(COMPILE_TASK), distros=[COMPILE_TASK_DISTRO])
     return build_variant
 
 
@@ -160,7 +160,7 @@ def _generate_evg_tasks(evergreen_api: EvergreenApi, shrub_project: ShrubProject
                                          repeat_tests_secs=config_options.repeat_tests_secs)
 
             burn_in_generator = GenerateBurnInExecutor(gen_config, repeat_config, evergreen_api)
-            burn_in_generator.add_config_for_build_variant(shrub_build_variant, tests_by_task)
+            burn_in_generator.generate_tasks_for_variant(tests_by_task, shrub_build_variant)
             shrub_project.add_build_variant(shrub_build_variant)
 
 
@@ -175,7 +175,7 @@ def burn_in(task_expansions: Dict[str, Any], evg_conf: EvergreenProjectConfig,
     :param repos: Git repositories.
     """
     shrub_project = ShrubProject.empty()
-    build_variant_map = _create_evg_build_variant_map(task_expansions, evg_conf)
+    build_variant_map = _create_evg_build_variant_map(task_expansions)
     _generate_evg_tasks(evergreen_api, shrub_project, task_expansions, build_variant_map, repos,
                         evg_conf)
 

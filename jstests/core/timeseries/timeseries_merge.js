@@ -3,7 +3,6 @@
  *
  *
  * @tags: [
- *   assumes_unsharded_collection,
  *   does_not_support_transactions,
  *   requires_timeseries,
  * ]
@@ -12,11 +11,6 @@
 "use strict";
 
 load("jstests/core/timeseries/libs/timeseries_agg_helpers.js");
-
-if (!TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo())) {
-    jsTestLog("Skipping test because the time-series collection feature flag is disabled");
-    return;
-}
 
 const testDB = TimeseriesAggTests.getTestDb();
 assert.commandWorked(testDB.dropDatabase());

@@ -148,7 +148,7 @@ Status checkOkayToGrantRolesToRole(OperationContext* opCtx,
     for (const auto& roleToAdd : rolesToAdd) {
         if (roleToAdd == role) {
             return {ErrorCodes::InvalidRoleModification,
-                    str::stream() << "Cannot grant role " << role.getFullName() << " to itself."};
+                    str::stream() << "Cannot grant role " << role << " to itself."};
         }
 
         if (role.getDB() != "admin" && roleToAdd.getDB() != role.getDB()) {
@@ -161,21 +161,20 @@ Status checkOkayToGrantRolesToRole(OperationContext* opCtx,
     auto status = authzManager->rolesExist(opCtx, rolesToAdd);
     if (!status.isOK()) {
         return {status.code(),
-                str::stream() << "Cannot grant roles to '" << role.toString()
-                              << "': " << status.reason()};
+                str::stream() << "Cannot grant roles to '" << role << "': " << status.reason()};
     }
 
     auto swData = authzManager->resolveRoles(
         opCtx, rolesToAdd, AuthorizationManager::ResolveRoleOption::kRoles);
     if (!swData.isOK()) {
         return {swData.getStatus().code(),
-                str::stream() << "Cannot grant roles to '" << role.toString()
+                str::stream() << "Cannot grant roles to '" << role
                               << "': " << swData.getStatus().reason()};
     }
 
     if (sequenceContains(swData.getValue().roles.get(), role)) {
         return {ErrorCodes::InvalidRoleModification,
-                str::stream() << "Granting roles to " << role.getFullName()
+                str::stream() << "Granting roles to " << role
                               << " would introduce a cycle in the role graph"};
     }
 
@@ -414,8 +413,7 @@ Status updateRoleDocument(OperationContext* opCtx, const RoleName& role, const B
         return status;
     }
     if (status.code() == ErrorCodes::NoMatchingDocument) {
-        return Status(ErrorCodes::RoleNotFound,
-                      str::stream() << "Role " << role.getFullName() << " not found");
+        return Status(ErrorCodes::RoleNotFound, str::stream() << "Role " << role << " not found");
     }
     if (status.code() == ErrorCodes::UnknownError) {
         return Status(ErrorCodes::RoleModificationFailed, status.reason());
@@ -476,8 +474,7 @@ Status updatePrivilegeDocument(OperationContext* opCtx,
         return {ErrorCodes::UserModificationFailed, status.reason()};
     }
     if (status.code() == ErrorCodes::NoMatchingDocument) {
-        return {ErrorCodes::UserNotFound,
-                str::stream() << "User " << user.getFullName() << " not found"};
+        return {ErrorCodes::UserNotFound, str::stream() << "User " << user << " not found"};
     }
     return status;
 }
@@ -1228,7 +1225,7 @@ void CmdUMCTyped<DropUserCommand>::Invocation::typedRun(OperationContext* opCtx)
     uassertStatusOK(status);
 
     uassert(ErrorCodes::UserNotFound,
-            str::stream() << "User '" << userName.getFullName() << "' not found",
+            str::stream() << "User '" << userName << "' not found",
             numMatched > 0);
 }
 
@@ -1346,41 +1343,64 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
                 "Privilege or restriction details require exact-match usersInfo queries",
                 !cmd.getFilter() && arg.isExact());
 
-        // If you want privileges or restrictions you need to call getUserDescription
-        // on each user.
+        // Exact-match usersInfo queries can be optimized to utilize the user cache if custom data
+        // can be omitted. This is especially helpful when config servers execute exact-match
+        // usersInfo queries on behalf of mongoses gathering roles + privileges for recently
+        // authenticated users.
         for (const auto& userName : arg.getElements(dbname)) {
-            BSONObj userDetails;
-            auto status = authzManager->getUserDescription(opCtx, userName, &userDetails);
-            if (status.code() == ErrorCodes::UserNotFound) {
-                continue;
-            }
-            uassertStatusOK(status);
-
-            // getUserDescription always includes credentials and restrictions, which may need
-            // to be stripped out
-            BSONObjBuilder strippedUser;
-            for (const BSONElement& e : userDetails) {
-                if (e.fieldNameStringData() == "credentials") {
-                    BSONArrayBuilder mechanismNamesBuilder;
-                    BSONObj mechanismsObj = e.Obj();
-                    for (const BSONElement& mechanismElement : mechanismsObj) {
-                        mechanismNamesBuilder.append(mechanismElement.fieldNameStringData());
-                    }
-                    strippedUser.append("mechanisms", mechanismNamesBuilder.arr());
-
-                    if (!cmd.getShowCredentials()) {
-                        continue;
-                    }
-                }
-
-                if ((e.fieldNameStringData() == "authenticationRestrictions") &&
-                    !cmd.getShowAuthenticationRestrictions()) {
+            if (cmd.getShowCustomData()) {
+                BSONObj userDetails;
+                auto status = authzManager->getUserDescription(opCtx, userName, &userDetails);
+                if (status.code() == ErrorCodes::UserNotFound) {
                     continue;
                 }
+                uassertStatusOK(status);
 
-                strippedUser.append(e);
+                // getUserDescription always includes credentials and restrictions, which may need
+                // to be stripped out
+                BSONObjBuilder strippedUser;
+                for (const BSONElement& e : userDetails) {
+                    if (e.fieldNameStringData() == "credentials") {
+                        BSONArrayBuilder mechanismNamesBuilder;
+                        BSONObj mechanismsObj = e.Obj();
+                        for (const BSONElement& mechanismElement : mechanismsObj) {
+                            mechanismNamesBuilder.append(mechanismElement.fieldNameStringData());
+                        }
+                        strippedUser.append("mechanisms", mechanismNamesBuilder.arr());
+
+                        if (!cmd.getShowCredentials()) {
+                            continue;
+                        }
+                    }
+
+                    if ((e.fieldNameStringData() == "authenticationRestrictions") &&
+                        !cmd.getShowAuthenticationRestrictions()) {
+                        continue;
+                    }
+
+                    strippedUser.append(e);
+                }
+                users.push_back(strippedUser.obj());
+            } else {
+                // Custom data is not required in the output, so it can be generated from a cached
+                // user object.
+                auto swUserHandle = authzManager->acquireUser(opCtx, userName);
+                if (swUserHandle.getStatus().code() == ErrorCodes::UserNotFound) {
+                    continue;
+                }
+                UserHandle user = uassertStatusOK(swUserHandle);
+
+                // The returned User object will need to be marshalled back into a BSON document and
+                // stripped of credentials and restrictions if they were not explicitly requested.
+                BSONObjBuilder userObjBuilder;
+                user->reportForUsersInfo(&userObjBuilder,
+                                         cmd.getShowCredentials(),
+                                         cmd.getShowPrivileges(),
+                                         cmd.getShowAuthenticationRestrictions());
+                BSONObj userObj = userObjBuilder.obj();
+                users.push_back(userObj);
+                userObjBuilder.doneFast();
             }
-            users.push_back(strippedUser.obj());
         }
     } else {
         // If you don't need privileges, or authenticationRestrictions, you can just do a
@@ -1414,15 +1434,18 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
                                                                      << "in"
                                                                      << "$$cred.k")))));
 
-        if (cmd.getShowCredentials()) {
-            // Authentication restrictions are only rendered in the single user case.
-            pipeline.push_back(BSON("$unset"
-                                    << "authenticationRestrictions"));
-        } else {
-            // Remove credentials as well, they're not required in the output
-            pipeline.push_back(BSON("$unset" << BSON_ARRAY("authenticationRestrictions"
-                                                           << "credentials")));
+        // Authentication restrictions are only rendered in the single user case.
+        BSONArrayBuilder fieldsToRemoveBuilder;
+        fieldsToRemoveBuilder.append("authenticationRestrictions");
+        if (!cmd.getShowCredentials()) {
+            // Remove credentials as well, they're not required in the output.
+            fieldsToRemoveBuilder.append("credentials");
         }
+        if (!cmd.getShowCustomData()) {
+            // Remove customData as well, it's not required in the output.
+            fieldsToRemoveBuilder.append("customData");
+        }
+        pipeline.push_back(BSON("$unset" << fieldsToRemoveBuilder.arr()));
 
         // Handle a user specified filter.
         if (auto filter = cmd.getFilter()) {
@@ -1598,7 +1621,7 @@ void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationCo
             !cmd.getPrivileges().empty());
 
     uassert(ErrorCodes::BadValue,
-            str::stream() << roleName.getFullName() << " is a built-in role and cannot be modified",
+            str::stream() << roleName << " is a built-in role and cannot be modified",
             !auth::isBuiltinRole(roleName));
 
     auto* client = opCtx->getClient();
@@ -1647,7 +1670,7 @@ void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(Operatio
             !cmd.getPrivileges().empty());
 
     uassert(ErrorCodes::BadValue,
-            str::stream() << roleName.getFullName() << " is a built-in role and cannot be modified",
+            str::stream() << roleName << " is a built-in role and cannot be modified",
             !auth::isBuiltinRole(roleName));
 
     auto* client = opCtx->getClient();
@@ -1701,7 +1724,7 @@ void CmdUMCTyped<GrantRolesToRoleCommand>::Invocation::typedRun(OperationContext
             !cmd.getRoles().empty());
 
     uassert(ErrorCodes::BadValue,
-            str::stream() << roleName.getFullName() << " is a built-in role and cannot be modified",
+            str::stream() << roleName << " is a built-in role and cannot be modified",
             !auth::isBuiltinRole(roleName));
 
     auto rolesToAdd = auth::resolveRoleNames(cmd.getRoles(), dbname);
@@ -1741,7 +1764,7 @@ void CmdUMCTyped<RevokeRolesFromRoleCommand>::Invocation::typedRun(OperationCont
             !cmd.getRoles().empty());
 
     uassert(ErrorCodes::BadValue,
-            str::stream() << roleName.getFullName() << " is a built-in role and cannot be modified",
+            str::stream() << roleName << " is a built-in role and cannot be modified",
             !auth::isBuiltinRole(roleName));
 
     auto rolesToRemove = auth::resolveRoleNames(cmd.getRoles(), dbname);
@@ -1842,7 +1865,7 @@ void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx)
     RoleName roleName(cmd.getCommandParameter(), dbname);
 
     uassert(ErrorCodes::BadValue,
-            str::stream() << roleName.getFullName() << " is a built-in role and cannot be modified",
+            str::stream() << roleName << " is a built-in role and cannot be modified",
             !auth::isBuiltinRole(roleName));
 
     auto* client = opCtx->getClient();
@@ -1868,8 +1891,8 @@ void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx)
                                   BSON("$pull" << BSON("roles" << roleName.toBSON())));
         if (!swCount.isOK()) {
             return useDefaultCode(swCount.getStatus(), ErrorCodes::UserModificationFailed)
-                .withContext(str::stream() << "Failed to remove role " << roleName.getFullName()
-                                           << " from all users");
+                .withContext(str::stream()
+                             << "Failed to remove role " << roleName << " from all users");
         }
 
         // Remove this role from all other roles
@@ -1878,15 +1901,15 @@ void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx)
                              BSON("$pull" << BSON("roles" << roleName.toBSON())));
         if (!swCount.isOK()) {
             return useDefaultCode(swCount.getStatus(), ErrorCodes::RoleModificationFailed)
-                .withContext(str::stream() << "Failed to remove role " << roleName.getFullName()
-                                           << " from all users");
+                .withContext(str::stream()
+                             << "Failed to remove role " << roleName << " from all users");
         }
 
         // Finally, remove the actual role document
         swCount = txn.remove(AuthorizationManager::rolesCollectionNamespace, roleName.toBSON());
         if (!swCount.isOK()) {
-            return swCount.getStatus().withContext(str::stream() << "Failed to remove role "
-                                                                 << roleName.getFullName());
+            return swCount.getStatus().withContext(str::stream()
+                                                   << "Failed to remove role " << roleName);
         }
 
         return Status::OK();

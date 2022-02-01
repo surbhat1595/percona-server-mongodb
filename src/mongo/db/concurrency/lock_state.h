@@ -32,6 +32,7 @@
 #include <queue>
 
 #include "mongo/db/concurrency/fast_map_noalloc.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/platform/atomic_word.h"
@@ -206,11 +207,17 @@ public:
     virtual void releaseTicket();
     virtual void reacquireTicket(OperationContext* opCtx);
 
+    bool hasReadTicket() const override {
+        return _modeForTicket == MODE_IS || _modeForTicket == MODE_S;
+    }
+
+    bool hasWriteTicket() const override {
+        return _modeForTicket == MODE_IX || _modeForTicket == MODE_X;
+    }
+
     void getFlowControlTicket(OperationContext* opCtx, LockMode lockMode) override;
 
-    FlowControlTicketholder::CurOp getFlowControlStats() const override {
-        return _flowControlStats;
-    }
+    FlowControlTicketholder::CurOp getFlowControlStats() const override;
 
     //
     // Below functions are for testing only.
@@ -342,7 +349,7 @@ private:
 
     // Per-locker locking statistics. Reported in the slow-query log message and through
     // db.currentOp. Complementary to the per-instance locking statistics.
-    SingleThreadedLockStats _stats;
+    AtomicLockStats _stats;
 
     // Delays release of exclusive/intent-exclusive locked resources until the write unit of
     // work completes. Value of 0 means we are not inside a write unit of work.

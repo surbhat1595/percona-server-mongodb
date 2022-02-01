@@ -55,7 +55,6 @@ class search_near_01 : public test_harness::test {
         uint64_t collections_per_thread = tc->collection_count;
         const uint64_t MAX_ROLLBACKS = 100;
         uint32_t rollback_retries = 0;
-        int cmpp;
 
         /*
          * Generate a table of data with prefix keys aaa -> zzz. We have 26 threads from ids
@@ -64,7 +63,7 @@ class search_near_01 : public test_harness::test {
          */
         for (int64_t i = 0; i < collections_per_thread; ++i) {
             collection &coll = tc->db.get_collection(i);
-            scoped_cursor cursor = tc->session.open_scoped_cursor(coll.name.c_str());
+            scoped_cursor cursor = tc->session.open_scoped_cursor(coll.name);
             for (uint64_t j = 0; j < ALPHABET.size(); ++j) {
                 for (uint64_t k = 0; k < ALPHABET.size(); ++k) {
                     for (uint64_t count = 0; count < tc->key_count; ++count) {
@@ -84,8 +83,8 @@ class search_near_01 : public test_harness::test {
                             --count;
                         } else {
                             /* Commit txn at commit timestamp 100. */
-                            tc->transaction.commit(
-                              "commit_timestamp=" + tc->tsm->decimal_to_hex(100));
+                            testutil_assert(tc->transaction.commit(
+                              "commit_timestamp=" + tc->tsm->decimal_to_hex(100)));
                             rollback_retries = 0;
                         }
                     }
@@ -191,8 +190,8 @@ class search_near_01 : public test_harness::test {
          * per search near function call. The key we search near can be different in length, which
          * will increase the number of entries search by a factor of 26.
          */
-        expected_entries = tc->thread_count * keys_per_prefix * 2 *
-          pow(ALPHABET.size(), PREFIX_KEY_LEN - srchkey_len);
+        expected_entries =
+          tc->thread_count * keys_per_prefix * pow(ALPHABET.size(), PREFIX_KEY_LEN - srchkey_len);
 
         /*
          * Read at timestamp 10, so that no keys are visible to this transaction. This allows prefix
@@ -205,8 +204,8 @@ class search_near_01 : public test_harness::test {
             /* Get a collection and find a cached cursor. */
             collection &coll = tc->db.get_random_collection();
             if (cursors.find(coll.id) == cursors.end()) {
-                scoped_cursor cursor = tc->session.open_scoped_cursor(coll.name.c_str());
-                cursor->reconfigure(cursor.get(), "prefix_key=true");
+                scoped_cursor cursor = tc->session.open_scoped_cursor(coll.name);
+                cursor->reconfigure(cursor.get(), "prefix_search=true");
                 cursors.emplace(coll.id, std::move(cursor));
             }
 
@@ -246,7 +245,24 @@ class search_near_01 : public test_harness::test {
                  */
                 testutil_assert(
                   (expected_entries + (2 * tc->thread_count)) >= entries_stat - prev_entries_stat);
-                testutil_assert(prefix_stat > prev_prefix_stat);
+                /*
+                 * There is an edge case where we may not early exit the prefix search near call
+                 * because the specified prefix matches the rest of the entries in the tree.
+                 *
+                 * In this test, the keys in our database start with prefixes aaa -> zzz. If we
+                 * search with a prefix such as "z", we will not early exit the search near call
+                 * because the rest of the keys will also start with "z" and match the prefix. The
+                 * statistic will stay the same if we do not early exit search near.
+                 *
+                 * However, we still need to keep the assertion as >= rather than a strictly equals
+                 * as the test is multithreaded and other threads may increment the statistic if
+                 * they are searching with a different prefix that will early exit.
+                 */
+                if (srch_key == "z" || srch_key == "zz" || srch_key == "zzz") {
+                    testutil_assert(prefix_stat >= prev_prefix_stat);
+                } else {
+                    testutil_assert(prefix_stat > prev_prefix_stat);
+                }
 
                 tc->transaction.add_op();
                 tc->sleep();
@@ -254,7 +270,6 @@ class search_near_01 : public test_harness::test {
             /* Reset our cursor to avoid pinning content. */
             testutil_check(cursor->reset(cursor.get()));
         }
-        tc->transaction.commit();
         /* Make sure the last transaction is rolled back now the work is finished. */
         if (tc->transaction.active())
             tc->transaction.rollback();

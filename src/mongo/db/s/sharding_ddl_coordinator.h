@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/internal_session_pool.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
@@ -90,25 +91,9 @@ public:
         return metadata().getForwardableOpMetadata().get();
     }
 
-    // Cached LSIDs shared between DDL coordinator instances
-    class SessionCache {
-
-    public:
-        SessionCache() = default;
-
-        static SessionCache* get(ServiceContext* serviceContext);
-        static SessionCache* get(OperationContext* opCtx);
-
-        ShardingDDLSession acquire();
-
-        void release(ShardingDDLSession);
-
-    private:
-        std::stack<ShardingDDLSession> _cache;
-
-        // Protects _cache.
-        mutable Mutex _cacheMutex = MONGO_MAKE_LATCH("SessionCache::_cacheMutex");
-    };
+    const boost::optional<mongo::DatabaseVersion>& getDatabaseVersion() const& {
+        return metadata().getDatabaseVersion();
+    }
 
 protected:
     virtual std::vector<StringData> _acquireAdditionalLocks(OperationContext* opCtx) {
@@ -152,7 +137,9 @@ protected:
             optSession->setTxnNumber(++txnNumber);
             newShardingDDLCoordinatorMetadata.setSession(optSession);
         } else {
-            newShardingDDLCoordinatorMetadata.setSession(SessionCache::get(opCtx)->acquire());
+            auto session = InternalSessionPool::get(opCtx)->acquire(opCtx);
+            newShardingDDLCoordinatorMetadata.setSession(
+                ShardingDDLSession(session.getSessionId(), session.getTxnNumber()));
         }
 
         StateDoc newDoc(doc);

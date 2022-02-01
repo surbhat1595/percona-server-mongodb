@@ -66,22 +66,42 @@ std::pair<value::TypeTags, value::Value> genericCompare(
                 return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
             }
             case value::TypeTags::NumberDouble: {
-                auto result = op(value::numericCast<double>(lhsTag, lhsValue),
-                                 value::numericCast<double>(rhsTag, rhsValue));
+                auto result = [&]() {
+                    if (lhsTag == value::TypeTags::NumberInt64) {
+                        auto rhs = value::bitcastTo<double>(rhsValue);
+                        if (std::isnan(rhs)) {
+                            return false;
+                        }
+                        return op(compareLongToDouble(value::bitcastTo<int64_t>(lhsValue), rhs), 0);
+                    } else if (rhsTag == value::TypeTags::NumberInt64) {
+                        auto lhs = value::bitcastTo<double>(lhsValue);
+                        if (std::isnan(lhs)) {
+                            return false;
+                        }
+                        return op(compareDoubleToLong(lhs, value::bitcastTo<int64_t>(rhsValue)), 0);
+                    } else {
+                        return op(value::numericCast<double>(lhsTag, lhsValue),
+                                  value::numericCast<double>(rhsTag, rhsValue));
+                    }
+                }();
                 return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
             }
             case value::TypeTags::NumberDecimal: {
                 auto result = [&]() {
                     if (lhsTag == value::TypeTags::NumberDouble) {
-                        return op(compareDoubleToDecimal(
-                                      value::numericCast<double>(lhsTag, lhsValue),
-                                      value::numericCast<Decimal128>(rhsTag, rhsValue)),
+                        if (value::isNaN(lhsTag, lhsValue) || value::isNaN(rhsTag, rhsValue)) {
+                            return false;
+                        }
+                        return op(compareDoubleToDecimal(value::bitcastTo<double>(lhsValue),
+                                                         value::bitcastTo<Decimal128>(rhsValue)),
                                   0);
                     } else if (rhsTag == value::TypeTags::NumberDouble) {
-                        return op(
-                            compareDecimalToDouble(value::numericCast<Decimal128>(lhsTag, lhsValue),
-                                                   value::numericCast<double>(rhsTag, rhsValue)),
-                            0);
+                        if (value::isNaN(lhsTag, lhsValue) || value::isNaN(rhsTag, rhsValue)) {
+                            return false;
+                        }
+                        return op(compareDecimalToDouble(value::bitcastTo<Decimal128>(lhsValue),
+                                                         value::bitcastTo<double>(rhsValue)),
+                                  0);
                     } else {
                         return op(value::numericCast<Decimal128>(lhsTag, lhsValue),
                                   value::numericCast<Decimal128>(rhsTag, rhsValue));
@@ -264,8 +284,6 @@ struct Instruction {
         getArraySize,
 
         aggSum,
-        aggDoubleDoubleSum,
-        doubleDoubleSumFinalize,
         aggMin,
         aggMax,
         aggFirst,
@@ -338,9 +356,16 @@ enum class Builtin : uint8_t {
     log10,
     sqrt,
     addToArray,       // agg function to append to an array
+    mergeObjects,     // agg function to merge BSON documents
     addToSet,         // agg function to append to a set
     collAddToSet,     // agg function to append to a set (with collation)
     doubleDoubleSum,  // special double summation
+    aggDoubleDoubleSum,
+    doubleDoubleSumFinalize,
+    doubleDoubleMergeSumFinalize,
+    aggStdDev,
+    stdDevPopFinalize,
+    stdDevSampFinalize,
     bitTestZero,      // test bitwise mask & value is zero
     bitTestMask,      // test bitwise mask & value is mask
     bitTestPosition,  // test BinData with a bit position list
@@ -409,8 +434,8 @@ enum class Builtin : uint8_t {
  * - The element at index `kDecimalTotal` is optional and represents the sum of all decimal values
  * if any such values are encountered.
  *
- * See 'aggDoubleDoubleSumImpl()'/'aggDoubleDoubleSum()'/'doubleDoubleSumFinalize()' for more
- * details.
+ * See 'builtinAggDoubleDoubleSumImpl()' / 'builtInAggDoubleDoubleSum()' /
+ * 'builtinDoubleDoubleSumFinalize()' for more details.
  */
 enum AggSumValueElems {
     kNonDecimalTotalTag,
@@ -419,6 +444,36 @@ enum AggSumValueElems {
     kDecimalTotal,
     // This is actually not an index but represents the maximum number of elements.
     kMaxSizeOfArray
+};
+
+/**
+ * This enum defines indices into an 'Array' that returns the partial sum result when 'needsMerge'
+ * is requested.
+ *
+ * See 'builtinDoubleDoubleSumFinalize()' for more details.
+ */
+enum class AggPartialSumElems { kTotal, kError, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that accumulates $stdDevPop and $stdDevSamp results.
+ *
+ * The array contains 3 elements:
+ * - The element at index `kCount` keeps track of the total number of values processd
+ * - The elements at index `kRunningMean` keeps track of the mean of all the values that have been
+ * processed.
+ * - The elements at index `kRunningM2` keeps track of running M2 value (defined within:
+ * https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm)
+ * for all the values that have been processed.
+ *
+ * See 'aggStdDevImpl()'/'aggStdDev()'/'stdDevPopFinalize() / stdDevSampFinalize()' for more
+ * details.
+ */
+enum AggStdDevValueElems {
+    kCount,
+    kRunningMean,
+    kRunningM2,
+    // This is actually not an index but represents the number of elements stored
+    kSizeOfArray
 };
 
 using SmallArityType = uint8_t;
@@ -520,8 +575,6 @@ public:
     void appendGetArraySize();
 
     void appendSum();
-    void appendDoubleDoubleSum();
-    void appendDoubleDoubleSumFinalize();
     void appendMin();
     void appendMax();
     void appendFirst();
@@ -594,15 +647,91 @@ private:
 
 class ByteCode {
 public:
-    ~ByteCode();
-
     std::tuple<uint8_t, value::TypeTags, value::Value> run(const CodeFragment* code);
     bool runPredicate(const CodeFragment* code);
 
 private:
-    std::vector<uint8_t> _argStackOwned;
-    std::vector<value::TypeTags> _argStackTags;
-    std::vector<value::Value> _argStackVals;
+    // The VM stack is used to pass inputs to instructions and hold the outputs produced by
+    // instructions. Each element of the VM stack is 3-tuple comprised of a boolean ('owned'),
+    // a value::TypeTags ('tag'), and a value::Value ('value').
+    //
+    // In order to make the VM stack cache-friendly, for each element we want 'owned', 'tag',
+    // and 'value' to be located relatively close together, and we also want to avoid wasting
+    // any bytes due to padding.
+    //
+    // To achieve these goals, the VM stack is organized as a vector of "stack segments". Each
+    // "segment" is large enough to hold 4 elements. The first 8 bytes of a segment holds the
+    // 'owned' and 'tag' components, and the remaining 32 bytes hold the 'value' components.
+    static constexpr size_t ElementsPerSegment = 4;
+
+    struct OwnedAndTag {
+        uint8_t owned;
+        value::TypeTags tag;
+    };
+
+    struct StackSegment {
+        OwnedAndTag ownedAndTags[ElementsPerSegment];
+        value::Value values[ElementsPerSegment];
+    };
+
+    class Stack {
+    public:
+        static constexpr size_t kMaxCapacity =
+            ((std::numeric_limits<size_t>::max() / 2) / sizeof(StackSegment)) * ElementsPerSegment;
+
+        const auto& ownedAndTag(size_t index) const {
+            return _segments[index / ElementsPerSegment].ownedAndTags[index % ElementsPerSegment];
+        }
+        auto& ownedAndTag(size_t index) {
+            return _segments[index / ElementsPerSegment].ownedAndTags[index % ElementsPerSegment];
+        }
+
+        const auto& owned(size_t index) const {
+            return ownedAndTag(index).owned;
+        }
+        auto& owned(size_t index) {
+            return ownedAndTag(index).owned;
+        }
+
+        const auto& tag(size_t index) const {
+            return ownedAndTag(index).tag;
+        }
+        auto& tag(size_t index) {
+            return ownedAndTag(index).tag;
+        }
+
+        const auto& value(size_t index) const {
+            return _segments[index / ElementsPerSegment].values[index % ElementsPerSegment];
+        }
+        auto& value(size_t index) {
+            return _segments[index / ElementsPerSegment].values[index % ElementsPerSegment];
+        }
+
+        auto size() const {
+            return _size;
+        }
+
+        auto capacity() const {
+            return _capacity;
+        }
+
+        void resize(size_t newSize) {
+            if (MONGO_likely(newSize <= capacity())) {
+                _size = newSize;
+                return;
+            }
+            growAndResize(newSize);
+        }
+
+    private:
+        MONGO_COMPILER_NOINLINE void growAndResize(size_t newSize);
+
+        std::unique_ptr<StackSegment[]> _segments;
+        size_t _size = 0;
+        size_t _capacity = 0;
+    };
+
+    Stack _argStack;
 
     void runInternal(const CodeFragment* code, int64_t position);
     std::tuple<bool, value::TypeTags, value::Value> runLambdaInternal(const CodeFragment* code,
@@ -709,20 +838,14 @@ private:
                                                            value::TypeTags fieldTag,
                                                            value::Value fieldValue);
 
-    std::tuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSumImpl(value::TypeTags lhsTag,
-                                                                           value::Value lhsValue,
-                                                                           value::TypeTags rhsTag,
-                                                                           value::Value rhsValue);
+    void aggDoubleDoubleSumImpl(value::Array* arr, value::TypeTags rhsTag, value::Value rhsValue);
 
-    std::tuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSum(value::TypeTags accTag,
-                                                                       value::Value accValue,
-                                                                       value::TypeTags fieldTag,
-                                                                       value::Value fieldValue);
+    // This is an implementation of the following algorithm:
+    // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+    void aggStdDevImpl(value::Array* arr, value::TypeTags rhsTag, value::Value rhsValue);
 
-    // This function is necessary because 'aggDoubleDoubleSum()' result is 'Array' type but we need
-    // to produce a scalar value out of it.
-    std::tuple<bool, value::TypeTags, value::Value> doubleDoubleSumFinalize(
-        value::TypeTags fieldTag, value::Value fieldValue);
+    std::tuple<bool, value::TypeTags, value::Value> aggStdDevFinalizeImpl(value::Value fieldValue,
+                                                                          bool isSamp);
 
     std::tuple<bool, value::TypeTags, value::Value> aggMin(value::TypeTags accTag,
                                                            value::Value accValue,
@@ -837,9 +960,17 @@ private:
     std::tuple<bool, value::TypeTags, value::Value> builtinLog10(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinSqrt(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinAddToArray(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinMergeObjects(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinAddToSet(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinCollAddToSet(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinDoubleDoubleSum(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinAggDoubleDoubleSum(ArityType arity);
+    // This is only for compatibility with mongos/sharding and we will revisit this later.
+    template <bool keepIntegerPrecision = false>
+    std::tuple<bool, value::TypeTags, value::Value> builtinDoubleDoubleSumFinalize(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinAggStdDev(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinStdDevPopFinalize(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinStdDevSampFinalize(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinBitTestZero(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinBitTestMask(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinBitTestPosition(ArityType arity);
@@ -899,61 +1030,63 @@ private:
     std::tuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f, ArityType arity);
 
     std::tuple<bool, value::TypeTags, value::Value> getFromStack(size_t offset) {
-        auto backOffset = _argStackOwned.size() - 1 - offset;
-        auto owned = _argStackOwned[backOffset];
-        auto tag = _argStackTags[backOffset];
-        auto val = _argStackVals[backOffset];
+        auto backOffset = _argStack.size() - 1 - offset;
+
+        auto [owned, tag] = _argStack.ownedAndTag(backOffset);
+        auto val = _argStack.value(backOffset);
 
         return {owned, tag, val};
     }
 
     std::tuple<bool, value::TypeTags, value::Value> moveFromStack(size_t offset) {
-        auto backOffset = _argStackOwned.size() - 1 - offset;
-        auto owned = _argStackOwned[backOffset];
-        _argStackOwned[backOffset] = false;
-        auto tag = _argStackTags[backOffset];
-        _argStackTags[backOffset] = value::TypeTags::Nothing;
-        auto val = _argStackVals[backOffset];
-        _argStackVals[backOffset] = 0;
+        auto backOffset = _argStack.size() - 1 - offset;
+
+        auto [owned, tag] = _argStack.ownedAndTag(backOffset);
+        auto val = _argStack.value(backOffset);
+        _argStack.owned(backOffset) = false;
 
         return {owned, tag, val};
     }
 
+    std::pair<value::TypeTags, value::Value> moveOwnedFromStack(size_t offset) {
+        auto [owned, tag, val] = moveFromStack(offset);
+        if (!owned) {
+            std::tie(tag, val) = value::copyValue(tag, val);
+        }
+
+        return {tag, val};
+    }
+
     void setStack(size_t offset, bool owned, value::TypeTags tag, value::Value val) {
-        auto backOffset = _argStackOwned.size() - 1 - offset;
-        _argStackOwned[backOffset] = owned;
-        _argStackTags[backOffset] = tag;
-        _argStackVals[backOffset] = val;
+        auto backOffset = _argStack.size() - 1 - offset;
+        _argStack.ownedAndTag(backOffset) = {owned, tag};
+        _argStack.value(backOffset) = val;
     }
 
     void pushStack(bool owned, value::TypeTags tag, value::Value val) {
-        _argStackOwned.push_back(owned);
-        _argStackTags.push_back(tag);
-        _argStackVals.push_back(val);
+        _argStack.resize(_argStack.size() + 1);
+        topStack(owned, tag, val);
     }
 
     void topStack(bool owned, value::TypeTags tag, value::Value val) {
-        _argStackOwned.back() = owned;
-        _argStackTags.back() = tag;
-        _argStackVals.back() = val;
+        size_t index = _argStack.size() - 1;
+        _argStack.ownedAndTag(index) = {owned, tag};
+        _argStack.value(index) = val;
     }
 
     void popStack() {
-        _argStackOwned.pop_back();
-        _argStackTags.pop_back();
-        _argStackVals.pop_back();
+        _argStack.resize(_argStack.size() - 1);
     }
 
     void popAndReleaseStack() {
-        auto owned = _argStackOwned.back();
-        auto tag = _argStackTags.back();
-        auto val = _argStackVals.back();
-
-        popStack();
+        size_t index = _argStack.size() - 1;
+        auto [owned, tag] = _argStack.ownedAndTag(index);
 
         if (owned) {
-            value::releaseValue(tag, val);
+            value::releaseValue(tag, _argStack.value(index));
         }
+
+        popStack();
     }
 
     void swapStack();

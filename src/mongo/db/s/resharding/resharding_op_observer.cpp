@@ -179,7 +179,7 @@ ReshardingOpObserver::~ReshardingOpObserver() = default;
 
 void ReshardingOpObserver::onInserts(OperationContext* opCtx,
                                      const NamespaceString& nss,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      std::vector<InsertStatement>::const_iterator begin,
                                      std::vector<InsertStatement>::const_iterator end,
                                      bool fromMigrate) {
@@ -216,7 +216,7 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEn
 
     if (args.nss == NamespaceString::kConfigReshardingOperationsNamespace) {
         auto newCoordinatorDoc = ReshardingCoordinatorDocument::parse(
-            IDLParserErrorContext("reshardingCoordinatorDoc"), args.updateArgs.updatedDoc);
+            IDLParserErrorContext("reshardingCoordinatorDoc"), args.updateArgs->updatedDoc);
         auto reshardingId = BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName
                                  << newCoordinatorDoc.getReshardingUUID());
         auto observer = getReshardingCoordinatorObserver(opCtx, reshardingId);
@@ -226,14 +226,14 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEn
                 observer->onReshardingParticipantTransition(newCoordinatorDoc);
             });
     } else if (args.nss.isTemporaryReshardingCollection()) {
-        const std::vector<InsertStatement> updateDoc{InsertStatement{args.updateArgs.updatedDoc}};
+        const std::vector<InsertStatement> updateDoc{InsertStatement{args.updateArgs->updatedDoc}};
         assertCanExtractShardKeyFromDocs(opCtx, args.nss, updateDoc.begin(), updateDoc.end());
     }
 }
 
 void ReshardingOpObserver::onDelete(OperationContext* opCtx,
                                     const NamespaceString& nss,
-                                    OptionalCollectionUUID uuid,
+                                    const UUID& uuid,
                                     StmtId stmtId,
                                     const OplogDeleteEntryArgs& args) {
     if (nss == NamespaceString::kDonorReshardingOperationsNamespace) {

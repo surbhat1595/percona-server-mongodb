@@ -42,6 +42,7 @@
 #include "mongo/db/catalog/list_indexes.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
@@ -115,11 +116,6 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
 
     IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(sourceColl->uuid());
 
-    if (source.isTimeseriesBucketsCollection()) {
-        return Status(ErrorCodes::IllegalOperation,
-                      str::stream() << "Renaming system.buckets collections is disallowed");
-    }
-
     const auto targetColl = catalog->lookupCollectionByNamespace(opCtx, target);
 
     if (!targetColl) {
@@ -179,7 +175,7 @@ Status renameTargetCollectionToTmp(OperationContext* opCtx,
 
 Status renameCollectionDirectly(OperationContext* opCtx,
                                 Database* db,
-                                OptionalCollectionUUID uuid,
+                                const UUID& uuid,
                                 NamespaceString source,
                                 NamespaceString target,
                                 RenameCollectionOptions options) {
@@ -212,7 +208,7 @@ Status renameCollectionDirectly(OperationContext* opCtx,
 
 Status renameCollectionAndDropTarget(OperationContext* opCtx,
                                      Database* db,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      NamespaceString source,
                                      NamespaceString target,
                                      const CollectionPtr& targetColl,
@@ -834,6 +830,10 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
     uassert(ErrorCodes::IllegalOperation,
             "renaming system.views collection or renaming to system.views is not allowed",
             !source.isSystemDotViews() && !target.isSystemDotViews());
+
+    uassert(ErrorCodes::IllegalOperation,
+            "Renaming system.buckets collections is not allowed",
+            !source.isTimeseriesBucketsCollection());
 }
 
 void validateAndRunRenameCollection(OperationContext* opCtx,
@@ -935,6 +935,8 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
                       str::stream() << "Cannot rename collection to the oplog");
     }
 
+    // Take global IX lock explicitly to avoid upgrading from IS later
+    Lock::GlobalLock globalLock(opCtx, MODE_IX);
     AutoGetCollectionForRead sourceColl(
         opCtx, sourceNss, AutoGetCollectionViewMode::kViewsPermitted);
 

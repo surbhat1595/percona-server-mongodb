@@ -227,28 +227,35 @@ constexpr std::array<std::array<uint8_t, 16>, 4> kIntsStoreForSelector = {
     std::array<uint8_t, 16>{0, 7, 6, 5, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0},
     std::array<uint8_t, 16>{0, 0, 0, 0, 0, 0, 0, 0, 6, 5, 4, 3, 2, 1, 0, 0}};
 
+// Calculates number of bits needed to store value. Must be less than
+// numeric_limits<uint64_t>::max().
 uint8_t _countBitsWithoutLeadingZeros(uint64_t value) {
     // All 1s is reserved for skip encoding so we add 1 to value to account for that case.
-    return 64 - countLeadingZeros64(value + 1);
+    return 64 - countLeadingZerosNonZero64(value + 1);
 }
 
 uint8_t _countTrailingZerosWithZero(uint64_t value) {
-    // countTrailingZeros64 returns 64 if the value is 0 and we only need to identify a single 0
-    // instead of 64.
-    return value == 0 ? 1 : countTrailingZerosNonZero64(value);
+    // countTrailingZeros64 returns 64 if the value is 0 but we consider this to be 0 trailing
+    // zeros.
+    return value == 0 ? 0 : countTrailingZerosNonZero64(value);
 }
 
 uint8_t _countTrailingZerosWithZero(uint128_t value) {
-    uint64_t low = static_cast<uint64_t>(value);
-    if (low == 0) {
-        return _countTrailingZerosWithZero(static_cast<uint64_t>(value >> 64)) + 64;
+    uint64_t low = absl::Uint128Low64(value);
+    uint64_t high = absl::Uint128High64(value);
+
+    // If value == 0 then we cannot add 64
+    if (low == 0 && high != 0) {
+        return countTrailingZerosNonZero64(high) + 64;
     } else {
         return _countTrailingZerosWithZero(low);
     }
 }
 
+// Calculates number of bits needed to store value. Must be less than
+// numeric_limits<uint128_t>::max().
 uint8_t _countBitsWithoutLeadingZeros(uint128_t value) {
-    uint64_t high = static_cast<uint64_t>(value >> 64);
+    uint64_t high = absl::Uint128High64(value);
     if (high == 0) {
         return _countBitsWithoutLeadingZeros(static_cast<uint64_t>(value));
     } else {
@@ -338,8 +345,11 @@ Simple8bBuilder<T>::PendingValue::PendingValue(
 
 template <typename T>
 Simple8bBuilder<T>::PendingIterator::PendingIterator(
-    typename std::deque<PendingValue>::const_iterator it, reference rleValue, uint32_t rleCount)
-    : _it(it), _rleValue(rleValue), _rleCount(rleCount) {}
+    typename std::deque<PendingValue>::const_iterator beginning,
+    typename std::deque<PendingValue>::const_iterator it,
+    reference rleValue,
+    uint32_t rleCount)
+    : _begin(beginning), _it(it), _rleValue(rleValue), _rleCount(rleCount) {}
 
 template <typename T>
 auto Simple8bBuilder<T>::PendingIterator::operator-> () const -> pointer {
@@ -369,6 +379,24 @@ template <typename T>
 auto Simple8bBuilder<T>::PendingIterator::operator++(int) -> PendingIterator {
     auto ret = *this;
     ++(*this);
+    return ret;
+}
+
+template <typename T>
+auto Simple8bBuilder<T>::PendingIterator::operator--() -> PendingIterator& {
+    if (_rleCount > 0 || _it == _begin) {
+        ++_rleCount;
+        return *this;
+    }
+
+    --_it;
+    return *this;
+}
+
+template <typename T>
+auto Simple8bBuilder<T>::PendingIterator::operator--(int) -> PendingIterator {
+    auto ret = *this;
+    --(*this);
     return ret;
 }
 
@@ -420,7 +448,6 @@ void Simple8bBuilder<T>::flush() {
     _handleRleTermination();
     // Flush buffered values in _pendingValues.
     if (!_pendingValues.empty()) {
-        PendingValue lastPendingValue = _pendingValues.back();
         // always flush with the most recent valid selector. This value is the baseSelector if we
         // have not have a valid selector yet.
         do {
@@ -431,12 +458,16 @@ void Simple8bBuilder<T>::flush() {
         // There are no more words in _pendingValues and RLE is possible.
         // However the _rleCount is 0 because we have not read any of the values in the next word.
         _rleCount = 0;
-        _lastValueInPrevWord = lastPendingValue;
+        _lastValueInPrevWord = {};
     }
 }
 
 template <typename T>
 bool Simple8bBuilder<T>::_appendValue(T value, bool tryRle) {
+    // Early exit if we try to store max value. They are not handled when counting zeros.
+    if (value == std::numeric_limits<T>::max())
+        return false;
+
     uint8_t trailingZerosCount = _countTrailingZerosWithZero(value);
     // Initially set every selector as invalid.
     uint8_t bitCountWithoutLeadingZeros = _countBitsWithoutLeadingZeros(value);
@@ -592,7 +623,7 @@ void Simple8bBuilder<T>::_appendRleEncoding() {
         _writeFn(rleEncoding);
     };
 
-    uint8_t count = _rleCount / kRleMultiplier;
+    uint32_t count = _rleCount / kRleMultiplier;
     // Check to make sure count is big enough for RLE encoding
     if (count >= 1) {
         while (count > kMaxRleCount) {
@@ -711,12 +742,24 @@ void Simple8bBuilder<T>::_updateSimple8bCurrentState(const PendingValue& val) {
 
 template <typename T>
 typename Simple8bBuilder<T>::PendingIterator Simple8bBuilder<T>::begin() const {
-    return {_pendingValues.begin(), _lastValueInPrevWord.val, _rleCount};
+    return {_pendingValues.begin(), _pendingValues.begin(), _lastValueInPrevWord.val, _rleCount};
 }
 
 template <typename T>
 typename Simple8bBuilder<T>::PendingIterator Simple8bBuilder<T>::end() const {
-    return PendingIterator{_pendingValues.end(), _lastValueInPrevWord.val, 0};
+    return {_pendingValues.begin(), _pendingValues.end(), _lastValueInPrevWord.val, 0};
+}
+
+template <typename T>
+std::reverse_iterator<typename Simple8bBuilder<T>::PendingIterator> Simple8bBuilder<T>::rbegin()
+    const {
+    return std::reverse_iterator<typename Simple8bBuilder<T>::PendingIterator>(end());
+}
+
+template <typename T>
+std::reverse_iterator<typename Simple8bBuilder<T>::PendingIterator> Simple8bBuilder<T>::rend()
+    const {
+    return std::reverse_iterator<typename Simple8bBuilder<T>::PendingIterator>(begin());
 }
 
 template <typename T>
@@ -725,8 +768,10 @@ void Simple8bBuilder<T>::setWriteCallback(Simple8bWriteFn writer) {
 }
 
 template <typename T>
-Simple8b<T>::Iterator::Iterator(const char* pos, const char* end)
-    : _pos(pos), _end(end), _value(0), _rleRemaining(0), _shift(0) {
+Simple8b<T>::Iterator::Iterator(const char* pos,
+                                const char* end,
+                                const boost::optional<T>& previous)
+    : _pos(pos), _end(end), _value(previous), _rleRemaining(0), _shift(0) {
     if (pos != end) {
         _loadBlock();
     }
@@ -847,18 +892,19 @@ bool Simple8b<T>::Iterator::operator!=(const Simple8b::Iterator& rhs) const {
 }
 
 template <typename T>
-Simple8b<T>::Simple8b(const char* buffer, int size) : _buffer(buffer), _size(size) {
+Simple8b<T>::Simple8b(const char* buffer, int size, boost::optional<T> previous)
+    : _buffer(buffer), _size(size), _previous(previous) {
     invariant(size % sizeof(uint64_t) == 0);
 }
 
 template <typename T>
 typename Simple8b<T>::Iterator Simple8b<T>::begin() const {
-    return {_buffer, _buffer + _size};
+    return {_buffer, _buffer + _size, _previous};
 }
 
 template <typename T>
 typename Simple8b<T>::Iterator Simple8b<T>::end() const {
-    return {_buffer + _size, _buffer + _size};
+    return {_buffer + _size, _buffer + _size, boost::none};
 }
 
 template class Simple8b<uint64_t>;

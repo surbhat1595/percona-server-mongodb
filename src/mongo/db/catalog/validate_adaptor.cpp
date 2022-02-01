@@ -34,6 +34,7 @@
 #include "mongo/db/catalog/validate_adaptor.h"
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_consistency.h"
@@ -66,6 +67,38 @@ const long long kMaxErrorSizeBytes = 1 * 1024 * 1024;
 const long long kInterruptIntervalNumRecords = 4096;
 const long long kInterruptIntervalNumBytes = 50 * 1024 * 1024;  // 50MB.
 
+/**
+ * Validate that for each record in a clustered RecordStore the record key (RecordId) matches the
+ * document's cluster key in the record value.
+ */
+void _validateClusteredCollectionRecordId(OperationContext* opCtx,
+                                          const RecordId& rid,
+                                          const BSONObj& doc,
+                                          const ClusteredIndexSpec& indexSpec,
+                                          ValidateResults* results) {
+    const auto ridFromDoc = record_id_helpers::keyForDoc(doc, indexSpec);
+    if (!ridFromDoc.isOK()) {
+        results->valid = false;
+        results->errors.push_back(str::stream() << rid << " " << ridFromDoc.getStatus().reason());
+        results->corruptRecords.push_back(rid);
+        return;
+    }
+
+    const auto ksFromBSON =
+        KeyString::Builder(KeyString::Version::kLatestVersion, ridFromDoc.getValue());
+    const auto ksFromRid = KeyString::Builder(KeyString::Version::kLatestVersion, rid);
+
+    const auto clusterKeyField = clustered_util::getClusterKeyFieldName(indexSpec);
+    if (ksFromRid != ksFromBSON) {
+        results->valid = false;
+        results->errors.push_back(
+            str::stream() << "Document with " << rid << " has mismatched " << doc[clusterKeyField]
+                          << " (RecordId KeyString='" << ksFromRid.toString()
+                          << "', cluster key KeyString='" << ksFromBSON.toString() << "')");
+        results->corruptRecords.push_back(rid);
+    }
+}
+
 }  // namespace
 
 Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
@@ -85,11 +118,13 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
     }
 
     const CollectionPtr& coll = _validateState->getCollection();
-    if (!coll->getIndexCatalog()->haveAnyIndexes()) {
-        return status;
+    if (coll->isClustered()) {
+        _validateClusteredCollectionRecordId(
+            opCtx, recordId, recordBson, coll->getClusteredInfo()->getIndexSpec(), results);
     }
 
     auto& executionCtx = StorageExecutionContext::get(opCtx);
+    SharedBufferFragmentBuilder pool(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
     for (const auto& index : _validateState->getIndexes()) {
         const IndexDescriptor* descriptor = index->descriptor();
@@ -104,7 +139,7 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
 
         iam->getKeys(opCtx,
                      coll,
-                     executionCtx.pooledBufferBuilder(),
+                     pool,
                      recordBson,
                      IndexAccessMethod::GetKeysMode::kEnforceConstraints,
                      IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -280,13 +315,9 @@ void ValidateAdaptor::traverseIndex(OperationContext* opCtx,
     const KeyString::Version version =
         index->accessMethod()->getSortedDataInterface()->getKeyStringVersion();
 
-    auto& executionCtx = StorageExecutionContext::get(opCtx);
-    KeyString::PooledBuilder firstKeyStringBuilder(executionCtx.pooledBufferBuilder(),
-                                                   version,
-                                                   BSONObj(),
-                                                   indexInfo.ord,
-                                                   KeyString::Discriminator::kExclusiveBefore);
-    KeyString::Value firstKeyString = firstKeyStringBuilder.release();
+    KeyString::Builder firstKeyStringBuilder(
+        version, BSONObj(), indexInfo.ord, KeyString::Discriminator::kExclusiveBefore);
+    KeyString::Value firstKeyString = firstKeyStringBuilder.getValueCopy();
     KeyString::Value prevIndexKeyStringValue;
 
     // Ensure that this index has an open index cursor.

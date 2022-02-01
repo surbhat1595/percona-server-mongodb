@@ -47,17 +47,50 @@ namespace repl {
 class OpTime;
 }  // namespace repl
 
+enum class RetryableFindAndModifyLocation {
+    // The operation is not retryable, or not a "findAndModify" command. Do not record a
+    // pre-image.
+    kNone,
+
+    // Store the pre-image in the side collection.
+    kSideCollection,
+
+    // Store the pre-image in the oplog.
+    kOplog,
+};
+
 /**
  * Holds document update information used in logging.
  */
 struct OplogUpdateEntryArgs {
-    CollectionUpdateArgs updateArgs;
+    CollectionUpdateArgs* updateArgs;
 
     NamespaceString nss;
     CollectionUUID uuid;
 
-    OplogUpdateEntryArgs(CollectionUpdateArgs updateArgs, NamespaceString nss, CollectionUUID uuid)
-        : updateArgs(std::move(updateArgs)), nss(std::move(nss)), uuid(std::move(uuid)) {}
+    // Specifies the pre-image recording option for retryable "findAndModify" commands.
+    RetryableFindAndModifyLocation retryableFindAndModifyLocation =
+        RetryableFindAndModifyLocation::kNone;
+
+    OplogUpdateEntryArgs(CollectionUpdateArgs* updateArgs, NamespaceString nss, CollectionUUID uuid)
+        : updateArgs(updateArgs), nss(std::move(nss)), uuid(std::move(uuid)) {}
+};
+
+struct OplogDeleteEntryArgs {
+    const BSONObj* deletedDoc = nullptr;
+
+    // "fromMigrate" indicates whether the delete was induced by a chunk migration, and so
+    // should be ignored by the user as an internal maintenance operation and not a real delete.
+    bool fromMigrate = false;
+    bool preImageRecordingEnabledForCollection = false;
+    bool changeStreamPreAndPostImagesEnabledForCollection = false;
+
+    // Specifies the pre-image recording option for retryable "findAndModify" commands.
+    RetryableFindAndModifyLocation retryableFindAndModifyLocation =
+        RetryableFindAndModifyLocation::kNone;
+
+    // Set if an OpTime was reserved for the delete ahead of time.
+    boost::optional<OplogSlot> oplogSlot = boost::none;
 };
 
 struct IndexCollModInfo {
@@ -65,6 +98,7 @@ struct IndexCollModInfo {
     boost::optional<Seconds> oldExpireAfterSeconds;
     boost::optional<bool> hidden;
     boost::optional<bool> oldHidden;
+    boost::optional<bool> unique;
     std::string indexName;
 };
 
@@ -130,7 +164,7 @@ public:
 
     virtual void onInserts(OperationContext* opCtx,
                            const NamespaceString& nss,
-                           OptionalCollectionUUID uuid,
+                           const UUID& uuid,
                            std::vector<InsertStatement>::const_iterator begin,
                            std::vector<InsertStatement>::const_iterator end,
                            bool fromMigrate) = 0;
@@ -140,33 +174,17 @@ public:
                                const BSONObj& doc) = 0;
 
     /**
-     * "fromMigrate" indicates whether the delete was induced by a chunk migration, and so should be
-     * ignored by the user as an internal maintenance operation and not a real delete.
-     */
-    struct OplogDeleteEntryArgs {
-        const BSONObj* deletedDoc = nullptr;
-        bool fromMigrate = false;
-        bool preImageRecordingEnabledForCollection = false;
-
-        // Set if an OpTime was reserved for the delete ahead of time.
-        boost::optional<OplogSlot> oplogSlot = boost::none;
-        // When true, store the pre- or post- image for findAndModify commands in the side
-        // collection. When false, store the image in the oplog.
-        bool storeImageInSideCollection = false;
-    };
-
-    /**
      * Handles logging before document is deleted.
      *
      * "ns" name of the collection from which deleteState.idDoc will be deleted.
      *
      * "args" is a reference to information detailing whether the pre-image of the doc should be
-     * preserved with deletion.  If `args.deletedDoc != nullptr`, then the opObserver must store the
-     * pre-image to be stored in addition to the documentKey.
+     * preserved with deletion. If `retryableWritePreImageRecordingType != kNotRetryable`, then the
+     * opObserver must store the `deletedDoc` in addition to the documentKey.
      */
     virtual void onDelete(OperationContext* opCtx,
                           const NamespaceString& nss,
-                          OptionalCollectionUUID uuid,
+                          const UUID& uuid,
                           StmtId stmtId,
                           const OplogDeleteEntryArgs& args) = 0;
 
@@ -178,7 +196,7 @@ public:
      */
     virtual void onInternalOpMessage(OperationContext* opCtx,
                                      const NamespaceString& nss,
-                                     boost::optional<UUID> uuid,
+                                     OptionalCollectionUUID uuid,
                                      const BSONObj& msgObj,
                                      boost::optional<BSONObj> o2MsgObj,
                                      boost::optional<repl::OpTime> preImageOpTime,
@@ -255,12 +273,12 @@ public:
      */
     virtual repl::OpTime onDropCollection(OperationContext* opCtx,
                                           const NamespaceString& collectionName,
-                                          OptionalCollectionUUID uuid,
+                                          const UUID& uuid,
                                           std::uint64_t numRecords,
                                           CollectionDropType dropType) = 0;
     virtual repl::OpTime onDropCollection(OperationContext* opCtx,
                                           const NamespaceString& collectionName,
-                                          OptionalCollectionUUID uuid,
+                                          const UUID& uuid,
                                           std::uint64_t numRecords,
                                           CollectionDropType dropType,
                                           bool markFromMigrate) {
@@ -279,7 +297,7 @@ public:
      */
     virtual void onDropIndex(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             OptionalCollectionUUID uuid,
+                             const UUID& uuid,
                              const std::string& indexName,
                              const BSONObj& indexInfo) = 0;
 
@@ -294,15 +312,14 @@ public:
     virtual repl::OpTime preRenameCollection(OperationContext* opCtx,
                                              const NamespaceString& fromCollection,
                                              const NamespaceString& toCollection,
-                                             OptionalCollectionUUID uuid,
+                                             const UUID& uuid,
                                              OptionalCollectionUUID dropTargetUUID,
                                              std::uint64_t numRecords,
                                              bool stayTemp) = 0;
-
     virtual repl::OpTime preRenameCollection(OperationContext* opCtx,
                                              const NamespaceString& fromCollection,
                                              const NamespaceString& toCollection,
-                                             OptionalCollectionUUID uuid,
+                                             const UUID& uuid,
                                              OptionalCollectionUUID dropTargetUUID,
                                              std::uint64_t numRecords,
                                              bool stayTemp,
@@ -319,7 +336,7 @@ public:
     virtual void postRenameCollection(OperationContext* opCtx,
                                       const NamespaceString& fromCollection,
                                       const NamespaceString& toCollection,
-                                      OptionalCollectionUUID uuid,
+                                      const UUID& uuid,
                                       OptionalCollectionUUID dropTargetUUID,
                                       bool stayTemp) = 0;
     /**
@@ -330,14 +347,14 @@ public:
     virtual void onRenameCollection(OperationContext* opCtx,
                                     const NamespaceString& fromCollection,
                                     const NamespaceString& toCollection,
-                                    OptionalCollectionUUID uuid,
+                                    const UUID& uuid,
                                     OptionalCollectionUUID dropTargetUUID,
                                     std::uint64_t numRecords,
                                     bool stayTemp) = 0;
     virtual void onRenameCollection(OperationContext* opCtx,
                                     const NamespaceString& fromCollection,
                                     const NamespaceString& toCollection,
-                                    OptionalCollectionUUID uuid,
+                                    const UUID& uuid,
                                     OptionalCollectionUUID dropTargetUUID,
                                     std::uint64_t numRecords,
                                     bool stayTemp,
@@ -360,7 +377,7 @@ public:
                             const BSONObj& applyOpCmd) = 0;
     virtual void onEmptyCapped(OperationContext* opCtx,
                                const NamespaceString& collectionName,
-                               OptionalCollectionUUID uuid) = 0;
+                               const UUID& uuid) = 0;
 
     /**
      * The onUnpreparedTransactionCommit method is called on the commit of an unprepared
@@ -465,9 +482,19 @@ public:
      *
      * This method is only applicable to the "rollback to a stable timestamp" algorithm, and is not
      * called when using any other rollback algorithm i.e "rollback via refetch".
+     *
+     * This function will call the private virtual '_onReplicationRollback' method. Any exceptions
+     * thrown indicates rollback failure that may have led us to some inconsistent on-disk or memory
+     * state, so we crash instead.
      */
-    virtual void onReplicationRollback(OperationContext* opCtx,
-                                       const RollbackObserverInfo& rbInfo) = 0;
+    void onReplicationRollback(OperationContext* opCtx,
+                               const RollbackObserverInfo& rbInfo) noexcept {
+        try {
+            _onReplicationRollback(opCtx, rbInfo);
+        } catch (const DBException& ex) {
+            fassert(6050902, ex.toStatus());
+        }
+    };
 
     /**
      * Called when the majority commit point is updated by replication.
@@ -480,6 +507,10 @@ public:
                                              const repl::OpTime& newCommitPoint) = 0;
 
     struct Times;
+
+private:
+    virtual void _onReplicationRollback(OperationContext* opCtx,
+                                        const RollbackObserverInfo& rbInfo) = 0;
 
 protected:
     class ReservedTimes;

@@ -237,7 +237,24 @@ public:
         std::abort();
     }
 
+    boost::optional<bool> getTimeseriesBucketsMayHaveMixedSchemaData() const {
+        std::abort();
+    }
+
+    void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
+                                                    boost::optional<bool> setting) {
+        std::abort();
+    }
+
+    bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const {
+        std::abort();
+    }
+
     bool isClustered() const {
+        std::abort();
+    }
+
+    boost::optional<ClusteredCollectionInfo> getClusteredInfo() const {
         std::abort();
     }
 
@@ -262,7 +279,8 @@ public:
         std::abort();
     }
 
-    void setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) {
+    void setChangeStreamPreAndPostImages(OperationContext* opCtx,
+                                         ChangeStreamPreAndPostImagesOptions val) {
         std::abort();
     }
 
@@ -382,6 +400,10 @@ public:
     }
 
     void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) {
+        std::abort();
+    }
+
+    void updateUniqueSetting(OperationContext* opCtx, StringData idxName) {
         std::abort();
     }
 

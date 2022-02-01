@@ -48,6 +48,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/platform/bits.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/allocator.h"
@@ -124,6 +125,9 @@ public:
         return _buf.get();
     }
 
+    // The buffer holder size for 'SharedBufferAllocator' comes from 'SharedBuffer'
+    static constexpr size_t kBuffHolderSize = SharedBuffer::kHolderSize;
+
 private:
     SharedBuffer _buf;
 };
@@ -165,7 +169,7 @@ public:
         _fragmentBuilder.start(sz);
     }
 
-    SharedBufferFragment finish(int sz) {
+    SharedBufferFragment finish(size_t sz) {
         return _fragmentBuilder.finish(sz);
     }
 
@@ -176,6 +180,10 @@ public:
     char* get() const {
         return _fragmentBuilder.get();
     }
+
+    // SharedBufferFragmentAllocator does not allocate any extra amount of memory for the buffer
+    // holder.
+    static constexpr size_t kBuffHolderSize = 0;
 
 private:
     SharedBufferFragmentBuilder& _fragmentBuilder;
@@ -220,6 +228,9 @@ public:
     char* get() const {
         return _buf.get();
     }
+
+    // The buffer holder size for 'UniqueBufferAllocator' comes from 'UniqueBuffer'
+    static constexpr size_t kBuffHolderSize = UniqueBuffer::kHolderSize;
 
 private:
     UniqueBuffer _buf;
@@ -275,6 +286,9 @@ public:
         return static_cast<char*>(_ptr);
     }
 
+    // StackAllocator does not allocate any extra amount of memory for the buffer holder.
+    static constexpr size_t kBuffHolderSize = 0;
+
 private:
     char _buf[SZ];
     size_t _capacity = SZ;
@@ -286,23 +300,25 @@ template <class BufferAllocator>
 class BasicBufBuilder {
 public:
     template <typename... AllocatorArgs>
-    BasicBufBuilder(AllocatorArgs&&... args) : _buf(std::forward<AllocatorArgs>(args)...) {}
+    BasicBufBuilder(AllocatorArgs&&... args)
+        : _buf(std::forward<AllocatorArgs>(args)...),
+          _nextByte(_buf.get()),
+          _end(_nextByte + _buf.capacity()) {}
 
     void kill() {
         _buf.free();
     }
 
     void reset() {
-        l = 0;
-        reservedBytes = 0;
+        _nextByte = _buf.get();
+        _end = _nextByte + _buf.capacity();
     }
     void reset(size_t maxSize) {
-        l = 0;
-        reservedBytes = 0;
         if (maxSize && _buf.capacity() > maxSize) {
             _buf.free();
             _buf.malloc(maxSize);
         }
+        reset();
     }
 
     /** leave room for some stuff later
@@ -393,10 +409,13 @@ public:
 
     /** Returns the length of data in the current buffer */
     int len() const {
-        return l;
+        if (MONGO_unlikely(!_nextByte || !_end)) {
+            return 0;
+        }
+        return _nextByte - _buf.get();
     }
     void setlen(int newLen) {
-        l = newLen;
+        _nextByte = _buf.get() + newLen;
     }
     /** Returns the capacity of the buffer */
     int capacity() const {
@@ -404,27 +423,32 @@ public:
     }
 
     /* returns the pre-grow write position */
-    inline char* grow(int by) {
-        int oldlen = l;
-        int newLen = l + by;
-        size_t minSize = newLen + reservedBytes;
-        if (minSize > _buf.capacity()) {
-            _growReallocate(minSize);
+    char* grow(int by) {
+        if (MONGO_likely(_nextByte + by <= _end)) {
+            char* oldNextByte = _nextByte;
+            _nextByte += by;
+            return oldNextByte;
         }
-        l = newLen;
-        return _buf.get() + oldlen;
+        return _growOutOfLineSlowPath(by);
     }
 
     /**
      * Reserve room for some number of bytes to be claimed at a later time via claimReservedBytes.
      */
     void reserveBytes(size_t bytes) {
-        size_t minSize = l + reservedBytes + bytes;
-        if (minSize > _buf.capacity())
-            _growReallocate(minSize);
+        dassert(_nextByte && _end);
+        if (MONGO_likely((_end - bytes) >= _nextByte)) {
+            _end -= bytes;
+            return;
+        }
 
-        // This must happen *after* any attempt to grow.
-        reservedBytes += bytes;
+        _growOutOfLineSlowPath(bytes);
+
+        // _growOutOfLineSlowPath adds to _nextByte to speed up the
+        // common case of grow(). Now remove those bytes, and put them
+        // after _end.
+        _nextByte -= bytes;
+        _end -= bytes;
     }
 
     /**
@@ -432,9 +456,9 @@ public:
      * reserved. Appends of up to this many bytes immediately following a claim are
      * guaranteed to succeed without a need to reallocate.
      */
-    void claimReservedBytes(int bytes) {
-        invariant(reservedBytes >= bytes);
-        reservedBytes -= bytes;
+    void claimReservedBytes(size_t bytes) {
+        invariant(reservedBytes() >= bytes);
+        _end += bytes;
     }
 
     /**
@@ -443,12 +467,23 @@ public:
      */
     REQUIRES_FOR_NON_TEMPLATE(std::is_same_v<BufferAllocator, SharedBufferAllocator>)
     void useSharedBuffer(SharedBuffer buf) {
-        invariant(l == 0);  // Can only do this while empty.
-        invariant(reservedBytes == 0);
+        invariant(len() == 0);  // Can only do this while empty.
+        invariant(reservedBytes() == 0);
         _buf = SharedBufferAllocator(std::move(buf));
+        reset();
     }
 
 protected:
+    /**
+     * Returns the reservedBytes in this buffer
+     */
+    size_t reservedBytes() const {
+        if (MONGO_unlikely(!_nextByte || !_end)) {
+            return 0;
+        }
+        return _buf.capacity() - (_end - _buf.get());
+    }
+
     template <typename T>
     void appendNumImpl(T t) {
         // NOTE: For now, we assume that all things written
@@ -457,12 +492,27 @@ protected:
         // we bake that assumption in here. This decision should be revisited soon.
         DataView(grow(sizeof(t))).write(tagLittleEndian(t));
     }
-    /* "slow" portion of 'grow()'  */
-    void _growReallocate(size_t minSize) {
+
+    /**
+     * The "slow" portion of 'grow()', for when we actually need to go
+     * to the underlying allocator for more memory. This function must
+     * not be inlined.
+     */
+    MONGO_COMPILER_NOINLINE char* _growOutOfLineSlowPath(size_t by) {
+        const size_t oldLen = len();
+        const size_t oldReserved = reservedBytes();
+        size_t minSize = oldLen + by + oldReserved;
+
         // Going beyond the maximum buffer size is not likely.
         if (MONGO_unlikely(minSize > BufferMaxSize)) {
-            growFailure(minSize);
+            std::stringstream ss;
+            ss << "BufBuilder attempted to grow() to " << minSize << " bytes, past the 64MB limit.";
+            msgasserted(13548, ss.str().c_str());
         }
+
+        // We add 'BufferAllocator::kBuffHolderSize' to the requested reallocation size, as it will
+        // be required later in '_buf.realloc'.
+        minSize += BufferAllocator::kBuffHolderSize;
 
         // We find the next power of two greater than the requested size, as it's
         // commonly more friendly with the underlying (system) memory allocators.
@@ -482,61 +532,94 @@ protected:
             // additional header objects that wrap the maximum size of a BSON.
             reallocSize = kOpMsgReplyBSONBufferMaxSize;
         } else if (MONGO_unlikely(reallocSize < 64)) {
+            // The minimum allocation is 64 bytes.
             reallocSize = 64;
+        } else if (MONGO_unlikely(minSize > BufferMaxSize)) {
+            // If adding 'kBuffHolderSize' to 'minSize' pushes it beyond 'BufferMaxSize', then we'll
+            // allocate enough memory according to the 'BufferMaxSize'.
+            reallocSize = BufferMaxSize + BufferAllocator::kBuffHolderSize;
         }
 
-        _buf.realloc(reallocSize);
-    }
+        // As we've added 'BufferAllocator::kBuffHolderSize' to 'minSize' in the beginning, we
+        // subtract it here from 'reallocSize' to account for the same amount that will be added
+        // later in '_buf.realloc'. Without this, we will end up allocating an amount of memory,
+        // which is not a power of two and defeats the purpose of the above logic to find the
+        // next power of two for being friendly to the system memory allocators and avoid memory
+        // fragmentation.
+        _buf.realloc(reallocSize - BufferAllocator::kBuffHolderSize);
+        _nextByte = _buf.get() + oldLen + by;
+        _end = _buf.get() + _buf.capacity() - oldReserved;
 
-    /*
-     * A failure path of 'grow' is marked as noinline as it is almost never called and needlesly
-     * expands the callee stack if inlined.
-     */
-    MONGO_COMPILER_NOINLINE void growFailure(int minSize) {
-        std::stringstream ss;
-        ss << "BufBuilder attempted to grow() to " << minSize << " bytes, past the 64MB limit.";
-        msgasserted(13548, ss.str().c_str());
+        invariant(_nextByte >= _buf.get());
+        invariant(_end >= _nextByte);
+        invariant(_buf.get() + _buf.capacity() >= _end);
+
+        return _buf.get() + oldLen;
     }
 
     BufferAllocator _buf;
-    int l{0};
-    int reservedBytes{0};  // eagerly _growReallocate to keep this many bytes of spare room.
+    char* _nextByte;
+    char* _end;
 
     template <class Builder>
     friend class StringBuilderImpl;
 };
+
+// The following extern template declaration must follow
+// BasicBufBuilder and come before its instantiation as a base class
+// for BufBuilder. Do not remove or re-order these lines w.r.t those
+// types without being sure that you are not undoing the advantages of
+// the extern template declaration.
+extern template class BasicBufBuilder<SharedBufferAllocator>;
 
 class BufBuilder : public BasicBufBuilder<SharedBufferAllocator> {
 public:
     static constexpr size_t kDefaultInitSizeBytes = 512;
     BufBuilder(size_t initsize = kDefaultInitSizeBytes) : BasicBufBuilder(initsize) {}
 
-    /* assume ownership of the buffer */
+    /**
+     * Assume ownership of the buffer.
+     * Note: There should not be any other method calls on this object after a call to 'release'.
+     */
     SharedBuffer release() {
         return _buf.release();
     }
 };
+
+// The following extern template declaration must follow
+// BasicBufBuilder and come before its instantiation as a base class
+// for PooledFragmentBuilder. Do not remove or re-order these lines
+// w.r.t those types without being sure that you are not undoing the
+// advantages of the extern template declaration.
+extern template class BasicBufBuilder<SharedBufferFragmentAllocator>;
+
 class PooledFragmentBuilder : public BasicBufBuilder<SharedBufferFragmentAllocator> {
 public:
     PooledFragmentBuilder(SharedBufferFragmentBuilder& fragmentBuilder)
-        : BasicBufBuilder(fragmentBuilder) {
-        // Indicate that we are starting to build a fragment but rely on the builder for the block
-        // size
-        _buf.start(0);
-    }
+        : BasicBufBuilder(fragmentBuilder.start(0)) {}
 
     SharedBufferFragment done() {
-        return _buf.finish(l);
+        return _buf.finish(len());
     }
 };
 MONGO_STATIC_ASSERT(std::is_move_constructible_v<BufBuilder>);
+
+// The following extern template declaration must follow
+// BasicBufBuilder and come before its instantiation as a base class
+// for UniqueBufBuilder. Do not remove or re-order these lines w.r.t
+// those types without being sure that you are not undoing the
+// advantages of the extern template declaration.
+extern template class BasicBufBuilder<UniqueBufferAllocator>;
 
 class UniqueBufBuilder : public BasicBufBuilder<UniqueBufferAllocator> {
 public:
     static constexpr size_t kDefaultInitSizeBytes = 512;
     UniqueBufBuilder(size_t initsize = kDefaultInitSizeBytes) : BasicBufBuilder(initsize) {}
 
-    /* assume ownership of the buffer */
+    /**
+     * Assume ownership of the buffer.
+     * Note: There should not be any other method calls on this object after a call to 'release'.
+     */
     UniqueBuffer release() {
         return _buf.release();
     }
@@ -557,6 +640,14 @@ public:
     StackBufBuilderBase(StackBufBuilderBase&&) = delete;
 };
 MONGO_STATIC_ASSERT(!std::is_move_constructible<StackBufBuilder>::value);
+
+// This extern template declaration must follow the declaration of
+// StackBufBuilderBase, and must come before the extern template
+// declarations of StringBuilder below. Do not remove or re-order
+// these lines w.r.t those StackBufBuilderBase or the other extern
+// template declarations without being sure that you are not undoing
+// the advantages of the extern template declaration.
+extern template class StackBufBuilderBase<StackSizeDefault>;
 
 /** std::stringstream deals with locale so this is a lot faster than std::stringstream for UTF8 */
 template <typename Builder>
@@ -642,13 +733,13 @@ public:
     StringBuilderImpl& operator<<(R (*val)(Args...)) = delete;
 
     void appendDoubleNice(double x) {
-        const int prev = _buf.l;
+        const int prev = _buf.len();
         const int maxSize = 32;
         char* start = _buf.grow(maxSize);
         int z = snprintf(start, maxSize, "%.16g", x);
         verify(z >= 0);
         verify(z < maxSize);
-        _buf.l = prev + z;
+        _buf.setlen(prev + z);
         if (strchr(start, '.') == nullptr && strchr(start, 'E') == nullptr &&
             strchr(start, 'N') == nullptr) {
             write(".0", 2);
@@ -668,7 +759,7 @@ public:
     }
 
     std::string str() const {
-        return std::string(_buf.buf(), _buf.l);
+        return std::string(_buf.buf(), _buf.len());
     }
 
     /**
@@ -677,7 +768,7 @@ public:
      * WARNING: The view is invalidated when this StringBuilder is modified or destroyed.
      */
     std::string_view stringView() const {
-        return std::string_view(_buf.buf(), _buf.l);
+        return std::string_view(_buf.buf(), _buf.len());
     }
 
     /**
@@ -686,12 +777,12 @@ public:
      * WARNING: The view is invalidated when this StringBuilder is modified or destroyed.
      */
     StringData stringData() const {
-        return StringData(_buf.buf(), _buf.l);
+        return StringData(_buf.buf(), _buf.len());
     }
 
     /** size of current std::string */
     int len() const {
-        return _buf.l;
+        return _buf.len();
     }
 
 private:
@@ -712,17 +803,23 @@ private:
 
     template <typename T>
     StringBuilderImpl& SBNUM(T val, int maxSize, const char* macro) {
-        int prev = _buf.l;
+        int prev = _buf.len();
         int z = snprintf(_buf.grow(maxSize), maxSize, macro, (val));
         verify(z >= 0);
         verify(z < maxSize);
-        _buf.l = prev + z;
+        _buf.setlen(prev + z);
         return *this;
     }
 
     Builder _buf;
 };
 
+
+// The following extern template declaration must follow the
+// declaration of StringBuilderImpl and StackBufBuilderBase along with
+// the extern template delarations for that type. Do not remove or
+// re-order these lines w.r.t those types without being sure that you
+// are not undoing the advantages of the extern template declaration.
 extern template class StringBuilderImpl<BufBuilder>;
 extern template class StringBuilderImpl<StackBufBuilderBase<StackSizeDefault>>;
 

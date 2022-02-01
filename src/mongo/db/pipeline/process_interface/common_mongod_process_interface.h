@@ -102,7 +102,7 @@ public:
                                            const NamespaceString& outputNs) const final;
 
     std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) const final;
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const final;
 
     void writeRecordsToRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                    RecordStore* rs,
@@ -119,9 +119,6 @@ public:
 
     void truncateRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                              RecordStore* rs) const final;
-
-    void deleteTemporaryRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    std::unique_ptr<TemporaryRecordStore> rs) const final;
 
 protected:
     BSONObj getCollectionOptionsLocally(OperationContext* opCtx, const NamespaceString& nss);

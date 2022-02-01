@@ -45,6 +45,7 @@
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/storage/durable_catalog.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
@@ -58,12 +59,18 @@ IndexBuildBlock::IndexBuildBlock(const NamespaceString& nss,
                                  const BSONObj& spec,
                                  IndexBuildMethod method,
                                  boost::optional<UUID> indexBuildUUID)
-    : _nss(nss), _spec(spec.getOwned()), _method(method), _buildUUID(indexBuildUUID) {}
+    : _nss(nss),
+      _spec(spec.getOwned()),
+      _method(method),
+      _buildUUID(indexBuildUUID),
+      _pooledBuilder(
+          gOperationMemoryPoolBlockInitialSizeKB.loadRelaxed() * static_cast<size_t>(1024),
+          SharedBufferFragmentBuilder::DoubleGrowStrategy(
+              gOperationMemoryPoolBlockMaxSizeKB.loadRelaxed() * static_cast<size_t>(1024))) {}
 
-void IndexBuildBlock::finalizeTemporaryTables(OperationContext* opCtx,
-                                              TemporaryRecordStore::FinalizationAction action) {
+void IndexBuildBlock::keepTemporaryTables() {
     if (_indexBuildInterceptor) {
-        _indexBuildInterceptor->finalizeTemporaryTables(opCtx, action);
+        _indexBuildInterceptor->keepTemporaryTables();
     }
 }
 
@@ -247,8 +254,11 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
                   "Index build: done building index {indexName} on ns {nss}",
                   "Index build: done building",
                   "buildUUID"_attr = buildUUID,
+                  "collectionUUID"_attr = coll->uuid(),
                   "namespace"_attr = coll->ns(),
                   "index"_attr = indexName,
+                  "ident"_attr = entry->getIdent(),
+                  "collectionIdent"_attr = coll->getSharedIdent()->getIdent(),
                   "commitTimestamp"_attr = commitTime);
 
             if (commitTime) {
@@ -257,6 +267,8 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
 
             // Add the index to the TTLCollectionCache upon successfully committing the index build.
             // TTL indexes are not compatible with capped collections.
+            // Note that TTL deletion is supported on capped clustered collections via bounded
+            // collection scan, which does not use an index.
             if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName) && !coll->isCapped()) {
                 TTLCollectionCache::get(svcCtx).registerTTLInfo(coll->uuid(), indexName);
             }

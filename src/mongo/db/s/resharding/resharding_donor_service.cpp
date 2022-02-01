@@ -56,6 +56,7 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding_util.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
@@ -71,6 +72,8 @@ using namespace fmt::literals;
 namespace {
 
 const WriteConcernOptions kNoWaitWriteConcern{1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)};
+const WriteConcernOptions kMajorityWriteConcern{
+    WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, Seconds(0)};
 
 Date_t getCurrentTime() {
     const auto svcCtx = cc().getServiceContext();
@@ -159,7 +162,7 @@ public:
             query,
             update,
             false, /* upsert */
-            ShardingCatalogClient::kMajorityWriteConcern,
+            kMajorityWriteConcern,
             Milliseconds::max()));
 
         if (!docWasModified) {
@@ -187,7 +190,9 @@ ThreadPool::Limits ReshardingDonorService::getThreadPoolLimits() const {
 }
 
 std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingDonorService::constructInstance(
-    BSONObj initialState) {
+    OperationContext* opCtx,
+    BSONObj initialState,
+    const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) {
     return std::make_shared<DonorStateMachine>(
         this,
         ReshardingDonorDocument::parse({"DonorStateMachine"}, initialState),

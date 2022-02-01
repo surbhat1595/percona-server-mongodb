@@ -101,7 +101,8 @@ public:
                                      const CollectionOptions& options) = 0;
 
     virtual std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
-                                                                  StringData ident) = 0;
+                                                                  StringData ident,
+                                                                  KeyFormat keyFormat) = 0;
 
     /**
      * Similar to createRecordStore but this imports from an existing table with the provided ident
@@ -175,6 +176,10 @@ public:
         return status;
     }
 
+    virtual void alterIdentMetadata(OperationContext* opCtx,
+                                    StringData ident,
+                                    const IndexDescriptor* desc) {}
+
     /**
      * See StorageEngine::flushAllFiles for details
      */
@@ -237,14 +242,6 @@ public:
      *     http://docs.mongodb.org/manual/reference/program/mongod/#cmdoption--directoryperdb
      */
     virtual bool supportsDirectoryPerDB() const = 0;
-
-    virtual Status okToRename(OperationContext* opCtx,
-                              StringData fromNS,
-                              StringData toNS,
-                              StringData ident,
-                              const RecordStore* originalRecordStore) const {
-        return Status::OK();
-    }
 
     virtual bool hasIdent(OperationContext* opCtx, StringData ident) const = 0;
 
@@ -374,13 +371,15 @@ public:
      * Methods to access the storage engine's timestamps.
      */
     virtual Timestamp getCheckpointTimestamp() const {
-        MONGO_UNREACHABLE;
+        return Timestamp();
     }
 
-    virtual Timestamp getOldestTimestamp() const = 0;
+    virtual Timestamp getOldestTimestamp() const {
+        return Timestamp();
+    }
 
     virtual Timestamp getStableTimestamp() const {
-        MONGO_UNREACHABLE;
+        return Timestamp();
     }
 
     virtual StatusWith<Timestamp> pinOldestTimestamp(OperationContext* opCtx,
@@ -398,6 +397,11 @@ public:
      * See `StorageEngine::setPinnedOplogTimestamp`
      */
     virtual void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) = 0;
+
+    /**
+     * See `StorageEngine::dump`
+     */
+    virtual void dump() const = 0;
 
     /**
      * The destructor will never be called from mongod, but may be called from tests.

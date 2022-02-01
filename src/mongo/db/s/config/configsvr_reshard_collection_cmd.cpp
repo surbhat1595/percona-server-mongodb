@@ -162,6 +162,7 @@ public:
                     // Join the existing resharding operation to prevent generating a new resharding
                     // instance if the same command is issued consecutively due to client disconnect
                     // etc.
+                    opCtx->setAlwaysInterruptAtStepDownOrUp();
                     reshardCollectionJoinedExistingOperation.pauseWhileSet(opCtx);
                     existingInstance.get()->getCoordinatorDocWrittenFuture().get(opCtx);
                     return existingInstance;
@@ -179,8 +180,7 @@ public:
                     return boost::none;
                 }
 
-                auto tempReshardingNss = constructTemporaryReshardingNss(
-                    nss.db(), getCollectionUUIDFromChunkManger(nss, cm));
+                auto tempReshardingNss = constructTemporaryReshardingNss(nss.db(), cm.getUUID());
 
 
                 if (auto zones = request().getZones()) {
@@ -194,7 +194,7 @@ public:
 
                 // Generate the resharding metadata for the ReshardingCoordinatorDocument.
                 auto reshardingUUID = UUID::gen();
-                auto existingUUID = getCollectionUUIDFromChunkManger(ns(), cm);
+                auto existingUUID = cm.getUUID();
                 auto commonMetadata = CommonReshardingMetadata(std::move(reshardingUUID),
                                                                ns(),
                                                                std::move(existingUUID),

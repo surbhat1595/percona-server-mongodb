@@ -1967,7 +1967,7 @@ def init_no_global_libdeps_tag_emitter(target, source, env):
     line.
     """
 
-    if link_model.startswith('dynamic'):
+    if link_model == 'dynamic':
         start_flag = env.get('LINK_AS_NEEDED_LIB_START', '')
         end_flag = env.get('LINK_AS_NEEDED_LIB_END', '')
 
@@ -2215,7 +2215,12 @@ elif env.TargetOSIs('windows'):
     #     object called lock on the stack.
     env.Append( CCFLAGS=["/we4013", "/we4099", "/we4930"] )
 
-    env.Append( CPPDEFINES=["_CONSOLE","_CRT_SECURE_NO_WARNINGS", "_SCL_SECURE_NO_WARNINGS"] )
+    env.Append(CPPDEFINES=[
+        "_CONSOLE",
+        "_CRT_SECURE_NO_WARNINGS",
+        "_ENABLE_EXTENDED_ALIGNED_STORAGE",
+        "_SCL_SECURE_NO_WARNINGS",
+    ])
 
     # this would be for pre-compiled headers, could play with it later
     #env.Append( CCFLAGS=['/Yu"pch.h"'] )
@@ -2653,41 +2658,80 @@ def doConfigure(myenv):
         }
         """ % compiler_minimum_string)
     elif myenv.ToolchainIs('gcc'):
-        compiler_minimum_string = "GCC 8.2"
-        compiler_test_body = textwrap.dedent(
-        """
-        #if !defined(__GNUC__) || defined(__clang__)
-        #error
-        #endif
+        if get_option('cxx-std') == "20":
+            compiler_minimum_string = "GCC 11.2"
+            compiler_test_body = textwrap.dedent(
+            """
+            #if !defined(__GNUC__) || defined(__clang__)
+            #error
+            #endif
 
-        #if (__GNUC__ < 8) || (__GNUC__ == 8 && __GNUC_MINOR__ < 2)
-        #error %s or newer is required to build MongoDB
-        #endif
+            #if (__GNUC__ < 11) || (__GNUC__ == 11 && __GNUC_MINOR__ < 2)
+            #error %s or newer is required to build MongoDB
+            #endif
 
-        int main(int argc, char* argv[]) {
-            return 0;
-        }
-        """ % compiler_minimum_string)
+            int main(int argc, char* argv[]) {
+                return 0;
+            }
+            """ % compiler_minimum_string)
+        else:
+            compiler_minimum_string = "GCC 8.2"
+            compiler_test_body = textwrap.dedent(
+            """
+            #if !defined(__GNUC__) || defined(__clang__)
+            #error
+            #endif
+
+            #if (__GNUC__ < 8) || (__GNUC__ == 8 && __GNUC_MINOR__ < 2)
+            #error %s or newer is required to build MongoDB
+            #endif
+
+            int main(int argc, char* argv[]) {
+                return 0;
+            }
+            """ % compiler_minimum_string)
     elif myenv.ToolchainIs('clang'):
-        compiler_minimum_string = "clang 7.0 (or Apple XCode 10.2)"
-        compiler_test_body = textwrap.dedent(
-        """
-        #if !defined(__clang__)
-        #error
-        #endif
+        if get_option('cxx-std') == "20":
+            compiler_minimum_string = "clang 12.0 (or Apple XCode 13.0)"
+            compiler_test_body = textwrap.dedent(
+            """
+            #if !defined(__clang__)
+            #error
+            #endif
 
-        #if defined(__apple_build_version__)
-        #if __apple_build_version__ < 10010046
-        #error %s or newer is required to build MongoDB
-        #endif
-        #elif (__clang_major__ < 7) || (__clang_major__ == 7 && __clang_minor__ < 0)
-        #error %s or newer is required to build MongoDB
-        #endif
+            #if defined(__apple_build_version__)
+            #if __apple_build_version__ < 13000029
+            #error %s or newer is required to build MongoDB
+            #endif
+            #elif (__clang_major__ < 12) || (__clang_major__ == 12 && __clang_minor__ < 0)
+            #error %s or newer is required to build MongoDB
+            #endif
 
-        int main(int argc, char* argv[]) {
-            return 0;
-        }
-        """ % (compiler_minimum_string, compiler_minimum_string))
+            int main(int argc, char* argv[]) {
+                return 0;
+            }
+            """ % (compiler_minimum_string, compiler_minimum_string))
+        else:
+            compiler_minimum_string = "clang 7.0 (or Apple XCode 10.2)"
+            compiler_test_body = textwrap.dedent(
+            """
+            #if !defined(__clang__)
+            #error
+            #endif
+
+            #if defined(__apple_build_version__)
+            #if __apple_build_version__ < 10010046
+            #error %s or newer is required to build MongoDB
+            #endif
+            #elif (__clang_major__ < 7) || (__clang_major__ == 7 && __clang_minor__ < 0)
+            #error %s or newer is required to build MongoDB
+            #endif
+
+            int main(int argc, char* argv[]) {
+                return 0;
+            }
+            """ % (compiler_minimum_string, compiler_minimum_string))
+
     else:
         myenv.ConfError("Error: can't check compiler minimum; don't know this compiler...")
 
@@ -4967,13 +5011,6 @@ if split_dwarf.exists(env):
 if get_option('ninja') == 'disabled':
     env.Tool("compilation_db")
 
-# If we can, load the dagger tool for build dependency graph introspection.
-# Dagger is only supported on Linux and OSX (not Windows or Solaris).
-should_dagger = ( mongo_platform.is_running_os('osx') or mongo_platform.is_running_os('linux')  ) and "dagger" in COMMAND_LINE_TARGETS
-
-if should_dagger:
-    env.Tool("dagger")
-
 incremental_link = Tool('incremental_link')
 if incremental_link.exists(env):
     incremental_link(env)
@@ -5343,12 +5380,6 @@ env.SConscript(
         'env',
     ],
 )
-
-# run the Dagger tool if it's installed
-if should_dagger:
-    dagger = env.Dagger('library_dependency_graph.json')
-    env.Depends(dagger, env.Alias("install-all"))
-    dependencyDb = env.Alias("dagger", dagger)
 
 # Declare the cache prune target
 cachePrune = env.Command(

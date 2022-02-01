@@ -229,6 +229,18 @@ public:
     virtual StatusWith<ReplSetConfig> getCurrentConfig() const final {
         MONGO_UNREACHABLE;
     }
+
+    StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* opCtx) const final {
+        MONGO_UNREACHABLE;
+    }
+
+    Status storeLocalConfigDocument(OperationContext* opCtx, const BSONObj& config) final {
+        MONGO_UNREACHABLE;
+    }
+
+    JournalListener* getReplicationJournalListener() final {
+        MONGO_UNREACHABLE;
+    }
 };
 
 
@@ -287,7 +299,10 @@ ExecutorFuture<void> TenantMigrationRecipientService::_rebuildService(
 }
 
 std::shared_ptr<PrimaryOnlyService::Instance> TenantMigrationRecipientService::constructInstance(
-    BSONObj initialStateDoc) {
+    OperationContext* opCtx,
+    BSONObj initialStateDoc,
+    const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) {
+    // TODO (SERVER-59786): check for conflicts here, not RecipientSyncDataCmd::typedRun.
     return std::make_shared<TenantMigrationRecipientService::Instance>(
         _serviceContext, this, initialStateDoc);
 }
@@ -302,6 +317,7 @@ TenantMigrationRecipientService::Instance::Instance(
       _stateDoc(TenantMigrationRecipientDocument::parse(IDLParserErrorContext("recipientStateDoc"),
                                                         stateDoc)),
       _tenantId(_stateDoc.getTenantId().toString()),
+      _protocol(_stateDoc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations)),
       _migrationUuid(_stateDoc.getId()),
       _donorConnectionString(_stateDoc.getDonorConnectionString().toString()),
       _donorUri(uassertStatusOK(MongoURI::parse(_stateDoc.getDonorConnectionString().toString()))),
@@ -404,7 +420,7 @@ Status TenantMigrationRecipientService::Instance::checkIfOptionsConflict(
     stdx::lock_guard<Latch> lg(_mutex);
     invariant(stateDoc.getId() == _migrationUuid);
 
-    if (stateDoc.getTenantId() == _tenantId &&
+    if (stateDoc.getProtocol() == _protocol && stateDoc.getTenantId() == _tenantId &&
         stateDoc.getDonorConnectionString() == _donorConnectionString &&
         stateDoc.getReadPreference().equals(_readPreference) &&
         stateDoc.getRecipientCertificateForDonor() == _recipientCertificateForDonor) {
@@ -514,14 +530,23 @@ TenantMigrationRecipientService::Instance::waitUntilMigrationReachesReturnAfterR
             opCtx, returnAfterReachingTimestamp, donorRecipientOpTimePair.recipientOpTime));
     }
     _stopOrHangOnFailPoint(&fpBeforePersistingRejectReadsBeforeTimestamp, opCtx);
-    uassertStatusOK(tenantMigrationRecipientEntryHelpers::updateStateDoc(opCtx, _stateDoc));
 
-    auto writeOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    auto lastOpBeforeUpdate = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    uassertStatusOK(tenantMigrationRecipientEntryHelpers::updateStateDoc(opCtx, _stateDoc));
+    auto lastOpAfterUpdate = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     auto replCoord = repl::ReplicationCoordinator::get(_serviceContext);
+    if (lastOpBeforeUpdate == lastOpAfterUpdate) {
+        // updateStateDoc was a no-op, but we still must ensure it's all-replicated.
+        lastOpAfterUpdate = uassertStatusOK(replCoord->getLatestWriteOpTime(opCtx));
+        LOGV2(6096900,
+              "Fixed write timestamp for recording rejectReadsBeforeTimestamp",
+              "newWriteOpTime"_attr = lastOpAfterUpdate);
+    }
+
     WriteConcernOptions writeConcern(repl::ReplSetConfig::kConfigAllWriteConcernName,
                                      WriteConcernOptions::SyncMode::NONE,
                                      opCtx->getWriteConcern().wTimeout);
-    uassertStatusOK(replCoord->awaitReplication(opCtx, writeOpTime, writeConcern).status);
+    uassertStatusOK(replCoord->awaitReplication(opCtx, lastOpAfterUpdate, writeConcern).status);
 
     _stopOrHangOnFailPoint(&fpAfterWaitForRejectReadsBeforeTimestamp, opCtx);
 
@@ -571,13 +596,12 @@ OpTime TenantMigrationRecipientService::Instance::_getDonorMajorityOpTime(
     std::unique_ptr<mongo::DBClientConnection>& client) {
     auto oplogOpTimeFields =
         BSON(OplogEntry::kTimestampFieldName << 1 << OplogEntry::kTermFieldName << 1);
-    auto majorityOpTimeBson =
-        client->findOne(NamespaceString::kRsOplogNamespace.ns(),
-                        BSONObj{},
-                        Query().sort("$natural", -1),
-                        &oplogOpTimeFields,
-                        QueryOption_SecondaryOk,
-                        ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    FindCommandRequest findCmd{NamespaceString::kRsOplogNamespace};
+    findCmd.setSort(BSON("$natural" << -1));
+    findCmd.setProjection(oplogOpTimeFields);
+    findCmd.setReadConcern(ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    auto majorityOpTimeBson = client->findOne(
+        std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
     uassert(5272003, "Found no entries in the remote oplog", !majorityOpTimeBson.isEmpty());
 
     auto majorityOpTime = uassertStatusOK(OpTime::parseFromOplogEntry(majorityOpTimeBson));
@@ -866,13 +890,13 @@ void TenantMigrationRecipientService::Instance::_getStartOpTimesFromDonor(WithLo
     const auto preparedState = DurableTxnState_serializer(DurableTxnStateEnum::kPrepared);
     const auto inProgressState = DurableTxnState_serializer(DurableTxnStateEnum::kInProgress);
     auto transactionTableOpTimeFields = BSON(SessionTxnRecord::kStartOpTimeFieldName << 1);
+    FindCommandRequest findCmd{NamespaceString::kSessionTransactionsTableNamespace};
+    findCmd.setFilter(BSON("state" << BSON("$in" << BSON_ARRAY(preparedState << inProgressState))));
+    findCmd.setSort(BSON(SessionTxnRecord::kStartOpTimeFieldName.toString() << 1));
+    findCmd.setProjection(transactionTableOpTimeFields);
+    findCmd.setReadConcern(ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
     auto earliestOpenTransactionBson = _client->findOne(
-        NamespaceString::kSessionTransactionsTableNamespace.ns(),
-        BSON("state" << BSON("$in" << BSON_ARRAY(preparedState << inProgressState))),
-        Query().sort(SessionTxnRecord::kStartOpTimeFieldName.toString(), 1),
-        &transactionTableOpTimeFields,
-        QueryOption_SecondaryOk,
-        ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+        std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
     LOGV2_DEBUG(4880602,
                 2,
                 "Transaction table entry for earliest transaction that was open at the read "
@@ -972,6 +996,7 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
                 "Migration attempting to commit transaction",
                 "sessionId"_attr = sessionId,
                 "txnNumber"_attr = txnNumber,
+                "txnRetryCounter"_attr = optTxnRetryCounter,
                 "tenantId"_attr = getTenantId(),
                 "migrationId"_attr = getMigrationUUID(),
                 "entry"_attr = entry);
@@ -992,16 +1017,20 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     // If the entry's transaction number is stale/older than the current active transaction number
     // on the participant, fail the migration.
     uassert(ErrorCodes::TransactionTooOld,
-            str::stream() << "Migration cannot apply transaction " << txnNumber << " on session "
-                          << sessionId << " because a newer transaction "
-                          << txnParticipant.getActiveTxnNumber() << " has already started",
-            txnParticipant.getActiveTxnNumber() <= txnNumber);
-    if (txnParticipant.getActiveTxnNumber() == txnNumber) {
+            str::stream() << "Migration cannot apply transaction with tranaction number "
+                          << txnNumber << " and transaction retry counter " << optTxnRetryCounter
+                          << " on session " << sessionId
+                          << " because a newer transaction with txnNumberAndRetryCounter: "
+                          << txnParticipant.getActiveTxnNumberAndRetryCounter().toBSON()
+                          << " has already started",
+            txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber() <= txnNumber);
+    if (txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber() == txnNumber) {
         // If the txn numbers are equal, move on to the next entry.
         return;
     }
 
-    txnParticipant.beginOrContinueTransactionUnconditionally(opCtx, txnNumber, optTxnRetryCounter);
+    txnParticipant.beginOrContinueTransactionUnconditionally(opCtx,
+                                                             {txnNumber, optTxnRetryCounter});
 
     MutableOplogEntry noopEntry;
     noopEntry.setOpType(repl::OpTypeEnum::kNoop);
@@ -1460,6 +1489,7 @@ void TenantMigrationRecipientService::Instance::_oplogFetcherCallback(Status opl
 
 void TenantMigrationRecipientService::Instance::_stopOrHangOnFailPoint(FailPoint* fp,
                                                                        OperationContext* opCtx) {
+    auto shouldHang = false;
     fp->executeIf(
         [&](const BSONObj& data) {
             LOGV2(4881103,
@@ -1469,11 +1499,8 @@ void TenantMigrationRecipientService::Instance::_stopOrHangOnFailPoint(FailPoint
                   "name"_attr = fp->getName(),
                   "args"_attr = data);
             if (data["action"].str() == "hang") {
-                if (opCtx) {
-                    fp->pauseWhileSet(opCtx);
-                } else {
-                    fp->pauseWhileSet();
-                }
+                // fp is locked. If we call pauseWhileSet here, another thread can't disable fp.
+                shouldHang = true;
             } else {
                 uasserted(data["stopErrorCode"].numberInt(),
                           "Skipping remaining processing due to fail point");
@@ -1483,6 +1510,14 @@ void TenantMigrationRecipientService::Instance::_stopOrHangOnFailPoint(FailPoint
             auto action = data["action"].str();
             return (action == "hang" || action == "stop");
         });
+
+    if (shouldHang) {
+        if (opCtx) {
+            fp->pauseWhileSet(opCtx);
+        } else {
+            fp->pauseWhileSet();
+        }
+    }
 }
 
 bool TenantMigrationRecipientService::Instance::_isCloneCompletedMarkerSet(WithLock) const {
@@ -1839,8 +1874,6 @@ void TenantMigrationRecipientService::Instance::_cleanupOnDataSyncCompletion(Sta
         setPromiseErrorifNotReady(lk, _dataConsistentPromise, status);
         setPromiseErrorifNotReady(lk, _dataSyncCompletionPromise, status);
 
-        shutdownTarget(lk, _writerPool);
-
         // Save them to join() with it outside of _mutex.
         using std::swap;
         swap(savedDonorOplogFetcher, _donorOplogFetcher);
@@ -1851,7 +1884,10 @@ void TenantMigrationRecipientService::Instance::_cleanupOnDataSyncCompletion(Sta
     // Perform join outside the lock to avoid deadlocks.
     joinTarget(savedDonorOplogFetcher);
     joinTarget(savedTenantOplogApplier);
-    joinTarget(savedWriterPool);
+    if (savedWriterPool) {
+        savedWriterPool->shutdown();
+        savedWriterPool->join();
+    }
 }
 
 BSONObj TenantMigrationRecipientService::Instance::_getOplogFetcherFilter() const {
@@ -1905,13 +1941,11 @@ void TenantMigrationRecipientService::Instance::_compareRecipientAndDonorFCV() c
         return;
     }
 
-    auto donorFCVbson =
-        _client->findOne(NamespaceString::kServerConfigurationNamespace.ns(),
-                         BSON("_id" << multiversion::kParameterName),
-                         Query(),
-                         nullptr,
-                         QueryOption_SecondaryOk,
-                         ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    FindCommandRequest findCmd{NamespaceString::kServerConfigurationNamespace};
+    findCmd.setFilter(BSON("_id" << multiversion::kParameterName));
+    findCmd.setReadConcern(ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    auto donorFCVbson = _client->findOne(std::move(findCmd),
+                                         ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
 
     uassert(5382302, "FCV on donor not set", !donorFCVbson.isEmpty());
 
@@ -1934,6 +1968,33 @@ void TenantMigrationRecipientService::Instance::_compareRecipientAndDonorFCV() c
     }
 }
 
+bool TenantMigrationRecipientService::Instance::_checkifProtocolRemainsFCVCompatible() {
+    stdx::lock_guard<Latch> lg(_mutex);
+
+    // Ensure that the on-disk protocol and cached value remains the same.
+    invariant(!_stateDoc.getProtocol() || _stateDoc.getProtocol().value() == getProtocol());
+
+    auto isAtLeastFCV52AtStart = serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
+        multiversion::FeatureCompatibilityVersion::kVersion_5_2);
+    if (isAtLeastFCV52AtStart) {
+        // When the instance is started using state doc < 5.2 FCV format, _stateDoc._protocol field
+        // won't be set. In that case, the cached value Instance::_protocol will be set to
+        // "kMultitenantMigrations".
+        return true;
+    }
+
+    if (getProtocol() == MigrationProtocolEnum::kShardMerge) {
+        LOGV2(5949504,
+              "Must abort tenant migration as 'Merge' protocol is not supported for FCV "
+              "below 5.2");
+        return false;
+    }
+    // For backward compatibility, ensure that the 'protocol' field is not set in the
+    // document.
+    _stateDoc.setProtocol(boost::none);
+    return true;
+}
+
 SemiFuture<void> TenantMigrationRecipientService::Instance::run(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) noexcept {
@@ -1951,16 +2012,29 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
     pauseBeforeRunTenantMigrationRecipientInstance.pauseWhileSet();
 
     bool cancelWhenDurable = false;
+    auto isFCVUpgradingOrDowngrading = [&]() -> bool {
+        // We must abort the migration if we try to start or resume while upgrading or downgrading.
+        // We defer this until after the state doc is persisted in a started so as to make sure it
+        // it safe to abort and forget the migration. (Generic FCV reference): This FCV check should
+        // exist across LTS binary versions.
+        if (serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading()) {
+            LOGV2(5356304, "Must abort tenant migration as recipient is upgrading or downgrading");
+            return true;
+        }
+        return false;
+    };
 
-    // We must abort the migration if we try to start or resume while upgrading or downgrading.
-    // We defer this until after the state doc is persisted in a started so as to make sure it it
-    // safe to abort and forget the migration.
-    // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-    if (serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading()) {
-        LOGV2(5356304, "Must abort tenant migration as recipient is upgrading or downgrading");
+    // Tenant migrations gets aborted on FCV upgrading or downgrading state. But,
+    // due to race between between Instance::getOrCreate() and
+    // SetFeatureCompatibilityVersionCommand::_cancelTenantMigrations(), we might miss aborting this
+    // tenant migration and FCV might have updated or downgraded at this point. So, need to ensure
+    // that the protocol is still compatible with FCV.
+    if (isFCVUpgradingOrDowngrading() || !_checkifProtocolRemainsFCVCompatible()) {
         cancelWhenDurable = true;
     }
 
+    // Any FCV changes after this point will abort this migration.
+    //
     // The 'AsyncTry' is run on the cleanup executor as opposed to the scoped executor  as we rely
     // on the 'PrimaryService' to interrupt the operation contexts based on thread pool and not the
     // executor.
@@ -2456,6 +2530,10 @@ const UUID& TenantMigrationRecipientService::Instance::getMigrationUUID() const 
 
 const std::string& TenantMigrationRecipientService::Instance::getTenantId() const {
     return _tenantId;
+}
+
+const MigrationProtocolEnum& TenantMigrationRecipientService::Instance::getProtocol() const {
+    return _protocol;
 }
 
 }  // namespace repl

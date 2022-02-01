@@ -97,6 +97,18 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
         for shard in self.shards:
             shard.setup()
 
+    def refresh_logical_session_cache(self, target):
+        """Refresh logical session cache with no timeout."""
+        primary = target.get_primary().mongo_client()
+        try:
+            primary.admin.command({"refreshLogicalSessionCacheNow": 1})
+        except pymongo.errors.OperationFailure as err:
+            if err.code != self._WRITE_CONCERN_FAILED:
+                raise err
+            self.logger.info("Ignoring write concern timeout for refreshLogicalSessionCacheNow "
+                             "command and continuing to wait")
+            target.await_last_op_committed(target.AWAIT_REPL_TIMEOUT_FOREVER_MINS * 60)
+
     def await_ready(self):
         """Block until the fixture can be used for testing."""
         # Wait for the config server
@@ -150,12 +162,10 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
 
         # Ensure that the sessions collection gets auto-sharded by the config server
         if self.configsvr is not None:
-            primary = self.configsvr.get_primary().mongo_client()
-            primary.admin.command({"refreshLogicalSessionCacheNow": 1})
+            self.refresh_logical_session_cache(self.configsvr)
 
         for shard in self.shards:
-            primary = shard.get_primary().mongo_client()
-            primary.admin.command({"refreshLogicalSessionCacheNow": 1})
+            self.refresh_logical_session_cache(shard)
 
     def _await_mongod_sharding_initialization(self):
         if (self.enable_sharding) and (self.num_rs_nodes_per_shard is not None):
@@ -363,7 +373,7 @@ class _MongoSFixture(interface.Fixture):
 
     # pylint: disable=too-many-arguments
     def __init__(self, logger, job_num, fixturelib, dbpath_prefix, mongos_executable=None,
-                 mongos_options=None):
+                 mongos_options=None, add_feature_flags=False):
         """Initialize _MongoSFixture."""
 
         interface.Fixture.__init__(self, logger, job_num, fixturelib)
@@ -377,6 +387,10 @@ class _MongoSFixture(interface.Fixture):
 
         self.mongos_options = self.fixturelib.make_historic(
             self.fixturelib.default_if_none(mongos_options, {})).copy()
+
+        if add_feature_flags:
+            for ff in self.config.ENABLED_FEATURE_FLAGS:
+                self.mongos_options["set_parameters"][ff] = "true"
 
         self.mongos = None
         self.port = fixturelib.get_next_port(job_num)

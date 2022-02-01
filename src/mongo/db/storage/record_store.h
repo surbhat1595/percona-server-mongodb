@@ -132,15 +132,18 @@ public:
      * Returns false if it is invalid to continue using this Cursor. This usually means that
      * capped deletes have caught up to the position of this Cursor and continuing could
      * result in missed data. Note that Cursors, unlike iterators can continue to iterate past the
-     * "end"
+     * "end".
      *
      * If the former position no longer exists, but it is safe to continue iterating, the
      * following call to next() will return the next closest position in the direction of the
      * scan, if any.
      *
      * This handles restoring after either save() or SeekableRecordCursor::saveUnpositioned().
+     *
+     * 'tolerateCappedRepositioning' allows repositioning a capped cursor, which is useful for
+     * range writes.
      */
-    virtual bool restore() = 0;
+    virtual bool restore(bool tolerateCappedRepositioning = true) = 0;
 
     /**
      * Detaches from the OperationContext and releases any storage-engine state.
@@ -247,7 +250,7 @@ public:
     /**
      * The key format for this RecordStore's RecordIds.
      *
-     * Collections with clustered indexes on _id may use the String format, however most
+     * Clustered collections may use the String format, however most
      * RecordStores use Long. RecordStores with the String format require callers to provide
      * RecordIds and will not generate them automatically.
      */
@@ -501,11 +504,9 @@ public:
      * visibility management. Calls with `orderedCommit` true will not be concurrent with calls of
      * `orderedCommit` false.
      */
-    virtual Status oplogDiskLocRegister(OperationContext* opCtx,
-                                        const Timestamp& opTime,
-                                        bool orderedCommit) {
-        return Status::OK();
-    }
+    Status oplogDiskLocRegister(OperationContext* opCtx,
+                                const Timestamp& opTime,
+                                bool orderedCommit);
 
     /**
      * Waits for all writes that completed before this call to be visible to forward scans.
@@ -514,7 +515,7 @@ public:
      * It is only legal to call this on an oplog. It is illegal to call this inside a
      * WriteUnitOfWork.
      */
-    virtual void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const = 0;
+    void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const;
 
     /**
      * Called after a repair operation is run with the recomputed numRecords and dataSize.
@@ -583,6 +584,14 @@ public:
     }
 
 protected:
+    virtual Status oplogDiskLocRegisterImpl(OperationContext* opCtx,
+                                            const Timestamp& opTime,
+                                            bool orderedCommit) {
+        return Status::OK();
+    }
+
+    virtual void waitForAllEarlierOplogWritesToBeVisibleImpl(OperationContext* opCtx) const = 0;
+
     std::string _ns;
 };
 

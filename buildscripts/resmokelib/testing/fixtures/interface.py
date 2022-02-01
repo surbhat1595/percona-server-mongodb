@@ -71,6 +71,15 @@ class TeardownMode(Enum):
 class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  # pylint: disable=invalid-metaclass
     """Base class for all fixtures."""
 
+    # Error response codes copied from mongo/base/error_codes.yml.
+    _WRITE_CONCERN_FAILED = 64
+    _NODE_NOT_FOUND = 74
+    _NEW_REPLICA_SET_CONFIGURATION_INCOMPATIBLE = 103
+    _CONFIGURATION_IN_PROGRESS = 109
+    _CURRENT_CONFIG_NOT_COMMITTED_YET = 308
+    _INTERRUPTED_DUE_TO_REPL_STATE_CHANGE = 11602
+    _INTERRUPTED_DUE_TO_STORAGE_CHANGE = 355
+
     # We explicitly set the 'REGISTERED_NAME' attribute so that PyLint realizes that the attribute
     # is defined for all subclasses of Fixture.
     REGISTERED_NAME = "Fixture"
@@ -196,6 +205,23 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
 
     def __repr__(self):
         return "%r(%r, %r)" % (self.__class__.__name__, self.logger, self.job_num)
+
+
+class MultiClusterFixture(Fixture):
+    """
+    Base class for fixtures that may consist of multiple independent participant clusters.
+
+    The participant clusters can function independently without coordination, but are bound together
+    only for some duration as they participate in some process such as a migration. The participant
+    clusters are fixtures themselves.
+    """
+
+    REGISTERED_NAME = registry.LEAVE_UNREGISTERED  # type: ignore
+
+    def get_independent_clusters(self):
+        """Return a list of the independent clusters (fixtures) that participate in this fixture."""
+        raise NotImplementedError(
+            "get_independent_clusters must be implemented by MultiClusterFixture subclasses")
 
 
 class ReplFixture(Fixture):

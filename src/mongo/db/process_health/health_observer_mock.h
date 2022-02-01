@@ -43,9 +43,9 @@ namespace process_health {
 class HealthObserverMock : public HealthObserverBase {
 public:
     HealthObserverMock(FaultFacetType mockType,
-                       ClockSource* clockSource,
+                       ServiceContext* svcCtx,
                        std::function<double()> getSeverityCallback)
-        : HealthObserverBase(clockSource),
+        : HealthObserverBase(svcCtx),
           _mockType(mockType),
           _getSeverityCallback(getSeverityCallback) {}
 
@@ -56,28 +56,22 @@ protected:
         return _mockType;
     }
 
-    FaultFacetPtr periodicCheckImpl(FaultFacetPtr optionalExistingFacet) override {
+    Future<HealthCheckStatus> periodicCheckImpl(
+        PeriodicHealthCheckContext&& periodicCheckContext) override {
         // Detects mocked severity and handles it.
         const double severity = _getSeverityCallback();
 
+        auto completionPf = makePromiseFuture<HealthCheckStatus>();
         if (HealthCheckStatus::isResolved(severity)) {
-            return {};
-        } else if (!optionalExistingFacet) {
-            FaultFacetPtr facet =
-                std::make_unique<FaultFacetMock>(_mockType, _clockSource, _getSeverityCallback);
-            return facet;
+            LOGV2(5936603, "Mock health observer returns a resolved severity");
+            completionPf.promise.emplaceValue(HealthCheckStatus(getType()));
+        } else {
+            LOGV2(5936604,
+                  "Mock health observer returns a fault severity",
+                  "severity"_attr = severity);
+            completionPf.promise.emplaceValue(HealthCheckStatus(getType(), severity, "failed"));
         }
-        return optionalExistingFacet;
-    }
-
-    HealthObserverIntensity getIntensity() override {
-        if (_getSeverityCallback() >= 1.0) {
-            return HealthObserverIntensity::kCritical;
-        } else if (_getSeverityCallback() > 0.0) {
-            return HealthObserverIntensity::kNonCritical;
-        }
-
-        return HealthObserverIntensity::kOff;
+        return std::move(completionPf.future);
     }
 
 private:

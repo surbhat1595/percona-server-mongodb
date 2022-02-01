@@ -243,17 +243,11 @@ protected:
         auto txnParticipant = TransactionParticipant::get(opCtx);
         ASSERT(txnParticipant);
         if (multiDocTxn) {
-            txnParticipant.beginOrContinue(opCtx,
-                                           txnNum,
-                                           false /* autocommit */,
-                                           true /* startTransaction */,
-                                           boost::none /* txnRetryCounter */);
+            txnParticipant.beginOrContinue(
+                opCtx, {txnNum}, false /* autocommit */, true /* startTransaction */);
         } else {
-            txnParticipant.beginOrContinue(opCtx,
-                                           txnNum,
-                                           boost::none /* autocommit */,
-                                           boost::none /* startTransaction */,
-                                           boost::none /* txnRetryCounter */);
+            txnParticipant.beginOrContinue(
+                opCtx, {txnNum}, boost::none /* autocommit */, boost::none /* startTransaction */);
         }
     }
 
@@ -261,10 +255,10 @@ protected:
         DBDirectClient client(operationContext());
         // The same logical session entry may be inserted more than once by a test case, so use a
         // $natural sort to find the most recently inserted entry.
-        auto bsonOplog =
-            client.findOne(NamespaceString::kRsOplogNamespace.ns(),
-                           BSON(repl::OplogEntryBase::kSessionIdFieldName << sessionId.toBSON()),
-                           Query().sort(BSON("$natural" << -1)));
+        FindCommandRequest findCmd{NamespaceString::kRsOplogNamespace};
+        findCmd.setFilter(BSON(repl::OplogEntryBase::kSessionIdFieldName << sessionId.toBSON()));
+        findCmd.setSort(BSON("$natural" << -1));
+        auto bsonOplog = client.findOne(std::move(findCmd));
         ASSERT(!bsonOplog.isEmpty());
         auto oplogEntry = repl::MutableOplogEntry::parse(bsonOplog).getValue();
         ASSERT_EQ(oplogEntry.getTxnNumber().get(), txnNum);
@@ -273,7 +267,7 @@ protected:
         ASSERT(oplogEntry.getOpType() == repl::OpTypeEnum::kNoop);
 
         auto bsonTxn =
-            client.findOne(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+            client.findOne(NamespaceString::kSessionTransactionsTableNamespace,
                            BSON(SessionTxnRecord::kSessionIdFieldName << sessionId.toBSON()));
         ASSERT(!bsonTxn.isEmpty());
         auto txn = SessionTxnRecord::parse(
@@ -290,18 +284,18 @@ protected:
 
         DBDirectClient client(operationContext());
         auto bsonOplog =
-            client.findOne(NamespaceString::kRsOplogNamespace.ns(),
+            client.findOne(NamespaceString::kRsOplogNamespace,
                            BSON(repl::OplogEntryBase::kSessionIdFieldName << sessionId.toBSON()));
 
         ASSERT_BSONOBJ_EQ(bsonOplog, {});
-        ASSERT_EQ(txnParticipant.getActiveTxnNumber(), txnNum);
+        ASSERT_EQ(txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber(), txnNum);
     }
 
     boost::optional<ReshardingTxnClonerProgress> getTxnCloningProgress(
         const ReshardingSourceId& sourceId) {
         DBDirectClient client(operationContext());
         auto progressDoc = client.findOne(
-            NamespaceString::kReshardingTxnClonerProgressNamespace.ns(),
+            NamespaceString::kReshardingTxnClonerProgressNamespace,
             BSON(ReshardingTxnClonerProgress::kSourceIdFieldName << sourceId.toBSON()));
 
         if (progressDoc.isEmpty()) {
@@ -351,7 +345,6 @@ protected:
 
     std::shared_ptr<MongoProcessInterface> makeMongoProcessInterface() {
         return std::make_shared<ShardServerProcessInterface>(
-            operationContext(),
             Grid::get(getServiceContext())->getExecutorPool()->getFixedExecutor());
     }
 
@@ -397,11 +390,8 @@ protected:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(opCtx,
-                                       txnNumber,
-                                       false /* autocommit */,
-                                       true /* startTransaction */,
-                                       boost::none /* txnRetryCounter */);
+        txnParticipant.beginOrContinue(
+            opCtx, {txnNumber}, false /* autocommit */, true /* startTransaction */);
 
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
@@ -421,11 +411,8 @@ protected:
 
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(opCtx,
-                                       txnNumber,
-                                       false /* autocommit */,
-                                       boost::none /* startTransaction */,
-                                       boost::none /* txnRetryCounter */);
+        txnParticipant.beginOrContinue(
+            opCtx, {txnNumber}, false /* autocommit */, boost::none /* startTransaction */);
 
         txnParticipant.unstashTransactionResources(opCtx, "abortTransaction");
         txnParticipant.abortTransaction(opCtx);

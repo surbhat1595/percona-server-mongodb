@@ -123,6 +123,11 @@ public:
     typedef stdx::unordered_map<K, KVListIt, KeyHasher> KVMap;
     typedef typename KVMap::const_iterator KVMapConstIt;
 
+    // These type declarations are required by the 'Partitioned' utility.
+    using key_type = typename KVMap::key_type;
+    using mapped_type = typename KVMap::mapped_type;
+    using value_type = typename KVMap::value_type;
+
     /**
      * Add an (K, V*) pair to the store, where 'key' can be used to retrieve value 'entry' from the
      * store. Takes ownership of 'entry'. If 'key' already exists in the kv-store, 'entry' will
@@ -174,7 +179,7 @@ public:
      * Remove the kv-store entry keyed by 'key'.
      * Returns false if there doesn't exist such 'key', otherwise returns true.
      */
-    bool remove(const K& key) {
+    bool erase(const K& key) {
         KVMapConstIt i = _kvMap.find(key);
         if (i == _kvMap.end()) {
             return false;
@@ -185,6 +190,27 @@ public:
         _kvMap.erase(i);
         _kvList.erase(found);
         return true;
+    }
+
+    /**
+     * Remove all the entries for keys for which the predicate returns true. Returns the number of
+     * removed entries.
+     */
+    template <typename UnaryPredicate>
+    size_t removeIf(UnaryPredicate predicate) {
+        size_t removed = 0;
+        for (auto it = _kvList.begin(); it != _kvList.end();) {
+            if (predicate(it->first)) {
+                std::unique_ptr<V> entryToRemove{it->second};
+                _budgetTracker.onRemove(*entryToRemove);
+                _kvMap.erase(it->first);
+                it = _kvList.erase(it);
+                ++removed;
+            } else {
+                ++it;
+            }
+        }
+        return removed;
     }
 
     /**

@@ -76,7 +76,8 @@ public:
         return Status::OK();
     }
     std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
-                                                          StringData ident) override {
+                                                          StringData ident,
+                                                          KeyFormat keyFormat) override {
         return {};
     }
     Status createSortedDataInterface(OperationContext* opCtx,
@@ -128,6 +129,8 @@ public:
     }
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) {}
+
+    void dump() const override {}
 
     // List of ident names removed using dropIdent().
     std::vector<std::string> droppedIdents;

@@ -30,6 +30,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/executor/scoped_task_executor.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace executor {
@@ -182,6 +183,14 @@ public:
     }
 
     void appendConnectionStats(ConnectionPoolStats* stats) const override {
+        MONGO_UNREACHABLE;
+    }
+
+    void dropConnections(const HostAndPort& hostAndPort) override {
+        MONGO_UNREACHABLE;
+    }
+
+    void appendNetworkInterfaceStats(BSONObjBuilder&) const override {
         MONGO_UNREACHABLE;
     }
 

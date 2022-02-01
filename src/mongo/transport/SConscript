@@ -55,6 +55,7 @@ tlEnv.Library(
         'transport_layer_asio.cpp',
         'asio_utils.cpp',
         'session_asio.cpp',
+        'proxy_protocol_header_parser.cpp',
         'transport_options.idl',
     ],
     LIBDEPS=[
@@ -63,6 +64,7 @@ tlEnv.Library(
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/stats/counters',
+        '$BUILD_DIR/mongo/util/executor_stats',
         'transport_layer_common',
     ],
     LIBDEPS_PRIVATE=[
@@ -179,12 +181,14 @@ env.Library(
 tlEnv.CppUnitTest(
     target='transport_test',
     source=[
+        'asio_utils_test.cpp',
         'message_compressor_manager_test.cpp',
         'message_compressor_registry_test.cpp',
         'transport_layer_asio_test.cpp',
         'service_executor_test.cpp',
         'max_conns_override_test.cpp',
         'service_state_machine_test.cpp',
+        'proxy_protocol_header_parser_test.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',

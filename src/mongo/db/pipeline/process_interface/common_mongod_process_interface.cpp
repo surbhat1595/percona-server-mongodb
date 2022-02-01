@@ -54,6 +54,7 @@
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
@@ -141,17 +142,17 @@ bool supportsUniqueKey(const boost::intrusive_ptr<ExpressionContext>& expCtx,
             CollatorInterface::collatorsMatch(index->getCollator(), expCtx->getCollator()));
 }
 
-// In an operation across GetMore requests we need to check that ignore conflicts is set for each
-// write to the RecordStore.
-void setIgnoreConflictsWriteBehavior(const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    if (expCtx->opCtx->recoveryUnit()->getPrepareConflictBehavior() !=
-        PrepareConflictBehavior::kIgnoreConflictsAllowWrites) {
-        expCtx->opCtx->recoveryUnit()->abandonSnapshot();
-        expCtx->opCtx->recoveryUnit()->setPrepareConflictBehavior(
-            PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
-    }
+// Proactively assert that this operation can safely write before hitting an assertion in the
+// storage engine. We can safely write if we are enforcing prepare conflicts by blocking or if we
+// are ignoring prepare conflicts and explicitly allowing writes. Ignoring prepare conflicts
+// without allowing writes will cause this operation to fail in the storage engine.
+void assertIgnorePrepareConflictsBehavior(const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    tassert(5996900,
+            "Expected operation to either be blocking on prepare conflicts or ignoring prepare "
+            "conflicts and allowing writes",
+            expCtx->opCtx->recoveryUnit()->getPrepareConflictBehavior() !=
+                PrepareConflictBehavior::kIgnoreConflicts);
 }
-
 }  // namespace
 
 std::unique_ptr<TransactionHistoryIteratorBase>
@@ -403,7 +404,7 @@ BackupCursorExtendState CommonMongodProcessInterface::extendBackupCursor(
 
 std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStats(
     OperationContext* opCtx, const NamespaceString& nss, const MatchExpression* matchExp) const {
-    const auto serializer = [](const PlanCacheEntry& entry) {
+    const auto serializer = [](const auto& entry) {
         BSONObjBuilder out;
         Explain::planCacheEntryToBSON(entry, &out);
         return out.obj();
@@ -417,10 +418,30 @@ std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStat
     uassert(
         50933, str::stream() << "collection '" << nss.toString() << "' does not exist", collection);
 
-    const auto planCache = CollectionQueryInfo::get(collection.getCollection()).getPlanCache();
+    const auto& collQueryInfo = CollectionQueryInfo::get(collection.getCollection());
+    const auto planCache = collQueryInfo.getPlanCache();
     invariant(planCache);
 
-    return planCache->getMatchingStats(serializer, predicate);
+    auto planCacheEntries =
+        planCache->getMatchingStats({} /* cacheKeyFilterFunc */, serializer, predicate);
+
+    if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+        // Retrieve plan cache entries from the SBE plan cache.
+        const auto cacheKeyFilter = [uuid = collection->uuid(),
+                                     collVersion = collQueryInfo.getPlanCacheInvalidatorVersion()](
+                                        const sbe::PlanCacheKey& key) {
+            // Only fetch plan cache entries with keys matching given UUID and collectionVersion.
+            return uuid == key.getCollectionUuid() && collVersion == key.getCollectionVersion();
+        };
+
+        auto planCacheEntriesSBE =
+            sbe::getPlanCache(opCtx).getMatchingStats(cacheKeyFilter, serializer, predicate);
+
+        planCacheEntries.insert(
+            planCacheEntries.end(), planCacheEntriesSBE.begin(), planCacheEntriesSBE.end());
+    }
+
+    return planCacheEntries;
 }
 
 bool CommonMongodProcessInterface::fieldsHaveSupportingUniqueIndex(
@@ -659,7 +680,7 @@ void CommonMongodProcessInterface::writeRecordsToRecordStore(
     std::vector<Record>* records,
     const std::vector<Timestamp>& ts) const {
     tassert(5643012, "Attempted to write to record store with nullptr", records);
-    setIgnoreConflictsWriteBehavior(expCtx);
+    assertIgnorePrepareConflictsBehavior(expCtx);
     writeConflictRetry(expCtx->opCtx, "MPI::writeRecordsToRecordStore", expCtx->ns.ns(), [&] {
         AutoGetCollection autoColl(expCtx->opCtx, expCtx->ns, MODE_IX);
         WriteUnitOfWork wuow(expCtx->opCtx);
@@ -670,13 +691,12 @@ void CommonMongodProcessInterface::writeRecordsToRecordStore(
         wuow.commit();
     });
 }
+
 std::unique_ptr<TemporaryRecordStore> CommonMongodProcessInterface::createTemporaryRecordStore(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
-    expCtx->opCtx->recoveryUnit()->abandonSnapshot();
-    expCtx->opCtx->recoveryUnit()->setPrepareConflictBehavior(
-        PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const {
+    assertIgnorePrepareConflictsBehavior(expCtx);
     return expCtx->opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
-        expCtx->opCtx);
+        expCtx->opCtx, keyFormat);
 }
 
 Document CommonMongodProcessInterface::readRecordFromRecordStore(
@@ -690,7 +710,7 @@ Document CommonMongodProcessInterface::readRecordFromRecordStore(
 
 void CommonMongodProcessInterface::deleteRecordFromRecordStore(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, RecordStore* rs, RecordId rID) const {
-    setIgnoreConflictsWriteBehavior(expCtx);
+    assertIgnorePrepareConflictsBehavior(expCtx);
     writeConflictRetry(expCtx->opCtx, "MPI::deleteFromRecordStore", expCtx->ns.ns(), [&] {
         AutoGetCollection autoColl(expCtx->opCtx, expCtx->ns, MODE_IX);
         WriteUnitOfWork wuow(expCtx->opCtx);
@@ -701,7 +721,7 @@ void CommonMongodProcessInterface::deleteRecordFromRecordStore(
 
 void CommonMongodProcessInterface::truncateRecordStore(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, RecordStore* rs) const {
-    setIgnoreConflictsWriteBehavior(expCtx);
+    assertIgnorePrepareConflictsBehavior(expCtx);
     writeConflictRetry(expCtx->opCtx, "MPI::truncateRecordStore", expCtx->ns.ns(), [&] {
         AutoGetCollection autoColl(expCtx->opCtx, expCtx->ns, MODE_IX);
         WriteUnitOfWork wuow(expCtx->opCtx);
@@ -709,14 +729,6 @@ void CommonMongodProcessInterface::truncateRecordStore(
         tassert(5643000, "Unable to clear record store", status.isOK());
         wuow.commit();
     });
-}
-
-void CommonMongodProcessInterface::deleteTemporaryRecordStore(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    std::unique_ptr<TemporaryRecordStore> rs) const {
-    setIgnoreConflictsWriteBehavior(expCtx);
-    AutoGetCollection autoColl(expCtx->opCtx, expCtx->ns, MODE_IX);
-    rs->finalizeTemporaryTable(expCtx->opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
 }
 
 }  // namespace mongo

@@ -175,7 +175,6 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
         storageEngineChangeContext->changeStorageEngine(
             service, std::move(token), std::move(storageEngine));
     }
-    service->getStorageEngine()->finishInit();
 
     if (lockFile) {
         uassertStatusOK(lockFile->writePid());
@@ -380,10 +379,7 @@ public:
         opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(storageEngine->newRecoveryUnit()),
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     }
-    void onDestroyOperationContext(OperationContext* opCtx) {
-        StorageEngineChangeContext::get(opCtx->getServiceContext())
-            ->onDestroyOperationContext(opCtx);
-    }
+    void onDestroyOperationContext(OperationContext* opCtx) {}
 };
 
 ServiceContext::ConstructorActionRegisterer registerStorageClientObserverConstructor{

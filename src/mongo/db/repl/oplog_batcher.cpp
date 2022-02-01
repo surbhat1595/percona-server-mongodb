@@ -177,10 +177,10 @@ StatusWith<std::vector<OplogEntry>> OplogBatcher::getNextApplierBatch(
                                   << ", oplog entry: " << redact(entry.toBSONForLogging())};
         }
 
-        if (batchLimits.slaveDelayLatestTimestamp) {
+        if (batchLimits.secondaryDelaySecsLatestTimestamp) {
             auto entryTime =
                 Date_t::fromDurationSinceEpoch(Seconds(entry.getTimestamp().getSecs()));
-            if (entryTime > *batchLimits.slaveDelayLatestTimestamp) {
+            if (entryTime > *batchLimits.secondaryDelaySecsLatestTimestamp) {
                 if (ops.empty()) {
                     // Sleep if we've got nothing to do. Only sleep for 1 second at a time to allow
                     // reconfigs and shutdown to occur.
@@ -226,18 +226,18 @@ StatusWith<std::vector<OplogEntry>> OplogBatcher::getNextApplierBatch(
 }
 
 /**
- * If slaveDelay is enabled, this function calculates the most recent timestamp of any oplog
+ * If secondaryDelaySecs is enabled, this function calculates the most recent timestamp of any oplog
  * entries that can be be returned in a batch.
  */
-boost::optional<Date_t> OplogBatcher::_calculateSlaveDelayLatestTimestamp() {
+boost::optional<Date_t> OplogBatcher::_calculateSecondaryDelaySecsLatestTimestamp() {
     auto service = cc().getServiceContext();
     auto replCoord = ReplicationCoordinator::get(service);
-    auto slaveDelay = replCoord->getSecondaryDelaySecs();
-    if (slaveDelay <= Seconds(0)) {
+    auto secondaryDelaySecs = replCoord->getSecondaryDelaySecs();
+    if (secondaryDelaySecs <= Seconds(0)) {
         return {};
     }
     auto fastClockSource = service->getFastClockSource();
-    return fastClockSource->now() - slaveDelay;
+    return fastClockSource->now() - secondaryDelaySecs;
 }
 
 void OplogBatcher::_consume(OperationContext* opCtx, OplogBuffer* oplogBuffer) {
@@ -259,15 +259,22 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
     while (true) {
         globalFailPointRegistry().find("rsSyncApplyStop")->pauseWhileSet();
 
-        batchLimits.slaveDelayLatestTimestamp = _calculateSlaveDelayLatestTimestamp();
+        batchLimits.secondaryDelaySecsLatestTimestamp =
+            _calculateSecondaryDelaySecsLatestTimestamp();
 
         // Check the limits once per batch since users can change them at runtime.
         batchLimits.ops = getBatchLimitOplogEntries();
 
         // Use the OplogBuffer to populate a local OplogBatch. Note that the buffer may be empty.
         OplogBatch ops(batchLimits.ops);
-        {
+        try {
             auto opCtx = cc().makeOperationContext();
+
+            // During storage change operations, we may shut down storage under a global lock
+            // and wait for any storage-using opCtxs to exit.  This results in a deadlock with
+            // uninterruptible global locks, so we will take the global lock here to block the
+            // storage change.  The rest of the batch acquisition remains uninterruptible.
+            Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
 
             // This use of UninterruptibleLockGuard is intentional. It is undesirable to use an
             // UninterruptibleLockGuard in client operations because stepdown requires the
@@ -285,18 +292,24 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
             for (const auto& oplogEntry : oplogEntries) {
                 ops.emplace_back(oplogEntry);
             }
+        } catch (const ExceptionForCat<ErrorCategory::Interruption>& e) {
+            LOGV2_DEBUG(6133400,
+                        1,
+                        "Interrupted getting the global lock in Repl Batcher",
+                        "error"_attr = e.toStatus());
+            invariant(ops.empty());
+        }
 
-            // If we don't have anything in the batch, wait a bit for something to appear.
-            if (oplogEntries.empty()) {
-                if (_oplogApplier->inShutdown()) {
-                    ops.setMustShutdownFlag();
+        // If we don't have anything in the batch, wait a bit for something to appear.
+        if (ops.empty()) {
+            if (_oplogApplier->inShutdown()) {
+                ops.setMustShutdownFlag();
+            } else {
+                // Block up to 1 second. Skip waiting if the failpoint is enabled.
+                if (MONGO_unlikely(skipOplogBatcherWaitForData.shouldFail())) {
+                    // do no waiting.
                 } else {
-                    // Block up to 1 second. Skip waiting if the failpoint is enabled.
-                    if (MONGO_unlikely(skipOplogBatcherWaitForData.shouldFail())) {
-                        // do no waiting.
-                    } else {
-                        _oplogBuffer->waitForData(Seconds(1));
-                    }
+                    _oplogBuffer->waitForData(Seconds(1));
                 }
             }
         }

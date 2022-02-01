@@ -378,49 +378,34 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::genericAdd(value::Type
 }
 
 namespace {
-Array* reserveArrayCapacity(Value arrVal, size_t cap) {
-    auto arr = reinterpret_cast<Array*>(arrVal);
-    arr->reserve(cap);
-
-    return arr;
-}
-
 void setNonDecimalTotal(TypeTags nonDecimalTotalTag,
                         const DoubleDoubleSummation& nonDecimalTotal,
                         Array* arr) {
     auto [sum, addend] = nonDecimalTotal.getDoubleDouble();
-    arr->push_back(nonDecimalTotalTag, value::bitcastFrom<int32_t>(0.0));
-    arr->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(sum));
-    arr->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(addend));
+    arr->setAt(AggSumValueElems::kNonDecimalTotalTag,
+               nonDecimalTotalTag,
+               value::bitcastFrom<int32_t>(0.0));
+    arr->setAt(AggSumValueElems::kNonDecimalTotalSum,
+               TypeTags::NumberDouble,
+               value::bitcastFrom<double>(sum));
+    arr->setAt(AggSumValueElems::kNonDecimalTotalAddend,
+               TypeTags::NumberDouble,
+               value::bitcastFrom<double>(addend));
 }
 
-std::tuple<bool, value::TypeTags, value::Value> makeSumResultArray(
-    TypeTags nonDecimalTotalTag, const DoubleDoubleSummation& nonDecimalTotal) {
-    auto [retTag, retVal] = makeNewArray();
-    ValueGuard guard{retTag, retVal};
-    setNonDecimalTotal(nonDecimalTotalTag,
-                       nonDecimalTotal,
-                       reserveArrayCapacity(retVal, AggSumValueElems::kMaxSizeOfArray - 1));
-
-    guard.reset();
-    return {true, TypeTags::Array, retVal};
-}
-
-std::tuple<bool, value::TypeTags, value::Value> makeSumResultArray(
-    TypeTags nonDecimalTotalTag,
-    const DoubleDoubleSummation& nonDecimalTotal,
-    const Decimal128& decimalTotal) {
-    auto [retTag, retVal] = makeNewArray();
-    ValueGuard guard{retTag, retVal};
-    auto ret = reserveArrayCapacity(retVal, AggSumValueElems::kMaxSizeOfArray);
-    setNonDecimalTotal(nonDecimalTotalTag, nonDecimalTotal, ret);
+void setDecimalTotal(TypeTags nonDecimalTotalTag,
+                     const DoubleDoubleSummation& nonDecimalTotal,
+                     const Decimal128& decimalTotal,
+                     Array* arr) {
+    setNonDecimalTotal(nonDecimalTotalTag, nonDecimalTotal, arr);
     // We don't need to use 'ValueGuard' for decimal because we've already allocated enough storage
-    // with `reserveArrayCapacity` and Array::push_back() is guaranteed to not throw.
+    // and Array::push_back() is guaranteed to not throw.
     auto [tag, val] = makeCopyDecimal(decimalTotal);
-    ret->push_back(tag, val);
-
-    guard.reset();
-    return {true, TypeTags::Array, retVal};
+    if (arr->size() < AggSumValueElems::kMaxSizeOfArray) {
+        arr->push_back(tag, val);
+    } else {
+        arr->setAt(AggSumValueElems::kDecimalTotal, tag, val);
+    }
 }
 
 void addNonDecimal(TypeTags tag, Value val, DoubleDoubleSummation& nonDecimalTotal) {
@@ -438,17 +423,21 @@ void addNonDecimal(TypeTags tag, Value val, DoubleDoubleSummation& nonDecimalTot
             MONGO_UNREACHABLE_TASSERT(5755316);
     }
 }
+
+void setStdDevArray(value::Value count, value::Value mean, value::Value m2, Array* arr) {
+    arr->setAt(AggStdDevValueElems::kCount, value::TypeTags::NumberInt64, count);
+    arr->setAt(AggStdDevValueElems::kRunningMean, value::TypeTags::NumberDouble, mean);
+    arr->setAt(AggStdDevValueElems::kRunningM2, value::TypeTags::NumberDouble, m2);
+}
 }  // namespace
 
-std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggDoubleDoubleSumImpl(
-    value::TypeTags lhsTag, value::Value lhsValue, value::TypeTags rhsTag, value::Value rhsValue) {
+void ByteCode::aggDoubleDoubleSumImpl(value::Array* arr,
+                                      value::TypeTags rhsTag,
+                                      value::Value rhsValue) {
     if (!isNumber(rhsTag)) {
-        auto [tag, val] = value::copyValue(lhsTag, lhsValue);
-        return {true, tag, val};
+        return;
     }
 
-    tassert(5755317, "The result slot must be Array-typed", lhsTag == TypeTags::Array);
-    auto arr = getArrayView(lhsValue);
     tassert(5755310,
             str::stream() << "The result slot must have at least "
                           << AggSumValueElems::kMaxSizeOfArray - 1
@@ -481,11 +470,11 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggDoubleDoubleSumImpl
             tassert(
                 5755313, "The arg value must be NumberDecimal", rhsTag == TypeTags::NumberDecimal);
 
-            return makeSumResultArray(
-                nonDecimalTotalTag, nonDecimalTotal, value::bitcastTo<Decimal128>(rhsValue));
+            setDecimalTotal(
+                nonDecimalTotalTag, nonDecimalTotal, value::bitcastTo<Decimal128>(rhsValue), arr);
         } else {
             addNonDecimal(rhsTag, rhsValue, nonDecimalTotal);
-            return makeSumResultArray(totalTag, nonDecimalTotal);
+            setNonDecimalTotal(totalTag, nonDecimalTotal, arr);
         }
     } else {
         // We've seen a decimal value. We've already started storing the total sum of decimal values
@@ -509,8 +498,84 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggDoubleDoubleSumImpl
             addNonDecimal(rhsTag, rhsValue, nonDecimalTotal);
         }
 
-        return makeSumResultArray(nonDecimalTotalTag, nonDecimalTotal, decimalTotal);
+        setDecimalTotal(nonDecimalTotalTag, nonDecimalTotal, decimalTotal, arr);
     }
+}
+
+void ByteCode::aggStdDevImpl(value::Array* arr, value::TypeTags rhsTag, value::Value rhsValue) {
+    if (!isNumber(rhsTag)) {
+        return;
+    }
+
+    auto [countTag, countVal] = arr->getAt(AggStdDevValueElems::kCount);
+    tassert(5755201, "The count must be of type NumberInt64", countTag == TypeTags::NumberInt64);
+
+    auto [meanTag, meanVal] = arr->getAt(AggStdDevValueElems::kRunningMean);
+    auto [m2Tag, m2Val] = arr->getAt(AggStdDevValueElems::kRunningM2);
+    tassert(5755202,
+            "The mean and m2 must be of type Double",
+            m2Tag == meanTag && meanTag == TypeTags::NumberDouble);
+
+    double inputDouble = 0.0;
+    // Within our query execution engine, $stdDevPop and $stdDevSamp do not maintain the precision
+    // of decimal types and converts all values to double. We do this here by converting
+    // NumberDecimal to Decimal128 and then extract a double value from it.
+    if (rhsTag == value::TypeTags::NumberDecimal) {
+        auto decimal = value::bitcastTo<Decimal128>(rhsValue);
+        inputDouble = decimal.toDouble();
+    } else {
+        inputDouble = numericCast<double>(rhsTag, rhsValue);
+    }
+    auto curVal = value::bitcastFrom<double>(inputDouble);
+
+    auto count = value::bitcastTo<int64_t>(countVal);
+    tassert(5755211,
+            "The total number of elements must be less than INT64_MAX",
+            ++count < std::numeric_limits<int64_t>::max());
+    auto newCountVal = value::bitcastFrom<int64_t>(count);
+
+    auto [deltaOwned, deltaTag, deltaVal] =
+        genericSub(value::TypeTags::NumberDouble, curVal, value::TypeTags::NumberDouble, meanVal);
+    auto [deltaDivCountOwned, deltaDivCountTag, deltaDivCountVal] =
+        genericDiv(deltaTag, deltaVal, value::TypeTags::NumberInt64, newCountVal);
+    auto [newMeanOwned, newMeanTag, newMeanVal] =
+        genericAdd(meanTag, meanVal, deltaDivCountTag, deltaDivCountVal);
+    auto [newDeltaOwned, newDeltaTag, newDeltaVal] =
+        genericSub(value::TypeTags::NumberDouble, curVal, newMeanTag, newMeanVal);
+    auto [deltaMultNewDeltaOwned, deltaMultNewDeltaTag, deltaMultNewDeltaVal] =
+        genericMul(deltaTag, deltaVal, newDeltaTag, newDeltaVal);
+    auto [newM2Owned, newM2Tag, newM2Val] =
+        genericAdd(m2Tag, m2Val, deltaMultNewDeltaTag, deltaMultNewDeltaVal);
+
+    return setStdDevArray(newCountVal, newMeanVal, newM2Val, arr);
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggStdDevFinalizeImpl(
+    value::Value fieldValue, bool isSamp) {
+    auto arr = value::getArrayView(fieldValue);
+
+    auto [countTag, countVal] = arr->getAt(AggStdDevValueElems::kCount);
+    tassert(5755207, "The count must be a NumberInt64", countTag == value::TypeTags::NumberInt64);
+
+    auto count = value::bitcastTo<int64_t>(countVal);
+
+    if (count == 0) {
+        return {true, value::TypeTags::Null, 0};
+    }
+
+    if (isSamp && count == 1) {
+        return {true, value::TypeTags::Null, 0};
+    }
+
+    auto [m2Tag, m2] = arr->getAt(AggStdDevValueElems::kRunningM2);
+    tassert(5755208,
+            "The m2 value must be of type NumberDouble",
+            m2Tag == value::TypeTags::NumberDouble);
+    auto m2Double = value::bitcastTo<double>(m2);
+    auto variance = isSamp ? (m2Double / (count - 1)) : (m2Double / count);
+    auto stdDev = sqrt(variance);
+
+    return {true, value::TypeTags::NumberDouble, value::bitcastFrom<double>(stdDev)};
 }
 
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::genericSub(value::TypeTags lhsTag,

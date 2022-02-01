@@ -33,6 +33,8 @@
 
 #include "mongo/config.h"
 #include "mongo/logv2/log.h"
+#include "mongo/transport/asio_utils.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo::transport {
 
@@ -95,10 +97,11 @@ TransportLayerASIO::ASIOSession::ASIOSession(
       _tl(tl),
       _isIngressSession(isIngressSession) {
     auto family = endpointToSockAddr(_socket.local_endpoint()).getType();
+    auto sev = logv2::LogSeverity::Debug(3);
     if (family == AF_INET || family == AF_INET6) {
-        setSocketOption(_socket, asio::ip::tcp::no_delay(true), "session no delay");
-        setSocketOption(_socket, asio::socket_base::keep_alive(true), "session keep alive");
-        setSocketKeepAliveParams(_socket.native_handle());
+        setSocketOption(_socket, asio::ip::tcp::no_delay(true), "session no delay", sev);
+        setSocketOption(_socket, asio::socket_base::keep_alive(true), "session keep alive", sev);
+        setSocketKeepAliveParams(_socket.native_handle(), sev);
     }
 
     _localAddr = endpointToSockAddr(_socket.local_endpoint());
@@ -129,8 +132,8 @@ TransportLayerASIO::ASIOSession::ASIOSession(
 #endif
 } catch (const DBException&) {
     throw;
-} catch (const asio::system_error& error) {
-    uasserted(ErrorCodes::SocketException, error.what());
+} catch (const asio::system_error&) {
+    throw;
 } catch (...) {
     uasserted(50797, str::stream() << "Unknown exception while configuring socket.");
 }
@@ -245,17 +248,20 @@ bool TransportLayerASIO::ASIOSession::isConnected() {
 
     auto revents = swPollEvents.getValue();
     if (revents & POLLIN) {
-        char testByte;
-        int size = ::recv(getSocket().native_handle(), &testByte, sizeof(testByte), MSG_PEEK);
-        if (size == sizeof(testByte)) {
+        try {
+            char testByte;
+            const auto bytesRead =
+                peekASIOStream(getSocket(), asio::buffer(&testByte, sizeof(testByte)));
+            uassert(ErrorCodes::SocketException,
+                    "Couldn't peek from underlying socket",
+                    bytesRead == sizeof(testByte));
             return true;
-        } else if (size == -1) {
+        } catch (const DBException& e) {
             LOGV2_WARNING(4615610,
                           "Failed to check socket connectivity: {error}",
                           "Failed to check socket connectivity",
-                          "error"_attr = errnoWithDescription(errno));
+                          "error"_attr = e);
         }
-        // If size == 0 then we got disconnected and we should return false.
     }
 
     return false;
@@ -324,16 +330,20 @@ void TransportLayerASIO::ASIOSession::ensureSync() {
         // Change boost::none (which means no timeout) into a zero value for the socket option,
         // which also means no timeout.
         auto timeout = _configuredTimeout.value_or(Milliseconds{0});
-        setSocketOption(
-            getSocket(), ASIOSocketTimeoutOption<SO_SNDTIMEO>(timeout), ec, "session send timeout");
+        setSocketOption(getSocket(),
+                        ASIOSocketTimeoutOption<SO_SNDTIMEO>(timeout),
+                        "session send timeout",
+                        logv2::LogSeverity::Info(),
+                        ec);
         if (auto status = errorCodeToStatus(ec); !status.isOK()) {
             tasserted(5342000, status.reason());
         }
 
         setSocketOption(getSocket(),
                         ASIOSocketTimeoutOption<SO_RCVTIMEO>(timeout),
-                        ec,
-                        "session receive timeout");
+                        "session receive timeout",
+                        logv2::LogSeverity::Info(),
+                        ec);
         if (auto status = errorCodeToStatus(ec); !status.isOK()) {
             tasserted(5342001, status.reason());
         }
@@ -417,7 +427,7 @@ Future<Message> TransportLayerASIO::ASIOSession::sourceMessageImpl(const BatonHa
 template <typename MutableBufferSequence>
 Future<void> TransportLayerASIO::ASIOSession::read(const MutableBufferSequence& buffers,
                                                    const BatonHandle& baton) {
-    // TODO SERVER-47229 Guard active ops for cancellation here.
+    // TODO SERVER-61192 Guard active ops for cancellation here.
 #ifdef MONGO_CONFIG_SSL
     if (_sslSocket) {
         return opportunisticRead(*_sslSocket, buffers, baton);
@@ -444,7 +454,7 @@ Future<void> TransportLayerASIO::ASIOSession::read(const MutableBufferSequence& 
 template <typename ConstBufferSequence>
 Future<void> TransportLayerASIO::ASIOSession::write(const ConstBufferSequence& buffers,
                                                     const BatonHandle& baton) {
-    // TODO SERVER-47229 Guard active ops for cancellation here.
+    // TODO SERVER-61192 Guard active ops for cancellation here.
 #ifdef MONGO_CONFIG_SSL
     _ranHandshake = true;
     if (_sslSocket) {

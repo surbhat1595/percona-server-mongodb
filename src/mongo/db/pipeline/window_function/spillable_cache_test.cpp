@@ -43,12 +43,12 @@ namespace {
 class MongoProcessInterfaceForTest : public StubMongoProcessInterface {
 public:
     std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) const override {
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const override {
         expCtx->opCtx->recoveryUnit()->abandonSnapshot();
         expCtx->opCtx->recoveryUnit()->setPrepareConflictBehavior(
             PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
         return expCtx->opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
-            expCtx->opCtx);
+            expCtx->opCtx, keyFormat);
     }
 
     void writeRecordsToRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -93,12 +93,6 @@ public:
         auto status = rs->truncate(expCtx->opCtx);
         tassert(5643015, "Unable to clear record store", status.isOK());
         wuow.commit();
-    }
-    void deleteTemporaryRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    std::unique_ptr<TemporaryRecordStore> rs) const override {
-        AutoGetCollection autoColl(expCtx->opCtx, expCtx->ns, MODE_IX);
-        rs->finalizeTemporaryTable(expCtx->opCtx,
-                                   TemporaryRecordStore::FinalizationAction::kDelete);
     }
 };
 

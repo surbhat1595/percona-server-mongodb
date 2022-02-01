@@ -90,7 +90,7 @@ void TenantMigrationRecipientOpObserver::onUpdate(OperationContext* opCtx,
     if (args.nss == NamespaceString::kTenantMigrationRecipientsNamespace &&
         !tenant_migration_access_blocker::inRecoveryMode(opCtx)) {
         auto recipientStateDoc = TenantMigrationRecipientDocument::parse(
-            IDLParserErrorContext("recipientStateDoc"), args.updateArgs.updatedDoc);
+            IDLParserErrorContext("recipientStateDoc"), args.updateArgs->updatedDoc);
         opCtx->recoveryUnit()->onCommit([opCtx, recipientStateDoc](boost::optional<Timestamp>) {
             auto mtab = tenant_migration_access_blocker::getTenantMigrationRecipientAccessBlocker(
                 opCtx->getServiceContext(), recipientStateDoc.getTenantId());
@@ -151,7 +151,7 @@ void TenantMigrationRecipientOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void TenantMigrationRecipientOpObserver::onDelete(OperationContext* opCtx,
                                                   const NamespaceString& nss,
-                                                  OptionalCollectionUUID uuid,
+                                                  const UUID& uuid,
                                                   StmtId stmtId,
                                                   const OplogDeleteEntryArgs& args) {
     if (nss == NamespaceString::kTenantMigrationRecipientsNamespace &&
@@ -168,7 +168,7 @@ void TenantMigrationRecipientOpObserver::onDelete(OperationContext* opCtx,
 repl::OpTime TenantMigrationRecipientOpObserver::onDropCollection(
     OperationContext* opCtx,
     const NamespaceString& collectionName,
-    OptionalCollectionUUID uuid,
+    const UUID& uuid,
     std::uint64_t numRecords,
     const CollectionDropType dropType) {
     if (collectionName == NamespaceString::kTenantMigrationRecipientsNamespace) {

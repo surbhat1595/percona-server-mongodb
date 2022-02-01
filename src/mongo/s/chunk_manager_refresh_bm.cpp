@@ -46,7 +46,8 @@ const NamespaceString kNss("test", "foo");
 RoutingTableHistoryValueHandle makeStandaloneRoutingTableHistory(RoutingTableHistory rt) {
     const auto version = rt.getVersion();
     return RoutingTableHistoryValueHandle(
-        std::move(rt), ComparableChunkVersion::makeComparableChunkVersion(version));
+        std::make_shared<RoutingTableHistory>(std::move(rt)),
+        ComparableChunkVersion::makeComparableChunkVersion(version));
 }
 
 ChunkRange getRangeForChunk(int i, int nChunks) {
@@ -136,7 +137,7 @@ void BM_IncrementalRefreshOfPessimalBalancedDistribution(benchmark::State& state
     auto metadata = makeChunkManagerWithPessimalBalancedDistribution(nShards, nChunks);
 
     auto postMoveVersion = metadata.getChunkManager()->getVersion();
-    auto const uuid = *metadata.getUUID();
+    const UUID uuid = metadata.getUUID();
     std::vector<ChunkType> newChunks;
     postMoveVersion.incMajor();
     newChunks.emplace_back(uuid, getRangeForChunk(1, nChunks), postMoveVersion, ShardId("shard0"));

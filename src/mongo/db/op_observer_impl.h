@@ -97,7 +97,7 @@ public:
 
     void onInserts(OperationContext* opCtx,
                    const NamespaceString& nss,
-                   OptionalCollectionUUID uuid,
+                   const UUID& uuid,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    bool fromMigrate) final;
@@ -107,12 +107,12 @@ public:
                        const BSONObj& doc) final;
     void onDelete(OperationContext* opCtx,
                   const NamespaceString& nss,
-                  OptionalCollectionUUID uuid,
+                  const UUID& uuid,
                   StmtId stmtId,
                   const OplogDeleteEntryArgs& args) final;
     void onInternalOpMessage(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             boost::optional<UUID> uuid,
+                             OptionalCollectionUUID uuid,
                              const BSONObj& msgObj,
                              boost::optional<BSONObj> o2MsgObj,
                              boost::optional<repl::OpTime> preImageOpTime,
@@ -134,31 +134,31 @@ public:
     void onDropDatabase(OperationContext* opCtx, const std::string& dbName) final;
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
-                                  OptionalCollectionUUID uuid,
+                                  const UUID& uuid,
                                   std::uint64_t numRecords,
                                   CollectionDropType dropType) final;
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
-                                  OptionalCollectionUUID uuid,
+                                  const UUID& uuid,
                                   std::uint64_t numRecords,
                                   CollectionDropType dropType,
                                   bool markFromMigrate) final;
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,
-                     OptionalCollectionUUID uuid,
+                     const UUID& uuid,
                      const std::string& indexName,
                      const BSONObj& indexInfo) final;
     repl::OpTime preRenameCollection(OperationContext* opCtx,
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      OptionalCollectionUUID dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp) final;
     repl::OpTime preRenameCollection(OperationContext* opCtx,
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      OptionalCollectionUUID dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp,
@@ -166,20 +166,20 @@ public:
     void postRenameCollection(OperationContext* opCtx,
                               const NamespaceString& fromCollection,
                               const NamespaceString& toCollection,
-                              OptionalCollectionUUID uuid,
+                              const UUID& uuid,
                               OptionalCollectionUUID dropTargetUUID,
                               bool stayTemp) final;
     void onRenameCollection(OperationContext* opCtx,
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
-                            OptionalCollectionUUID uuid,
+                            const UUID& uuid,
                             OptionalCollectionUUID dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp) final;
     void onRenameCollection(OperationContext* opCtx,
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
-                            OptionalCollectionUUID uuid,
+                            const UUID& uuid,
                             OptionalCollectionUUID dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp,
@@ -197,7 +197,7 @@ public:
                     const BSONObj& applyOpCmd) final;
     void onEmptyCapped(OperationContext* opCtx,
                        const NamespaceString& collectionName,
-                       OptionalCollectionUUID uuid);
+                       const UUID& uuid) final;
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
                                        std::vector<repl::ReplOperation>* statements,
                                        size_t numberOfPreImagesToWrite) final;
@@ -212,7 +212,6 @@ public:
                               size_t numberOfPreImagesToWrite) final;
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) final;
-    void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
     void onMajorityCommitPointUpdate(ServiceContext* service,
                                      const repl::OpTime& newCommitPoint) final {}
 
@@ -254,6 +253,7 @@ private:
         OperationContext* opCtx,
         const std::vector<repl::ReplOperation>& stmts,
         const repl::OpTime& prepareOrCommitOptime) {}
+    void _onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
 };
 
 extern const OperationContext::Decoration<boost::optional<OpObserverImpl::DocumentKey>>

@@ -33,7 +33,10 @@
 #include "mongo/db/process_health/fault.h"
 #include "mongo/db/process_health/fault_facet.h"
 #include "mongo/db/process_health/fault_facet_container.h"
+#include "mongo/db/process_health/fault_manager_config.h"
+#include "mongo/db/process_health/health_monitoring_server_parameters_gen.h"
 #include "mongo/db/process_health/health_observer.h"
+#include "mongo/db/process_health/progress_monitor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/atomic_word.h"
@@ -43,44 +46,29 @@ namespace mongo {
 namespace process_health {
 
 /**
- * Current fault state of the server in a simple actionable form.
- */
-enum class FaultState {
-    kOk = 0,
-
-    // The manager conducts startup checks, new connections should be refused.
-    kStartupCheck,
-
-    // The manager detected a fault, however the fault is either not severe
-    // enough or is not observed for sufficiently long period of time.
-    kTransientFault,
-
-    // The manager detected a severe fault, which made the server unusable.
-    kActiveFault
-};
-
-StringBuilder& operator<<(StringBuilder& s, const FaultState& state);
-
-std::ostream& operator<<(std::ostream& os, const FaultState& state);
-
-/**
  * FaultManager is a singleton constantly monitoring the health of the
  * system.
  *
- * It supports pluggable 'facets', which are responsible to check various
+ * It supports pluggable 'HealthObservers', which are responsible to check various
  * aspects of the server health. The aggregate outcome of all periodic checks
- * is accesible as FaultState, which should be used to gate access to the server.
+ * is accesible as FaultState.
  *
- * If an active fault state persists, FaultManager puts the server into quiesce
- * mode and shuts it down.
+ * If an active fault state persists, FaultManager will terminate the server process.
  */
 class FaultManager : protected FaultFacetsContainerFactory {
     FaultManager(const FaultManager&) = delete;
     FaultManager& operator=(const FaultManager&) = delete;
 
 public:
-    explicit FaultManager(ServiceContext* svcCtx,
-                          std::shared_ptr<executor::TaskExecutor> taskExecutor);
+    // The taskExecutor provided should not be already started.
+    FaultManager(ServiceContext* svcCtx,
+                 std::shared_ptr<executor::TaskExecutor> taskExecutor,
+                 std::unique_ptr<FaultManagerConfig> config);
+    // Variant with explicit crash callback for tests.
+    FaultManager(ServiceContext* svcCtx,
+                 std::shared_ptr<executor::TaskExecutor> taskExecutor,
+                 std::unique_ptr<FaultManagerConfig> config,
+                 std::function<void(std::string cause)> crashCb);
     virtual ~FaultManager();
 
     // Start periodic health checks, invoke it once during server startup.
@@ -102,61 +90,100 @@ public:
     // Returns the current fault, if any. Otherwise returns an empty pointer.
     FaultConstPtr currentFault() const;
 
+    // All observers remain valid for the manager lifetime, thus returning
+    // just pointers is safe, as long as they are used while manager exists.
+    std::vector<HealthObserver*> getHealthObservers();
+
+    // Gets the aggregate configuration for all process health environment.
+    FaultManagerConfig getConfig() const;
+
+    // Gets the timestamp of the last transition
+    Date_t getLastTransitionTime() const;
+
 protected:
     // Starts the health check sequence and updates the internal state on completion.
     // This is invoked by the internal timer.
     virtual void healthCheck();
 
-    // All observers remain valid for the manager lifetime, thus returning
-    // just pointers is safe, as long as they are used while manager exists.
-    std::vector<HealthObserver*> getHealthObservers();
-
     // Protected interface FaultFacetsContainerFactory implementation.
 
     // The interface FaultFacetsContainerFactory is implemented by the member '_fault'.
-    FaultFacetsContainerPtr getFaultFacetsContainer() override;
+    FaultFacetsContainerPtr getFaultFacetsContainer() const override;
 
     FaultFacetsContainerPtr getOrCreateFaultFacetsContainer() override;
+
+    void updateWithCheckStatus(HealthCheckStatus&& checkStatus) override;
 
     // State machine related.
 
     void checkForStateTransition();  // Invoked by periodic thread.
 
     // Methods that represent particular events that trigger state transition.
-    Status processFaultExistsEvent();
-    Status processFaultIsResolvedEvent();
+    void processFaultExistsEvent();
+    void processFaultIsResolvedEvent();
 
     // Makes a valid state transition or returns an error.
     // State transition should be triggered by events above.
-    Status transitionToState(FaultState newState);
+    void transitionToState(FaultState newState);
 
     void schedulePeriodicHealthCheckThread(bool immediately = false);
 
+    // TODO: move this into fault class; refactor to remove FaultInternal
+    bool hasCriticalFacet(const FaultInternal* fault) const;
+
+    void progressMonitorCheckForTests(std::function<void(std::string cause)> crashCb);
+
 private:
-    // State machine related.
-    Status _transitionToKOk();
-    Status _transitionToKTransientFault();
-    Status _transitionToKActiveFault();
-
     // One time init.
-    void _initHealthObserversIfNeeded();
+    void _firstTimeInitIfNeeded();
 
+    std::unique_ptr<FaultManagerConfig> _config;
     ServiceContext* const _svcCtx;
+    std::shared_ptr<executor::TaskExecutor> _taskExecutor;
+    // Callback used to crash the server.
+    std::function<void(std::string cause)> _crashCb;
 
     mutable Mutex _mutex =
-        MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(1), "FaultManager::_mutex");
+        MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(5), "FaultManager::_mutex");
+
     std::shared_ptr<FaultInternal> _fault;
     // We lazily init all health observers.
-    AtomicWord<bool> _initializedAllHealthObservers{false};
+    AtomicWord<bool> _firstTimeInitExecuted{false};
+    // This source is canceled before the _taskExecutor shutdown(). It
+    // can be used to check for the start of the shutdown sequence.
+    CancellationSource _managerShuttingDownCancellationSource;
     // Manager owns all observer instances.
     std::vector<std::unique_ptr<HealthObserver>> _observers;
-    std::shared_ptr<executor::TaskExecutor> _taskExecutor;
     boost::optional<executor::TaskExecutor::CallbackHandle> _periodicHealthCheckCbHandle;
+    SharedPromise<void> _initialHealthCheckCompletedPromise;
 
-    // Protects the current state of fault manager.
+    // Protects the state below.
     mutable Mutex _stateMutex =
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "FaultManager::_stateMutex");
     FaultState _currentState = FaultState::kStartupCheck;
+
+    Date_t _lastTransitionTime;
+
+    // Responsible for transitioning the state of FaultManager to ActiveFault after a
+    // timeout while in the TransientFault state. The timer is canceled when the instance is
+    // destroyed.
+    struct TransientFaultDeadline {
+        TransientFaultDeadline() = delete;
+        TransientFaultDeadline(FaultManager* faultManager,
+                               std::shared_ptr<executor::TaskExecutor> executor,
+                               Milliseconds timeout);
+        virtual ~TransientFaultDeadline();
+
+    protected:
+        // Cancel timer for transitioning to ActiveFault
+        CancellationSource cancelActiveFaultTransition;
+
+        // Fufilled when we should transition to ActiveFault
+        ExecutorFuture<void> activeFaultTransition;
+    };
+    std::unique_ptr<TransientFaultDeadline> _transientFaultDeadline;
+
+    std::unique_ptr<ProgressMonitor> _progressMonitor;
 };
 
 }  // namespace process_health

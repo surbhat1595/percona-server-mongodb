@@ -27,50 +27,105 @@
  *    it in the license file.
  */
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kProcessHealth
+
 #include "mongo/db/process_health/health_observer_base.h"
 
 #include "mongo/db/service_context.h"
+#include "mongo/logv2/log.h"
 
 namespace mongo {
 namespace process_health {
 
-HealthObserverBase::HealthObserverBase(ClockSource* clockSource) : _clockSource(clockSource) {}
+HealthObserverBase::HealthObserverBase(ServiceContext* svcCtx) : _svcCtx(svcCtx) {}
 
-void HealthObserverBase::periodicCheck(FaultFacetsContainerFactory& factory) {
-    if (getIntensity() == HealthObserverIntensity::kOff) {
-        return;
-    }
+void HealthObserverBase::periodicCheck(FaultFacetsContainerFactory& factory,
+                                       std::shared_ptr<executor::TaskExecutor> taskExecutor,
+                                       CancellationToken token) {
+    // If we have reached here, the intensity of this health observer must not be off
+    {
+        auto lk = stdx::lock_guard(_mutex);
+        if (_currentlyRunningHealthCheck) {
+            return;
+        }
 
-    // Before invoking the implementation callback, we need to find out if
-    // there is an ongoing fault of this kind.
-    FaultFacetPtr optionalExistingFacet;
-    auto optionalExistingContainer = factory.getFaultFacetsContainer();
+        const auto now = _svcCtx->getPreciseClockSource()->now();
+        if (now - _lastTimeTheCheckWasRun < minimalCheckInterval()) {
+            LOGV2_DEBUG(6136802,
+                        3,
+                        "Safety interval prevented new health check",
+                        "observerType"_attr = getType());
+            return;
+        }
+        _lastTimeTheCheckWasRun = now;
 
-    if (optionalExistingContainer) {
-        optionalExistingFacet = optionalExistingContainer->getFaultFacet(getType());
+        LOGV2_DEBUG(6007902, 2, "Start periodic health check", "observerType"_attr = getType());
+
+        _currentlyRunningHealthCheck = true;
     }
 
     // Do the health check.
-    optionalExistingFacet = periodicCheckImpl(optionalExistingFacet);
+    taskExecutor->schedule([this, &factory, token, taskExecutor](Status status) {
+        periodicCheckImpl({token, taskExecutor})
+            .then([this, &factory](HealthCheckStatus&& checkStatus) mutable {
+                const auto severity = checkStatus.getSeverity();
+                factory.updateWithCheckStatus(std::move(checkStatus));
 
-    // Send the result back to container.
-    optionalExistingContainer = factory.getFaultFacetsContainer();
-
-    if (!optionalExistingContainer && !optionalExistingFacet) {
-        return;  // Nothing to do.
-    }
-
-    if (!optionalExistingContainer) {
-        // Need to create container first.
-        optionalExistingContainer = factory.getOrCreateFaultFacetsContainer();
-    }
-    invariant(optionalExistingContainer);
-
-    optionalExistingContainer->updateWithSuppliedFacet(getType(), optionalExistingFacet);
+                auto lk = stdx::lock_guard(_mutex);
+                ++_completedChecksCount;
+                if (!HealthCheckStatus::isResolved(severity)) {
+                    ++_completedChecksWithFaultCount;
+                }
+            })
+            .onCompletion([this](Status status) {
+                if (!status.isOK()) {
+                    // Health checkers should not throw, they should return FaultFacetPtr.
+                    LOGV2_ERROR(
+                        6007901, "Unexpected failure during health check", "status"_attr = status);
+                }
+                const auto now = _svcCtx->getPreciseClockSource()->now();
+                auto lk = stdx::lock_guard(_mutex);
+                invariant(_currentlyRunningHealthCheck);
+                _currentlyRunningHealthCheck = false;
+                _lastTimeCheckCompleted = now;
+            })
+            .getAsync([this](Status status) {});
+    });
 }
 
-HealthObserverIntensity HealthObserverBase::getIntensity() {
-    return _intensity;
+HealthCheckStatus HealthObserverBase::makeHealthyStatus() const {
+    return HealthCheckStatus(getType());
+}
+
+HealthCheckStatus HealthObserverBase::makeSimpleFailedStatus(double severity,
+                                                             std::vector<Status>&& failures) const {
+    if (severity <= 0) {
+        LOGV2_WARNING(6007903,
+                      "Creating faulty health check status requires positive severity",
+                      "observerType"_attr = getType());
+    }
+    StringBuilder sb;
+    for (const auto& s : failures) {
+        sb.append(s.toString());
+        sb.append(" ");
+    }
+
+    return HealthCheckStatus(getType(), severity, sb.stringData());
+}
+
+HealthObserverLivenessStats HealthObserverBase::getStats() const {
+    auto lk = stdx::lock_guard(_mutex);
+    return getStatsLocked(lk);
+}
+
+HealthObserverLivenessStats HealthObserverBase::getStatsLocked(WithLock) const {
+    HealthObserverLivenessStats stats;
+    stats.currentlyRunningHealthCheck = _currentlyRunningHealthCheck;
+    stats.lastTimeCheckStarted = _lastTimeTheCheckWasRun;
+    stats.lastTimeCheckCompleted = _lastTimeCheckCompleted;
+    stats.completedChecksCount = _completedChecksCount;
+    stats.completedChecksWithFaultCount = _completedChecksWithFaultCount;
+    return stats;
 }
 
 }  // namespace process_health

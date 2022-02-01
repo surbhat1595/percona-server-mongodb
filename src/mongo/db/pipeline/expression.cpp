@@ -48,6 +48,7 @@
 #include "mongo/db/pipeline/variable_validation.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/platform/bits.h"
 #include "mongo/platform/decimal128.h"
@@ -55,6 +56,7 @@
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/summation.h"
+
 
 namespace mongo {
 using Parser = Expression::Parser;
@@ -181,7 +183,7 @@ void Expression::registerExpression(
     parserMap[key] =
         ParserRegistration{parser, allowedWithApiStrict, allowedWithClientType, requiredMinVersion};
     // Add this expression to the global map of operator counters for expressions.
-    operatorCountersExpressions.addExpressionCounter(key);
+    operatorCountersAggExpressions.addAggExpressionCounter(key);
 }
 
 intrusive_ptr<Expression> Expression::parseExpression(ExpressionContext* const expCtx,
@@ -215,15 +217,12 @@ intrusive_ptr<Expression> Expression::parseExpression(ExpressionContext* const e
                 (*entry.requiredMinVersion <= *expCtx->maxFeatureCompatibilityVersion));
 
     if (expCtx->opCtx) {
-        // Only confirm API versioning if in a user operation, and not parsing a collection
-        // validator. Instead we perform checks for validators at time of access in subsequent
-        // insert/update.
         assertLanguageFeatureIsAllowed(
             expCtx->opCtx, opName, entry.allowedWithApiStrict, entry.allowedWithClientType);
     }
 
-    // Increment the global counter for this expression.
-    operatorCountersExpressions.incrementExpressionCounter(opName);
+    // Increment the counter for this expression in the current context.
+    expCtx->incrementAggExprCounter(opName);
     return entry.parser(expCtx, obj.firstElement(), vps);
 }
 
@@ -1042,6 +1041,19 @@ boost::intrusive_ptr<Expression> ExpressionCond::optimize() {
     }
 
     return this;
+}
+
+boost::intrusive_ptr<Expression> ExpressionCond::create(ExpressionContext* const expCtx,
+                                                        boost::intrusive_ptr<Expression> ifExp,
+                                                        boost::intrusive_ptr<Expression> elseExpr,
+                                                        boost::intrusive_ptr<Expression> thenExpr) {
+    intrusive_ptr<ExpressionCond> ret = new ExpressionCond(expCtx);
+    ret->_children.resize(3);
+
+    ret->_children[0] = ifExp;
+    ret->_children[1] = elseExpr;
+    ret->_children[2] = thenExpr;
+    return ret;
 }
 
 intrusive_ptr<Expression> ExpressionCond::parse(ExpressionContext* const expCtx,
@@ -2524,6 +2536,9 @@ intrusive_ptr<Expression> ExpressionFilter::parse(ExpressionContext* const expCt
     BSONElement inputElem;
     BSONElement asElem;
     BSONElement condElem;
+    BSONElement limitElem;
+
+
     for (auto elem : expr.Obj()) {
         if (elem.fieldNameStringData() == "input") {
             inputElem = elem;
@@ -2531,6 +2546,12 @@ intrusive_ptr<Expression> ExpressionFilter::parse(ExpressionContext* const expCt
             asElem = elem;
         } else if (elem.fieldNameStringData() == "cond") {
             condElem = elem;
+        } else if (elem.fieldNameStringData() == "limit") {
+            assertLanguageFeatureIsAllowed(expCtx->opCtx,
+                                           "limit argument of $filter operator",
+                                           AllowedWithApiStrict::kNeverInVersion1,
+                                           AllowedWithClientType::kAny);
+            limitElem = elem;
         } else {
             uasserted(28647,
                       str::stream() << "Unrecognized parameter to $filter: " << elem.fieldName());
@@ -2543,17 +2564,21 @@ intrusive_ptr<Expression> ExpressionFilter::parse(ExpressionContext* const expCt
     // Parse "input", only has outer variables.
     intrusive_ptr<Expression> input = parseOperand(expCtx, inputElem, vpsIn);
 
-    // Parse "as".
     VariablesParseState vpsSub(vpsIn);  // vpsSub gets our variable, vpsIn doesn't.
-
-    // If "as" is not specified, then use "this" by default.
-    auto varName = asElem.eoo() ? "this" : asElem.str();
+    // Parse "as". If "as" is not specified, then use "this" by default.
+    auto const varName = asElem.eoo() ? "this" : asElem.str();
 
     variableValidation::validateNameForUserWrite(varName);
     Variables::Id varId = vpsSub.defineVariable(varName);
 
     // Parse "cond", has access to "as" variable.
     intrusive_ptr<Expression> cond = parseOperand(expCtx, condElem, vpsSub);
+
+    if (limitElem) {
+        intrusive_ptr<Expression> limit = parseOperand(expCtx, limitElem, vpsIn);
+        return new ExpressionFilter(
+            expCtx, std::move(varName), varId, std::move(input), std::move(cond), std::move(limit));
+    }
 
     return new ExpressionFilter(
         expCtx, std::move(varName), varId, std::move(input), std::move(cond));
@@ -2563,28 +2588,43 @@ ExpressionFilter::ExpressionFilter(ExpressionContext* const expCtx,
                                    string varName,
                                    Variables::Id varId,
                                    intrusive_ptr<Expression> input,
-                                   intrusive_ptr<Expression> filter)
-    : Expression(expCtx, {std::move(input), std::move(filter)}),
+                                   intrusive_ptr<Expression> cond,
+                                   intrusive_ptr<Expression> limit)
+    : Expression(expCtx,
+                 limit ? makeVector(std::move(input), std::move(cond), std::move(limit))
+                       : makeVector(std::move(input), std::move(cond))),
       _varName(std::move(varName)),
       _varId(varId),
       _input(_children[0]),
-      _filter(_children[1]) {}
+      _cond(_children[1]),
+      _limit(_children.size() == 3
+                 ? _children[2]
+                 : boost::optional<boost::intrusive_ptr<Expression>&>(boost::none)) {}
 
 intrusive_ptr<Expression> ExpressionFilter::optimize() {
     // TODO handle when _input is constant.
     _input = _input->optimize();
-    _filter = _filter->optimize();
+    _cond = _cond->optimize();
+    if (_limit)
+        *_limit = (*_limit)->optimize();
+
     return this;
 }
 
 Value ExpressionFilter::serialize(bool explain) const {
+    if (_limit) {
+        return Value(DOC("$filter" << DOC("input" << _input->serialize(explain) << "as" << _varName
+                                                  << "cond" << _cond->serialize(explain) << "limit"
+                                                  << (*_limit)->serialize(explain))));
+    }
     return Value(DOC("$filter" << DOC("input" << _input->serialize(explain) << "as" << _varName
-                                              << "cond" << _filter->serialize(explain))));
+                                              << "cond" << _cond->serialize(explain))));
 }
 
 Value ExpressionFilter::evaluate(const Document& root, Variables* variables) const {
     // We are guaranteed at parse time that this isn't using our _varId.
     const Value inputVal = _input->evaluate(root, variables);
+
     if (inputVal.nullish())
         return Value(BSONNULL);
 
@@ -2598,12 +2638,44 @@ Value ExpressionFilter::evaluate(const Document& root, Variables* variables) con
     if (input.empty())
         return inputVal;
 
+
+    // This counter ensures we don't return more array elements than our limit arg has specified.
+    // For example, given the query, {$project: {b: {$filter: {input: '$a', as: 'x', cond: {$gt:
+    // ['$$x', 1]}, limit: {$literal: 3}}}}} remainingLimitCounter would be 3 and we would return up
+    // to the first 3 elements matching our condition, per doc.
+    auto approximateOutputSize = input.size();
+    boost::optional<int> remainingLimitCounter;
+    if (_limit) {
+        auto limitValue = (*_limit)->evaluate(root, variables);
+        // If the $filter query contains limit: null, we interpret the query as being "limit-less"
+        // and therefore return all matching elements per doc.
+        if (!limitValue.nullish()) {
+            uassert(
+                327391,
+                str::stream() << "$filter: limit must be represented as a 32-bit integral value: "
+                              << limitValue.toString(),
+                limitValue.integral());
+            int coercedLimitValue = limitValue.coerceToInt();
+            uassert(327392,
+                    str::stream() << "$filter: limit must be greater than 0: "
+                                  << limitValue.toString(),
+                    coercedLimitValue > 0);
+            remainingLimitCounter = coercedLimitValue;
+            approximateOutputSize =
+                std::min(approximateOutputSize, static_cast<size_t>(coercedLimitValue));
+        }
+    }
+
     vector<Value> output;
+    output.reserve(approximateOutputSize);
     for (const auto& elem : input) {
         variables->setValue(_varId, elem);
 
-        if (_filter->evaluate(root, variables).coerceToBool()) {
+        if (_cond->evaluate(root, variables).coerceToBool()) {
             output.push_back(std::move(elem));
+            if (remainingLimitCounter && --*remainingLimitCounter == 0) {
+                return Value(std::move(output));
+            }
         }
     }
 
@@ -2612,7 +2684,10 @@ Value ExpressionFilter::evaluate(const Document& root, Variables* variables) con
 
 void ExpressionFilter::_doAddDependencies(DepsTracker* deps) const {
     _input->addDependencies(deps);
-    _filter->addDependencies(deps);
+    _cond->addDependencies(deps);
+    if (_limit) {
+        (*_limit)->addDependencies(deps);
+    }
 }
 
 /* ------------------------- ExpressionFloor -------------------------- */
@@ -3123,11 +3198,15 @@ public:
         } else {
             doubleProduct *= val.coerceToDouble();
 
-            if (!std::isfinite(val.coerceToDouble()) ||
-                overflow::mul(longProduct, val.coerceToLong(), &longProduct)) {
-                // The number is either Infinity or NaN, or the 'longProduct' would have
-                // overflowed, so we're abandoning it.
-                productType = NumberDouble;
+            if (productType != NumberDouble) {
+                // If `productType` is not a double, it must be one of the integer types, so we
+                // attempt to update `longProduct`.
+                if (!std::isfinite(val.coerceToDouble()) ||
+                    overflow::mul(longProduct, val.coerceToLong(), &longProduct)) {
+                    // The multiplier is either Infinity or NaN, or the `longProduct` would
+                    // have overflowed, so we're abandoning it.
+                    productType = NumberDouble;
+                }
             }
         }
     }
@@ -4145,10 +4224,23 @@ Value ExpressionRange::evaluate(const Document& root, Variables* variables) cons
         uassert(34449, "$range requires a non-zero step value", step != 0);
     }
 
+    // Calculate how much memory is needed to generate the array and avoid going over the memLimit.
+    auto steps = (end - current) / step;
+    // If steps not positive then no amount of steps can get you from start to end. For example
+    // with start=5, end=7, step=-1 steps would be negative and in this case we would return an
+    // empty array.
+    auto length = steps >= 0 ? 1 + steps : 0;
+    int64_t memNeeded = sizeof(std::vector<Value>) + length * startVal.getApproximateSize();
+    auto memLimit = internalQueryMaxRangeBytes.load();
+    uassert(ErrorCodes::ExceededMemoryLimit,
+            str::stream() << "$range would use too much memory (" << memNeeded << " bytes) "
+                          << "and cannot spill to disk. Memory limit: " << memLimit << " bytes",
+            memNeeded < memLimit);
+
     std::vector<Value> output;
 
     while ((step > 0 ? current < end : current > end)) {
-        output.push_back(Value(static_cast<int>(current)));
+        output.emplace_back(static_cast<int>(current));
         current += step;
     }
 
@@ -6031,6 +6123,14 @@ public:
         };
 
         //
+        // Conversions from bsonTimestamp
+        //
+        table[BSONType::bsonTimestamp][BSONType::Date] = [](ExpressionContext* const expCtx,
+                                                            Value inputValue) {
+            return Value(inputValue.coerceToDate());
+        };
+
+        //
         // Conversions from NumberInt
         //
         table[BSONType::NumberInt][BSONType::NumberDouble] = [](ExpressionContext* const expCtx,
@@ -7214,6 +7314,10 @@ Value ExpressionDateSubtract::evaluateDateArithmetics(Date_t date,
                                                       TimeUnit unit,
                                                       long long amount,
                                                       const TimeZone& timezone) const {
+    // Long long min value cannot be negated.
+    uassert(6045000,
+            str::stream() << "invalid $dateSubtract 'amount' parameter value: " << amount,
+            amount != std::numeric_limits<long long>::min());
     return Value(dateAdd(date, unit, -amount, timezone));
 }
 

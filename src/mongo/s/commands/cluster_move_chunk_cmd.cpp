@@ -183,13 +183,14 @@ public:
             uassertStatusOK(MigrationSecondaryThrottleOptions::createFromCommand(cmdObj));
 
         ChunkType chunkType;
-        chunkType.setCollectionUUID(*cm.getUUID());
+        chunkType.setCollectionUUID(cm.getUUID());
         chunkType.setMin(chunk->getMin());
         chunkType.setMax(chunk->getMax());
         chunkType.setShard(chunk->getShardId());
         chunkType.setVersion(cm.getVersion());
 
         uassertStatusOK(configsvr_client::moveChunk(opCtx,
+                                                    nss,
                                                     chunkType,
                                                     to->getId(),
                                                     maxChunkSizeBytes,

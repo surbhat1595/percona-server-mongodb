@@ -120,6 +120,7 @@ AbstractIndexAccessMethod::AbstractIndexAccessMethod(const IndexCatalogEntry* bt
 
 // Find the keys for obj, put them in the tree pointing to loc.
 Status AbstractIndexAccessMethod::insert(OperationContext* opCtx,
+                                         SharedBufferFragmentBuilder& pooledBufferBuilder,
                                          const CollectionPtr& coll,
                                          const BSONObj& obj,
                                          const RecordId& loc,
@@ -136,7 +137,7 @@ Status AbstractIndexAccessMethod::insert(OperationContext* opCtx,
 
     getKeys(opCtx,
             coll,
-            executionCtx.pooledBufferBuilder(),
+            pooledBufferBuilder,
             obj,
             options.getKeysMode,
             GetKeysContext::kAddingKeys,
@@ -196,10 +197,20 @@ Status AbstractIndexAccessMethod::insertKeys(OperationContext* opCtx,
     if (numInserted) {
         *numInserted = 0;
     }
+    bool unique = _descriptor->unique();
+    // Oplog application should avoid checking for duplicates on unique indexes except when:
+    // 1. Building an index. We have to use the duplicate key error to record possible conflicts.
+    // 2. Inserting into the '_id' index. We never allow duplicates in the '_id' index.
+    //
+    // Additionally, unique indexes conflict checking can cause out-of-order updates in wiredtiger.
+    // See SERVER-59831.
+    bool dupsAllowed = !_descriptor->isIdIndex() && !opCtx->isEnforcingConstraints() &&
+            coll->isIndexReady(_descriptor->indexName())
+        ? true
+        : !unique;
     // Add all new keys into the index. The RecordId for each is already encoded in the KeyString.
     for (const auto& keyString : keys) {
-        bool unique = _descriptor->unique();
-        Status status = _newInterface->insert(opCtx, keyString, !unique /* dupsAllowed */);
+        Status status = _newInterface->insert(opCtx, keyString, dupsAllowed);
 
         // When duplicates are encountered and allowed, retry with dupsAllowed. Call
         // onDuplicateKey() with the inserted duplicate key.
@@ -276,6 +287,8 @@ RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
     KeyString::Value actualKey = [&]() {
         if (_indexCatalogEntry->getCollator()) {
             // For performance, call get keys only if there is a non-simple collation.
+            SharedBufferFragmentBuilder pooledBuilder(
+                KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
             auto& executionCtx = StorageExecutionContext::get(opCtx);
             auto keys = executionCtx.keys();
             KeyStringSet* multikeyMetadataKeys = nullptr;
@@ -283,7 +296,7 @@ RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
 
             getKeys(opCtx,
                     collection,
-                    executionCtx.pooledBufferBuilder(),
+                    pooledBuilder,
                     requestedKey,
                     GetKeysMode::kEnforceConstraints,
                     GetKeysContext::kAddingKeys,
@@ -391,7 +404,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
                                               const RecordId& record,
                                               const InsertDeleteOptions& options,
                                               UpdateTicket* ticket) const {
-    auto& executionCtx = StorageExecutionContext::get(opCtx);
+    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
     const MatchExpression* indexFilter = index->getFilterExpression();
     if (!indexFilter || indexFilter->matchesBSON(from)) {
         // Override key constraints when generating keys for removal. This only applies to keys
@@ -405,7 +418,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
         // metadata isn't updated when keys are deleted.
         getKeys(opCtx,
                 collection,
-                executionCtx.pooledBufferBuilder(),
+                pooledBuilder,
                 from,
                 getKeysMode,
                 GetKeysContext::kRemovingKeys,
@@ -419,7 +432,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
     if (!indexFilter || indexFilter->matchesBSON(to)) {
         getKeys(opCtx,
                 collection,
-                executionCtx.pooledBufferBuilder(),
+                pooledBuilder,
                 to,
                 options.getKeysMode,
                 GetKeysContext::kAddingKeys,
@@ -499,6 +512,7 @@ public:
 
     Status insert(OperationContext* opCtx,
                   const CollectionPtr& collection,
+                  SharedBufferFragmentBuilder& pooledBuilder,
                   const BSONObj& obj,
                   const RecordId& loc,
                   const InsertDeleteOptions& options,
@@ -576,6 +590,7 @@ AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEn
 Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(
     OperationContext* opCtx,
     const CollectionPtr& collection,
+    SharedBufferFragmentBuilder& pooledBuilder,
     const BSONObj& obj,
     const RecordId& loc,
     const InsertDeleteOptions& options,
@@ -590,7 +605,7 @@ Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(
         _indexCatalogEntry->accessMethod()->getKeys(
             opCtx,
             collection,
-            executionCtx.pooledBufferBuilder(),
+            pooledBuilder,
             obj,
             options.getKeysMode,
             GetKeysContext::kAddingKeys,
@@ -795,7 +810,9 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
         // builds since this check can be expensive.
         int cmpData;
         if (_descriptor->unique()) {
-            cmpData = data.first.compareWithoutRecordIdLong(previousKey);
+            cmpData = (_newInterface->rsKeyFormat() == KeyFormat::Long)
+                ? data.first.compareWithoutRecordIdLong(previousKey)
+                : data.first.compareWithoutRecordIdStr(previousKey);
         }
 
         if (kDebugBuild && data.first.compare(previousKey) < 0) {
@@ -973,7 +990,9 @@ std::string nextFileName() {
 Status AbstractIndexAccessMethod::_handleDuplicateKey(OperationContext* opCtx,
                                                       const KeyString::Value& dataKey,
                                                       const RecordIdHandlerFn& onDuplicateRecord) {
-    RecordId recordId = KeyString::decodeRecordIdLongAtEnd(dataKey.getBuffer(), dataKey.getSize());
+    RecordId recordId = (KeyFormat::Long == _newInterface->rsKeyFormat())
+        ? KeyString::decodeRecordIdLongAtEnd(dataKey.getBuffer(), dataKey.getSize())
+        : KeyString::decodeRecordIdStrAtEnd(dataKey.getBuffer(), dataKey.getSize());
     if (onDuplicateRecord) {
         return onDuplicateRecord(recordId);
     }

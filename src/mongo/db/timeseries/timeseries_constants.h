@@ -42,6 +42,7 @@ static constexpr StringData kBucketDataFieldName = "data"_sd;
 static constexpr StringData kBucketMetaFieldName = "meta"_sd;
 static constexpr StringData kBucketControlFieldName = "control"_sd;
 static constexpr StringData kBucketControlVersionFieldName = "version"_sd;
+static constexpr StringData kBucketControlCountFieldName = "count"_sd;
 static constexpr StringData kBucketControlMinFieldName = "min"_sd;
 static constexpr StringData kBucketControlMaxFieldName = "max"_sd;
 static constexpr StringData kControlMaxFieldNamePrefix = "control.max."_sd;
@@ -55,6 +56,7 @@ static constexpr StringData kMetaFieldName = "metaField"_sd;
 // These are hard-coded field names in index specs.
 static constexpr StringData kKeyFieldName = "key"_sd;
 static constexpr StringData kOriginalSpecFieldName = "originalSpec"_sd;
+static constexpr StringData kPartialFilterExpressionFieldName = "partialFilterExpression"_sd;
 
 static constexpr int kTimeseriesControlDefaultVersion = 1;
 static constexpr int kTimeseriesControlCompressedVersion = 2;

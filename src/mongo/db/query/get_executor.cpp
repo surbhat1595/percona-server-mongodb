@@ -97,6 +97,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/str.h"
@@ -356,6 +357,7 @@ void fillOutPlannerParams(OperationContext* opCtx,
     }
 
     if (collection->isClustered()) {
+        plannerParams->clusteredInfo = collection->getClusteredInfo();
         plannerParams->allowRIDRange = true;
     }
 }
@@ -1077,12 +1079,17 @@ std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(
     PlanYieldPolicy::YieldPolicy requestedYieldPolicy,
     const Yieldable* yieldable,
     NamespaceString nss) {
-    return std::make_unique<PlanYieldPolicySBE>(requestedYieldPolicy,
-                                                opCtx->getServiceContext()->getFastClockSource(),
-                                                internalQueryExecYieldIterations.load(),
-                                                Milliseconds{internalQueryExecYieldPeriodMS.load()},
-                                                yieldable,
-                                                std::make_unique<YieldPolicyCallbacksImpl>(nss));
+    return std::make_unique<PlanYieldPolicySBE>(
+        requestedYieldPolicy,
+        opCtx->getServiceContext()->getFastClockSource(),
+        internalQueryExecYieldIterations.load(),
+        Milliseconds{internalQueryExecYieldPeriodMS.load()},
+        yieldable,
+        std::make_unique<YieldPolicyCallbacksImpl>(nss),
+        // Use the new yielding behavior if it is enabled.
+        serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            feature_flags::gYieldingSupportForSBE.isEnabled(
+                serverGlobalParams.featureCompatibility));
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExecutor(
@@ -1097,24 +1104,26 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
         extractAndAttachPipelineStages(cq.get());
     }
 
+    // Analyze the provided query and build the list of candidate plans for it.
     auto nss = cq->nss();
     auto yieldPolicy = makeSbeYieldPolicy(opCtx, requestedYieldPolicy, collection, nss);
     SlotBasedPrepareExecutionHelper helper{
         opCtx, *collection, cq.get(), yieldPolicy.get(), plannerOptions};
-    auto executionResult = helper.prepare();
-    if (!executionResult.isOK()) {
-        return executionResult.getStatus();
+    auto planningResultWithStatus = helper.prepare();
+    if (!planningResultWithStatus.isOK()) {
+        return planningResultWithStatus.getStatus();
     }
+    auto&& planningResult = planningResultWithStatus.getValue();
+    auto&& [roots, solutions] = planningResult->extractResultData();
 
-    auto&& result = executionResult.getValue();
-    auto&& [roots, solutions] = result->extractResultData();
-
+    // In some circumstances (e.g. when have multiple candidate plans or using a cached one), we
+    // might need to execute the plan(s) to pick the best one or to confirm the choice.
     if (auto planner = makeRuntimePlannerIfNeeded(opCtx,
                                                   *collection,
                                                   cq.get(),
                                                   solutions.size(),
-                                                  result->decisionWorks(),
-                                                  result->needsSubplanning(),
+                                                  planningResult->decisionWorks(),
+                                                  planningResult->needsSubplanning(),
                                                   yieldPolicy.get(),
                                                   plannerOptions)) {
         // Do the runtime planning and pick the best candidate plan.
@@ -1179,8 +1188,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions) {
-    return !canonicalQuery->getForceClassicEngine() &&
-            isQuerySbeCompatible(opCtx, collection, canonicalQuery.get(), plannerOptions)
+    canonicalQuery->setSbeCompatible(
+        isQuerySbeCompatible(opCtx, collection, canonicalQuery.get(), plannerOptions));
+    return !canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()
         ? getSlotBasedExecutor(opCtx,
                                collection,
                                std::move(canonicalQuery),

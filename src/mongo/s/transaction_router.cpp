@@ -443,7 +443,8 @@ BSONObj TransactionRouter::Participant::attachTxnFieldsIfNeeded(
     if (!mustStartTransaction) {
         auto readConcernFieldName = repl::ReadConcernArgs::kReadConcernFieldName;
         dassert(!cmd.hasField(readConcernFieldName) ||
-                cmd.getObjectField(readConcernFieldName).isEmpty());
+                cmd.getObjectField(readConcernFieldName).isEmpty() ||
+                sharedOptions.isInternalTransactionForRetryableWrite);
     }
 
     BSONObjBuilder newCmd = mustStartTransaction
@@ -660,7 +661,8 @@ TransactionRouter::Participant& TransactionRouter::Router::_createParticipant(
         o().apiParameters,
         o().readConcernArgs,
         o().atClusterTime ? boost::optional<LogicalTime>(o().atClusterTime->getTime())
-                          : boost::none};
+                          : boost::none,
+        isInternalSessionForRetryableWrite(_sessionId())};
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     auto resultPair =
@@ -932,9 +934,10 @@ void TransactionRouter::Router::_beginOrContinueActiveTxnNumber(OperationContext
     } else if (txnRetryCounter == o().txnRetryCounter) {
         switch (action) {
             case TransactionActions::kStart: {
-                uasserted(ErrorCodes::ConflictingOperationInProgress,
-                          str::stream() << "txnNumber " << o().txnNumber << " for session "
-                                        << _sessionId() << " already started");
+                uassert(ErrorCodes::ConflictingOperationInProgress,
+                        str::stream() << "txnNumber " << o().txnNumber << " for session "
+                                      << _sessionId() << " already started",
+                        isInternalSessionForRetryableWrite(_sessionId()));
                 break;
             }
             case TransactionActions::kContinue: {
@@ -959,14 +962,24 @@ void TransactionRouter::Router::_beginOrContinueActiveTxnNumber(OperationContext
                 str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
                               << txnNumber << " on session " << _sessionId()
                               << " using txnRetryCounter " << txnRetryCounter
+                              << " because it has already started to commit using "
+                              << "a lower txnRetryCounter " << o().txnRetryCounter,
+                o().commitType == CommitType::kNotInitiated || !o().abortCause.empty());
+
+        if (action == TransactionActions::kCommit) {
+            // If the first action seen by the router for this txnRetryCounter is to commit, that
+            // means that the client is attempting to recover a commit decision.
+            _resetRouterState(opCtx, txnNumber, txnRetryCounter);
+            p().isRecoveringCommit = true;
+            return;
+        }
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
+                              << txnNumber << " on session " << _sessionId()
+                              << " using txnRetryCounter " << txnRetryCounter
                               << " because it is using a lower txnRetryCounter "
                               << o().txnRetryCounter,
                 action == TransactionActions::kStart);
-        uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Cannot restart transaction " << txnNumber << " on session "
-                              << _sessionId() << " using txnRetryCounter " << txnRetryCounter
-                              << " because it has already started to commit",
-                o().commitType == CommitType::kNotInitiated || !o().abortCause.empty());
         _resetRouterStateForStartTransaction(opCtx, txnNumber, txnRetryCounter);
     }
 }

@@ -223,6 +223,13 @@ std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
             if (ErrorCodes::CommandOnShardedViewNotSupportedOnMongod == status) {
                 uassertStatusOK(status);
             }
+
+            if (ErrorCodes::TenantMigrationAborted == status) {
+                uassertStatusOK(status.withContext(
+                    str::stream() << "got TenantMigrationAborted response from shard "
+                                  << response.shardId << " at host "
+                                  << response.shardHostAndPort->toString()));
+            }
         }
         responses.push_back(std::move(response));
     }
@@ -503,18 +510,6 @@ AsyncRequestsSender::Response executeCommandAgainstDatabasePrimary(
                         retryPolicy,
                         buildUnshardedRequestsForAllShards(
                             opCtx, {dbInfo.primaryId()}, appendDbVersionIfPresent(cmdObj, dbInfo)));
-    return std::move(responses.front());
-}
-
-AsyncRequestsSender::Response executeRawCommandAgainstDatabasePrimary(
-    OperationContext* opCtx,
-    StringData dbName,
-    const CachedDatabaseInfo& dbInfo,
-    const BSONObj& cmdObj,
-    const ReadPreferenceSetting& readPref,
-    Shard::RetryPolicy retryPolicy) {
-    auto responses =
-        gatherResponses(opCtx, dbName, readPref, retryPolicy, {{dbInfo.primaryId(), cmdObj}});
     return std::move(responses.front());
 }
 

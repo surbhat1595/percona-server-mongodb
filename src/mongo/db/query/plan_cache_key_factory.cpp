@@ -29,9 +29,11 @@
 
 #include "mongo/db/query/plan_cache_key_factory.h"
 
+#include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/planner_ixselect.h"
 
-namespace mongo::plan_cache_detail {
+namespace mongo {
+namespace plan_cache_detail {
 // Delimiters for cache key encoding.
 const char kEncodeDiscriminatorsBegin = '<';
 const char kEncodeDiscriminatorsEnd = '>';
@@ -73,9 +75,8 @@ void encodeIndexability(const MatchExpression* tree,
     }
 }
 
-PlanCacheKey make(const CanonicalQuery& query,
-                  const CollectionPtr& collection,
-                  PlanCacheKeyTag<PlanCacheKey> tag) {
+PlanCacheKeyInfo makePlanCacheKeyInfo(const CanonicalQuery& query,
+                                      const CollectionPtr& collection) {
     const auto shapeString = query.encodeKey();
 
     StringBuilder indexabilityKeyBuilder;
@@ -84,12 +85,21 @@ PlanCacheKey make(const CanonicalQuery& query,
         CollectionQueryInfo::get(collection).getPlanCacheIndexabilityState(),
         &indexabilityKeyBuilder);
 
-    return PlanCacheKey(shapeString, indexabilityKeyBuilder.str(), !query.getForceClassicEngine());
+    return PlanCacheKeyInfo(shapeString, indexabilityKeyBuilder.str());
+}
+
+PlanCacheKey make(const CanonicalQuery& query,
+                  const CollectionPtr& collection,
+                  PlanCacheKeyTag<PlanCacheKey>) {
+    return {makePlanCacheKeyInfo(query, collection)};
 }
 
 sbe::PlanCacheKey make(const CanonicalQuery& query,
                        const CollectionPtr& collection,
-                       PlanCacheKeyTag<sbe::PlanCacheKey> tag) {
-    return sbe::PlanCacheKey(query.getQueryObj());
+                       PlanCacheKeyTag<sbe::PlanCacheKey>) {
+    auto collectionVersion = CollectionQueryInfo::get(collection).getPlanCacheInvalidatorVersion();
+
+    return {makePlanCacheKeyInfo(query, collection), collection->uuid(), collectionVersion};
 }
-}  // namespace mongo::plan_cache_detail
+}  // namespace plan_cache_detail
+}  // namespace mongo

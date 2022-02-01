@@ -90,6 +90,7 @@ DEFAULTS = {
     "report_failure_status": "fail",
     "report_file": None,
     "run_all_feature_flag_tests": False,
+    "run_all_feature_flags_no_tests": False,
     "additional_feature_flags": None,
     "seed": int(time.time() * 256),  # Taken from random.py code in Python 2.7.
     "service_executor": None,
@@ -99,7 +100,7 @@ DEFAULTS = {
     "spawn_using": None,
     "stagger_jobs": None,
     "majority_read_concern": "on",
-    "storage_engine": None,
+    "storage_engine": "wiredTiger",
     "storage_engine_cache_size_gb": None,
     "suite_files": "with_server",
     "tag_files": [],
@@ -107,7 +108,7 @@ DEFAULTS = {
     "transport_layer": None,
     "user_friendly_output": None,
     "mixed_bin_versions": None,
-    "old_bin_version": "last_continuous",
+    "old_bin_version": None,
     "linear_chain": None,
     "num_replset_nodes": None,
     "num_shards": None,
@@ -154,6 +155,9 @@ DEFAULTS = {
 
     # Generate multiversion exclude tags options
     "exclude_tags_file_path": "generated_resmoke_config/multiversion_exclude_tags.yml",
+
+    # Limit the number of tests to execute
+    "max_test_queue_size": None,
 }
 
 _SuiteOptions = collections.namedtuple("_SuiteOptions", [
@@ -274,6 +278,9 @@ ARCHIVE_LIMIT_MB = None
 # The limit number of tests to archive for an Evergreen task.
 ARCHIVE_LIMIT_TESTS = None
 
+# Whether to back up data when restarting a process.
+BACKUP_ON_RESTART_DIR = None
+
 # The starting port number to use for mongod and mongos processes spawned by resmoke.py and the
 # mongo shell.
 BASE_PORT = None
@@ -377,6 +384,9 @@ INSTALL_DIR = None
 
 # Whether to run tests for feature flags.
 RUN_ALL_FEATURE_FLAG_TESTS = None
+
+# Whether to run the server with feature flags. Defaults to true if `RUN_ALL_FEATURE_FLAG_TESTS` is true.
+RUN_ALL_FEATURE_FLAGS = None
 
 # List of enabled feature flags.
 ENABLED_FEATURE_FLAGS = []
@@ -532,6 +542,9 @@ UNDO_RECORDER_PATH = None
 
 # # Generate multiversion exclude tags options
 EXCLUDE_TAGS_FILE_PATH = None
+
+# Limit the number of tests to execute
+MAX_TEST_QUEUE_SIZE = None
 
 ##
 # Internally used configuration options that aren't exposed to the user

@@ -30,9 +30,12 @@
 #pragma once
 
 #include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/simple8b.h"
 
+#include <boost/container/small_vector.hpp>
 #include <deque>
+#include <memory>
 #include <vector>
 
 namespace mongo {
@@ -99,20 +102,29 @@ public:
     private:
         Iterator(BSONColumn& column, const char* pos, const char* end);
 
-        // Loads current control byte
-        void _loadControl(const BSONElement& prev);
+        // Initializes Iterator and makes it ready for iteration. Provided index must be 0 or point
+        // to a full literal.
+        void _initialize(size_t index);
 
-        // Loads delta value
-        void _loadDelta(const BSONElement& prev, const boost::optional<uint64_t>& delta);
-        void _loadDelta(const BSONElement& prev, const boost::optional<uint128_t>& delta);
+        // Initialize sub-object interleaving from current control byte position. Must be on a
+        // interleaved start byte.
+        void _initializeInterleaving();
 
-        // Helpers to determine if we need to store uncompressed element when advancing iterator
-        bool _needStoreElement() const;
-        void _storeElementIfNeeded(BSONElement elem);
+        // Helpers to increment the iterator in regular and interleaved mode.
+        void _incrementRegular();
+        void _incrementInterleaved();
+
+        // Handles EOO when in regular mode. Iterator is set to end.
+        void _handleEOO();
 
         // Checks if control byte is literal
-        static bool _literal(uint8_t control) {
+        static bool _isLiteral(uint8_t control) {
             return (control & 0xE0) == 0;
+        }
+
+        // Checks if control byte is interleaved mode start
+        static bool _isInterleavedStart(uint8_t control) {
+            return control == 0xF0;
         }
 
         // Returns number of Simple-8b blocks from control byte
@@ -127,14 +139,6 @@ public:
         // Current iterator position
         size_t _index = 0;
 
-        // Last index observed with a non-skipped value
-        size_t _lastValueIndex = 0;
-
-        // Last encoded values used to calculate delta and delta-of-delta
-        int64_t _lastEncodedValue64 = 0;
-        int64_t _lastEncodedValueForDeltaOfDelta = 0;
-        int128_t _lastEncodedValue128 = 0;
-
         // Current control byte on iterator position
         const char* _control;
 
@@ -142,22 +146,70 @@ public:
         const char* _end;
 
         // Helper to create Simple8b decoding iterators for 64bit and 128bit value types.
+        // previousValue is used in case the first Simple8b block is RLE and this value will then be
+        // used for the RLE repeat.
         template <typename T>
         struct Decoder {
-            Decoder(const char* buf, size_t size)
-                : s8b(buf, size), pos(s8b.begin()), end(s8b.end()) {}
+            Decoder(const char* buf, size_t size, const boost::optional<T>& previousValue)
+                : s8b(buf, size, previousValue), pos(s8b.begin()), end(s8b.end()) {}
 
             Simple8b<T> s8b;
             typename Simple8b<T>::Iterator pos;
             typename Simple8b<T>::Iterator end;
         };
 
-        // Decoders, only one should be instantiated at a time.
-        boost::optional<Decoder<uint64_t>> _decoder64;
-        boost::optional<Decoder<uint128_t>> _decoder128;
+        /**
+         * Decoding state for decoding compressed binary into BSONElement. It is detached from the
+         * actual binary to allow interleaving where control bytes corresponds to separate decoding
+         * states.
+         */
+        struct DecodingState {
+            struct LoadControlResult {
+                BSONElement element;
+                int size;
+                bool full;
+            };
 
-        // Current scale index
-        uint8_t _scaleIndex;
+            // Loads a literal
+            void _loadLiteral(const BSONElement& elem);
+
+            // Loads current control byte
+            LoadControlResult _loadControl(BSONColumn& column,
+                                           const char* buffer,
+                                           const char* end,
+                                           const BSONElement* current);
+
+            // Loads delta value
+            BSONElement _loadDelta(BSONColumn& column,
+                                   const boost::optional<uint64_t>& delta,
+                                   const BSONElement* current);
+            BSONElement _loadDelta(BSONColumn& column,
+                                   const boost::optional<uint128_t>& delta,
+                                   const BSONElement* current);
+
+            // Decoders, only one should be instantiated at a time.
+            boost::optional<Decoder<uint64_t>> _decoder64;
+            boost::optional<Decoder<uint128_t>> _decoder128;
+
+            // Last encoded values used to calculate delta and delta-of-delta
+            int64_t _lastEncodedValue64 = 0;
+            int64_t _lastEncodedValueForDeltaOfDelta = 0;
+            int128_t _lastEncodedValue128 = 0;
+
+            BSONElement _lastValue;
+
+            // Current scale index
+            uint8_t _scaleIndex;
+        };
+
+        // Interleaved decoding states. When in regular mode we just have one.
+        boost::container::small_vector<DecodingState, 1> _states;
+        // Interleaving reference object read when encountered the interleaving start control byte.
+        // We setup a decoding state for each scalar field in this object. The object hierarchy is
+        // used to re-construct with full objects with the correct hierachy to the user.
+        BSONObj _interleavedReferenceObj;
+        // Boolean to indicate if we are in interleaved mode or not.
+        bool _interleaved = false;
     };
 
     /**
@@ -168,7 +220,7 @@ public:
      * Iterators materialize compressed BSONElement as they iterate over the compressed binary.
      * It is NOT safe to do this from multiple threads concurrently.
      *
-     * Throws BadValue if invalid encoding is encountered.
+     * Throws if invalid encoding is encountered.
      */
     Iterator begin();
     Iterator end();
@@ -176,25 +228,28 @@ public:
     /**
      * Element lookup by index
      *
-     * Returns EOO if index represent skipped element or is out of bounds.
+     * Returns EOO if index represent skipped element.
+     * Returns boost::none if index is out of bounds.
+     *
      * O(1) time complexity if element has been previously accessed
      * O(N) time complexity otherwise
      *
      * Materializes compressed BSONElement as needed. It is NOT safe to do this from multiple
      * threads concurrently.
      *
-     * Throws BadValue if invalid encoding is encountered.
+     * Throws if invalid encoding is encountered.
      */
-    BSONElement operator[](size_t index);
+    boost::optional<const BSONElement&> operator[](size_t index);
 
     /**
      * Number of elements stored in this BSONColumn
      *
-     * O(1) time complexity
+     * O(1) time complexity if BSONColumn is fully decompressed (iteration reached end).
+     * O(N) time complexity otherwise, will fully decompress BSONColumn.
+     *
+     * * Throws if invalid encoding is encountered.
      */
-    size_t size() const {
-        return _elementCount;
-    }
+    size_t size();
 
     /**
      * Field name that this BSONColumn represents.
@@ -212,9 +267,13 @@ private:
      */
     class ElementStorage {
     public:
+        /**
+         * "Writable" BSONElement. Provides access to a writable pointer for writing the value of
+         * the BSONElement. Users must write valid BSON data depending on the requested BSON type.
+         */
         class Element {
         public:
-            Element(char* buffer, int valueSize);
+            Element(char* buffer, int nameSize, int valueSize);
 
             /**
              * Returns a pointer for writing a BSONElement value.
@@ -233,16 +292,73 @@ private:
 
         private:
             char* _buffer;
+            int _nameSize;
             int _valueSize;
         };
+
+        /**
+         * RAII Helper to manage contiguous mode. Starts on construction and leaves on destruction.
+         */
+        class ContiguousBlock {
+        public:
+            ContiguousBlock(ElementStorage& storage);
+            ~ContiguousBlock();
+
+            const char* done();
+
+        private:
+            ElementStorage& _storage;
+            bool _finished = false;
+        };
+
+        /**
+         * Allocates provided number of bytes. Returns buffer that is safe to write up to that
+         * amount. Any subsequent call to allocate() or deallocate() invalidates the returned
+         * buffer.
+         */
+        char* allocate(int bytes);
 
         /**
          * Allocates a BSONElement of provided type and value size. Field name is set to empty
          * string.
          */
-        Element allocate(BSONType type, int valueSize);
+        Element allocate(BSONType type, StringData fieldName, int valueSize);
+
+        /**
+         * Deallocates provided number of bytes. Moves back the pointer of used memory so it can be
+         * re-used by the next allocate() call.
+         */
+        void deallocate(int bytes);
+
+        /**
+         * Starts contiguous mode. All allocations will be in a contiguous memory block. When
+         * allocate() need to grow contents from previous memory block is copied.
+         */
+        ContiguousBlock startContiguous();
+
+        /**
+         * Returns writable pointer to the beginning of contiguous memory block. Any call to
+         * allocate() will invalidate this pointer.
+         */
+        char* contiguous() const {
+            return _block.get() + _contiguousPos;
+        }
+
+        /**
+         * Returns pointer to the end of current memory block. Any call to allocate() will
+         * invalidate this pointer.
+         */
+        const char* position() const {
+            return _block.get() + _pos;
+        }
 
     private:
+        // Starts contiguous mode
+        void _beginContiguous();
+
+        // Ends contiguous mode
+        void _endContiguous();
+
         // Full memory blocks that are kept alive.
         std::vector<std::unique_ptr<char[]>> _blocks;
 
@@ -254,7 +370,14 @@ private:
 
         // Position to first unused byte in current memory block
         int _pos = 0;
+
+        // Position to beginning of contiguous block if enabled.
+        int _contiguousPos = 0;
+
+        bool _contiguousEnabled = false;
     };
+
+    struct SubObjectAllocator;
 
     std::deque<BSONElement> _decompressed;
     ElementStorage _elementStorage;
@@ -264,8 +387,14 @@ private:
 
     uint32_t _elementCount;
 
-    const char* _controlLastLiteral;
-    size_t _indexLastLiteral = 0;
+    struct DecodingStartPosition {
+        void setIfLarger(size_t index, const char* control);
+
+        const char* _control = nullptr;
+        size_t _index = 0;
+    };
+    DecodingStartPosition _maxDecodingStartPos;
+
     bool _fullyDecompressed = false;
 
     std::string _name;

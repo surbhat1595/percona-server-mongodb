@@ -34,9 +34,12 @@
 
 #include "mongo/db/process_health/health_observer_mock.h"
 #include "mongo/db/process_health/health_observer_registration.h"
+#include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/tick_source_mock.h"
 
 namespace mongo {
 
@@ -47,6 +50,12 @@ namespace process_health {
 
 namespace test {
 
+static inline std::unique_ptr<FaultManagerConfig> getConfigWithDisabledPeriodicChecks() {
+    auto config = std::make_unique<FaultManagerConfig>();
+    config->disablePeriodicChecksForTests();
+    return config;
+}
+
 /**
  * Test wrapper class for FaultManager that has access to protected methods
  * for testing.
@@ -54,15 +63,25 @@ namespace test {
 class FaultManagerTestImpl : public FaultManager {
 public:
     FaultManagerTestImpl(ServiceContext* svcCtx,
-                         std::shared_ptr<executor::TaskExecutor> taskExecutor)
-        : FaultManager(svcCtx, taskExecutor) {}
+                         std::shared_ptr<executor::TaskExecutor> taskExecutor,
+                         std::unique_ptr<FaultManagerConfig> config)
+        : FaultManager(svcCtx,
+                       taskExecutor,
+                       [&config]() -> std::unique_ptr<FaultManagerConfig> {
+                           if (config)
+                               return std::move(config);
+                           else
+                               return getConfigWithDisabledPeriodicChecks();
+                       }(),
+                       [](std::string cause) {
+                           // In tests, do not crash.
+                           LOGV2(5936606,
+                                 "Fault manager progress monitor triggered the termination",
+                                 "cause"_attr = cause);
+                       }) {}
 
-    Status transitionStateTest(FaultState newState) {
-        return transitionToState(newState);
-    }
-
-    FaultState getFaultStateTest() {
-        return getFaultState();
+    void transitionStateTest(FaultState newState) {
+        transitionToState(newState);
     }
 
     void healthCheckTest() {
@@ -73,12 +92,16 @@ public:
         return getHealthObservers();
     }
 
-    Status processFaultExistsEventTest() {
-        return processFaultExistsEvent();
+    void processFaultExistsEventTest() {
+        processFaultExistsEvent();
     }
 
-    Status processFaultIsResolvedEventTest() {
+    void processFaultIsResolvedEventTest() {
         return processFaultIsResolvedEvent();
+    }
+
+    FaultFacetsContainerPtr getOrCreateFaultFacetsContainerTest() {
+        return getOrCreateFaultFacetsContainer();
     }
 
     FaultInternal& getFault() {
@@ -87,8 +110,12 @@ public:
         return *(static_cast<FaultInternal*>(fault.get()));
     }
 
-    void schedulePeriodicHealthCheckThreadTest() {
-        schedulePeriodicHealthCheckThread();
+    void progressMonitorCheckTest(std::function<void(std::string cause)> crashCb) {
+        progressMonitorCheckForTests(crashCb);
+    }
+
+    FaultManagerConfig getConfigTest() {
+        return getConfig();
     }
 };
 
@@ -99,32 +126,68 @@ class FaultManagerTest : public unittest::Test {
 public:
     void setUp() override {
         RAIIServerParameterControllerForTest _controller{"featureFlagHealthMonitoring", true};
-        init();
-    }
+        HealthObserverRegistration::resetObserverFactoriesForTest();
 
-    void init() {
-        _svcCtx = ServiceContext::make();
-        _svcCtx->setFastClockSource(std::make_unique<ClockSourceMock>());
+        createServiceContextIfNeeded();
+        bumpUpLogging();
         resetManager();
     }
 
-    void resetManager() {
-        // Construct task executor
-        auto network = std::make_unique<executor::NetworkInterfaceMock>();
-        _net = network.get();
-        auto executor = makeSharedThreadPoolTestExecutor(std::move(network));
-        executor->startup();
+    void createServiceContextIfNeeded() {
+        if (!_svcCtx) {
+            // Reset only once because the Ldap connection reaper is running asynchronously
+            // and is using the simulated clock, which should not go out of scope.
+            _svcCtx = ServiceContext::make();
+            _svcCtx->setFastClockSource(std::make_unique<ClockSourceMock>());
+            _svcCtx->setPreciseClockSource(std::make_unique<ClockSourceMock>());
+            _svcCtx->setTickSource(std::make_unique<TickSourceMock<Milliseconds>>());
+            advanceTime(Seconds(100));
+        }
+    }
 
-        FaultManager::set(_svcCtx.get(),
-                          std::make_unique<FaultManagerTestImpl>(_svcCtx.get(), executor));
+    void bumpUpLogging() {
+        logv2::LogManager::global().getGlobalSettings().setMinimumLoggedSeverity(
+            mongo::logv2::LogComponent::kProcessHealth, logv2::LogSeverity::Debug(3));
+        logv2::LogManager::global().getGlobalSettings().setMinimumLoggedSeverity(
+            mongo::logv2::LogComponent::kAccessControl, logv2::LogSeverity::Debug(3));
+    }
+
+    void tearDown() override {
+        LOGV2(6007905, "Clean up test resources");
+        // Shutdown the executor before the context is deleted.
+        resetManager();
+    }
+
+    void constructTaskExecutor() {
+        auto network = std::shared_ptr<executor::NetworkInterface>(
+            executor::makeNetworkInterface("FaultManagerTest").release());
+        ThreadPool::Options options;
+        auto pool = std::make_unique<ThreadPool>(options);
+
+        _executor =
+            std::make_unique<executor::ThreadPoolTaskExecutor>(std::move(pool), std::move(network));
+        _executor->startup();
+    }
+
+    void resetManager(std::unique_ptr<FaultManagerConfig> config = nullptr) {
+        constructTaskExecutor();
+        FaultManager::set(
+            _svcCtx.get(),
+            std::make_unique<FaultManagerTestImpl>(_svcCtx.get(), _executor, std::move(config)));
     }
 
     void registerMockHealthObserver(FaultFacetType mockType,
                                     std::function<double()> getSeverityCallback) {
-        HealthObserverRegistration::registerObserverFactory([mockType, getSeverityCallback](
-                                                                ClockSource* clockSource) {
-            return std::make_unique<HealthObserverMock>(mockType, clockSource, getSeverityCallback);
-        });
+        HealthObserverRegistration::registerObserverFactory(
+            [mockType, getSeverityCallback](ServiceContext* svcCtx) {
+                return std::make_unique<HealthObserverMock>(mockType, svcCtx, getSeverityCallback);
+            });
+    }
+
+    template <typename Observer>
+    void registerHealthObserver() {
+        HealthObserverRegistration::registerObserverFactory(
+            [](ServiceContext* svcCtx) { return std::make_unique<Observer>(svcCtx); });
     }
 
     FaultManagerTestImpl& manager() {
@@ -135,28 +198,94 @@ public:
         return *static_cast<ClockSourceMock*>(_svcCtx->getFastClockSource());
     }
 
+    ServiceContext* svcCtx() const {
+        return _svcCtx.get();
+    }
+
+    TickSourceMock<Milliseconds>& tickSource() {
+        return *static_cast<TickSourceMock<Milliseconds>*>(_svcCtx->getTickSource());
+    }
+
+    template <typename Observer>
+    Observer& observer(FaultFacetType type) {
+        std::vector<HealthObserver*> observers = manager().getHealthObserversTest();
+        ASSERT_TRUE(!observers.empty());
+        auto it = std::find_if(observers.begin(), observers.end(), [type](const HealthObserver* o) {
+            return o->getType() == type;
+        });
+        ASSERT_TRUE(it != observers.end());
+        return *static_cast<Observer*>(*it);
+    }
+
+    HealthObserverBase::PeriodicHealthCheckContext checkContext() {
+        HealthObserverBase::PeriodicHealthCheckContext ctx{CancellationToken::uncancelable(),
+                                                           _executor};
+        return ctx;
+    }
+
     template <typename Duration>
     void advanceTime(Duration d) {
-        executor::NetworkInterfaceMock::InNetworkGuard guard(_net);
-        _net->advanceTime(_net->now() + d);
+        clockSource().advance(d);
+        static_cast<ClockSourceMock*>(_svcCtx->getPreciseClockSource())->advance(d);
+        tickSource().advance(d);
+    }
+
+    void assertInvalidStateTransition(FaultState newState) {
+        try {
+            manager().transitionStateTest(newState);
+            ASSERT(false);
+        } catch (const DBException& ex) {
+            ASSERT(ex.code() == ErrorCodes::BadValue);
+            // expected exception
+        }
+    }
+
+    static inline const Seconds kWaitTimeout{30};
+    static inline const Milliseconds kSleepTime{1};
+    void assertSoon(std::function<bool()> predicate, Milliseconds timeout = kWaitTimeout) {
+        Timer t;
+        while (t.elapsed() < timeout) {
+            if (predicate())
+                return;
+            sleepFor(kSleepTime);
+        }
+        invariant(false);
+    }
+
+    static inline const Milliseconds kCheckTimeIncrement{100};
+    void assertSoonWithHealthCheck(std::function<bool()> predicate,
+                                   Milliseconds timeout = kWaitTimeout) {
+        auto predicate2 = [=]() {
+            if (predicate())
+                return true;
+            else {
+                advanceTime(kCheckTimeIncrement);
+                manager().healthCheckTest();
+                return false;
+            }
+        };
+        assertSoon(predicate2, timeout);
+    }
+
+    bool hasFault() {
+        return static_cast<bool>(manager().currentFault());
+    }
+
+    void waitForFaultBeingResolved() {
+        assertSoon([this]() { return !hasFault(); });
+    }
+
+    void waitForFaultBeingCreated() {
+        assertSoon([this]() { return hasFault(); });
+    }
+
+    void waitForTransitionIntoState(FaultState state) {
+        assertSoonWithHealthCheck([=]() { return manager().getFaultState() == state; });
     }
 
 private:
     ServiceContext::UniqueServiceContext _svcCtx;
-    executor::NetworkInterfaceMock* _net;
-};
-
-class FaultManagerTestNoPeriodicThread : public FaultManagerTest {
-public:
-    void setUp() override {
-        init();
-    }
-
-    void startHealthCheckThread() {
-        RAIIServerParameterControllerForTest _controller{"featureFlagHealthMonitoring", true};
-        manager().schedulePeriodicHealthCheckThreadTest();
-        advanceTime(Milliseconds(60));
-    }
+    std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
 };
 
 }  // namespace test

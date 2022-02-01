@@ -125,6 +125,8 @@ selector:
   - jstests/core/views/invalid_system_views.js
   - jstests/core/views/views_all_commands.js
   - jstests/core/rename_collection_staytemp.js
+  # Causes CappedPositionLost on recipient, which is not recoverable.
+  - jstests/core/rename_collection_capped.js
 
   #
   # Excluded from replica_sets_multi_stmt_txn_jscore_passthrough.yml
@@ -398,6 +400,9 @@ executor:
       global_vars:
         TestData: *TestData
   - class: ValidateCollections
+    shell_options:
+      global_vars:
+        TestData: *TestData
   - class: CleanEveryN
     n: 1
   fixture:

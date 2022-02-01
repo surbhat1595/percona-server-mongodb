@@ -69,53 +69,52 @@ modules:
   # etc/perf.yml in mongodb/mongo
   - name: dsi
     repo: git@github.com:10gen/dsi.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: genny
     repo: git@github.com:10gen/genny.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: signal-processing
     repo: git@github.com:10gen/signal-processing.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: workloads
     repo: git@github.com:10gen/workloads.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: linkbench
     repo: git@github.com:10gen/linkbench.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: linkbench2
     repo: git@github.com:10gen/linkbench2.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: tsbs
     repo: git@github.com:gregorynoma/tsbs.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
     ref: 225e713010463582712dca30ffcfc70c7d661663
   - name: mongo-perf
     repo: git@github.com:mongodb/mongo-perf.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: YCSB
     repo: git@github.com:mongodb-labs/YCSB.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: production
   - name: benchmarks
     repo: git@github.com:mongodb-labs/benchmarks.git
-    prefix: ../../src
+    prefix: ${workdir}/src
     branch: master
   - name: py-tpcc
     repo: git@github.com:mongodb-labs/py-tpcc.git
-    prefix: ../../src
-    branch: master
-    ref: 46f8f42a71626fc2057d2604ab9359ccf0395ba0
+    prefix: ${workdir}/src
+    branch: production
 #  - name: mongo
 #    repo: git@github.com:mongodb/mongo.git
-#    prefix: ../../src
+#    prefix: ${workdir}/src
 #    branch: master
   ###
   - name: enterprise
@@ -894,6 +893,13 @@ tasks:
         vars:
           test_control: "change_streams_latency"
 
+  - name: change_streams_listen_throughput
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "change_streams_listen_throughput"
+
   - name: change_streams_multi_mongos
     priority: 5
     commands:
@@ -935,7 +941,7 @@ buildvariants:
     name: compile-amazon2
     display_name: Compile
     modules: *modules
-    cron: "0 0 * * 0,2,4" # 00:00 on Sunday,Tuesday,Thursday
+    cron: "0 0 * * *" # Everyday at 00:00
     expansions: &compile-expansions
       platform: linux
       project_dir: &project_dir dsi
@@ -950,13 +956,13 @@ buildvariants:
         --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
         install-mongocryptd
     run_on:
-      - "amazon2-build"
+      - "amazon2-xlarge"
     tasks:
       - name: compile
 
   - name: linux-standalone
     display_name: Linux Standalone
-    cron: "0 0 * * 0,2,4" # 00:00 on Sunday,Tuesday,Thursday
+    cron: "0 0 * * *" # Everyday at 00:00
     modules: *modules
     expansions:
       mongodb_setup: standalone
@@ -991,7 +997,7 @@ buildvariants:
   - name: compile-rhel70
     display_name: Compile for Atlas-like
     modules: *modules
-    cron: "0 0 * * 0,2,4" # 00:00 on Sunday,Tuesday,Thursday
+    cron: "0 0 * * *" # Everyday at 00:00
     expansions:
       <<: *compile-expansions
       compile_flags: >-
@@ -1040,6 +1046,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: linkbench
       - name: linkbench2
@@ -1224,6 +1231,7 @@ buildvariants:
       - name: mongos_large_catalog_workloads
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
 
   - name: linux-shard-lite-audit
@@ -1268,6 +1276,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_latency
       - name: change_streams_throughput
+      - name: change_streams_listen_throughput
       - name: industry_benchmarks
       - name: industry_benchmarks_wmajority
       - name: linkbench
@@ -1358,7 +1367,7 @@ buildvariants:
 
   - name: linux-3-node-replSet
     display_name: Linux 3-Node ReplSet
-    cron: "0 0 * * 0,2,4" # 00:00 on Sunday,Tuesday,Thursday
+    cron: "0 0 * * *" # Everyday at 00:00
     modules: *modules
     expansions:
       mongodb_setup: replica
@@ -1394,6 +1403,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
@@ -1444,6 +1454,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
@@ -1494,6 +1505,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
@@ -1546,6 +1558,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
@@ -1584,6 +1597,7 @@ buildvariants:
       - name: industry_benchmarks_wmajority
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: tpcc
       - name: linkbench
       - name: linkbench2
@@ -1665,7 +1679,7 @@ buildvariants:
       mongodb_setup: initialsync-logkeeper
       infrastructure_provisioning: initialsync-logkeeper
       # EBS logkeeper snapshot with FCV set to 5.0
-      snapshotId: snap-0b91f3899d0b10008
+      snapshotId: snap-0cc5e61399e2e79f6
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -1776,6 +1790,7 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_throughput
       - name: change_streams_latency
+      - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc

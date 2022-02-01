@@ -169,7 +169,8 @@ public:
 
     /**
      * Compute the "shape" of this query by encoding the match, projection and sort, and stripping
-     * out the appropriate values.
+     * out the appropriate values. Note that different types of PlanCache use different encoding
+     * approaches.
      */
     QueryShapeString encodeKey() const;
 
@@ -204,17 +205,20 @@ public:
         return _canHaveNoopMatchNodes;
     }
 
-    /**
-     * Return options as a bit vector.
-     */
-    int getOptions() const;
-
     bool getExplain() const {
         return _explain;
     }
 
     bool getForceClassicEngine() const {
         return _forceClassicEngine;
+    }
+
+    void setSbeCompatible(bool sbeCompatible) {
+        _sbeCompatible = sbeCompatible;
+    }
+
+    bool isSbeCompatible() const {
+        return _sbeCompatible;
     }
 
     void setExplain(bool explain) {
@@ -275,6 +279,9 @@ private:
 
     // Determines whether the classic engine must be used.
     bool _forceClassicEngine = false;
+
+    // True if this query can be executed by the SBE.
+    bool _sbeCompatible = false;
 };
 
 }  // namespace mongo

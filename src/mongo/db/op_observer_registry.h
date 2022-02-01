@@ -68,53 +68,53 @@ public:
             o->onCreateIndex(opCtx, nss, uuid, indexDoc, fromMigrate);
     }
 
-    virtual void onStartIndexBuild(OperationContext* opCtx,
-                                   const NamespaceString& nss,
-                                   CollectionUUID collUUID,
-                                   const UUID& indexBuildUUID,
-                                   const std::vector<BSONObj>& indexes,
-                                   bool fromMigrate) override {
+    void onStartIndexBuild(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           CollectionUUID collUUID,
+                           const UUID& indexBuildUUID,
+                           const std::vector<BSONObj>& indexes,
+                           bool fromMigrate) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers) {
             o->onStartIndexBuild(opCtx, nss, collUUID, indexBuildUUID, indexes, fromMigrate);
         }
     }
 
-    virtual void onStartIndexBuildSinglePhase(OperationContext* opCtx,
-                                              const NamespaceString& nss) override {
+    void onStartIndexBuildSinglePhase(OperationContext* opCtx,
+                                      const NamespaceString& nss) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers) {
             o->onStartIndexBuildSinglePhase(opCtx, nss);
         }
     }
 
-    virtual void onAbortIndexBuildSinglePhase(OperationContext* opCtx,
-                                              const NamespaceString& nss) override {
+    void onAbortIndexBuildSinglePhase(OperationContext* opCtx,
+                                      const NamespaceString& nss) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers) {
             o->onAbortIndexBuildSinglePhase(opCtx, nss);
         }
     }
 
-    virtual void onCommitIndexBuild(OperationContext* opCtx,
-                                    const NamespaceString& nss,
-                                    CollectionUUID collUUID,
-                                    const UUID& indexBuildUUID,
-                                    const std::vector<BSONObj>& indexes,
-                                    bool fromMigrate) override {
+    void onCommitIndexBuild(OperationContext* opCtx,
+                            const NamespaceString& nss,
+                            CollectionUUID collUUID,
+                            const UUID& indexBuildUUID,
+                            const std::vector<BSONObj>& indexes,
+                            bool fromMigrate) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers) {
             o->onCommitIndexBuild(opCtx, nss, collUUID, indexBuildUUID, indexes, fromMigrate);
         }
     }
 
-    virtual void onAbortIndexBuild(OperationContext* opCtx,
-                                   const NamespaceString& nss,
-                                   CollectionUUID collUUID,
-                                   const UUID& indexBuildUUID,
-                                   const std::vector<BSONObj>& indexes,
-                                   const Status& cause,
-                                   bool fromMigrate) override {
+    void onAbortIndexBuild(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           CollectionUUID collUUID,
+                           const UUID& indexBuildUUID,
+                           const std::vector<BSONObj>& indexes,
+                           const Status& cause,
+                           bool fromMigrate) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers) {
             o->onAbortIndexBuild(opCtx, nss, collUUID, indexBuildUUID, indexes, cause, fromMigrate);
@@ -123,7 +123,7 @@ public:
 
     void onInserts(OperationContext* const opCtx,
                    const NamespaceString& nss,
-                   OptionalCollectionUUID uuid,
+                   const UUID& uuid,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    bool fromMigrate) override {
@@ -148,7 +148,7 @@ public:
 
     void onDelete(OperationContext* const opCtx,
                   const NamespaceString& nss,
-                  OptionalCollectionUUID uuid,
+                  const UUID& uuid,
                   StmtId stmtId,
                   const OplogDeleteEntryArgs& args) override {
         ReservedTimes times{opCtx};
@@ -158,7 +158,7 @@ public:
 
     void onInternalOpMessage(OperationContext* const opCtx,
                              const NamespaceString& nss,
-                             const boost::optional<UUID> uuid,
+                             OptionalCollectionUUID uuid,
                              const BSONObj& msgObj,
                              const boost::optional<BSONObj> o2MsgObj,
                              const boost::optional<repl::OpTime> preImageOpTime,
@@ -208,7 +208,7 @@ public:
 
     repl::OpTime onDropCollection(OperationContext* const opCtx,
                                   const NamespaceString& collectionName,
-                                  const OptionalCollectionUUID uuid,
+                                  const UUID& uuid,
                                   std::uint64_t numRecords,
                                   const CollectionDropType dropType) override {
         return onDropCollection(
@@ -217,7 +217,7 @@ public:
 
     repl::OpTime onDropCollection(OperationContext* const opCtx,
                                   const NamespaceString& collectionName,
-                                  const OptionalCollectionUUID uuid,
+                                  const UUID& uuid,
                                   std::uint64_t numRecords,
                                   const CollectionDropType dropType,
                                   bool markFromMigrate) override {
@@ -232,7 +232,7 @@ public:
 
     void onDropIndex(OperationContext* const opCtx,
                      const NamespaceString& nss,
-                     OptionalCollectionUUID uuid,
+                     const UUID& uuid,
                      const std::string& indexName,
                      const BSONObj& idxDescriptor) override {
         ReservedTimes times{opCtx};
@@ -243,7 +243,7 @@ public:
     void onRenameCollection(OperationContext* const opCtx,
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
-                            OptionalCollectionUUID uuid,
+                            const UUID& uuid,
                             OptionalCollectionUUID dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp) override {
@@ -260,7 +260,7 @@ public:
     void onRenameCollection(OperationContext* const opCtx,
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
-                            OptionalCollectionUUID uuid,
+                            const UUID& uuid,
                             OptionalCollectionUUID dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp,
@@ -300,7 +300,7 @@ public:
     repl::OpTime preRenameCollection(OperationContext* const opCtx,
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      OptionalCollectionUUID dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp) override {
@@ -317,7 +317,7 @@ public:
     repl::OpTime preRenameCollection(OperationContext* const opCtx,
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      OptionalCollectionUUID dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp,
@@ -340,7 +340,7 @@ public:
     void postRenameCollection(OperationContext* const opCtx,
                               const NamespaceString& fromCollection,
                               const NamespaceString& toCollection,
-                              OptionalCollectionUUID uuid,
+                              const UUID& uuid,
                               OptionalCollectionUUID dropTargetUUID,
                               bool stayTemp) override {
         ReservedTimes times{opCtx};
@@ -358,7 +358,7 @@ public:
 
     void onEmptyCapped(OperationContext* const opCtx,
                        const NamespaceString& collectionName,
-                       OptionalCollectionUUID uuid) {
+                       const UUID& uuid) {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onEmptyCapped(opCtx, collectionName, uuid);
@@ -401,12 +401,6 @@ public:
             o->onTransactionAbort(opCtx, abortOplogEntryOpTime);
     }
 
-    void onReplicationRollback(OperationContext* opCtx,
-                               const RollbackObserverInfo& rbInfo) override {
-        for (auto& o : _observers)
-            o->onReplicationRollback(opCtx, rbInfo);
-    }
-
     void onMajorityCommitPointUpdate(ServiceContext* service,
                                      const repl::OpTime& newCommitPoint) override {
         for (auto& o : _observers)
@@ -414,6 +408,12 @@ public:
     }
 
 private:
+    void _onReplicationRollback(OperationContext* opCtx,
+                                const RollbackObserverInfo& rbInfo) override {
+        for (auto& o : _observers)
+            o->onReplicationRollback(opCtx, rbInfo);
+    }
+
     static repl::OpTime _getOpTimeToReturn(const std::vector<repl::OpTime>& times) {
         if (times.empty()) {
             return repl::OpTime{};

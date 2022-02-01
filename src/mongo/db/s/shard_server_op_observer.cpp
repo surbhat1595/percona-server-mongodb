@@ -247,7 +247,7 @@ ShardServerOpObserver::~ShardServerOpObserver() = default;
 
 void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                                       const NamespaceString& nss,
-                                      OptionalCollectionUUID uuid,
+                                      const UUID& uuid,
                                       std::vector<InsertStatement>::const_iterator begin,
                                       std::vector<InsertStatement>::const_iterator end,
                                       bool fromMigrate) {
@@ -318,7 +318,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    const auto& updateDoc = args.updateArgs.update;
+    const auto& updateDoc = args.updateArgs->update;
     // Most of these handlers do not need to run when the update is a full document replacement.
     const bool isReplacementUpdate = (update_oplog_entry::extractUpdateType(updateDoc) ==
                                       update_oplog_entry::UpdateType::kReplacement);
@@ -347,7 +347,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             std::string coll;
             fassert(40477,
                     bsonExtractStringField(
-                        args.updateArgs.criteria, ShardCollectionType::kNssFieldName, &coll));
+                        args.updateArgs->criteria, ShardCollectionType::kNssFieldName, &coll));
             return NamespaceString(coll);
         }());
 
@@ -390,7 +390,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
         std::string db;
         fassert(
             40478,
-            bsonExtractStringField(args.updateArgs.criteria, ShardDatabaseType::name.name(), &db));
+            bsonExtractStringField(args.updateArgs->criteria, ShardDatabaseType::name.name(), &db));
 
         auto enterCriticalSectionCounterFieldNewVal = update_oplog_entry::extractNewValueForField(
             updateDoc, ShardDatabaseType::enterCriticalSectionCounter.name());
@@ -410,11 +410,11 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             return;
 
         const auto pendingFieldRemovedStatus =
-            update_oplog_entry::isFieldRemovedByUpdate(args.updateArgs.update, "pending");
+            update_oplog_entry::isFieldRemovedByUpdate(args.updateArgs->update, "pending");
 
         if (pendingFieldRemovedStatus == update_oplog_entry::FieldRemovedStatus::kFieldRemoved) {
             auto deletionTask = RangeDeletionTask::parse(
-                IDLParserErrorContext("ShardServerOpObserver"), args.updateArgs.updatedDoc);
+                IDLParserErrorContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
 
             if (deletionTask.getDonorShardId() != ShardingState::get(opCtx)->shardId()) {
                 // Range deletion tasks for moved away chunks are scheduled through the
@@ -431,7 +431,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             (!replCoord->getMemberState().recovering() &&
              !replCoord->getMemberState().rollback())) {
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-                IDLParserErrorContext("ShardServerOpObserver"), args.updateArgs.updatedDoc);
+                IDLParserErrorContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
 
             opCtx->recoveryUnit()->onCommit(
                 [opCtx, updatedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
@@ -454,9 +454,9 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
         incrementChunkOnInsertOrUpdate(opCtx,
                                        args.nss,
                                        *metadata->getChunkManager(),
-                                       args.updateArgs.updatedDoc,
-                                       args.updateArgs.updatedDoc.objsize(),
-                                       args.updateArgs.source == OperationSource::kFromMigrate);
+                                       args.updateArgs->updatedDoc,
+                                       args.updateArgs->updatedDoc.objsize(),
+                                       args.updateArgs->source == OperationSource::kFromMigrate);
     }
 }
 
@@ -475,7 +475,7 @@ void ShardServerOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                                      const NamespaceString& nss,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      StmtId stmtId,
                                      const OplogDeleteEntryArgs& args) {
     auto& documentId = documentIdDecoration(opCtx);
@@ -538,6 +538,12 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
                     UninterruptibleLockGuard noInterrupt(opCtx->lockState());
                     auto* const csr = CollectionShardingRuntime::get(opCtx, deletedNss);
+
+                    // Secondary nodes must clear the filtering metadata before releasing the
+                    // in-memory critical section
+                    if (!isStandaloneOrPrimary(opCtx))
+                        csr->clearFilteringMetadata(opCtx);
+
                     auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(opCtx, csr);
                     csr->exitCriticalSection(csrLock, reason);
                 });
@@ -585,7 +591,7 @@ void ShardServerOpObserver::onCreateCollection(OperationContext* opCtx,
 
 repl::OpTime ShardServerOpObserver::onDropCollection(OperationContext* opCtx,
                                                      const NamespaceString& collectionName,
-                                                     OptionalCollectionUUID uuid,
+                                                     const UUID& uuid,
                                                      std::uint64_t numRecords,
                                                      const CollectionDropType dropType) {
     if (collectionName == NamespaceString::kServerConfigurationNamespace) {
@@ -626,7 +632,7 @@ void ShardServerOpObserver::onAbortIndexBuildSinglePhase(OperationContext* opCtx
 
 void ShardServerOpObserver::onDropIndex(OperationContext* opCtx,
                                         const NamespaceString& nss,
-                                        OptionalCollectionUUID uuid,
+                                        const UUID& uuid,
                                         const std::string& indexName,
                                         const BSONObj& indexInfo) {
     abortOngoingMigrationIfNeeded(opCtx, nss);
@@ -641,8 +647,8 @@ void ShardServerOpObserver::onCollMod(OperationContext* opCtx,
     abortOngoingMigrationIfNeeded(opCtx, nss);
 };
 
-void ShardServerOpObserver::onReplicationRollback(OperationContext* opCtx,
-                                                  const RollbackObserverInfo& rbInfo) {
+void ShardServerOpObserver::_onReplicationRollback(OperationContext* opCtx,
+                                                   const RollbackObserverInfo& rbInfo) {
     if (rbInfo.rollbackNamespaces.find(NamespaceString::kCollectionCriticalSectionsNamespace) !=
         rbInfo.rollbackNamespaces.end()) {
         RecoverableCriticalSectionService::get(opCtx)->recoverRecoverableCriticalSections(opCtx);

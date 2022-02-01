@@ -243,8 +243,8 @@ private:
     State _state{kCreated};
 
     // The epoch of the collection being migrated and its UUID, as of the time the migration
-    // started. Values are boost::optional up until the constructor runs, because UUID doesn't have
-    // a default constructor.
+    // started. Values are boost::optional only up until the constructor runs, because UUID doesn't
+    // have a default constructor.
     boost::optional<OID> _collectionEpoch;
     boost::optional<UUID> _collectionUUID;
 
@@ -273,6 +273,9 @@ private:
 
     // Information about the moveChunk to be used in the critical section.
     const BSONObj _critSecReason;
+
+    // It states whether the critical section has to be acquired on the recipient.
+    const bool _acquireCSOnRecipient;
 };
 
 }  // namespace mongo

@@ -7,6 +7,8 @@
  *  requires_sharding,
  *  assumes_balancer_off,
  *  requires_non_retryable_writes,
+ *  does_not_support_transactions,
+ *  requires_fcv_51,
  * ]
  */
 'use strict';
@@ -99,8 +101,7 @@ var $config = extendWorkload($config, function($config, $super) {
     };
 
     $config.states.init = function init(db, collName, connCache) {
-        if (TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo()) &&
-            TimeseriesTest.shardedtimeseriesCollectionsEnabled(db.getMongo())) {
+        if (TimeseriesTest.shardedtimeseriesCollectionsEnabled(db.getMongo())) {
             this.featureFlagDisabled = false;
         }
     };
@@ -155,8 +156,7 @@ var $config = extendWorkload($config, function($config, $super) {
     };
 
     $config.setup = function setup(db, collName, cluster) {
-        if (TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo()) &&
-            TimeseriesTest.shardedtimeseriesCollectionsEnabled(db.getMongo())) {
+        if (TimeseriesTest.shardedtimeseriesCollectionsEnabled(db.getMongo())) {
             this.featureFlagDisabled = false;
         } else {
             return;

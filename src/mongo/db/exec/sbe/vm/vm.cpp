@@ -48,6 +48,7 @@
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/storage/key_string.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
@@ -112,8 +113,6 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,   // getArraySize
 
     -1,  // aggSum
-    -1,  // aggDoubleDoubleSum
-    0,   // doubleDoubleSumFinalize
     -1,  // aggMin
     -1,  // aggMax
     -1,  // aggFirst
@@ -366,14 +365,6 @@ void CodeFragment::appendSum() {
     appendSimpleInstruction(Instruction::aggSum);
 }
 
-void CodeFragment::appendDoubleDoubleSum() {
-    appendSimpleInstruction(Instruction::aggDoubleDoubleSum);
-}
-
-void CodeFragment::appendDoubleDoubleSumFinalize() {
-    appendSimpleInstruction(Instruction::doubleDoubleSumFinalize);
-}
-
 void CodeFragment::appendMin() {
     appendSimpleInstruction(Instruction::aggMin);
 }
@@ -505,14 +496,45 @@ void CodeFragment::appendJumpNothing(int jumpOffset) {
     offset += writeToMemory(offset, jumpOffset);
 }
 
-ByteCode::~ByteCode() {
-    auto size = _argStackOwned.size();
-    invariant(_argStackTags.size() == size);
-    invariant(_argStackVals.size() == size);
-    for (size_t i = 0; i < size; ++i) {
-        if (_argStackOwned[i]) {
-            value::releaseValue(_argStackTags[i], _argStackVals[i]);
+void ByteCode::Stack::growAndResize(size_t newSize) {
+    auto currentCapacity = capacity();
+    if (newSize <= currentCapacity) {
+        _size = newSize;
+        return;
+    }
+
+    auto newCapacity = newSize;
+    if (newCapacity > kMaxCapacity) {
+        uasserted(6040901,
+                  str::stream() << "Requested capacity of " << newCapacity
+                                << " elements exceeds the maximum capacity of " << kMaxCapacity);
+        return;
+    }
+
+    if (currentCapacity >= kMaxCapacity / 2) {
+        newCapacity = kMaxCapacity;
+    } else if (2 * currentCapacity > newCapacity) {
+        newCapacity = 2 * currentCapacity;
+    }
+
+    try {
+        auto numSegments = (_size + ElementsPerSegment - 1) / ElementsPerSegment;
+        auto numNewSegments = (newCapacity + ElementsPerSegment - 1) / ElementsPerSegment;
+        newCapacity = numNewSegments * ElementsPerSegment;
+
+        auto newSegments = std::make_unique<StackSegment[]>(numNewSegments);
+
+        if (_segments.get() != nullptr && numSegments > 0) {
+            memcpy(newSegments.get(), _segments.get(), numSegments * sizeof(StackSegment));
         }
+
+        _segments = std::move(newSegments);
+        _capacity = newCapacity;
+        _size = newSize;
+    } catch (std::bad_alloc&) {
+        uasserted(6040902,
+                  str::stream() << "Unable to allocate requested capacity of " << newCapacity
+                                << " elements");
     }
 }
 
@@ -909,22 +931,21 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggSum(value::TypeTags
     return genericAdd(accTag, accValue, fieldTag, fieldValue);
 }
 
-std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggDoubleDoubleSum(
-    value::TypeTags accTag,
-    value::Value accValue,
-    value::TypeTags fieldTag,
-    value::Value fieldValue) {
-    // Skip aggregation step if we don't have the input.
-    if (fieldTag == value::TypeTags::Nothing) {
-        auto [tag, val] = value::copyValue(accTag, accValue);
-        return {true, tag, val};
-    }
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDoubleDoubleSum(
+    ArityType arity) {
+
+    auto [_, fieldTag, fieldValue] = getFromStack(1);
+    // Move the incoming accumulator state from the stack. Given that we are now the owner of the
+    // state we are free to do any in-place update as we see fit.
+    auto [accTag, accValue] = moveOwnedFromStack(0);
+    value::ValueGuard guard{accTag, accValue};
 
     // Initialize the accumulator.
     if (accTag == value::TypeTags::Nothing) {
-        auto [accTagN, accValueN] = value::makeNewArray();
-        value::ValueGuard guard{accTagN, accValueN};
-        auto arr = value::getArrayView(accValueN);
+        std::tie(accTag, accValue) = value::makeNewArray();
+        value::ValueGuard guard{accTag, accValue};
+        auto arr = value::getArrayView(accValue);
+        arr->reserve(AggSumValueElems::kMaxSizeOfArray);
 
         // The order of the following three elements should match to 'AggSumValueElems'.
         arr->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
@@ -932,14 +953,25 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggDoubleDoubleSum(
         arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
         // The absent 'kDecimalTotal' element means that we've not seen any decimal value. So, we're
         // not adding 'kDecimalTotal' element yet.
-        return aggDoubleDoubleSumImpl(accTagN, accValueN, fieldTag, fieldValue);
+        aggDoubleDoubleSumImpl(arr, fieldTag, fieldValue);
+        guard.reset();
+        return {true, accTag, accValue};
     }
+    tassert(5755317, "The result slot must be Array-typed", accTag == value::TypeTags::Array);
 
-    return aggDoubleDoubleSumImpl(accTag, accValue, fieldTag, fieldValue);
+    aggDoubleDoubleSumImpl(value::getArrayView(accValue), fieldTag, fieldValue);
+    guard.reset();
+    return {true, accTag, accValue};
 }
 
-std::tuple<bool, value::TypeTags, value::Value> ByteCode::doubleDoubleSumFinalize(
-    value::TypeTags fieldTag, value::Value fieldValue) {
+// This function is necessary because 'aggDoubleDoubleSum()' result is 'Array' type but we need
+// to produce a scalar value out of it.
+//
+// 'keepIntegerPrecision' should be set to true when we want to keep precision for integral values.
+template <bool keepIntegerPrecision>
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoubleSumFinalize(
+    ArityType arity) {
+    auto [_, fieldTag, fieldValue] = getFromStack(0);
     auto arr = value::getArrayView(fieldValue);
     tassert(5755321,
             str::stream() << "The result slot must have at least "
@@ -954,7 +986,7 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::doubleDoubleSumFinaliz
     auto [sumTag, sum] = arr->getAt(AggSumValueElems::kNonDecimalTotalSum);
     auto [addendTag, addend] = arr->getAt(AggSumValueElems::kNonDecimalTotalAddend);
     tassert(5755323,
-            "The sum and addend must be NumbetDouble",
+            "The sum and addend must be NumberDouble",
             sumTag == addendTag && sumTag == value::TypeTags::NumberDouble);
 
     // We're guaranteed to always have a valid nonDecimalTotal value.
@@ -979,6 +1011,25 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::doubleDoubleSumFinaliz
                                 value::bitcastFrom<int64_t>(longVal)};
                     }
                 }
+
+                if constexpr (keepIntegerPrecision) {
+                    // The value was too large for a NumberInt64, so output an array with two
+                    // values adding up to the desired total. The mongos computes the final sum,
+                    // considering errors.
+                    auto [total, error] = nonDecimalTotal.getDoubleDouble();
+                    auto llerror = static_cast<int64_t>(error);
+                    auto [tag, val] = value::makeNewArray();
+                    value::ValueGuard guard(tag, val);
+                    auto arr = value::getArrayView(val);
+                    arr->reserve(static_cast<size_t>(AggPartialSumElems::kSizeOfArray));
+                    arr->push_back(value::TypeTags::NumberDouble,
+                                   value::bitcastFrom<double>(total));
+                    arr->push_back(value::TypeTags::NumberInt64,
+                                   value::bitcastFrom<int64_t>(llerror));
+                    guard.reset();
+                    return {true, tag, val};
+                }
+
                 // Sum doesn't fit a NumberLong, so return a NumberDouble instead.
                 [[fallthrough]];
             case value::TypeTags::NumberDouble:
@@ -1004,6 +1055,49 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::doubleDoubleSumFinaliz
         auto [tag, val] = value::makeCopyDecimal(decimalTotal.add(nonDecimalTotal.getDecimal()));
         return {true, tag, val};
     }
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggStdDev(ArityType arity) {
+    auto [_, fieldTag, fieldValue] = getFromStack(1);
+    // Move the incoming accumulator state from the stack. Given that we are now the owner of the
+    // state we are free to do any in-place update as we see fit.
+    auto [accTag, accValue] = moveOwnedFromStack(0);
+    value::ValueGuard guard{accTag, accValue};
+
+    // Initialize the accumulator.
+    if (accTag == value::TypeTags::Nothing) {
+        auto [newAccTag, newAccValue] = value::makeNewArray();
+        value::ValueGuard newGuard{newAccTag, newAccValue};
+        auto arr = value::getArrayView(newAccValue);
+        arr->reserve(AggStdDevValueElems::kSizeOfArray);
+
+        // The order of the following three elements should match to 'AggStdDevValueElems'.
+        arr->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));
+        arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+        arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+        aggStdDevImpl(arr, fieldTag, fieldValue);
+        newGuard.reset();
+        return {true, newAccTag, newAccValue};
+    }
+    tassert(5755210, "The result slot must be Array-typed", accTag == value::TypeTags::Array);
+
+    aggStdDevImpl(value::getArrayView(accValue), fieldTag, fieldValue);
+    guard.reset();
+    return {true, accTag, accValue};
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinStdDevPopFinalize(
+    ArityType arity) {
+    auto [_, fieldTag, fieldValue] = getFromStack(0);
+
+    return aggStdDevFinalizeImpl(fieldValue, false /* isSamp */);
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinStdDevSampFinalize(
+    ArityType arity) {
+    auto [_, fieldTag, fieldValue] = getFromStack(0);
+
+    return aggStdDevFinalizeImpl(fieldValue, true /* isSamp */);
 }
 
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::aggMin(value::TypeTags accTag,
@@ -1365,22 +1459,23 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewArrayFromRan
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    auto isPositiveStep = stepVal > 0;
+    // Calculate how much memory is needed to generate the array and avoid going over the memLimit.
+    auto steps = (endVal - startVal) / stepVal;
+    // If steps not positive then no amount of steps can get you from start to end. For example
+    // with start=5, end=7, step=-1 steps would be negative and in this case we would return an
+    // empty array.
+    auto length = steps >= 0 ? 1 + steps : 0;
+    int64_t memNeeded = sizeof(value::Array) + length * value::getApproximateSize(startTag, start);
+    auto memLimit = internalQueryMaxRangeBytes.load();
+    uassert(ErrorCodes::ExceededMemoryLimit,
+            str::stream() << "$range would use too much memory (" << memNeeded
+                          << " bytes) and cannot spill to disk. Memory limit: " << memLimit
+                          << " bytes",
+            memNeeded < memLimit);
 
-    if (isPositiveStep) {
-        if (startVal < endVal) {
-            arr->reserve(1 + (endVal - startVal) / stepVal);
-            for (auto i = startVal; i < endVal; i += stepVal) {
-                arr->push_back(value::TypeTags::NumberInt32, value::bitcastTo<int32_t>(i));
-            }
-        }
-    } else {
-        if (startVal > endVal) {
-            arr->reserve(1 + (startVal - endVal) / (-stepVal));
-            for (auto i = startVal; i > endVal; i += stepVal) {
-                arr->push_back(value::TypeTags::NumberInt32, value::bitcastTo<int32_t>(i));
-            }
-        }
+    arr->reserve(length);
+    for (auto i = startVal; stepVal > 0 ? i < endVal : i > endVal; i += stepVal) {
+        arr->push_back(value::TypeTags::NumberInt32, value::bitcastTo<int32_t>(i));
     }
 
     guard.reset();
@@ -1593,6 +1688,64 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinAddToArray(Arit
 
     guard.reset();
     return {ownAgg, tagAgg, valAgg};
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinMergeObjects(ArityType arity) {
+    auto [_, tagField, valField] = getFromStack(1);
+    // Move the incoming accumulator state from the stack. Given that we are now the owner of the
+    // state we are free to do any in-place update as we see fit.
+    auto [tagAgg, valAgg] = moveOwnedFromStack(0);
+
+    value::ValueGuard guard{tagAgg, valAgg};
+    // Create a new object if it does not exist yet.
+    if (tagAgg == value::TypeTags::Nothing) {
+        std::tie(tagAgg, valAgg) = value::makeNewObject();
+    }
+
+    invariant(tagAgg == value::TypeTags::Object);
+
+    if (tagField == value::TypeTags::Nothing || tagField == value::TypeTags::Null) {
+        guard.reset();
+        return {true, tagAgg, valAgg};
+    }
+
+    auto obj = value::getObjectView(valAgg);
+
+    StringMap<std::pair<value::TypeTags, value::Value>> currObjMap;
+    for (auto currObjEnum = value::ObjectEnumerator{tagField, valField}; !currObjEnum.atEnd();
+         currObjEnum.advance()) {
+        currObjMap[currObjEnum.getFieldName()] = currObjEnum.getViewOfValue();
+    }
+
+    // Process the accumulated fields and if a field within the current object already exists
+    // within the existing accuultor, we set the value of that field within the accumuator to the
+    // value contained within the current object. Preserves the order of existing fields in the
+    // accumulator
+    for (size_t idx = 0, numFields = obj->size(); idx < numFields; ++idx) {
+        auto it = currObjMap.find(obj->field(idx));
+        if (it != currObjMap.end()) {
+            auto [currObjTag, currObjVal] = it->second;
+            auto [currObjTagCopy, currObjValCopy] = value::copyValue(currObjTag, currObjVal);
+            obj->setAt(idx, currObjTagCopy, currObjValCopy);
+            currObjMap.erase(it);
+        }
+    }
+
+    // Copy the remaining fields of the current object being processed to the
+    // accumulator. Fields that were already present in the accumulated fields
+    // have been set already. Preserves the relative order of the new fields
+    for (auto currObjEnum = value::ObjectEnumerator{tagField, valField}; !currObjEnum.atEnd();
+         currObjEnum.advance()) {
+        auto it = currObjMap.find(currObjEnum.getFieldName());
+        if (it != currObjMap.end()) {
+            auto [currObjTag, currObjVal] = it->second;
+            auto [currObjTagCopy, currObjValCopy] = value::copyValue(currObjTag, currObjVal);
+            obj->push_back(currObjEnum.getFieldName(), currObjTagCopy, currObjValCopy);
+        }
+    }
+
+    guard.reset();
+    return {true, tagAgg, valAgg};
 }
 
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinAddToSet(ArityType arity) {
@@ -3665,12 +3818,28 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builti
             return builtinSqrt(arity);
         case Builtin::addToArray:
             return builtinAddToArray(arity);
+        case Builtin::mergeObjects:
+            return builtinMergeObjects(arity);
         case Builtin::addToSet:
             return builtinAddToSet(arity);
         case Builtin::collAddToSet:
             return builtinCollAddToSet(arity);
         case Builtin::doubleDoubleSum:
             return builtinDoubleDoubleSum(arity);
+        case Builtin::aggDoubleDoubleSum:
+            return builtinAggDoubleDoubleSum(arity);
+        case Builtin::doubleDoubleSumFinalize:
+            return builtinDoubleDoubleSumFinalize<>(arity);
+        case Builtin::doubleDoubleMergeSumFinalize:
+            // This is for sharding support of aggregations that use 'doubleDoubleSum' algorithm.
+            // We should keep precision for integral values when the partial sum is to be merged.
+            return builtinDoubleDoubleSumFinalize<true /*keepIntegerPrecision*/>(arity);
+        case Builtin::aggStdDev:
+            return builtinAggStdDev(arity);
+        case Builtin::stdDevPopFinalize:
+            return builtinStdDevPopFinalize(arity);
+        case Builtin::stdDevSampFinalize:
+            return builtinStdDevSampFinalize(arity);
         case Builtin::bitTestZero:
             return builtinBitTestZero(arity);
         case Builtin::bitTestMask:
@@ -4488,35 +4657,6 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                     }
                     break;
                 }
-                case Instruction::aggDoubleDoubleSum: {
-                    auto [rhsOwned, rhsTag, rhsVal] = getFromStack(0);
-                    popStack();
-                    auto [lhsOwned, lhsTag, lhsVal] = getFromStack(0);
-
-                    auto [owned, tag, val] = aggDoubleDoubleSum(lhsTag, lhsVal, rhsTag, rhsVal);
-
-                    topStack(owned, tag, val);
-
-                    if (rhsOwned) {
-                        value::releaseValue(rhsTag, rhsVal);
-                    }
-                    if (lhsOwned) {
-                        value::releaseValue(lhsTag, lhsVal);
-                    }
-                    break;
-                }
-                case Instruction::doubleDoubleSumFinalize: {
-                    auto [sumArrayOwned, sumArrayTag, sumArrayVal] = getFromStack(0);
-                    auto [finalSumOwned, finalSumTag, finalSumVal] =
-                        doubleDoubleSumFinalize(sumArrayTag, sumArrayVal);
-
-                    topStack(finalSumOwned, finalSumTag, finalSumVal);
-
-                    if (sumArrayOwned) {
-                        value::releaseValue(sumArrayTag, sumArrayVal);
-                    }
-                    break;
-                }
                 case Instruction::aggMin: {
                     auto [rhsOwned, rhsTag, rhsVal] = getFromStack(0);
                     popStack();
@@ -4923,18 +5063,29 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
 }
 
 std::tuple<uint8_t, value::TypeTags, value::Value> ByteCode::run(const CodeFragment* code) {
+    uassert(6040900, "The evaluation stack must be empty", _argStack.size() == 0);
+
+    ON_BLOCK_EXIT([&] {
+        auto size = _argStack.size();
+        for (size_t i = 0; i < size; ++i) {
+            auto [owned, tag] = _argStack.ownedAndTag(i);
+            if (owned) {
+                value::releaseValue(tag, _argStack.value(i));
+            }
+        }
+
+        _argStack.resize(0);
+    });
+
     runInternal(code, 0);
 
-    uassert(
-        4822801, "The evaluation stack must hold only a single value", _argStackOwned.size() == 1);
+    uassert(4822801, "The evaluation stack must hold only a single value", _argStack.size() == 1);
 
-    auto owned = _argStackOwned[0];
-    auto tag = _argStackTags[0];
-    auto val = _argStackVals[0];
+    auto [owned, tag] = _argStack.ownedAndTag(0);
+    auto val = _argStack.value(0);
 
-    _argStackOwned.clear();
-    _argStackTags.clear();
-    _argStackVals.clear();
+    // Transfer ownership of tag/val to the caller
+    _argStack.resize(0);
 
     return {owned, tag, val};
 }

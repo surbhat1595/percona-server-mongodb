@@ -226,7 +226,11 @@ public:
              BSONObjBuilder& result) override {
         auto const sessionId = uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj));
         auto const mdm = MigrationDestinationManager::get(opCtx);
-        Status const status = mdm->startCommit(sessionId);
+
+        const auto elem = cmdObj.getField("acquireCSOnRecipient");
+        const auto acquireCSOnRecipient = elem ? elem.boolean() : false;
+
+        Status const status = mdm->startCommit(sessionId, acquireCSOnRecipient);
         mdm->report(result, opCtx, false);
         if (!status.isOK()) {
             LOGV2(22014,
@@ -301,6 +305,64 @@ public:
     }
 
 } recvChunkAbortCommand;
+
+class RecvChunkReleaseCritSecCommand : public BasicCommand {
+public:
+    RecvChunkReleaseCritSecCommand() : BasicCommand("_recvChunkReleaseCritSec") {}
+
+    std::string help() const override {
+        return "internal";
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
+    }
+
+    bool adminOnly() const override {
+        return true;
+    }
+
+
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
+        return true;
+    }
+
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
+        ActionSet actions;
+        actions.addAction(ActionType::internal);
+        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
+    }
+
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        opCtx->setAlwaysInterruptAtStepDownOrUp();
+
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << getName() << " must be called with majority writeConcern, got "
+                              << opCtx->getWriteConcern().wMode,
+                opCtx->getWriteConcern().wMode == WriteConcernOptions::kMajority);
+
+        const auto sessionId = uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj));
+
+        LOGV2_DEBUG(5899101, 2, "Received _recvChunkReleaseCritSec", "sessionId"_attr = sessionId);
+
+        const auto mdm = MigrationDestinationManager::get(opCtx);
+        const auto status = mdm->exitCriticalSection(opCtx, sessionId);
+        if (!status.isOK()) {
+            LOGV2(5899109,
+                  "_recvChunkReleaseCritSec failed: {error}",
+                  "_recvChunkReleaseCritSec failed",
+                  "error"_attr = redact(status));
+            uassertStatusOK(status);
+        }
+        return true;
+    }
+
+} recvChunkReleaseCritSecCommand;
 
 }  // namespace
 }  // namespace mongo

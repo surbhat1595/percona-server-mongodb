@@ -352,7 +352,6 @@ variables:
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2004-64
   - enterprise-windows
-  - enterprise-windows-suggested
   - enterprise-windows-debug-unoptimized
   - enterprise-windows-inmem
   - enterprise-windows-required
@@ -375,7 +374,6 @@ variables:
   - enterprise-amazon2-arm64
   - enterprise-ubuntu1804-64
   - enterprise-windows
-  - enterprise-windows-suggested
   - enterprise-windows-required
 
 # List of all variants that use the packages.tgz
@@ -417,7 +415,7 @@ variables:
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2004-64
   - enterprise-windows
-  - enterprise-windows-suggested
+  - enterprise-windows-required
   - windows
 
 
@@ -679,15 +677,6 @@ functions:
   "set up remote credentials":
     - *f_expansions_write
     - *set_up_remote_credentials
-
-  "call BF Suggestion service":
-    - *f_expansions_write
-    - command: subprocess.exec
-      params:
-        binary: bash
-        silent: true
-        args:
-          - "./src/evergreen/functions/bf_suggestion_service_call.sh"
 
   "upload debugsymbols": &upload_debugsymbols
     command: s3.put
@@ -1877,7 +1866,6 @@ post:
   - func: "attach report"
   - func: "attach artifacts"
   - func: "save ec2 task artifacts"
-  - func: "call BF Suggestion service"
   - func: "attach wiki page"
   - func: "kill processes"
   - func: "save local client logs"
@@ -1980,7 +1968,6 @@ tasks:
           - "compile_expansions.yml"
           - "all_feature_flags.txt"  # Must correspond to the definition in buildscripts/idl/lib.py.
           - "jstests/**"
-          - "library_dependency_graph.json"
           - "patch_files.txt"
           - "evergreen/**"
           - "src/mongo/client/sdam/json_tests/sdam_tests/**"
@@ -2781,68 +2768,6 @@ tasks:
       files:
         - src/burn_in_tests_gen.json
 
-- name: burn_in_tests_multiversion_gen
-  tags: []
-  commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - *f_expansions_write
-  - *kill_processes
-  - *cleanup_environment
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "f_expansions_write"
-  - func: "configure evergreen api credentials"
-  - func: "do multiversion setup"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-        - "src/evergreen/burn_in_tests_multiversion.sh"
-
-  - command: archive.targz_pack
-    params:
-      target: src/burn_in_tests_multiversion_gen.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-        - burn_in_tests_multiversion_gen.json
-
-  - command: archive.targz_pack
-    params:
-      target: src/generate_tasks_config.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-        - "*"
-
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/generate_tasks_config.tgz
-      remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen-${build_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/gzip
-      optional: true
-      display_name: Generated Multiversion Resmoke.py Suite Config - Execution ${execution}
-
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/burn_in_tests_multiversion_gen.tgz
-      remote_file: ${project}/${build_variant}/${revision}/generate_tasks/burn_in_tests_multiversion_gen_config-${build_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/gzip
-      display_name: Burn_in_tests Task Config - Execution ${execution}
-
-  - command: generate.tasks
-    params:
-      files:
-        - src/generated_resmoke_config/burn_in_tests_multiversion_gen.json
-
 - <<: *benchmark_template
   name: benchmarks_orphaned
   tags: ["benchmarks"]
@@ -2958,7 +2883,7 @@ tasks:
 ## initial sync multiversion fuzzer ##
 - <<: *jstestfuzz_template
   name: initial_sync_multiversion_fuzzer_gen
-  tags: ["multiversion_fuzzer"]
+  tags: ["multiversion_fuzzer", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -2969,7 +2894,6 @@ tasks:
       suite: initial_sync_multiversion_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       name: initial_sync_multiversion_fuzzer
-      require_multiversion: true
 
 ## initial sync generational fuzzer ##
 - <<: *jstestfuzz_template
@@ -3000,7 +2924,6 @@ tasks:
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       npm_command: agg-fuzzer
       name: aggregation_multiversion_fuzzer
-      require_multiversion: true
 
 ## Standalone generational fuzzer for multiversion aggregation expressions ##
 - <<: *jstestfuzz_template
@@ -3016,7 +2939,6 @@ tasks:
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       npm_command: agg-expr-fuzzer
       name: aggregation_expression_multiversion_fuzzer
-      require_multiversion: true
 
 ## Standalone generational fuzzer for checking optimized and unoptimized expression equivalence
 - <<: *jstestfuzz_template
@@ -3149,7 +3071,7 @@ tasks:
 ## jstestfuzz replication update generational fuzzer ##
 - <<: *jstestfuzz_template
   name: update_fuzzer_replication_gen
-  tags: ["updatefuzzer"]
+  tags: ["updatefuzzer", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3160,12 +3082,11 @@ tasks:
       suite: generational_fuzzer_replication
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       name: update_fuzzer_replication
-      require_multiversion: true
 
 ## rollback multiversion fuzzer ##
 - <<: *jstestfuzz_template
   name: rollback_multiversion_fuzzer_gen
-  tags: ["multiversion_fuzzer"]
+  tags: ["multiversion_fuzzer", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3178,7 +3099,6 @@ tasks:
       # index build commit quorum.
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}, enableIndexBuildCommitQuorum: false}'"
       name: rollback_multiversion_fuzzer
-      require_multiversion: true
 
 ## rollback generational fuzzer ##
 - <<: *jstestfuzz_template
@@ -3507,7 +3427,7 @@ tasks:
 ## jstestfuzz replica set ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_multiversion_passthrough_gen
-  tags: ["jstestfuzz_multiversion_passthrough_gen"]
+  tags: ["jstestfuzz_multiversion_passthrough_gen", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3515,9 +3435,6 @@ tasks:
       jstestfuzz_vars: --jsTestsDir ../jstests
       resmoke_args: "--storageEngine=wiredTiger --mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       suite: jstestfuzz_replication
-      is_jstestfuzz: true
-      require_multiversion: true
-      implicit_multiversion: true
       npm_command: jstestfuzz
 
 ## jstestfuzz initial sync replica set ##
@@ -3572,7 +3489,6 @@ tasks:
       jstestfuzz_vars: --jsTestsDir ../jstests
       resmoke_args: "--storageEngine=wiredTiger --mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       suite: jstestfuzz_sharded
-      is_jstestfuzz: true
       require_multiversion: true
       implicit_multiversion: true
       npm_command: jstestfuzz
@@ -3698,14 +3614,12 @@ tasks:
 ## Tests that the multiversion test generation logic is not broken.
 - <<: *gen_task_template
   name: multiversion_sanity_check_passthrough_gen
-  tags: []
+  tags: ["multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: replica_sets_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger --includeWithAnyTags=multiversion_sanity_check
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *gen_task_template
   name: replica_sets_jscore_multiversion_passthrough_gen
@@ -3959,14 +3873,12 @@ tasks:
 
 - <<: *gen_task_template
   name: change_streams_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: change_streams
       resmoke_args: --storageEngine=wiredTiger
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *task_template
   name: change_streams_update_v1_oplog
@@ -4023,14 +3935,12 @@ tasks:
 
 - <<: *gen_task_template
   name: change_streams_sharded_collections_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: change_streams_sharded_collections_passthrough
       resmoke_args: --storageEngine=wiredTiger
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *task_template
   name: change_streams_whole_db_passthrough
@@ -4690,12 +4600,11 @@ tasks:
 
 - <<: *gen_task_template
   name: multiversion_gen
-  tags: []
+  tags: ["multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: "--storageEngine=wiredTiger"
-      require_multiversion: true
 
 # Tests the runFeatureFlagMultiversionTest helper.
 # This requires the 'featureFlagToaster' and 'featureFlagSpoon' parameters to be set to true on
@@ -4779,14 +4688,12 @@ tasks:
 
 - <<: *gen_task_template
   name: sharded_collections_jscore_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: sharded_collections_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *task_template
   name: sharding_jscore_passthrough
@@ -4799,14 +4706,12 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_jscore_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough"]
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: sharding_jscore_passthrough
       resmoke_args: --storageEngine=wiredTiger
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *gen_task_template
   name: sharding_api_version_jscore_passthrough_gen
@@ -4986,14 +4891,12 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_multiversion_passthrough_gen
-  tags: [multiversion_passthrough]
+  tags: [multiversion_passthrough, "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: concurrency_replication
       resmoke_args: --storageEngine=wiredTiger
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *gen_task_template
   name: concurrency_replication_causal_consistency_gen
@@ -5074,14 +4977,12 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_replication_multiversion_passthrough_gen
-  tags: ["multiversion_passthrough", "sharded"]
+  tags: ["multiversion_passthrough", "sharded", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       suite: concurrency_sharded_replication
       resmoke_args: --storageEngine=wiredTiger
-      require_multiversion: true
-      implicit_multiversion: true
 
 - <<: *gen_task_template
   name: concurrency_sharded_replication_with_balancer_gen
@@ -5417,12 +5318,11 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_multiversion_gen
-  tags: ["random_multiversion_ds"]
+  tags: ["random_multiversion_ds", "multiversion"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       resmoke_args: --storageEngine=wiredTiger --tagFile=generated_resmoke_config/multiversion_exclude_tags.yml
-      require_multiversion: true
       suite: replica_sets_multiversion
 
 - <<: *task_template
@@ -5526,7 +5426,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
-      require_multiversion: true
       resmoke_args: --tagFile=generated_resmoke_config/multiversion_exclude_tags.yml
 
 - <<: *gen_task_template

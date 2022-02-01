@@ -68,8 +68,8 @@ public:
                                                                StringData ident,
                                                                const CollectionOptions& options);
 
-    virtual std::unique_ptr<mongo::RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
-                                                                         StringData ident) override;
+    virtual std::unique_ptr<mongo::RecordStore> makeTemporaryRecordStore(
+        OperationContext* opCtx, StringData ident, KeyFormat keyFormat) override;
 
     virtual Status createSortedDataInterface(OperationContext* opCtx,
                                              const CollectionOptions& collOptions,
@@ -205,6 +205,8 @@ public:
     static bool instanceExists();
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) {}
+
+    void dump() const override {}
 
 private:
     void _cleanHistory(WithLock);

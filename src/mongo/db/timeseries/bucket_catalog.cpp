@@ -48,7 +48,9 @@ namespace mongo {
 namespace {
 
 void normalizeArray(BSONArrayBuilder* builder, const BSONObj& obj);
-void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj);
+void normalizeObject(BSONObjBuilder* builder,
+                     const BSONObj& obj,
+                     boost::optional<StringData> omitField = boost::none);
 
 const auto getBucketCatalog = ServiceContext::declareDecoration<BucketCatalog>();
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeWriteConflict);
@@ -76,7 +78,9 @@ void normalizeArray(BSONArrayBuilder* builder, const BSONObj& obj) {
     }
 }
 
-void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
+void normalizeObject(BSONObjBuilder* builder,
+                     const BSONObj& obj,
+                     boost::optional<StringData> omitField) {
     // BSONObjIteratorSorted provides an abstraction similar to what this function does. However it
     // is using a lexical comparison that is slower than just doing a binary comparison of the field
     // names. That is all we need here as we are looking to create something that is binary
@@ -113,6 +117,10 @@ void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
     auto end = fields.end();
     std::sort(it, end);
     for (; it != end; ++it) {
+        if (omitField && *omitField == it->fieldName) {
+            continue;
+        }
+
         auto elem = it->element();
         if (elem.type() == BSONType::Array) {
             BSONArrayBuilder subArray(builder->subarrayStart(elem.fieldNameStringData()));
@@ -155,6 +163,197 @@ BSONObj buildControlMinTimestampDoc(StringData timeField, Date_t roundedTime) {
     builder.append(timeField, roundedTime);
     return builder.obj();
 }
+
+enum class SchemaChange { Compatible, NeedsMerge, Incompatible };
+
+SchemaChange compareSchemaArray(const BSONObj& reference, const BSONObj& arr);
+
+// Recursive comparison helper for objects
+SchemaChange compareSchemaObject(const BSONObj& reference, const BSONObj& obj) {
+    SchemaChange res{SchemaChange::Compatible};
+
+    auto refIt = reference.begin();
+    auto refEnd = reference.end();
+    auto it = obj.begin();
+    auto end = obj.end();
+
+    // Iterate until we reach end of any of the two objects.
+    while (refIt != refEnd && it != end) {
+        StringData refName = refIt->fieldNameStringData();
+        StringData itName = it->fieldNameStringData();
+        int nameCmp = refName.compare(itName);
+        if (nameCmp == 0) {
+            bool typeMatch = refIt->canonicalType() == it->canonicalType();
+            SchemaChange subRes{SchemaChange::Compatible};
+            if (!typeMatch) {
+                return SchemaChange::Incompatible;
+            } else if (refIt->type() == Object) {
+                subRes = compareSchemaObject(refIt->Obj(), it->Obj());
+            } else if (refIt->type() == Array) {
+                subRes = compareSchemaArray(refIt->Obj(), it->Obj());
+            }
+
+            if (subRes == SchemaChange::Incompatible) {
+                return subRes;
+            } else if (subRes == SchemaChange::NeedsMerge) {
+                res = subRes;
+            }
+
+            ++refIt;
+            ++it;
+        } else if (nameCmp < 0) {
+            res = SchemaChange::NeedsMerge;
+            ++refIt;
+        } else {
+            res = SchemaChange::NeedsMerge;
+            ++it;
+        }
+    }
+
+    // If we haven't detected any schema change yet, but we have extra elements in one of the
+    // objects, then we just need to mark the changes compatible.
+    if (res == SchemaChange::Compatible && (refIt != refEnd || it != end)) {
+        res = SchemaChange::NeedsMerge;
+    }
+
+    return res;
+}
+
+// Recursively merge helper for arrays
+SchemaChange compareSchemaArray(const BSONObj& reference, const BSONObj& arr) {
+    SchemaChange res{SchemaChange::Compatible};
+
+    auto refIt = reference.begin();
+    auto refEnd = reference.end();
+    auto it = arr.begin();
+    auto end = arr.end();
+
+    // Iterate until we reach end of any of the two objects.
+    while (refIt != refEnd && it != end) {
+        SchemaChange subRes{SchemaChange::Compatible};
+        bool typeMatch = refIt->canonicalType() == it->canonicalType();
+        if (!typeMatch) {
+            return SchemaChange::Incompatible;
+        } else if (refIt->type() == Object) {
+            subRes = compareSchemaObject(refIt->Obj(), it->Obj());
+        } else if (refIt->type() == Array) {
+            subRes = compareSchemaArray(refIt->Obj(), it->Obj());
+        }
+
+        if (subRes == SchemaChange::Incompatible) {
+            return subRes;
+        } else if (subRes == SchemaChange::NeedsMerge) {
+            res = subRes;
+        }
+
+        ++refIt;
+        ++it;
+    }
+
+    // If we haven't detected any schema change yet, but we have extra elements in one of the
+    // arrays, then we just need to mark the changes compatible.
+    if (res == SchemaChange::Compatible && (refIt != refEnd || it != end)) {
+        res = SchemaChange::NeedsMerge;
+    }
+
+    return res;
+}
+
+void mergeSchemaArray(BSONArrayBuilder* builder, const BSONObj& reference, const BSONObj& arr);
+
+// Recursive merge helper for objects
+void mergeSchemaObject(BSONObjBuilder* builder, const BSONObj& reference, const BSONObj& obj) {
+    auto refIt = reference.begin();
+    auto refEnd = reference.end();
+    auto it = obj.begin();
+    auto end = obj.end();
+
+    // Iterate until we reach end of any of the two objects.
+    while (refIt != refEnd && it != end) {
+        StringData refName = refIt->fieldNameStringData();
+        StringData itName = it->fieldNameStringData();
+        int nameCmp = refName.compare(itName);
+        if (nameCmp == 0) {
+            if (refIt->type() == Object) {
+                // Recurse deeper
+                BSONObjBuilder subBuilder{builder->subobjStart(refName)};
+                mergeSchemaObject(&subBuilder, refIt->Obj(), it->Obj());
+
+            } else if (refIt->type() == Array) {
+                BSONArrayBuilder subBuilder{builder->subarrayStart(refName)};
+                mergeSchemaArray(&subBuilder, refIt->Obj(), it->Obj());
+            } else {
+                builder->append(*refIt);
+            }
+            ++refIt;
+            ++it;
+        } else if (nameCmp < 0) {
+            builder->append(*refIt);
+            ++refIt;
+        } else {
+            builder->append(*it);
+            ++it;
+        }
+    }
+
+    // Add remaining reference elements when we reached end first in 'obj'.
+    for (; refIt != refEnd; ++refIt) {
+        builder->append(*refIt);
+    }
+
+    // Add remaining 'obj' elements when we reached end first in 'reference'.
+    for (; it != end; ++it) {
+        builder->append(*it);
+    }
+}
+
+// Recursively merge helper for arrays
+void mergeSchemaArray(BSONArrayBuilder* builder, const BSONObj& reference, const BSONObj& arr) {
+    auto refIt = reference.begin();
+    auto refEnd = reference.end();
+    auto it = arr.begin();
+    auto end = arr.end();
+
+    // Iterate until we reach end of any of the two objects.
+    while (refIt != refEnd && it != end) {
+        if (refIt->type() == Object) {
+            // Recurse deeper
+            BSONObjBuilder subBuilder{builder->subobjStart()};
+            mergeSchemaObject(&subBuilder, refIt->Obj(), it->Obj());
+
+        } else if (refIt->type() == Array) {
+            BSONArrayBuilder subBuilder{builder->subarrayStart()};
+            mergeSchemaArray(&subBuilder, refIt->Obj(), it->Obj());
+        } else {
+            builder->append(*refIt);
+        }
+        ++refIt;
+        ++it;
+    }
+
+    // Add remaining reference elements when we reached end first in 'obj'.
+    for (; refIt != refEnd; ++refIt) {
+        builder->append(*refIt);
+    }
+
+    // Add remaining 'obj' elements when we reached end first in 'reference'.
+    for (; it != end; ++it) {
+        builder->append(*it);
+    }
+}
+
+// Recursively merge two sorted objects of compatible schema, retaining type information.
+BSONObj mergeSchema(const BSONObj& reference, const BSONObj& input) {
+    if (reference.isEmptyPrototype()) {
+        return input;
+    }
+
+    BSONObjBuilder merged;
+    mergeSchemaObject(&merged, reference, input);
+
+    return merged.obj();
+}
+
 }  // namespace
 
 const std::shared_ptr<BucketCatalog::ExecutionStats> BucketCatalog::kEmptyStats{
@@ -168,8 +367,8 @@ BucketCatalog& BucketCatalog::get(OperationContext* opCtx) {
     return get(opCtx->getServiceContext());
 }
 
-BSONObj BucketCatalog::getMetadata(Bucket* ptr) const {
-    BucketAccess bucket{const_cast<BucketCatalog*>(this), ptr};
+BSONObj BucketCatalog::getMetadata(const OID& bucketId) const {
+    BucketAccess bucket{const_cast<BucketCatalog*>(this), bucketId};
     if (!bucket) {
         return {};
     }
@@ -191,6 +390,10 @@ StatusWith<BucketCatalog::InsertResult> BucketCatalog::insert(
         metadata = doc[*metaFieldName];
     }
     auto key = BucketKey{ns, BucketMetadata{metadata, comparator}};
+
+    BSONObjBuilder normalized;
+    normalizeObject(&normalized, doc, metaFieldName);
+    BSONObj schema = normalized.obj();
 
     auto stats = _getExecutionStats(ns);
     invariant(stats);
@@ -217,7 +420,11 @@ StatusWith<BucketCatalog::InsertResult> BucketCatalog::insert(
                                                 &newFieldNamesSize,
                                                 &sizeToBeAdded);
 
-    auto isBucketFull = [&](BucketAccess* bucket) -> bool {
+    auto shouldCloseBucket = [&](BucketAccess* bucket) -> bool {
+        if (bucket->schemaIncompatible(schema)) {
+            stats->numBucketsClosedDueToSchemaChange.fetchAndAddRelaxed(1);
+            return true;
+        }
         if ((*bucket)->_numMeasurements == static_cast<std::uint64_t>(gTimeseriesBucketMaxCount)) {
             stats->numBucketsClosedDueToCount.fetchAndAddRelaxed(1);
             return true;
@@ -239,8 +446,8 @@ StatusWith<BucketCatalog::InsertResult> BucketCatalog::insert(
         return false;
     };
 
-    if (!bucket->_ns.isEmpty() && isBucketFull(&bucket)) {
-        bucket.rollover(isBucketFull, &closedBuckets);
+    if (!bucket->_ns.isEmpty() && shouldCloseBucket(&bucket)) {
+        bucket.rollover(shouldCloseBucket, &closedBuckets);
 
         bucket->_calculateBucketFieldsAndSizeChange(doc,
                                                     options.getMetaField(),
@@ -270,6 +477,10 @@ StatusWith<BucketCatalog::InsertResult> BucketCatalog::insert(
         // _openBuckets, _idleBuckets.
         bucket->_memoryUsage += (ns.size() * 2) + (bucket->_metadata.toBSON().objsize() * 2) +
             sizeof(Bucket) + sizeof(std::unique_ptr<Bucket>) + (sizeof(Bucket*) * 2);
+
+        BSONObjBuilder normalized;
+        normalizeObject(&normalized, doc);
+        bucket->_schema = normalized.obj();
     } else {
         _memoryUsage.fetchAndSubtract(bucket->_memoryUsage);
     }
@@ -286,7 +497,7 @@ bool BucketCatalog::prepareCommit(std::shared_ptr<WriteBatch> batch) {
 
     _waitToCommitBatch(batch);
 
-    BucketAccess bucket(this, batch->bucket(), BucketState::kPrepared);
+    BucketAccess bucket(this, batch->bucketId(), BucketState::kPrepared);
     if (batch->finished()) {
         // Someone may have aborted it while we were waiting.
         return false;
@@ -296,10 +507,8 @@ bool BucketCatalog::prepareCommit(std::shared_ptr<WriteBatch> batch) {
     }
 
     auto prevMemoryUsage = bucket->_memoryUsage;
-    batch->_prepareCommit();
+    batch->_prepareCommit(bucket);
     _memoryUsage.fetchAndAdd(bucket->_memoryUsage - prevMemoryUsage);
-
-    bucket->_batches.erase(batch->_opId);
 
     return true;
 }
@@ -311,10 +520,9 @@ boost::optional<BucketCatalog::ClosedBucket> BucketCatalog::finish(
 
     boost::optional<ClosedBucket> closedBucket;
 
-    Bucket* ptr(batch->bucket());
     batch->_finish(info);
 
-    BucketAccess bucket(this, ptr, BucketState::kNormal);
+    BucketAccess bucket(this, batch->bucketId(), BucketState::kNormal);
     if (bucket) {
         bucket->_preparedBatch.reset();
     }
@@ -337,10 +545,12 @@ boost::optional<BucketCatalog::ClosedBucket> BucketCatalog::finish(
         // here. In this case, we should abort any other ongoing batches and clear the bucket from
         // the catalog so it's not hanging around idle.
         auto lk = _lockExclusive();
-        if (_allBuckets.contains(ptr)) {
-            stdx::unique_lock blk{ptr->_mutex};
-            ptr->_preparedBatch.reset();
-            _abort(blk, ptr, nullptr, boost::none);
+        auto it = _allBuckets.find(batch->bucketId());
+        if (it != _allBuckets.end()) {
+            auto bucket = it->second.get();
+            stdx::unique_lock blk{bucket->_mutex};
+            bucket->_preparedBatch.reset();
+            _abort(blk, bucket, nullptr, boost::none);
         }
     } else if (bucket->allCommitted()) {
         if (bucket->_full) {
@@ -351,18 +561,25 @@ boost::optional<BucketCatalog::ClosedBucket> BucketCatalog::finish(
             bucket.release();
             auto lk = _lockExclusive();
 
-            closedBucket =
-                ClosedBucket{ptr->_id, ptr->getTimeField().toString(), ptr->numMeasurements()};
+            auto it = _allBuckets.find(batch->bucketId());
+            if (it != _allBuckets.end()) {
+                Bucket* ptr = it->second.get();
+                _verifyBucketIsUnused(ptr);
 
-            // Only remove from _allBuckets and _idleBuckets. If it was marked full, we know that
-            // happened in BucketAccess::rollover, and that there is already a new open bucket for
-            // this metadata.
-            _markBucketNotIdle(ptr, false /* locked */);
-            {
-                stdx::lock_guard statesLk{_statesMutex};
-                _bucketStates.erase(ptr->_id);
+                closedBucket = ClosedBucket{
+                    batch->bucketId(), ptr->getTimeField().toString(), ptr->numMeasurements()};
+
+                // Only remove from _allBuckets and _idleBuckets. If it was marked full, we know
+                // that happened in BucketAccess::rollover, and that there is already a new open
+                // bucket for this metadata.
+                _markBucketNotIdle(ptr, false /* locked */);
+                {
+                    stdx::lock_guard statesLk{_statesMutex};
+                    _bucketStates.erase(batch->bucketId());
+                }
+
+                _allBuckets.erase(batch->bucketId());
             }
-            _allBuckets.erase(ptr);
         } else {
             _markBucketIdle(bucket);
         }
@@ -386,16 +603,16 @@ void BucketCatalog::abort(std::shared_ptr<WriteBatch> batch,
         return;
     }
 
-    Bucket* bucket = batch->bucket();
-
     // Before we access the bucket, make sure it's still there.
     auto lk = _lockExclusive();
-    if (!_allBuckets.contains(bucket)) {
+    auto it = _allBuckets.find(batch->bucketId());
+    if (it == _allBuckets.end()) {
         // Special case, bucket has already been cleared, and we need only abort this batch.
-        batch->_abort(status, false);
+        batch->_abort(status, nullptr);
         return;
     }
 
+    Bucket* bucket = it->second.get();
     stdx::unique_lock blk{bucket->_mutex};
     _abort(blk, bucket, batch, status);
 }
@@ -415,7 +632,7 @@ void BucketCatalog::clear(const std::function<bool(const NamespaceString&)>& sho
     for (auto it = _allBuckets.begin(); it != _allBuckets.end();) {
         auto nextIt = std::next(it);
 
-        const auto& bucket = *it;
+        const auto& bucket = it->second;
         stdx::unique_lock blk{bucket->_mutex};
         if (shouldClear(bucket->_ns)) {
             _executionStats.erase(bucket->_ns);
@@ -442,6 +659,8 @@ void BucketCatalog::appendExecutionStats(const NamespaceString& ns, BSONObjBuild
     builder->appendNumber("numBucketsOpenedDueToMetadata",
                           stats->numBucketsOpenedDueToMetadata.load());
     builder->appendNumber("numBucketsClosedDueToCount", stats->numBucketsClosedDueToCount.load());
+    builder->appendNumber("numBucketsClosedDueToSchemaChange",
+                          stats->numBucketsClosedDueToSchemaChange.load());
     builder->appendNumber("numBucketsClosedDueToSize", stats->numBucketsClosedDueToSize.load());
     builder->appendNumber("numBucketsClosedDueToTimeForward",
                           stats->numBucketsClosedDueToTimeForward.load());
@@ -485,8 +704,8 @@ BucketCatalog::StripedMutex::ExclusiveLock BucketCatalog::_lockExclusive() const
 
 void BucketCatalog::_waitToCommitBatch(const std::shared_ptr<WriteBatch>& batch) {
     while (true) {
-        BucketAccess bucket{this, batch->bucket()};
-        if (!bucket) {
+        BucketAccess bucket{this, batch->bucketId()};
+        if (!bucket || batch->finished()) {
             return;
         }
 
@@ -494,6 +713,7 @@ void BucketCatalog::_waitToCommitBatch(const std::shared_ptr<WriteBatch>& batch)
         if (!current) {
             // No other batches for this bucket are currently committing, so we can proceed.
             bucket->_preparedBatch = batch;
+            bucket->_batches.erase(batch->_opId);
             break;
         }
 
@@ -504,7 +724,7 @@ void BucketCatalog::_waitToCommitBatch(const std::shared_ptr<WriteBatch>& batch)
 }
 
 bool BucketCatalog::_removeBucket(Bucket* bucket, bool expiringBuckets) {
-    auto it = _allBuckets.find(bucket);
+    auto it = _allBuckets.find(bucket->id());
     if (it == _allBuckets.end()) {
         return false;
     }
@@ -518,7 +738,7 @@ bool BucketCatalog::_removeBucket(Bucket* bucket, bool expiringBuckets) {
     _openBuckets.erase({bucket->_ns, bucket->_metadata});
     {
         stdx::lock_guard statesLk{_statesMutex};
-        _bucketStates.erase(bucket->_id);
+        _bucketStates.erase(bucket->id());
     }
     _allBuckets.erase(it);
 
@@ -540,7 +760,7 @@ void BucketCatalog::_abort(stdx::unique_lock<Mutex>& lk,
     // otherwise try to claim the rights and abort it. If we don't get the rights, then wait
     // for the other writer to resolve the batch.
     for (const auto& [_, current] : bucket->_batches) {
-        current->_abort(status, true);
+        current->_abort(status, bucket);
     }
     bucket->_batches.clear();
 
@@ -550,7 +770,7 @@ void BucketCatalog::_abort(stdx::unique_lock<Mutex>& lk,
                            // that batch is finished.
     if (auto& prepared = bucket->_preparedBatch) {
         if (prepared == batch) {
-            prepared->_abort(status, true);
+            prepared->_abort(status, bucket);
             prepared.reset();
         } else {
             doRemove = false;
@@ -592,16 +812,25 @@ void BucketCatalog::_verifyBucketIsUnused(Bucket* bucket) const {
 void BucketCatalog::_expireIdleBuckets(ExecutionStats* stats,
                                        std::vector<BucketCatalog::ClosedBucket>* closedBuckets) {
     // Must hold an exclusive lock on _bucketMutex from outside.
-    stdx::lock_guard lk{_idleMutex};
+    stdx::unique_lock lk{_idleMutex};
 
     // As long as we still need space and have entries and remaining attempts, close idle buckets.
     int32_t numClosed = 0;
     while (!_idleBuckets.empty() &&
            _memoryUsage.load() >
-               static_cast<std::uint64_t>(gTimeseriesIdleBucketExpiryMemoryUsageThreshold) &&
+               static_cast<std::uint64_t>(gTimeseriesIdleBucketExpiryMemoryUsageThreshold.load()) &&
            numClosed <= gTimeseriesIdleBucketExpiryMaxCountPerAttempt) {
         Bucket* bucket = _idleBuckets.back();
+
+        lk.unlock();
         _verifyBucketIsUnused(bucket);
+        lk.lock();
+        if (!bucket->_idleListEntry) {
+            // The bucket may have become non-idle between when we unlocked _idleMutex and locked
+            // the bucket's mutex.
+            continue;
+        }
+
         ClosedBucket closed{
             bucket->id(), bucket->getTimeField().toString(), bucket->numMeasurements()};
         if (_removeBucket(bucket, true /* expiringBuckets */)) {
@@ -625,14 +854,31 @@ BucketCatalog::Bucket* BucketCatalog::_allocateBucket(const BucketKey& key,
                                                       bool openedDuetoMetadata) {
     _expireIdleBuckets(stats, closedBuckets);
 
-    auto [it, inserted] = _allBuckets.insert(std::make_unique<Bucket>());
-    Bucket* bucket = it->get();
-    _setIdTimestamp(bucket, time, options);
+    OID bucketId = OID::gen();
+
+    auto roundedTime = timeseries::roundTimestampToGranularity(time, options.getGranularity());
+    auto const roundedSeconds = durationCount<Seconds>(roundedTime.toDurationSinceEpoch());
+    bucketId.setTimestamp(roundedSeconds);
+
+    auto [it, inserted] = _allBuckets.try_emplace(bucketId, std::make_unique<Bucket>(bucketId));
+    tassert(6130900, "Expected bucket to be inserted", inserted);
+    Bucket* bucket = it->second.get();
     _openBuckets[key] = bucket;
+    {
+        stdx::lock_guard statesLk{_statesMutex};
+        _bucketStates.emplace(bucketId, BucketState::kNormal);
+    }
 
     if (openedDuetoMetadata) {
         stats->numBucketsOpenedDueToMetadata.fetchAndAddRelaxed(1);
     }
+
+    bucket->_timeField = options.getTimeField().toString();
+
+    // Make sure we set the control.min time field to match the rounded _id timestamp.
+    auto controlDoc = buildControlMinTimestampDoc(options.getTimeField(), roundedTime);
+    bucket->_minmax.update(
+        controlDoc, bucket->_metadata.getMetaField(), bucket->_metadata.getComparator());
 
     return bucket;
 }
@@ -661,23 +907,6 @@ const std::shared_ptr<BucketCatalog::ExecutionStats> BucketCatalog::_getExecutio
         return it->second;
     }
     return kEmptyStats;
-}
-
-void BucketCatalog::_setIdTimestamp(Bucket* bucket,
-                                    const Date_t& time,
-                                    const TimeseriesOptions& options) {
-    auto roundedTime = timeseries::roundTimestampToGranularity(time, options.getGranularity());
-    auto const roundedSeconds = durationCount<Seconds>(roundedTime.toDurationSinceEpoch());
-    bucket->_id.setTimestamp(roundedSeconds);
-    bucket->_timeField = options.getTimeField().toString();
-
-    // Make sure we set the control.min time field to match the rounded _id timestamp.
-    auto controlDoc = buildControlMinTimestampDoc(options.getTimeField(), roundedTime);
-    bucket->_minmax.update(
-        controlDoc, bucket->_metadata.getMetaField(), bucket->_metadata.getComparator());
-
-    stdx::lock_guard statesLk{_statesMutex};
-    _bucketStates.emplace(bucket->_id, BucketState::kNormal);
 }
 
 boost::optional<BucketCatalog::BucketState> BucketCatalog::_setBucketState(const OID& id,
@@ -774,6 +1003,8 @@ const StringData::ComparatorInterface* BucketCatalog::BucketMetadata::getCompara
     return _comparator;
 }
 
+BucketCatalog::Bucket::Bucket(const OID& id) : _id(id) {}
+
 const OID& BucketCatalog::Bucket::id() const {
     return _id;
 }
@@ -836,7 +1067,7 @@ std::shared_ptr<BucketCatalog::WriteBatch> BucketCatalog::Bucket::_activeBatch(
     OperationId opId, const std::shared_ptr<ExecutionStats>& stats) {
     auto it = _batches.find(opId);
     if (it == _batches.end()) {
-        it = _batches.try_emplace(opId, std::make_shared<WriteBatch>(this, opId, stats)).first;
+        it = _batches.try_emplace(opId, std::make_shared<WriteBatch>(_id, opId, stats)).first;
     }
     return it->second;
 }
@@ -906,7 +1137,7 @@ BucketCatalog::BucketAccess::BucketAccess(BucketCatalog* catalog,
 }
 
 BucketCatalog::BucketAccess::BucketAccess(BucketCatalog* catalog,
-                                          Bucket* bucket,
+                                          const OID& bucketId,
                                           boost::optional<BucketState> targetState)
     : _catalog(catalog) {
     invariant(!targetState || targetState == BucketState::kNormal ||
@@ -914,12 +1145,12 @@ BucketCatalog::BucketAccess::BucketAccess(BucketCatalog* catalog,
 
     {
         auto lk = _catalog->_lockShared();
-        auto bucketIt = _catalog->_allBuckets.find(bucket);
+        auto bucketIt = _catalog->_allBuckets.find(bucketId);
         if (bucketIt == _catalog->_allBuckets.end()) {
             return;
         }
 
-        _bucket = bucket;
+        _bucket = bucketIt->second.get();
         _acquire();
     }
 
@@ -1067,13 +1298,27 @@ BucketCatalog::BucketAccess::operator BucketCatalog::Bucket*() const {
     return _bucket;
 }
 
-void BucketCatalog::BucketAccess::rollover(const std::function<bool(BucketAccess*)>& isBucketFull,
-                                           ClosedBuckets* closedBuckets) {
+bool BucketCatalog::BucketAccess::schemaIncompatible(const BSONObj& input) {
+    auto res = compareSchemaObject(_bucket->_schema, input);
+    if (res == SchemaChange::Compatible) {
+        return false;
+    } else if (res == SchemaChange::Incompatible) {
+        return true;
+    }
+
+    invariant(res == SchemaChange::NeedsMerge);
+    _bucket->_schema = mergeSchema(_bucket->_schema, input);
+
+    return false;
+}
+
+void BucketCatalog::BucketAccess::rollover(
+    const std::function<bool(BucketAccess*)>& shouldCloseBucket, ClosedBuckets* closedBuckets) {
     invariant(isLocked());
     invariant(_key);
     invariant(_time);
 
-    auto oldBucket = _bucket;
+    auto oldId = _bucket->id();
     release();
 
     // Precompute the hash outside the lock, since it's expensive.
@@ -1089,8 +1334,8 @@ void BucketCatalog::BucketAccess::rollover(const std::function<bool(BucketAccess
 
     // Recheck if still full now that we've reacquired the bucket.
     bool sameBucket =
-        oldBucket == _bucket;  // Only record stats if bucket has changed, don't double-count.
-    if (sameBucket || isBucketFull(this)) {
+        oldId == _bucket->id();  // Only record stats if bucket has changed, don't double-count.
+    if (sameBucket || shouldCloseBucket(this)) {
         // The bucket is indeed full, so create a new one.
         if (_bucket->allCommitted()) {
             // The bucket does not contain any measurements that are yet to be committed, so we can
@@ -1098,7 +1343,7 @@ void BucketCatalog::BucketAccess::rollover(const std::function<bool(BucketAccess
             closedBuckets->push_back(ClosedBucket{
                 _bucket->id(), _bucket->getTimeField().toString(), _bucket->numMeasurements()});
 
-            oldBucket = _bucket;
+            Bucket* oldBucket = _bucket;
             release();
             bool removed = _catalog->_removeBucket(oldBucket, false /* expiringBuckets */);
             invariant(removed);
@@ -1119,10 +1364,10 @@ Date_t BucketCatalog::BucketAccess::getTime() const {
     return _bucket->id().asDateT();
 }
 
-BucketCatalog::WriteBatch::WriteBatch(Bucket* bucket,
+BucketCatalog::WriteBatch::WriteBatch(const OID& bucketId,
                                       OperationId opId,
                                       const std::shared_ptr<ExecutionStats>& stats)
-    : _bucket{bucket}, _opId(opId), _stats{stats} {}
+    : _bucketId{bucketId}, _opId(opId), _stats{stats} {}
 
 bool BucketCatalog::WriteBatch::claimCommitRights() {
     return !_commitRights.swap(true);
@@ -1135,8 +1380,8 @@ StatusWith<BucketCatalog::CommitInfo> BucketCatalog::WriteBatch::getResult() con
     return _promise.getFuture().getNoThrow();
 }
 
-BucketCatalog::Bucket* BucketCatalog::WriteBatch::bucket() const {
-    return _bucket;
+const OID& BucketCatalog::WriteBatch::bucketId() const {
+    return _bucketId;
 }
 
 const std::vector<BSONObj>& BucketCatalog::WriteBatch::measurements() const {
@@ -1196,42 +1441,42 @@ void BucketCatalog::WriteBatch::_recordNewFields(NewFieldNames&& fields) {
     }
 }
 
-void BucketCatalog::WriteBatch::_prepareCommit() {
+void BucketCatalog::WriteBatch::_prepareCommit(Bucket* bucket) {
     invariant(_commitRights.load());
     invariant(_active);
     _active = false;
-    _numPreviouslyCommittedMeasurements = _bucket->_numCommittedMeasurements;
+    _numPreviouslyCommittedMeasurements = bucket->_numCommittedMeasurements;
 
     // Filter out field names that were new at the time of insertion, but have since been committed
     // by someone else.
     for (auto it = _newFieldNamesToBeInserted.begin(); it != _newFieldNamesToBeInserted.end();) {
         StringMapHashedKey fieldName(it->first, it->second);
-        if (_bucket->_fieldNames.contains(fieldName)) {
+        if (bucket->_fieldNames.contains(fieldName)) {
             _newFieldNamesToBeInserted.erase(it++);
             continue;
         }
 
-        _bucket->_fieldNames.emplace(fieldName);
+        bucket->_fieldNames.emplace(fieldName);
         ++it;
     }
 
     for (const auto& doc : _measurements) {
-        _bucket->_minmax.update(
-            doc, _bucket->_metadata.getMetaField(), _bucket->_metadata.getComparator());
+        bucket->_minmax.update(
+            doc, bucket->_metadata.getMetaField(), bucket->_metadata.getComparator());
     }
 
     const bool isUpdate = _numPreviouslyCommittedMeasurements > 0;
     if (isUpdate) {
-        _min = _bucket->_minmax.minUpdates();
-        _max = _bucket->_minmax.maxUpdates();
+        _min = bucket->_minmax.minUpdates();
+        _max = bucket->_minmax.maxUpdates();
     } else {
-        _min = _bucket->_minmax.min();
-        _max = _bucket->_minmax.max();
+        _min = bucket->_minmax.min();
+        _max = bucket->_minmax.max();
 
         // Approximate minmax memory usage by taking sizes of initial commit. Subsequent updates may
         // add fields but are most likely just to update values.
-        _bucket->_memoryUsage += _min.objsize();
-        _bucket->_memoryUsage += _max.objsize();
+        bucket->_memoryUsage += _min.objsize();
+        bucket->_memoryUsage += _max.objsize();
     }
 }
 
@@ -1239,25 +1484,22 @@ void BucketCatalog::WriteBatch::_finish(const CommitInfo& info) {
     invariant(_commitRights.load());
     invariant(!_active);
     _promise.emplaceValue(info);
-    _bucket = nullptr;
 }
 
 void BucketCatalog::WriteBatch::_abort(const boost::optional<Status>& status,
-                                       bool canAccessBucket) {
+                                       const Bucket* bucket) {
     if (finished()) {
         return;
     }
 
     _active = false;
-    std::string bucketIdentification;
-    if (canAccessBucket) {
-        bucketIdentification.append(str::stream()
-                                    << _bucket->id() << " for " << _bucket->_ns << " ");
+    std::string nsIdentification;
+    if (bucket) {
+        nsIdentification.append(str::stream() << " for namespace " << bucket->_ns);
     }
-    _promise.setError(status.value_or(
-        Status{ErrorCodes::TimeseriesBucketCleared,
-               str::stream() << "Time-series bucket " << bucketIdentification << "was cleared"}));
-    _bucket = nullptr;
+    _promise.setError(status.value_or(Status{ErrorCodes::TimeseriesBucketCleared,
+                                             str::stream() << "Time-series bucket " << _bucketId
+                                                           << nsIdentification << " was cleared"}));
 }
 
 class BucketCatalog::ServerStatus : public ServerStatusSection {

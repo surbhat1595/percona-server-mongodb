@@ -38,7 +38,6 @@ namespace mongo {
  */
 class StorageEngineMock : public StorageEngine {
 public:
-    void finishInit() final {}
     RecoveryUnit* newRecoveryUnit() final {
         return nullptr;
     }
@@ -87,11 +86,12 @@ public:
                              const NamespaceString& ns) final {
         return Status::OK();
     }
-    std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(OperationContext* opCtx) final {
+    std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                   KeyFormat keyFormat) final {
         return {};
     }
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreForResumableIndexBuild(
-        OperationContext* opCtx) final {
+        OperationContext* opCtx, KeyFormat keyFormat) final {
         return {};
     }
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreFromExistingIdent(
@@ -169,6 +169,8 @@ public:
     void addDropPendingIdent(const Timestamp& dropTimestamp,
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) final {}
+    void startDropPendingIdentReaper() final {}
+
     void checkpoint() final {}
 
     int64_t sizeOnDiskForDb(OperationContext* opCtx, StringData dbName) final {
@@ -200,6 +202,8 @@ public:
     void unpinOldestTimestamp(const std::string& requestingServiceName) final {}
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) final {}
+
+    void dump() const final {}
 };
 
 }  // namespace mongo

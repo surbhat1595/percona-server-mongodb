@@ -284,8 +284,10 @@ OpTime MutableOplogEntry::getOpTime() const {
 }
 
 size_t DurableOplogEntry::getDurableReplOperationSize(const DurableReplOperation& op) {
+    const auto stmtIds = variant_util::toVector<StmtId>(op.getStatementIds());
     return sizeof(op) + op.getNss().size() + op.getObject().objsize() +
-        (op.getObject2() ? op.getObject2()->objsize() : 0);
+        (op.getObject2() ? op.getObject2()->objsize() : 0) +
+        (sizeof(std::vector<StmtId>) + (sizeof(StmtId) * stmtIds.size()));
 }
 
 StatusWith<DurableOplogEntry> DurableOplogEntry::parse(const BSONObj& object) {
@@ -367,6 +369,20 @@ bool DurableOplogEntry::isCrudOpType(OpTypeEnum opType) {
 
 bool DurableOplogEntry::isCrudOpType() const {
     return isCrudOpType(getOpType());
+}
+
+bool DurableOplogEntry::isUpdateOrDelete() const {
+    auto opType = getOpType();
+    switch (opType) {
+        case OpTypeEnum::kDelete:
+        case OpTypeEnum::kUpdate:
+            return true;
+        case OpTypeEnum::kInsert:
+        case OpTypeEnum::kCommand:
+        case OpTypeEnum::kNoop:
+            return false;
+    }
+    MONGO_UNREACHABLE;
 }
 
 bool DurableOplogEntry::shouldPrepare() const {
@@ -710,6 +726,9 @@ bool OplogEntry::isSingleOplogEntryTransactionWithCommand() const {
 
 bool OplogEntry::isCrudOpType() const {
     return _entry.isCrudOpType();
+}
+bool OplogEntry::isUpdateOrDelete() const {
+    return _entry.isUpdateOrDelete();
 }
 
 bool OplogEntry::isIndexCommandType() const {

@@ -36,7 +36,10 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
@@ -208,16 +211,34 @@ int removeSessionsTransactionRecords(OperationContext* opCtx,
 void createTransactionTable(OperationContext* opCtx) {
     auto serviceCtx = opCtx->getServiceContext();
     CollectionOptions options;
-    auto status =
+    auto createCollectionStatus =
         repl::StorageInterface::get(serviceCtx)
             ->createCollection(opCtx, NamespaceString::kSessionTransactionsTableNamespace, options);
-    if (status == ErrorCodes::NamespaceExists) {
+    if (createCollectionStatus == ErrorCodes::NamespaceExists) {
         return;
     }
 
     uassertStatusOKWithContext(
-        status,
+        createCollectionStatus,
         str::stream() << "Failed to create the "
+                      << NamespaceString::kSessionTransactionsTableNamespace.ns() << " collection");
+
+    NewIndexSpec index;
+    index.setV(int(IndexDescriptor::kLatestIndexVersion));
+    index.setKey(BSON(
+        SessionTxnRecord::kParentSessionIdFieldName
+        << 1
+        << (SessionTxnRecord::kSessionIdFieldName + "." + LogicalSessionId::kTxnNumberFieldName)
+        << 1 << SessionTxnRecord::kSessionIdFieldName << 1));
+    index.setName("parent_lsid");
+    index.setPartialFilterExpression(BSON("parentLsid" << BSON("$exists" << true)));
+
+    const auto createIndexStatus =
+        repl::StorageInterface::get(opCtx)->createIndexesOnEmptyCollection(
+            opCtx, NamespaceString::kSessionTransactionsTableNamespace, {index.toBSON()});
+    uassertStatusOKWithContext(
+        createIndexStatus,
+        str::stream() << "Failed to create partial index for the "
                       << NamespaceString::kSessionTransactionsTableNamespace.ns() << " collection");
 }
 
@@ -304,10 +325,11 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
             LOGV2_DEBUG(21979,
                         3,
                         "Restoring locks of prepared transaction. SessionId: {sessionId} "
-                        "TxnNumber: {txnNumber}",
+                        "TxnNumberAndRetryCounter: {txnNumberAndRetryCounter}",
                         "Restoring locks of prepared transaction",
                         "sessionId"_attr = sessionId.getId(),
-                        "txnNumber"_attr = txnParticipant.getActiveTxnNumber());
+                        "txnNumberAndRetryCounter"_attr =
+                            txnParticipant.getActiveTxnNumberAndRetryCounter());
             txnParticipant.refreshLocksForPreparedTransaction(newOpCtx.get(), false);
         }
     }
@@ -486,7 +508,7 @@ MongoDOperationContextSessionWithoutRefresh::MongoDOperationContextSessionWithou
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinueTransactionUnconditionally(
-        opCtx, clientTxnNumber, clientTxnRetryCounter);
+        opCtx, {clientTxnNumber, clientTxnRetryCounter});
 }
 
 MongoDOperationContextSessionWithoutRefresh::~MongoDOperationContextSessionWithoutRefresh() {

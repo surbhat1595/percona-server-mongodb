@@ -629,10 +629,13 @@ public:
         if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
                 serverGlobalParams.featureCompatibility)) {
             const auto isRecordPreImagesEnabled = cmd->getRecordPreImages().get_value_or(false);
+            const auto isChangeStreamPreAndPostImagesEnabled =
+                (cmd->getChangeStreamPreAndPostImages() &&
+                 cmd->getChangeStreamPreAndPostImages()->getEnabled());
             uassert(ErrorCodes::InvalidOptions,
-                    "recordPreImages and changeStreamPreAndPostImages can not be set to true "
-                    "simultaneously",
-                    !(cmd->getChangeStreamPreAndPostImages() && isRecordPreImagesEnabled));
+                    "'recordPreImages' and 'changeStreamPreAndPostImages.enabled' can not be set "
+                    "to true simultaneously",
+                    !(isChangeStreamPreAndPostImagesEnabled && isRecordPreImagesEnabled));
         } else {
             uassert(5846901,
                     "BSON field 'changeStreamPreAndPostImages' is an unknown field.",
@@ -682,15 +685,13 @@ public:
             auto timeseriesViewCmd =
                 makeTimeseriesViewCollModCommand(opCtx, requestParser.request());
             if (timeseriesViewCmd) {
-                uassertStatusOK(collMod(opCtx,
-                                        timeseriesViewCmd->getNamespace(),
-                                        timeseriesViewCmd->toBSON(BSONObj()),
-                                        &result));
+                uassertStatusOK(processCollModCommand(
+                    opCtx, timeseriesViewCmd->getNamespace(), *timeseriesViewCmd, &result));
             }
             cmd = timeseriesBucketsCmd.get();
         }
 
-        uassertStatusOK(collMod(opCtx, cmd->getNamespace(), cmd->toBSON(BSONObj()), &result));
+        uassertStatusOK(processCollModCommand(opCtx, cmd->getNamespace(), *cmd, &result));
         return true;
     }
 

@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/pipeline/accumulator.h"
+#include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
 
 namespace mongo {
@@ -37,12 +38,18 @@ namespace mongo {
 template <AccumulatorMinMax::Sense sense>
 class WindowFunctionMinMaxCommon : public WindowFunctionState {
 public:
-    void add(Value value) override {
+    void add(Value value) final {
+        // Ignore nullish values.
+        if (value.nullish())
+            return;
         _memUsageBytes += value.getApproximateSize();
         _values.insert(std::move(value));
     }
 
-    void remove(Value value) override {
+    void remove(Value value) final {
+        // Ignore nullish values.
+        if (value.nullish())
+            return;
         // std::multiset::insert is guaranteed to put the element after any equal elements
         // already in the container. So find() / erase() will remove the oldest equal element,
         // which is what we want, to satisfy "remove() undoes add() when called in FIFO order".
@@ -106,23 +113,24 @@ public:
                                                        long long n) {
         return std::make_unique<WindowFunctionMinMaxN<sense>>(expCtx, n);
     }
+
+    static AccumulationExpression parse(ExpressionContext* const expCtx,
+                                        BSONElement elem,
+                                        VariablesParseState vps) {
+        return AccumulatorMinMaxN::parseMinMaxN<sense>(expCtx, elem, vps);
+    }
+
+    static const char* getName() {
+        if constexpr (sense == AccumulatorMinMax::Sense::kMin) {
+            return AccumulatorMinN::getName();
+        } else {
+            return AccumulatorMaxN::getName();
+        }
+    }
+
     explicit WindowFunctionMinMaxN(ExpressionContext* const expCtx, long long n)
         : WindowFunctionMinMaxCommon<sense>(expCtx), _n(n) {
         _memUsageBytes = sizeof(*this);
-    }
-
-    void add(Value value) final {
-        // Ignore nullish values.
-        if (value.nullish())
-            return;
-        WindowFunctionMinMaxCommon<sense>::add(std::move(value));
-    }
-
-    void remove(Value value) final {
-        // Ignore nullish values.
-        if (value.nullish())
-            return;
-        WindowFunctionMinMaxCommon<sense>::remove(std::move(value));
     }
 
     Value getValue() const final {

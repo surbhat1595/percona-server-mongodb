@@ -295,13 +295,14 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
                 _fromExpCtx = _fromExpCtx->copyWith(e->getNamespace());
                 _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
 
-                LOGV2_DEBUG(5865400,
-                            3,
-                            "$graphLookup found view definition. ns: {ns}, pipeline: {pipeline}. "
-                            "New $graphLookup sub-pipeline: {new_pipe}",
-                            "ns"_attr = e->getNamespace(),
-                            "pipeline"_attr = Value(e->getPipeline()),
-                            "new_pipe"_attr = _fromPipeline);
+                LOGV2_DEBUG(
+                    5865400,
+                    3,
+                    "$graphLookup found view definition. ns: {namespace}, pipeline: {pipeline}. "
+                    "New $graphLookup sub-pipeline: {new_pipe}",
+                    logAttrs(e->getNamespace()),
+                    "pipeline"_attr = Value(e->getPipeline()),
+                    "new_pipe"_attr = _fromPipeline);
 
                 // We can now safely optimize and reattempt attaching the cursor source.
                 pipeline = Pipeline::makePipeline(_fromPipeline, _fromExpCtx, pipelineOpts);
@@ -401,6 +402,12 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
     //
     // We wrap the query in a $match so that it can be parsed into a DocumentSourceMatch when
     // constructing a pipeline to execute.
+
+    // $match stages will conflate null, and undefined values. Keep track of which ones are
+    // present and eliminate documents that would match the others later.
+    bool matchNull = false;
+    bool matchUndefined = false;
+    bool seenMissing = false;
     BSONObjBuilder match;
     {
         BSONObjBuilder query(match.subobjStart("$match"));
@@ -417,9 +424,37 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
                     {
                         BSONArrayBuilder in(subObj.subarrayStart("$in"));
                         for (auto&& value : _frontier) {
+                            if (value.getType() == BSONType::jstNULL) {
+                                matchNull = true;
+                            } else if (value.getType() == BSONType::Undefined) {
+                                matchUndefined = true;
+                            } else if (value.missing()) {
+                                seenMissing = true;
+                            }
                             in << value;
                         }
                     }
+                }
+            }
+            // We never want to see documents where the 'connectToField' is missing. Only add a
+            // check for it in situations where we might match it accidentally.
+            if (matchNull || matchUndefined || seenMissing) {
+                auto existsMatch = BSON(_connectToField.fullPath() << BSON("$exists" << true));
+                andObj << existsMatch;
+            }
+            // If matching null or undefined, make sure we don't match the other one.
+            // If seenMissing is true, we've already filtered out missing values above.
+            if (matchNull || matchUndefined) {
+                if (!matchUndefined) {
+                    auto notUndefined =
+                        BSON(_connectToField.fullPath() << BSON("$not" << BSON("$type"
+                                                                               << "undefined")));
+                    andObj << notUndefined;
+                } else if (!matchNull) {
+                    auto notUndefined =
+                        BSON(_connectToField.fullPath() << BSON("$not" << BSON("$type"
+                                                                               << "null")));
+                    andObj << notUndefined;
                 }
             }
         }

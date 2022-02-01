@@ -163,7 +163,7 @@ public:
 
     repl::OplogEntry getOplog(OperationContext* opCtx, const repl::OpTime& opTime) {
         DBDirectClient client(opCtx);
-        auto oplogBSON = client.findOne(NamespaceString::kRsOplogNamespace.ns(), opTime.asQuery());
+        auto oplogBSON = client.findOne(NamespaceString::kRsOplogNamespace, opTime.asQuery());
 
         ASSERT_FALSE(oplogBSON.isEmpty());
         auto parseStatus = repl::OplogEntry::parse(oplogBSON);
@@ -183,11 +183,8 @@ public:
         opCtx->setTxnNumber(txnNum);
         MongoDOperationContextSession ocs(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(opCtx,
-                                       txnNum,
-                                       boost::none /* autocommit */,
-                                       boost::none /* startTransaction */,
-                                       boost::none /* txnRetryCounter */);
+        txnParticipant.beginOrContinue(
+            opCtx, {txnNum}, boost::none /* autocommit */, boost::none /* startTransaction */);
     }
 
     void checkOplog(const repl::OplogEntry& originalOplog, const repl::OplogEntry& oplogToCheck) {
@@ -255,10 +252,9 @@ public:
             MongoDOperationContextSession sessionTxnState(innerOpCtx.get());
             auto txnParticipant = TransactionParticipant::get(innerOpCtx.get());
             txnParticipant.beginOrContinue(innerOpCtx.get(),
-                                           *sessionInfo.getTxnNumber(),
+                                           {*sessionInfo.getTxnNumber()},
                                            boost::none /* autocommit */,
-                                           boost::none /* startTransaction */,
-                                           boost::none /* txnRetryCounter */);
+                                           boost::none /* startTransaction */);
 
             const auto reply = write_ops_exec::performInserts(innerOpCtx.get(), insertRequest);
             ASSERT(reply.results.size() == 1);
@@ -1886,11 +1882,8 @@ TEST_F(SessionCatalogMigrationDestinationTest,
         auto txnParticipant = TransactionParticipant::get(opCtx);
 
         txnParticipant.refreshFromStorageIfNeeded(opCtx);
-        txnParticipant.beginOrContinue(opCtx,
-                                       3,
-                                       boost::none /* autocommit */,
-                                       boost::none /* startTransaction */,
-                                       boost::none /* txnRetryCounter */);
+        txnParticipant.beginOrContinue(
+            opCtx, {3}, boost::none /* autocommit */, boost::none /* startTransaction */);
     }
 
     OperationSessionInfo sessionInfo2;
@@ -2005,7 +1998,7 @@ TEST_F(SessionCatalogMigrationDestinationTest, MigratingKnownStmtWhileOplogTrunc
     {
         // Confirm that oplog is indeed empty.
         DBDirectClient client(opCtx);
-        auto result = client.findOne(NamespaceString::kRsOplogNamespace.ns(), BSONObj{});
+        auto result = client.findOne(NamespaceString::kRsOplogNamespace, BSONObj{});
         ASSERT_TRUE(result.isEmpty());
     }
 

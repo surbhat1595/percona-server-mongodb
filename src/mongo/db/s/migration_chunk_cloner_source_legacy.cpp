@@ -55,6 +55,7 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/balancer_configuration.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/elapsed_tracker.h"
@@ -338,7 +339,8 @@ Status MigrationChunkClonerSourceLegacy::awaitUntilCriticalSectionIsAppropriate(
     return _checkRecipientCloningStatus(opCtx, maxTimeToWait);
 }
 
-StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::commitClone(OperationContext* opCtx) {
+StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::commitClone(OperationContext* opCtx,
+                                                                  bool acquireCSOnRecipient) {
     invariant(_state == kCloning);
     invariant(!opCtx->lockState()->isLocked());
     if (_jumboChunkCloneState && _forceJumbo) {
@@ -357,8 +359,14 @@ StatusWith<BSONObj> MigrationChunkClonerSourceLegacy::commitClone(OperationConte
         _sessionCatalogSource->onCommitCloneStarted();
     }
 
-    auto responseStatus = _callRecipient(
-        opCtx, createRequestWithSessionId(kRecvChunkCommit, _args.getNss(), _sessionId));
+
+    auto responseStatus = _callRecipient(opCtx, [&] {
+        BSONObjBuilder builder;
+        builder.append(kRecvChunkCommit, _args.getNss().ns());
+        builder.append("acquireCSOnRecipient", acquireCSOnRecipient);
+        _sessionId.append(&builder);
+        return builder.obj();
+    }());
 
     if (responseStatus.isOK()) {
         _cleanup(opCtx);
@@ -1017,29 +1025,41 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
         }
         iteration++;
 
+        const auto sessionCatalogSourceInCatchupPhase = _sessionCatalogSource->inCatchupPhase();
+        const auto estimateUntransferredSessionsSize = sessionCatalogSourceInCatchupPhase
+            ? _sessionCatalogSource->untransferredCatchUpDataSize()
+            : std::numeric_limits<int64_t>::max();
+
         stdx::lock_guard<Latch> sl(_mutex);
 
         const std::size_t cloneLocsRemaining = _cloneLocs.size();
+        int64_t untransferredModsSizeBytes = _untransferredDeletesCounter * _averageObjectIdSize +
+            _untransferredUpsertsCounter * _averageObjectSizeForCloneLocs;
 
         if (_forceJumbo && _jumboChunkCloneState) {
             LOGV2(21992,
                   "moveChunk data transfer progress: {response} mem used: {memoryUsedBytes} "
-                  "documents cloned so far: {docsCloned}",
+                  "documents cloned so far: {docsCloned} remaining amount: "
+                  "{untransferredModsSizeBytes}",
                   "moveChunk data transfer progress",
                   "response"_attr = redact(res),
                   "memoryUsedBytes"_attr = _memoryUsed,
-                  "docsCloned"_attr = _jumboChunkCloneState->docsCloned);
+                  "docsCloned"_attr = _jumboChunkCloneState->docsCloned,
+                  "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes);
         } else {
             LOGV2(21993,
                   "moveChunk data transfer progress: {response} mem used: {memoryUsedBytes} "
-                  "documents remaining to clone: {docsRemainingToClone}",
+                  "documents remaining to clone: {docsRemainingToClone} estimated remaining size "
+                  "{untransferredModsSizeBytes}",
                   "moveChunk data transfer progress",
                   "response"_attr = redact(res),
                   "memoryUsedBytes"_attr = _memoryUsed,
-                  "docsRemainingToClone"_attr = cloneLocsRemaining);
+                  "docsRemainingToClone"_attr = cloneLocsRemaining,
+                  "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes);
         }
 
-        if (res["state"].String() == "steady") {
+        if (res["state"].String() == "steady" && sessionCatalogSourceInCatchupPhase &&
+            estimateUntransferredSessionsSize == 0) {
             if (cloneLocsRemaining != 0 ||
                 (_jumboChunkCloneState && _forceJumbo &&
                  PlanExecutor::IS_EOF != _jumboChunkCloneState->clonerState)) {
@@ -1064,25 +1084,27 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
             supportsCriticalSectionDuringCatchUp = true;
         }
 
-        if (res["state"].String() == "catchup" && supportsCriticalSectionDuringCatchUp) {
-            int64_t estimatedUntransferredModsSize =
-                _untransferredDeletesCounter * _averageObjectIdSize +
-                _untransferredUpsertsCounter * _averageObjectSizeForCloneLocs;
+        if ((res["state"].String() == "steady" || res["state"].String() == "catchup") &&
+            sessionCatalogSourceInCatchupPhase && supportsCriticalSectionDuringCatchUp) {
             auto estimatedUntransferredChunkPercentage =
-                (std::min(_args.getMaxChunkSizeBytes(), estimatedUntransferredModsSize) * 100) /
+                (std::min(_args.getMaxChunkSizeBytes(), untransferredModsSizeBytes) * 100) /
                 _args.getMaxChunkSizeBytes();
-            if (estimatedUntransferredChunkPercentage < maxCatchUpPercentageBeforeBlockingWrites) {
+            int64_t maxUntransferredSessionsSize = BSONObjMaxUserSize *
+                _args.getMaxChunkSizeBytes() / ChunkSizeSettingsType::kDefaultMaxChunkSizeBytes;
+            if (estimatedUntransferredChunkPercentage < maxCatchUpPercentageBeforeBlockingWrites &&
+                estimateUntransferredSessionsSize < maxUntransferredSessionsSize) {
                 // The recipient is sufficiently caught-up with the writes on the donor.
                 // Block writes, so that it can drain everything.
-                LOGV2_DEBUG(5630700,
-                            1,
-                            "moveChunk data transfer within threshold to allow write blocking",
-                            "_untransferredUpsertsCounter"_attr = _untransferredUpsertsCounter,
-                            "_untransferredDeletesCounter"_attr = _untransferredDeletesCounter,
-                            "_averageObjectSizeForCloneLocs"_attr = _averageObjectSizeForCloneLocs,
-                            "_averageObjectIdSize"_attr = _averageObjectIdSize,
-                            "maxChunksSizeBytes"_attr = _args.getMaxChunkSizeBytes(),
-                            "_sessionId"_attr = _sessionId.toString());
+                LOGV2(5630700,
+                      "moveChunk data transfer within threshold to allow write blocking",
+                      "_untransferredUpsertsCounter"_attr = _untransferredUpsertsCounter,
+                      "_untransferredDeletesCounter"_attr = _untransferredDeletesCounter,
+                      "_averageObjectSizeForCloneLocs"_attr = _averageObjectSizeForCloneLocs,
+                      "_averageObjectIdSize"_attr = _averageObjectIdSize,
+                      "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes,
+                      "untransferredSessionDataInBytes"_attr = estimateUntransferredSessionsSize,
+                      "maxChunksSizeBytes"_attr = _args.getMaxChunkSizeBytes(),
+                      "_sessionId"_attr = _sessionId.toString());
                 return Status::OK();
             }
         }

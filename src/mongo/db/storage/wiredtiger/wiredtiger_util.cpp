@@ -127,19 +127,19 @@ Mutex WiredTigerUtil::_tableLoggingInfoMutex =
     MONGO_MAKE_LATCH("WiredTigerUtil::_tableLoggingInfoMutex");
 WiredTigerUtil::TableLoggingInfo WiredTigerUtil::_tableLoggingInfo;
 
-Status wtRCToStatus_slow(int retCode, const char* prefix) {
+Status wtRCToStatus_slow(int retCode, StringData prefix) {
     if (retCode == 0)
         return Status::OK();
 
     if (retCode == WT_ROLLBACK) {
-        throw WriteConflictException();
+        throw WriteConflictException(prefix);
     }
 
     // Don't abort on WT_PANIC when repairing, as the error will be handled at a higher layer.
     fassert(28559, retCode != WT_PANIC || storageGlobalParams.repair);
 
     str::stream s;
-    if (prefix)
+    if (!prefix.empty())
         s << prefix << " ";
     s << retCode << ": " << wiredtiger_strerror(retCode);
 
@@ -695,13 +695,6 @@ bool WiredTigerUtil::useTableLogging(NamespaceString ns, bool replEnabled) {
     if (ns.coll() == "replset.minvalid") {
         // Of local collections, this is derived from the state of the data and therefore
         // not logged.
-        return false;
-    }
-
-    // Change stream pre-image collections are not logged.
-    // TODO SERVER-59607: remove this line when the preimages collection move to the config
-    // database.
-    if (ns.isChangeStreamPreImagesCollection()) {
         return false;
     }
 

@@ -100,6 +100,7 @@ selector:
 
   # Uses getmores.
   - jstests/concurrency/fsm_workloads/agg_base.js
+  - jstests/concurrency/fsm_workloads/agg_graph_lookup.js
   - jstests/concurrency/fsm_workloads/agg_unionWith_interrupt_cleanup.js
   - jstests/concurrency/fsm_workloads/create_capped_collection.js
   - jstests/concurrency/fsm_workloads/create_capped_collection_maxdocs.js
@@ -220,6 +221,9 @@ executor:
       replset_config_options:
         settings:
           catchUpTimeoutMillis: 0
+      mongod_options:
+        set_parameters:
+          reshardingMinimumOperationDurationMillis: 30000 # 30 seconds
     shard_options:
       all_nodes_electable: true
       mongod_options:

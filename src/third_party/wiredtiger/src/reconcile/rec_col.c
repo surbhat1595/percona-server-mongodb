@@ -35,7 +35,7 @@ __rec_col_fix_bulk_insert_split_check(WT_CURSOR_BULK *cbulk)
              */
             __wt_rec_incr(
               session, r, cbulk->entry, __bitstr_size((size_t)cbulk->entry * btree->bitcnt));
-            WT_RET(__wt_rec_split(session, r, 0, false));
+            WT_RET(__wt_rec_split(session, r, 0));
         }
         cbulk->entry = 0;
         cbulk->nrecs = WT_FIX_BYTES_TO_ENTRIES(btree, r->space_avail);
@@ -132,7 +132,7 @@ __wt_bulk_insert_var(WT_SESSION_IMPL *session, WT_CURSOR_BULK *cbulk, bool delet
 
     /* Boundary: split or write the page. */
     if (WT_CROSSING_SPLIT_BND(r, val->len))
-        WT_RET(__wt_rec_split_crossing_bnd(session, r, val->len, false));
+        WT_RET(__wt_rec_split_crossing_bnd(session, r, val->len));
 
     /* Copy the value onto the page. */
     if (btree->dictionary)
@@ -174,7 +174,7 @@ __rec_col_merge(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
 
         /* Boundary: split or write the page. */
         if (__wt_rec_need_split(r, val->len))
-            WT_RET(__wt_rec_split_crossing_bnd(session, r, val->len, false));
+            WT_RET(__wt_rec_split_crossing_bnd(session, r, val->len));
 
         /* Copy the value onto the page. */
         __wt_rec_image_copy(session, r, val);
@@ -276,10 +276,15 @@ __wt_rec_col_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_REF *pageref)
             addr = ref->addr;
         if (addr == NULL) {
             __wt_cell_unpack_addr(session, page->dsk, ref->addr, vpack);
-            val->buf.data = ref->addr;
-            val->buf.size = __wt_cell_total_len(vpack);
-            val->cell_len = 0;
-            val->len = val->buf.size;
+            if (F_ISSET(vpack, WT_CELL_UNPACK_TIME_WINDOW_CLEARED)) {
+                /* Need to rebuild the cell with the updated time info. */
+                __wt_rec_cell_build_addr(session, r, NULL, vpack, false, ref->ref_recno);
+            } else {
+                val->buf.data = ref->addr;
+                val->buf.size = __wt_cell_total_len(vpack);
+                val->cell_len = 0;
+                val->len = val->buf.size;
+            }
             WT_TIME_AGGREGATE_COPY(&ta, &vpack->ta);
         } else {
             __wt_rec_cell_build_addr(session, r, addr, NULL, false, ref->ref_recno);
@@ -289,9 +294,9 @@ __wt_rec_col_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_REF *pageref)
 
         /* Boundary: split or write the page. */
         if (__wt_rec_need_split(r, val->len))
-            WT_ERR(__wt_rec_split_crossing_bnd(session, r, val->len, false));
+            WT_ERR(__wt_rec_split_crossing_bnd(session, r, val->len));
 
-        /* Copy the value onto the page. */
+        /* Copy the value (which is in val, val == r->v) onto the page. */
         __wt_rec_image_copy(session, r, val);
         WT_TIME_AGGREGATE_MERGE(session, &r->cur_ptr->ta, &ta);
     }
@@ -403,7 +408,7 @@ __wt_rec_col_fix(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_REF *pageref)
              * last, allowing it to grow in the future.
              */
             __wt_rec_incr(session, r, entry, __bitstr_size((size_t)entry * btree->bitcnt));
-            WT_RET(__wt_rec_split(session, r, 0, false));
+            WT_RET(__wt_rec_split(session, r, 0));
 
             /* Calculate the number of entries per page. */
             entry = 0;
@@ -543,7 +548,7 @@ __rec_col_var_helper(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_SALVAGE_COOKI
 
     /* Boundary: split or write the page. */
     if (__wt_rec_need_split(r, val->len))
-        WT_RET(__wt_rec_split_crossing_bnd(session, r, val->len, false));
+        WT_RET(__wt_rec_split_crossing_bnd(session, r, val->len));
 
     /* Copy the value onto the page. */
     if (!deleted && !overflow_type && btree->dictionary)

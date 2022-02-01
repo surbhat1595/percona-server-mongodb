@@ -809,7 +809,8 @@ public:
             return;
         }
 
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection, insert three records and check it's valid.
         lockDb(MODE_X);
@@ -863,7 +864,7 @@ public:
             KeyStringSet keys;
             iam->getKeys(&_opCtx,
                          coll,
-                         executionCtx.pooledBufferBuilder(),
+                         pooledBuilder,
                          actualKey,
                          IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                          IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -875,8 +876,8 @@ public:
 
             auto removeStatus =
                 iam->removeKeys(&_opCtx, {keys.begin(), keys.end()}, id1, options, &numDeleted);
-            auto insertStatus =
-                iam->insert(&_opCtx, coll, badKey, id1, options, nullptr, &numInserted);
+            auto insertStatus = iam->insert(
+                &_opCtx, pooledBuilder, coll, badKey, id1, options, nullptr, &numInserted);
 
             ASSERT_EQUALS(numDeleted, 1);
             ASSERT_EQUALS(numInserted, 1);
@@ -1207,7 +1208,8 @@ public:
             return;
         }
 
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection.
         lockDb(MODE_X);
@@ -1267,7 +1269,7 @@ public:
             KeyStringSet keys;
             iam->getKeys(&_opCtx,
                          coll,
-                         executionCtx.pooledBufferBuilder(),
+                         pooledBuilder,
                          actualKey,
                          IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                          IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -1591,7 +1593,8 @@ public:
     ValidateMissingIndexEntryRepair() : ValidateBase(/*full=*/false, /*background=*/false) {}
 
     void run() {
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection.
         lockDb(MODE_X);
@@ -1651,7 +1654,7 @@ public:
             KeyStringSet keys;
             iam->getKeys(&_opCtx,
                          coll,
-                         executionCtx.pooledBufferBuilder(),
+                         pooledBuilder,
                          actualKey,
                          IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                          IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -1926,7 +1929,8 @@ public:
         : ValidateBase(/*full=*/false, /*background=*/false) {}
 
     void run() {
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection and insert a document.
         lockDb(MODE_X);
@@ -1998,7 +2002,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              dupObj,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraints,
                              IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -2033,13 +2037,6 @@ public:
                 }
 
                 ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx));
-
-                {
-                    WriteUnitOfWork wunit(&_opCtx);
-                    interceptor->finalizeTemporaryTables(
-                        &_opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
-                    wunit.commit();
-                }
             }
 
             // Removing an index entry without removing the document should cause us to have a
@@ -2056,7 +2053,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              actualKey,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                              IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -2147,8 +2144,8 @@ public:
         : ValidateBase(/*full=*/false, /*background=*/false) {}
 
     void run() {
-
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection and insert non-multikey document.
         lockDb(MODE_X);
@@ -2195,7 +2192,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              doc,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                              IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -2328,7 +2325,8 @@ public:
     ValidateDuplicateDocumentIndexKeySet() : ValidateBase(/*full=*/false, /*background=*/false) {}
 
     void run() {
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection.
         lockDb(MODE_X);
@@ -2400,7 +2398,7 @@ public:
             KeyStringSet keys;
             iam->getKeys(&_opCtx,
                          coll,
-                         executionCtx.pooledBufferBuilder(),
+                         pooledBuilder,
                          actualKey,
                          IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                          IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -2439,7 +2437,7 @@ public:
             KeyStringSet keys;
             iam->getKeys(&_opCtx,
                          coll,
-                         executionCtx.pooledBufferBuilder(),
+                         pooledBuilder,
                          actualKey,
                          IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                          IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -2476,7 +2474,8 @@ public:
             return;
         }
 
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection.
         lockDb(MODE_X);
@@ -2554,7 +2553,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              dupObj,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraints,
                              IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -2589,13 +2588,6 @@ public:
                 }
 
                 ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx));
-
-                {
-                    WriteUnitOfWork wunit(&_opCtx);
-                    interceptor->finalizeTemporaryTables(
-                        &_opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
-                    wunit.commit();
-                }
             }
 
             // Insert the key on "a".
@@ -2608,7 +2600,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              dupObj,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraints,
                              IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -2643,13 +2635,6 @@ public:
                 }
 
                 ASSERT_NOT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx));
-
-                {
-                    WriteUnitOfWork wunit(&_opCtx);
-                    interceptor->finalizeTemporaryTables(
-                        &_opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
-                    wunit.commit();
-                }
             }
 
             releaseDb();
@@ -2913,8 +2898,8 @@ public:
     ValidateIndexWithMultikeyDocRepair() : ValidateBase(/*full=*/false, /*background=*/false) {}
 
     void run() {
-
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection and insert non-multikey document.
         lockDb(MODE_X);
@@ -2961,7 +2946,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              doc,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                              IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -2997,7 +2982,7 @@ public:
                 MultikeyPaths multikeyPaths;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              mkDoc,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                              IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -3139,8 +3124,8 @@ public:
     ValidateMultikeyPathCoverageRepair() : ValidateBase(/*full=*/false, /*background=*/false) {}
 
     void run() {
-
-        auto& executionCtx = StorageExecutionContext::get(&_opCtx);
+        SharedBufferFragmentBuilder pooledBuilder(
+            KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
 
         // Create a new collection and insert multikey document.
         lockDb(MODE_X);
@@ -3190,7 +3175,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              doc1,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                              IndexAccessMethod::GetKeysContext::kRemovingKeys,
@@ -3227,7 +3212,7 @@ public:
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
                              coll,
-                             executionCtx.pooledBufferBuilder(),
+                             pooledBuilder,
                              doc2,
                              IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                              IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -3388,7 +3373,8 @@ public:
         {
             WriteUnitOfWork wunit(&_opCtx);
             auto writableCatalog = const_cast<IndexCatalog*>(indexCatalog);
-            descriptor = writableCatalog->refreshEntry(&_opCtx, writableCollection, descriptor);
+            descriptor = writableCatalog->refreshEntry(
+                &_opCtx, writableCollection, descriptor, CreateIndexEntryFlags::kIsReady);
             wunit.commit();
         }
 
@@ -3737,17 +3723,19 @@ public:
         // Run validate with repair, expect that extra index entries are removed and missing index
         // entries are inserted.
         {
+            auto mode = _background ? CollectionValidation::ValidateMode::kBackground
+                                    : CollectionValidation::ValidateMode::kForeground;
+
             ValidateResults results;
             BSONObjBuilder output;
 
-            ASSERT_OK(
-                CollectionValidation::validate(&_opCtx,
-                                               _nss,
-                                               CollectionValidation::ValidateMode::kForegroundFull,
-                                               CollectionValidation::RepairMode::kFixErrors,
-                                               &results,
-                                               &output,
-                                               kTurnOnExtraLoggingForTest));
+            ASSERT_OK(CollectionValidation::validate(&_opCtx,
+                                                     _nss,
+                                                     mode,
+                                                     CollectionValidation::RepairMode::kFixErrors,
+                                                     &results,
+                                                     &output,
+                                                     kTurnOnExtraLoggingForTest));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3767,6 +3755,130 @@ public:
             dumpOnErrorGuard.dismiss();
         }
     }
+};
+
+/**
+ * Validate the detection of inconsistent RecordId's in a clustered collection.
+ * Covered scenarios: a document with missing _id and a Record whose
+ * RecordId doesn't match the document _id.
+ */
+template <bool background>
+class ValidateInvalidRecordIdOnClusteredCollection : public ValidateBase {
+public:
+    ValidateInvalidRecordIdOnClusteredCollection(bool withSecondaryIndex)
+        : ValidateBase(/*full=*/true, /*background=*/background, /*clustered=*/true),
+          _withSecondaryIndex(withSecondaryIndex) {}
+
+    void run() {
+        if (_background && !_supportsBackgroundValidation) {
+            return;
+        }
+
+        lockDb(MODE_X);
+        CollectionPtr coll =
+            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, _nss);
+        ASSERT(coll);
+
+        if (_withSecondaryIndex) {
+            // Create index on {a: 1}
+            const auto indexName = "a";
+            const auto indexKey = BSON("a" << 1);
+            auto status = dbtests::createIndexFromSpec(
+                &_opCtx,
+                coll->ns().ns(),
+                BSON("name" << indexName << "key" << indexKey << "v"
+                            << static_cast<int>(kIndexVersion) << "background" << false));
+            ASSERT_OK(status);
+        }
+
+        // Insert documents
+        OpDebug* const nullOpDebug = nullptr;
+        lockDb(MODE_X);
+
+        const OID firstRecordId = OID::gen();
+        {
+            WriteUnitOfWork wunit(&_opCtx);
+            ASSERT_OK(
+                coll->insertDocument(&_opCtx,
+                                     InsertStatement(BSON("_id" << firstRecordId << "a" << 1)),
+                                     nullOpDebug,
+                                     true));
+            ASSERT_OK(coll->insertDocument(&_opCtx,
+                                           InsertStatement(BSON("_id" << OID::gen() << "a" << 2)),
+                                           nullOpDebug,
+                                           true));
+            ASSERT_OK(coll->insertDocument(&_opCtx,
+                                           InsertStatement(BSON("_id" << OID::gen() << "a" << 3)),
+                                           nullOpDebug,
+                                           true));
+            wunit.commit();
+        }
+        releaseDb();
+        ensureValidateWorked();
+        lockDb(MODE_X);
+
+        // Corrupt the first record in the RecordStore by dropping the document's _id field.
+        // Corrupt the second record in the RecordStore by having the RecordId not match the _id
+        // field. Leave the third record untocuhed.
+
+        RecordStore* rs = coll->getRecordStore();
+        auto cursor = coll->getCursor(&_opCtx);
+        const auto ridMissingId = cursor->next()->id;
+        {
+            WriteUnitOfWork wunit(&_opCtx);
+            auto doc = BSON("a" << 1);
+            auto updateStatus =
+                rs->updateRecord(&_opCtx, ridMissingId, doc.objdata(), doc.objsize());
+            ASSERT_OK(updateStatus);
+            wunit.commit();
+        }
+        const auto ridMismatchedId = cursor->next()->id;
+        {
+            WriteUnitOfWork wunit(&_opCtx);
+            auto doc = BSON("_id" << OID::gen() << "a" << 2);
+            auto updateStatus =
+                rs->updateRecord(&_opCtx, ridMismatchedId, doc.objdata(), doc.objsize());
+            ASSERT_OK(updateStatus);
+            wunit.commit();
+        }
+        cursor.reset();
+
+        releaseDb();
+
+        // Verify that validate() detects the two corrupt records.
+        {
+            ValidateResults results;
+            BSONObjBuilder output;
+
+            ASSERT_OK(
+                CollectionValidation::validate(&_opCtx,
+                                               _nss,
+                                               CollectionValidation::ValidateMode::kForegroundFull,
+                                               CollectionValidation::RepairMode::kNone,
+                                               &results,
+                                               &output,
+                                               kTurnOnExtraLoggingForTest));
+
+            ScopeGuard dumpOnErrorGuard([&] {
+                StorageDebugUtil::printValidateResults(results);
+                StorageDebugUtil::printCollectionAndIndexTableEntries(&_opCtx, coll->ns());
+            });
+
+            ASSERT_EQ(false, results.valid);
+            ASSERT_EQ(static_cast<size_t>(2), results.errors.size());
+            ASSERT_EQ(static_cast<size_t>(0), results.warnings.size());
+            ASSERT_EQ(static_cast<size_t>(0), results.extraIndexEntries.size());
+            ASSERT_EQ(static_cast<size_t>(0), results.missingIndexEntries.size());
+            ASSERT_EQ(static_cast<size_t>(2), results.corruptRecords.size());
+            ASSERT_EQ(ridMissingId, results.corruptRecords[0]);
+            ASSERT_EQ(ridMismatchedId, results.corruptRecords[1]);
+
+            dumpOnErrorGuard.dismiss();
+        }
+    }
+
+private:
+    const bool _withSecondaryIndex;
 };
 
 class ValidateTests : public OldStyleSuiteSpecification {
@@ -3838,6 +3950,11 @@ public:
         add<ValidateReportInfoOnClusteredCollection<false>>();
         add<ValidateReportInfoOnClusteredCollection<true>>();
         add<ValidateRepairOnClusteredCollection>();
+
+        add<ValidateInvalidRecordIdOnClusteredCollection<false>>(false /*withSecondaryIndex*/);
+        add<ValidateInvalidRecordIdOnClusteredCollection<false>>(true /*withSecondaryIndex*/);
+        add<ValidateInvalidRecordIdOnClusteredCollection<true>>(false /*withSecondaryIndex*/);
+        add<ValidateInvalidRecordIdOnClusteredCollection<true>>(true /*withSecondaryIndex*/);
     }
 };
 

@@ -575,6 +575,9 @@ class WiredTigerTestCase(unittest.TestCase):
         yield
         self.captureerr.checkAdditionalPattern(self, pat, re_flags)
 
+    def readStdout(self, maxchars=10000):
+        return self.captureout.readFileFrom(self.captureout.filename, self.captureout.expectpos, maxchars)
+
     def ignoreStdoutPatternIfExists(self, pat, re_flags=0):
         if self.captureout.hasUnexpectedOutput(self):
             self.captureout.checkAdditionalPattern(self, pat, re_flags)
@@ -780,7 +783,12 @@ class WiredTigerTestCase(unittest.TestCase):
         'test_file.test_file.test_funcname(scen1.scen2.scen3)'.
         So transform '(', but remove final ')'.
         """
-        return self.shortid().translate(str.maketrans('($[]/ ','______', ')'))
+        name = self.shortid().translate(str.maketrans('($[]/ ','______', ')'))
+
+        # On OS/X, we can get name conflicts if names differ by case. Upper
+        # case letters are uncommon in our python class and method names, so
+        # we lowercase them and prefix with '@', e.g. "AbC" -> "@ab@c".
+        return re.sub(r'[A-Z]', lambda x: '@' + x.group(0).lower(), name)
 
     def className(self):
         return self.__class__.__name__

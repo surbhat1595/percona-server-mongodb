@@ -218,6 +218,26 @@ struct ServerGlobalParams {
                 version != multiversion::GenericFCV::kLastLTS;
         }
 
+        bool isFCVUpgradingToOrAlreadyLatest() const {
+            auto currentVersion = getVersion();
+
+            // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
+            return currentVersion == multiversion::GenericFCV::kUpgradingFromLastLTSToLatest ||
+                isGreaterThanOrEqualTo(
+                       multiversion::GenericFCV::kUpgradingFromLastContinuousToLatest);
+        }
+
+        bool isFCVDowngradingOrAlreadyDowngradedFromLatest() const {
+            auto currentVersion = getVersion();
+
+            // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
+            return currentVersion == multiversion::GenericFCV::kDowngradingFromLatestToLastLTS ||
+                currentVersion == multiversion::GenericFCV::kLastLTS ||
+                currentVersion ==
+                multiversion::GenericFCV::kDowngradingFromLatestToLastContinuous ||
+                currentVersion == multiversion::GenericFCV::kLastContinuous;
+        }
+
         void reset() {
             _version.store(FCV::kUnsetDefaultLastLTSBehavior);
         }

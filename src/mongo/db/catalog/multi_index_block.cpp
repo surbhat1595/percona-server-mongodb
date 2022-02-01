@@ -53,6 +53,8 @@
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -81,6 +83,20 @@ size_t getEachIndexBuildMaxMemoryUsageBytes(size_t numIndexSpecs) {
 
     return static_cast<std::size_t>(maxIndexBuildMemoryUsageMegabytes.load()) * 1024 * 1024 /
         numIndexSpecs;
+}
+
+Status timeseriesMixedSchemaDataFailure(const Collection* collection) {
+    // TODO SERVER-61070: Re-word the error message below if necessary and add a URL for
+    // workarounds.
+    return Status(
+        ErrorCodes::CannotCreateIndex,
+        str::stream() << "Index build on collection '" << collection->ns() << "' ("
+                      << collection->uuid()
+                      << ") failed due to the detection of mixed-schema data in the "
+                      << "time-series buckets collection. Starting as of v5.2, time-series "
+                      << "measurement bucketing has been modified to ensure that newly created "
+                      << "time-series buckets do not contain mixed-schema data. For workarounds, "
+                      << "see: <url>");
 }
 
 }  // namespace
@@ -122,8 +138,6 @@ void MultiIndexBlock::abortIndexBuild(OperationContext* opCtx,
             // a WUOW. Nothing inside this block can fail, and it is made fatal if it does.
             for (size_t i = 0; i < _indexes.size(); i++) {
                 _indexes[i].block->fail(opCtx, collection.getWritableCollection());
-                _indexes[i].block->finalizeTemporaryTables(
-                    opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
             }
 
             onCleanUp();
@@ -204,10 +218,6 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
         // up _indexes manually (since the changes were already rolled back). Due to this, it is
         // thus legal to call init() again after it fails.
         opCtx->recoveryUnit()->onRollback([this, opCtx]() {
-            for (auto& index : _indexes) {
-                index.block->finalizeTemporaryTables(
-                    opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
-            }
             _indexes.clear();
             _buildIsCleanedUp = true;
         });
@@ -260,6 +270,15 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
             }
             info = statusWithInfo.getValue();
             indexInfoObjs.push_back(info);
+
+            // TODO SERVER-54592: Remove FCV check once feature flag is enabled for v5.2.
+            boost::optional<TimeseriesOptions> options = collection->getTimeseriesOptions();
+            if (options &&
+                serverGlobalParams.featureCompatibility.isFCVUpgradingToOrAlreadyLatest() &&
+                timeseries::doesBucketsIndexIncludeKeyOnMeasurement(*options, info)) {
+                invariant(collection->getTimeseriesBucketsMayHaveMixedSchemaData());
+                _containsIndexBuildOnTimeseriesMeasurement = true;
+            }
 
             boost::optional<IndexStateInfo> stateInfo;
             auto& index = _indexes.emplace_back();
@@ -318,6 +337,8 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
                   "specIndex"_attr = i,
                   "numSpecs"_attr = indexSpecs.size(),
                   "method"_attr = _method,
+                  "ident"_attr = indexCatalogEntry->getIdent(),
+                  "collectionIdent"_attr = collection->getSharedIdent()->getIdent(),
                   "maxTemporaryMemoryUsageMB"_attr =
                       eachIndexBuildMaxMemoryUsageBytes / 1024 / 1024);
 
@@ -615,7 +636,15 @@ void MultiIndexBlock::_doCollectionScan(OperationContext* opCtx,
                     collection,
                     objToIndex,
                     loc,
-                    /*saveCursorBeforeWrite*/ [&exec] { exec->saveState(); },
+                    /*saveCursorBeforeWrite*/
+                    [&exec, &objToIndex] {
+                        // Update objToIndex so that it continues to point to valid data when the
+                        // cursor is closed. A WCE may occur during a write to index A, and
+                        // objToIndex must still be used when the write is retried or for a write to
+                        // another index (if creating multiple indexes at once)
+                        objToIndex = objToIndex.getOwned();
+                        exec->saveState();
+                    },
                     /*restoreCursorAfterWrite*/ [&] { exec->restoreState(&collection); }));
 
         _failPointHangDuringBuild(opCtx,
@@ -647,6 +676,37 @@ Status MultiIndexBlock::_insert(OperationContext* opCtx,
                                 const std::function<void()>& saveCursorBeforeWrite,
                                 const std::function<void()>& restoreCursorAfterWrite) {
     invariant(!_buildIsCleanedUp);
+
+    // The detection of mixed-schema data needs to be done before applying the partial filter
+    // expression below. Only check for mixed-schema data if it's possible for the time-series
+    // collection to have it.
+    if (_containsIndexBuildOnTimeseriesMeasurement &&
+        *collection->getTimeseriesBucketsMayHaveMixedSchemaData()) {
+        bool docHasMixedSchemaData =
+            collection->doesTimeseriesBucketsDocContainMixedSchemaData(doc);
+
+        if (docHasMixedSchemaData) {
+            LOGV2(6057700,
+                  "Detected mixed-schema data in time-series bucket collection",
+                  logAttrs(collection->ns()),
+                  logAttrs(collection->uuid()),
+                  "recordId"_attr = loc,
+                  "control"_attr = redact(doc.getObjectField(timeseries::kBucketControlFieldName)));
+
+            _timeseriesBucketContainsMixedSchemaData = true;
+        }
+
+        // Only enforce the mixed-schema data constraint on the primary. Index builds may not fail
+        // on the secondaries. The primary will replicate an abortIndexBuild oplog entry.
+        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+        const bool replSetAndNotPrimary = replCoord->getSettings().usingReplSets() &&
+            !replCoord->canAcceptWritesFor(opCtx, collection->ns());
+
+        if (docHasMixedSchemaData && !replSetAndNotPrimary) {
+            return timeseriesMixedSchemaDataFailure(collection.get());
+        }
+    }
+
     for (size_t i = 0; i < _indexes.size(); i++) {
         if (_indexes[i].filterExpression && !_indexes[i].filterExpression->matchesBSON(doc)) {
             continue;
@@ -659,6 +719,7 @@ Status MultiIndexBlock::_insert(OperationContext* opCtx,
         try {
             idxStatus = _indexes[i].bulk->insert(opCtx,
                                                  collection,
+                                                 _indexes[i].block->getPooledBuilder(),
                                                  doc,
                                                  loc,
                                                  _indexes[i].options,
@@ -853,6 +914,23 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         invariant(_collectionUUID.get() == collection->uuid());
     }
 
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    const bool replSetAndNotPrimary = replCoord->getSettings().usingReplSets() &&
+        !replCoord->canAcceptWritesFor(opCtx, collection->ns());
+
+    // During the collection scan phase, only the primary will enforce the mixed-schema data
+    // constraint. Secondaries will only keep track of and take no action if mixed-schema data is
+    // detected. If the primary steps down during the index build, a secondary node will takeover.
+    // This can happen after the collection scan phase, which is why we need this check here.
+    if (_timeseriesBucketContainsMixedSchemaData && !replSetAndNotPrimary) {
+        LOGV2_DEBUG(6057701,
+                    1,
+                    "Aborting index build commit due to the earlier detection of mixed-schema data",
+                    logAttrs(collection->ns()),
+                    logAttrs(collection->uuid()));
+        return timeseriesMixedSchemaDataFailure(collection);
+    }
+
     // Do not interfere with writing multikey information when committing index builds.
     ScopeGuard restartTracker(
         [this, opCtx] { MultikeyPathTracker::get(opCtx).startTrackingMultikeyPathInfo(); });
@@ -886,16 +964,21 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         if (bulkBuilder->isMultikey()) {
             indexCatalogEntry->setMultikey(opCtx, collection, {}, bulkBuilder->getMultikeyPaths());
         }
-
-        // The commit() function can be called multiple times on write conflict errors. Dropping the
-        // temp tables cannot be rolled back, so do it only after the WUOW commits.
-        opCtx->recoveryUnit()->onCommit([opCtx, i, this](auto commitTs) {
-            _indexes[i].block->finalizeTemporaryTables(
-                opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
-        });
     }
 
     onCommit();
+
+    // Update the 'timeseriesBucketsMayHaveMixedSchemaData' catalog entry flag to false in order to
+    // allow subsequent index builds to skip checking bucket documents for mixed-schema data.
+    if (_containsIndexBuildOnTimeseriesMeasurement && !_timeseriesBucketContainsMixedSchemaData) {
+        boost::optional<bool> mayContainMixedSchemaData =
+            collection->getTimeseriesBucketsMayHaveMixedSchemaData();
+        invariant(mayContainMixedSchemaData);
+
+        if (*mayContainMixedSchemaData) {
+            collection->setTimeseriesBucketsMayHaveMixedSchemaData(opCtx, false);
+        }
+    }
 
     CollectionQueryInfo::get(collection).clearQueryCache(opCtx, collection);
     opCtx->recoveryUnit()->onCommit(
@@ -924,18 +1007,15 @@ void MultiIndexBlock::abortWithoutCleanup(OperationContext* opCtx,
         lk.emplace(opCtx, MODE_IX);
     }
 
-    auto action = TemporaryRecordStore::FinalizationAction::kDelete;
-
     if (isResumable) {
         invariant(_buildUUID);
         invariant(_method == IndexBuildMethod::kHybrid);
 
         _writeStateToDisk(opCtx, collection);
-        action = TemporaryRecordStore::FinalizationAction::kKeep;
-    }
 
-    for (auto& index : _indexes) {
-        index.block->finalizeTemporaryTables(opCtx, action);
+        for (auto& index : _indexes) {
+            index.block->keepTemporaryTables();
+        }
     }
 
     _buildIsCleanedUp = true;
@@ -946,7 +1026,7 @@ void MultiIndexBlock::_writeStateToDisk(OperationContext* opCtx,
     auto obj = _constructStateObject(opCtx, collection);
     auto rs = opCtx->getServiceContext()
                   ->getStorageEngine()
-                  ->makeTemporaryRecordStoreForResumableIndexBuild(opCtx);
+                  ->makeTemporaryRecordStoreForResumableIndexBuild(opCtx, KeyFormat::Long);
 
     WriteUnitOfWork wuow(opCtx);
 
@@ -962,8 +1042,6 @@ void MultiIndexBlock::_writeStateToDisk(OperationContext* opCtx,
         dassert(status,
                 str::stream() << "Failed to write resumable index build state to disk. UUID: "
                               << _buildUUID);
-
-        rs->finalizeTemporaryTable(opCtx, TemporaryRecordStore::FinalizationAction::kDelete);
         return;
     }
 
@@ -976,7 +1054,7 @@ void MultiIndexBlock::_writeStateToDisk(OperationContext* opCtx,
           logAttrs(collection->ns()),
           "details"_attr = obj);
 
-    rs->finalizeTemporaryTable(opCtx, TemporaryRecordStore::FinalizationAction::kKeep);
+    rs->keep();
 }
 
 BSONObj MultiIndexBlock::_constructStateObject(OperationContext* opCtx,

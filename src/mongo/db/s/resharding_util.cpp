@@ -41,6 +41,7 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_find_and_modify_image_lookup.h"
@@ -107,15 +108,6 @@ RecipientShardEntry makeRecipientShard(ShardId shardId,
     emplaceTruncatedAbortReasonIfExists(recipientCtx, abortReason);
 
     return RecipientShardEntry{std::move(shardId), std::move(recipientCtx)};
-}
-
-UUID getCollectionUUIDFromChunkManger(const NamespaceString& originalNss, const ChunkManager& cm) {
-    auto collectionUUID = cm.getUUID();
-    uassert(ErrorCodes::InvalidUUID,
-            "Cannot reshard collection {} due to missing UUID"_format(originalNss.ns()),
-            collectionUUID);
-
-    return collectionUUID.get();
 }
 
 NamespaceString constructTemporaryReshardingNss(StringData db, const UUID& sourceUuid) {
@@ -342,4 +334,25 @@ NamespaceString getLocalConflictStashNamespace(UUID existingUUID, ShardId donorS
                            "localReshardingConflictStash.{}.{}"_format(existingUUID.toString(),
                                                                        donorShardId.toString())};
 }
+
+void doNoopWrite(OperationContext* opCtx, StringData opStr, const NamespaceString& nss) {
+    writeConflictRetry(opCtx, opStr, NamespaceString::kRsOplogNamespace.ns(), [&] {
+        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+
+        const std::string msg = str::stream() << opStr << " on " << nss;
+        WriteUnitOfWork wuow(opCtx);
+        opCtx->getClient()->getServiceContext()->getOpObserver()->onInternalOpMessage(
+            opCtx,
+            {},
+            boost::none,
+            BSON("msg" << msg),
+            boost::none,
+            boost::none,
+            boost::none,
+            boost::none,
+            boost::none);
+        wuow.commit();
+    });
+}
+
 }  // namespace mongo

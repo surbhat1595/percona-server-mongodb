@@ -31,7 +31,6 @@ global:
 
 imports:
   - "mongo/idl/basic_types.idl"
-  - "mongo/db/timeseries/timeseries.idl"
 
 server_parameters:
     KillSessionsMaxConcurrency:
@@ -64,40 +63,4 @@ structs:
         optional: true
       timeout:
         type: int
-        optional: true
-
-  ShardCollection:
-    description: "The public shardCollection command on mongos"
-    strict: false
-    fields:
-      shardCollection:
-        type: namespacestring
-        description: "The namespace of the collection to shard in the form <database>.<collection>."
-        optional: true
-      shardcollection:
-          type: namespacestring
-          description: "Same as the previous field, but refers to the deprecated version of this command's name"
-          optional: true
-      key:
-        type: object
-        description: "The index specification document to use as the shard key."
-      unique:
-        type: bool
-        description: "Whether the shard key index should enforce a unique constraint"
-        default: false
-      numInitialChunks:
-        type: safeInt64
-        description: "The number of chunks to create initially when sharding an empty collection with a hashed shard key."
-        default: 0
-      presplitHashedZones:
-        type: bool
-        description: "True if the chunks should be pre-split based on the existing zones when sharding a collection with hashed shard key"
-        default: false
-      collation:
-        type: object
-        description: "The collation to use for the shard key index."
-        optional: true
-      timeseries:
-        description: "The options to create the time-series collection with."
-        type: TimeseriesOptions
         optional: true

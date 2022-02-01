@@ -27,8 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog_raii.h"
@@ -74,6 +73,12 @@ protected:
                              uint16_t numPreviouslyCommittedMeasurements);
 
     long long _getNumWaits(const NamespaceString& ns);
+    long long _getNumSchemaChanges(const NamespaceString& ns);
+
+    // Check that each group of objects has compatible schema with itself, but that inserting the
+    // first object in new group closes the existing bucket and opens a new one
+    void _testMeasurementSchema(
+        const std::initializer_list<std::initializer_list<BSONObj>>& groups);
 
     OperationContext* _opCtx;
     BucketCatalog* _bucketCatalog;
@@ -178,6 +183,57 @@ long long BucketCatalogTest::_getNumWaits(const NamespaceString& ns) {
     return builder.obj().getIntField("numWaits");
 }
 
+long long BucketCatalogTest::_getNumSchemaChanges(const NamespaceString& ns) {
+    BSONObjBuilder builder;
+    _bucketCatalog->appendExecutionStats(ns, &builder);
+    return builder.obj().getIntField("numBucketsClosedDueToSchemaChange");
+}
+
+void BucketCatalogTest::_testMeasurementSchema(
+    const std::initializer_list<std::initializer_list<BSONObj>>& groups) {
+    // Make sure we start and end with a clean slate.
+    _bucketCatalog->clear(_ns1);
+    ScopeGuard guard([this]() { _bucketCatalog->clear(_ns1); });
+
+    bool firstGroup = true;
+    for (const auto& group : groups) {
+        bool firstMember = true;
+        for (const auto& doc : group) {
+            BSONObjBuilder timestampedDoc;
+            timestampedDoc.append(_timeField, Date_t::now());
+            timestampedDoc.appendElements(doc);
+
+            auto pre = _getNumSchemaChanges(_ns1);
+            auto result = _bucketCatalog
+                              ->insert(_opCtx,
+                                       _ns1,
+                                       _getCollator(_ns1),
+                                       _getTimeseriesOptions(_ns1),
+                                       timestampedDoc.obj(),
+                                       BucketCatalog::CombineWithInsertsFromOtherClients::kAllow)
+                              .getValue();
+            auto post = _getNumSchemaChanges(_ns1);
+
+            if (firstMember) {
+                if (firstGroup) {
+                    // We don't expect to close a bucket if we are on the first group.
+                    ASSERT_EQ(pre, post);
+                    firstGroup = false;
+                } else {
+                    // Otherwise we expect that we are in fact closing a bucket because we have
+                    // an incompatible schema change.
+                    invariant(pre + 1 == post);
+                    ASSERT_EQ(pre + 1, post);
+                }
+                firstMember = false;
+            } else {
+                // Should have compatible schema, no expected bucket closure.
+                ASSERT_EQ(pre, post);
+            }
+        }
+    }
+}
+
 TEST_F(BucketCatalogTest, InsertIntoSameBucket) {
     // The first insert should be able to take commit rights, but batch is still active
     auto result1 =
@@ -236,9 +292,9 @@ TEST_F(BucketCatalogTest, GetMetadataReturnsEmptyDocOnMissingBucket) {
                      .getValue()
                      .batch;
     ASSERT(batch->claimCommitRights());
-    auto bucket = batch->bucket();
+    auto bucketId = batch->bucketId();
     _bucketCatalog->abort(batch);
-    ASSERT_BSONOBJ_EQ(BSONObj(), _bucketCatalog->getMetadata(bucket));
+    ASSERT_BSONOBJ_EQ(BSONObj(), _bucketCatalog->getMetadata(bucketId));
 }
 
 TEST_F(BucketCatalogTest, InsertIntoDifferentBuckets) {
@@ -271,10 +327,10 @@ TEST_F(BucketCatalogTest, InsertIntoDifferentBuckets) {
 
     // Check metadata in buckets.
     ASSERT_BSONOBJ_EQ(BSON(_metaField << "123"),
-                      _bucketCatalog->getMetadata(result1.getValue().batch->bucket()));
+                      _bucketCatalog->getMetadata(result1.getValue().batch->bucketId()));
     ASSERT_BSONOBJ_EQ(BSON(_metaField << BSONObj()),
-                      _bucketCatalog->getMetadata(result2.getValue().batch->bucket()));
-    ASSERT(_bucketCatalog->getMetadata(result3.getValue().batch->bucket()).isEmpty());
+                      _bucketCatalog->getMetadata(result2.getValue().batch->bucketId()));
+    ASSERT(_bucketCatalog->getMetadata(result3.getValue().batch->bucketId()).isEmpty());
 
     // Committing one bucket should only return the one document in that bucket and should not
     // affect the other bucket.
@@ -304,9 +360,9 @@ TEST_F(BucketCatalogTest, InsertIntoSameBucketArray) {
 
     // Check metadata in buckets.
     ASSERT_BSONOBJ_EQ(BSON(_metaField << BSON_ARRAY(BSON("a" << 0 << "b" << 1))),
-                      _bucketCatalog->getMetadata(result1.getValue().batch->bucket()));
+                      _bucketCatalog->getMetadata(result1.getValue().batch->bucketId()));
     ASSERT_BSONOBJ_EQ(BSON(_metaField << BSON_ARRAY(BSON("a" << 0 << "b" << 1))),
-                      _bucketCatalog->getMetadata(result2.getValue().batch->bucket()));
+                      _bucketCatalog->getMetadata(result2.getValue().batch->bucketId()));
 }
 
 TEST_F(BucketCatalogTest, InsertIntoSameBucketObjArray) {
@@ -335,11 +391,11 @@ TEST_F(BucketCatalogTest, InsertIntoSameBucketObjArray) {
     ASSERT_BSONOBJ_EQ(
         BSON(_metaField << BSONObj(BSON(
                  "c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1) << BSON("f" << 1 << "g" << 0))))),
-        _bucketCatalog->getMetadata(result1.getValue().batch->bucket()));
+        _bucketCatalog->getMetadata(result1.getValue().batch->bucketId()));
     ASSERT_BSONOBJ_EQ(
         BSON(_metaField << BSONObj(BSON(
                  "c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1) << BSON("f" << 1 << "g" << 0))))),
-        _bucketCatalog->getMetadata(result2.getValue().batch->bucket()));
+        _bucketCatalog->getMetadata(result2.getValue().batch->bucketId()));
 }
 
 
@@ -371,11 +427,11 @@ TEST_F(BucketCatalogTest, InsertIntoSameBucketNestedArray) {
     ASSERT_BSONOBJ_EQ(BSON(_metaField << BSONObj(BSON("c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1)
                                                                         << BSON_ARRAY("123"
                                                                                       << "456"))))),
-                      _bucketCatalog->getMetadata(result1.getValue().batch->bucket()));
+                      _bucketCatalog->getMetadata(result1.getValue().batch->bucketId()));
     ASSERT_BSONOBJ_EQ(BSON(_metaField << BSONObj(BSON("c" << BSON_ARRAY(BSON("a" << 0 << "b" << 1)
                                                                         << BSON_ARRAY("123"
                                                                                       << "456"))))),
-                      _bucketCatalog->getMetadata(result2.getValue().batch->bucket()));
+                      _bucketCatalog->getMetadata(result2.getValue().batch->bucketId()));
 }
 
 TEST_F(BucketCatalogTest, InsertNullAndMissingMetaFieldIntoDifferentBuckets) {
@@ -399,8 +455,8 @@ TEST_F(BucketCatalogTest, InsertNullAndMissingMetaFieldIntoDifferentBuckets) {
 
     // Check metadata in buckets.
     ASSERT_BSONOBJ_EQ(BSON(_metaField << BSONNULL),
-                      _bucketCatalog->getMetadata(result1.getValue().batch->bucket()));
-    ASSERT(_bucketCatalog->getMetadata(result2.getValue().batch->bucket()).isEmpty());
+                      _bucketCatalog->getMetadata(result1.getValue().batch->bucketId()));
+    ASSERT(_bucketCatalog->getMetadata(result2.getValue().batch->bucketId()).isEmpty());
 
     // Committing one bucket should only return the one document in that bucket and should not
     // affect the other bucket.
@@ -506,7 +562,7 @@ TEST_F(BucketCatalogWithoutMetadataTest, GetMetadataReturnsEmptyDoc) {
                      .getValue()
                      .batch;
 
-    ASSERT_BSONOBJ_EQ(BSONObj(), _bucketCatalog->getMetadata(batch->bucket()));
+    ASSERT_BSONOBJ_EQ(BSONObj(), _bucketCatalog->getMetadata(batch->bucketId()));
 
     _commit(batch, 0);
 }
@@ -521,7 +577,7 @@ TEST_F(BucketCatalogWithoutMetadataTest, CommitReturnsNewFields) {
                                          BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
     ASSERT(result.isOK());
     auto batch = result.getValue().batch;
-    auto oldId = batch->bucket()->id();
+    auto oldId = batch->bucketId();
     _commit(batch, 0);
     ASSERT_EQ(2U, batch->newFieldNamesToBeInserted().size()) << batch->toBSON();
     ASSERT(batch->newFieldNamesToBeInserted().count(_timeField)) << batch->toBSON();
@@ -577,7 +633,7 @@ TEST_F(BucketCatalogWithoutMetadataTest, CommitReturnsNewFields) {
         BSON(_timeField << Date_t::now() << "a" << gTimeseriesBucketMaxCount),
         BucketCatalog::CombineWithInsertsFromOtherClients::kAllow);
     auto& batch2 = result2.getValue().batch;
-    ASSERT_NE(oldId, batch2->bucket()->id());
+    ASSERT_NE(oldId, batch2->bucketId());
     _commit(batch2, 0);
     ASSERT_EQ(2U, batch2->newFieldNamesToBeInserted().size()) << batch2->toBSON();
     ASSERT(batch2->newFieldNamesToBeInserted().count(_timeField)) << batch2->toBSON();
@@ -682,7 +738,7 @@ TEST_F(BucketCatalogTest, ClearBucketWithPreparedBatchThrowsConflict) {
     ASSERT_EQ(batch->measurements().size(), 1);
     ASSERT_EQ(batch->numPreviouslyCommittedMeasurements(), 0);
 
-    ASSERT_THROWS(_bucketCatalog->clear(batch->bucket()->id()), WriteConflictException);
+    ASSERT_THROWS(_bucketCatalog->clear(batch->bucketId()), WriteConflictException);
 
     _bucketCatalog->abort(batch);
     ASSERT(batch->finished());
@@ -715,10 +771,10 @@ TEST_F(BucketCatalogTest, PrepareCommitOnClearedBatchWithAlreadyPreparedBatch) {
                       .getValue()
                       .batch;
     ASSERT_NE(batch1, batch2);
-    ASSERT_EQ(batch1->bucket(), batch2->bucket());
+    ASSERT_EQ(batch1->bucketId(), batch2->bucketId());
 
     // Now clear the bucket. Since there's a prepared batch it should conflict.
-    ASSERT_THROWS(_bucketCatalog->clear(batch1->bucket()->id()), WriteConflictException);
+    ASSERT_THROWS(_bucketCatalog->clear(batch1->bucketId()), WriteConflictException);
 
     // Now try to prepare the second batch. Ensure it aborts the batch.
     ASSERT(batch2->claimCommitRights());
@@ -727,7 +783,7 @@ TEST_F(BucketCatalogTest, PrepareCommitOnClearedBatchWithAlreadyPreparedBatch) {
     ASSERT_EQ(batch2->getResult().getStatus(), ErrorCodes::TimeseriesBucketCleared);
 
     // Make sure we didn't clear the bucket state when we aborted the second batch.
-    ASSERT_THROWS(_bucketCatalog->clear(batch1->bucket()->id()), WriteConflictException);
+    ASSERT_THROWS(_bucketCatalog->clear(batch1->bucketId()), WriteConflictException);
 
     // Make sure a subsequent insert, which opens a new bucket, doesn't corrupt the old bucket
     // state and prevent us from finishing the first batch.
@@ -742,7 +798,7 @@ TEST_F(BucketCatalogTest, PrepareCommitOnClearedBatchWithAlreadyPreparedBatch) {
                       .batch;
     ASSERT_NE(batch1, batch3);
     ASSERT_NE(batch2, batch3);
-    ASSERT_NE(batch1->bucket(), batch3->bucket());
+    ASSERT_NE(batch1->bucketId(), batch3->bucketId());
     // Clean up this batch
     ASSERT(batch3->claimCommitRights());
     _bucketCatalog->abort(batch3);
@@ -898,6 +954,41 @@ TEST_F(BucketCatalogTest, DuplicateNewFieldNamesAcrossConcurrentBatches) {
     _bucketCatalog->prepareCommit(batch1);
     ASSERT(batch1->newFieldNamesToBeInserted().empty());
     _bucketCatalog->finish(batch1, {});
+}
+
+TEST_F(BucketCatalogTest, SchemaChanges) {
+    std::vector<BSONObj> docs = {
+        ::mongo::fromjson(R"({a: 1})"),                                // 0
+        ::mongo::fromjson(R"({a: true})"),                             // 1
+        ::mongo::fromjson(R"({a: {}})"),                               // 2
+        ::mongo::fromjson(R"({a: {b: 1}})"),                           // 3
+        ::mongo::fromjson(R"({a: {b: true}})"),                        // 4
+        ::mongo::fromjson(R"({a: {c: true}})"),                        // 5
+        ::mongo::fromjson(R"({a: {d: true}})"),                        // 6
+        ::mongo::fromjson(R"({a: {e: true}})"),                        // 7
+        ::mongo::fromjson(R"({a: {f: true}})"),                        // 8
+        ::mongo::fromjson(R"({a: {d: 1.0}})"),                         // 9
+        ::mongo::fromjson(R"({b: 1.0})"),                              // 10
+        ::mongo::fromjson(R"({c: {}})"),                               // 11
+        ::mongo::fromjson(R"({a: 1.0, b: 2.0, c: 3.0})"),              // 12
+        ::mongo::fromjson(R"({c: 1.0, b: 3.0, a: 2.0})"),              // 13
+        ::mongo::fromjson(R"({b: 1.0, a: 3.0, c: 2.0})"),              // 14
+        ::mongo::fromjson(R"({a: {b: [1.0, 2.0]}})"),                  // 15
+        ::mongo::fromjson(R"({a: {b: [true, false]}})"),               // 16
+        ::mongo::fromjson(R"({a: {b: [false, true, false, true]}})"),  // 17
+        ::mongo::fromjson(R"({a: {b: [{a: true}, {b: false}]}})"),     // 18
+        ::mongo::fromjson(R"({a: {b: [{b: true}, {a: false}]}})"),     // 19
+        ::mongo::fromjson(R"({a: {b: [{a: 1.0}, {b: 2.0}]}})"),        // 20
+        ::mongo::fromjson(R"({a: {b: [{}, {}, true, false]}})"),       // 21
+    };
+
+    _testMeasurementSchema({{docs[0]}, {docs[1]}, {docs[2], docs[3]}, {docs[4]}});
+    _testMeasurementSchema({{docs[0]}, {docs[1]}, {docs[2], docs[4]}, {docs[3]}});
+    _testMeasurementSchema({{docs[4], docs[5], docs[6], docs[7], docs[8]}, {docs[9]}});
+    _testMeasurementSchema({{docs[4], docs[5], docs[6], docs[7], docs[8], docs[10]}});
+    _testMeasurementSchema({{docs[10], docs[11]}, {docs[12]}});
+    _testMeasurementSchema({{docs[12], docs[13], docs[14]}, {docs[15]}, {docs[16], docs[17]}});
+    _testMeasurementSchema({{docs[18], docs[19]}, {docs[20], docs[21]}});
 }
 
 }  // namespace

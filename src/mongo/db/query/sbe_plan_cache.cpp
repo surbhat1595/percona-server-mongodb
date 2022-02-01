@@ -31,6 +31,7 @@
 
 #include "mongo/db/query/sbe_plan_cache.h"
 
+#include "mongo/db/query/plan_cache_invalidator.h"
 #include "mongo/db/query/plan_cache_size_parameter.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
@@ -41,6 +42,18 @@ namespace {
 
 const auto sbePlanCacheDecoration =
     ServiceContext::declareDecoration<std::unique_ptr<sbe::PlanCache>>();
+
+class SbePlanCacheInvalidatorCallback final : public PlanCacheInvalidatorCallback {
+public:
+    SbePlanCacheInvalidatorCallback(ServiceContext* serviceCtx) : _serviceCtx{serviceCtx} {}
+
+    void invalidateCacheEntriesWith(UUID collectionUuid, size_t oldVersion) override {
+        clearPlanCache(_serviceCtx, collectionUuid, oldVersion);
+    }
+
+private:
+    ServiceContext* _serviceCtx;
+};
 
 size_t convertToSizeInBytes(const plan_cache_util::PlanCacheSizeParameter& param) {
     constexpr size_t kBytesInMB = 1014 * 1024;
@@ -93,6 +106,9 @@ size_t capPlanCacheSize(size_t planCacheSize) {
 
 size_t getPlanCacheSizeInBytes(const plan_cache_util::PlanCacheSizeParameter& param) {
     size_t planCacheSize = convertToSizeInBytes(param);
+    uassert(5968001,
+            "Cache size must be at least 1KB * number of cores",
+            planCacheSize >= 1024 * ProcessInfo::getNumCores());
     return capPlanCacheSize(planCacheSize);
 }
 
@@ -113,13 +129,15 @@ ServiceContext::ConstructorActionRegisterer planCacheRegisterer{
         plan_cache_util::sbePlanCacheSizeUpdaterDecoration(serviceCtx) =
             std::make_unique<PlanCacheSizeUpdaterImpl>();
 
+        PlanCacheInvalidatorCallback::set(
+            serviceCtx, std::make_unique<SbePlanCacheInvalidatorCallback>(serviceCtx));
         if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
             auto status = plan_cache_util::PlanCacheSizeParameter::parse(planCacheSize.get());
             uassertStatusOK(status);
 
             auto size = getPlanCacheSizeInBytes(status.getValue());
             auto& globalPlanCache = sbePlanCacheDecoration(serviceCtx);
-            globalPlanCache = std::make_unique<sbe::PlanCache>(size);
+            globalPlanCache = std::make_unique<sbe::PlanCache>(size, ProcessInfo::getNumCores());
         }
     }};
 
@@ -140,11 +158,20 @@ sbe::PlanCache& getPlanCache(OperationContext* opCtx) {
     return getPlanCache(opCtx->getServiceContext());
 }
 
-uint32_t PlanCacheKey::queryHash() const {
-    return static_cast<uint32_t>(PlanCacheKeyHasher{}(*this));
-}
+void clearPlanCache(ServiceContext* serviceCtx, UUID collectionUuid, size_t collectionVersion) {
+    if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+        auto removed = sbe::getPlanCache(serviceCtx)
+                           .removeIf([&collectionUuid, collectionVersion](const PlanCacheKey& key) {
+                               return key.getCollectionVersion() == collectionVersion &&
+                                   key.getCollectionUuid() == collectionUuid;
+                           });
 
-uint32_t PlanCacheKey::planCacheKeyHash() const {
-    return static_cast<uint32_t>(PlanCacheKeyHasher{}(*this));
+        LOGV2_DEBUG(6006600,
+                    1,
+                    "Clearing SBE Plan Cache",
+                    "collectionUuid"_attr = collectionUuid,
+                    "collectionVersion"_attr = collectionVersion,
+                    "removedEntries"_attr = removed);
+    }
 }
 }  // namespace mongo::sbe

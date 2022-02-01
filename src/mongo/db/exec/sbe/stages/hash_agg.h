@@ -35,6 +35,7 @@
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
@@ -89,6 +90,8 @@ public:
     size_t estimateCompileTimeSize() const final;
 
 private:
+    void makeTemporaryRecordStore();
+
     using TableType = stdx::unordered_map<value::MaterializedRow,
                                           value::MaterializedRow,
                                           value::MaterializedRowHasher,
@@ -132,6 +135,10 @@ private:
 
     bool _compiled{false};
     bool _childOpened{false};
+
+    // Used when spilling to disk.
+    std::unique_ptr<TemporaryRecordStore> _recordStore;
 };
+
 }  // namespace sbe
 }  // namespace mongo

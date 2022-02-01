@@ -70,9 +70,9 @@ namespace plan_cache_key_factory {
 /**
  * A factory helper to make a plan cache key of the given type.
  */
-template <typename K>
-K make(const CanonicalQuery& query, const CollectionPtr& collection) {
-    return plan_cache_detail::make(query, collection, plan_cache_detail::PlanCacheKeyTag<K>{});
+template <typename Key>
+Key make(const CanonicalQuery& query, const CollectionPtr& collection) {
+    return plan_cache_detail::make(query, collection, plan_cache_detail::PlanCacheKeyTag<Key>{});
 }
 }  // namespace plan_cache_key_factory
 }  // namespace mongo

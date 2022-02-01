@@ -60,7 +60,7 @@ protected:
     void expectGetDatabase() {
         expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
             DatabaseType db(
-                kNss.db().toString(), {"0"}, true, DatabaseVersion(UUID::gen(), Timestamp()));
+                kNss.db().toString(), {"0"}, true, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
             return std::vector<BSONObj>{db.toBSON()};
         }());
     }
@@ -328,7 +328,7 @@ TEST_F(CatalogCacheRefreshTest, ChunksBSONCorrupted) {
         const auto chunk1 =
             ChunkType(coll.getUuid(),
                       {shardKeyPattern.getKeyPattern().globalMin(), BSON("_id" << 0)},
-                      ChunkVersion(1, 0, epoch, Timestamp()),
+                      ChunkVersion(1, 0, epoch, Timestamp(1, 1)),
                       {"0"});
         return std::vector<BSONObj>{/* collection */
                                     coll.toBSON(),
@@ -407,7 +407,7 @@ TEST_F(CatalogCacheRefreshTest, FullLoadMissingChunkWithLowestVersion) {
 TEST_F(CatalogCacheRefreshTest, FullLoadMissingChunkWithHighestVersion) {
     const OID epoch = OID::gen();
     const UUID uuid = UUID::gen();
-    const Timestamp timestamp;
+    const Timestamp timestamp(1, 1);
     const ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
 
     auto future = scheduleRoutingInfoUnforcedRefresh(kNss);
@@ -465,7 +465,7 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadMissingChunkWithLowestVersion) {
 
     auto initialRoutingInfo(makeChunkManager(kNss, shardKeyPattern, nullptr, true, {}));
     const OID epoch = initialRoutingInfo.getVersion().epoch();
-    const UUID uuid = *initialRoutingInfo.getUUID();
+    const UUID uuid = initialRoutingInfo.getUUID();
     const auto timestamp = initialRoutingInfo.getVersion().getTimestamp();
 
     ASSERT_EQ(1, initialRoutingInfo.numChunks());
@@ -523,7 +523,7 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadMissingChunkWithHighestVersion) {
 
     auto initialRoutingInfo(makeChunkManager(kNss, shardKeyPattern, nullptr, true, {}));
     const OID epoch = initialRoutingInfo.getVersion().epoch();
-    const UUID uuid = *initialRoutingInfo.getUUID();
+    const UUID uuid = initialRoutingInfo.getUUID();
     const auto timestamp = initialRoutingInfo.getVersion().getTimestamp();
 
     ASSERT_EQ(1, initialRoutingInfo.numChunks());
@@ -694,7 +694,7 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadAfterCollectionEpochChange) {
 
     ChunkVersion oldVersion = initialRoutingInfo.getVersion();
     ChunkVersion newVersion(1, 0, OID::gen(), Timestamp(2));
-    const UUID uuid = *initialRoutingInfo.getUUID();
+    const UUID uuid = initialRoutingInfo.getUUID();
 
     // Return collection with a different epoch and a set of chunks, which represent a split
     onFindCommand([&](const RemoteCommandRequest& request) {
@@ -811,7 +811,7 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadAfterMoveWithReshardingFieldsAdde
     ASSERT(boost::none == initialRoutingInfo.getReshardingFields());
 
     ChunkVersion version = initialRoutingInfo.getVersion();
-    const UUID uuid = *initialRoutingInfo.getUUID();
+    const UUID uuid = initialRoutingInfo.getUUID();
 
     auto future = scheduleRoutingInfoIncrementalRefresh(kNss);
 
@@ -864,7 +864,7 @@ TEST_F(CatalogCacheRefreshTest, IncrementalLoadAfterMoveLastChunkWithReshardingF
     // Return set of chunks, which represent a move
     version.incMajor();
     ChunkType chunk1(
-        *initialRoutingInfo.getUUID(),
+        initialRoutingInfo.getUUID(),
         {shardKeyPattern.getKeyPattern().globalMin(), shardKeyPattern.getKeyPattern().globalMax()},
         version,
         {"1"});

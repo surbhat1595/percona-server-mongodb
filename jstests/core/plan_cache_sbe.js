@@ -17,17 +17,12 @@
 (function() {
 "use strict";
 
-load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
-
-if (checkSBEEnabled(db, ["featureFlagSbePlanCache"])) {
-    jsTest.log("Skipping test because SBE and SBE plan cache are both enabled.");
-    return;
-}
+load("jstests/libs/sbe_util.js");             // For checkSBEEnabled.
+load("jstests/libs/sbe_explain_helpers.js");  // For engineSpecificAssertion.
 
 const coll = db.plan_cache_sbe;
 coll.drop();
 
-const isSBEEnabled = checkSBEEnabled(db);
 assert.commandWorked(coll.insert({a: 1, b: 1}));
 
 // We need two indexes so that the multi-planner is executed.
@@ -42,6 +37,24 @@ const allStats = coll.aggregate([{$planCacheStats: {}}]).toArray();
 assert.eq(allStats.length, 1, allStats);
 const stats = allStats[0];
 assert(stats.hasOwnProperty("cachedPlan"), stats);
-assert.eq(stats.cachedPlan.hasOwnProperty("queryPlan"), isSBEEnabled, stats);
-assert.eq(stats.cachedPlan.hasOwnProperty("slotBasedPlan"), isSBEEnabled, stats);
+
+if (!checkSBEEnabled(db, ["featureFlagSbePlanCache"])) {
+    // TODO SERVER-61314: Please modify this branch when "featureFlagSbePlanCache" is removed.
+    // Currently this branch will be taken if either 1) SBE is disabled, or 2) SBE is enabled but
+    // the "featureFlagSbePlanCache" flag is disabled.
+    engineSpecificAssertion(!stats.cachedPlan.hasOwnProperty("queryPlan"),
+                            stats.cachedPlan.hasOwnProperty("queryPlan"),
+                            db,
+                            stats);
+    engineSpecificAssertion(!stats.cachedPlan.hasOwnProperty("slotBasedPlan"),
+                            stats.cachedPlan.hasOwnProperty("slotBasedPlan"),
+                            db,
+                            stats);
+} else {
+    engineSpecificAssertion(
+        !stats.cachedPlan.hasOwnProperty("slots") && !stats.cachedPlan.hasOwnProperty("stages"),
+        stats.cachedPlan.hasOwnProperty("slots") && stats.cachedPlan.hasOwnProperty("stages"),
+        db,
+        stats);
+}
 })();

@@ -407,6 +407,14 @@ Status storeMongodOptions(const moe::Environment& params) {
         storageGlobalParams.dbpath =
             storageGlobalParams.dbpath.erase(storageGlobalParams.dbpath.size() - 1);
     }
+
+    StringData dbpath(storageGlobalParams.dbpath);
+    if (dbpath.size() >= 2 && dbpath.startsWith("\\\\")) {
+        // Check if the dbpath is on a Windows network share (eg. \\myserver\myshare)
+        LOGV2_WARNING_OPTIONS(5808500,
+                              {logv2::LogTag::kStartupWarnings},
+                              "dbpath should not be used on a network share");
+    }
 #endif
 
     if (params.count("operationProfiling.mode")) {
@@ -523,15 +531,16 @@ Status storeMongodOptions(const moe::Environment& params) {
     }
 
     if (params.count("security.clusterIpSourceAllowlist")) {
-        mongodGlobalParams.allowlistedClusterNetwork = std::vector<std::string>();
+        auto allowlistedClusterNetwork = std::make_shared<std::vector<std::string>>();
         for (const std::string& allowlistEntry :
              params["security.clusterIpSourceAllowlist"].as<std::vector<std::string>>()) {
             std::vector<std::string> intermediates;
             str::splitStringDelim(allowlistEntry, &intermediates, ',');
             std::copy(intermediates.begin(),
                       intermediates.end(),
-                      std::back_inserter(*mongodGlobalParams.allowlistedClusterNetwork));
+                      std::back_inserter(*allowlistedClusterNetwork));
         }
+        mongodGlobalParams.allowlistedClusterNetwork = allowlistedClusterNetwork;
     }
 
     if (params.count("repair") && params["repair"].as<bool>() == true) {

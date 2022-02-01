@@ -57,17 +57,18 @@ struct MigrateInfo {
     enum MigrationReason { drain, zoneViolation, chunksImbalance };
 
     MigrateInfo(const ShardId& a_to,
+                const NamespaceString& a_nss,
                 const ChunkType& a_chunk,
                 MoveChunkRequest::ForceJumbo a_forceJumbo,
                 MigrationReason a_reason);
 
     std::string getName() const;
-    StatusWith<NamespaceString> getNss(OperationContext* opCtx) const;
 
-    BSONObj getMigrationTypeQuery(NamespaceString const& nss) const;
+    BSONObj getMigrationTypeQuery() const;
 
     std::string toString() const;
 
+    NamespaceString nss;
     UUID uuid;
     ShardId to;
     ShardId from;
@@ -114,6 +115,14 @@ public:
         return _zoneRanges;
     }
 
+    /**
+     * read all tags for collection via the catalog client and add to the zoneInfo
+     */
+    static Status addTagsFromCatalog(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const KeyPattern& keyPattern,
+                                     ZoneInfo& zoneInfo);
+
 private:
     // Map of zone max key to the zone description
     BSONObjIndexedMap<ZoneRange> _zoneRanges;
@@ -122,18 +131,21 @@ private:
     std::set<std::string> _allZones;
 };
 
+class ChunkManager;
+
 /**
  * This class constitutes a cache of the chunk distribution across the entire cluster along with the
  * zone boundaries imposed on it. This information is stored in format, which makes it efficient to
  * query utilization statististics and to decide what to balance.
  */
-class DistributionStatus {
+class DistributionStatus final {
     DistributionStatus(const DistributionStatus&) = delete;
     DistributionStatus& operator=(const DistributionStatus&) = delete;
 
 public:
     DistributionStatus(NamespaceString nss, ShardToChunksMap shardToChunksMap);
     DistributionStatus(DistributionStatus&&) = default;
+    ~DistributionStatus() {}
 
     /**
      * Returns the namespace for which this balance status applies.
@@ -186,6 +198,13 @@ public:
      */
     const std::set<std::string>& tags() const {
         return _zoneInfo.allZones();
+    }
+
+    /**
+     * Direct access to zone info
+     */
+    ZoneInfo& zoneInfo() {
+        return _zoneInfo;
     }
 
     /**

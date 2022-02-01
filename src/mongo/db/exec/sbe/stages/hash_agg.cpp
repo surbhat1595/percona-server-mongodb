@@ -133,6 +133,31 @@ value::SlotAccessor* HashAggStage::getAccessor(CompileCtx& ctx, value::SlotId sl
     return ctx.getAccessor(slot);
 }
 
+namespace {
+// This check makes sure we are safe to spill to disk without the need to abandon the current
+// snapshot.
+void assertIgnoreConflictsWriteBehavior(OperationContext* opCtx) {
+    tassert(5907502,
+            "The operation must be ignoring conflicts and allowing writes or enforcing prepare "
+            "conflicts entirely",
+            opCtx->recoveryUnit()->getPrepareConflictBehavior() !=
+                PrepareConflictBehavior::kIgnoreConflicts);
+}
+}  // namespace
+
+void HashAggStage::makeTemporaryRecordStore() {
+    tassert(
+        5907500,
+        "HashAggStage attempted to write to disk in an environment which is not prepared to do so",
+        _opCtx->getServiceContext());
+    tassert(5907501,
+            "No storage engine so HashAggStage cannot spill to disk",
+            _opCtx->getServiceContext()->getStorageEngine());
+    assertIgnoreConflictsWriteBehavior(_opCtx);
+    _recordStore = _opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
+        _opCtx, KeyFormat::String);
+}
+
 void HashAggStage::open(bool reOpen) {
     auto optTimer(getOptTimer(_opCtx));
 
@@ -191,9 +216,12 @@ void HashAggStage::open(bool reOpen) {
                 long estimatedSizeForOneRow =
                     it->first.memUsageForSorter() + it->second.memUsageForSorter();
                 long long estimatedTotalSize = _ht->size() * estimatedSizeForOneRow;
-                uassert(5859000,
-                        "Need to spill to disk",
-                        estimatedTotalSize < _approxMemoryUseInBytesBeforeSpill);
+
+                if (estimatedTotalSize >= _approxMemoryUseInBytesBeforeSpill) {
+                    // TODO SERVER-58436: Remove this uassert when spilling is implemented.
+                    uasserted(5859000, "Need to spill to disk");
+                    makeTemporaryRecordStore();
+                }
             }
         }
 
@@ -234,6 +262,10 @@ PlanState HashAggStage::getNext() {
     }
 
     if (_htIt == _ht->end()) {
+        if (_recordStore && _seekKeysAccessors.empty()) {
+            // A record store was created to spill to disk. Clean it up.
+            _recordStore.reset();
+        }
         return trackPlanState(PlanState::IS_EOF);
     }
 
@@ -269,6 +301,10 @@ void HashAggStage::close() {
 
     trackClose();
     _ht = boost::none;
+    if (_recordStore) {
+        // A record store was created to spill to disk. Clean it up.
+        _recordStore.reset();
+    }
 
     if (_childOpened) {
         _children[0]->close();

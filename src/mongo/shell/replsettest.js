@@ -1532,6 +1532,7 @@ var ReplSetTest = function(opts) {
             for (let i = 2; i <= originalMembers.length; i++) {
                 print("ReplSetTest adding in node " + i);
                 assert.soon(function() {
+                    primary = self.getPrimary().getDB("admin");
                     const statusRes =
                         assert.commandWorked(primary.adminCommand({replSetGetStatus: 1}));
                     const primaryMember = statusRes.members.find((m) => m.self);
@@ -1546,7 +1547,8 @@ var ReplSetTest = function(opts) {
                         ErrorCodes.NewReplicaSetConfigurationIncompatible,
                         ErrorCodes.InterruptedDueToReplStateChange,
                         ErrorCodes.ConfigurationInProgress,
-                        ErrorCodes.CurrentConfigNotCommittedYet
+                        ErrorCodes.CurrentConfigNotCommittedYet,
+                        ErrorCodes.NotWritablePrimary
                     ];
                     if (retryableReconfigCodes.includes(reconfigRes.code)) {
                         print("Retrying reconfig due to " + tojsononeline(reconfigRes));
@@ -2436,8 +2438,10 @@ var ReplSetTest = function(opts) {
                 // sync. It's guaranteed to be eventually consistent. However, tests that initial
                 // sync concurrently with retryable findAndModify statements cannot make this
                 // assumption.
-                const primaryCollections = Object.keys(primaryDBHash.collections)
-                                               .filter((x) => x !== "config.image_collection");
+                // TODO SERVER-60238: remove system.preimages check when replication to secondaries
+                // is implemented.
+                const primaryCollections =
+                    Object.keys(primaryDBHash.collections).filter((x) => x !== "system.preimages");
                 assert.commandWorked(primaryDBHash);
 
                 // Filter only collections that were retrieved by the dbhash. listCollections

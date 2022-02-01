@@ -88,10 +88,6 @@ public:
                                                      const char* damageSource,
                                                      const mutablebson::DamageVector& damages);
 
-    Status oplogDiskLocRegister(OperationContext* opCtx,
-                                const Timestamp& opTime,
-                                bool orderedCommit) override;
-
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                     bool forward) const final;
 
@@ -104,11 +100,16 @@ public:
                                    BSONObjBuilder* result,
                                    double scale) const {}
 
-    void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const override;
-
     virtual void updateStatsAfterRepair(OperationContext* opCtx,
                                         long long numRecords,
                                         long long dataSize);
+
+protected:
+    Status oplogDiskLocRegisterImpl(OperationContext* opCtx,
+                                    const Timestamp& opTime,
+                                    bool orderedCommit) override;
+
+    void waitForAllEarlierOplogWritesToBeVisibleImpl(OperationContext* opCtx) const override;
 
 private:
     friend class VisibilityManagerChange;
@@ -172,6 +173,12 @@ private:
         VisibilityManager* _visibilityManager;
         RecordId _oplogVisibility;
 
+        // Each cursor holds a strong reference to the recovery unit's working copy at the time of
+        // the last next()/seek() on the cursor. This ensures that in between calls to
+        // next()/seek(), the data pointed to by the cursor remains valid, even if the client
+        // finishes a transaction and advances the snapshot.
+        std::shared_ptr<StringStore> _workingCopy;
+
     public:
         Cursor(OperationContext* opCtx,
                const RecordStore& rs,
@@ -181,12 +188,16 @@ private:
         boost::optional<Record> seekNear(const RecordId& id) final override;
         void save() final;
         void saveUnpositioned() final override;
-        bool restore() final;
+        bool restore(bool tolerateCappedRepositioning = true) final;
         void detachFromOperationContext() final;
         void reattachToOperationContext(OperationContext* opCtx) final;
 
     private:
         bool inPrefix(const std::string& key_string);
+
+        // Updates '_workingCopy' and 'it' to use the snapshot associated with the recovery unit,
+        // if it has changed.
+        void advanceSnapshotIfNeeded();
     };
 
     class ReverseCursor final : public SeekableRecordCursor {
@@ -198,6 +209,12 @@ private:
         bool _lastMoveWasRestore = false;
         VisibilityManager* _visibilityManager;
 
+        // Each cursor holds a strong reference to the recovery unit's working copy at the time of
+        // the last next()/seek() on the cursor. This ensures that in between calls to
+        // next()/seek(), the data pointed to by the cursor remains valid, even if the client
+        // finishes a transaction and advances the snapshot.
+        std::shared_ptr<StringStore> _workingCopy;
+
     public:
         ReverseCursor(OperationContext* opCtx,
                       const RecordStore& rs,
@@ -207,12 +224,16 @@ private:
         boost::optional<Record> seekNear(const RecordId& id) final override;
         void save() final;
         void saveUnpositioned() final override;
-        bool restore() final;
+        bool restore(bool tolerateCappedRepositioning = true) final;
         void detachFromOperationContext() final;
         void reattachToOperationContext(OperationContext* opCtx) final;
 
     private:
         bool inPrefix(const std::string& key_string);
+
+        // Updates '_workingCopy' and 'it' to use the snapshot associated with the recovery unit,
+        // if it has changed.
+        void advanceSnapshotIfNeeded();
     };
 };
 

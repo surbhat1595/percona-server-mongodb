@@ -32,7 +32,6 @@
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
 #include "mongo/db/s/balancer/balancer_random.h"
-#include "mongo/db/s/balancer/migration_manager.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/thread.h"
@@ -41,6 +40,8 @@ namespace mongo {
 
 class ChunkType;
 class ClusterStatistics;
+class BalancerChunkMerger;
+class BalancerCommandsScheduler;
 class MigrationSecondaryThrottleOptions;
 class OperationContext;
 class ServiceContext;
@@ -146,7 +147,9 @@ public:
      * will actually move because it may already be at the best shard. An error will be returned if
      * the attempt to find a better shard or the actual migration fail for any reason.
      */
-    Status rebalanceSingleChunk(OperationContext* opCtx, const ChunkType& chunk);
+    Status rebalanceSingleChunk(OperationContext* opCtx,
+                                const NamespaceString& nss,
+                                const ChunkType& chunk);
 
     /**
      * Blocking call, which requests the balancer to move a single chunk to the specified location
@@ -157,6 +160,7 @@ public:
      *       move regardless. If should be used only for user-initiated moves.
      */
     Status moveSingleChunk(OperationContext* opCtx,
+                           const NamespaceString& nss,
                            const ChunkType& chunk,
                            const ShardId& newShardId,
                            uint64_t maxChunkSizeBytes,
@@ -265,6 +269,11 @@ private:
     int _moveChunks(OperationContext* opCtx,
                     const BalancerChunkSelectionPolicy::MigrateInfoVector& candidateChunks);
 
+    /**
+     * Merge chunks on collections where the balancerShouldMergeChunks flag is set to true
+     */
+    void _mergeChunksIfNeeded(OperationContext* opCtx);
+
     // Protects the state below
     Mutex _mutex = MONGO_MAKE_LATCH("Balancer::_mutex");
 
@@ -279,16 +288,6 @@ private:
     // kRunning state and is used to force interrupt of any blocking calls made by the balancer
     // thread.
     OperationContext* _threadOperationContext{nullptr};
-
-    // This thread is only available in the kStopping state and is necessary for the migration
-    // manager shutdown to not deadlock with replica set step down. In particular, the migration
-    // manager's order of lock acquisition is mutex, then collection lock, whereas stepdown first
-    // acquires the global S lock and then acquires the migration manager's mutex.
-    //
-    // The interrupt thread is scheduled when the balancer enters the kStopping state (which is at
-    // step down) and is joined outside of lock, when the replica set leaves draining mode, outside
-    // of the global X lock.
-    stdx::thread _migrationManagerInterruptThread;
 
     // Indicates whether the balancer is currently executing a balancer round
     bool _inBalancerRound{false};
@@ -317,8 +316,9 @@ private:
     // it should be created after them and destroyed before them.
     std::unique_ptr<BalancerChunkSelectionPolicy> _chunkSelectionPolicy;
 
-    // Migration manager used to schedule and manage migrations
-    MigrationManager _migrationManager;
+    std::unique_ptr<BalancerCommandsScheduler> _commandScheduler;
+
+    std::unique_ptr<BalancerChunkMerger> _chunkMerger;
 };
 
 }  // namespace mongo

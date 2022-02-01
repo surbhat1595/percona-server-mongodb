@@ -42,7 +42,7 @@ namespace mongo {
 /**
  * Contains server/cluster-wide information about Authorization.
  */
-class AuthorizationManagerImpl : public AuthorizationManager {
+class AuthorizationManagerImpl final : public AuthorizationManager {
 public:
     struct InstallMockForTestingOrAuthImpl {
         explicit InstallMockForTestingOrAuthImpl() = default;
@@ -106,6 +106,12 @@ public:
     void invalidateUserByName(OperationContext* opCtx, const UserName& user) override;
 
     void invalidateUsersFromDB(OperationContext* opCtx, StringData dbname) override;
+
+    /**
+     * Verify role information for users in the $external database and insert updated information
+     * into the cache if necessary. Currently, this is only used to refresh LDAP users.
+     */
+    Status refreshExternalUsers(OperationContext* opCtx) override;
 
     Status initialize(OperationContext* opCtx) override;
 

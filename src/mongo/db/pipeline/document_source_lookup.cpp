@@ -363,7 +363,7 @@ PrivilegeVector DocumentSourceLookUp::LiteParsed::requiredPrivileges(
 REGISTER_DOCUMENT_SOURCE(lookup,
                          DocumentSourceLookUp::LiteParsed::parse,
                          DocumentSourceLookUp::createFromBson,
-                         AllowedWithApiStrict::kSometimes);
+                         AllowedWithApiStrict::kConditionally);
 
 const char* DocumentSourceLookUp::getSourceName() const {
     return kStageName.rawData();
@@ -480,7 +480,7 @@ DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
         results.emplace_back(std::move(*result));
     }
 
-    recordPlanSummaryStats(*pipeline);
+    accumulatePipelinePlanSummaryStats(*pipeline, _stats.planSummaryStats);
     MutableDocument output(std::move(inputDoc));
     output.setNestedField(_as, Value(std::move(results)));
     return output.freeze();
@@ -555,9 +555,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
 
             LOGV2_DEBUG(3254800,
                         3,
-                        "$lookup found view definition. ns: {ns}, pipeline: {pipeline}. New "
+                        "$lookup found view definition. ns: {namespace}, pipeline: {pipeline}. New "
                         "$lookup sub-pipeline: {new_pipe}",
-                        "ns"_attr = e->getNamespace(),
+                        logAttrs(e->getNamespace()),
                         "pipeline"_attr = Value(e->getPipeline()),
                         "new_pipe"_attr = _resolvedPipeline);
 
@@ -605,9 +605,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
 
             LOGV2_DEBUG(3254801,
                         3,
-                        "$lookup found view definition. ns: {ns}, pipeline: {pipeline}. New "
+                        "$lookup found view definition. ns: {namespace}, pipeline: {pipeline}. New "
                         "$lookup sub-pipeline: {new_pipe}",
-                        "ns"_attr = e->getNamespace(),
+                        logAttrs(e->getNamespace()),
                         "pipeline"_attr = Value(e->getPipeline()),
                         "new_pipe"_attr = _resolvedPipeline);
 
@@ -806,7 +806,7 @@ bool DocumentSourceLookUp::usedDisk() {
 
 void DocumentSourceLookUp::doDispose() {
     if (_pipeline) {
-        recordPlanSummaryStats(*_pipeline);
+        accumulatePipelinePlanSummaryStats(*_pipeline, _stats.planSummaryStats);
         _pipeline->dispose(pExpCtx->opCtx);
         _pipeline.reset();
     }
@@ -922,7 +922,7 @@ DocumentSource::GetNextResult DocumentSourceLookUp::unwindResult() {
         }
 
         if (_pipeline) {
-            recordPlanSummaryStats(*_pipeline);
+            accumulatePipelinePlanSummaryStats(*_pipeline, _stats.planSummaryStats);
             _pipeline->dispose(pExpCtx->opCtx);
         }
 
@@ -977,16 +977,10 @@ void DocumentSourceLookUp::resolveLetVariables(const Document& localDoc, Variabl
 
 void DocumentSourceLookUp::initializeResolvedIntrospectionPipeline() {
     _variables.copyToExpCtx(_variablesParseState, _fromExpCtx.get());
+    _fromExpCtx->startExpressionCounters();
     _resolvedIntrospectionPipeline =
         Pipeline::parse(_resolvedPipeline, _fromExpCtx, lookupPipeValidator);
-}
-
-void DocumentSourceLookUp::recordPlanSummaryStats(const Pipeline& pipeline) {
-    for (auto&& source : pipeline.getSources()) {
-        if (auto specificStats = source->getSpecificStats()) {
-            specificStats->accumulate(_stats.planSummaryStats);
-        }
-    }
+    _fromExpCtx->stopExpressionCounters();
 }
 
 void DocumentSourceLookUp::appendSpecificExecStats(MutableDocument& doc) const {

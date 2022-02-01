@@ -57,7 +57,7 @@ FreeMonOpObserver::~FreeMonOpObserver() = default;
 
 repl::OpTime FreeMonOpObserver::onDropCollection(OperationContext* opCtx,
                                                  const NamespaceString& collectionName,
-                                                 OptionalCollectionUUID uuid,
+                                                 const UUID& uuid,
                                                  std::uint64_t numRecords,
                                                  const CollectionDropType dropType) {
     if (collectionName == NamespaceString::kServerConfigurationNamespace) {
@@ -73,7 +73,7 @@ repl::OpTime FreeMonOpObserver::onDropCollection(OperationContext* opCtx,
 
 void FreeMonOpObserver::onInserts(OperationContext* opCtx,
                                   const NamespaceString& nss,
-                                  OptionalCollectionUUID uuid,
+                                  const UUID& uuid,
                                   std::vector<InsertStatement>::const_iterator begin,
                                   std::vector<InsertStatement>::const_iterator end,
                                   bool fromMigrate) {
@@ -109,11 +109,11 @@ void FreeMonOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntry
         return;
     }
 
-    if (args.updateArgs.updatedDoc["_id"].str() == FreeMonStorage::kFreeMonDocIdKey) {
+    if (args.updateArgs->updatedDoc["_id"].str() == FreeMonStorage::kFreeMonDocIdKey) {
         auto controller = FreeMonController::get(opCtx->getServiceContext());
 
         if (controller != nullptr) {
-            controller->notifyOnUpsert(args.updateArgs.updatedDoc.getOwned());
+            controller->notifyOnUpsert(args.updateArgs->updatedDoc.getOwned());
         }
     }
 }
@@ -132,7 +132,7 @@ void FreeMonOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void FreeMonOpObserver::onDelete(OperationContext* opCtx,
                                  const NamespaceString& nss,
-                                 OptionalCollectionUUID uuid,
+                                 const UUID& uuid,
                                  StmtId stmtId,
                                  const OplogDeleteEntryArgs& args) {
     if (nss != NamespaceString::kServerConfigurationNamespace) {
@@ -152,8 +152,8 @@ void FreeMonOpObserver::onDelete(OperationContext* opCtx,
     }
 }
 
-void FreeMonOpObserver::onReplicationRollback(OperationContext* opCtx,
-                                              const RollbackObserverInfo& rbInfo) {
+void FreeMonOpObserver::_onReplicationRollback(OperationContext* opCtx,
+                                               const RollbackObserverInfo& rbInfo) {
     // Invalidate any in-memory auth data if necessary.
     const auto& rollbackNamespaces = rbInfo.rollbackNamespaces;
     if (rollbackNamespaces.count(NamespaceString::kServerConfigurationNamespace) == 1) {

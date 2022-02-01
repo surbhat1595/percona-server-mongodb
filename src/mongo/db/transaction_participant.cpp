@@ -56,6 +56,7 @@
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/retryable_writes_stats.h"
@@ -99,23 +100,34 @@ const StringMap<int> preparedTxnCmdAllowlist = {
     {"abortTransaction", 1}, {"commitTransaction", 1}, {"prepareTransaction", 1}};
 
 void fassertOnRepeatedExecution(const LogicalSessionId& lsid,
-                                TxnNumber txnNumber,
+                                TxnNumberAndRetryCounter txnNumberAndRetryCounter,
                                 StmtId stmtId,
                                 const repl::OpTime& firstOpTime,
                                 const repl::OpTime& secondOpTime) {
     LOGV2_FATAL(
         40526,
-        "Statement id {stmtId} from transaction [ {lsid}:{txnNumber} ] was committed once "
-        "with opTime {firstCommitOpTime} and a second time with opTime {secondCommitOpTime}. This "
-        "indicates possible data corruption or server bug and the process will be "
-        "terminated.",
+        "Statement id {stmtId} from transaction [ {lsid}:{txnNumberAndRetryCounter} ] was "
+        "committed once with opTime {firstCommitOpTime} and a second time with opTime { "
+        "secondCommitOpTime}. This indicates possible data corruption or server bug and the "
+        "process will be terminated.",
         "Statement from transaction was committed twice. This indicates possible data corruption "
         "or server bug and the process will be terminated",
         "stmtId"_attr = stmtId,
         "lsid"_attr = lsid.toBSON(),
-        "txnNumber"_attr = txnNumber,
+        "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
         "firstCommitOpTime"_attr = firstOpTime,
         "secondCommitOpTime"_attr = secondOpTime);
+}
+
+void validateTransactionHistoryApplyOpsOplogEntry(const repl::OplogEntry& oplogEntry) {
+    uassert(5875601,
+            "Found an applyOps oplog entry for retryable writes that were executed without "
+            "using a retryable internal transaction",
+            isInternalSessionForRetryableWrite(*oplogEntry.getSessionId()));
+    uassert(5875602,
+            "Found an applyOps oplog entry for retryable internal transaction with top-level "
+            "'stmtId' field",
+            oplogEntry.getStatementIds().empty());
 }
 
 struct ActiveTransactionHistory {
@@ -142,7 +154,7 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
         // field has been set, bumping the global lock acquisition to an IX. That upconvert would
         // require a flow control ticket to be obtained.
         FlowControl::Bypass flowControlBypass(opCtx);
-        auto result = client.findOne(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+        auto result = client.findOne(NamespaceString::kSessionTransactionsTableNamespace,
                                      BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()));
         if (result.isEmpty()) {
             return boost::none;
@@ -156,14 +168,35 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
         return result;
     }
 
-    if (result.lastTxnRecord->getState()) {
-        // When state is given, it must be a transaction, so we don't need to traverse the history.
-        return result;
+    if (auto state = result.lastTxnRecord->getState()) {
+        if (!isInternalSessionForRetryableWrite(lsid) || state == DurableTxnStateEnum::kAborted) {
+            // When state is given, it must be a transaction, so we don't need to traverse the
+            // history if it is not a transaction for retryable writes.
+            return result;
+        }
     }
 
     if (!fetchOplogEntries) {
         return result;
     }
+
+    auto insertStmtIdsForOplogEntry = [&](const repl::OplogEntry& entry) {
+        for (auto stmtId : entry.getStatementIds()) {
+            uassert(5875604,
+                    str::stream() << "Found an oplog entry with an invalid stmtId "
+                                  << entry.toBSONForLogging(),
+                    stmtId >= 0);
+            const auto insertRes = result.committedStatements.emplace(stmtId, entry.getOpTime());
+            if (!insertRes.second) {
+                const auto& existingOpTime = insertRes.first->second;
+                fassertOnRepeatedExecution(lsid,
+                                           result.lastTxnRecord->getTxnNum(),
+                                           stmtId,
+                                           existingOpTime,
+                                           entry.getOpTime());
+            }
+        }
+    };
 
     auto it = TransactionHistoryIterator(result.lastTxnRecord->getLastWriteOpTime());
     while (it.hasNext()) {
@@ -173,34 +206,46 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
             // Each entry should correspond to a retryable write or a FCV4.0 format transaction.
             // These oplog entries must have statementIds.
             auto stmtIds = entry.getStatementIds();
-            invariant(!stmtIds.empty());
-            if (stmtIds.front() == kIncompleteHistoryStmtId) {
-                // Only the dead end sentinel can have this id for oplog write history
-                invariant(stmtIds.size() == 1);
-                invariant(entry.getObject2());
-                invariant(entry.getObject2()->woCompare(TransactionParticipant::kDeadEndSentinel) ==
-                          0);
-                result.hasIncompleteHistory = true;
-                continue;
-            }
 
-            if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps &&
-                !entry.shouldPrepare() && !entry.isPartialTransaction()) {
-                result.lastTxnRecord->setState(DurableTxnStateEnum::kCommitted);
-                return result;
-            }
+            if (isInternalSessionForRetryableWrite(lsid)) {
+                uassert(5875605,
+                        "Found an oplog entry for retryable internal transaction with top-level "
+                        "'stmtId' field",
+                        stmtIds.empty());
 
-            for (auto stmtId : entry.getStatementIds()) {
-                const auto insertRes =
-                    result.committedStatements.emplace(stmtId, entry.getOpTime());
-                if (!insertRes.second) {
-                    const auto& existingOpTime = insertRes.first->second;
-                    fassertOnRepeatedExecution(lsid,
-                                               result.lastTxnRecord->getTxnNum(),
-                                               stmtId,
-                                               existingOpTime,
-                                               entry.getOpTime());
+                if (entry.getCommandType() == repl::OplogEntry::CommandType::kCommitTransaction) {
+                    continue;
+                } else if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
+                    validateTransactionHistoryApplyOpsOplogEntry(entry);
+
+                    std::vector<repl::OplogEntry> innerEntries;
+                    repl::ApplyOps::extractOperationsTo(
+                        entry, entry.getEntry().toBSON(), &innerEntries);
+                    for (const auto& innerEntry : innerEntries) {
+                        insertStmtIdsForOplogEntry(innerEntry);
+                    }
+                } else {
+                    MONGO_UNREACHABLE;
                 }
+            } else {
+                invariant(!stmtIds.empty());
+
+                if (stmtIds.front() == kIncompleteHistoryStmtId) {
+                    // Only the dead end sentinel can have this id for oplog write history
+                    invariant(stmtIds.size() == 1);
+                    invariant(entry.getObject2());
+                    invariant(entry.getObject2()->woCompare(
+                                  TransactionParticipant::kDeadEndSentinel) == 0);
+                    result.hasIncompleteHistory = true;
+                    continue;
+                }
+
+                if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps &&
+                    !entry.shouldPrepare() && !entry.isPartialTransaction()) {
+                    result.lastTxnRecord->setState(DurableTxnStateEnum::kCommitted);
+                    return result;
+                }
+                insertStmtIdsForOplogEntry(entry);
             }
         } catch (const DBException& ex) {
             if (ex.code() == ErrorCodes::IncompleteTransactionHistory) {
@@ -266,6 +311,13 @@ void updateSessionEntry(OperationContext* opCtx, const UpdateRequest& updateRequ
     auto originalRecordData = collection->getRecordStore()->dataFor(opCtx, recordId);
     auto originalDoc = originalRecordData.toBson();
 
+    const auto parentLsidFieldName = SessionTxnRecord::kParentSessionIdFieldName;
+    uassert(5875700,
+            str::stream() << "Cannot modify the '" << parentLsidFieldName << "' field of "
+                          << NamespaceString::kSessionTransactionsTableNamespace << " entries",
+            updateMod.getObjectField(parentLsidFieldName)
+                    .woCompare(originalDoc.getObjectField(parentLsidFieldName)) == 0);
+
     invariant(collection->getDefaultCollator() == nullptr);
     boost::intrusive_ptr<ExpressionContext> expCtx(
         new ExpressionContext(opCtx, nullptr, updateRequest.getNamespaceString()));
@@ -281,11 +333,13 @@ void updateSessionEntry(OperationContext* opCtx, const UpdateRequest& updateRequ
     args.update = updateMod;
     args.criteria = toUpdateIdDoc;
 
+    // Specify indexesAffected = false because the sessions collection has two indexes: {_id: 1} and
+    // {parentLsid: 1, _id.txnNumber: 1, _id: 1}, and none of the fields are mutable.
     collection->updateDocument(opCtx,
                                recordId,
                                Snapshotted<BSONObj>(startingSnapshotId, originalDoc),
                                updateMod,
-                               false,  // indexesAffected = false because _id is the only index
+                               false, /* indexesAffected */
                                nullptr,
                                &args);
 
@@ -425,11 +479,18 @@ const LogicalSessionId& TransactionParticipant::Observer::_sessionId() const {
     return owningSession->getSessionId();
 }
 
+bool TransactionParticipant::Observer::_isInternalSessionForRetryableWrite() const {
+    return isInternalSessionForRetryableWrite(_sessionId());
+}
+
 void TransactionParticipant::Participant::_beginOrContinueRetryableWrite(
-    OperationContext* opCtx, const TxnNumber& txnNumber) {
-    if (txnNumber > o().activeTxnNumber) {
+    OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
+    invariant(!txnNumberAndRetryCounter.getTxnRetryCounter());
+    if (txnNumberAndRetryCounter.getTxnNumber() >
+        o().activeTxnNumberAndRetryCounter.getTxnNumber()) {
         // New retryable write.
-        _setNewTxnNumber(opCtx, txnNumber, kUninitializedTxnRetryCounter);
+        _setNewTxnNumberAndRetryCounter(
+            opCtx, {txnNumberAndRetryCounter.getTxnNumber(), kUninitializedTxnRetryCounter});
         p().autoCommit = boost::none;
     } else {
         // Retrying a retryable write.
@@ -441,26 +502,36 @@ void TransactionParticipant::Participant::_beginOrContinueRetryableWrite(
 }
 
 void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
-    OperationContext* opCtx, const TxnNumber& txnNumber, const TxnRetryCounter& txnRetryCounter) {
+    OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
     uassert(ErrorCodes::NoSuchTransaction,
             str::stream()
-                << "Given transaction number " << txnNumber
+                << "Given transaction number " << txnNumberAndRetryCounter.getTxnNumber()
                 << " does not match any in-progress transactions. The active transaction number is "
-                << o().activeTxnNumber,
-            txnNumber == o().activeTxnNumber && !o().txnState.isInRetryableWriteMode());
+                << o().activeTxnNumberAndRetryCounter.getTxnNumber(),
+            txnNumberAndRetryCounter.getTxnNumber() ==
+                    o().activeTxnNumberAndRetryCounter.getTxnNumber() &&
+                !o().txnState.isInRetryableWriteMode());
 
-    uassert(TxnRetryCounterTooOldInfo(o().activeTxnRetryCounter),
-            str::stream() << "Cannot continue transaction " << txnNumber << " on session "
-                          << _sessionId() << " using txnRetryCounter " << txnRetryCounter
+    uassert(TxnRetryCounterTooOldInfo(*o().activeTxnNumberAndRetryCounter.getTxnRetryCounter()),
+            str::stream() << "Cannot continue transaction "
+                          << txnNumberAndRetryCounter.getTxnNumber() << " on session "
+                          << _sessionId() << " using txnRetryCounter "
+                          << txnNumberAndRetryCounter.getTxnRetryCounter()
                           << " because it has already been restarted using a higher"
-                          << " txnRetryCounter " << o().activeTxnRetryCounter,
-            txnRetryCounter >= o().activeTxnRetryCounter);
+                          << " txnRetryCounter "
+                          << o().activeTxnNumberAndRetryCounter.getTxnRetryCounter(),
+            txnNumberAndRetryCounter.getTxnRetryCounter() >=
+                o().activeTxnNumberAndRetryCounter.getTxnRetryCounter());
     uassert(ErrorCodes::IllegalOperation,
-            str::stream() << "Cannot continue transaction " << txnNumber << " on session "
-                          << _sessionId() << " using txnRetryCounter " << txnRetryCounter
+            str::stream() << "Cannot continue transaction "
+                          << txnNumberAndRetryCounter.getTxnNumber() << " on session "
+                          << _sessionId() << " using txnNumberAndRetryCounter.getTxnRetryCounter() "
+                          << txnNumberAndRetryCounter.getTxnRetryCounter()
                           << " because it is currently in state " << o().txnState
-                          << " with txnRetryCounter " << o().activeTxnRetryCounter,
-            txnRetryCounter == o().activeTxnRetryCounter);
+                          << " with txnRetryCounter "
+                          << o().activeTxnNumberAndRetryCounter.getTxnRetryCounter(),
+            txnNumberAndRetryCounter.getTxnRetryCounter() ==
+                o().activeTxnNumberAndRetryCounter.getTxnRetryCounter());
 
     if (o().txnState.isInProgress() && !o().txnResourceStash) {
         // This indicates that the first command in the transaction failed but did not implicitly
@@ -479,23 +550,30 @@ void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
         uasserted(
             ErrorCodes::NoSuchTransaction,
             str::stream()
-                << "Transaction " << txnNumber
+                << "Transaction with " << txnNumberAndRetryCounter.toBSON()
                 << " has been aborted because an earlier command in this transaction failed.");
     }
 }
 
 void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
-    OperationContext* opCtx, const TxnNumber& txnNumber, const TxnRetryCounter& txnRetryCounter) {
-    if (txnNumber == o().activeTxnNumber) {
-        if (txnRetryCounter < o().activeTxnRetryCounter) {
-            uasserted(TxnRetryCounterTooOldInfo(o().activeTxnRetryCounter),
-                      str::stream()
-                          << "Cannot start a transaction at given transaction number " << txnNumber
-                          << " on session " << _sessionId() << " using txnRetryCounter "
-                          << txnRetryCounter << " because it has already been restarted using a "
-                          << "higher txnRetryCounter " << o().activeTxnRetryCounter);
-        } else if (txnRetryCounter == o().activeTxnRetryCounter ||
-                   o().activeTxnRetryCounter == kUninitializedTxnRetryCounter) {
+    OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
+    if (txnNumberAndRetryCounter.getTxnNumber() ==
+        o().activeTxnNumberAndRetryCounter.getTxnNumber()) {
+        if (txnNumberAndRetryCounter.getTxnRetryCounter() <
+            o().activeTxnNumberAndRetryCounter.getTxnRetryCounter()) {
+            uasserted(
+                TxnRetryCounterTooOldInfo(*o().activeTxnNumberAndRetryCounter.getTxnRetryCounter()),
+                str::stream() << "Cannot start a transaction at given transaction number "
+                              << txnNumberAndRetryCounter.getTxnNumber() << " on session "
+                              << _sessionId() << " using txnRetryCounter "
+                              << txnNumberAndRetryCounter.getTxnRetryCounter()
+                              << " because it has already been restarted using a "
+                              << "higher txnRetryCounter "
+                              << o().activeTxnNumberAndRetryCounter.getTxnRetryCounter());
+        } else if (txnNumberAndRetryCounter.getTxnRetryCounter() ==
+                       o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ||
+                   o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ==
+                       kUninitializedTxnRetryCounter) {
             // Servers in a sharded cluster can start a new transaction at the active transaction
             // number to allow internal retries by routers on re-targeting errors, like
             // StaleShard/DatabaseVersion or SnapshotTooOld.
@@ -503,6 +581,13 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
                     "Only servers in a sharded cluster can start a new transaction at the active "
                     "transaction number",
                     serverGlobalParams.clusterRole != ClusterRole::None);
+
+            if (_isInternalSessionForRetryableWrite() &&
+                o().txnState.isInSet(TransactionState::kCommitted)) {
+                // This is a retry of a committed internal transaction for retryable writes so
+                // skip resetting the state and updating the metrics.
+                return;
+            }
 
             // The active transaction number can only be reused if:
             // 1. The transaction participant is in retryable write mode and has not yet executed a
@@ -514,26 +599,31 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
             const auto restartableStates =
                 TransactionState::kNone | TransactionState::kAbortedWithoutPrepare;
             uassert(50911,
-                    str::stream() << "Cannot start a transaction at given transaction number "
-                                  << txnNumber << " a transaction with the same number is in state "
+                    str::stream() << "Cannot start a transaction at given transaction with "
+                                  << txnNumberAndRetryCounter.toBSON()
+                                  << " because a transaction with the same number is in state "
                                   << o().txnState,
                     o().txnState.isInSet(restartableStates));
         } else {
             const auto restartableStates = TransactionState::kNone | TransactionState::kInProgress |
                 TransactionState::kAbortedWithoutPrepare | TransactionState::kAbortedWithPrepare;
             uassert(ErrorCodes::IllegalOperation,
-                    str::stream() << "Cannot restart transaction " << txnNumber
-                                  << " using txnRetryCounter " << txnRetryCounter
+                    str::stream() << "Cannot restart transaction "
+                                  << txnNumberAndRetryCounter.getTxnNumber()
+                                  << " using txnRetryCounter "
+                                  << txnNumberAndRetryCounter.getTxnRetryCounter()
                                   << " because it is already in state " << o().txnState
-                                  << " with txnRetryCounter " << o().activeTxnRetryCounter,
+                                  << " with txnRetryCounter "
+                                  << o().activeTxnNumberAndRetryCounter.getTxnRetryCounter(),
                     o().txnState.isInSet(restartableStates));
         }
     } else {
-        invariant(txnNumber > o().activeTxnNumber);
+        invariant(txnNumberAndRetryCounter.getTxnNumber() >
+                  o().activeTxnNumberAndRetryCounter.getTxnNumber());
     }
 
     // Aborts any in-progress txns.
-    _setNewTxnNumber(opCtx, txnNumber, txnRetryCounter);
+    _setNewTxnNumberAndRetryCounter(opCtx, txnNumberAndRetryCounter);
     p().autoCommit = false;
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -560,10 +650,9 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
 
 void TransactionParticipant::Participant::beginOrContinue(
     OperationContext* opCtx,
-    TxnNumber txnNumber,
+    TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
-    boost::optional<bool> startTransaction,
-    boost::optional<TxnRetryCounter> txnRetryCounter) {
+    boost::optional<bool> startTransaction) {
     // Make sure we are still a primary. We need to hold on to the RSTL through the end of this
     // method, as we otherwise risk stepping down in the interim and incorrectly updating the
     // transaction number, which can abort active transactions.
@@ -584,22 +673,26 @@ void TransactionParticipant::Participant::beginOrContinue(
                     getTestCommandsEnabled());
     }
 
-    if (txnNumber < o().activeTxnNumber) {
+    if (txnNumberAndRetryCounter.getTxnNumber() <
+        o().activeTxnNumberAndRetryCounter.getTxnNumber()) {
         const std::string currOperation =
             o().txnState.isInRetryableWriteMode() ? "retryable write" : "transaction";
         if (!autocommit) {
             uasserted(ErrorCodes::TransactionTooOld,
                       str::stream()
-                          << "Retryable write with txnNumber " << txnNumber
-                          << " is prohibited on session " << _sessionId() << " because a newer "
-                          << currOperation << " with txnNumber " << o().activeTxnNumber
+                          << "Retryable write with txnNumber "
+                          << txnNumberAndRetryCounter.getTxnNumber() << " is prohibited on session "
+                          << _sessionId() << " because a newer " << currOperation
+                          << " with txnNumber " << o().activeTxnNumberAndRetryCounter.getTxnNumber()
                           << " has already started on this session.");
         } else {
             uasserted(ErrorCodes::TransactionTooOld,
-                      str::stream() << "Cannot start transaction " << txnNumber << " on session "
-                                    << _sessionId() << " because a newer " << currOperation
-                                    << " with txnNumber " << o().activeTxnNumber
-                                    << " has already started on this session.");
+                      str::stream()
+                          << "Cannot start transaction with " << txnNumberAndRetryCounter.toBSON()
+                          << " on session " << _sessionId() << " because a newer " << currOperation
+                          << " with txnNumberAndRetryCounter "
+                          << o().activeTxnNumberAndRetryCounter.toBSON()
+                          << " has already started on this session.");
         }
     }
 
@@ -608,9 +701,9 @@ void TransactionParticipant::Participant::beginOrContinue(
     // startTransaction, which is verified earlier when parsing the request.
     if (!autocommit) {
         invariant(!startTransaction);
-        invariant(!txnRetryCounter.has_value(),
+        invariant(!txnNumberAndRetryCounter.getTxnRetryCounter(),
                   "Cannot specify a txnRetryCounter for retryable write");
-        _beginOrContinueRetryableWrite(opCtx, txnNumber);
+        _beginOrContinueRetryableWrite(opCtx, txnNumberAndRetryCounter);
         return;
     }
 
@@ -619,17 +712,18 @@ void TransactionParticipant::Participant::beginOrContinue(
     // is verified earlier when parsing the request.
     invariant(*autocommit == false);
     invariant(opCtx->inMultiDocumentTransaction());
-    if (txnRetryCounter.has_value()) {
+    if (txnNumberAndRetryCounter.getTxnRetryCounter()) {
         uassert(ErrorCodes::InvalidOptions,
                 "txnRetryCounter is only supported in sharded clusters",
                 serverGlobalParams.clusterRole != ClusterRole::None);
-        invariant(*txnRetryCounter >= 0, "Cannot specify a negative txnRetryCounter");
+        invariant(*txnNumberAndRetryCounter.getTxnRetryCounter() >= 0,
+                  "Cannot specify a negative txnRetryCounter");
     } else {
-        txnRetryCounter = 0;
+        txnNumberAndRetryCounter.setTxnRetryCounter(0);
     }
 
     if (!startTransaction) {
-        _continueMultiDocumentTransaction(opCtx, txnNumber, *txnRetryCounter);
+        _continueMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
         return;
     }
 
@@ -637,22 +731,23 @@ void TransactionParticipant::Participant::beginOrContinue(
     // an argument on the request. The 'startTransaction' argument currently can only be specified
     // as true, which is verified earlier, when parsing the request.
     invariant(*startTransaction);
-    _beginMultiDocumentTransaction(opCtx, txnNumber, *txnRetryCounter);
+    _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
 }
 
 void TransactionParticipant::Participant::beginOrContinueTransactionUnconditionally(
-    OperationContext* opCtx,
-    TxnNumber txnNumber,
-    boost::optional<TxnRetryCounter> txnRetryCounter) {
+    OperationContext* opCtx, TxnNumberAndRetryCounter txnNumberAndRetryCounter) {
     invariant(opCtx->inMultiDocumentTransaction());
 
     // We don't check or fetch any on-disk state, so treat the transaction as 'valid' for the
     // purposes of this method and continue the transaction unconditionally
     p().isValid = true;
 
-    if (o().activeTxnNumber != txnNumber) {
-        _beginMultiDocumentTransaction(
-            opCtx, txnNumber, txnRetryCounter.has_value() ? *txnRetryCounter : 0);
+    if (o().activeTxnNumberAndRetryCounter.getTxnNumber() !=
+        txnNumberAndRetryCounter.getTxnNumber()) {
+        if (!txnNumberAndRetryCounter.getTxnRetryCounter()) {
+            txnNumberAndRetryCounter.setTxnRetryCounter(0);
+        }
+        _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
     } else {
         invariant(o().txnState.isInSet(TransactionState::kInProgress | TransactionState::kPrepared),
                   str::stream() << "Current state: " << o().txnState);
@@ -947,7 +1042,7 @@ void TransactionParticipant::Participant::_stashActiveTransaction(OperationConte
         return;
     }
 
-    invariant(o().activeTxnNumber == opCtx->getTxnNumber());
+    invariant(o().activeTxnNumberAndRetryCounter.getTxnNumber() == opCtx->getTxnNumber());
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     {
@@ -1049,7 +1144,7 @@ void TransactionParticipant::Participant::unstashTransactionResources(OperationC
         return;
     }
 
-    _checkIsCommandValidWithTxnState(*opCtx->getTxnNumber(), cmdName);
+    _checkIsCommandValidWithTxnState({*opCtx->getTxnNumber()}, cmdName);
     if (o().txnResourceStash) {
         MaxLockTimeout maxLockTimeout;
         // Default is we should acquire ticket.
@@ -1309,13 +1404,29 @@ const repl::OpTime TransactionParticipant::Participant::getPrepareOpTimeForRecov
 
 void TransactionParticipant::Participant::addTransactionOperation(
     OperationContext* opCtx, const repl::ReplOperation& operation) {
-
     // Ensure that we only ever add operations to an in progress transaction.
+    if (!o().txnState.isInProgress() && _isInternalSessionForRetryableWrite()) {
+        // Throw a uassert error instead of an invariant error if this is a retryable internal
+        // transaction since all write statements are allowed to bypass the checks in
+        // beginOrContinue if the transaction has already committed.
+        uasserted(5875606,
+                  "Cannot perform writes in a retryable internal transaction that has already "
+                  "committed, aborted or prepared");
+    }
     invariant(o().txnState.isInProgress(), str::stream() << "Current state: " << o().txnState);
 
-    invariant(p().autoCommit && !*p().autoCommit && o().activeTxnNumber != kUninitializedTxnNumber);
+    invariant(p().autoCommit && !*p().autoCommit &&
+              o().activeTxnNumberAndRetryCounter.getTxnNumber() != kUninitializedTxnNumber);
     invariant(opCtx->lockState()->inAWriteUnitOfWork());
     p().transactionOperations.push_back(operation);
+    const auto stmtIds = operation.getStatementIds();
+    for (auto stmtId : stmtIds) {
+        auto [_, inserted] = p().transactionStmtIds.insert(stmtId);
+        uassert(5875600,
+                str::stream() << "Found two operations using the same stmtId of " << stmtId,
+                inserted);
+    }
+
     p().transactionOperationBytes +=
         repl::DurableOplogEntry::getDurableReplOperationSize(operation);
     if (!operation.getPreImage().isEmpty()) {
@@ -1357,6 +1468,7 @@ void TransactionParticipant::Participant::clearOperationsInMemory(OperationConte
     invariant(p().autoCommit);
     p().transactionOperationBytes = 0;
     p().transactionOperations.clear();
+    p().transactionStmtIds.clear();
     p().numberOfPreImagesToWrite = 0;
 }
 
@@ -1593,6 +1705,11 @@ bool TransactionParticipant::Observer::expiredAsOf(Date_t when) const {
 }
 
 void TransactionParticipant::Participant::abortTransaction(OperationContext* opCtx) {
+    if (_isInternalSessionForRetryableWrite() && o().txnState.isCommitted()) {
+        // An error occurred while retrying an committed retryable internal transaction should
+        // not modify the state of the committed transaction.
+        return;
+    }
     // Normally, absence of a transaction resource stash indicates an inactive transaction.
     // However, in the case of a failed "unstash", an active transaction may exist without a stash
     // and be killed externally.  In that case, the opCtx will not have a transaction number.
@@ -1699,9 +1816,9 @@ void TransactionParticipant::Participant::_finishAbortingActiveTransaction(
     // When the state of active transaction on session is not expected, it means another
     // thread has already aborted the transaction on session.
     if (o().txnState.isInSet(expectedStates)) {
-        invariant(opCtx->getTxnNumber() == o().activeTxnNumber);
+        invariant(opCtx->getTxnNumber() == o().activeTxnNumberAndRetryCounter.getTxnNumber());
         _abortTransactionOnSession(opCtx);
-    } else if (opCtx->getTxnNumber() == o().activeTxnNumber) {
+    } else if (opCtx->getTxnNumber() == o().activeTxnNumberAndRetryCounter.getTxnNumber()) {
         if (o().txnState.isInRetryableWriteMode()) {
             // The active transaction is not a multi-document transaction.
             invariant(opCtx->getWriteUnitOfWork() == nullptr);
@@ -1782,15 +1899,21 @@ void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
 }
 
 void TransactionParticipant::Participant::_checkIsCommandValidWithTxnState(
-    const TxnNumber& requestTxnNumber, const std::string& cmdName) const {
+    const TxnNumberAndRetryCounter& requestTxnNumberAndRetryCounter,
+    const std::string& cmdName) const {
     uassert(ErrorCodes::NoSuchTransaction,
-            str::stream() << "Transaction " << requestTxnNumber << " has been aborted.",
+            str::stream() << "Transaction with " << requestTxnNumberAndRetryCounter.toBSON()
+                          << " has been aborted.",
             !o().txnState.isAborted());
 
-    // Cannot change committed transaction but allow retrying commitTransaction command.
+    // Cannot change committed transaction but allow retrying:
+    // - commitTransaction command.
+    // - any command if the transaction is an internal transaction for retryable writes.
     uassert(ErrorCodes::TransactionCommitted,
-            str::stream() << "Transaction " << requestTxnNumber << " has been committed.",
-            cmdName == "commitTransaction" || !o().txnState.isCommitted());
+            str::stream() << "Transaction with " << requestTxnNumberAndRetryCounter.toBSON()
+                          << " has been committed.",
+            cmdName == "commitTransaction" || !o().txnState.isCommitted() ||
+                (_isInternalSessionForRetryableWrite() && o().txnState.isCommitted()));
 
     // Disallow operations other than abort, prepare or commit on a prepared transaction
     uassert(ErrorCodes::PreparedTransactionInProgress,
@@ -1810,7 +1933,7 @@ void TransactionParticipant::Observer::reportStashedState(OperationContext* opCt
                                                           BSONObjBuilder* builder) const {
     if (o().txnResourceStash && o().txnResourceStash->locker()) {
         if (auto lockerInfo = o().txnResourceStash->locker()->getLockerInfo(boost::none)) {
-            invariant(o().activeTxnNumber != kUninitializedTxnNumber);
+            invariant(o().activeTxnNumberAndRetryCounter.getTxnNumber() != kUninitializedTxnNumber);
             builder->append("type", "idleSession");
             builder->append("host", getHostNameCachedAndPort());
             builder->append("desc", "inactive transaction");
@@ -1990,7 +2113,7 @@ std::string TransactionParticipant::Participant::_transactionInfoForLog(
     _sessionId().serialize(&lsidBuilder);
     lsidBuilder.doneFast();
 
-    parametersBuilder.append("txnNumber", o().activeTxnNumber);
+    parametersBuilder.append("txnNumber", o().activeTxnNumberAndRetryCounter.getTxnNumber());
     parametersBuilder.append("autocommit", p().autoCommit ? *p().autoCommit : true);
     apiParameters.appendInfo(&parametersBuilder);
     readConcernArgs.appendInfo(&parametersBuilder);
@@ -2064,7 +2187,7 @@ void TransactionParticipant::Participant::_transactionInfoForLog(
     _sessionId().serialize(&lsidBuilder);
     lsidBuilder.doneFast();
 
-    parametersBuilder.append("txnNumber", o().activeTxnNumber);
+    parametersBuilder.append("txnNumber", o().activeTxnNumberAndRetryCounter.getTxnNumber());
     parametersBuilder.append("autocommit", p().autoCommit ? *p().autoCommit : true);
     apiParameters.appendInfo(&parametersBuilder);
     readConcernArgs.appendInfo(&parametersBuilder);
@@ -2132,7 +2255,7 @@ BSONObj TransactionParticipant::Participant::_transactionInfoBSONForLog(
     _sessionId().serialize(&lsidBuilder);
     lsidBuilder.doneFast();
 
-    parametersBuilder.append("txnNumber", o().activeTxnNumber);
+    parametersBuilder.append("txnNumber", o().activeTxnNumberAndRetryCounter.getTxnNumber());
     parametersBuilder.append("autocommit", p().autoCommit ? *p().autoCommit : true);
     apiParameters.appendInfo(&parametersBuilder);
     readConcernArgs.appendInfo(&parametersBuilder);
@@ -2221,9 +2344,8 @@ void TransactionParticipant::Participant::_logSlowTransaction(
     }
 }
 
-void TransactionParticipant::Participant::_setNewTxnNumber(OperationContext* opCtx,
-                                                           const TxnNumber& txnNumber,
-                                                           const TxnRetryCounter& txnRetryCounter) {
+void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
+    OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
     uassert(ErrorCodes::PreparedTransactionInProgress,
             "Cannot change transaction number while the session has a prepared transaction",
             !o().txnState.isInSet(TransactionState::kPrepared));
@@ -2231,10 +2353,10 @@ void TransactionParticipant::Participant::_setNewTxnNumber(OperationContext* opC
     LOGV2_FOR_TRANSACTION(
         23984,
         4,
-        "New transaction started with txnNumber: {txnNumber} on session with lsid "
+        "New transaction started with txnNumber: {txnNumberAndRetryCounter} on session with lsid "
         "{lsid}",
         "New transaction started",
-        "txnNumber"_attr = txnNumber,
+        "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
         "lsid"_attr = _sessionId().getId(),
         "apiParameters"_attr = APIParameters::get(opCtx).toBSON());
 
@@ -2244,8 +2366,7 @@ void TransactionParticipant::Participant::_setNewTxnNumber(OperationContext* opC
     }
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
-    o(lk).activeTxnNumber = txnNumber;
-    o(lk).activeTxnRetryCounter = txnRetryCounter;
+    o(lk).activeTxnNumberAndRetryCounter = txnNumberAndRetryCounter;
     o(lk).lastWriteOpTime = repl::OpTime();
 
     // Reset the retryable writes state
@@ -2255,7 +2376,8 @@ void TransactionParticipant::Participant::_setNewTxnNumber(OperationContext* opC
     _resetTransactionState(lk, TransactionState::kNone);
 
     // Reset the transactions metrics
-    o(lk).transactionMetricsObserver.resetSingleTransactionStats(txnNumber);
+    o(lk).transactionMetricsObserver.resetSingleTransactionStats(
+        txnNumberAndRetryCounter.getTxnNumber());
 }
 
 void TransactionParticipant::Participant::refreshFromStorageIfNeeded(OperationContext* opCtx) {
@@ -2279,8 +2401,8 @@ void TransactionParticipant::Participant::_refreshFromStorageIfNeeded(OperationC
     const auto& lastTxnRecord = activeTxnHistory.lastTxnRecord;
     if (lastTxnRecord) {
         stdx::lock_guard<Client> lg(*opCtx->getClient());
-        o(lg).activeTxnNumber = lastTxnRecord->getTxnNum();
-        o(lg).activeTxnRetryCounter = [&] {
+        o(lg).activeTxnNumberAndRetryCounter.setTxnNumber(lastTxnRecord->getTxnNum());
+        o(lg).activeTxnNumberAndRetryCounter.setTxnRetryCounter([&] {
             if (lastTxnRecord->getState()) {
                 if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
                         serverGlobalParams.featureCompatibility)) {
@@ -2296,7 +2418,7 @@ void TransactionParticipant::Participant::_refreshFromStorageIfNeeded(OperationC
                 return 0;
             }
             return kUninitializedTxnRetryCounter;
-        }();
+        }());
         o(lg).lastWriteOpTime = lastTxnRecord->getLastWriteOpTime();
         p().activeTxnCommittedStatements = std::move(activeTxnHistory.committedStatements);
         p().hasIncompleteHistory = activeTxnHistory.hasIncompleteHistory;
@@ -2336,7 +2458,16 @@ void TransactionParticipant::Participant::onWriteOpCompletedOnPrimary(
     const SessionTxnRecord& sessionTxnRecord) {
     invariant(opCtx->lockState()->inAWriteUnitOfWork());
     invariant(sessionTxnRecord.getSessionId() == _sessionId());
-    invariant(sessionTxnRecord.getTxnNum() == o().activeTxnNumber);
+    invariant(sessionTxnRecord.getTxnNum() == o().activeTxnNumberAndRetryCounter.getTxnNumber());
+
+    if (o().txnState.isCommitted()) {
+        // Only write statements in retryable internal transaction can bypass the checks in
+        // beginOrContinue and get to here.
+        invariant(_isInternalSessionForRetryableWrite());
+        uasserted(5875603,
+                  "Cannot perform writes in a retryable internal transaction that has already "
+                  "committed");
+    }
 
     // Sanity check that we don't double-execute statements
     for (const auto stmtId : stmtIdsWritten) {
@@ -2365,7 +2496,7 @@ void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
     const SessionTxnRecord& sessionTxnRecord) {
     invariant(opCtx->lockState()->inAWriteUnitOfWork());
     invariant(sessionTxnRecord.getSessionId() == _sessionId());
-    invariant(sessionTxnRecord.getTxnNum() == o().activeTxnNumber);
+    invariant(sessionTxnRecord.getTxnNum() == o().activeTxnNumberAndRetryCounter.getTxnNumber());
 
     const auto updateRequest = _makeUpdateRequest(sessionTxnRecord);
 
@@ -2378,11 +2509,12 @@ void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
 
 void TransactionParticipant::Participant::_invalidate(WithLock wl) {
     p().isValid = false;
-    o(wl).activeTxnNumber = kUninitializedTxnNumber;
+    o(wl).activeTxnNumberAndRetryCounter = {kUninitializedTxnNumber, kUninitializedTxnRetryCounter};
     o(wl).lastWriteOpTime = repl::OpTime();
 
     // Reset the transactions metrics.
-    o(wl).transactionMetricsObserver.resetSingleTransactionStats(o().activeTxnNumber);
+    o(wl).transactionMetricsObserver.resetSingleTransactionStats(
+        o().activeTxnNumberAndRetryCounter.getTxnNumber());
 }
 
 void TransactionParticipant::Participant::_resetRetryableWriteState() {
@@ -2404,6 +2536,7 @@ void TransactionParticipant::Participant::_resetTransactionState(
 
     p().transactionOperationBytes = 0;
     p().transactionOperations.clear();
+    p().transactionStmtIds.clear();
     o(wl).prepareOpTime = repl::OpTime();
     o(wl).recoveryPrepareOpTime = repl::OpTime();
     p().autoCommit = boost::none;
@@ -2437,10 +2570,25 @@ boost::optional<repl::OplogEntry> TransactionParticipant::Participant::checkStat
     TransactionHistoryIterator txnIter(*stmtTimestamp);
     while (txnIter.hasNext()) {
         const auto entry = txnIter.next(opCtx);
-        auto stmtIds = entry.getStatementIds();
-        invariant(!stmtIds.empty());
-        if (std::find(stmtIds.begin(), stmtIds.end(), stmtId) != stmtIds.end())
-            return entry;
+
+        if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
+            validateTransactionHistoryApplyOpsOplogEntry(entry);
+
+            std::vector<repl::OplogEntry> innerEntries;
+            repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+            for (const auto& innerEntry : innerEntries) {
+                auto stmtIds = innerEntry.getStatementIds();
+                if (std::find(stmtIds.begin(), stmtIds.end(), stmtId) != stmtIds.end()) {
+                    return innerEntry;
+                }
+            }
+        } else {
+            auto stmtIds = entry.getStatementIds();
+            invariant(!stmtIds.empty());
+            if (std::find(stmtIds.begin(), stmtIds.end(), stmtId) != stmtIds.end()) {
+                return entry;
+            }
+        }
     }
 
     MONGO_UNREACHABLE;
@@ -2459,7 +2607,8 @@ boost::optional<repl::OpTime> TransactionParticipant::Participant::_checkStateme
     if (it == p().activeTxnCommittedStatements.end()) {
         uassert(ErrorCodes::IncompleteTransactionHistory,
                 str::stream() << "Incomplete history detected for transaction "
-                              << o().activeTxnNumber << " on session " << _sessionId(),
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " on session "
+                              << _sessionId(),
                 !p().hasIncompleteHistory);
 
         return boost::none;
@@ -2519,7 +2668,7 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
             if (!insertRes.second) {
                 const auto& existingOpTime = insertRes.first->second;
                 fassertOnRepeatedExecution(participant._sessionId(),
-                                           participant.o().activeTxnNumber,
+                                           participant.o().activeTxnNumberAndRetryCounter,
                                            stmtId,
                                            existingOpTime,
                                            lastStmtIdWriteOpTime);
@@ -2543,9 +2692,9 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
         if (!failBeforeCommitExceptionElem.eoo()) {
             const auto failureCode = ErrorCodes::Error(int(failBeforeCommitExceptionElem.Number()));
             uasserted(failureCode,
-                      str::stream()
-                          << "Failing write for " << _sessionId() << ":" << o().activeTxnNumber
-                          << " due to failpoint. The write must not be reflected.");
+                      str::stream() << "Failing write for " << _sessionId() << ":"
+                                    << o().activeTxnNumberAndRetryCounter.getTxnNumber()
+                                    << " due to failpoint. The write must not be reflected.");
         }
     });
 }

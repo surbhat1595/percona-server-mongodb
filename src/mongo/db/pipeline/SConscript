@@ -15,6 +15,17 @@ env.SConscript(
 )
 
 env.Library(
+    target='change_stream_pre_and_post_images_options',
+    source=[
+        'change_stream_pre_and_post_images_options.idl'
+    ],
+     LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
     target="change_stream_preimage",
     source=[
         "change_stream_preimage.idl",
@@ -22,6 +33,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/idl/idl_parser',
+        '$BUILD_DIR/mongo/idl/server_parameter',
     ],
 )
 
@@ -140,6 +152,7 @@ env.Library(
         'accumulator_integral.cpp',
         'accumulator_js_reduce.cpp',
         'accumulator_last.cpp',
+        'accumulator_locf.cpp',
         'accumulator_merge_objects.cpp',
         'accumulator_min_max.cpp',
         'accumulator_multi.cpp',
@@ -162,6 +175,10 @@ env.Library(
         '$BUILD_DIR/mongo/util/summation',
         'expression_context',
         'field_path',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/exec/sort_executor',
+        '$BUILD_DIR/mongo/db/index/key_generator'
     ]
 )
 
@@ -198,7 +215,6 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/s/async_requests_sender',
-        '$BUILD_DIR/mongo/s/commands/shared_cluster_commands',
         '$BUILD_DIR/mongo/s/query/cluster_query',
         'aggregation',
     ],
@@ -381,7 +397,6 @@ env.Library(
         'document_source_change_stream_check_invalidate.cpp',
         'document_source_change_stream_check_resumability.cpp',
         'document_source_change_stream_check_topology_change.cpp',
-        'document_source_change_stream_close_cursor.cpp',
         'document_source_change_stream_ensure_resume_token_present.cpp',
         'document_source_change_stream_handle_topology_change.cpp',
         'document_source_change_stream_add_pre_image.cpp',
@@ -437,6 +452,22 @@ env.Library(
         '$BUILD_DIR/mongo/s/common_s',
         'runtime_constants_idl',
     ],
+)
+
+env.Library(
+    target='change_stream_expired_pre_image_remover',
+    source=[
+        'change_stream_expired_pre_image_remover.cpp'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/db_raii',
+        '$BUILD_DIR/mongo/db/query_exec',
+        '$BUILD_DIR/mongo/db/record_id_helpers',
+        '$BUILD_DIR/mongo/db/repl/oplog_entry',
+        '$BUILD_DIR/mongo/db/repl/storage_interface',
+        '$BUILD_DIR/mongo/util/periodic_runner',
+        'change_stream_preimage',
+    ]
 )
 
 env.CppUnitTest(

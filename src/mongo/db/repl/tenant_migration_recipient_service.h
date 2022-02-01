@@ -73,7 +73,10 @@ public:
 
     ThreadPool::Limits getThreadPoolLimits() const final;
 
-    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialStateDoc) final;
+    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(
+        OperationContext* opCtx,
+        BSONObj initialStateDoc,
+        const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) final;
 
     /**
      * Sends an abort to all tenant migration instances on this recipient.
@@ -137,6 +140,11 @@ public:
          *  Returns the tenant id (database prefix).
          */
         const std::string& getTenantId() const;
+
+        /*
+         *  Returns the migration protocol.
+         */
+        const MigrationProtocolEnum& getProtocol() const;
 
         /**
          * To be called on the instance returned by PrimaryOnlyService::getOrCreate(). Returns an
@@ -300,6 +308,12 @@ public:
             // or stepdown/shutdown.
             bool _isExternalInterrupt = false;
         };
+
+        /*
+         * Returns false if the protocol is FCV incompatible. Also, resets the 'protocol' field in
+         * the _stateDoc to boost::none for FCV < 5.2.
+         */
+        bool _checkifProtocolRemainsFCVCompatible();
 
         /*
          * Helper for interrupt().
@@ -508,6 +522,7 @@ public:
         // This data is provided in the initial state doc and never changes.  We keep copies to
         // avoid having to obtain the mutex to access them.
         const std::string _tenantId;                                                     // (R)
+        const MigrationProtocolEnum _protocol;                                           // (R)
         const UUID _migrationUuid;                                                       // (R)
         const std::string _donorConnectionString;                                        // (R)
         const MongoURI _donorUri;                                                        // (R)

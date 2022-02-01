@@ -212,11 +212,44 @@ std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeSum(
             str::stream() << "Expected one input slot for finalization of sum, got: "
                           << sumSlots.size(),
             sumSlots.size() == 1);
-    auto sumFinalize =
-        sbe::makeE<sbe::EIf>(generateNullOrMissing(makeVariable(sumSlots[0])),
-                             makeConstant(sbe::value::TypeTags::NumberInt32, 0),
-                             makeFunction("doubleDoubleSumFinalize", makeVariable(sumSlots[0])));
-    return {std::move(sumFinalize), std::move(inputStage)};
+
+    if (state.needsMerge) {
+        // When to support the sharding behavior, the mongos splits $group into two separate $group
+        // stages one at the mongo-side side and the other at the shard-side, the shard-side $sum
+        // accumulator is responsible to return the partial sum which is mostly same format to the
+        // global sum but in the cases of overflowed 'NumberInt32'/'NumberInt64', return a
+        // sub-document {subTotal: val1, subTotalError: val2}. The builtin function for $sum
+        // ('builtinDoubleDoubleSumFinalize()') returns an 'Array' when there's an overflow. So,
+        // only when the return value is 'Array'-typed, we compose the sub-document.
+        auto sumFinalize = makeFunction("doubleDoubleMergeSumFinalize", makeVariable(sumSlots[0]));
+
+        auto partialSumFinalize = makeLocalBind(
+            state.frameIdGenerator,
+            [](sbe::EVariable input) {
+                return sbe::makeE<sbe::EIf>(
+                    makeFunction("isArray", input.clone()),
+                    makeFunction(
+                        "newObj",
+                        makeConstant("subTotal"_sd),
+                        makeFunction(
+                            "getElement",
+                            input.clone(),
+                            makeConstant(sbe::value::TypeTags::NumberInt32,
+                                         static_cast<int>(sbe::vm::AggPartialSumElems::kTotal))),
+                        makeConstant("subTotalError"_sd),
+                        makeFunction(
+                            "getElement",
+                            input.clone(),
+                            makeConstant(sbe::value::TypeTags::NumberInt32,
+                                         static_cast<int>(sbe::vm::AggPartialSumElems::kError)))),
+                    input.clone());
+            },
+            std::move(sumFinalize));
+        return {std::move(partialSumFinalize), std::move(inputStage)};
+    } else {
+        auto sumFinalize = makeFunction("doubleDoubleSumFinalize", makeVariable(sumSlots[0]));
+        return {std::move(sumFinalize), std::move(inputStage)};
+    }
 }
 
 std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumulatorAddToSet(
@@ -240,16 +273,82 @@ std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumu
     aggs.push_back(makeFunction("addToArray", std::move(arg)));
     return {std::move(aggs), std::move(inputStage)};
 }
+
+std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumulatorStdDev(
+    StageBuilderState& state,
+    const AccumulationExpression& expr,
+    std::unique_ptr<sbe::EExpression> arg,
+    EvalStage inputStage,
+    PlanNodeId planNodeId) {
+    std::vector<std::unique_ptr<sbe::EExpression>> aggs;
+    aggs.push_back(makeFunction("aggStdDev", std::move(arg)));
+    return {std::move(aggs), std::move(inputStage)};
+}
+
+std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeStdDevPop(
+    StageBuilderState& state,
+    const AccumulationExpression& expr,
+    const sbe::value::SlotVector& stdDevSlots,
+    EvalStage inputStage,
+    PlanNodeId planNodeId) {
+    tassert(5755204,
+            str::stream() << "Expected one input slot for finalization of stdDevPop, got: "
+                          << stdDevSlots.size(),
+            stdDevSlots.size() == 1);
+    auto stdDevPopFinalize = makeFunction("stdDevPopFinalize", makeVariable(stdDevSlots[0]));
+    return {std::move(stdDevPopFinalize), std::move(inputStage)};
+}
+
+std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeStdDevSamp(
+    StageBuilderState& state,
+    const AccumulationExpression& expr,
+    const sbe::value::SlotVector& stdDevSlots,
+    EvalStage inputStage,
+    PlanNodeId planNodeId) {
+    tassert(5755209,
+            str::stream() << "Expected one input slot for finalization of stdDevSamp, got: "
+                          << stdDevSlots.size(),
+            stdDevSlots.size() == 1);
+    auto stdDevSampFinalize = makeFunction("stdDevSampFinalize", makeVariable(stdDevSlots[0]));
+    return {std::move(stdDevSampFinalize), std::move(inputStage)};
+}
+
+std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumulatorMergeObjects(
+    StageBuilderState& state,
+    const AccumulationExpression& expr,
+    std::unique_ptr<sbe::EExpression> arg,
+    EvalStage inputStage,
+    PlanNodeId planNodeId) {
+    std::vector<std::unique_ptr<sbe::EExpression>> aggs;
+
+    auto filterExpr = makeLocalBind(
+        state.frameIdGenerator,
+        [](sbe::EVariable input) {
+            return makeBinaryOp(
+                sbe::EPrimBinary::logicOr,
+                generateNullOrMissing(input),
+                makeBinaryOp(sbe::EPrimBinary::logicOr,
+                             makeFunction("isObject", input.clone()),
+                             sbe::makeE<sbe::EFail>(ErrorCodes::Error{5911200},
+                                                    "$mergeObjects only supports objects")));
+        },
+        arg->clone());
+
+    inputStage = makeFilter<false>(std::move(inputStage), std::move(filterExpr), planNodeId);
+
+    aggs.push_back(makeFunction("mergeObjects", std::move(arg)));
+    return {std::move(aggs), std::move(inputStage)};
+}
 };  // namespace
 
 std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildArgument(
     StageBuilderState& state,
     const AccumulationStatement& acc,
     EvalStage stage,
-    sbe::value::SlotId inputVar,
+    boost::optional<sbe::value::SlotId> optionalRootSlot,
     PlanNodeId planNodeId) {
-    auto [argExpr, outStage] =
-        generateExpression(state, acc.expr.argument.get(), std::move(stage), inputVar, planNodeId);
+    auto [argExpr, outStage] = generateExpression(
+        state, acc.expr.argument.get(), std::move(stage), optionalRootSlot, planNodeId);
     return {argExpr.extractExpr(), std::move(outStage)};
 }
 
@@ -276,6 +375,9 @@ std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumu
         {AccumulatorAddToSet::kName, &buildAccumulatorAddToSet},
         {AccumulatorSum::kName, &buildAccumulatorSum},
         {AccumulatorPush::kName, &buildAccumulatorPush},
+        {AccumulatorMergeObjects::kName, &buildAccumulatorMergeObjects},
+        {AccumulatorStdDevPop::kName, &buildAccumulatorStdDev},
+        {AccumulatorStdDevSamp::kName, &buildAccumulatorStdDev},
     };
 
     auto accExprName = acc.expr.name;
@@ -313,6 +415,9 @@ std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalize(
         {AccumulatorAddToSet::kName, nullptr},
         {AccumulatorSum::kName, &buildFinalizeSum},
         {AccumulatorPush::kName, nullptr},
+        {AccumulatorMergeObjects::kName, nullptr},
+        {AccumulatorStdDevPop::kName, &buildFinalizeStdDevPop},
+        {AccumulatorStdDevSamp::kName, &buildFinalizeStdDevSamp},
     };
 
     auto accExprName = acc.expr.name;

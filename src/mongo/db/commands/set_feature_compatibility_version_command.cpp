@@ -42,6 +42,7 @@
 #include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_impl.h"
+#include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/feature_compatibility_version_documentation.h"
@@ -61,6 +62,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
+#include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
@@ -71,6 +73,7 @@
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
@@ -320,6 +323,15 @@ public:
 
         if (!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kStart) {
             {
+                boost::optional<MigrationBlockingGuard> drainNewMoveChunks;
+                // Downgrades from a version >= 5.2 to 5.1 or lower must drain new protocol
+                // moveChunks
+                if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection
+                        .isEnabledAndIgnoreFCV() &&
+                    actualVersion > multiversion::FeatureCompatibilityVersion::kVersion_5_1 &&
+                    requestedVersion <= multiversion::FeatureCompatibilityVersion::kVersion_5_1)
+                    drainNewMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
+
                 // Start transition to 'requestedVersion' by updating the local FCV document to a
                 // 'kUpgrading' or 'kDowngrading' state, respectively.
                 const auto fcvChangeRegion(
@@ -351,6 +363,14 @@ public:
         }
 
         {
+            boost::optional<MigrationBlockingGuard> drainOldMoveChunks;
+            // Upgrades from a version <= 5.1 to 5.2 or greater must drain old protocol moveChunks
+            if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection
+                    .isEnabledAndIgnoreFCV() &&
+                actualVersion <= multiversion::FeatureCompatibilityVersion::kVersion_5_1 &&
+                requestedVersion > multiversion::FeatureCompatibilityVersion::kVersion_5_1)
+                drainOldMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
+
             // Complete transition by updating the local FCV document to the fully upgraded or
             // downgraded requestedVersion.
             const auto fcvChangeRegion(FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
@@ -395,6 +415,49 @@ private:
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before upgrade procedures begin right after this.
             Lock::GlobalLock lk(opCtx, MODE_S);
+        }
+
+        // TODO SERVER-60911: When kLatest is 5.3, only check when upgrading from kLastLTS (5.0).
+        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated upgrade code.
+        if (serverGlobalParams.featureCompatibility.isFCVUpgradingToOrAlreadyLatest()) {
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_X,
+                    [&](const CollectionPtr& collection) {
+                        if (collection->getTimeseriesBucketsMayHaveMixedSchemaData()) {
+                            // The catalog entry flag has already been added. This can happen if the
+                            // upgrade process was interrupted and is being run again, or if there
+                            // was a time-series collection created during the upgrade. The upgrade
+                            // process cannot be aborted at this point.
+                            return true;
+                        }
+
+                        NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
+                        CollMod collModCmd(collection->ns());
+                        BSONObjBuilder unusedBuilder;
+                        Status status =
+                            processCollModCommand(opCtx, nsOrUUID, collModCmd, &unusedBuilder);
+
+                        if (!status.isOK()) {
+                            LOGV2_FATAL(
+                                6057503,
+                                "Failed to add catalog entry during upgrade",
+                                "error"_attr = status,
+                                "timeseriesBucketsMayHaveMixedSchemaData"_attr =
+                                    collection->getTimeseriesBucketsMayHaveMixedSchemaData(),
+                                logAttrs(collection->ns()),
+                                logAttrs(collection->uuid()));
+                        }
+
+                        return true;
+                    },
+                    [&](const CollectionPtr& collection) {
+                        return collection->getTimeseriesOptions() != boost::none;
+                    });
+            }
         }
 
         uassert(ErrorCodes::Error(549180),
@@ -444,16 +507,26 @@ private:
 
         _cancelTenantMigrations(opCtx);
 
-        // Secondary indexes on time-series measurements are only supported in 5.1 and up. If the
-        // user tries to downgrade the cluster to an earlier version, they must first remove all
-        // incompatible secondary indexes on time-series measurements.
-        if (requestedVersion < multiversion::FeatureCompatibilityVersion::kVersion_5_1) {
+        {
+            // Take the global lock in S mode to create a barrier for operations taking the global
+            // IX or X locks. This ensures that either
+            //   - The global IX/X locked operation will start after the FCV change, see the
+            //     downgrading to the last-lts or last-continuous FCV and act accordingly.
+            //   - The global IX/X locked operation began prior to the FCV change, is acting on that
+            //     assumption and will finish before downgrade procedures begin right after this.
+            Lock::GlobalLock lk(opCtx, MODE_S);
+        }
+
+        // TODO SERVER-60911: When kLatest is 5.3, only check when downgrading to kLastLTS (5.0).
+        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated downgrade code.
+        if (serverGlobalParams.featureCompatibility
+                .isFCVDowngradingOrAlreadyDowngradedFromLatest()) {
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
                 catalog::forEachCollectionFromDb(
                     opCtx,
                     dbName,
-                    MODE_IS,
+                    MODE_X,
                     [&](const CollectionPtr& collection) {
                         invariant(collection->getTimeseriesOptions());
 
@@ -463,6 +536,10 @@ private:
 
                         while (indexIt->more()) {
                             auto indexEntry = indexIt->next();
+                            // Secondary indexes on time-series measurements are only supported
+                            // in 5.2 and up. If the user tries to downgrade the cluster to an
+                            // earlier version, they must first remove all incompatible secondary
+                            // indexes on time-series measurements.
                             uassert(ErrorCodes::CannotDowngrade,
                                     str::stream()
                                         << "Cannot downgrade the cluster when there are secondary "
@@ -495,6 +572,30 @@ private:
                             }
                         }
 
+                        if (!collection->getTimeseriesBucketsMayHaveMixedSchemaData()) {
+                            // The catalog entry flag has already been removed. This can happen if
+                            // the downgrade process was interrupted and is being run again. The
+                            // downgrade process cannot be aborted at this point.
+                            return true;
+                        }
+
+                        NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
+                        CollMod collModCmd(collection->ns());
+                        BSONObjBuilder unusedBuilder;
+                        Status status =
+                            processCollModCommand(opCtx, nsOrUUID, collModCmd, &unusedBuilder);
+
+                        if (!status.isOK()) {
+                            LOGV2_FATAL(
+                                6057600,
+                                "Failed to remove catalog entry during downgrade",
+                                "error"_attr = status,
+                                "timeseriesBucketsMayHaveMixedSchemaData"_attr =
+                                    collection->getTimeseriesBucketsMayHaveMixedSchemaData(),
+                                logAttrs(collection->ns()),
+                                logAttrs(collection->uuid()));
+                        }
+
                         return true;
                     },
                     [&](const CollectionPtr& collection) {
@@ -503,18 +604,8 @@ private:
             }
         }
 
-        {
-            // Take the global lock in S mode to create a barrier for operations taking the global
-            // IX or X locks. This ensures that either
-            //   - The global IX/X locked operation will start after the FCV change, see the
-            //     downgrading to the last-lts or last-continuous FCV and act accordingly.
-            //   - The global IX/X locked operation began prior to the FCV change, is acting on that
-            //     assumption and will finish before downgrade procedures begin right after this.
-            Lock::GlobalLock lk(opCtx, MODE_S);
-        }
-
         uassert(ErrorCodes::Error(549181),
-                "Failing upgrade due to 'failDowngrading' failpoint set",
+                "Failing downgrade due to 'failDowngrading' failpoint set",
                 !failDowngrading.shouldFail());
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {

@@ -58,8 +58,9 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
                                const CollectionPtr& collection,
                                const CollectionScanParams& params,
                                WorkingSet* workingSet,
-                               const MatchExpression* filter)
-    : RequiresCollectionStage(kStageType, expCtx, collection),
+                               const MatchExpression* filter,
+                               bool relaxCappedConstraints)
+    : RequiresCollectionStage(kStageType, expCtx, collection, relaxCappedConstraints),
       _workingSet(workingSet),
       _filter((filter && !filter->isTriviallyTrue()) ? filter : nullptr),
       _params(params) {
@@ -70,7 +71,7 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
     _specificStats.tailable = params.tailable;
     if (params.minRecord || params.maxRecord) {
         // The 'minRecord' and 'maxRecord' parameters are used for a special optimization that
-        // applies only to forwards scans of the oplog and scans on collections clustered by _id.
+        // applies only to forwards scans of the oplog and scans on clustered collections.
         invariant(!params.resumeAfterRecordId);
         if (collection->ns().isOplog()) {
             invariant(params.direction == CollectionScanParams::FORWARD);
@@ -78,6 +79,24 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
             invariant(collection->isClustered());
         }
     }
+
+    if (params.boundInclusion !=
+        CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords) {
+        // A collection must be clustered if the bounds aren't both included by default.
+        tassert(6125000,
+                "Only collection scans on clustered collections may specify recordId "
+                "BoundInclusion policies",
+                collection->isClustered());
+
+        if (filter) {
+            // The filter is applied after the ScanBoundInclusion is considered.
+            LOGV2_DEBUG(6125007,
+                        5,
+                        "Running a bounded collection scan with a ScanInclusionBound may cause "
+                        "the filter to be overriden");
+        }
+    }
+
     LOGV2_DEBUG(5400802,
                 5,
                 "collection scan bounds",
@@ -96,6 +115,14 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
         invariant(params.direction == CollectionScanParams::FORWARD);
     }
 }
+
+CollectionScan::CollectionScan(ExpressionContext* expCtx,
+                               const CollectionPtr& collection,
+                               const CollectionScanParams& params,
+                               WorkingSet* workingSet,
+                               const MatchExpression* filter)
+    : CollectionScan(
+          expCtx, collection, params, workingSet, filter, false /* relaxCappedConstraints */) {}
 
 PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
     if (_commonStats.isEOF) {
@@ -210,7 +237,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
 
     WorkingSetID id = _workingSet->allocate();
     WorkingSetMember* member = _workingSet->get(id);
-    member->recordId = record->id;
+    member->recordId = std::move(record->id);
     member->resetDocument(opCtx()->recoveryUnit()->getSnapshotId(), record->data.releaseToBson());
     _workingSet->transitionToRecordIdAndObj(id);
 
@@ -252,11 +279,58 @@ void CollectionScan::assertTsHasNotFallenOffOplog(const Record& record) {
 }
 
 namespace {
-bool atEndOfRangeInclusive(const CollectionScanParams& params, const WorkingSetMember& member) {
+bool shouldIncludeStartRecord(const CollectionScanParams& params) {
+    return params.boundInclusion ==
+        CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords ||
+        params.boundInclusion == CollectionScanParams::ScanBoundInclusion::kIncludeStartRecordOnly;
+}
+
+bool shouldIncludeEndRecord(const CollectionScanParams& params) {
+    return params.boundInclusion ==
+        CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords ||
+        params.boundInclusion == CollectionScanParams::ScanBoundInclusion::kIncludeEndRecordOnly;
+}
+
+bool pastEndOfRange(const CollectionScanParams& params, const WorkingSetMember& member) {
     if (params.direction == CollectionScanParams::FORWARD) {
-        return params.maxRecord && member.recordId > *params.maxRecord;
+        // A forward scan ends with the maxRecord when it is specified.
+        if (!params.maxRecord) {
+            return false;
+        }
+
+        auto endRecord = *params.maxRecord;
+        return member.recordId > endRecord ||
+            (member.recordId == endRecord && !shouldIncludeEndRecord(params));
     } else {
-        return params.minRecord && member.recordId < *params.minRecord;
+        // A backward scan ends with the minRecord when it is specified.
+        if (!params.minRecord) {
+            return false;
+        }
+        auto endRecord = *params.minRecord;
+
+        return member.recordId < endRecord ||
+            (member.recordId == endRecord && !shouldIncludeEndRecord(params));
+    }
+}
+
+bool beforeStartOfRange(const CollectionScanParams& params, const WorkingSetMember& member) {
+    if (params.direction == CollectionScanParams::FORWARD) {
+        // A forward scan begins with the minRecord when it is specified.
+        if (!params.minRecord) {
+            return false;
+        }
+
+        auto startRecord = *params.minRecord;
+        return member.recordId < startRecord ||
+            (member.recordId == startRecord && !shouldIncludeStartRecord(params));
+    } else {
+        // A backward scan begins with the maxRecord when specified.
+        if (!params.maxRecord) {
+            return false;
+        }
+        auto startRecord = *params.maxRecord;
+        return member.recordId > startRecord ||
+            (member.recordId == startRecord && !shouldIncludeStartRecord(params));
     }
 }
 }  // namespace
@@ -269,13 +343,21 @@ PlanStage::StageState CollectionScan::returnIfMatches(WorkingSetMember* member,
     // The 'minRecord' and 'maxRecord' bounds are always inclusive, even if the query predicate is
     // an exclusive inequality like $gt or $lt. In such cases, we rely on '_filter' to either
     // exclude or include the endpoints as required by the user's query.
-    if (atEndOfRangeInclusive(_params, *member)) {
+    if (pastEndOfRange(_params, *member)) {
         _workingSet->free(memberID);
         _commonStats.isEOF = true;
         return PlanStage::IS_EOF;
     }
 
-    if (Filter::passes(member, _filter)) {
+    // For clustered collections, seekNear() is allowed to return a record prior to the
+    // requested minRecord for a forward scan or after the requested maxRecord for a reverse
+    // scan. Ensure that we do not return a record out of the requested range. Require that the
+    // caller advance our cursor until it is positioned within the correct range.
+    //
+    // In the future, we could change seekNear() to always return a record after minRecord in the
+    // direction of the scan. However, tailable scans depend on the current behavior in order to
+    // mark their position for resuming the tailable scan later on.
+    if (!beforeStartOfRange(_params, *member) && Filter::passes(member, _filter)) {
         if (_params.stopApplyingFilterAfterFirstMatch) {
             _filter = nullptr;
         }
@@ -299,7 +381,13 @@ void CollectionScan::doSaveStateRequiresCollection() {
 
 void CollectionScan::doRestoreStateRequiresCollection() {
     if (_cursor) {
-        const bool couldRestore = _cursor->restore();
+        // If this collection scan serves a read operation on a capped collection, only restore the
+        // cursor if it can be repositioned exactly where it was, so that consumers don't silently
+        // get 'holes' when scanning capped collections. If this collection scan serves a write
+        // operation on a capped collection like a clustered TTL deletion, exempt this operation
+        // from the guarantees above.
+        const auto tolerateCappedCursorRepositioning = _relaxCappedConstraints;
+        const bool couldRestore = _cursor->restore(tolerateCappedCursorRepositioning);
         uassert(ErrorCodes::CappedPositionLost,
                 str::stream()
                     << "CollectionScan died due to position in capped collection being deleted. "

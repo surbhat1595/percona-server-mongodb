@@ -59,23 +59,16 @@ public:
     }
 
     HealthCheckStatus getStatus() const override {
-        double severity = _callback();
+        const double severity = _callback();
 
-        auto lk = stdx::lock_guard(_mutex);
-        if (HealthCheckStatus::isActiveFault(severity)) {
-            if (_activeFaultTime == Date_t::max()) {
-                _activeFaultTime = _clockSource->now();
-            }
-        } else {
-            _activeFaultTime = Date_t::max();
-        }
-
-        auto now = _clockSource->now();
-        HealthCheckStatus healthCheckStatus(
-            _mockType, severity, "Mock facet", now - _activeFaultTime, now - _startTime);
+        auto healthCheckStatus = HealthCheckStatus(_mockType, severity, "Mock facet");
         LOGV2(5956702, "Mock fault facet status", "status"_attr = healthCheckStatus);
 
         return healthCheckStatus;
+    }
+
+    void update(HealthCheckStatus status) override {
+        MONGO_UNREACHABLE;  // Don't use this in mock.
     }
 
 private:
@@ -83,10 +76,6 @@ private:
     ClockSource* const _clockSource;
     const Date_t _startTime = _clockSource->now();
     const MockCallback _callback;
-
-    mutable Mutex _mutex;
-    // We also update the _activeFaultTime inside the const getStatus().
-    mutable Date_t _activeFaultTime = Date_t::max();
 };
 
 }  // namespace process_health

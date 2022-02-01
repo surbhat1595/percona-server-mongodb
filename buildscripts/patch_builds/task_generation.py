@@ -7,6 +7,8 @@ from shrub.v2 import FunctionCall, ShrubProject
 from shrub.v2.command import timeout_update, ShrubCommand
 from structlog import get_logger
 
+from buildscripts.task_generation.constants import CONFIGURE_EVG_CREDENTIALS
+
 LOGGER = get_logger(__name__)
 MAX_SHRUB_TASKS_FOR_SINGLE_TASK = 1000
 
@@ -26,23 +28,26 @@ your patch up into patches that each touch a fewer number of tests.
 
 def resmoke_commands(run_tests_fn_name: str, run_tests_vars: Dict[str, Any],
                      timeout_info: TimeoutInfo,
-                     require_multiversion: Optional[bool] = None) -> List[ShrubCommand]:
+                     require_multiversion_setup: Optional[bool] = False) -> List[ShrubCommand]:
     """
     Create a list of commands to run a resmoke task.
+
+    Used by burn_in* only. Other tasks use a standalone multiversion decorator.
 
     :param run_tests_fn_name: Name of function to run resmoke tests.
     :param run_tests_vars: Dictionary of variables to pass to run_tests function.
     :param timeout_info: Timeout info for task.
-    :param require_multiversion: Requires downloading Multiversion binaries.
+    :param require_multiversion_setup: Requires downloading Multiversion binaries.
     :return: List of commands to run a resmoke task.
     """
+
     commands = [
         timeout_info.cmd,
-        FunctionCall("git get project no modules") if require_multiversion else None,
-        FunctionCall("add git tag") if require_multiversion else None,
+        FunctionCall("git get project no modules") if require_multiversion_setup else None,
+        FunctionCall("add git tag") if require_multiversion_setup else None,
         FunctionCall("do setup"),
-        FunctionCall("configure evergreen api credentials") if require_multiversion else None,
-        FunctionCall("do multiversion setup") if require_multiversion else None,
+        FunctionCall(CONFIGURE_EVG_CREDENTIALS),
+        FunctionCall("do multiversion setup") if require_multiversion_setup else None,
         FunctionCall(run_tests_fn_name, run_tests_vars),
     ]
 

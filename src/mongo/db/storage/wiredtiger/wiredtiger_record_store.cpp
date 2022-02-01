@@ -694,7 +694,8 @@ public:
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
         metricsCollector.incrementOneDocRead(value.size);
 
-        return {{id, {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
+        return {
+            {std::move(id), {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
     }
 
     void save() final {
@@ -708,7 +709,7 @@ public:
         }
     }
 
-    bool restore() final {
+    bool restore(bool tolerateCappedRepositioning = true) final {
         // We can't use the CursorCache since this cursor needs a special config string.
         WT_SESSION* session = WiredTigerRecoveryUnit::get(_opCtx)->getSession()->getSession();
 
@@ -893,7 +894,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
     // case for temporary RecordStores (those not associated with any collection) and in unit
     // tests. Persistent size information is not required in either case. If a RecordStore needs
     // persistent size information, we require it to use a SizeStorer.
-    _sizeInfo = _sizeStorer ? _sizeStorer->load(_uri)
+    _sizeInfo = _sizeStorer ? _sizeStorer->load(ctx, _uri)
                             : std::make_shared<WiredTigerSizeStorer::SizeInfo>(0, 0);
 }
 
@@ -904,7 +905,8 @@ WiredTigerRecordStore::~WiredTigerRecordStore() {
     }
 
     if (!isTemp()) {
-        LOGV2_DEBUG(22395, 1, "~WiredTigerRecordStore for: {ns}", "ns"_attr = ns());
+        LOGV2_DEBUG(
+            22395, 1, "~WiredTigerRecordStore for: {namespace}", logAttrs(NamespaceString(ns())));
     } else {
         LOGV2_DEBUG(22396,
                     1,
@@ -1244,6 +1246,7 @@ void WiredTigerRecordStore::reclaimOplog(OperationContext* opCtx, Timestamp mayT
     _truncateCount.fetchAndAdd(1);
     LOGV2(22402,
           "WiredTiger record store oplog truncation finished",
+          "pinnedOplogTimestamp"_attr = mayTruncateUpTo,
           "numRecords"_attr = _sizeInfo->numRecords.load(),
           "dataSize"_attr = _sizeInfo->dataSize.load(),
           "duration"_attr = Milliseconds(elapsedMillis));
@@ -1705,7 +1708,8 @@ void WiredTigerRecordStore::appendCustomStats(OperationContext* opCtx,
     }
 }
 
-void WiredTigerRecordStore::waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const {
+void WiredTigerRecordStore::waitForAllEarlierOplogWritesToBeVisibleImpl(
+    OperationContext* opCtx) const {
     // Make sure that callers do not hold an active snapshot so it will be able to see the oplog
     // entries it waited for afterwards.
     if (opCtx->recoveryUnit()->isActive()) {
@@ -1768,10 +1772,22 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     // Need to start at 1 so we are always higher than RecordId::minLong()
     int64_t nextId = 1;
 
-    // Find the largest RecordId currently in use.
-    std::unique_ptr<SeekableRecordCursor> cursor = getCursor(opCtx, /*forward=*/false);
-    if (auto record = cursor->next()) {
-        nextId = record->id.getLong() + 1;
+    // Initialize the highest seen RecordId in a session without a read timestamp because that is
+    // required by the largest_key API.
+    WiredTigerSessionCache* cache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
+    auto sessRaii = cache->getSession();
+    auto cachedCursor = sessRaii->getCachedCursor(_tableId, "");
+    auto cursor = cachedCursor ? cachedCursor : sessRaii->getNewCursor(_uri);
+    ON_BLOCK_EXIT([&] { sessRaii->releaseCursor(_tableId, cursor, ""); });
+
+    // Find the largest RecordId in the table and add 1 to generate our next RecordId. The
+    // largest_key API returns the largest key in the table regardless of visibility. This ensures
+    // we don't re-use RecordIds that are not visible.
+    int ret = cursor->largest_key(cursor);
+    if (ret != WT_NOTFOUND) {
+        invariantWTOK(ret);
+        auto recordId = getKey(cursor);
+        nextId = recordId.getLong() + 1;
     }
 
     _nextIdNum.store(nextId);
@@ -1966,9 +1982,9 @@ void WiredTigerRecordStore::cappedTruncateAfter(OperationContext* opCtx,
     }
 }
 
-Status WiredTigerRecordStore::oplogDiskLocRegister(OperationContext* opCtx,
-                                                   const Timestamp& ts,
-                                                   bool orderedCommit) {
+Status WiredTigerRecordStore::oplogDiskLocRegisterImpl(OperationContext* opCtx,
+                                                       const Timestamp& ts,
+                                                       bool orderedCommit) {
     opCtx->recoveryUnit()->setOrderedCommit(orderedCommit);
 
     if (!orderedCommit) {
@@ -2047,7 +2063,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
                     "last"_attr = _lastReturnedId);
 
         // Crash when testing diagnostics are enabled.
-        invariant(!TestingProctor::instance().isEnabled());
+        invariant(!TestingProctor::instance().isEnabled(), "next was not greater than last");
 
         // Force a retry of the operation from our last known position by acting as-if
         // we received a WT_ROLLBACK error.
@@ -2061,7 +2077,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
     metricsCollector.incrementOneDocRead(value.size);
 
     _lastReturnedId = id;
-    return {{id, {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
+    return {{std::move(id), {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
 }
 
 boost::optional<Record> WiredTigerRecordStoreCursorBase::seekExact(const RecordId& id) {
@@ -2187,7 +2203,7 @@ void WiredTigerRecordStoreCursorBase::saveUnpositioned() {
     _lastReturnedId = RecordId();
 }
 
-bool WiredTigerRecordStoreCursorBase::restore() {
+bool WiredTigerRecordStoreCursorBase::restore(bool tolerateCappedRepositioning) {
     if (_rs._isOplog && _forward) {
         auto wtRu = WiredTigerRecoveryUnit::get(_opCtx);
         wtRu->setIsOplogReader();
@@ -2217,22 +2233,28 @@ bool WiredTigerRecordStoreCursorBase::restore() {
 
     int cmp;
     int ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->search_near(c, &cmp); });
-    RecordId id;
     if (ret == WT_NOTFOUND) {
         _eof = true;
-        return !_rs._isCapped;
+
+        if (_rs._isCapped && !tolerateCappedRepositioning) {
+            // Capped read collscans do not tolerate cursor repositioning.
+            // By contrast, write collscans on a clustered collection like TTL deletion
+            // tolerate cursor repositioning like normal collections.
+            return false;
+        }
+        return true;
     }
     invariantWTOK(ret);
-    id = getKey(c);
 
     if (cmp == 0)
         return true;  // Landed right where we left off.
 
-    if (_rs._isCapped) {
-        // Document was removed by capped collection operations. It is important that we error out
-        // in this case so that consumers don't silently get 'holes' when scanning capped
-        // collections. We don't make this guarantee for normal collections so it is ok to skip
-        // ahead in that case.
+    if (_rs._isCapped && !tolerateCappedRepositioning) {
+        // The cursor has been repositioned as it was sitting on a document that has been
+        // removed by capped collection deletion. It is important that we error out in this case
+        // so that consumers don't silently get 'holes' when scanning capped collections.
+        // We don't make this guarantee for normal collections or for write operations like
+        // capped TTL deletion so it is ok to skip ahead in that case.
         _eof = true;
         return false;
     }

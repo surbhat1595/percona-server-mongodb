@@ -94,28 +94,33 @@ last-continuous:
       test_file: jstests/core/timeseries/timeseries_bucket_rename.js
     - ticket: SERVER-59424
       test_file: jstests/sharding/change_stream_show_migration_events.js
+    - ticket: SERVER-59108
+      test_file: jstests/replsets/stepdown_race_with_transaction.js
     - ticket: SERVER-58636
       test_file: jstests/replsets/initial_sync_replicate_drop_mid_secondary_batch.js
+    - ticket: SERVER-59613
+      test_file: jstests/aggregation/range.js
+    - ticket: SERVER-59923
+      test_file: jstests/sharding/test_resharding_test_fixture_shutdown_retry_needed.js
+    - ticket: SERVER-60567
+      test_file: jstests/core/sbe/sbe_cmd.js
+    - ticket: SERVER-61087
+      test_file: jstests/core/sbe/sbe_ixscan_explain.js
+    - ticket: SERVER-56127
+      test_file: jstests/sharding/retryable_writes_nested_shard_key.js
+    - ticket: SERVER-54909
+      test_file: jstests/replsets/replSetGetStatus_member_wall_times.js
+    - ticket: SERVER-58744
+      test_file: jstests/replsets/apply_ops_capped_collection.js
+    - ticket: SERVER-57700
+      test_file: jstests/sharding/resharding_histogram_metrics.js
+    - ticket: SERVER-59721
+      test_file: jstests/replsets/sync_source_selection_ignores_minvalid_after_rollback.js
+    - ticket: SERVER-59721
+      test_file: jstests/sharding/resharding_secondary_recovers_temp_ns_metadata.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
-    change_streams_multiversion_passthrough:
-
-    change_streams_sharded_collections_multiversion_passthrough:
-
-    concurrency_replication_multiversion_passthrough:
-
-    concurrency_sharded_replication_multiversion_passthrough:
-
-    replica_sets_multiversion:
-      - ticket: SERVER-58744
-        test_file: jstests/replsets/apply_ops_capped_collection.js
-
-    replica_sets_jscore_multiversion_passthrough:
-
-    sharding_jscore_multiversion_passthrough:
-
-    sharded_collections_jscore_multiversion_passthrough:
 
 last-lts:
   # Tests that should be excluded from ALL multiversion suites should be listed here.
@@ -284,6 +289,8 @@ last-lts:
       test_file: jstests/replsets/cluster_chaining_override.js
     - ticket: SERVER-57729
       test_file: jstests/core/timeseries/timeseries_bucket_drop.js
+    - ticket: SERVER-59505
+      test_file: jstests/core/timeseries/timeseries_find.js
     - ticket: SERVER-56800
       test_file: jstests/sharding/cwwc_conflict_add_shard.js
     - ticket: SERVER-57262
@@ -316,8 +323,6 @@ last-lts:
       test_file: jstests/sharding/resharding_size_estimate.js
     - ticket: SERVER-58898
       test_file: jstests/replsets/write_concern_write_to_local.js
-    - ticket: SERVER-56846
-      test_file: jstests/sharding/reconfig_fails_no_cwwc_set_sharding.js
     - ticket: SERVER-59057
       test_file: jstests/replsets/rollback_transaction_table.js
     - ticket: SERVER-58353
@@ -350,25 +355,30 @@ last-lts:
       test_file: jstests/aggregation/expressions/date_add_subtract.js
     - ticket: SERVER-59424
       test_file: jstests/sharding/change_stream_show_migration_events.js
+    - ticket: SERVER-59108
+      test_file: jstests/replsets/stepdown_race_with_transaction.js
     - ticket: SERVER-58636
       test_file: jstests/replsets/initial_sync_replicate_drop_mid_secondary_batch.js
+    - ticket: SERVER-59613
+      test_file: jstests/aggregation/range.js
+    - ticket: SERVER-59923
+      test_file: jstests/sharding/test_resharding_test_fixture_shutdown_retry_needed.js
+    - ticket: SERVER-60567
+      test_file: jstests/core/sbe/sbe_cmd.js
+    - ticket: SERVER-61087
+      test_file: jstests/core/sbe/sbe_ixscan_explain.js
+    - ticket: SERVER-56127
+      test_file: jstests/sharding/retryable_writes_nested_shard_key.js
+    - ticket: SERVER-54909
+      test_file: jstests/replsets/replSetGetStatus_member_wall_times.js
+    - ticket: SERVER-35649
+      test_file: jstests/replsets/disallow_adding_initialized_node1.js
+    - ticket: SERVER-57700
+      test_file: jstests/sharding/resharding_histogram_metrics.js
+    - ticket: SERVER-59721
+      test_file: jstests/replsets/sync_source_selection_ignores_minvalid_after_rollback.js
+    - ticket: SERVER-59721
+      test_file: jstests/sharding/resharding_secondary_recovers_temp_ns_metadata.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
-    change_streams_multiversion_passthrough:
-
-    change_streams_sharded_collections_multiversion_passthrough:
-
-    concurrency_replication_multiversion_passthrough:
-
-    concurrency_sharded_replication_multiversion_passthrough:
-
-    replica_sets_multiversion:
-    - ticket: SERVER-35649
-      test_file: jstests/replsets/disallow_adding_initialized_node1.js
-
-    replica_sets_jscore_multiversion_passthrough:
-
-    sharding_jscore_multiversion_passthrough:
-
-    sharded_collections_jscore_multiversion_passthrough:

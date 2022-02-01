@@ -59,7 +59,7 @@ ConfigServerOpObserver::~ConfigServerOpObserver() = default;
 
 void ConfigServerOpObserver::onDelete(OperationContext* opCtx,
                                       const NamespaceString& nss,
-                                      OptionalCollectionUUID uuid,
+                                      const UUID& uuid,
                                       StmtId stmtId,
                                       const OplogDeleteEntryArgs& args) {
     if (nss == VersionType::ConfigNS) {
@@ -77,7 +77,7 @@ void ConfigServerOpObserver::onDelete(OperationContext* opCtx,
 
 repl::OpTime ConfigServerOpObserver::onDropCollection(OperationContext* opCtx,
                                                       const NamespaceString& collectionName,
-                                                      OptionalCollectionUUID uuid,
+                                                      const UUID& uuid,
                                                       std::uint64_t numRecords,
                                                       const CollectionDropType dropType) {
     if (collectionName == VersionType::ConfigNS) {
@@ -95,8 +95,8 @@ repl::OpTime ConfigServerOpObserver::onDropCollection(OperationContext* opCtx,
     return {};
 }
 
-void ConfigServerOpObserver::onReplicationRollback(OperationContext* opCtx,
-                                                   const RollbackObserverInfo& rbInfo) {
+void ConfigServerOpObserver::_onReplicationRollback(OperationContext* opCtx,
+                                                    const RollbackObserverInfo& rbInfo) {
     if (rbInfo.configServerConfigVersionRolledBack) {
         // Throw out any cached information related to the cluster ID.
         ShardingCatalogManager::get(opCtx)->discardCachedConfigDatabaseInitializationState();
@@ -106,7 +106,7 @@ void ConfigServerOpObserver::onReplicationRollback(OperationContext* opCtx,
 
 void ConfigServerOpObserver::onInserts(OperationContext* opCtx,
                                        const NamespaceString& nss,
-                                       OptionalCollectionUUID uuid,
+                                       const UUID& uuid,
                                        std::vector<InsertStatement>::const_iterator begin,
                                        std::vector<InsertStatement>::const_iterator end,
                                        bool fromMigrate) {

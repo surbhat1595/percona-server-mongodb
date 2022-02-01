@@ -92,7 +92,13 @@ enum class CreateIndexEntryFlags : int {
      * built. This is used when starting a node in standalone mode and a two-phase index build
      * is incomplete. kIsReady must not also be set.
      */
-    kFrozen = 0x4
+    kFrozen = 0x4,
+    /**
+     * kUpdateMetadata indicates that the index metadata in the storage engine should be updated
+     * based on changes to the IndexDescriptor.
+     * This is used when making an index unique through the collMod command.
+     */
+    kUpdateMetadata = 0x8
 };
 
 inline bool operator&(CreateIndexEntryFlags lhs, CreateIndexEntryFlags rhs) {
@@ -279,7 +285,8 @@ public:
      */
     virtual const IndexDescriptor* refreshEntry(OperationContext* opCtx,
                                                 Collection* collection,
-                                                const IndexDescriptor* oldDesc) = 0;
+                                                const IndexDescriptor* oldDesc,
+                                                CreateIndexEntryFlags flags) = 0;
 
     /**
      * Returns a pointer to the index catalog entry associated with 'desc'. Throws if there is no

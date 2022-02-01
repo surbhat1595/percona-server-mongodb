@@ -39,6 +39,7 @@
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/util/fail_point.h"
 
 namespace mongo {
@@ -139,7 +140,8 @@ void MigrationCoordinator::setMigrationDecision(DecisionEnum decision) {
 }
 
 
-boost::optional<SemiFuture<void>> MigrationCoordinator::completeMigration(OperationContext* opCtx) {
+boost::optional<SemiFuture<void>> MigrationCoordinator::completeMigration(
+    OperationContext* opCtx, bool acquireCSOnRecipient) {
     auto decision = _migrationInfo.getDecision();
     if (!decision) {
         LOGV2(
@@ -158,15 +160,22 @@ boost::optional<SemiFuture<void>> MigrationCoordinator::completeMigration(Operat
           "decision"_attr = (decision == DecisionEnum::kCommitted ? "committed" : "aborted"),
           "migrationId"_attr = _migrationInfo.getId());
 
+    if (acquireCSOnRecipient) {
+        if (!_releaseRecipientCriticalSectionFuture) {
+            launchReleaseRecipientCriticalSection(opCtx);
+        }
+    }
+
     boost::optional<SemiFuture<void>> cleanupCompleteFuture = boost::none;
 
     switch (*decision) {
         case DecisionEnum::kAborted:
-            _abortMigrationOnDonorAndRecipient(opCtx);
+            _abortMigrationOnDonorAndRecipient(opCtx, acquireCSOnRecipient);
             hangBeforeForgettingMigrationAfterAbortDecision.pauseWhileSet();
             break;
         case DecisionEnum::kCommitted:
-            cleanupCompleteFuture = _commitMigrationOnDonorAndRecipient(opCtx);
+            cleanupCompleteFuture =
+                _commitMigrationOnDonorAndRecipient(opCtx, acquireCSOnRecipient);
             hangBeforeForgettingMigrationAfterCommitDecision.pauseWhileSet();
             break;
     }
@@ -177,12 +186,16 @@ boost::optional<SemiFuture<void>> MigrationCoordinator::completeMigration(Operat
 }
 
 SemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient(
-    OperationContext* opCtx) {
+    OperationContext* opCtx, bool acquireCSOnRecipient) {
     hangBeforeMakingCommitDecisionDurable.pauseWhileSet();
 
     LOGV2_DEBUG(
         23894, 2, "Making commit decision durable", "migrationId"_attr = _migrationInfo.getId());
     migrationutil::persistCommitDecision(opCtx, _migrationInfo);
+
+    if (acquireCSOnRecipient) {
+        waitForReleaseRecipientCriticalSectionFuture(opCtx);
+    }
 
     LOGV2_DEBUG(
         23895,
@@ -232,7 +245,8 @@ SemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient(
     return migrationutil::submitRangeDeletionTask(opCtx, deletionTask).semi();
 }
 
-void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* opCtx) {
+void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* opCtx,
+                                                              bool acquireCSOnRecipient) {
     hangBeforeMakingAbortDecisionDurable.pauseWhileSet();
 
     LOGV2_DEBUG(
@@ -240,6 +254,10 @@ void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* 
     migrationutil::persistAbortDecision(opCtx, _migrationInfo);
 
     hangBeforeSendingAbortDecision.pauseWhileSet();
+
+    if (acquireCSOnRecipient) {
+        waitForReleaseRecipientCriticalSectionFuture(opCtx);
+    }
 
     // Ensure removing the local range deletion document to prevent incoming migrations with
     // overlapping ranges to hang.
@@ -291,6 +309,27 @@ void MigrationCoordinator::forgetMigration(OperationContext* opCtx) {
                 "Deleting migration coordinator document",
                 "migrationId"_attr = _migrationInfo.getId());
     migrationutil::deleteMigrationCoordinatorDocumentLocally(opCtx, _migrationInfo.getId());
+}
+
+void MigrationCoordinator::launchReleaseRecipientCriticalSection(OperationContext* opCtx) {
+    _releaseRecipientCriticalSectionFuture =
+        migrationutil::launchReleaseCriticalSectionOnRecipientFuture(
+            opCtx,
+            _migrationInfo.getRecipientShardId(),
+            _migrationInfo.getNss(),
+            _migrationInfo.getMigrationSessionId());
+}
+
+void MigrationCoordinator::waitForReleaseRecipientCriticalSectionFuture(OperationContext* opCtx) {
+    invariant(_releaseRecipientCriticalSectionFuture);
+    try {
+        _releaseRecipientCriticalSectionFuture->get(opCtx);
+    } catch (const ExceptionFor<ErrorCodes::ShardNotFound>& exShardNotFound) {
+        LOGV2(5899100,
+              "Failed to releaseCriticalSectionOnRecipient",
+              "shardId"_attr = _migrationInfo.getRecipientShardId(),
+              "error"_attr = exShardNotFound);
+    }
 }
 
 }  // namespace migrationutil

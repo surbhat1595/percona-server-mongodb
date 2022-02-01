@@ -60,10 +60,9 @@ SkippedRecordTracker::SkippedRecordTracker(OperationContext* opCtx,
             opCtx, ident.get());
 }
 
-void SkippedRecordTracker::finalizeTemporaryTable(OperationContext* opCtx,
-                                                  TemporaryRecordStore::FinalizationAction action) {
+void SkippedRecordTracker::keepTemporaryTable() {
     if (_skippedRecordsTable) {
-        _skippedRecordsTable->finalizeTemporaryTable(opCtx, action);
+        _skippedRecordsTable->keep();
     }
 }
 
@@ -75,7 +74,8 @@ void SkippedRecordTracker::record(OperationContext* opCtx, const RecordId& recor
     // Lazily initialize table when we record the first document.
     if (!_skippedRecordsTable) {
         _skippedRecordsTable =
-            opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(opCtx);
+            opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
+                opCtx, KeyFormat::Long);
     }
 
     writeConflictRetry(
@@ -133,6 +133,7 @@ Status SkippedRecordTracker::retrySkippedRecords(OperationContext* opCtx,
             CurOp::get(opCtx)->setProgress_inlock(curopMessage, _skippedRecordCounter.load(), 1));
     }
 
+    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
     auto recordStore = _skippedRecordsTable->rs();
     auto cursor = recordStore->getCursor(opCtx);
     int resolved = 0;
@@ -158,8 +159,14 @@ Status SkippedRecordTracker::retrySkippedRecords(OperationContext* opCtx,
                 // Because constraint enforcement is set, this will throw if there are any indexing
                 // errors, instead of writing back to the skipped records table, which would
                 // normally happen if constraints were relaxed.
-                auto status = _indexCatalogEntry->accessMethod()->insert(
-                    opCtx, collection, skippedDoc, skippedRecordId, options, nullptr, nullptr);
+                auto status = _indexCatalogEntry->accessMethod()->insert(opCtx,
+                                                                         pooledBuilder,
+                                                                         collection,
+                                                                         skippedDoc,
+                                                                         skippedRecordId,
+                                                                         options,
+                                                                         nullptr,
+                                                                         nullptr);
                 if (!status.isOK()) {
                     return status;
                 }

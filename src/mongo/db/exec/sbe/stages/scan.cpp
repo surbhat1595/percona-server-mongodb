@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/scan.h"
 
+#include "mongo/config.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/trial_run_tracker.h"
@@ -161,9 +162,22 @@ value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot)
     return ctx.getAccessor(slot);
 }
 
-void ScanStage::doSaveState(bool fullSave) {
+void ScanStage::doSaveState(bool relinquishCursor) {
     if (slotsAccessible()) {
-        if (fullSave) {
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+        if (_recordAccessor &&
+            _recordAccessor->getViewOfValue().first != value::TypeTags::Nothing) {
+            auto [tag, val] = _recordAccessor->getViewOfValue();
+            tassert(5975900, "expected scan to produce bson", tag == value::TypeTags::bsonObject);
+
+            auto* raw = value::bitcastTo<const char*>(val);
+            const auto size = ConstDataView(raw).read<LittleEndian<uint32_t>>();
+            _lastReturned.clear();
+            _lastReturned.assign(raw, raw + size);
+        }
+#endif
+
+        if (relinquishCursor) {
             if (_recordAccessor) {
                 _recordAccessor->makeOwned();
             }
@@ -176,14 +190,21 @@ void ScanStage::doSaveState(bool fullSave) {
         }
     }
 
-    if (_cursor && fullSave) {
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+    if (!_recordAccessor || !slotsAccessible()) {
+        _lastReturned.clear();
+    }
+#endif
+
+
+    if (_cursor && relinquishCursor) {
         _cursor->save();
     }
 
     _coll.reset();
 }
 
-void ScanStage::doRestoreState(bool fullSave) {
+void ScanStage::doRestoreState(bool relinquishCursor) {
     invariant(_opCtx);
     invariant(!_coll);
 
@@ -195,13 +216,35 @@ void ScanStage::doRestoreState(bool fullSave) {
     tassert(5777408, "Catalog epoch should be initialized", _catalogEpoch);
     _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
 
-    if (_cursor && fullSave) {
-        const bool couldRestore = _cursor->restore();
+    if (_cursor && relinquishCursor) {
+        // Unlike the classic query engine CollectionScan::doSaveStateRequiresCollection(), the SBE
+        // engine does not support clustered collections. As a consequence, capped collection scans
+        // only serve read operations and do not need to relax capped collection constraints like
+        // tolerating cursor repositioning.
+        const auto tolerateCappedCursorRepositioning = false;
+        const bool couldRestore = _cursor->restore(tolerateCappedCursorRepositioning);
         uassert(ErrorCodes::CappedPositionLost,
                 str::stream()
                     << "CollectionScan died due to position in capped collection being deleted. ",
                 couldRestore);
     }
+
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+    if (_recordAccessor && !_lastReturned.empty()) {
+        auto [tag, val] = _recordAccessor->getViewOfValue();
+        tassert(5975901, "expected scan to produce bson", tag == value::TypeTags::bsonObject);
+
+        auto* raw = value::bitcastTo<const char*>(val);
+        const auto size = ConstDataView(raw).read<LittleEndian<uint32_t>>();
+
+        tassert(5975902,
+                "expected scan recordAccessor contents to remain the same after yield",
+                size == _lastReturned.size());
+        tassert(5975903,
+                "expected scan recordAccessor contents to remain the same after yield",
+                std::memcmp(&_lastReturned[0], raw, size) == 0);
+    }
+#endif
 }
 
 void ScanStage::doDetachFromOperationContext() {
@@ -265,7 +308,7 @@ void ScanStage::open(bool reOpen) {
             _cursor = _coll->getCursor(_opCtx, _forward);
         }
     } else {
-        _cursor.reset();
+        MONGO_UNREACHABLE_TASSERT(5959701);
     }
 
     _open = true;
@@ -278,10 +321,6 @@ PlanState ScanStage::getNext() {
     // We are about to call next() on a storage cursor so do not bother saving our internal state in
     // case it yields as the state will be completely overwritten after the next() call.
     disableSlotAccess();
-
-    if (!_cursor) {
-        return trackPlanState(PlanState::IS_EOF);
-    }
 
     checkForInterrupt(_opCtx);
 
@@ -619,8 +658,21 @@ value::SlotAccessor* ParallelScanStage::getAccessor(CompileCtx& ctx, value::Slot
     return ctx.getAccessor(slot);
 }
 
-void ParallelScanStage::doSaveState(bool fullSave) {
+void ParallelScanStage::doSaveState(bool relinquishCursor) {
     if (slotsAccessible()) {
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+        if (_recordAccessor &&
+            _recordAccessor->getViewOfValue().first != value::TypeTags::Nothing) {
+            auto [tag, val] = _recordAccessor->getViewOfValue();
+            tassert(5975904, "expected scan to produce bson", tag == value::TypeTags::bsonObject);
+
+            auto* raw = value::bitcastTo<const char*>(val);
+            const auto size = ConstDataView(raw).read<LittleEndian<uint32_t>>();
+            _lastReturned.clear();
+            _lastReturned.assign(raw, raw + size);
+        }
+#endif
+
         if (_recordAccessor) {
             _recordAccessor->makeOwned();
         }
@@ -632,6 +684,12 @@ void ParallelScanStage::doSaveState(bool fullSave) {
         }
     }
 
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+    if (!_recordAccessor || !slotsAccessible()) {
+        _lastReturned.clear();
+    }
+#endif
+
     if (_cursor) {
         _cursor->save();
     }
@@ -639,7 +697,7 @@ void ParallelScanStage::doSaveState(bool fullSave) {
     _coll.reset();
 }
 
-void ParallelScanStage::doRestoreState(bool fullSave) {
+void ParallelScanStage::doRestoreState(bool relinquishCursor) {
     invariant(_opCtx);
     invariant(!_coll);
 
@@ -651,13 +709,30 @@ void ParallelScanStage::doRestoreState(bool fullSave) {
     tassert(5777409, "Catalog epoch should be initialized", _catalogEpoch);
     _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
 
-    if (_cursor && fullSave) {
+    if (_cursor && relinquishCursor) {
         const bool couldRestore = _cursor->restore();
         uassert(ErrorCodes::CappedPositionLost,
                 str::stream()
                     << "CollectionScan died due to position in capped collection being deleted. ",
                 couldRestore);
     }
+
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+    if (_recordAccessor && !_lastReturned.empty()) {
+        auto [tag, val] = _recordAccessor->getViewOfValue();
+        tassert(5975905, "expected scan to produce bson", tag == value::TypeTags::bsonObject);
+
+        auto* raw = value::bitcastTo<const char*>(val);
+        const auto size = ConstDataView(raw).read<LittleEndian<uint32_t>>();
+
+        tassert(5975906,
+                "expected scan recordAccessor contents to remain the same after yield",
+                size == _lastReturned.size());
+        tassert(5975907,
+                "expected scan recordAccessor contents to remain the same after yield",
+                std::memcmp(&_lastReturned[0], raw, size) == 0);
+    }
+#endif
 }
 
 void ParallelScanStage::doDetachFromOperationContext() {
@@ -687,38 +762,36 @@ void ParallelScanStage::open(bool reOpen) {
         _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
     }
 
-    if (_coll) {
-        {
-            stdx::unique_lock lock(_state->mutex);
-            if (_state->ranges.empty()) {
-                auto ranges = _coll->getRecordStore()->numRecords(_opCtx) / 10240;
-                if (ranges < 2) {
-                    _state->ranges.emplace_back(Range{RecordId{}, RecordId{}});
-                } else {
-                    if (ranges > 1024) {
-                        ranges = 1024;
-                    }
-                    auto randomCursor = _coll->getRecordStore()->getRandomCursor(_opCtx);
-                    invariant(randomCursor);
-                    std::set<RecordId> rids;
-                    while (ranges--) {
-                        auto nextRecord = randomCursor->next();
-                        if (nextRecord) {
-                            rids.emplace(nextRecord->id);
-                        }
-                    }
-                    RecordId lastid{};
-                    for (auto id : rids) {
-                        _state->ranges.emplace_back(Range{lastid, id});
-                        lastid = id;
-                    }
-                    _state->ranges.emplace_back(Range{lastid, RecordId{}});
+    {
+        stdx::unique_lock lock(_state->mutex);
+        if (_state->ranges.empty()) {
+            auto ranges = _coll->getRecordStore()->numRecords(_opCtx) / 10240;
+            if (ranges < 2) {
+                _state->ranges.emplace_back(Range{RecordId{}, RecordId{}});
+            } else {
+                if (ranges > 1024) {
+                    ranges = 1024;
                 }
+                auto randomCursor = _coll->getRecordStore()->getRandomCursor(_opCtx);
+                invariant(randomCursor);
+                std::set<RecordId> rids;
+                while (ranges--) {
+                    auto nextRecord = randomCursor->next();
+                    if (nextRecord) {
+                        rids.emplace(nextRecord->id);
+                    }
+                }
+                RecordId lastid{};
+                for (auto id : rids) {
+                    _state->ranges.emplace_back(Range{lastid, id});
+                    lastid = id;
+                }
+                _state->ranges.emplace_back(Range{lastid, RecordId{}});
             }
         }
-
-        _cursor = _coll->getCursor(_opCtx);
     }
+
+    _cursor = _coll->getCursor(_opCtx);
 
     _open = true;
 }

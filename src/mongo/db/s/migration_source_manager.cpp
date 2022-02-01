@@ -61,6 +61,7 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/s/request_types/commit_chunk_migration_request_type.h"
 #include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/s/shard_key_pattern.h"
@@ -129,8 +130,10 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
       _stats(ShardingStatistics::get(_opCtx)),
       _critSecReason(BSON("command"
                           << "moveChunk"
-                          << "fromShard" << request.getFromShardId() << "toShard"
-                          << request.getToShardId())) {
+                          << "fromShard" << _args.getFromShardId() << "toShard"
+                          << _args.getToShardId())),
+      _acquireCSOnRecipient(feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabled(
+          serverGlobalParams.featureCompatibility)) {
     invariant(!_opCtx->lockState()->isLocked());
 
     LOGV2(22016,
@@ -375,7 +378,7 @@ Status MigrationSourceManager::commitChunkOnRecipient() {
     ScopeGuard scopedGuard([&] { cleanupOnError(); });
 
     // Tell the recipient shard to fetch the latest changes.
-    auto commitCloneStatus = _cloneDriver->commitClone(_opCtx);
+    auto commitCloneStatus = _cloneDriver->commitClone(_opCtx, _acquireCSOnRecipient);
 
     if (MONGO_unlikely(failMigrationCommit.shouldFail()) && commitCloneStatus.isOK()) {
         commitCloneStatus = {ErrorCodes::InternalError,
@@ -442,6 +445,11 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
     if (MONGO_unlikely(migrationCommitNetworkError.shouldFail())) {
         commitChunkMigrationResponse = Status(
             ErrorCodes::InternalError, "Failpoint 'migrationCommitNetworkError' generated error");
+    }
+
+    if (_acquireCSOnRecipient) {
+        // Asynchronously tell the recipient to release its critical section
+        _coordinator->launchReleaseRecipientCriticalSection(_opCtx);
     }
 
     Status migrationCommitStatus =
@@ -535,7 +543,7 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
 
     const ChunkRange range(_args.getMinKey(), _args.getMaxKey());
 
-    if (!MONGO_unlikely(doNotRefreshRecipientAfterCommit.shouldFail())) {
+    if (!_acquireCSOnRecipient && !MONGO_unlikely(doNotRefreshRecipientAfterCommit.shouldFail())) {
         // Best-effort make the recipient refresh its routing table to the new collection
         // version.
         refreshRecipientRoutingTable(
@@ -738,7 +746,8 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
                 // This can be called on an exception path after the OperationContext has been
                 // interrupted, so use a new OperationContext. Note, it's valid to call
                 // getServiceContext on an interrupted OperationContext.
-                _cleanupCompleteFuture = _coordinator->completeMigration(newOpCtx);
+                _cleanupCompleteFuture =
+                    _coordinator->completeMigration(newOpCtx, _acquireCSOnRecipient);
             }
         }
 

@@ -64,7 +64,7 @@ constexpr auto kCreateCommandHelp =
     "  viewOn: <string: name of source collection or view>,\n"
     "  pipeline: <array<object>: aggregation pipeline stage>,\n"
     "  collation: <document: default collation for the collection or view>,\n"
-    "  changeStreamPreAndPostImages: <bool: pre- and post-images for change streams enabled>,\n"
+    "  changeStreamPreAndPostImages: <document: pre- and post-images options for change streams>,\n"
     "  writeConcern: <document: write concern expression for the operation>]\n"
     "}"_sd;
 
@@ -114,20 +114,41 @@ public:
 #undef DEPR_23800
             }
 
-            // Ensure that the 'size' field is present if 'capped' is set to true.
-            if (cmd.getCapped()) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "the 'size' field is required when 'capped' is true",
-                        cmd.getSize());
-            }
+            if (!cmd.getClusteredIndex()) {
+                // Ensure that the 'size' field is present if 'capped' is set to true and this is
+                // not a clustered collection.
+                if (cmd.getCapped()) {
+                    uassert(ErrorCodes::InvalidOptions,
+                            str::stream() << "the 'size' field is required when 'capped' is true",
+                            cmd.getSize());
+                }
 
-            // If the 'size' or 'max' fields are present, then 'capped' must be set to true.
-            if (cmd.getSize() || cmd.getMax()) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream()
-                            << "the 'capped' field needs to be true when either the 'size'"
-                            << " or 'max' fields are present",
-                        cmd.getCapped());
+                // If the 'size' or 'max' fields are present and this is not a clustered collection,
+                // then 'capped' must be set to true.
+                if (cmd.getSize() || cmd.getMax()) {
+                    uassert(ErrorCodes::InvalidOptions,
+                            str::stream()
+                                << "the 'capped' field needs to be true when either the 'size'"
+                                << " or 'max' fields are present",
+                            cmd.getCapped());
+                }
+            } else {
+                // Clustered collection.
+                uassert(ErrorCodes::Error(6049200),
+                        str::stream() << "'size' field for capped collections is not "
+                                         "allowed on clustered collections. "
+                                      << "Did you mean 'capped: true' with 'expireAfterSeconds'?",
+                        !cmd.getSize());
+                uassert(ErrorCodes::Error(6049204),
+                        str::stream() << "'max' field for capped collections is not "
+                                         "allowed on clustered collections. "
+                                      << "Did you mean 'capped: true' with 'expireAfterSeconds'?",
+                        !cmd.getMax());
+                if (cmd.getCapped()) {
+                    uassert(ErrorCodes::Error(6049201),
+                            "A capped clustered collection requires the 'expireAfterSeconds' field",
+                            cmd.getExpireAfterSeconds());
+                }
             }
 
             // The 'temp' field is only allowed to be used internally and isn't available to
@@ -147,11 +168,6 @@ public:
             }
 
             if (auto timeseries = cmd.getTimeseries()) {
-                uassert(ErrorCodes::InvalidOptions,
-                        "Time-series collection is not enabled",
-                        feature_flags::gTimeseriesCollection.isEnabled(
-                            serverGlobalParams.featureCompatibility));
-
                 for (auto&& option : cmd.toBSON({})) {
                     auto fieldName = option.fieldNameStringData();
 
@@ -272,10 +288,13 @@ public:
             if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
                     serverGlobalParams.featureCompatibility)) {
                 const auto isRecordPreImagesEnabled = cmd.getRecordPreImages().get_value_or(false);
+                const auto isChangeStreamPreAndPostImagesEnabled =
+                    (cmd.getChangeStreamPreAndPostImages() &&
+                     cmd.getChangeStreamPreAndPostImages()->getEnabled());
                 uassert(ErrorCodes::InvalidOptions,
-                        "recordPreImages and changeStreamPreAndPostImages can not be set to true "
-                        "simultaneously",
-                        !(cmd.getChangeStreamPreAndPostImages() && isRecordPreImagesEnabled));
+                        "'recordPreImages' and 'changeStreamPreAndPostImages.enabled' can not be "
+                        "set to true simultaneously",
+                        !(isChangeStreamPreAndPostImagesEnabled && isRecordPreImagesEnabled));
             } else {
                 uassert(5846900,
                         "BSON field 'changeStreamPreAndPostImages' is an unknown field.",

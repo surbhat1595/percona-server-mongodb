@@ -124,6 +124,9 @@ public:
     // Namespace for storing the persisted state of migration coordinators.
     static const NamespaceString kMigrationCoordinatorsNamespace;
 
+    // Namespace for storing the persisted state of migration recipients.
+    static const NamespaceString kMigrationRecipientsNamespace;
+
     // Namespace for storing the persisted state of tenant migration donors.
     static const NamespaceString kTenantMigrationDonorsNamespace;
 
@@ -138,6 +141,9 @@ public:
 
     // Namespace for replica set configuration settings.
     static const NamespaceString kSystemReplSetNamespace;
+
+    // Namespace for storing the last replica set election vote.
+    static const NamespaceString kLastVoteNamespace;
 
     // Namespace for change stream pre-images collection.
     static const NamespaceString kChangeStreamPreImagesNamespace;
@@ -371,7 +377,7 @@ public:
     bool isTimeseriesBucketsCollection() const;
 
     /**
-     * Returns whether the specified namespace is local.system.preimages.
+     * Returns whether the specified namespace is config.system.preimages.
      */
     bool isChangeStreamPreImagesCollection() const;
 

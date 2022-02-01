@@ -84,6 +84,9 @@ public:
               Interruptible* interruptible = Interruptible::notInterruptible()) override;
 
     void appendConnectionStats(ConnectionPoolStats* stats) const override;
+    void appendNetworkInterfaceStats(BSONObjBuilder&) const override;
+
+    void dropConnections(const HostAndPort& hostAndPort) override;
 
 private:
     std::unique_ptr<ThreadPoolTaskExecutor> _executor;

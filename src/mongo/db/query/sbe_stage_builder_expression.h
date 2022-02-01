@@ -43,9 +43,9 @@ namespace mongo::stage_builder {
  * subtree to build on top of.
  */
 EvalExprStagePair generateExpression(StageBuilderState& state,
-                                     Expression* expr,
+                                     const Expression* expr,
                                      EvalStage stage,
-                                     sbe::value::SlotId inputVar,
+                                     boost::optional<sbe::value::SlotId> optionalRootSlot,
                                      PlanNodeId planNodeId);
 
 /**

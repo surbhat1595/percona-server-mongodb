@@ -1,20 +1,22 @@
 // Tests that the point-in-time pre- and post-images are loaded correctly in $changeStream running
-// with different arguments for collections with 'changeStreamPreAndPostImages' set to true.
+// with different arguments for collections with 'changeStreamPreAndPostImages' being enabled.
 // @tags: [
-//  assumes_against_mongod_not_mongos,
-//  change_stream_does_not_expect_txns,
-//  multiversion_incompatible,
+//   # TODO SERVER-58694: remove this tag.
+//   change_stream_does_not_expect_txns,
+//   multiversion_incompatible,
+//   # TODO SERVER-60238: remove this tag.
+//   assumes_read_preference_unchanged
 // ]
 (function() {
 "use strict";
 
 load("jstests/libs/collection_drop_recreate.js");  // For assertDropAndRecreateCollection.
-load("jstests/libs/change_stream_util.js");        // For isChangeStreamPreAndPostImagesEnabled.
+load("jstests/libs/change_stream_util.js");        // For canRecordPreImagesInConfigDatabase.
 
 const testDB = db.getSiblingDB(jsTestName());
 const collName = "test";
 
-if (!isChangeStreamPreAndPostImagesEnabled(db)) {
+if (!canRecordPreImagesInConfigDatabase(testDB)) {
     const coll = assertDropAndRecreateCollection(testDB, collName);
 
     // If feature flag is off, creating changeStream with new fullDocument arguments should throw.
@@ -23,7 +25,7 @@ if (!isChangeStreamPreAndPostImagesEnabled(db)) {
     assert.throwsWithCode(() => coll.watch([], {fullDocument: 'required'}), ErrorCodes.BadValue);
 
     jsTestLog(
-        'Skipping test because featureFlagChangeStreamPreAndPostImages feature flag is not enabled');
+        "Skipping test because pre-image recording capability in 'system.preimages' is not enabled.");
     return;
 }
 
@@ -39,7 +41,7 @@ const updatedDoc2 = {
     _id: 1,
     x: 5
 };
-const replaceDoc = {
+const replacedDoc = {
     _id: 1,
     z: 1
 };
@@ -50,7 +52,8 @@ function preAndPostImageTest({
     changeStreamOptions = {},
     expectedOnUpdateImagesWithChangeStreamPreImagesDisabled = {},
     expectedOnUpdateImages = {},
-    expectedOnReplaceImages = {}
+    expectedOnReplaceImages = {},
+    expectedOnDeleteImages = {},
 } = {}) {
     // Confirms that the change event document does not contain any internal-only fields.
     function assertChangeStreamInternalFieldsNotPresent(changeStreamDoc) {
@@ -111,7 +114,7 @@ function preAndPostImageTest({
 
     // Enable changeStreamPreAndPostImages for pre-images recording.
     assert.commandWorked(
-        testDB.runCommand({collMod: collName, changeStreamPreAndPostImages: true}));
+        testDB.runCommand({collMod: collName, changeStreamPreAndPostImages: {enabled: true}}));
 
     // Perform an update modification.
     assert.commandWorked(coll.update(updatedDoc, {$inc: {x: 2}}));
@@ -124,7 +127,7 @@ function preAndPostImageTest({
     assertChangeStreamInternalFieldsNotPresent(changeStreamDoc);
 
     // Perform a full-document replacement.
-    assert.commandWorked(coll.update(updatedDoc2, replaceDoc));
+    assert.commandWorked(coll.update(updatedDoc2, replacedDoc));
 
     // The next change stream event should contain the expected pre- and post-images.
     assert.soon(() => changeStreamCursor.hasNext());
@@ -133,12 +136,24 @@ function preAndPostImageTest({
     assert.eq(changeStreamDoc.fullDocument, expectedOnReplaceImages.postImage);
     assert.eq(changeStreamDoc.operationType, "replace");
     assertChangeStreamInternalFieldsNotPresent(changeStreamDoc);
+
+    // Perform a document removal.
+    assert.commandWorked(coll.remove(replacedDoc));
+
+    // The next change stream event should contain the expected pre-image.
+    assert.soon(() => changeStreamCursor.hasNext());
+    changeStreamDoc = changeStreamCursor.next();
+    assert.eq(changeStreamDoc.fullDocumentBeforeChange, expectedOnDeleteImages.preImage);
+    assert(!changeStreamDoc.hasOwnProperty("fullDocument"), changeStreamDoc);
+    assert.eq(changeStreamDoc.operationType, "delete");
+    assertChangeStreamInternalFieldsNotPresent(changeStreamDoc);
 }
 
 preAndPostImageTest({
     expectedOnReplaceImages: {
-        postImage: replaceDoc,
-    }
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {}
 });
 preAndPostImageTest({
     changeStreamOptions: {fullDocumentBeforeChange: 'whenAvailable'},
@@ -150,7 +165,10 @@ preAndPostImageTest({
     },
     expectedOnReplaceImages: {
         preImage: updatedDoc2,
-        postImage: replaceDoc,
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {
+        preImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -162,7 +180,7 @@ preAndPostImageTest({
         postImage: updatedDoc2,
     },
     expectedOnReplaceImages: {
-        postImage: replaceDoc,
+        postImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -177,7 +195,10 @@ preAndPostImageTest({
     },
     expectedOnReplaceImages: {
         preImage: updatedDoc2,
-        postImage: replaceDoc,
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {
+        preImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -188,7 +209,10 @@ preAndPostImageTest({
     },
     expectedOnReplaceImages: {
         preImage: updatedDoc2,
-        postImage: replaceDoc,
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {
+        preImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -198,7 +222,7 @@ preAndPostImageTest({
         postImage: updatedDoc2,
     },
     expectedOnReplaceImages: {
-        postImage: replaceDoc,
+        postImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -210,7 +234,10 @@ preAndPostImageTest({
     },
     expectedOnReplaceImages: {
         preImage: updatedDoc2,
-        postImage: replaceDoc,
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {
+        preImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -222,7 +249,10 @@ preAndPostImageTest({
     },
     expectedOnReplaceImages: {
         preImage: updatedDoc2,
-        postImage: replaceDoc,
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {
+        preImage: replacedDoc,
     }
 });
 preAndPostImageTest({
@@ -234,7 +264,10 @@ preAndPostImageTest({
     },
     expectedOnReplaceImages: {
         preImage: updatedDoc2,
-        postImage: replaceDoc,
+        postImage: replacedDoc,
+    },
+    expectedOnDeleteImages: {
+        preImage: replacedDoc,
     }
 });
 }());

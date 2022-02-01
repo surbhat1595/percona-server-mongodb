@@ -69,6 +69,9 @@ const NamespaceString NamespaceString::kTransactionCoordinatorsNamespace(
 const NamespaceString NamespaceString::kMigrationCoordinatorsNamespace(NamespaceString::kConfigDb,
                                                                        "migrationCoordinators");
 
+const NamespaceString NamespaceString::kMigrationRecipientsNamespace(NamespaceString::kConfigDb,
+                                                                     "migrationRecipients");
+
 const NamespaceString NamespaceString::kTenantMigrationDonorsNamespace(NamespaceString::kConfigDb,
                                                                        "tenantMigrationDonors");
 
@@ -92,7 +95,9 @@ const NamespaceString NamespaceString::kExternalKeysCollectionNamespace(Namespac
 const NamespaceString NamespaceString::kRsOplogNamespace(NamespaceString::kLocalDb, "oplog.rs");
 const NamespaceString NamespaceString::kSystemReplSetNamespace(NamespaceString::kLocalDb,
                                                                "system.replset");
-const NamespaceString NamespaceString::kChangeStreamPreImagesNamespace(NamespaceString::kLocalDb,
+const NamespaceString NamespaceString::kLastVoteNamespace(NamespaceString::kLocalDb,
+                                                          "replset.election");
+const NamespaceString NamespaceString::kChangeStreamPreImagesNamespace(NamespaceString::kConfigDb,
                                                                        "system.preimages");
 const NamespaceString NamespaceString::kIndexBuildEntryNamespace(NamespaceString::kConfigDb,
                                                                  "system.indexBuilds");

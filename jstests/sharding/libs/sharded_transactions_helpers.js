@@ -191,3 +191,38 @@ function flushRoutersAndRefreshShardMetadata(st, {ns, dbNames = []} = {}) {
         });
     });
 }
+
+function getOplogEntriesForTxn(rs, lsid, txnNumber) {
+    const filter = {txnNumber: NumberLong(txnNumber)};
+    for (let k in lsid) {
+        filter["lsid." + k] = lsid[k];
+    }
+    return rs.getPrimary().getCollection("local.oplog.rs").find(filter).sort({_id: 1}).toArray();
+}
+
+function getTxnEntriesForSession(rs, lsid) {
+    return rs.getPrimary()
+        .getCollection("config.transactions")
+        .find({"_id.id": lsid.id})
+        .sort({_id: 1})
+        .toArray();
+}
+
+function makeCommitTransactionCmdObj(lsid, txnNumber) {
+    return {
+        commitTransaction: 1,
+        lsid: lsid,
+        txnNumber: NumberLong(txnNumber),
+        autocommit: false,
+    };
+}
+
+function makePrepareTransactionCmdObj(lsid, txnNumber) {
+    return {
+        prepareTransaction: 1,
+        lsid: lsid,
+        txnNumber: NumberLong(txnNumber),
+        autocommit: false,
+        writeConcern: {w: "majority"},
+    };
+}

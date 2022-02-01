@@ -326,10 +326,6 @@ PlanState IndexScanStage::getNext() {
     // state in case it yields as the state will be completely overwritten after the call.
     disableSlotAccess();
 
-    if (!_cursor) {
-        return trackPlanState(PlanState::IS_EOF);
-    }
-
     checkForInterrupt(_opCtx);
 
     if (_firstGetNext) {
@@ -409,6 +405,7 @@ std::unique_ptr<PlanStageStats> IndexScanStage::getStats(bool includeDebugInfo) 
 
     if (includeDebugInfo) {
         BSONObjBuilder bob;
+        bob.append("indexName", _indexName);
         bob.appendNumber("keysExamined", static_cast<long long>(_specificStats.keysExamined));
         bob.appendNumber("seeks", static_cast<long long>(_specificStats.seeks));
         bob.appendNumber("numReads", static_cast<long long>(_specificStats.numReads));

@@ -34,16 +34,34 @@
 namespace mongo {
 namespace clustered_util {
 
-static constexpr StringData kDefaultClusteredIndexName = "_id_1"_sd;
+static constexpr StringData kDefaultClusteredIndexName = "_id_"_sd;
 
-ClusteredCollectionInfo makeCanonicalClusteredInfoForLegacyFormat() {
-    auto indexSpec = ClusteredIndexSpec{BSON("_id" << 1), true};
-    indexSpec.setName(kDefaultClusteredIndexName);
-    return ClusteredCollectionInfo(std::move(indexSpec), true);
+void ensureClusteredIndexName(ClusteredIndexSpec& indexSpec) {
+    if (!indexSpec.getName()) {
+        auto clusterKey = indexSpec.getKey().firstElement().fieldNameStringData();
+        if (clusterKey == "_id") {
+            indexSpec.setName(kDefaultClusteredIndexName);
+        } else {
+            indexSpec.setName(StringData(clusterKey + "_1"));
+        }
+    }
 }
 
-ClusteredCollectionInfo makeCanonicalClusteredInfo(const ClusteredIndexSpec& indexSpec) {
-    return ClusteredCollectionInfo(indexSpec, false);
+ClusteredCollectionInfo makeCanonicalClusteredInfoForLegacyFormat() {
+    auto indexSpec = ClusteredIndexSpec{BSON("_id" << 1), true /* unique */};
+    indexSpec.setName(kDefaultClusteredIndexName);
+    return ClusteredCollectionInfo(std::move(indexSpec), true /* legacy */);
+}
+
+ClusteredCollectionInfo makeDefaultClusteredIdIndex() {
+    auto indexSpec = ClusteredIndexSpec{BSON("_id" << 1), true /* unique */};
+    indexSpec.setName(kDefaultClusteredIndexName);
+    return makeCanonicalClusteredInfo(indexSpec);
+}
+
+ClusteredCollectionInfo makeCanonicalClusteredInfo(ClusteredIndexSpec indexSpec) {
+    ensureClusteredIndexName(indexSpec);
+    return ClusteredCollectionInfo(std::move(indexSpec), false);
 }
 
 boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& elem) {
@@ -64,15 +82,29 @@ boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& e
     }
 
     auto indexSpec = ClusteredIndexSpec::parse({"ClusteredUtil::parseClusteredInfo"}, elem.Obj());
-    if (!indexSpec.getName()) {
-        indexSpec.setName(kDefaultClusteredIndexName);
-    }
-
-    return makeCanonicalClusteredInfo(indexSpec);
+    ensureClusteredIndexName(indexSpec);
+    return makeCanonicalClusteredInfo(std::move(indexSpec));
 }
 
 bool requiresLegacyFormat(const NamespaceString& nss) {
     return nss.isTimeseriesBucketsCollection();
+}
+
+BSONObj formatClusterKeyForListIndexes(const ClusteredCollectionInfo& collInfo) {
+    BSONObjBuilder bob;
+    collInfo.getIndexSpec().serialize(&bob);
+    bob.append("clustered", true);
+    return bob.obj();
+}
+
+bool matchesClusterKey(const BSONObj& obj,
+                       const boost::optional<ClusteredCollectionInfo>& collInfo) {
+    return obj.firstElement().fieldNameStringData() ==
+        collInfo->getIndexSpec().getKey().firstElement().fieldNameStringData();
+}
+
+StringData getClusterKeyFieldName(const ClusteredIndexSpec& indexSpec) {
+    return indexSpec.getKey().firstElement().fieldNameStringData();
 }
 
 }  // namespace clustered_util

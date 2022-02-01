@@ -69,7 +69,8 @@ OpTime ReplicationConsistencyMarkersMock::getMinValid(OperationContext* opCtx) c
 }
 
 void ReplicationConsistencyMarkersMock::setMinValid(OperationContext* opCtx,
-                                                    const OpTime& minValid) {
+                                                    const OpTime& minValid,
+                                                    bool alwaysAllowUntimestampedWrite) {
     stdx::lock_guard<Latch> lock(_minValidBoundariesMutex);
     _minValid = minValid;
 }
@@ -135,12 +136,18 @@ Status ReplicationConsistencyMarkersMock::createInternalCollections(OperationCon
     return Status::OK();
 }
 
-void ReplicationConsistencyMarkersMock::setInitialSyncIdIfNotSet(OperationContext* opCtx) {}
+void ReplicationConsistencyMarkersMock::setInitialSyncIdIfNotSet(OperationContext* opCtx) {
+    if (_initialSyncId.isEmpty()) {
+        _initialSyncId = UUID::gen().toBSON();
+    }
+}
 
-void ReplicationConsistencyMarkersMock::clearInitialSyncId(OperationContext* opCtx) {}
+void ReplicationConsistencyMarkersMock::clearInitialSyncId(OperationContext* opCtx) {
+    _initialSyncId = BSONObj();
+}
 
 BSONObj ReplicationConsistencyMarkersMock::getInitialSyncId(OperationContext* opCtx) {
-    return BSONObj();
+    return _initialSyncId;
 }
 
 }  // namespace repl

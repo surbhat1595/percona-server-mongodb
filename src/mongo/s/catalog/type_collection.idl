@@ -110,6 +110,10 @@ structs:
                 type: safeInt64
                 description: "Max chunk size in bytes."
                 optional: true
+            balancerShouldMergeChunks: 
+                type: bool
+                description: "Balancer will merge chunks up to the configured maxChunkSizeBytes."
+                optional: true
             noAutoSplit: 
                 type: bool
                 description: "Specifies whether the auto-splitter should be running or not for this collection."
@@ -161,4 +165,11 @@ structs:
                               system.cache.chunks.<NS> collections are created or renamed using the
                               sharded collection UUID, instead of the namespace, as part of their
                               names, i.e., system.cache.chunks.<UUID>."
+                optional: true
+# TODO SERVER-61033: merge this flag with allowMigrations.
+            permitMigrations:
+                type: bool
+                description: "DEPRECATED flag that determines wether this collection allows chunks to
+                               move. This will only prevent migration from committing and new balancer
+                               rounds, this flag will not be loaded by shards."
                 optional: true

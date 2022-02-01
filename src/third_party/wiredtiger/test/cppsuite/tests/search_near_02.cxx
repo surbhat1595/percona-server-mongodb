@@ -90,12 +90,14 @@ class search_near_02 : public test_harness::test {
         for (uint64_t i = thread_offset;
              i < thread_offset + collections_per_thread && tc->running(); ++i) {
             collection &coll = tc->db.get_collection(i);
-            scoped_cursor cursor = tc->session.open_scoped_cursor(coll.name.c_str());
+            scoped_cursor cursor = tc->session.open_scoped_cursor(coll.name);
             ccv.push_back({coll, std::move(cursor)});
         }
 
         std::string key;
+        const uint64_t MAX_ROLLBACKS = 100;
         uint64_t counter = 0;
+        uint32_t rollback_retries = 0;
 
         while (tc->running()) {
 
@@ -109,12 +111,18 @@ class search_near_02 : public test_harness::test {
 
                 /* Insert a key value pair. */
                 if (tc->insert(cc.cursor, cc.coll.id, key)) {
-                    if (tc->transaction.can_commit())
+                    if (tc->transaction.can_commit()) {
                         /* We are not checking the result of commit as it is not necessary. */
-                        tc->transaction.commit();
+                        if (tc->transaction.commit())
+                            rollback_retries = 0;
+                        else
+                            ++rollback_retries;
+                    }
                 } else {
                     tc->transaction.rollback();
+                    ++rollback_retries;
                 }
+                testutil_assert(rollback_retries < MAX_ROLLBACKS);
 
                 /* Sleep the duration defined by the configuration. */
                 tc->sleep();
@@ -155,12 +163,11 @@ class search_near_02 : public test_harness::test {
 
             /* Find a cached cursor or create one if none exists. */
             if (cursors.find(coll.id) == cursors.end()) {
-                cursors.emplace(
-                  coll.id, std::move(tc->session.open_scoped_cursor(coll.name.c_str())));
+                cursors.emplace(coll.id, std::move(tc->session.open_scoped_cursor(coll.name)));
                 auto &cursor_prefix = cursors[coll.id];
                 /* The cached cursors have the prefix configuration enabled. */
                 testutil_check(
-                  cursor_prefix.get()->reconfigure(cursor_prefix.get(), "prefix_key=true"));
+                  cursor_prefix.get()->reconfigure(cursor_prefix.get(), "prefix_search=true"));
             }
 
             auto &cursor_prefix = cursors[coll.id];
@@ -203,7 +210,7 @@ class search_near_02 : public test_harness::test {
                 }
 
                 /* Open a cursor with the default configuration on the selected collection. */
-                scoped_cursor cursor_default(tc->session.open_scoped_cursor(coll.name.c_str()));
+                scoped_cursor cursor_default(tc->session.open_scoped_cursor(coll.name));
 
                 /* Verify the prefix search_near output using the default cursor. */
                 validate_prefix_search_near(
@@ -268,7 +275,6 @@ class search_near_02 : public test_harness::test {
     {
         const char *k;
         std::string k_str;
-        int ret;
 
         /*
          * The prefix search near call cannot retrieve a key with a smaller value than the prefix we

@@ -74,8 +74,6 @@ public:
 
     virtual ~StorageEngineImpl();
 
-    virtual void finishInit() override;
-
     virtual void notifyStartupComplete() override;
 
     virtual RecoveryUnit* newRecoveryUnit() override;
@@ -115,10 +113,10 @@ public:
                                      const NamespaceString& nss) override;
 
     virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(
-        OperationContext* opCtx) override;
+        OperationContext* opCtx, KeyFormat keyFormat) override;
 
     virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreForResumableIndexBuild(
-        OperationContext* opCtx) override;
+        OperationContext* opCtx, KeyFormat keyFormat) override;
 
     virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreFromExistingIdent(
         OperationContext* opCtx, StringData ident) override;
@@ -273,6 +271,11 @@ public:
          */
         void addListener_forTestOnly(TimestampListener* listener);
 
+        /**
+         * Remove a listener.
+         */
+        void removeListener_forTestOnly(TimestampListener* listener);
+
         bool isRunning_forTestOnly() const {
             return _running;
         }
@@ -317,6 +320,8 @@ public:
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) override;
 
+    void startDropPendingIdentReaper() override;
+
     void checkpoint() override;
 
     StatusWith<ReconcileResult> reconcileCatalogAndIdents(
@@ -357,6 +362,8 @@ public:
     void unpinOldestTimestamp(const std::string& requestingServiceName) override;
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) override;
+
+    void dump() const override;
 
 private:
     using CollIter = std::list<std::string>::iterator;

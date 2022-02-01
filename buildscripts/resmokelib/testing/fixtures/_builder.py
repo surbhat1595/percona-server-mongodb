@@ -32,6 +32,13 @@ def make_fixture(class_name, logger, job_num, *args, **kwargs):
 
     if class_name not in _FIXTURES:
         raise ValueError("Unknown fixture class '%s'" % class_name)
+
+    # Special case MongoDFixture or _MongosFixture for now since we only add one option.
+    # If there's more logic, we should add a builder class for them.
+    if class_name in ["MongoDFixture", "_MongoSFixture"]:
+        return _FIXTURES[class_name](logger, job_num, fixturelib, *args,
+                                     add_feature_flags=bool(config.ENABLED_FEATURE_FLAGS), **kwargs)
+
     return _FIXTURES[class_name](logger, job_num, fixturelib, *args, **kwargs)
 
 
@@ -70,7 +77,16 @@ class ReplSetBuilder(FixtureBuilder):
         """Build a replica set."""
         # We hijack the mixed_bin_versions passed to the fixture.
         mixed_bin_versions = kwargs.pop("mixed_bin_versions", config.MIXED_BIN_VERSIONS)
+        # We have the same code in configure_resmoke.py to split config.MIXED_BIN_VERSIONS,
+        # but here it is for the case, when it comes from resmoke suite definition
+        if isinstance(mixed_bin_versions, str):
+            mixed_bin_versions = mixed_bin_versions.split("_")
+        if config.MIXED_BIN_VERSIONS is None:
+            config.MIXED_BIN_VERSIONS = mixed_bin_versions
+
         old_bin_version = kwargs.pop("old_bin_version", config.MULTIVERSION_BIN_VERSION)
+        if config.MULTIVERSION_BIN_VERSION is None:
+            config.MULTIVERSION_BIN_VERSION = old_bin_version
 
         # We also hijack the num_nodes because we need it here.
         num_nodes = kwargs.pop("num_nodes", 2)
@@ -174,9 +190,6 @@ class ReplSetBuilder(FixtureBuilder):
             new_fixture_port = old_fixture.port
 
         new_fixture_mongod_options = replset.get_options_for_mongod(replset_node_index)
-        if config.ENABLED_FEATURE_FLAGS is not None:
-            for ff in config.ENABLED_FEATURE_FLAGS:
-                new_fixture_mongod_options["set_parameters"][ff] = True
 
         new_fixture = make_fixture(classes[BinVersionEnum.NEW], mongod_logger, replset.job_num,
                                    mongod_executable=executables[BinVersionEnum.NEW],
@@ -273,8 +286,18 @@ class ShardedClusterBuilder(FixtureBuilder):
     def build_fixture(self, logger, job_num, fixturelib, *args, **kwargs):
         """Build a sharded cluster."""
 
-        mixed_bin_versions = kwargs.get("mixed_bin_versions", config.MIXED_BIN_VERSIONS)
+        mixed_bin_versions = kwargs.pop("mixed_bin_versions", config.MIXED_BIN_VERSIONS)
+        # We have the same code in configure_resmoke.py to split config.MIXED_BIN_VERSIONS,
+        # but here it is for the case, when it comes from resmoke suite definition
+        if isinstance(mixed_bin_versions, str):
+            mixed_bin_versions = mixed_bin_versions.split("_")
+        if config.MIXED_BIN_VERSIONS is None:
+            config.MIXED_BIN_VERSIONS = mixed_bin_versions
+
         old_bin_version = kwargs.pop("old_bin_version", config.MULTIVERSION_BIN_VERSION)
+        if config.MULTIVERSION_BIN_VERSION is None:
+            config.MULTIVERSION_BIN_VERSION = old_bin_version
+
         is_multiversion = mixed_bin_versions is not None
 
         num_shards = kwargs.pop("num_shards", 1)
@@ -315,12 +338,12 @@ class ShardedClusterBuilder(FixtureBuilder):
         sharded_cluster = _FIXTURES[self.REGISTERED_NAME](logger, job_num, fixturelib, *args,
                                                           **kwargs)
 
-        config_svr = self._new_configsvr(sharded_cluster, is_multiversion)
+        config_svr = self._new_configsvr(sharded_cluster, is_multiversion, old_bin_version)
         sharded_cluster.install_configsvr(config_svr)
 
         for rs_shard_index in range(num_shards):
-            rs_shard = self._new_rs_shard(sharded_cluster, mixed_bin_versions, rs_shard_index,
-                                          num_rs_nodes_per_shard)
+            rs_shard = self._new_rs_shard(sharded_cluster, mixed_bin_versions, old_bin_version,
+                                          rs_shard_index, num_rs_nodes_per_shard)
             sharded_cluster.install_rs_shard(rs_shard)
 
         for mongos_index in range(num_mongos):
@@ -330,7 +353,7 @@ class ShardedClusterBuilder(FixtureBuilder):
         return sharded_cluster
 
     @classmethod
-    def _new_configsvr(cls, sharded_cluster, is_multiversion):
+    def _new_configsvr(cls, sharded_cluster, is_multiversion, old_bin_version):
         """Return a replicaset.ReplicaSetFixture configured as the config server."""
 
         configsvr_logger = sharded_cluster.get_configsvr_logger()
@@ -343,10 +366,11 @@ class ShardedClusterBuilder(FixtureBuilder):
             mixed_bin_versions = [BinVersionEnum.NEW] * 2
 
         return make_fixture("ReplicaSetFixture", configsvr_logger, sharded_cluster.job_num,
-                            mixed_bin_versions=mixed_bin_versions, **configsvr_kwargs)
+                            mixed_bin_versions=mixed_bin_versions, old_bin_version=old_bin_version,
+                            **configsvr_kwargs)
 
     @classmethod
-    def _new_rs_shard(cls, sharded_cluster, mixed_bin_versions, rs_shard_index,
+    def _new_rs_shard(cls, sharded_cluster, mixed_bin_versions, old_bin_version, rs_shard_index,
                       num_rs_nodes_per_shard):
         """Return a replicaset.ReplicaSetFixture configured as a shard in a sharded cluster."""
 
@@ -360,7 +384,7 @@ class ShardedClusterBuilder(FixtureBuilder):
 
         return make_fixture("ReplicaSetFixture", rs_shard_logger, sharded_cluster.job_num,
                             num_nodes=num_rs_nodes_per_shard, mixed_bin_versions=mixed_bin_versions,
-                            **rs_shard_kwargs)
+                            old_bin_version=old_bin_version, **rs_shard_kwargs)
 
     @classmethod
     def _new_mongos(cls, sharded_cluster, mongos_executable, mongos_index, total):

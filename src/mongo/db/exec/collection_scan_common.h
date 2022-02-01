@@ -40,11 +40,18 @@ struct CollectionScanParams {
         BACKWARD = -1,
     };
 
+    enum class ScanBoundInclusion {
+        kExcludeBothStartAndEndRecords,
+        kIncludeStartRecordOnly,
+        kIncludeEndRecordOnly,
+        kIncludeBothStartAndEndRecords,
+    };
+
     // If present, this parameter sets the start point of a forward scan or the end point of a
     // reverse scan. A forward scan will start scanning at the document with the lowest RecordId
     // greater than or equal to minRecord. A reverse scan will stop and return EOF on the first
     // document with a RecordId less than minRecord, or a higher record if none exists. May only
-    // be used for scans on collections clustered by _id and forward oplog scans. If exclusive
+    // be used for scans on clustered collections and forward oplog scans. If exclusive
     // bounds are required, a MatchExpression must be passed to the CollectionScan stage. This field
     // cannot be used in conjunction with 'resumeAfterRecordId'
     boost::optional<RecordId> minRecord;
@@ -53,7 +60,7 @@ struct CollectionScanParams {
     // forward scan. A forward scan will stop and return EOF on the first document with a RecordId
     // greater than maxRecord. A reverse scan will start scanning at the document with the
     // highest RecordId less than or equal to maxRecord, or a lower record if none exists. May
-    // only be used for scans on collections clustered by _id and forward oplog scans. If exclusive
+    // only be used for scans on clustered collections and forward oplog scans. If exclusive
     // bounds are required, a MatchExpression must be passed to the CollectionScan stage. This field
     // cannot be used in conjunction with 'resumeAfterRecordId'.
     boost::optional<RecordId> maxRecord;
@@ -67,6 +74,24 @@ struct CollectionScanParams {
     boost::optional<RecordId> resumeAfterRecordId;
 
     Direction direction = FORWARD;
+
+    // By default, both start and end records will be included.
+    //
+    // For a FORWARD scan, the startRecord is the minRecord. For a BACKWARD scan, the startRecord is
+    // the maxRecord.
+    //
+    // Only compatible with bounded collection scans. Only excludes record bounds if the bound is
+    // also defined.
+    // Ex) A forward scan with [minRecord, maxRecord] of [boost::none, 10] and
+    // ScanBoundInclusion::kIncludeEndRecordOnly will yield the same results as
+    // ScanBoundInclusion::kIncludeBothStartAndEndRecords since the startRecord that would have been
+    // excluded is not defined anyway.
+    //
+    // Use with caution, as this can override a filter.
+    // Ex) Suppose we have [minRecord, maxRecord] of [-10, 10],
+    // ScanBoundInclusion::kIncludeEndRecordOnly, and a filter {$gte: RecordId(-10)} for a forward
+    // scan. The results would still exclude RecordId(-10) due to the ScanBoundInclusion.
+    ScanBoundInclusion boundInclusion = ScanBoundInclusion::kIncludeBothStartAndEndRecords;
 
     // Do we want the scan to be 'tailable'?  Only meaningful if the collection is capped.
     bool tailable = false;

@@ -149,7 +149,7 @@ void FcvOpObserver::_onInsertOrUpdate(OperationContext* opCtx, const BSONObj& do
 
 void FcvOpObserver::onInserts(OperationContext* opCtx,
                               const NamespaceString& nss,
-                              OptionalCollectionUUID uuid,
+                              const UUID& uuid,
                               std::vector<InsertStatement>::const_iterator first,
                               std::vector<InsertStatement>::const_iterator last,
                               bool fromMigrate) {
@@ -161,17 +161,17 @@ void FcvOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void FcvOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    if (args.updateArgs.update.isEmpty()) {
+    if (args.updateArgs->update.isEmpty()) {
         return;
     }
     if (args.nss.isServerConfigurationCollection()) {
-        _onInsertOrUpdate(opCtx, args.updateArgs.updatedDoc);
+        _onInsertOrUpdate(opCtx, args.updateArgs->updatedDoc);
     }
 }
 
 void FcvOpObserver::onDelete(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             OptionalCollectionUUID uuid,
+                             const UUID& uuid,
                              StmtId stmtId,
                              const OplogDeleteEntryArgs& args) {
     // documentKeyDecoration is set in OpObserverImpl::aboutToDelete. So the FcvOpObserver
@@ -186,8 +186,8 @@ void FcvOpObserver::onDelete(OperationContext* opCtx,
     }
 }
 
-void FcvOpObserver::onReplicationRollback(OperationContext* opCtx,
-                                          const RollbackObserverInfo& rbInfo) {
+void FcvOpObserver::_onReplicationRollback(OperationContext* opCtx,
+                                           const RollbackObserverInfo& rbInfo) {
     // Ensures the in-memory and on-disk FCV states are consistent after a rollback.
     const auto query = BSON("_id" << multiversion::kParameterName);
     const auto swFcv = repl::StorageInterface::get(opCtx)->findById(

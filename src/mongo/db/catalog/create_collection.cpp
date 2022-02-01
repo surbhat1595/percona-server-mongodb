@@ -65,10 +65,12 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(failTimeseriesViewCreation);
 MONGO_FAIL_POINT_DEFINE(failPreimagesCollectionCreation);
+MONGO_FAIL_POINT_DEFINE(clusterAllCollectionsByDefault);
 
 using IndexVersion = IndexDescriptor::IndexVersion;
 
 Status validateClusteredIndexSpec(OperationContext* opCtx,
+                                  const NamespaceString& nss,
                                   const ClusteredIndexSpec& spec,
                                   boost::optional<int64_t> expireAfterSeconds) {
     if (!spec.getUnique()) {
@@ -76,9 +78,33 @@ Status validateClusteredIndexSpec(OperationContext* opCtx,
                       "The clusteredIndex option requires unique: true to be specified");
     }
 
-    if (SimpleBSONObjComparator::kInstance.evaluate(spec.getKey() != BSON("_id" << 1))) {
+    bool clusterKeyOnId =
+        SimpleBSONObjComparator::kInstance.evaluate(spec.getKey() == BSON("_id" << 1));
+    if (nss.isReplicated() && !clusterKeyOnId) {
         return Status(ErrorCodes::Error(5979701),
-                      "The clusteredIndex option is only supported for key: {_id: 1}");
+                      "The clusteredIndex option is only supported for key: {_id: 1} on replicated "
+                      "collections");
+    }
+
+    if (spec.getKey().nFields() > 1) {
+        return Status(ErrorCodes::Error(6053700),
+                      "The clusteredIndex option does not support a compound cluster key");
+    }
+
+    const auto arbitraryClusterKeyField = clustered_util::getClusterKeyFieldName(spec);
+    if (arbitraryClusterKeyField.find(".", 0) != std::string::npos) {
+        return Status(
+            ErrorCodes::Error(6053701),
+            "The clusteredIndex option does not support a cluster key with nested fields");
+    }
+
+    const bool isForwardClusterKey = SimpleBSONObjComparator::kInstance.evaluate(
+        spec.getKey() == BSON(arbitraryClusterKeyField << 1));
+    if (!isForwardClusterKey) {
+        return Status(ErrorCodes::Error(6053702),
+                      str::stream()
+                          << "The clusteredIndex option supports cluster keys like {"
+                          << arbitraryClusterKeyField << ": 1}, but got " << spec.getKey());
     }
 
     if (expireAfterSeconds) {
@@ -130,7 +156,7 @@ Status _createView(OperationContext* opCtx,
                           str::stream() << "Not primary while creating collection " << nss);
         }
 
-        if (collectionOptions.changeStreamPreAndPostImagesEnabled) {
+        if (collectionOptions.changeStreamPreAndPostImagesOptions.getEnabled()) {
             return Status(ErrorCodes::InvalidOptions,
                           "option not supported on a view: changeStreamPreAndPostImages");
         }
@@ -425,7 +451,12 @@ Status _createCollection(OperationContext* opCtx,
                           str::stream() << "A view already exists. NS: " << nss);
         }
 
-
+        if (!collectionOptions.clusteredIndex && (!idIndex || idIndex->isEmpty()) &&
+            // Capped, clustered collections different in behavior significantly from normal capped
+            // collections. Notably, they allow out-of-order insertion.
+            !collectionOptions.capped && clusterAllCollectionsByDefault.shouldFail()) {
+            collectionOptions.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
+        }
         if (auto clusteredIndex = collectionOptions.clusteredIndex) {
             bool clusteredIndexesEnabled =
                 feature_flags::gClusteredIndexes.isEnabled(serverGlobalParams.featureCompatibility);
@@ -449,9 +480,13 @@ Status _createCollection(OperationContext* opCtx,
                     ErrorCodes::InvalidOptions,
                     "The 'clusteredIndex' option is not supported with the 'idIndex' option");
             }
+            if (collectionOptions.autoIndexId == CollectionOptions::NO) {
+                return Status(ErrorCodes::Error(6026501),
+                              "The 'clusteredIndex' option does not support {autoIndexId: false}");
+            }
 
             auto clusteredIndexStatus = validateClusteredIndexSpec(
-                opCtx, clusteredIndex->getIndexSpec(), collectionOptions.expireAfterSeconds);
+                opCtx, nss, clusteredIndex->getIndexSpec(), collectionOptions.expireAfterSeconds);
             if (!clusteredIndexStatus.isOK()) {
                 return clusteredIndexStatus;
             }
@@ -514,6 +549,10 @@ Status createCollection(OperationContext* opCtx,
                 str::stream() << "Cannot create a view in a multi-document "
                                  "transaction.",
                 !opCtx->inMultiDocumentTransaction());
+        uassert(ErrorCodes::Error(6026500),
+                "The 'clusteredIndex' option is not supported with views",
+                !options.clusteredIndex);
+
         return _createView(opCtx, ns, std::move(options));
     } else if (options.timeseries && !ns.isTimeseriesBucketsCollection()) {
         // This helper is designed for user-created time-series collections on primaries. If a
@@ -529,7 +568,7 @@ Status createCollection(OperationContext* opCtx,
                 str::stream() << "Cannot create system collection " << ns
                               << " within a transaction.",
                 !opCtx->inMultiDocumentTransaction() || !ns.isSystem());
-        if (options.changeStreamPreAndPostImagesEnabled) {
+        if (options.changeStreamPreAndPostImagesOptions.getEnabled()) {
             tassert(5868500,
                     "ChangeStreamPreAndPostImages feature flag must be enabled",
                     feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
@@ -612,11 +651,21 @@ void createChangeStreamPreImagesCollection(OperationContext* opCtx) {
     uassert(5868501,
             "Failpoint failPreimagesCollectionCreation enabled. Throwing exception",
             !MONGO_unlikely(failPreimagesCollectionCreation.shouldFail()));
+    tassert(5882500,
+            "Failed to create the pre-images collection: clustered indexes feature is not enabled",
+            feature_flags::gClusteredIndexes.isEnabled(serverGlobalParams.featureCompatibility));
 
     const auto nss = NamespaceString::kChangeStreamPreImagesNamespace;
-    const auto status = _createCollection(opCtx, nss, CollectionOptions(), BSONObj());
+    CollectionOptions preImagesCollectionOptions;
+
+    // Make the collection clustered by _id.
+    preImagesCollectionOptions.clusteredIndex.emplace(
+        clustered_util::makeDefaultClusteredIdIndex());
+    const auto status =
+        _createCollection(opCtx, nss, std::move(preImagesCollectionOptions), BSONObj());
     uassert(status.code(),
-            str::stream() << "Failed to create the pre-images collection: " << nss.coll(),
+            str::stream() << "Failed to create the pre-images collection: " << nss.coll()
+                          << causedBy(status.reason()),
             status.isOK() || status.code() == ErrorCodes::NamespaceExists);
 }
 

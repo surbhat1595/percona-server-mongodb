@@ -6,7 +6,7 @@ selector:
   - jstests/libs/txns/txn_passthrough_runner_selftest.js
   exclude_files:
   # These tests already run with transactions.
-  - jstests/core/txns/*.js
+  - jstests/core/txns/**/*.js
 
   ##
   ## Limitations with the way the runner file injects transactions.
@@ -16,6 +16,8 @@ selector:
   - jstests/core/api_params_getmore.js
   - jstests/core/bulk_api_ordered.js
   - jstests/core/bulk_api_unordered.js
+  - jstests/core/clustered_collection_basic.js # DuplicateKeys, too large RecordId's
+  - jstests/core/clustered_collection_nonreplicated_basic.js # DuplicateKeys, too large RecordId's
   - jstests/core/commands_with_uuid.js
   - jstests/core/dbcase.js
   - jstests/core/dbcase2.js

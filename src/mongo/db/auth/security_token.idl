@@ -32,16 +32,6 @@ global:
 imports:
     - "mongo/idl/basic_types.idl"
 
-server_parameters:
-  acceptOpMsgSecurityToken:
-    description: >-
-        Accept and process Op Message Security Token if provided by client.
-        If this setting is disabled, then passing a security token is treated as an error.
-    set_at: [ startup ]
-    cpp_vartype: bool
-    cpp_varname: gAcceptOpMsgSecurityToken
-    default: false
-
 structs:
     SecurityToken:
         description: "Security Token as passed in OP_MSG"

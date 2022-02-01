@@ -432,7 +432,7 @@ public:
      * checked by the commands infrastructure. Used by $lookup and $graphLookup to enforce the
      * constraint that the foreign collection must be unsharded if featureFlagShardedLookup is
      * turned off. Also used to enforce that the catalog cache is up-to-date when doing a local
-     * read.If the parent operation is unversioned, this method does nothing.
+     * read.
      */
     virtual void setExpectedShardVersion(OperationContext* opCtx,
                                          const NamespaceString& nss,
@@ -483,7 +483,7 @@ public:
      * Create a temporary record store.
      */
     virtual std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) const = 0;
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const = 0;
 
     /**
      * Write the records in 'records' to the record store. Record store must already exist. Asserts
@@ -515,13 +515,6 @@ public:
      */
     virtual void truncateRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                      RecordStore* rs) const = 0;
-
-    /**
-     * Takes ownership of and deletes the record store `rs`. It is invalid to perform more
-     * operations on `rs` after this has been called.
-     */
-    virtual void deleteTemporaryRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                            std::unique_ptr<TemporaryRecordStore> rs) const = 0;
 };
 
 }  // namespace mongo

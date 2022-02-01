@@ -71,6 +71,15 @@ void dropCollectionLocally(OperationContext* opCtx, const NamespaceString& nss) 
                 "collectionExisted"_attr = knownNss);
 }
 
+/* Clear the CollectionShardingRuntime entry for the specified namespace */
+void clearFilteringMetadata(OperationContext* opCtx, const NamespaceString& nss) {
+    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+    Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+    Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
+    auto* csr = CollectionShardingRuntime::get(opCtx, nss);
+    csr->clearFilteringMetadata(opCtx);
+}
+
 /*
  * Rename the collection if exists locally, otherwise simply drop the target collection.
  */
@@ -131,7 +140,10 @@ RenameCollectionParticipantService* RenameCollectionParticipantService::getServi
 }
 
 std::shared_ptr<RenameCollectionParticipantService::Instance>
-RenameCollectionParticipantService::constructInstance(BSONObj initialState) {
+RenameCollectionParticipantService::constructInstance(
+    OperationContext* opCtx,
+    BSONObj initialState,
+    const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) {
     LOGV2_DEBUG(5515102,
                 2,
                 "Constructing new rename participant",
@@ -256,6 +268,11 @@ SemiFuture<void> RenameParticipantInstance::run(
                 service->promoteRecoverableCriticalSectionToBlockAlsoReads(
                     opCtx, toNss(), reason, ShardingCatalogClient::kLocalWriteConcern);
 
+                // Clear the filtering metadata to safely create new range deletion tasks: the
+                // submission will serialize on the renamed collection's metadata refresh.
+                clearFilteringMetadata(opCtx, fromNss());
+                clearFilteringMetadata(opCtx, toNss());
+
                 snapshotRangeDeletionsForRename(opCtx, fromNss(), toNss());
             }))
         .then(_executePhase(
@@ -302,17 +319,6 @@ SemiFuture<void> RenameParticipantInstance::run(
             [this, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
-
-                // Clear the CollectionShardingRuntime entry
-                auto clearFilteringMetadata = [&](const NamespaceString& nss) {
-                    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-                    Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
-                    Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
-                    auto* csr = CollectionShardingRuntime::get(opCtx, nss);
-                    csr->clearFilteringMetadata(opCtx);
-                };
-                clearFilteringMetadata(fromNss());
-                clearFilteringMetadata(toNss());
 
                 // Force the refresh of the catalog cache for both source and destination
                 // collections to purge outdated information.

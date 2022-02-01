@@ -79,7 +79,7 @@ public:
 
     void onInserts(OperationContext* opCtx,
                    const NamespaceString& nss,
-                   OptionalCollectionUUID uuid,
+                   const UUID& uuid,
                    std::vector<InsertStatement>::const_iterator first,
                    std::vector<InsertStatement>::const_iterator last,
                    bool fromMigrate) final;
@@ -92,13 +92,13 @@ public:
 
     void onDelete(OperationContext* opCtx,
                   const NamespaceString& nss,
-                  OptionalCollectionUUID uuid,
+                  const UUID& uuid,
                   StmtId stmtId,
                   const OplogDeleteEntryArgs& args) final;
 
     void onInternalOpMessage(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             const boost::optional<UUID> uuid,
+                             OptionalCollectionUUID uuid,
                              const BSONObj& msgObj,
                              const boost::optional<BSONObj> o2MsgObj,
                              const boost::optional<repl::OpTime> preImageOpTime,
@@ -125,13 +125,13 @@ public:
     using OpObserver::onDropCollection;
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
-                                  OptionalCollectionUUID uuid,
+                                  const UUID& uuid,
                                   std::uint64_t numRecords,
                                   CollectionDropType dropType) final;
 
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,
-                     OptionalCollectionUUID uuid,
+                     const UUID& uuid,
                      const std::string& indexName,
                      const BSONObj& indexInfo) final;
 
@@ -139,7 +139,7 @@ public:
     void onRenameCollection(OperationContext* opCtx,
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
-                            OptionalCollectionUUID uuid,
+                            const UUID& uuid,
                             OptionalCollectionUUID dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp) final;
@@ -157,7 +157,7 @@ public:
     repl::OpTime preRenameCollection(OperationContext* opCtx,
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
-                                     OptionalCollectionUUID uuid,
+                                     const UUID& uuid,
                                      OptionalCollectionUUID dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp) final {
@@ -166,7 +166,7 @@ public:
     void postRenameCollection(OperationContext* opCtx,
                               const NamespaceString& fromCollection,
                               const NamespaceString& toCollection,
-                              OptionalCollectionUUID uuid,
+                              const UUID& uuid,
                               OptionalCollectionUUID dropTargetUUID,
                               bool stayTemp) final;
     void onApplyOps(OperationContext* opCtx,
@@ -175,7 +175,7 @@ public:
 
     void onEmptyCapped(OperationContext* opCtx,
                        const NamespaceString& collectionName,
-                       OptionalCollectionUUID uuid) final;
+                       const UUID& uuid) final;
 
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
                                        std::vector<repl::ReplOperation>* statements,
@@ -195,8 +195,6 @@ public:
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) final {}
 
-    void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo);
-
     void onMajorityCommitPointUpdate(ServiceContext* service,
                                      const repl::OpTime& newCommitPoint) final {}
 
@@ -204,6 +202,9 @@ public:
     static BSONObj getDocumentKey(OperationContext* opCtx,
                                   NamespaceString const& nss,
                                   BSONObj const& doc);
+
+private:
+    void _onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo);
 };
 
 }  // namespace mongo

@@ -25,13 +25,11 @@ SPECIFIC_TASK_OVERRIDES = {
         "replica_sets_jscore_passthrough": timedelta(hours=3),
         "replica_sets_update_v1_oplog_jscore_passthrough": timedelta(hours=2, minutes=30),
     },
-    "enterprise-windows-suggested": {
+    "enterprise-windows-required": {
         "replica_sets_jscore_passthrough": timedelta(hours=3),
         "replica_sets_update_v1_oplog_jscore_passthrough": timedelta(hours=2, minutes=30),
     },
-    "enterprise-windows-inmem": {
-        "replica_sets_jscore_passthrough": timedelta(hours=2, minutes=30),
-    },
+    "enterprise-windows-inmem": {"replica_sets_jscore_passthrough": timedelta(hours=3), },
     "enterprise-windows": {"replica_sets_jscore_passthrough": timedelta(hours=3), },
     "windows-debug-suggested": {
         "replica_sets_initsync_jscore_passthrough": timedelta(hours=2, minutes=30),

@@ -1013,13 +1013,26 @@ TEST(Simple8b, RleFront) {
 }
 
 TEST(Simple8b, EightSelectorLargeBase) {
-    // 8462480737302404222943232 = 111 + 80 zeros. This should be stored as (0111 10100) where the
+    // 8462480737302404222943232 = 111 + 80 zeros. This should be stored as (111 10100) where the
     // second value of 20 is the nibble shift of 4*20. The first value is 0111 because we store at
-    // least 4 values. This should be encoded as [(0111) (10100)] x6 [1000] [1000] = //
+    // least 4 values. This should be encoded as [(111) (10100)] x6 [1000] [1000] = //
     // 81E8F47A3D1E8F48
     uint128_t val = absl::MakeUint128(0x70000, 0x0);
     std::vector<boost::optional<uint128_t>> expectedInts = {val, val, val, val, val, val};
     std::vector<uint8_t> expectedBinary = {0x88, 0xF4, 0xE8, 0xD1, 0xA3, 0x47, 0x8F, 0x1E};
+    testSimple8b(expectedInts, expectedBinary);
+}
+
+TEST(Simple8b, UInt128Zero) {
+    // Have a large value that forces the extended selectors to be used. Then we check that zeros
+    // are handled correctly for them.
+    uint128_t val =
+        absl::MakeUint128(0x70000, 0x0);  // Stored as 0xF4, [value=(111) nibble count=(10100)]
+    uint128_t zero = absl::MakeUint128(0x0, 0x0);
+
+    // 5 values with Selector8Large = 0x98
+    std::vector<boost::optional<uint128_t>> expectedInts = {val, zero, zero, zero, zero};
+    std::vector<uint8_t> expectedBinary = {0x98, 0xF4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     testSimple8b(expectedInts, expectedBinary);
 }
 
@@ -1120,6 +1133,42 @@ TEST(Simple8b, RleEightSelectorLarge) {
     testSimple8b(expectedInts, expectedBinary);
 }
 
+TEST(Simple8b, RleFlushResetsRle) {
+    BufBuilder buffer;
+    Simple8bBuilder<uint64_t> builder([&buffer](uint64_t simple8bBlock) {
+        buffer.appendNum(simple8bBlock);
+        return true;
+    });
+
+    // Write a single 1 and flush. Then we add 120 more 1s and check that this does not start RLE.
+    ASSERT_TRUE(builder.append(1));
+    builder.flush();
+
+    for (int i = 0; i < 120; ++i) {
+        ASSERT_TRUE(builder.append(1));
+    }
+    builder.flush();
+
+    auto size = buffer.len();
+    auto sharedBuffer = buffer.release();
+
+    std::vector<uint8_t> simple8bBlockOne1 = {0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    std::vector<uint8_t> simple8bBlockThirty1s = {0x52, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};
+
+    std::vector<uint8_t> expectedBinary;
+    expectedBinary.insert(expectedBinary.end(), simple8bBlockOne1.begin(), simple8bBlockOne1.end());
+    for (int i = 0; i < 4; ++i) {
+        expectedBinary.insert(
+            expectedBinary.end(), simple8bBlockThirty1s.begin(), simple8bBlockThirty1s.end());
+    }
+
+    ASSERT_EQ(size, expectedBinary.size());
+    ASSERT_EQ(memcmp(sharedBuffer.get(), expectedBinary.data(), size), 0);
+
+    Simple8b<uint64_t> s8b(sharedBuffer.get(), size);
+    assertValuesEqual(s8b, std::vector<boost::optional<uint64_t>>(121, 1));
+}
+
 TEST(Simple8b, EightSelectorLargeMax) {
     // Selector 8 value
     // 1111 + 124 zeros
@@ -1131,10 +1180,47 @@ TEST(Simple8b, EightSelectorLargeMax) {
     testSimple8b(expectedInts, expectedBinary);
 }
 
+TEST(Simple8b, RLELargeCount) {
+    std::vector<boost::optional<uint64_t>> expectedInts(257 * 120, 0);
+
+    std::vector<uint8_t> RLEblock16Count = {0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    std::vector<uint8_t> RLEblock1Count = {0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    std::vector<uint8_t> expectedBinary;
+    for (int i = 0; i < 16; ++i) {
+        expectedBinary.insert(expectedBinary.end(), RLEblock16Count.begin(), RLEblock16Count.end());
+    }
+    expectedBinary.insert(expectedBinary.end(), RLEblock1Count.begin(), RLEblock1Count.end());
+
+    testSimple8b(expectedInts, expectedBinary);
+}
+
 TEST(Simple8b, ValueTooLarge) {
     // This value needs 61 bits which it too large for Simple8b
     uint64_t value = 0x1FFFFFFFFFFFFFFF;
     Simple8bBuilder<uint64_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
+}
+
+TEST(Simple8b, ValueTooLargeMaxUInt64) {
+    // Make sure we handle uint64_t max correctly.
+    uint64_t value = std::numeric_limits<uint64_t>::max();
+
+    Simple8bBuilder<uint64_t> builder([](uint64_t) {
+        ASSERT(false);
+        return true;
+    });
+    ASSERT_FALSE(builder.append(value));
+}
+
+TEST(Simple8b, ValueTooLargeMaxUInt128) {
+    // Make sure we handle uint128_t max correctly.
+    uint128_t value = std::numeric_limits<uint128_t>::max();
+
+    Simple8bBuilder<uint128_t> builder([](uint64_t) {
         ASSERT(false);
         return true;
     });

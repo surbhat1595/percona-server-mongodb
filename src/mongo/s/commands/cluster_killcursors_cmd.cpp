@@ -50,12 +50,13 @@ struct ClusterKillCursorsCmd {
         };
 
         return Grid::get(opCtx)->getCursorManager()->checkAuthForKillCursors(
-            opCtx, nss, cursorId, authChecker);
+            opCtx, cursorId, authChecker);
     }
+
     static Status doKillCursor(OperationContext* opCtx,
                                const NamespaceString& nss,
                                CursorId cursorId) {
-        return Grid::get(opCtx)->getCursorManager()->killCursor(opCtx, nss, cursorId);
+        return Grid::get(opCtx)->getCursorManager()->killCursor(opCtx, cursorId);
     }
 };
 KillCursorsCmdBase<ClusterKillCursorsCmd> clusterKillCursorsCmd;

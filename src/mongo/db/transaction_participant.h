@@ -268,18 +268,11 @@ public:
         explicit Observer(const ObservableSession& session);
 
         /**
-         * Returns the currently active transaction number on this participant.
+         * Returns an object containing the currently active transaction number and
+         * transaction retry counter on this participant.
          */
-        TxnNumber getActiveTxnNumber() const {
-            return o().activeTxnNumber;
-        }
-
-        /**
-         * Returns the last used transaction retry counter for the currently active transaction on
-         * this participant.
-         */
-        TxnRetryCounter getActiveTxnRetryCounter() const {
-            return o().activeTxnRetryCounter;
+        TxnNumberAndRetryCounter getActiveTxnNumberAndRetryCounter() const {
+            return o().activeTxnNumberAndRetryCounter;
         }
 
         /**
@@ -356,6 +349,8 @@ public:
         }
 
         const LogicalSessionId& _sessionId() const;
+
+        bool _isInternalSessionForRetryableWrite() const;
 
         // Reports transaction stats for both active and inactive transactions using the provided
         // builder.
@@ -444,10 +439,9 @@ public:
          * when updating the shard key.
          */
         void beginOrContinue(OperationContext* opCtx,
-                             TxnNumber txnNumber,
+                             TxnNumberAndRetryCounter txnNumberAndRetryCounter,
                              boost::optional<bool> autocommit,
-                             boost::optional<bool> startTransaction,
-                             boost::optional<TxnRetryCounter> txnRetryCounter);
+                             boost::optional<bool> startTransaction);
 
         /**
          * Used only by the secondary oplog application logic. Similar to 'beginOrContinue' without
@@ -455,9 +449,7 @@ public:
          * the past.
          */
         void beginOrContinueTransactionUnconditionally(
-            OperationContext* opCtx,
-            TxnNumber txnNumber,
-            boost::optional<TxnRetryCounter> txnRetryCounter);
+            OperationContext* opCtx, TxnNumberAndRetryCounter txnNumberAndRetryCounter);
 
         /**
          * If the participant is in prepare, returns a future whose promise is fulfilled when
@@ -763,8 +755,9 @@ public:
 
         // Checks if the command can be run on this transaction based on the state of the
         // transaction.
-        void _checkIsCommandValidWithTxnState(const TxnNumber& requestTxnNumber,
-                                              const std::string& cmdName) const;
+        void _checkIsCommandValidWithTxnState(
+            const TxnNumberAndRetryCounter& requestTxnNumberAndRetryCounter,
+            const std::string& cmdName) const;
 
         // Logs the transaction information if it has run slower than the global parameter slowMS.
         // The transaction must be committed or aborted when this function is called.
@@ -797,25 +790,24 @@ public:
                                            APIParameters apiParameters,
                                            repl::ReadConcernArgs readConcernArgs) const;
 
-        // Bumps up the transaction number of this transaction and perform the necessary cleanup.
-        void _setNewTxnNumber(OperationContext* opCtx,
-                              const TxnNumber& txnNumber,
-                              const TxnRetryCounter& txnRetryCounter);
+        // Bumps up the transaction number and transaction retry counter of this transaction and
+        // performs the necessary cleanup.
+        void _setNewTxnNumberAndRetryCounter(
+            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
 
         // Attempt to begin or retry a retryable write at the given transaction number.
-        void _beginOrContinueRetryableWrite(OperationContext* opCtx, const TxnNumber& txnNumber);
+        void _beginOrContinueRetryableWrite(
+            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
 
         // Attempt to begin a new multi document transaction at the given transaction number and
         // transaction retry counter.
-        void _beginMultiDocumentTransaction(OperationContext* opCtx,
-                                            const TxnNumber& txnNumber,
-                                            const TxnRetryCounter& txnRetryCounter);
+        void _beginMultiDocumentTransaction(
+            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
 
         // Attempt to continue an in-progress multi document transaction at the given transaction
         // number and transaction retry counter.
-        void _continueMultiDocumentTransaction(OperationContext* opCtx,
-                                               const TxnNumber& txnNumber,
-                                               const TxnRetryCounter& txnRetryCounter);
+        void _continueMultiDocumentTransaction(
+            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
 
         // Implementation of public refreshFromStorageIfNeeded methods.
         void _refreshFromStorageIfNeeded(OperationContext* opCtx, bool fetchOplogEntries);
@@ -958,16 +950,14 @@ private:
         // Maintains the transaction state and the transition table for legal state transitions.
         TransactionState txnState;
 
-        // Tracks the last seen txn number for the session and is always >= to the transaction
-        // number in the last written txn record. When it is > than that in the last written txn
-        // record, this means a new transaction has begun on the session, but it hasn't yet
-        // performed any writes.
-        TxnNumber activeTxnNumber{kUninitializedTxnNumber};
-
-        // Tracks the last seen txnRetryCounter for the the current transaction. Should always be
+        // Tracks the last seen TxnNumber and TxnRetryCounter for the session. The txn number is
+        // always >= to the transaction number in the last written txn record. When it is > than
+        // that in the last written txn record, this means a new transaction has begun on the
+        // session, but it hasn't yet performed any writes. The txnRetryCounter should always be
         // kUninitializedTxnRetryCounter for a retryable write, and non-negative for a
         // multi-statement transaction.
-        TxnRetryCounter activeTxnRetryCounter{kUninitializedTxnRetryCounter};
+        TxnNumberAndRetryCounter activeTxnNumberAndRetryCounter{kUninitializedTxnNumber,
+                                                                kUninitializedTxnRetryCounter};
 
         // Caches what is known to be the last optime written for the active transaction.
         repl::OpTime lastWriteOpTime;
@@ -1009,6 +999,10 @@ private:
         // Holds oplog data for operations which have been applied in the current multi-document
         // transaction.
         std::vector<repl::ReplOperation> transactionOperations;
+
+        // Holds stmtIds for operations which have been applied in the current multi-document
+        // transaction.
+        stdx::unordered_set<StmtId> transactionStmtIds;
 
         // Total size in bytes of all operations within the _transactionOperations vector.
         size_t transactionOperationBytes{0};

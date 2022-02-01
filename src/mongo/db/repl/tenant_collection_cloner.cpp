@@ -184,7 +184,7 @@ BaseCloner::AfterStageBehavior TenantCollectionCloner::countStage() {
         LOGV2_WARNING(5426601,
                       "Skipping recording of data size metrics for collection due to failure in the"
                       " 'collStats' command, tenant migration stats may be inaccurate.",
-                      "nss"_attr = _sourceNss,
+                      logAttrs(_sourceNss),
                       "migrationId"_attr = getSharedData()->getMigrationId(),
                       "tenantId"_attr = _tenantId,
                       "status"_attr = status);
@@ -348,9 +348,10 @@ BaseCloner::AfterStageBehavior TenantCollectionCloner::createCollectionStage() {
         // (createCollection/createIndex) don't get stamped with the fromTenantMigration field.
         ON_BLOCK_EXIT([&opCtx] { tenantMigrationRecipientInfo(opCtx.get()) = boost::none; });
 
-        auto fieldsToReturn = BSON("_id" << 1);
-        _lastDocId = client.findOne(
-            _existingNss->ns(), BSONObj{}, Query().sort(BSON("_id" << -1)), &fieldsToReturn);
+        FindCommandRequest findCmd{*_existingNss};
+        findCmd.setSort(BSON("_id" << -1));
+        findCmd.setProjection(BSON("_id" << 1));
+        _lastDocId = client.findOne(std::move(findCmd));
         if (!_lastDocId.isEmpty()) {
             // The collection is not empty. Skip creating indexes and resume cloning from the last
             // document.
@@ -550,9 +551,9 @@ void TenantCollectionCloner::insertDocumentsCallback(
     }
 
     // Disabling the internal document validation for inserts on recipient side as those
-    // validation should have already been performed on donor's primary during tenant
+    // validations should have already been performed on donor's primary during tenant
     // collection document insertion.
-    DisableDocumentValidation doumentValidationDisabler(
+    DisableDocumentValidation documentValidationDisabler(
         cbd.opCtx,
         DocumentValidationSettings::kDisableSchemaValidation |
             DocumentValidationSettings::kDisableInternalValidation);

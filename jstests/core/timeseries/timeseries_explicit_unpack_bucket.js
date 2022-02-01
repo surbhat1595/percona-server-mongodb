@@ -4,7 +4,6 @@
  * MongoDB products rather than user applications.
  *
  * @tags: [
- *   assumes_unsharded_collection,
  *   does_not_support_transactions,
  *   requires_timeseries,
  * ]
@@ -12,13 +11,6 @@
 
 (function() {
 "use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
-
-if (!TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo())) {
-    jsTestLog("Skipping test because the time-series collection feature flag is disabled");
-    return;
-}
 
 const testDB = db.getSiblingDB(jsTestName());
 assert.commandWorked(testDB.dropDatabase());

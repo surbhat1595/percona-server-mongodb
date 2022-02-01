@@ -70,11 +70,8 @@ void runInTransaction(OperationContext* opCtx, Callable&& func) {
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
     ASSERT(txnParticipant);
-    txnParticipant.beginOrContinue(opCtx,
-                                   txnNum,
-                                   false /* autocommit */,
-                                   true /* startTransaction */,
-                                   boost::none /* txnRetryCounter */);
+    txnParticipant.beginOrContinue(
+        opCtx, {txnNum}, false /* autocommit */, true /* startTransaction */);
     txnParticipant.unstashTransactionResources(opCtx, "SetDestinedRecipient");
 
     func();
@@ -181,7 +178,7 @@ protected:
         UUID sourceUuid;
         ShardId destShard;
         ChunkVersion version;
-        DatabaseVersion dbVersion{UUID::gen(), Timestamp()};
+        DatabaseVersion dbVersion{UUID::gen(), Timestamp(1, 1)};
     };
 
     ReshardingEnv setupReshardingEnv(OperationContext* opCtx, bool refreshTempNss) {
@@ -198,7 +195,7 @@ protected:
 
         ReshardingEnv env(CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, kNss).value());
         env.destShard = kShardList[1].getName();
-        env.version = ChunkVersion(1, 0, OID::gen(), Timestamp());
+        env.version = ChunkVersion(1, 0, OID::gen(), Timestamp(1, 1));
         env.tempNss =
             NamespaceString(kNss.db(),
                             fmt::format("{}{}",

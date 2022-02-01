@@ -8,6 +8,11 @@
 load("jstests/libs/fail_point_util.js");
 load('jstests/libs/parallel_shell_helpers.js');
 
+// TODO SERVER-50144 Remove this and allow orphan checking.
+// This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
+// therefore preventing orphans from being cleaned up.
+TestData.skipCheckOrphans = true;
+
 const dbName = "test";
 const collName = "foo";
 const ns = dbName + "." + collName;
@@ -198,6 +203,22 @@ let moveChunk = function(ns, shard) {
 function testSetFCVDoesNotBlockWhileMigratingChunk() {
     jsTestLog("Testing that setFCV does not block while migrating a chunk");
     let st = setup();
+
+    const featureFlagMigrationRecipientCriticalSection =
+        assert.commandWorked(st.configRS.getPrimary().adminCommand(
+            {getParameter: 1, featureFlagMigrationRecipientCriticalSection: 1}));
+    const featureFlagMigrationRecipientCriticalSectionEnabled =
+        featureFlagMigrationRecipientCriticalSection.featureFlagMigrationRecipientCriticalSection
+            .value;
+
+    // SERVER-61072: Reenable this test once 6.0 becomes last LTS.
+    // We have to skip this test because the current implementation of the setFCV might wait for the
+    // completion of moveChunk operations before starting to use a different migration protocol.
+    if (featureFlagMigrationRecipientCriticalSectionEnabled) {
+        jsTest.log('Skipping test because featureFlagMigrationRecipientCriticalSection is enabled');
+        st.stop();
+        return;
+    }
 
     // Set config and shards to last-lts FCV
     assert.commandWorked(

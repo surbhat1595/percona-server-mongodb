@@ -37,6 +37,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/db_raii.h"
@@ -77,6 +78,10 @@ std::list<BSONObj> listIndexesInLock(OperationContext* opCtx,
         std::list<BSONObj> indexSpecs;
         collection->getAllIndexes(&indexNames);
 
+        if (collection->isClustered() && !collection->ns().isTimeseriesBucketsCollection()) {
+            indexSpecs.push_back(clustered_util::formatClusterKeyForListIndexes(
+                collection->getClusteredInfo().get()));
+        }
         for (size_t i = 0; i < indexNames.size(); i++) {
             if (!includeBuildUUIDs.value_or(false) || collection->isIndexReady(indexNames[i])) {
                 indexSpecs.push_back(collection->getIndexSpec(indexNames[i]));

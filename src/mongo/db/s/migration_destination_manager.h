@@ -38,6 +38,7 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/active_migrations_registry.h"
+#include "mongo/db/s/migration_recipient_recovery_document_gen.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/s/session_catalog_migration_destination.h"
 #include "mongo/platform/mutex.h"
@@ -74,7 +75,18 @@ class MigrationDestinationManager {
     MigrationDestinationManager& operator=(const MigrationDestinationManager&) = delete;
 
 public:
-    enum State { READY, CLONE, CATCHUP, STEADY, COMMIT_START, DONE, FAIL, ABORT };
+    enum State {
+        READY,
+        CLONE,
+        CATCHUP,
+        STEADY,
+        COMMIT_START,
+        ENTERED_CRIT_SEC,
+        EXIT_CRIT_SEC,
+        DONE,
+        FAIL,
+        ABORT
+    };
 
     MigrationDestinationManager();
     ~MigrationDestinationManager();
@@ -113,6 +125,13 @@ public:
                  const WriteConcernOptions& writeConcern);
 
     /**
+     * Restores the MigrationDestinationManager state for a migration recovered on step-up.
+     */
+    Status restoreRecoveredMigrationState(OperationContext* opCtx,
+                                          ScopedReceiveChunk scopedReceiveChunk,
+                                          const MigrationRecipientRecoveryDocument& recoveryDoc);
+
+    /**
      * Clones documents from a donor shard.
      */
     static repl::OpTime fetchAndApplyBatch(
@@ -132,7 +151,14 @@ public:
      */
     void abortWithoutSessionIdCheck();
 
-    Status startCommit(const MigrationSessionId& sessionId);
+    Status startCommit(const MigrationSessionId& sessionId, bool acquireCSOnRecipient);
+
+    /*
+     * Refreshes the filtering metadata and releases the migration recipient critical section for
+     * the specified migration session. If no session is ongoing or the session doesn't match the
+     * current one, it does nothing and returns OK.
+     */
+    Status exitCriticalSection(OperationContext* opCtx, const MigrationSessionId& sessionId);
 
     /**
      * Gets the collection indexes from fromShardId. If given a chunk manager, will fetch the
@@ -185,9 +211,9 @@ private:
     /**
      * Thread which drives the migration apply process on the recipient side.
      */
-    void _migrateThread();
+    void _migrateThread(bool skipToCritSecTaken = false);
 
-    void _migrateDriver(OperationContext* opCtx);
+    void _migrateDriver(OperationContext* opCtx, bool skipToCritSecTaken = false);
 
     bool _applyMigrateOp(OperationContext* opCtx, const BSONObj& xfer);
 
@@ -222,6 +248,13 @@ private:
      */
     bool _isActive(WithLock) const;
 
+    /**
+     * Waits for _state to transition to EXIT_CRIT_SEC. Then, it performs a filtering metadata
+     * refresh, releases the critical section and finally deletes the recovery document.
+     */
+    void awaitCriticalSectionReleaseSignalAndCompleteMigration(OperationContext* opCtx,
+                                                               const Timer& timeInCriticalSection);
+
     // Mutex to guard all fields
     mutable Mutex _mutex = MONGO_MAKE_LATCH("MigrationDestinationManager::_mutex");
 
@@ -239,7 +272,6 @@ private:
     LogicalSessionId _lsid;
     TxnNumber _txnNumber{kUninitializedTxnNumber};
     NamespaceString _nss;
-    boost::optional<UUID> _collUuid;
     ConnectionString _fromShardConnString;
     ShardId _fromShard;
     ShardId _toShard;
@@ -268,6 +300,8 @@ private:
 
     // Condition variable, which is signalled every time the state of the migration changes.
     stdx::condition_variable _stateChangedCV;
+
+    bool _acquireCSOnRecipient{false};
 };
 
 }  // namespace mongo

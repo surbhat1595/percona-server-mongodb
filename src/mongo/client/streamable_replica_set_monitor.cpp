@@ -689,8 +689,8 @@ void StreamableReplicaSetMonitor::onTopologyDescriptionChangedEvent(
               "RSM {replicaSet} Topology Change: {newTopologyDescription}",
               "RSM Topology Change",
               "replicaSet"_attr = getName(),
-              "newTopologyDescription"_attr = newDescription->toString(),
-              "previousTopologyDescription"_attr = previousDescription->toString());
+              "newTopologyDescription"_attr = newDescription->toBSON(),
+              "previousTopologyDescription"_attr = previousDescription->toBSON());
 
         auto maybePrimary = newDescription->getPrimary();
         if (maybePrimary) {
@@ -726,6 +726,21 @@ void StreamableReplicaSetMonitor::onTopologyDescriptionChangedEvent(
                 ReplicaSetMonitorManager::get()->getNotifier().onPossibleSet(connectionString);
             }
         }
+    }
+
+    if (auto previousMaxElectionIdSetVersionPair =
+            previousDescription->getMaxElectionIdSetVersionPair(),
+        newMaxElectionIdSetVersionPair = newDescription->getMaxElectionIdSetVersionPair();
+        setVersionWentBackwards(previousMaxElectionIdSetVersionPair,
+                                newMaxElectionIdSetVersionPair)) {
+        // The previous primary was unable to reach consensus for the config with
+        // higher version and it was abandoned after failover.
+        LOGV2(5940902,
+              "Max known Set version coming from new primary forces to rollback it backwards",
+              "replicaSet"_attr = getName(),
+              "newElectionIdSetVersion"_attr = newMaxElectionIdSetVersionPair.setVersion,
+              "previousMaxElectionIdSetVersion"_attr =
+                  previousMaxElectionIdSetVersionPair.setVersion);
     }
 }
 

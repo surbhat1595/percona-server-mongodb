@@ -88,11 +88,11 @@ public:
 
     Status rename(OperationContext* opCtx, const NamespaceString& nss, bool stayTemp) final;
 
-    RecordId getCatalogId() const {
+    RecordId getCatalogId() const final {
         return _catalogId;
     }
 
-    UUID uuid() const {
+    UUID uuid() const final {
         return _uuid;
     }
 
@@ -316,11 +316,23 @@ public:
     void setRecordPreImages(OperationContext* opCtx, bool val) final;
 
     bool isChangeStreamPreAndPostImagesEnabled() const final;
-    void setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) final;
+    void setChangeStreamPreAndPostImages(OperationContext* opCtx,
+                                         ChangeStreamPreAndPostImagesOptions val) final;
 
     bool isTemporary() const final;
 
+    boost::optional<bool> getTimeseriesBucketsMayHaveMixedSchemaData() const final;
+    void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
+                                                    boost::optional<bool> setting) final;
+
+    bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const final;
+
+    /**
+     * isClustered() relies on the object returned from getClusteredInfo(). If
+     * ClusteredCollectionInfo exists, the collection is clustered.
+     */
     bool isClustered() const final;
+    boost::optional<ClusteredCollectionInfo> getClusteredInfo() const final;
     void updateClusteredIndexTTLSetting(OperationContext* opCtx,
                                         boost::optional<int64_t> expireAfterSeconds) final;
 
@@ -421,6 +433,8 @@ public:
                           long long newExpireSeconds) final;
 
     void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) final;
+
+    void updateUniqueSetting(OperationContext* opCtx, StringData idxName) final;
 
     std::vector<std::string> removeInvalidIndexOptions(OperationContext* opCtx) final;
 
@@ -580,9 +594,6 @@ private:
     // The validator is using shared state internally. Collections share validator until a new
     // validator is set in setValidator which sets a new instance.
     Validator _validator;
-
-    // Whether or not this collection is clustered on _id values.
-    bool _clustered = false;
 
     // The earliest snapshot that is allowed to use this collection.
     boost::optional<Timestamp> _minVisibleSnapshot;

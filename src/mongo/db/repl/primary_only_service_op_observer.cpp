@@ -59,7 +59,7 @@ void PrimaryOnlyServiceOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void PrimaryOnlyServiceOpObserver::onDelete(OperationContext* opCtx,
                                             const NamespaceString& nss,
-                                            OptionalCollectionUUID uuid,
+                                            const UUID& uuid,
                                             StmtId stmtId,
                                             const OplogDeleteEntryArgs& args) {
     auto& documentId = documentIdDecoration(opCtx);
@@ -80,7 +80,7 @@ void PrimaryOnlyServiceOpObserver::onDelete(OperationContext* opCtx,
 
 repl::OpTime PrimaryOnlyServiceOpObserver::onDropCollection(OperationContext* opCtx,
                                                             const NamespaceString& collectionName,
-                                                            OptionalCollectionUUID uuid,
+                                                            const UUID& uuid,
                                                             std::uint64_t numRecords,
                                                             const CollectionDropType dropType) {
     auto service = _registry->lookupServiceByNamespace(collectionName);

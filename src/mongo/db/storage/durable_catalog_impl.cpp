@@ -371,6 +371,17 @@ StatusWith<DurableCatalog::Entry> DurableCatalogImpl::_addEntry(OperationContext
         BSONCollectionCatalogEntry::MetaData md;
         md.ns = nss.ns();
         md.options = options;
+
+        // TODO SERVER-60911: When kLatest is 5.3, only check when upgrading from kLastLTS (5.0).
+        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated upgrade code.
+        if (options.timeseries &&
+            serverGlobalParams.featureCompatibility.isFCVUpgradingToOrAlreadyLatest()) {
+            // When the server has begun upgrading FCV to 5.2, all newly created catalog entries for
+            // time-series collections will have this flag set to false by default as mixed-schema
+            // data is only possible in versions 5.1 and earlier. We do not have to wait for FCV to
+            // be fully upgraded to 5.2 to start this process.
+            md.timeseriesBucketsMayHaveMixedSchemaData = false;
+        }
         b.append("md", md.toBSON());
         obj = b.obj();
     }
@@ -407,8 +418,7 @@ StatusWith<DurableCatalog::Entry> DurableCatalogImpl::_importEntry(OperationCont
     _catalogIdToEntryMap[res.getValue()] = {res.getValue(), ident, nss};
     opCtx->recoveryUnit()->registerChange(std::make_unique<AddIdentChange>(this, res.getValue()));
 
-    LOGV2_DEBUG(
-        5095101, 1, "imported meta data", "nss"_attr = nss.ns(), "metadata"_attr = res.getValue());
+    LOGV2_DEBUG(5095101, 1, "imported meta data", logAttrs(nss), "metadata"_attr = res.getValue());
     return {{res.getValue(), ident, nss}};
 }
 
@@ -644,8 +654,8 @@ StatusWith<std::string> DurableCatalogImpl::newOrphanedIdent(OperationContext* o
 
     LOGV2_DEBUG(22213,
                 1,
-                "stored meta data for orphaned collection {ns} @ {res_getValue}",
-                "ns"_attr = ns,
+                "stored meta data for orphaned collection {namespace} @ {res_getValue}",
+                logAttrs(ns),
                 "res_getValue"_attr = res.getValue());
     return {ns.ns()};
 }

@@ -48,6 +48,14 @@ WriteConflictException::WriteConflictException()
     }
 }
 
+WriteConflictException::WriteConflictException(StringData context) : WriteConflictException() {
+    // Avoid unnecessary update to embedded Status within DBException.
+    if (context.empty()) {
+        return;
+    }
+    addContext(context);
+}
+
 void WriteConflictException::logAndBackoff(int attempt, StringData operation, StringData ns) {
     mongo::logAndBackoff(4640401,
                          ::mongo::logv2::LogComponent::kWrite,
@@ -55,6 +63,6 @@ void WriteConflictException::logAndBackoff(int attempt, StringData operation, St
                          static_cast<size_t>(attempt),
                          "Caught WriteConflictException",
                          "operation"_attr = operation,
-                         "ns"_attr = ns);
+                         logAttrs(NamespaceString(ns)));
 }
 }  // namespace mongo

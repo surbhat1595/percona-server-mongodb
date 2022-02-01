@@ -107,6 +107,25 @@ def get_session_kv_pairs():
     return list(absl_get_nodes(session_catalog["_sessions"]))  # pylint: disable=undefined-variable
 
 
+def get_wt_session(recovery_unit, recovery_unit_impl_type):
+    """Return the WT_SESSION pointer stored in the WiredTigerRecoveryUnit.
+
+    Returns None if the recovery unit is not for the WiredTiger storage engine, or if no WT_SESSION
+    has been opened.
+    """
+
+    if recovery_unit_impl_type != "mongo::WiredTigerRecoveryUnit":
+        return None
+    if not recovery_unit:
+        return None
+    wt_session_handle = get_unique_ptr(recovery_unit["_session"])  # pylint: disable=undefined-variable
+    if not wt_session_handle.dereference().address:
+        return None
+    wt_session = wt_session_handle.dereference().cast(
+        gdb.lookup_type("mongo::WiredTigerSession"))["_session"]  # pylint: disable=undefined-variable
+    return wt_session
+
+
 def get_decorations(obj):
     """Return an iterator to all decorations on a given object.
 
@@ -140,9 +159,12 @@ def get_decorations(obj):
         if type_name.endswith('*'):
             type_name = type_name[0:len(type_name) - 1]
         type_name = type_name.rstrip()
-        type_t = gdb.lookup_type(type_name)
-        obj = decoration_data[dindex].cast(type_t)
-        yield (type_name, obj)
+        try:
+            type_t = gdb.lookup_type(type_name)
+            obj = decoration_data[dindex].cast(type_t)
+            yield (type_name, obj)
+        except Exception as err:
+            print("Failed to look up decoration type: " + type_name + ": " + str(err))
 
 
 def get_decoration(obj, type_name):
@@ -505,6 +527,9 @@ class MongoDBDumpRecoveryUnits(gdb.Command):
                     gdb.lookup_type(recovery_unit_impl_type))
 
             output_doc["recoveryUnit"] = hex(recovery_unit_handle) if recovery_unit else "0x0"
+            wt_session = get_wt_session(recovery_unit, recovery_unit_impl_type)
+            if wt_session:
+                output_doc["WT_SESSION"] = hex(wt_session)
             print(json.dumps(output_doc))
             if recovery_unit:
                 print(recovery_unit)
@@ -534,6 +559,9 @@ class MongoDBDumpRecoveryUnits(gdb.Command):
                         gdb.lookup_type(recovery_unit_impl_type))
 
             output_doc["recoveryUnit"] = hex(recovery_unit_handle) if recovery_unit else "0x0"
+            wt_session = get_wt_session(recovery_unit, recovery_unit_impl_type)
+            if wt_session:
+                output_doc["WT_SESSION"] = hex(wt_session)
             print(json.dumps(output_doc))
             if recovery_unit:
                 print(recovery_unit)
@@ -544,6 +572,41 @@ class MongoDBDumpRecoveryUnits(gdb.Command):
 
 # Register command
 MongoDBDumpRecoveryUnits()
+
+
+class MongoDBDumpStorageEngineInfo(gdb.Command):
+    """Dump storage engine info in mongod process."""
+
+    def __init__(self):
+        """Initialize MongoDBDumpStorageEngineInfo."""
+        RegisterMongoCommand.register(self, "mongodb-dump-storage-engine-info", gdb.COMMAND_DATA)
+
+    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+        """Invoke MongoDBDumpStorageEngineInfo."""
+        print("Running Hang Analyzer Supplement - MongoDBDumpStorageEngineInfo")
+
+        main_binary_name = get_process_name()
+        if main_binary_name == 'mongod':
+            self.dump_mongod_storage_engine_info()
+        else:
+            print("Not invoking mongod storage engine info dump for: %s" % (main_binary_name))
+
+    @staticmethod
+    def dump_mongod_storage_engine_info():
+        """GDB in-process python supplement."""
+
+        try:
+            # Call into mongod, and dump the state of storage engine
+            # Note that output will go to mongod's standard output, not the debugger output window
+            gdb.execute(
+                "call mongo::getGlobalServiceContext()->_storageEngine._ptr._value._M_b._M_p->dump()",
+                from_tty=False, to_string=False)
+        except gdb.error as gdberr:
+            print("Ignoring error '%s' in dump_mongod_storage_engine_info" % str(gdberr))
+
+
+# Register command
+MongoDBDumpStorageEngineInfo()
 
 
 class BtIfActive(gdb.Command):

@@ -125,6 +125,8 @@ public:
                                                        const BSONObj&,
                                                        BoundInclusion,
                                                        std::size_t)>;
+    using PutSingletonFn =
+        std::function<Status(OperationContext*, const NamespaceString&, const TimestampedBSONObj&)>;
     using IsAdminDbValidFn = std::function<Status(OperationContext*)>;
     using GetCollectionUUIDFn =
         std::function<StatusWith<UUID>(OperationContext*, const NamespaceString&)>;
@@ -240,7 +242,7 @@ public:
     Status putSingleton(OperationContext* opCtx,
                         const NamespaceString& nss,
                         const TimestampedBSONObj& update) override {
-        return Status{ErrorCodes::IllegalOperation, "putSingleton not implemented."};
+        return putSingletonFn(opCtx, nss, update);
     }
 
     Status updateSingleton(OperationContext* opCtx,
@@ -283,6 +285,10 @@ public:
     boost::optional<BSONObj> findOplogEntryLessThanOrEqualToTimestampRetryOnWCE(
         OperationContext* opCtx, const CollectionPtr& oplog, const Timestamp& timestamp) override {
         return boost::none;
+    }
+
+    Timestamp getEarliestOplogTimestamp(OperationContext* opCtx) override {
+        return Timestamp();
     }
 
     Timestamp getLatestOplogTimestamp(OperationContext* opCtx) override {
@@ -427,6 +433,10 @@ public:
                                              std::size_t limit) {
         return Status{ErrorCodes::IllegalOperation, "DeleteOneFn not implemented."};
     };
+    PutSingletonFn putSingletonFn =
+        [](OperationContext* opCtx, const NamespaceString& nss, const TimestampedBSONObj& update) {
+            return Status{ErrorCodes::IllegalOperation, "PutSingletonFn not implemented."};
+        };
     IsAdminDbValidFn isAdminDbValidFn = [](OperationContext*) {
         return Status{ErrorCodes::IllegalOperation, "IsAdminDbValidFn not implemented."};
     };

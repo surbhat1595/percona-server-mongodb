@@ -123,12 +123,6 @@ public:
         }
     };
 
-    /**
-     * During the duration that the CollectionCatalog pointer is held by the caller, the global lock
-     * must be held in some mode by the caller to prevent write operations from making in-place
-     * modifications on the CollectionCatalog. This pointer is unsafe to use once the global lock
-     * is relinquished.
-     */
     static std::shared_ptr<const CollectionCatalog> get(ServiceContext* svcCtx);
     static std::shared_ptr<const CollectionCatalog> get(OperationContext* opCtx);
 
@@ -139,12 +133,8 @@ public:
     static void stash(OperationContext* opCtx, std::shared_ptr<const CollectionCatalog> catalog);
 
     /**
-     * Perform a write to the catalog using:
-     * (1) in-place if a global exclusive lock is held in the overload for OperationContext, or,
-     * (2) using copy-on-write if the global exclusive lock is not held, or if the overload for
-     * ServiceContext is used.
-     *
-     * For (2), a catalog previously returned by get() will not be modified.
+     * Perform a write to the catalog using copy-on-write. A catalog previously returned by get()
+     * will not be modified.
      *
      * This call will block until the modified catalog has been committed. Concurrant writes are
      * batched together and will thus block each other. It is important to not perform blocking
@@ -390,7 +380,7 @@ public:
     void onCloseCatalog(OperationContext* opCtx);
 
     /**
-     * Puts the catalog back in open state, removing the pre-close state. See onCloseCatalog.
+     * Puts the catatlog back in open state, removing the pre-close state. See onCloseCatalog.
      *
      * Must be called with the global lock acquired in exclusive mode.
      */
@@ -530,6 +520,26 @@ private:
  */
 struct LookupCollectionForYieldRestore {
     const Collection* operator()(OperationContext* opCtx, CollectionUUID uuid) const;
+};
+
+/**
+ * RAII class to perform multiple writes to the CollectionCatalog on a single copy of the
+ * CollectionCatalog instance. Requires the global lock to be held in exclusive write mode (MODE_X)
+ * for the lifetime of this object.
+ */
+class BatchedCollectionCatalogWriter {
+public:
+    BatchedCollectionCatalogWriter(OperationContext* opCtx);
+    ~BatchedCollectionCatalogWriter();
+
+    BatchedCollectionCatalogWriter(const BatchedCollectionCatalogWriter&) = delete;
+    BatchedCollectionCatalogWriter(BatchedCollectionCatalogWriter&&) = delete;
+
+private:
+    OperationContext* _opCtx;
+    // Store base when we clone the CollectionCatalog so we can verify that there has been no other
+    // writers during the batching.
+    std::shared_ptr<CollectionCatalog> _base = nullptr;
 };
 
 }  // namespace mongo

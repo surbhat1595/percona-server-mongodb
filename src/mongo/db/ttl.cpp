@@ -253,8 +253,8 @@ private:
         if (!coll || coll->uuid() != uuid)
             return;
 
-        // TTL indexes are not compatible with capped collections.
-        invariant(!coll->isCapped());
+        // Allow TTL deletion on non-capped collections, and on capped clustered collections.
+        invariant(!coll->isCapped() || (coll->isCapped() && coll->isClustered()));
 
         if (MONGO_unlikely(hangTTLMonitorWithLock.shouldFail())) {
             LOGV2(22534,
@@ -441,15 +441,42 @@ private:
         }
     }
 
+    /**
+     * Returns the end recordId bound with the correct type. All time-series buckets collections
+     * delete entries of type 'ObjectId'. All other collections must only delete entries of type
+     * 'Date'.
+     */
+    RecordId makeCollScanEndBound(const CollectionPtr& collection, Date_t expirationDate) {
+        if (collection->getTimeseriesOptions()) {
+            auto endOID = OID();
+            endOID.init(expirationDate, true /* max */);
+            return record_id_helpers::keyForOID(endOID);
+        }
+
+        return record_id_helpers::keyForDate(expirationDate);
+    }
+
+    RecordId makeCollScanStartBound(const CollectionPtr& collection, const Date_t startDate) {
+        if (collection->getTimeseriesOptions()) {
+            auto startOID = OID();
+            startOID.init(startDate, false /* max */);
+            return record_id_helpers::keyForOID(startOID);
+        }
+
+        return record_id_helpers::keyForDate(startDate);
+    }
+
     /*
-     * Removes expired documents from a collection clustered by _id using a bounded collection scan.
+     * Removes expired documents from a clustered collection using a bounded collection scan.
+     * On time-series buckets collections, TTL operates on type 'ObjectId'. On general purpose
+     * collections, TTL operates on type 'Date'.
      */
     void deleteExpiredWithCollscan(OperationContext* opCtx,
                                    TTLCollectionCache* ttlCollectionCache,
                                    const CollectionPtr& collection) {
         const auto& collOptions = collection->getCollectionOptions();
         uassert(5400701,
-                "collection is not clustered by _id but is described as being TTL",
+                "collection is not clustered but is described as being TTL",
                 collOptions.clusteredIndex);
         invariant(collection->isClustered());
 
@@ -460,19 +487,13 @@ private:
             return;
         }
 
-        LOGV2_DEBUG(5400704,
-                    1,
-                    "running TTL job for collection clustered by _id",
-                    logAttrs(collection->ns()));
+        LOGV2_DEBUG(
+            5400704, 1, "running TTL job for clustered collection", logAttrs(collection->ns()));
+
+        const auto startId = makeCollScanStartBound(collection, Date_t::min());
 
         const auto expirationDate = safeExpirationDate(opCtx, collection, *expireAfterSeconds);
-
-        // Generate upper bound ObjectId that compares greater than every ObjectId with a the same
-        // timestamp or lower.
-        auto endOID = OID();
-        endOID.init(expirationDate, true /* max */);
-
-        const auto endId = record_id_helpers::keyForOID(endOID);
+        const auto endId = makeCollScanEndBound(collection, expirationDate);
 
         auto params = std::make_unique<DeleteStageParams>();
         params->isMulti = true;
@@ -486,7 +507,7 @@ private:
                                                       std::move(params),
                                                       PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                       InternalPlanner::Direction::FORWARD,
-                                                      boost::none /* minRecord */,
+                                                      startId,
                                                       endId);
 
         try {

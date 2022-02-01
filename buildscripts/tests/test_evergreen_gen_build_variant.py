@@ -80,9 +80,57 @@ def build_mock_orchestrator(build_expansions=None, task_def_list=None, build_tas
         gen_task_options=MagicMock(),
         evg_project_config=mock_project,
         evg_expansions=mock_evg_expansions,
-        multiversion_util=MagicMock(),
         evg_api=mock_evg_api,
     )
+
+
+class TestEvgExpansions(unittest.TestCase):
+    def test_get_max_sub_suites_should_use_patch_value_in_patches(self):
+        evg_expansions = under_test.EvgExpansions(
+            is_patch=True,
+            max_sub_suites=5,
+            mainline_max_sub_suites=1,
+            build_id="build_id",
+            build_variant="build_variant",
+            project="project",
+            revision="revision",
+            task_name="task_name",
+            task_id="task_id",
+        )
+
+        self.assertEqual(evg_expansions.get_max_sub_suites(), evg_expansions.max_sub_suites)
+
+    def test_get_max_sub_suites_should_use_mainline_value_in_non_patches(self):
+        evg_expansions = under_test.EvgExpansions(
+            is_patch=False,
+            max_sub_suites=5,
+            mainline_max_sub_suites=1,
+            build_id="build_id",
+            build_variant="build_variant",
+            project="project",
+            revision="revision",
+            task_name="task_name",
+            task_id="task_id",
+        )
+
+        self.assertEqual(evg_expansions.get_max_sub_suites(),
+                         evg_expansions.mainline_max_sub_suites)
+
+    def test_get_max_sub_suites_should_use_mainline_value_if_patch_status_unknown(self):
+        evg_expansions = under_test.EvgExpansions(
+            is_patch=None,
+            max_sub_suites=5,
+            mainline_max_sub_suites=1,
+            build_id="build_id",
+            build_variant="build_variant",
+            project="project",
+            revision="revision",
+            task_name="task_name",
+            task_id="task_id",
+        )
+
+        self.assertEqual(evg_expansions.get_max_sub_suites(),
+                         evg_expansions.mainline_max_sub_suites)
 
 
 class TestTranslateRunVar(unittest.TestCase):
@@ -155,7 +203,7 @@ class TestTaskDefToGenParams(unittest.TestCase):
 
         gen_params = mock_orchestrator.task_def_to_gen_params(mock_task_def, "build_variant")
 
-        self.assertIsNone(gen_params.require_multiversion)
+        self.assertFalse(gen_params.require_multiversion_setup)
         self.assertEqual("run tests", gen_params.resmoke_args)
         self.assertEqual(mock_orchestrator.evg_expansions.config_location.return_value,
                          gen_params.config_location)
@@ -166,7 +214,6 @@ class TestTaskDefToGenParams(unittest.TestCase):
         run_vars = {
             "resmoke_args": "run tests",
             "use_large_distro": "true",
-            "require_multiversion": True,
         }
         mock_task_def = build_mock_task("my_task", run_vars)
         build_expansions = {"large_distro_name": "my large distro"}
@@ -174,7 +221,7 @@ class TestTaskDefToGenParams(unittest.TestCase):
                                                     task_def_list=[mock_task_def])
         gen_params = mock_orchestrator.task_def_to_gen_params(mock_task_def, "build_variant")
 
-        self.assertTrue(gen_params.require_multiversion)
+        self.assertFalse(gen_params.require_multiversion_setup)
         self.assertEqual("run tests", gen_params.resmoke_args)
         self.assertEqual(mock_orchestrator.evg_expansions.config_location.return_value,
                          gen_params.config_location)
@@ -185,11 +232,10 @@ class TestTaskDefToGenParams(unittest.TestCase):
 class TestTaskDefToFuzzerParams(unittest.TestCase):
     def test_params_should_be_generated(self):
         run_vars = {
-            "name": "my_fuzzer",
             "num_files": "5",
             "num_tasks": "3",
         }
-        mock_task_def = build_mock_task("my_task", run_vars)
+        mock_task_def = build_mock_task("my_fuzzer_gen", run_vars)
         mock_orchestrator = build_mock_orchestrator(task_def_list=[mock_task_def])
         fuzzer_params = mock_orchestrator.task_def_to_fuzzer_params(mock_task_def, "build_variant")
 
@@ -204,13 +250,12 @@ class TestTaskDefToFuzzerParams(unittest.TestCase):
 
     def test_params_should_be_overwritable(self):
         run_vars = {
-            "name": "my_fuzzer",
             "num_files": "${file_count|8}",
             "num_tasks": "3",
             "use_large_distro": "true",
             "npm_command": "aggfuzzer",
         }
-        mock_task_def = build_mock_task("my_task", run_vars)
+        mock_task_def = build_mock_task("my_fuzzer_gen", run_vars)
         build_expansions = {"large_distro_name": "my large distro"}
         mock_orchestrator = build_mock_orchestrator(build_expansions=build_expansions,
                                                     task_def_list=[mock_task_def])
@@ -234,22 +279,18 @@ class TestGenerateBuildVariant(unittest.TestCase):
         }
         mv_gen_run_vars = {
             "resmoke_args": "run tests",
-            "suite": "multiversion suite",
-            "implicit_multiversion": "True",
+            "suite": "some suite",
         }
         fuzz_run_vars = {
-            "name": "my_fuzzer",
             "num_files": "5",
             "num_tasks": "3",
-            "is_jstestfuzz": "True",
+            "is_jstestfuzz": "true",
         }
         mv_fuzz_run_vars = {
-            "name": "my_fuzzer",
             "num_files": "5",
             "num_tasks": "3",
-            "is_jstestfuzz": "True",
+            "is_jstestfuzz": "true",
             "suite": "aggfuzzer",
-            "implicit_multiversion": "True",
         }
         mock_task_defs = [
             build_mock_task("my_gen_task", gen_run_vars),
@@ -262,9 +303,8 @@ class TestGenerateBuildVariant(unittest.TestCase):
 
         builder = mock_orchestrator.generate_build_variant(builder, "build variant")
 
-        self.assertEqual(builder.generate_suite.call_count, 1)
+        self.assertEqual(builder.generate_suite.call_count, 2)
         self.assertEqual(builder.generate_fuzzer.call_count, 2)
-        self.assertEqual(builder.add_multiversion_suite.call_count, 1)
 
 
 class TestAdjustTaskPriority(unittest.TestCase):
@@ -296,7 +336,8 @@ class TestAdjustGenTasksPriority(unittest.TestCase):
         gen_tasks = {"task_3", "task_8", "task_13"}
         n_build_tasks = 25
         mock_task_list = [
-            MagicMock(display_name=f"task_{i}", priority=0) for i in range(n_build_tasks)
+            MagicMock(build_variant='dummy_variant', display_name=f"task_{i}", priority=0)
+            for i in range(n_build_tasks)
         ]
         mock_orchestrator = build_mock_orchestrator(build_task_list=mock_task_list)
 

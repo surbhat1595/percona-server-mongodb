@@ -29,10 +29,13 @@
 
 #pragma once
 
+#include <boost/functional/hash.hpp>
+
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_cache.h"
+#include "mongo/db/query/plan_cache_key_info.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/service_context.h"
 
@@ -40,39 +43,60 @@ namespace mongo {
 namespace sbe {
 
 /**
- * Represents the key used to look up entries in the SBE PlanCache.
+ * Represents the "key" used in the PlanCache mapping from query shape -> query plan.
  */
 class PlanCacheKey {
 public:
-    explicit PlanCacheKey(BSONObj filter) : _filter(filter.getOwned()) {}
+    PlanCacheKey(PlanCacheKeyInfo&& info, UUID collectionUuid, size_t collectionVersion)
+        : _info{std::move(info)},
+          _collectionUuid{collectionUuid},
+          _collectionVersion{collectionVersion} {}
+
+    const UUID& getCollectionUuid() const {
+        return _collectionUuid;
+    }
+
+    size_t getCollectionVersion() const {
+        return _collectionVersion;
+    }
 
     bool operator==(const PlanCacheKey& other) const {
-        return other._filter.binaryEqual(_filter);
+        return other._info == _info && other._collectionUuid == _collectionUuid &&
+            other._collectionVersion == _collectionVersion;
     }
 
     bool operator!=(const PlanCacheKey& other) const {
         return !(*this == other);
     }
 
-    const BSONObj& getFilter() const {
-        return _filter;
+    uint32_t queryHash() const {
+        return _info.queryHash();
     }
 
-    uint32_t queryHash() const;
-
-    uint32_t planCacheKeyHash() const;
+    uint32_t planCacheKeyHash() const {
+        size_t hash = _info.planCacheKeyHash();
+        boost::hash_combine(hash, UUID::Hash{}(_collectionUuid));
+        boost::hash_combine(hash, _collectionVersion);
+        return hash;
+    }
 
 private:
-    const BSONObj _filter;
+    const PlanCacheKeyInfo _info;
+    const UUID _collectionUuid;
+    const size_t _collectionVersion;
 };
 
-/**
- * Provides hash function to hash a 'PlanCacheKey'.
- */
 class PlanCacheKeyHasher {
 public:
-    std::size_t operator()(const PlanCacheKey& key) const {
-        return SimpleBSONObjComparator::kInstance.hash(key.getFilter());
+    std::size_t operator()(const PlanCacheKey& k) const {
+        return k.planCacheKeyHash();
+    }
+};
+
+struct PlanCachePartitioner {
+    // Determines the partitioning function for use with the 'Partitioned' utility.
+    std::size_t operator()(const PlanCacheKey& k, const std::size_t nPartitions) const {
+        return PlanCacheKeyHasher{}(k) % nPartitions;
     }
 };
 
@@ -104,8 +128,11 @@ struct BudgetEstimator {
     }
 };
 
-using PlanCache =
-    PlanCacheBase<sbe::PlanCacheKey, CachedSbePlan, BudgetEstimator, sbe::PlanCacheKeyHasher>;
+using PlanCache = PlanCacheBase<PlanCacheKey,
+                                CachedSbePlan,
+                                BudgetEstimator,
+                                PlanCachePartitioner,
+                                PlanCacheKeyHasher>;
 
 /**
  * A helper method to get the global SBE plan cache decorated in 'serviceCtx'.
@@ -116,6 +143,11 @@ PlanCache& getPlanCache(ServiceContext* serviceCtx);
  * A wrapper for the helper above. 'opCtx' cannot be null.
  */
 PlanCache& getPlanCache(OperationContext* opCtx);
+
+/**
+ * Remove cached plan entries with the given collection UUID and collection version number.
+ */
+void clearPlanCache(ServiceContext* serviceCtx, UUID collectionUuid, size_t collectionVersion);
 
 }  // namespace sbe
 }  // namespace mongo

@@ -624,17 +624,6 @@ public:
                   ComparisonRulesSet rules = ComparisonRules::kConsiderFieldName,
                   const StringData::ComparatorInterface* comparator = nullptr) const;
 
-    /**
-     * Returns a boolean for how, using the rules specified by 'rules' and the given
-     * comparison functions 'comp' and 'stringComp', this BSONElement compares with 'other'.
-     * Returns the result of BSONObj::woCompare if this object is an Array, Object, or CodeWScope.
-     */
-    template <typename Comparator>
-    bool compare(const BSONElement& other,
-                 Comparator comp,
-                 ComparisonRulesSet rules = ComparisonRules::kConsiderFieldName,
-                 const StringData::ComparatorInterface* stringComp = nullptr) const;
-
     DeferredComparison operator<(const BSONElement& other) const {
         return DeferredComparison(DeferredComparison::Type::kLT, *this, other);
     }
@@ -1056,7 +1045,8 @@ Status BSONElement::tryCoerce(T* out) const {
             if (!std::isfinite(d)) {
                 return {ErrorCodes::BadValue, "Unable to coerce NaN/Inf to integral type"};
             }
-            bool sameMax = std::numeric_limits<T>::max() == std::numeric_limits<long long>::max();
+            constexpr bool sameMax =
+                std::numeric_limits<T>::max() == std::numeric_limits<long long>::max();
             if ((!sameMax && d > static_cast<double>(std::numeric_limits<T>::max())) ||
                 (sameMax && d >= static_cast<double>(std::numeric_limits<T>::max())) ||
                 (d < std::numeric_limits<T>::lowest())) {

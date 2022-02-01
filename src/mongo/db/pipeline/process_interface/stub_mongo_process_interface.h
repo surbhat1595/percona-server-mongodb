@@ -282,7 +282,7 @@ public:
     }
 
     std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const {
         MONGO_UNREACHABLE;
     }
 
@@ -307,10 +307,6 @@ public:
 
     void truncateRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                              RecordStore* rs) const {
-        MONGO_UNREACHABLE;
-    }
-    void deleteTemporaryRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    std::unique_ptr<TemporaryRecordStore> rs) const {
         MONGO_UNREACHABLE;
     }
 };

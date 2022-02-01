@@ -40,7 +40,13 @@
 #include "search_near_01.cxx"
 #include "search_near_02.cxx"
 
-std::string
+/* Declarations to avoid the error raised by -Werror=missing-prototypes. */
+const std::string parse_configuration_from_file(const std::string &filename);
+void print_help();
+int64_t run_test(
+  const std::string &test_name, const std::string &config, const std::string &wt_open_config);
+
+const std::string
 parse_configuration_from_file(const std::string &filename)
 {
     std::string cfg, line, error;
@@ -225,12 +231,20 @@ main(int argc, char *argv[])
             }
         } else {
             current_test_name = test_name;
-            /* Configuration parsing. */
-            if (!config_filename.empty())
-                cfg = parse_configuration_from_file(config_filename);
-            else if (cfg.empty())
-                cfg = parse_configuration_from_file(get_default_config_path(current_test_name));
-            error_code = run_test(current_test_name, cfg, wt_open_config);
+            /* Check the test exists. */
+            if (std::find(all_tests.begin(), all_tests.end(), current_test_name) ==
+              all_tests.end()) {
+                test_harness::logger::log_msg(
+                  LOG_ERROR, "The test " + current_test_name + " was not found.");
+                error_code = -1;
+            } else {
+                /* Configuration parsing. */
+                if (!config_filename.empty())
+                    cfg = parse_configuration_from_file(config_filename);
+                else if (cfg.empty())
+                    cfg = parse_configuration_from_file(get_default_config_path(current_test_name));
+                error_code = run_test(current_test_name, cfg, wt_open_config);
+            }
         }
 
         if (error_code != 0)

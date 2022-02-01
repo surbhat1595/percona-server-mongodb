@@ -70,6 +70,14 @@ WT_CURSOR::search_near method:
 
 @snippet ex_cursor.c cursor search near
 
+The WT_CURSOR::search_near method can also be used with a prefix key by
+setting \c prefix_search=true in the cursor configuration options. This
+optimization ensures that search_near only traverses the relevant key
+range with the matching prefix. Limiting the key range that search_near
+can traverse through is particularly useful when there are a larger number
+of records present outside of the key range which are not visible to the
+search_near caller.
+
 Cursor positions do not survive transactions: cursors that are open during
 WT_SESSION::begin_transaction, WT_SESSION::commit_transaction or
 WT_SESSION::rollback_transaction will lose their position as if
@@ -108,10 +116,8 @@ record does not previously exist.
 The WT_SESSION::largest_key \c gets the largest key in a table regardless of
 visibility.
 
-It can only be called without a read timestamp, otherwise it returns an invalid
-argument error. Any following prev or next calls will behave as if they were
-invoked on an unpositioned cursor no matter the largest key call is successful
-or not.
+Any following prev or next calls will behave as if they were invoked on an
+unpositioned cursor no matter the largest key call is successful or not.
 
 @section cursor_error Cursor position after error
 

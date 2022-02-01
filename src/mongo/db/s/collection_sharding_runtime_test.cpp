@@ -56,7 +56,7 @@ protected:
     static CollectionMetadata makeShardedMetadata(OperationContext* opCtx,
                                                   UUID uuid = UUID::gen()) {
         const OID epoch = OID::gen();
-        const Timestamp timestamp;
+        const Timestamp timestamp(1, 1);
         auto range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
         auto chunk = ChunkType(
             uuid, std::move(range), ChunkVersion(1, 0, epoch, timestamp), ShardId("other"));
@@ -185,7 +185,7 @@ TEST_F(CollectionShardingRuntimeTest,
 
     ASSERT_EQ(csr.getNumMetadataManagerChanges_forTest(), 2);
     ASSERT(
-        csr.getCollectionDescription(opCtx).uuidMatches(*newMetadata.getChunkManager()->getUUID()));
+        csr.getCollectionDescription(opCtx).uuidMatches(newMetadata.getChunkManager()->getUUID()));
 }
 
 class CollectionShardingRuntimeTestWithMockedLoader : public ShardServerTestFixture {
@@ -328,13 +328,15 @@ public:
         CollectionShardingRuntimeTest::tearDown();
     }
 
+    // Creates the CSR if it does not exist and stashes it in the CollectionShardingStateMap. This
+    // is required for waitForClean tests which use CollectionShardingRuntime::get().
     CollectionShardingRuntime& csr() {
-        // Creates the CSR if it does not exist and stashes it in the CollectionShardingStateMap.
-        // This is required for waitForClean tests which use CollectionShardingRuntime::get().
-        return *CollectionShardingRuntime::get_UNSAFE(getServiceContext(), kTestNss);
+        AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
+        auto* css = CollectionShardingState::get(operationContext(), kTestNss);
+        return *checked_cast<CollectionShardingRuntime*>(css);
     }
 
-    UUID uuid() {
+    const UUID& uuid() const {
         return _uuid;
     }
 

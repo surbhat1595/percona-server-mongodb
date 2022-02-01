@@ -41,6 +41,29 @@ namespace mongo {
 
 namespace {
 
+class LockerImplClientObserver : public ServiceContext::ClientObserver {
+public:
+    LockerImplClientObserver() = default;
+    ~LockerImplClientObserver() = default;
+
+    void onCreateClient(Client* client) final {}
+
+    void onDestroyClient(Client* client) final {}
+
+    void onCreateOperationContext(OperationContext* opCtx) override {
+        opCtx->setLockState(std::make_unique<LockerImpl>());
+    }
+
+    void onDestroyOperationContext(OperationContext* opCtx) final {}
+};
+
+const ServiceContext::ConstructorActionRegisterer clientObserverRegisterer{
+    "CollectionCatalogBenchmarkClientObserver",
+    [](ServiceContext* service) {
+        service->registerClientObserver(std::make_unique<LockerImplClientObserver>());
+    },
+    [](ServiceContext* serviceContext) {}};
+
 ServiceContext* setupServiceContext() {
     auto serviceContext = ServiceContext::make();
     auto serviceContextPtr = serviceContext.get();
@@ -48,15 +71,9 @@ ServiceContext* setupServiceContext() {
     return serviceContextPtr;
 }
 
-void createCollectionsAndLocker(OperationContext* opCtx, int numCollections) {
-    {
-        stdx::lock_guard<Client> lk(cc());
-        opCtx->swapLockState(std::make_unique<LockerImpl>(), lk);
-    }
-
-    // Register new collections under the exclusive global lock to avoid the copy-on-write mechanism
-    // during the benchmark setup.
+void createCollections(OperationContext* opCtx, int numCollections) {
     Lock::GlobalLock globalLk(opCtx, MODE_X);
+    BatchedCollectionCatalogWriter batched(opCtx);
 
     for (auto i = 0; i < numCollections; i++) {
         const NamespaceString nss("collection_catalog_bm", std::to_string(i));
@@ -73,7 +90,7 @@ void BM_CollectionCatalogWrite(benchmark::State& state) {
     ThreadClient threadClient(serviceContext);
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
-    createCollectionsAndLocker(opCtx.get(), state.range(0));
+    createCollections(opCtx.get(), state.range(0));
 
     for (auto _ : state) {
         benchmark::ClobberMemory();
@@ -81,14 +98,15 @@ void BM_CollectionCatalogWrite(benchmark::State& state) {
     }
 }
 
-void BM_CollectionCatalogWriteWithGlobalExclusiveLock(benchmark::State& state) {
+void BM_CollectionCatalogWriteBatchedWithGlobalExclusiveLock(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
     ThreadClient threadClient(serviceContext);
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
-    createCollectionsAndLocker(opCtx.get(), state.range(0));
+    createCollections(opCtx.get(), state.range(0));
 
     Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
+    BatchedCollectionCatalogWriter batched(opCtx.get());
 
     for (auto _ : state) {
         benchmark::ClobberMemory();
@@ -97,6 +115,6 @@ void BM_CollectionCatalogWriteWithGlobalExclusiveLock(benchmark::State& state) {
 }
 
 BENCHMARK(BM_CollectionCatalogWrite)->Ranges({{{1}, {100'000}}});
-BENCHMARK(BM_CollectionCatalogWriteWithGlobalExclusiveLock)->Ranges({{{1}, {100'000}}});
+BENCHMARK(BM_CollectionCatalogWriteBatchedWithGlobalExclusiveLock)->Ranges({{{1}, {100'000}}});
 
 }  // namespace mongo

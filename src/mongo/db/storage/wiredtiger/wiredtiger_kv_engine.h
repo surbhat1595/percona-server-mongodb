@@ -66,7 +66,7 @@ struct WiredTigerFileVersion {
     enum class StartupVersion { IS_42, IS_44_FCV_42, IS_44_FCV_44 };
 
     StartupVersion _startupVersion;
-    bool shouldDowngrade(bool readOnly, bool repairMode, bool hasRecoveryTimestamp);
+    bool shouldDowngrade(bool readOnly, bool hasRecoveryTimestamp);
     std::string getDowngradeString();
 };
 
@@ -138,7 +138,8 @@ public:
                                                 const CollectionOptions& options) override;
 
     std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
-                                                          StringData ident) override;
+                                                          StringData ident,
+                                                          KeyFormat keyFormat) override;
 
     Status createSortedDataInterface(OperationContext* opCtx,
                                      const CollectionOptions& collOptions,
@@ -170,13 +171,11 @@ public:
 
     void dropIdentForImport(OperationContext* opCtx, StringData ident) override;
 
-    void keydbDropDatabase(const std::string& db) override;
+    void alterIdentMetadata(OperationContext* opCtx,
+                            StringData ident,
+                            const IndexDescriptor* desc) override;
 
-    Status okToRename(OperationContext* opCtx,
-                      StringData fromNS,
-                      StringData toNS,
-                      StringData ident,
-                      const RecordStore* originalRecordStore) const override;
+    void keydbDropDatabase(const std::string& db) override;
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
@@ -374,6 +373,8 @@ public:
     std::map<std::string, Timestamp> getPinnedTimestampRequests();
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) override;
+
+    void dump() const override;
 
 private:
     class WiredTigerSessionSweeper;

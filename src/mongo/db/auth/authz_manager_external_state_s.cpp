@@ -132,13 +132,13 @@ Status AuthzManagerExternalStateMongos::getUserDescription(OperationContext* opC
                                                            BSONObj* result) {
     const UserName& userName = user.name;
     if (!user.roles) {
-        BSONObj usersInfoCmd =
-            BSON("usersInfo" << BSON_ARRAY(BSON(AuthorizationManager::USER_NAME_FIELD_NAME
-                                                << userName.getUser()
-                                                << AuthorizationManager::USER_DB_FIELD_NAME
-                                                << userName.getDB()))
-                             << "showPrivileges" << true << "showCredentials" << true
-                             << "showAuthenticationRestrictions" << true);
+        BSONObj usersInfoCmd = BSON(
+            "usersInfo" << BSON_ARRAY(BSON(AuthorizationManager::USER_NAME_FIELD_NAME
+                                           << userName.getUser()
+                                           << AuthorizationManager::USER_DB_FIELD_NAME
+                                           << userName.getDB()))
+                        << "showPrivileges" << true << "showCredentials" << true
+                        << "showAuthenticationRestrictions" << true << "showCustomData" << false);
         BSONObjBuilder builder;
         const bool ok = Grid::get(opCtx)->catalogClient()->runUserManagementReadCommand(
             opCtx, "admin", usersInfoCmd, &builder);
@@ -150,7 +150,7 @@ Status AuthzManagerExternalStateMongos::getUserDescription(OperationContext* opC
         std::vector<BSONElement> foundUsers = cmdResult["users"].Array();
         if (foundUsers.size() == 0) {
             return Status(ErrorCodes::UserNotFound,
-                          "User \"" + userName.toString() + "\" not found");
+                          str::stream() << "User \"" << userName << "\" not found");
         }
 
         if (foundUsers.size() > 1) {

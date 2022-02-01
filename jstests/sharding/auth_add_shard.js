@@ -4,6 +4,11 @@
 (function() {
 'use strict';
 
+// TODO SERVER-50144 Remove this and allow orphan checking.
+// This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
+// therefore preventing orphans from being cleaned up.
+TestData.skipCheckOrphans = true;
+
 // login method to login into the database
 function login(userObj) {
     var authResult = mongos.getDB(userObj.db).auth(userObj.username, userObj.password);
@@ -70,8 +75,9 @@ for (var i = 0; i < 4; i++) {
 }
 
 // move a chunk
-assert.commandWorked(
-    admin.runCommand({moveChunk: "foo.bar", find: {_id: 1}, to: addShardRes.shardAdded}));
+// TODO (SERVER-60767): remove _waitForDelete param; removeShard() will sync on range deletion.
+assert.commandWorked(admin.runCommand(
+    {moveChunk: "foo.bar", find: {_id: 1}, to: addShardRes.shardAdded, _waitForDelete: true}));
 
 // verify the chunk was moved
 admin.runCommand({flushRouterConfig: 1});

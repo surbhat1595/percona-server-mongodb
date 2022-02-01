@@ -429,6 +429,20 @@ BSONObj ShardKeyPattern::extractShardKeyFromDocThrows(const BSONObj& doc) const 
     return shardKey;
 }
 
+BSONObj ShardKeyPattern::extractShardKeyFromOplogEntry(const repl::OplogEntry& entry) const {
+    if (!entry.isCrudOpType()) {
+        return BSONObj();
+    }
+
+    auto objWithDocumentKey = entry.getObjectContainingDocumentKey();
+
+    if (!entry.isUpdateOrDelete()) {
+        return extractShardKeyFromDoc(objWithDocumentKey);
+    }
+
+    return extractShardKeyFromDocumentKey(objWithDocumentKey);
+}
+
 BSONObj ShardKeyPattern::emplaceMissingShardKeyValuesForDocument(const BSONObj doc) const {
     BSONObjBuilder fullDocBuilder(doc);
     for (const auto& skField : _keyPattern.toBSON()) {
@@ -627,6 +641,21 @@ BoundList ShardKeyPattern::flattenBounds(const IndexBounds& indexBounds) const {
     }
 
     return ret;
+}
+
+size_t ShardKeyPattern::getApproximateSize() const {
+    auto computeVectorSize = [](const std::vector<std::unique_ptr<FieldRef>>& v) {
+        size_t size = 0;
+        for (const auto& ptr : v) {
+            size += sizeof(ptr) + (ptr ? ptr->estimateObjectSizeInBytes() : 0);
+        }
+        return size;
+    };
+
+    auto size = sizeof(ShardKeyPattern);
+    size += _keyPattern.getApproximateSize() - sizeof(KeyPattern);
+    size += computeVectorSize(_keyPatternPaths);
+    return 0;
 }
 
 }  // namespace mongo

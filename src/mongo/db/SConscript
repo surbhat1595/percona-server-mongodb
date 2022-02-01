@@ -65,8 +65,8 @@ env.SConscript(
 #
 
 env.Library(
-    target= 'common',
-    source= [
+    target='common',
+    source=[
         'field_ref.cpp',
         'field_ref_set.cpp',
         'field_parser.cpp',
@@ -85,7 +85,7 @@ env.Library(
 
 env.Library(
     target='shutdown_in_progress_quiesce_info',
-    source= [
+    source=[
         'shutdown_in_progress_quiesce_info.cpp',
     ],
     LIBDEPS=[
@@ -95,7 +95,7 @@ env.Library(
 
 env.Library(
     target='initialize_snmp',
-    source= [
+    source=[
         'initialize_snmp.cpp',
     ],
     LIBDEPS=[
@@ -165,7 +165,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/stats/timer_stats',
         '$BUILD_DIR/mongo/rpc/client_metadata',
         '$BUILD_DIR/mongo/transport/service_executor',
-        '$BUILD_DIR/mongo/util/diagnostic_info' if get_option('use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/diagnostic_info' if get_option(
+            'use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/net/network',
         '$BUILD_DIR/mongo/util/progress_meter',
@@ -257,6 +258,19 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
+    ],
+)
+
+env.Library(
+    target='multitenancy_params',
+    source=[
+        'multitenancy.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/server_parameter',
     ],
 )
 
@@ -405,6 +419,7 @@ env.Library(
     LIBDEPS=[
         'encryption/encryption_options',
         'repl/repl_settings',
+        'service_context',
     ],
 )
 
@@ -645,6 +660,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands/create_command',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+        '$BUILD_DIR/mongo/db/pipeline/change_stream_pre_and_post_images_options',
         '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/idl_parser',
@@ -778,9 +794,12 @@ env.Library(
         'catalog_raii',
         'curop_failpoint_helpers',
         'dbdirectclient',
+        'index_builds_coordinator_interface',
+        'index_commands_idl',
         'internal_transactions_feature_flag',
         'not_primary_error_tracker',
         'query_exec',
+        'repl/apply_ops_command_info',
         'repl/repl_server_parameters',
         'stats/fill_locker_info',
         'stats/top',
@@ -1236,6 +1255,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/storage/key_string',
     ],)
 
@@ -1383,6 +1403,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
+        '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         'kill_sessions',
         'not_primary_error_tracker',
@@ -1428,11 +1449,13 @@ env.Library(
 env.Library(
     target='logical_session_id_helpers',
     source=[
+        'internal_session_pool.cpp',
         'logical_session_id_helpers.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/auth/authprivilege',
+        'logical_session_cache',
         'logical_session_id',
     ],
 )
@@ -1880,11 +1903,11 @@ env.Library(
 )
 
 env.Library(
-    target= 'logical_time_metadata_hook',
-    source= [
+    target='logical_time_metadata_hook',
+    source=[
         'vector_clock_metadata_hook.cpp',
     ],
-    LIBDEPS= [
+    LIBDEPS=[
         '$BUILD_DIR/mongo/rpc/metadata',
         'logical_time',
         'vector_clock',
@@ -1903,11 +1926,11 @@ env.Library(
 )
 
 env.Library(
-    target= 'vector_clock_test_fixture',
-    source= [
+    target='vector_clock_test_fixture',
+    source=[
         'vector_clock_test_fixture.cpp',
     ],
-    LIBDEPS= [
+    LIBDEPS=[
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/util/clock_source_mock',
         's/sharding_mongod_test_fixture',
@@ -1932,8 +1955,8 @@ env.Library(
 )
 
 env.Library(
-    target= 'service_context_d_test_fixture',
-    source= [
+    target='service_context_d_test_fixture',
+    source=[
         'service_context_d_test_fixture.cpp',
     ],
     LIBDEPS=[
@@ -1955,8 +1978,8 @@ env.Library(
 )
 
 env.Library(
-    target= 'service_context_devnull_test_fixture',
-    source= [
+    target='service_context_devnull_test_fixture',
+    source=[
         'service_context_devnull_test_fixture.cpp',
     ],
     LIBDEPS=[
@@ -1999,6 +2022,7 @@ env.Library(
 env.Library(
     target='generic_cursor',
     source=[
+        'allocate_cursor_id.cpp',
         'generic_cursor.idl',
     ],
     LIBDEPS=[
@@ -2115,7 +2139,8 @@ env.Library(
         '$BUILD_DIR/mongo/base',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/util/net/ssl_options_server' if get_option('ssl') == 'on' else '',
+        '$BUILD_DIR/mongo/util/net/ssl_options_server' if get_option(
+            'ssl') == 'on' else '',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
         'mongod_options',
     ]
@@ -2133,7 +2158,7 @@ env.Library(
         # please add that library here, as a private library dependency.
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/rpc/rpc',
-        '$BUILD_DIR/mongo/s/commands/shared_cluster_commands',
+        '$BUILD_DIR/mongo/s/commands/sharded_cluster_sharding_commands',
         '$BUILD_DIR/mongo/scripting/scripting_server',
         '$BUILD_DIR/mongo/transport/message_compressor_options_server',
         '$BUILD_DIR/mongo/transport/service_entry_point',
@@ -2141,7 +2166,8 @@ env.Library(
         '$BUILD_DIR/mongo/util/clock_sources',
         '$BUILD_DIR/mongo/util/elapsed_tracker',
         '$BUILD_DIR/mongo/util/fail_point',
-        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option('use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option(
+            'use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/net/network',
         '$BUILD_DIR/mongo/util/ntservice',
         '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
@@ -2259,6 +2285,7 @@ env.Library(
         # please add that library as a private libdep of
         # mongod_initializers.
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
+        '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
         '$BUILD_DIR/mongo/scripting/scripting',
@@ -2266,7 +2293,8 @@ env.Library(
         '$BUILD_DIR/mongo/transport/transport_layer_manager',
         '$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
-        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option('use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option(
+            'use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/net/http_client_impl',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
         '$BUILD_DIR/mongo/util/signal_handlers',
@@ -2443,6 +2471,7 @@ if wiredtiger:
             'hasher_test.cpp',
             'index_build_entry_helpers_test.cpp',
             'index_builds_coordinator_mongod_test.cpp',
+            'internal_session_pool_test.cpp',
             'keypattern_test.cpp',
             'keys_collection_document_test.cpp',
             'logical_session_cache_test.cpp',
@@ -2612,5 +2641,8 @@ env.Benchmark(
     target='commands_bm',
     source=[
         'commands_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )

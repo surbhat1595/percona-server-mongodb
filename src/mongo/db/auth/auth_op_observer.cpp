@@ -52,7 +52,7 @@ AuthOpObserver::~AuthOpObserver() = default;
 
 void AuthOpObserver::onInserts(OperationContext* opCtx,
                                const NamespaceString& nss,
-                               OptionalCollectionUUID uuid,
+                               const UUID& uuid,
                                std::vector<InsertStatement>::const_iterator first,
                                std::vector<InsertStatement>::const_iterator last,
                                bool fromMigrate) {
@@ -64,14 +64,14 @@ void AuthOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void AuthOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    if (args.updateArgs.update.isEmpty()) {
+    if (args.updateArgs->update.isEmpty()) {
         return;
     }
 
-    audit::logUpdateOperation(opCtx->getClient(), args.nss, args.updateArgs.updatedDoc);
+    audit::logUpdateOperation(opCtx->getClient(), args.nss, args.updateArgs->updatedDoc);
 
     AuthorizationManager::get(opCtx->getServiceContext())
-        ->logOp(opCtx, "u", args.nss, args.updateArgs.update, &args.updateArgs.criteria);
+        ->logOp(opCtx, "u", args.nss, args.updateArgs->update, &args.updateArgs->criteria);
 }
 
 void AuthOpObserver::aboutToDelete(OperationContext* opCtx,
@@ -86,7 +86,7 @@ void AuthOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void AuthOpObserver::onDelete(OperationContext* opCtx,
                               const NamespaceString& nss,
-                              OptionalCollectionUUID uuid,
+                              const UUID& uuid,
                               StmtId stmtId,
                               const OplogDeleteEntryArgs& args) {
     auto& documentId = documentIdDecoration(opCtx);
@@ -135,7 +135,7 @@ void AuthOpObserver::onDropDatabase(OperationContext* opCtx, const std::string& 
 
 repl::OpTime AuthOpObserver::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
-                                              OptionalCollectionUUID uuid,
+                                              const UUID& uuid,
                                               std::uint64_t numRecords,
                                               const CollectionDropType dropType) {
     const auto cmdNss = collectionName.getCommandNS();
@@ -149,7 +149,7 @@ repl::OpTime AuthOpObserver::onDropCollection(OperationContext* opCtx,
 
 void AuthOpObserver::onDropIndex(OperationContext* opCtx,
                                  const NamespaceString& nss,
-                                 OptionalCollectionUUID uuid,
+                                 const UUID& uuid,
                                  const std::string& indexName,
                                  const BSONObj& indexInfo) {
     const auto cmdNss = nss.getCommandNS();
@@ -162,7 +162,7 @@ void AuthOpObserver::onDropIndex(OperationContext* opCtx,
 void AuthOpObserver::postRenameCollection(OperationContext* const opCtx,
                                           const NamespaceString& fromCollection,
                                           const NamespaceString& toCollection,
-                                          OptionalCollectionUUID uuid,
+                                          const UUID& uuid,
                                           OptionalCollectionUUID dropTargetUUID,
                                           bool stayTemp) {
     const auto cmdNss = fromCollection.getCommandNS();
@@ -184,7 +184,7 @@ void AuthOpObserver::postRenameCollection(OperationContext* const opCtx,
 void AuthOpObserver::onRenameCollection(OperationContext* const opCtx,
                                         const NamespaceString& fromCollection,
                                         const NamespaceString& toCollection,
-                                        OptionalCollectionUUID uuid,
+                                        const UUID& uuid,
                                         OptionalCollectionUUID dropTargetUUID,
                                         std::uint64_t numRecords,
                                         bool stayTemp) {
@@ -214,7 +214,7 @@ void AuthOpObserver::onApplyOps(OperationContext* opCtx,
 
 void AuthOpObserver::onEmptyCapped(OperationContext* opCtx,
                                    const NamespaceString& collectionName,
-                                   OptionalCollectionUUID uuid) {
+                                   const UUID& uuid) {
     const auto cmdNss = collectionName.getCommandNS();
     const auto cmdObj = BSON("emptycapped" << collectionName.coll());
 
@@ -222,8 +222,8 @@ void AuthOpObserver::onEmptyCapped(OperationContext* opCtx,
         ->logOp(opCtx, "c", cmdNss, cmdObj, nullptr);
 }
 
-void AuthOpObserver::onReplicationRollback(OperationContext* opCtx,
-                                           const RollbackObserverInfo& rbInfo) {
+void AuthOpObserver::_onReplicationRollback(OperationContext* opCtx,
+                                            const RollbackObserverInfo& rbInfo) {
     // Invalidate any in-memory auth data if necessary.
     const auto& rollbackNamespaces = rbInfo.rollbackNamespaces;
     if (rollbackNamespaces.count(AuthorizationManager::versionCollectionNamespace) == 1 ||

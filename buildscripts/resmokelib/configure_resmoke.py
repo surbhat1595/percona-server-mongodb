@@ -48,7 +48,7 @@ def _validate_options(parser, args):
             "Cannot use --replayFile with additional test files listed on the command line invocation."
         )
 
-    if args.run_all_feature_flag_tests:
+    if args.run_all_feature_flag_tests or args.run_all_feature_flags_no_tests:
         if not os.path.isfile(ALL_FEATURE_FLAG_FILE):
             parser.error(
                 "To run tests with all feature flags, the %s file must exist and be placed in"
@@ -156,18 +156,25 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
 
     def setup_feature_flags():
         _config.RUN_ALL_FEATURE_FLAG_TESTS = config.pop("run_all_feature_flag_tests")
-        all_feature_flags = []
+        _config.RUN_ALL_FEATURE_FLAGS = config.pop("run_all_feature_flags_no_tests")
+
+        # Running all feature flag tests implies running the fixtures with feature flags.
+        if _config.RUN_ALL_FEATURE_FLAG_TESTS:
+            _config.RUN_ALL_FEATURE_FLAGS = True
+
+        all_ff = []
         enabled_feature_flags = []
         try:
-            all_feature_flags = open(ALL_FEATURE_FLAG_FILE).read().split()
+            with open(ALL_FEATURE_FLAG_FILE) as fd:
+                all_ff = fd.read().split()
         except FileNotFoundError:
             # If we ask resmoke to run with all feature flags, the feature flags file
             # needs to exist.
-            if _config.RUN_ALL_FEATURE_FLAG_TESTS:
+            if _config.RUN_ALL_FEATURE_FLAGS:
                 raise
 
-        if _config.RUN_ALL_FEATURE_FLAG_TESTS:
-            enabled_feature_flags = all_feature_flags[:]
+        if _config.RUN_ALL_FEATURE_FLAGS:
+            enabled_feature_flags = all_ff[:]
 
         # Specify additional feature flags from the command line.
         # Set running all feature flag tests to True if this options is specified.
@@ -175,7 +182,7 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
         if additional_feature_flags is not None:
             enabled_feature_flags.extend(additional_feature_flags)
 
-        return enabled_feature_flags, all_feature_flags
+        return enabled_feature_flags, all_ff
 
     _config.ENABLED_FEATURE_FLAGS, all_feature_flags = setup_feature_flags()
     not_enabled_feature_flags = list(set(all_feature_flags) - set(_config.ENABLED_FEATURE_FLAGS))
@@ -192,8 +199,12 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.EXCLUDE_WITH_ANY_TAGS.extend(
         utils.default_if_none(_tags_from_list(config.pop("exclude_with_any_tags")), []))
 
-    # Don't run tests with feature flags that are not enabled.
-    _config.EXCLUDE_WITH_ANY_TAGS.extend(not_enabled_feature_flags)
+    if _config.RUN_ALL_FEATURE_FLAGS and not _config.RUN_ALL_FEATURE_FLAG_TESTS:
+        # Don't run any feature flag tests.
+        _config.EXCLUDE_WITH_ANY_TAGS.extend(all_feature_flags)
+    else:
+        # Don't run tests with feature flags that are not enabled.
+        _config.EXCLUDE_WITH_ANY_TAGS.extend(not_enabled_feature_flags)
 
     _config.FAIL_FAST = not config.pop("continue_on_failure")
     _config.FLOW_CONTROL = config.pop("flow_control")
@@ -236,10 +247,6 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.MONGOD_EXECUTABLE = _expand_user(config.pop("mongod_executable"))
 
     mongod_set_parameters = config.pop("mongod_set_parameters")
-    # TODO: This should eventually be migrated entirely to _builder.py
-    if _config.ENABLED_FEATURE_FLAGS and not _config.MIXED_BIN_VERSIONS:
-        feature_flag_dict = {ff: "true" for ff in _config.ENABLED_FEATURE_FLAGS}
-        mongod_set_parameters.append(str(feature_flag_dict))
 
     _config.MONGOD_SET_PARAMETERS = _merge_set_params(mongod_set_parameters)
     _config.FUZZ_MONGOD_CONFIGS = config.pop("fuzz_mongod_configs")
@@ -250,16 +257,12 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
             _config.CONFIG_FUZZ_SEED = random.randrange(sys.maxsize)
         else:
             _config.CONFIG_FUZZ_SEED = int(_config.CONFIG_FUZZ_SEED)
-        _config.MONGOD_SET_PARAMETERS, _config.WT_ENGINE_CONFIG = mongod_fuzzer_configs \
-            .fuzz_set_parameters(_config.CONFIG_FUZZ_SEED, _config.MONGOD_SET_PARAMETERS)
+        _config.MONGOD_SET_PARAMETERS, _config.WT_ENGINE_CONFIG, _config.WT_COLL_CONFIG, \
+        _config.WT_INDEX_CONFIG = mongod_fuzzer_configs.fuzz_set_parameters(
+            _config.CONFIG_FUZZ_SEED, _config.MONGOD_SET_PARAMETERS)
 
     _config.MONGOS_EXECUTABLE = _expand_user(config.pop("mongos_executable"))
-
     mongos_set_parameters = config.pop("mongos_set_parameters")
-    if _config.ENABLED_FEATURE_FLAGS and not _config.MIXED_BIN_VERSIONS:
-        feature_flag_dict = {ff: "true" for ff in _config.ENABLED_FEATURE_FLAGS}
-        mongos_set_parameters.append(str(feature_flag_dict))
-
     _config.MONGOS_SET_PARAMETERS = _merge_set_params(mongos_set_parameters)
 
     _config.MONGOCRYPTD_SET_PARAMETERS = _merge_set_params(config.pop("mongocryptd_set_parameters"))
@@ -324,12 +327,16 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.ARCHIVE_LIMIT_MB = config.pop("archive_limit_mb")
     _config.ARCHIVE_LIMIT_TESTS = config.pop("archive_limit_tests")
 
-    # Wiredtiger options.
-    _config.WT_COLL_CONFIG = config.pop("wt_coll_config")
+    # Wiredtiger options. Prevent fuzzed wt configs from being overwritten unless user specifies it.
     wt_engine_config = config.pop("wt_engine_config")
-    if wt_engine_config:  # prevents fuzzed wt_engine_config from being overwritten unless user specifies it
+    if wt_engine_config:
         _config.WT_ENGINE_CONFIG = config.pop("wt_engine_config")
-    _config.WT_INDEX_CONFIG = config.pop("wt_index_config")
+    wt_coll_config = config.pop("wt_coll_config")
+    if wt_coll_config:
+        _config.WT_COLL_CONFIG = config.pop("wt_coll_config")
+    wt_index_config = config.pop("wt_index_config")
+    if wt_index_config:
+        _config.WT_INDEX_CONFIG = config.pop("wt_index_config")
 
     # Benchmark/Benchrun options.
     _config.BENCHMARK_FILTER = config.pop("benchmark_filter")
@@ -355,6 +362,8 @@ def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many
     _config.UNDO_RECORDER_PATH = config.pop("undo_recorder_path")
 
     _config.EXCLUDE_TAGS_FILE_PATH = config.pop("exclude_tags_file_path")
+
+    _config.MAX_TEST_QUEUE_SIZE = config.pop("max_test_queue_size")
 
     def configure_tests(test_files, replay_file):
         # `_validate_options` has asserted that at most one of `test_files` and `replay_file` contains input.

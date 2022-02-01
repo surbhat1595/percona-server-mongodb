@@ -42,10 +42,15 @@ namespace clustered_util {
 ClusteredCollectionInfo makeCanonicalClusteredInfoForLegacyFormat();
 
 /**
- * Constructs ClusteredCollectionInfo according to the 'indexSpec'. Stores the information is
- * provided in the non-legacy format.
+ * Generates the default _id clustered index.
  */
-ClusteredCollectionInfo makeCanonicalClusteredInfo(const ClusteredIndexSpec& indexSpec);
+ClusteredCollectionInfo makeDefaultClusteredIdIndex();
+
+/**
+ * Constructs ClusteredCollectionInfo according to the 'indexSpec'. Constructs a 'name' by default
+ * if the field is not yet defined. Stores the information is provided in the non-legacy format.
+ */
+ClusteredCollectionInfo makeCanonicalClusteredInfo(ClusteredIndexSpec indexSpec);
 
 boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& elem);
 
@@ -54,6 +59,22 @@ boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& e
  */
 bool requiresLegacyFormat(const NamespaceString& nss);
 
-}  // namespace clustered_util
+/**
+ * listIndexes requires the ClusteredIndexSpec be formatted with an additional field 'clustered:
+ * true' to indicate it is a clustered index.
+ */
+BSONObj formatClusterKeyForListIndexes(const ClusteredCollectionInfo& collInfo);
 
+/**
+ * Returns true if the BSON object matches the collection's cluster key.
+ */
+bool matchesClusterKey(const BSONObj& obj,
+                       const boost::optional<ClusteredCollectionInfo>& collInfo);
+
+/**
+ * Returns the field name of a cluster key.
+ */
+StringData getClusterKeyFieldName(const ClusteredIndexSpec& indexSpec);
+
+}  // namespace clustered_util
 }  // namespace mongo

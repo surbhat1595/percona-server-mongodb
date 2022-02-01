@@ -41,8 +41,7 @@ namespace mongo {
  * its "fullDocumentBeforeChange" field shall be the optime of the noop oplog entry containing the
  * pre-image. This stage replaces that field with the actual pre-image document.
  */
-class DocumentSourceChangeStreamAddPreImage final : public DocumentSource,
-                                                    public ChangeStreamStageSerializationInterface {
+class DocumentSourceChangeStreamAddPreImage final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$_internalChangeStreamAddPreImage"_sd;
     static constexpr StringData kFullDocumentBeforeChangeFieldName =
@@ -95,11 +94,8 @@ public:
         return constraints;
     }
 
-    // Conceptually, this stage must always run on the shards part of the pipeline. At
-    // present, however, pre-image retrieval is not supported in a sharded cluster, and
-    // so the distributed plan logic will not be used.
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
-        return DistributedPlanLogic{this, nullptr, boost::none};
+        return boost::none;
     }
 
     DepsTracker::State getDependencies(DepsTracker* deps) const {
@@ -109,9 +105,7 @@ public:
         return DepsTracker::State::SEE_NEXT;
     }
 
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final {
-        return ChangeStreamStageSerializationInterface::serializeToValue(explain);
-    }
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     const char* getSourceName() const final {
         return kStageName.rawData();
@@ -122,9 +116,6 @@ private:
      * Performs the lookup to retrieve the full pre-image document for applicable operations.
      */
     GetNextResult doGetNext() final;
-
-    Value serializeLegacy(boost::optional<ExplainOptions::Verbosity> explain) const final;
-    Value serializeLatest(boost::optional<ExplainOptions::Verbosity> explain) const final;
 
     // Determines whether pre-images are strictly required or may be included only when available.
     FullDocumentBeforeChangeModeEnum _fullDocumentBeforeChangeMode =

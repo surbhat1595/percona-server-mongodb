@@ -94,13 +94,13 @@ void generatePlannerInfo(PlanExecutor* exec,
     if (collection && exec->getCanonicalQuery()) {
         const QuerySettings* querySettings =
             QuerySettingsDecoration::get(collection->getSharedDecorations());
-        const PlanCacheKey planCacheKey =
+        const auto planCacheKeyInfo =
             plan_cache_key_factory::make<PlanCacheKey>(*exec->getCanonicalQuery(), collection);
-        planCacheKeyHash = planCacheKey.planCacheKeyHash();
-        queryHash = planCacheKey.queryHash();
+        planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
+        queryHash = planCacheKeyInfo.queryHash();
 
         if (auto allowedIndicesFilter =
-                querySettings->getAllowedIndicesFilter(planCacheKey.getStableKey())) {
+                querySettings->getAllowedIndicesFilter(planCacheKeyInfo.getQueryShape())) {
             // Found an index filter set on the query shape.
             indexFilterSet = true;
         }
@@ -287,6 +287,15 @@ void executePlan(PlanExecutor* exec) {
 BSONObj explainVersionToBson(const PlanExplainer::ExplainVersion& version) {
     return BSON("explainVersion" << version);
 }
+
+template <typename EntryType>
+void appendBasicPlanCacheEntryInfoToBSON(const EntryType& entry, BSONObjBuilder* out) {
+    out->append("queryHash", zeroPaddedHex(entry.queryHash));
+    out->append("planCacheKey", zeroPaddedHex(entry.planCacheKey));
+    out->append("isActive", entry.isActive);
+    out->append("works", static_cast<long long>(entry.works));
+    out->append("timeOfCreation", entry.timeOfCreation);
+}
 }  // namespace
 
 void Explain::explainStages(PlanExecutor* exec,
@@ -383,15 +392,10 @@ void Explain::explainStages(PlanExecutor* exec,
     explain_common::generateServerParameters(out);
 }
 
-
 void Explain::planCacheEntryToBSON(const PlanCacheEntry& entry, BSONObjBuilder* out) {
-    out->append("queryHash", zeroPaddedHex(entry.queryHash));
-    out->append("planCacheKey", zeroPaddedHex(entry.planCacheKey));
+    out->append("version", "1");
 
-    // Append whether or not the entry is active.
-    out->append("isActive", entry.isActive);
-    out->append("works", static_cast<long long>(entry.works));
-    out->append("timeOfCreation", entry.timeOfCreation);
+    appendBasicPlanCacheEntryInfoToBSON(entry, out);
 
     if (entry.debugInfo) {
         const auto& debugInfo = *entry.debugInfo;
@@ -447,6 +451,18 @@ void Explain::planCacheEntryToBSON(const PlanCacheEntry& entry, BSONObjBuilder* 
     }
 
     out->append("indexFilterSet", entry.cachedPlan->indexFilterApplied);
+
+    out->append("estimatedSizeBytes", static_cast<long long>(entry.estimatedEntrySizeBytes));
+}
+
+void Explain::planCacheEntryToBSON(const sbe::PlanCacheEntry& entry, BSONObjBuilder* out) {
+    out->append("version", "2");
+
+    appendBasicPlanCacheEntryInfoToBSON(entry, out);
+
+    out->append("cachedPlan",
+                BSON("slots" << entry.cachedPlan->planStageData.debugString() << "stages"
+                             << sbe::DebugPrinter().print(*entry.cachedPlan->root)));
 
     out->append("estimatedSizeBytes", static_cast<long long>(entry.estimatedEntrySizeBytes));
 }

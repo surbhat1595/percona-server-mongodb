@@ -127,7 +127,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
         return statusWithMatcher.getStatus();
     }
 
-    // Stop counting match expressions after they have been parsed to exclude expressions created
+    // Stop counting expressions after they have been parsed to exclude expressions created
     // during optimization and other processing steps.
     newExpCtx->stopExpressionCounters();
 
@@ -475,23 +475,6 @@ Status CanonicalQuery::isValidNormalized(const MatchExpression* root) {
     return Status::OK();
 }
 
-int CanonicalQuery::getOptions() const {
-    int options = 0;
-    if (_findCommand->getTailable()) {
-        options |= QueryOption_CursorTailable;
-    }
-    if (_findCommand->getAwaitData()) {
-        options |= QueryOption_AwaitData;
-    }
-    if (_findCommand->getNoCursorTimeout()) {
-        options |= QueryOption_NoCursorTimeout;
-    }
-    if (_findCommand->getAllowPartialResults()) {
-        options |= QueryOption_PartialResults;
-    }
-    return options;
-}
-
 std::string CanonicalQuery::toString() const {
     str::stream ss;
     ss << "ns=" << _findCommand->getNamespaceOrUUID().nss().value_or(NamespaceString()).ns();
@@ -545,7 +528,9 @@ std::string CanonicalQuery::toStringShort() const {
 }
 
 CanonicalQuery::QueryShapeString CanonicalQuery::encodeKey() const {
-    return canonical_query_encoder::encode(*this);
+    return (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() &&
+            !_forceClassicEngine && _sbeCompatible)
+        ? canonical_query_encoder::encodeSBE(*this)
+        : canonical_query_encoder::encode(*this);
 }
-
 }  // namespace mongo

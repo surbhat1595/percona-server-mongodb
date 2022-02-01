@@ -31,6 +31,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/apply_ops_gen.h"
 #include "mongo/db/repl/multiapplier.h"
 #include "mongo/db/repl/oplog.h"
@@ -41,56 +42,6 @@ class BSONObjBuilder;
 class OperationContext;
 
 namespace repl {
-class ApplyOps {
-public:
-    static constexpr StringData kPreconditionFieldName = "preCondition"_sd;
-    static constexpr StringData kOplogApplicationModeFieldName = "oplogApplicationMode"_sd;
-
-    /**
-     * Extracts CRUD operations from an atomic applyOps oplog entry.
-     * Throws UserException on error.
-     */
-    static std::vector<OplogEntry> extractOperations(const OplogEntry& applyOpsOplogEntry);
-
-    /**
-     * This variant allows optimization for extracting multiple applyOps operations.  The entry for
-     * the non-DurableReplOperation fields of the extracted operation must be specified as
-     * 'topLevelDoc', and need not be any of the applyOps operations. The 'topLevelDoc' entry's
-     * 'ts' field will be used as the 'ts' field for each operation.
-     */
-    static void extractOperationsTo(const OplogEntry& applyOpsOplogEntry,
-                                    const BSONObj& topLevelDoc,
-                                    std::vector<OplogEntry>* operations);
-};
-
-/**
- * Holds information about an applyOps command object.
- */
-class ApplyOpsCommandInfo : public ApplyOpsCommandInfoBase {
-public:
-    /**
-     * Parses the object in the 'o' field of an applyOps command.
-     * May throw UserException.
-     */
-    static ApplyOpsCommandInfo parse(const BSONObj& applyOpCmd);
-
-    /**
-     * Returns true if all operations described by this applyOps command are CRUD only.
-     */
-    bool areOpsCrudOnly() const;
-
-    /**
-     * Returns true if applyOps will try to process all operations in a single batch atomically.
-     * Derived from getAllowAtomic() and areOpsCrudOnly().
-     */
-    bool isAtomic() const;
-
-private:
-    explicit ApplyOpsCommandInfo(const BSONObj& applyOpCmd);
-
-    const bool _areOpsCrudOnly;
-};
-
 /**
  * Applies ops contained in 'applyOpCmd' and populates fields in 'result' to be returned to the
  * caller. The information contained in 'result' can be returned to the user if called as part

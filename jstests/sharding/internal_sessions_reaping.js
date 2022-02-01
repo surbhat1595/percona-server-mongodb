@@ -39,6 +39,9 @@ let transactionsCollOnPrimary = shard0Primary.getCollection(kConfigTxnsNs);
 let imageCollOnPrimary = shard0Primary.getCollection(kImageCollNs);
 let testDB = shard0Primary.getDB(kDbName);
 
+assert.commandWorked(testDB.createCollection(kCollName));
+assert.commandWorked(shard0Primary.adminCommand({refreshLogicalSessionCacheNow: 1}));
+
 const sessionUUID = UUID();
 const parentLsid = {
     id: sessionUUID
@@ -86,7 +89,7 @@ numTransactionsCollEntries++;
 const childLsid1 = {
     id: sessionUUID,
     txnNumber: parentTxnNumber1,
-    stmtId: NumberInt(0)
+    txnUUID: UUID()
 };
 
 assert.commandWorked(testDB.runCommand({
@@ -118,7 +121,7 @@ assert.eq(numTransactionsCollEntries, transactionsCollOnPrimary.find().itcount()
 const childLsid2 = {
     id: sessionUUID,
     txnNumber: parentTxnNumber2,
-    stmtId: NumberInt(0)
+    txnUUID: UUID()
 };
 
 assert.commandWorked(testDB.runCommand({
@@ -142,7 +145,7 @@ assert.commandWorked(testDB.runCommand(
 jsTest.log("Verify that the config.transactions entry for the retryable internal transaction for " +
            "the findAndModify did not get reaped although there is already a new retryable write");
 assert.eq(numTransactionsCollEntries, transactionsCollOnPrimary.find().itcount());
-// TODO (SERVER-58756): a retryable findAndModify command run inside a retryable internal
+// TODO (SERVER-60540): a retryable findAndModify command run inside a retryable internal
 // transaction should have a config.image_collection entry like a regular retryable write.
 // assert.eq(numImageCollEntries, imageCollOnPrimary.find().itcount());
 

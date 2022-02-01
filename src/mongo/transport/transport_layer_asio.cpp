@@ -50,7 +50,9 @@
 #include "mongo/transport/asio_utils.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/transport_options_gen.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/errno_util.h"
+#include "mongo/util/executor_stats.h"
 #include "mongo/util/hierarchical_acquisition.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/sockaddr.h"
@@ -99,6 +101,7 @@ boost::optional<Status> maybeTcpFastOpenStatus;
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(transportLayerASIOasyncConnectTimesOut);
+MONGO_FAIL_POINT_DEFINE(transportLayerASIOhangBeforeAccept);
 
 #ifdef MONGO_CONFIG_SSL
 SSLConnectionContext::~SSLConnectionContext() = default;
@@ -179,7 +182,7 @@ private:
 
 class TransportLayerASIO::ASIOReactor final : public Reactor {
 public:
-    ASIOReactor() : _ioContext() {}
+    ASIOReactor() : _clkSource(this), _stats(&_clkSource), _ioContext() {}
 
     void run() noexcept override {
         ThreadIdGuard threadIdGuard(this);
@@ -215,11 +218,12 @@ public:
     }
 
     void schedule(Task task) override {
-        asio::post(_ioContext, [task = std::move(task)] { task(Status::OK()); });
+        asio::post(_ioContext, [task = _stats.wrapTask(std::move(task))] { task(Status::OK()); });
     }
 
     void dispatch(Task task) override {
-        asio::dispatch(_ioContext, [task = std::move(task)] { task(Status::OK()); });
+        asio::dispatch(_ioContext,
+                       [task = _stats.wrapTask(std::move(task))] { task(Status::OK()); });
     }
 
     bool onReactorThread() const override {
@@ -230,7 +234,29 @@ public:
         return _ioContext;
     }
 
+    void appendStats(BSONObjBuilder& bob) const override {
+        _stats.serialize(&bob);
+    }
+
 private:
+    // Provides `ClockSource` API for the reactor's clock source.
+    class ReactorClockSource final : public ClockSource {
+    public:
+        explicit ReactorClockSource(ASIOReactor* reactor) : _reactor(reactor) {}
+        ~ReactorClockSource() = default;
+
+        Milliseconds getPrecision() override {
+            MONGO_UNREACHABLE;
+        }
+
+        Date_t now() override {
+            return _reactor->now();
+        }
+
+    private:
+        ASIOReactor* const _reactor;
+    };
+
     class ThreadIdGuard {
     public:
         ThreadIdGuard(TransportLayerASIO::ASIOReactor* reactor) {
@@ -245,6 +271,10 @@ private:
     };
 
     static thread_local ASIOReactor* _reactorForThread;
+
+    ReactorClockSource _clkSource;
+
+    ExecutorStats _stats;
 
     asio::io_context _ioContext;
 };
@@ -538,8 +568,11 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
 #ifdef TCP_FASTOPEN_CONNECT
     const auto family = protocol.family();
     if ((family == AF_INET) || (family == AF_INET6)) {
-        setSocketOption(
-            sock, TCPFastOpenConnect(gTCPFastOpenClient), ec, "connect (sync) TCP fast open");
+        setSocketOption(sock,
+                        TCPFastOpenConnect(gTCPFastOpenClient),
+                        "connect (sync) TCP fast open",
+                        logv2::LogSeverity::Info(),
+                        ec);
         if (tcpFastOpenIsConfigured) {
             return errorCodeToStatus(ec);
         }
@@ -692,8 +725,9 @@ Future<SessionHandle> TransportLayerASIO::asyncConnect(
             std::error_code ec;
             setSocketOption(connector->socket,
                             TCPFastOpenConnect(gTCPFastOpenClient),
-                            ec,
-                            "connect (async) TCP fast open");
+                            "connect (async) TCP fast open",
+                            logv2::LogSeverity::Info(),
+                            ec);
             if (tcpFastOpenIsConfigured) {
                 return futurize(ec);
             }
@@ -988,13 +1022,19 @@ Status TransportLayerASIO::setup() {
 
             throw;
         }
-        setSocketOption(acceptor, GenericAcceptor::reuse_address(true), "acceptor reuse address");
+        setSocketOption(acceptor,
+                        GenericAcceptor::reuse_address(true),
+                        "acceptor reuse address",
+                        logv2::LogSeverity::Info());
 
         std::error_code ec;
 #ifdef TCP_FASTOPEN
         if (gTCPFastOpenServer && ((addr.family() == AF_INET) || (addr.family() == AF_INET6))) {
-            setSocketOption(
-                acceptor, TCPFastOpen(gTCPFastOpenQueueSize), ec, "acceptor TCP fast open");
+            setSocketOption(acceptor,
+                            TCPFastOpen(gTCPFastOpenQueueSize),
+                            "acceptor TCP fast open",
+                            logv2::LogSeverity::Info(),
+                            ec);
             if (tcpFastOpenIsConfigured) {
                 return errorCodeToStatus(ec);
             }
@@ -1002,7 +1042,8 @@ Status TransportLayerASIO::setup() {
         }
 #endif
         if (addr.family() == AF_INET6) {
-            setSocketOption(acceptor, asio::ip::v6_only(true), "acceptor v6 only");
+            setSocketOption(
+                acceptor, asio::ip::v6_only(true), "acceptor v6 only", logv2::LogSeverity::Info());
         }
 
         acceptor.non_blocking(true, ec);
@@ -1187,6 +1228,8 @@ ReactorHandle TransportLayerASIO::getReactor(WhichReactor which) {
 void TransportLayerASIO::_acceptConnection(GenericAcceptor& acceptor) {
     auto acceptCb = [this, &acceptor](const std::error_code& ec,
                                       ASIOSession::GenericSocket peerSocket) mutable {
+        transportLayerASIOhangBeforeAccept.pauseWhileSet();
+
         if (auto lk = stdx::lock_guard(_mutex); _isShutdown) {
             return;
         }
@@ -1214,6 +1257,16 @@ void TransportLayerASIO::_acceptConnection(GenericAcceptor& acceptor) {
             std::shared_ptr<ASIOSession> session(
                 new ASIOSession(this, std::move(peerSocket), true));
             _sep->startSession(std::move(session));
+        } catch (const asio::system_error& e) {
+            // Swallow connection reset errors. Connection reset errors classically present as
+            // asio::error::eof, but can bubble up as asio::error::invalid_argument when calling
+            // into socket.set_option().
+            if (e.code() != asio::error::eof && e.code() != asio::error::invalid_argument) {
+                LOGV2_WARNING(5746600,
+                              "Error accepting new connection: {error}",
+                              "Error accepting new connection",
+                              "error"_attr = e.code().message());
+            }
         } catch (const DBException& e) {
             LOGV2_WARNING(23023,
                           "Error accepting new connection: {error}",

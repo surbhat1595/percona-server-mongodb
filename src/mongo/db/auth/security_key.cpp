@@ -84,7 +84,7 @@ public:
             return boost::none;
         }
         const auto passwordDigest = mongo::createPasswordDigest(
-            internalSecurity.user->getName().getUser().toString(), password);
+            (*internalSecurity.getUser())->getName().getUser(), password);
 
         User::CredentialData credentials;
         if (!_copyCredentials(
@@ -154,7 +154,8 @@ bool setUpSecurityKey(const string& filename, ClusterAuthMode mode) {
         return false;
     }
 
-    internalSecurity.user->setCredentials(std::move(*credentials));
+    internalSecurity.credentials = credentials;
+    (*internalSecurity.getUser())->setCredentials(credentials.value());
 
     if (keyStrings.size() == 2) {
         credentials = generator.generate(keyStrings[1]);

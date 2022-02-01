@@ -61,8 +61,7 @@ constexpr Minutes kLogicalSessionDefaultTimeout =
 
 inline bool operator==(const LogicalSessionId& lhs, const LogicalSessionId& rhs) {
     return (lhs.getId() == rhs.getId()) && (lhs.getUid() == rhs.getUid()) &&
-        (lhs.getTxnNumber() == rhs.getTxnNumber()) && (lhs.getStmtId() == rhs.getStmtId()) &&
-        (lhs.getTxnUUID() == rhs.getTxnUUID());
+        (lhs.getTxnNumber() == rhs.getTxnNumber()) && (lhs.getTxnUUID() == rhs.getTxnUUID());
 }
 
 inline bool operator!=(const LogicalSessionId& lhs, const LogicalSessionId& rhs) {
@@ -79,9 +78,8 @@ inline bool operator!=(const LogicalSessionRecord& lhs, const LogicalSessionReco
 
 LogicalSessionId makeLogicalSessionIdForTest();
 
-LogicalSessionId makeLogicalSessionIdWithTxnNumberForTest(
-    boost::optional<LogicalSessionId> parentLsid = boost::none,
-    boost::optional<StmtId> stmtId = boost::none);
+LogicalSessionId makeLogicalSessionIdWithTxnNumberAndUUIDForTest(
+    boost::optional<LogicalSessionId> parentLsid = boost::none);
 
 LogicalSessionId makeLogicalSessionIdWithTxnUUIDForTest(
     boost::optional<LogicalSessionId> parentLsid = boost::none);
@@ -131,5 +129,51 @@ using LogicalSessionRecordSet = stdx::unordered_set<LogicalSessionRecord, Logica
 
 template <typename T>
 using LogicalSessionIdMap = stdx::unordered_map<LogicalSessionId, T, LogicalSessionIdHash>;
+
+class TxnNumberAndRetryCounter {
+public:
+    TxnNumberAndRetryCounter(TxnNumber txnNumber, boost::optional<TxnRetryCounter> txnRetryCounter)
+        : _txnNumber(txnNumber), _txnRetryCounter(txnRetryCounter) {}
+
+    TxnNumberAndRetryCounter(TxnNumber txnNumber)
+        : _txnNumber(txnNumber), _txnRetryCounter(boost::none) {}
+
+    BSONObj toBSON() const {
+        BSONObjBuilder bob;
+        bob.append(OperationSessionInfo::kTxnNumberFieldName, _txnNumber);
+        if (_txnRetryCounter) {
+            bob.append(OperationSessionInfo::kTxnRetryCounterFieldName, *_txnRetryCounter);
+        }
+        return bob.obj();
+    }
+
+    TxnNumber getTxnNumber() const {
+        return _txnNumber;
+    }
+
+    boost::optional<TxnRetryCounter> getTxnRetryCounter() const {
+        return _txnRetryCounter;
+    }
+
+    void setTxnNumber(const TxnNumber txnNumber) {
+        _txnNumber = txnNumber;
+    }
+
+    void setTxnRetryCounter(const boost::optional<TxnRetryCounter> txnRetryCounter) {
+        _txnRetryCounter = txnRetryCounter;
+    }
+
+private:
+    TxnNumber _txnNumber;
+    boost::optional<TxnRetryCounter> _txnRetryCounter;
+};
+
+inline bool operator==(const TxnNumberAndRetryCounter& l, const TxnNumberAndRetryCounter& r) {
+    return l.getTxnNumber() == r.getTxnNumber() && l.getTxnRetryCounter() == r.getTxnRetryCounter();
+}
+
+inline bool operator!=(const TxnNumberAndRetryCounter& l, const TxnNumberAndRetryCounter& r) {
+    return !(l == r);
+}
 
 }  // namespace mongo

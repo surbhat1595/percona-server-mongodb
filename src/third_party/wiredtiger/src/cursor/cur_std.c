@@ -856,7 +856,7 @@ __wt_cursor_cache_get(WT_SESSION_IMPL *session, const char *uri, uint64_t hash_v
              * than flag values, so fix them up according to the given configuration.
              */
             F_CLR(cursor,
-              WT_CURSTD_APPEND | WT_CURSTD_PREFIX_SEARCH | WT_CURSTD_RAW | WT_CURSTD_OVERWRITE);
+              WT_CURSTD_APPEND | WT_CURSTD_OVERWRITE | WT_CURSTD_PREFIX_SEARCH | WT_CURSTD_RAW);
             F_SET(cursor, overwrite_flag);
             /*
              * If this is a btree cursor, clear its read_once flag.
@@ -1084,7 +1084,7 @@ __wt_cursor_reconfigure(WT_CURSOR *cursor, const char *config)
         WT_ERR_NOTFOUND_OK(ret, false);
 
     /* Set the prefix search near flag. */
-    if ((ret = __wt_config_getones(session, config, "prefix_key", &cval)) == 0) {
+    if ((ret = __wt_config_getones(session, config, "prefix_search", &cval)) == 0) {
         if (cval.val) {
             /* Prefix search near configuration can only be used for row-store. */
             if (WT_CURSOR_RECNO(cursor))
@@ -1120,28 +1120,26 @@ err:
 int
 __wt_cursor_largest_key(WT_CURSOR *cursor)
 {
+    WT_CURSOR_BTREE *cbt;
     WT_DECL_ITEM(key);
     WT_DECL_RET;
     WT_SESSION_IMPL *session;
-    bool ignore_tombstone;
+    bool key_only;
 
-    ignore_tombstone = F_ISSET(cursor, WT_CURSTD_IGNORE_TOMBSTONE);
-    CURSOR_API_CALL(cursor, session, largest_key, NULL);
-
-    if (F_ISSET(session->txn, WT_TXN_SHARED_TS_READ))
-        WT_ERR_MSG(session, EINVAL, "largest key cannot be called with a read timestamp");
+    cbt = (WT_CURSOR_BTREE *)cursor;
+    key_only = F_ISSET(cursor, WT_CURSTD_KEY_ONLY);
+    CURSOR_API_CALL(cursor, session, largest_key, CUR2BT(cbt));
 
     WT_ERR(__wt_scr_alloc(session, 0, &key));
 
     /* Reset the cursor to give up the cursor position. */
     WT_ERR(cursor->reset(cursor));
 
-    /* Ignore deletion */
-    F_SET(cursor, WT_CURSTD_IGNORE_TOMBSTONE);
+    /* Set the flag to bypass value read. */
+    F_SET(cursor, WT_CURSTD_KEY_ONLY);
 
-    /* Call cursor prev with read uncommitted isolation level. */
-    WT_WITH_TXN_ISOLATION(session, WT_ISO_READ_UNCOMMITTED, ret = cursor->prev(cursor));
-    WT_ERR(ret);
+    /* Call btree cursor prev to get the largest key. */
+    WT_ERR(__wt_btcur_prev(cbt, false));
 
     /* Copy the key as we will reset the cursor after that. */
     WT_ERR(__wt_buf_set(session, key, cursor->key.data, cursor->key.size));
@@ -1151,8 +1149,8 @@ __wt_cursor_largest_key(WT_CURSOR *cursor)
     F_SET(cursor, WT_CURSTD_KEY_EXT);
 
 err:
-    if (!ignore_tombstone)
-        F_CLR(cursor, WT_CURSTD_IGNORE_TOMBSTONE);
+    if (!key_only)
+        F_CLR(cursor, WT_CURSTD_KEY_ONLY);
     __wt_scr_free(session, &key);
     if (ret != 0)
         WT_TRET(cursor->reset(cursor));

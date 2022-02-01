@@ -42,29 +42,72 @@ namespace process_health {
  */
 class HealthObserverBase : public HealthObserver {
 public:
-    HealthObserverBase(ClockSource* clockSource);
+    explicit HealthObserverBase(ServiceContext* svcCtx);
     virtual ~HealthObserverBase() = default;
+
+    ClockSource* clockSource() const {
+        return _svcCtx->getPreciseClockSource();
+    }
+
+    TickSource* tickSource() const {
+        return _svcCtx->getTickSource();
+    }
+
+    ServiceContext* svcCtx() const {
+        return _svcCtx;
+    }
+
+    /**
+     * @return Milliseconds the shortest interval it is safe to repeat this check on.
+     */
+    virtual Milliseconds minimalCheckInterval() const {
+        return Milliseconds(10);
+    }
 
     // Implements the common logic for periodic checks.
     // Every observer should implement periodicCheckImpl() for specific tests.
-    void periodicCheck(FaultFacetsContainerFactory& factory) final;
+    void periodicCheck(FaultFacetsContainerFactory& factory,
+                       std::shared_ptr<executor::TaskExecutor> taskExecutor,
+                       CancellationToken token) override;
+
+    HealthObserverLivenessStats getStats() const override;
+
+    // Common params for every health check.
+    struct PeriodicHealthCheckContext {
+        CancellationToken cancellationToken;
+        std::shared_ptr<executor::TaskExecutor> taskExecutor;
+    };
 
 protected:
     /**
      * The main method every health observer should implement for a particular
      * health check it does.
      *
-     * @param optionalExistingFacet if a fault facet of this particular type already exists
-     *        (if there is an ongoing incident already)
+     * @return The result of a complete health check
      */
-    // TODO(SERVER-59592): futurize this.
-    virtual FaultFacetPtr periodicCheckImpl(FaultFacetPtr optionalExistingFacet) = 0;
+    virtual Future<HealthCheckStatus> periodicCheckImpl(
+        PeriodicHealthCheckContext&& periodicCheckContext) = 0;
 
-    ClockSource* const _clockSource;
+    // Helper method to create a status without errors.
+    HealthCheckStatus makeHealthyStatus() const;
 
-    HealthObserverIntensity _intensity = HealthObserverIntensity::kNonCritical;
+    // Make a generic error status.
+    HealthCheckStatus makeSimpleFailedStatus(double severity, std::vector<Status>&& failures) const;
 
-    HealthObserverIntensity getIntensity();
+    HealthObserverLivenessStats getStatsLocked(WithLock) const;
+
+    ServiceContext* const _svcCtx;
+
+    mutable Mutex _mutex =
+        MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(1), "HealthObserverBase::_mutex");
+
+    // Indicates if there any check running to prevent running checks concurrently.
+    bool _currentlyRunningHealthCheck = false;
+    // Enforces the safety interval.
+    Date_t _lastTimeTheCheckWasRun;
+    Date_t _lastTimeCheckCompleted;
+    int _completedChecksCount = 0;
+    int _completedChecksWithFaultCount = 0;
 };
 
 }  // namespace process_health

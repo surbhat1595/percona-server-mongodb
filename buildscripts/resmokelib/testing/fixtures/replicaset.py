@@ -11,8 +11,6 @@ import pymongo.write_concern
 
 import buildscripts.resmokelib.testing.fixtures.interface as interface
 
-USE_LEGACY_MULTIVERSION = False
-
 
 def compare_timestamp(timestamp1, timestamp2):
     """Compare the timestamp object ts part."""
@@ -42,21 +40,13 @@ def compare_optime(optime1, optime2):
 class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-instance-attributes, too-many-public-methods
     """Fixture which provides JSTests with a replica set to run against."""
 
-    # Error response codes copied from mongo/base/error_codes.yml.
-    _NODE_NOT_FOUND = 74
-    _NEW_REPLICA_SET_CONFIGURATION_INCOMPATIBLE = 103
-    _CONFIGURATION_IN_PROGRESS = 109
-    _CURRENT_CONFIG_NOT_COMMITTED_YET = 308
-    _INTERRUPTED_DUE_TO_REPL_STATE_CHANGE = 11602
-
     def __init__(  # pylint: disable=too-many-arguments, too-many-locals
             self, logger, job_num, fixturelib, mongod_executable=None, mongod_options=None,
             dbpath_prefix=None, preserve_dbpath=False, num_nodes=2, start_initial_sync_node=False,
             write_concern_majority_journal_default=None, auth_options=None,
             replset_config_options=None, voting_secondaries=True, all_nodes_electable=False,
-            use_replica_set_connection_string=None, linear_chain=False, mixed_bin_versions=None,
-            default_read_concern=None, default_write_concern=None, shard_logging_prefix=None,
-            replicaset_logging_prefix=None):
+            use_replica_set_connection_string=None, linear_chain=False, default_read_concern=None,
+            default_write_concern=None, shard_logging_prefix=None, replicaset_logging_prefix=None):
         """Initialize ReplicaSetFixture."""
 
         interface.ReplFixture.__init__(self, logger, job_num, fixturelib,
@@ -76,7 +66,6 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
         self.use_replica_set_connection_string = use_replica_set_connection_string
         self.default_read_concern = default_read_concern
         self.default_write_concern = default_write_concern
-        self.mixed_bin_versions = mixed_bin_versions
         self.shard_logging_prefix = shard_logging_prefix
         self.replicaset_logging_prefix = replicaset_logging_prefix
         self.num_nodes = num_nodes
@@ -130,17 +119,6 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
         if self.initial_sync_node:
             self.initial_sync_node.setup()
             self.initial_sync_node.await_ready()
-
-        # Legacy multiversion line
-        if self.mixed_bin_versions:
-            for i in range(self.num_nodes):
-                print("node[i] version: " + self.nodes[i].mongod_executable +
-                      "mixed_bin_version[i]: " + self.mixed_bin_versions[i])
-                if self.nodes[i].mongod_executable != self.mixed_bin_versions[i]:
-                    msg = (f"Executable of node{i}: {self.nodes[i].mongod_executable} does not "
-                           f"match the executable assigned by mixedBinVersions: "
-                           f"{self.mixed_bin_versions[i]}.")
-                    raise self.fixturelib.ServerFailure(msg)
 
         # We need only to wait to connect to the first node of the replica set because we first
         # initiate it as a single node replica set.
@@ -208,7 +186,10 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
             # nodes are subsequently added to the set, since such nodes cannot set their FCV to
             # "latest". Therefore, we make sure the primary is "last-lts" FCV before adding in
             # nodes of different binary versions to the replica set.
-            client.admin.command({"setFeatureCompatibilityVersion": self.fcv})
+            client.admin.command({
+                "setFeatureCompatibilityVersion": self.fcv,
+                "fromConfigServer": True,
+            })
 
         if self.nodes[1:]:
             # Wait to connect to each of the secondaries before running the replSetReconfig
@@ -251,11 +232,13 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
                 # These error codes may be transient, and so we retry the reconfig with a
                 # (potentially) higher config version. We should not receive these codes
                 # indefinitely.
+                # pylint: disable=too-many-boolean-expressions
                 if (err.code != ReplicaSetFixture._NEW_REPLICA_SET_CONFIGURATION_INCOMPATIBLE
                         and err.code != ReplicaSetFixture._CURRENT_CONFIG_NOT_COMMITTED_YET
                         and err.code != ReplicaSetFixture._CONFIGURATION_IN_PROGRESS
                         and err.code != ReplicaSetFixture._NODE_NOT_FOUND
-                        and err.code != ReplicaSetFixture._INTERRUPTED_DUE_TO_REPL_STATE_CHANGE):
+                        and err.code != ReplicaSetFixture._INTERRUPTED_DUE_TO_REPL_STATE_CHANGE
+                        and err.code != ReplicaSetFixture._INTERRUPTED_DUE_TO_STORAGE_CHANGE):
                     msg = ("Operation failure while setting up the "
                            "replica set fixture: {}").format(err)
                     self.logger.error(msg)
@@ -291,7 +274,7 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
                     raise self.fixturelib.ServerFailure(msg)
                 time.sleep(5)  # Wait a little bit before trying again.
 
-    def await_last_op_committed(self):
+    def await_last_op_committed(self, timeout_secs=None):
         """Wait for the last majority committed op to be visible."""
         primary_client = self.get_primary().mongo_client()
         interface.authenticate(primary_client, self.auth_options)
@@ -310,7 +293,8 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
 
             return len(up_to_date_nodes) == len(self.nodes)
 
-        self._await_cmd_all_nodes(check_rcmaj_optime, "waiting for last committed optime")
+        self._await_cmd_all_nodes(check_rcmaj_optime, "waiting for last committed optime",
+                                  timeout_secs)
 
     def await_ready(self):
         """Wait for replica set to be ready."""
@@ -346,9 +330,13 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
             while True:
                 self.logger.info("Waiting for secondary on port %d to become available.",
                                  secondary.port)
-                is_secondary = client.admin.command("isMaster")["secondary"]
-                if is_secondary:
-                    break
+                try:
+                    is_secondary = client.admin.command("isMaster")["secondary"]
+                    if is_secondary:
+                        break
+                except pymongo.errors.OperationFailure as err:
+                    if err.code != ReplicaSetFixture._INTERRUPTED_DUE_TO_STORAGE_CHANGE:
+                        raise
                 time.sleep(0.1)  # Wait a little bit before trying again.
             self.logger.info("Secondary on port %d is now available.", secondary.port)
 
@@ -508,7 +496,7 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
 
         return self._await_cmd_all_nodes(is_primary, "waiting for a primary", timeout_secs)
 
-    def _await_cmd_all_nodes(self, fn, msg, timeout_secs=30):
+    def _await_cmd_all_nodes(self, fn, msg, timeout_secs=None):
         """Run `fn` on all nodes until it returns a truthy value.
 
         Return the node for which makes `fn` become truthy.
@@ -517,6 +505,8 @@ class ReplicaSetFixture(interface.ReplFixture):  # pylint: disable=too-many-inst
         the MongoDFixture corresponding to that node.
         """
 
+        if timeout_secs is None:
+            timeout_secs = self.AWAIT_REPL_TIMEOUT_MINS * 60
         start = time.time()
         clients = {}
         while True:

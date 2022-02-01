@@ -99,10 +99,6 @@ struct CollectionUpdateArgs {
 
     // Set if an OpTime was reserved for the update ahead of time.
     boost::optional<OplogSlot> oplogSlot = boost::none;
-
-    // When true, store the pre- or post- image for findAndModify commands in the side collection.
-    // When false, store the image in the oplog.
-    bool storeImageInSideCollection = false;
 };
 
 /**
@@ -517,7 +513,8 @@ public:
     virtual void setRecordPreImages(OperationContext* opCtx, bool val) = 0;
 
     virtual bool isChangeStreamPreAndPostImagesEnabled() const = 0;
-    virtual void setChangeStreamPreAndPostImages(OperationContext* opCtx, bool val) = 0;
+    virtual void setChangeStreamPreAndPostImages(OperationContext* opCtx,
+                                                 ChangeStreamPreAndPostImagesOptions val) = 0;
 
     /**
      * Returns true if this is a temporary collection.
@@ -525,10 +522,34 @@ public:
     virtual bool isTemporary() const = 0;
 
     /**
-     * Returns true if this collection is clustered on _id values. That is, its RecordIds are _id
-     * values and has no separate _id index.
+     * Returns true if the time-series collection may have mixed-schema data.
+     *
+     * If FCV < 5.2 or if this is not a time-series collection, returns boost::none.
+     */
+    virtual boost::optional<bool> getTimeseriesBucketsMayHaveMixedSchemaData() const = 0;
+
+    /**
+     * Sets the 'timeseriesBucketsMayHaveMixedSchemaData' catalog entry flag to 'setting' for this
+     * collection.
+     *
+     * Throws if this is not a time-series collection.
+     */
+    virtual void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
+                                                            boost::optional<bool> setting) = 0;
+
+    /**
+     * Returns true if the passed in time-series bucket document contains mixed-schema data.
+     */
+    virtual bool doesTimeseriesBucketsDocContainMixedSchemaData(
+        const BSONObj& bucketsDoc) const = 0;
+
+    /*
+     * Returns true if this collection is clustered. That is, its RecordIds store the value of the
+     * cluster key. If the collection is clustered on _id, there is no separate _id index.
      */
     virtual bool isClustered() const = 0;
+
+    virtual boost::optional<ClusteredCollectionInfo> getClusteredInfo() const = 0;
 
     /**
      * Updates the expireAfterSeconds setting for a clustered TTL index in this Collection and the
@@ -564,6 +585,12 @@ public:
      * query planner.
      */
     virtual void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) = 0;
+
+    /*
+     * Converts the the given index to be unique.
+     * This is a one-way transformation - the uniqueness constraint cannot be removed.
+     */
+    virtual void updateUniqueSetting(OperationContext* opCtx, StringData idxName) = 0;
 
     /**
      * Removes invalid index options on all indexes in this collection. Returns a list of index

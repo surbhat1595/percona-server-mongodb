@@ -53,6 +53,7 @@
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_coordinator.h"
+#include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/s/sharding_state.h"
@@ -68,6 +69,7 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/s/request_types/ensure_chunk_version_is_greater_than_gen.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/exit.h"
@@ -158,10 +160,10 @@ const ServiceContext::ConstructorActionRegisterer migrationUtilExecutorRegistere
     [](ServiceContext* service) { migrationUtilExecutorDecoration(service).shutDownAndJoin(); }};
 
 template <typename Cmd>
-void sendToRecipient(OperationContext* opCtx,
-                     const ShardId& recipientId,
-                     const Cmd& cmd,
-                     const BSONObj& passthroughFields = {}) {
+void sendWriteCommandToRecipient(OperationContext* opCtx,
+                                 const ShardId& recipientId,
+                                 const Cmd& cmd,
+                                 const BSONObj& passthroughFields = {}) {
     auto recipientShard =
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, recipientId));
 
@@ -175,7 +177,8 @@ void sendToRecipient(OperationContext* opCtx,
         cmdBSON,
         Shard::RetryPolicy::kIdempotent);
 
-    uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(response));
+    uassertStatusOK(response.getStatus());
+    uassertStatusOK(getStatusFromWriteCommandReply(response.getValue().response));
 }
 
 /**
@@ -347,7 +350,6 @@ bool deletionTaskUuidMatchesFilteringMetadataUuid(
 ExecutorFuture<void> cleanUpRange(ServiceContext* serviceContext,
                                   const std::shared_ptr<executor::ThreadPoolTaskExecutor>& executor,
                                   const RangeDeletionTask& deletionTask) {
-
     return AsyncTry([=]() mutable {
                ThreadClient tc(kRangeDeletionThreadName, serviceContext);
                {
@@ -358,33 +360,45 @@ ExecutorFuture<void> cleanUpRange(ServiceContext* serviceContext,
                auto opCtx = uniqueOpCtx.get();
                opCtx->setAlwaysInterruptAtStepDownOrUp();
 
-               AutoGetCollection autoColl(opCtx, deletionTask.getNss(), MODE_IS);
-               auto csr = CollectionShardingRuntime::get(opCtx, deletionTask.getNss());
-               // Keep the collection metadata from changing for the rest of this scope.
-               auto csrLock = CollectionShardingRuntime::CSRLock::lockShared(opCtx, csr);
-               auto optCollDescr = csr->getCurrentMetadataIfKnown();
-               uassert(
-                   ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist,
-                   str::stream()
-                       << "Even after forced refresh, filtering metadata for namespace in "
-                          "deletion task "
-                       << (optCollDescr
-                               ? (optCollDescr->isSharded()
-                                      ? " has UUID that does not match UUID of the deletion task"
-                                      : " is unsharded")
-                               : " is not known"),
-                   deletionTaskUuidMatchesFilteringMetadataUuid(opCtx, optCollDescr, deletionTask));
+               const NamespaceString& nss = deletionTask.getNss();
 
-               LOGV2(22026,
-                     "Submitting range deletion task",
-                     "deletionTask"_attr = redact(deletionTask.toBSON()),
-                     "migrationId"_attr = deletionTask.getId());
+               while (true) {
+                   {
+                       // Holding the locks while enqueueing the task protects against possible
+                       // concurrent cleanups of the filtering metadata, that be serialized
+                       AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+                       auto csr = CollectionShardingRuntime::get(opCtx, nss);
+                       auto csrLock = CollectionShardingRuntime::CSRLock::lockShared(opCtx, csr);
+                       auto optCollDescr = csr->getCurrentMetadataIfKnown();
 
-               const auto whenToClean = deletionTask.getWhenToClean() == CleanWhenEnum::kNow
-                   ? CollectionShardingRuntime::kNow
-                   : CollectionShardingRuntime::kDelayed;
+                       if (optCollDescr) {
+                           uassert(ErrorCodes::
+                                       RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist,
+                                   str::stream() << "Filtering metadata for " << nss
+                                                 << (optCollDescr->isSharded()
+                                                         ? " has UUID that does not match UUID of "
+                                                           "the deletion task"
+                                                         : " is unsharded"),
+                                   deletionTaskUuidMatchesFilteringMetadataUuid(
+                                       opCtx, optCollDescr, deletionTask));
 
-               return csr->cleanUpRange(deletionTask.getRange(), deletionTask.getId(), whenToClean);
+                           LOGV2(22026,
+                                 "Submitting range deletion task",
+                                 "deletionTask"_attr = redact(deletionTask.toBSON()),
+                                 "migrationId"_attr = deletionTask.getId());
+
+                           const auto whenToClean =
+                               deletionTask.getWhenToClean() == CleanWhenEnum::kNow
+                               ? CollectionShardingRuntime::kNow
+                               : CollectionShardingRuntime::kDelayed;
+
+                           return csr->cleanUpRange(
+                               deletionTask.getRange(), deletionTask.getId(), whenToClean);
+                       }
+                   }
+
+                   refreshFilteringMetadataUntilSuccess(opCtx, nss);
+               }
            })
         .until([](Status status) mutable {
             // Resubmit the range for deletion on a RangeOverlapConflict error.
@@ -405,8 +419,6 @@ ExecutorFuture<void> submitRangeDeletionTask(OperationContext* opCtx,
                 stdx::lock_guard<Client> lk(*tc.get());
                 tc->setSystemOperationKillableByStepdown(lk);
             }
-            auto uniqueOpCtx = tc->makeOperationContext();
-            auto opCtx = uniqueOpCtx.get();
 
             uassert(
                 ErrorCodes::ResumableRangeDeleterDisabled,
@@ -414,36 +426,6 @@ ExecutorFuture<void> submitRangeDeletionTask(OperationContext* opCtx,
                     << "Not submitting range deletion task " << redact(deletionTask.toBSON())
                     << " because the disableResumableRangeDeleter server parameter is set to true",
                 !disableResumableRangeDeleter.load());
-
-            // Make sure the collection metadata is up-to-date before submitting.
-            boost::optional<CollectionMetadata> optCollDescr;
-            {
-                AutoGetCollection autoColl(opCtx, deletionTask.getNss(), MODE_IS);
-                auto csr = CollectionShardingRuntime::get(opCtx, deletionTask.getNss());
-                optCollDescr = csr->getCurrentMetadataIfKnown();
-            }
-
-            if (!deletionTaskUuidMatchesFilteringMetadataUuid(opCtx, optCollDescr, deletionTask)) {
-
-                // If the collection's filtering metadata is not known, is unsharded, or its
-                // UUID does not match the UUID of the deletion task, force a filtering metadata
-                // refresh, because this node may have just stepped up and therefore may have a
-                // stale cache.
-                LOGV2(22024,
-                      "Filtering metadata for this range deletion task may be outdated; "
-                      "forcing refresh",
-                      "deletionTask"_attr = redact(deletionTask.toBSON()),
-                      "error"_attr =
-                          (optCollDescr ? (optCollDescr->isSharded()
-                                               ? "Collection has UUID that does not match "
-                                                 "UUID of the deletion task"
-                                               : "Collection is unsharded")
-                                        : "Collection's sharding state is not known"),
-                      "namespace"_attr = deletionTask.getNss(),
-                      "migrationId"_attr = deletionTask.getId());
-
-                refreshFilteringMetadataUntilSuccess(opCtx, deletionTask.getNss());
-            }
 
             return AsyncTry([=]() {
                        return cleanUpRange(serviceContext, executor, deletionTask)
@@ -459,7 +441,7 @@ ExecutorFuture<void> submitRangeDeletionTask(OperationContext* opCtx,
                                LOGV2(55557,
                                      "cleanUpRange failed due to keyPattern shorter than range "
                                      "deletion bounds. Refreshing collection metadata to retry.",
-                                     "nss"_attr = deletionTask.getNss(),
+                                     logAttrs(deletionTask.getNss()),
                                      "status"_attr = redact(status));
 
                                onShardVersionMismatch(
@@ -731,10 +713,11 @@ void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
 
     hangInDeleteRangeDeletionOnRecipientInterruptible.pauseWhileSet(opCtx);
 
-    sendToRecipient(opCtx,
-                    recipientId,
-                    deleteOp,
-                    BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority));
+    sendWriteCommandToRecipient(
+        opCtx,
+        recipientId,
+        deleteOp,
+        BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority));
 
     if (hangInDeleteRangeDeletionOnRecipientThenSimulateErrorUninterruptible.shouldFail()) {
         hangInDeleteRangeDeletionOnRecipientThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);
@@ -775,7 +758,7 @@ void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
             hangInReadyRangeDeletionOnRecipientInterruptible.pauseWhileSet(newOpCtx);
 
             try {
-                sendToRecipient(
+                sendWriteCommandToRecipient(
                     newOpCtx,
                     recipientId,
                     updateOp,
@@ -818,7 +801,7 @@ void advanceTransactionOnRecipient(OperationContext* opCtx,
                                   << "txnNumber" << currentTxnNumber + 1);
 
     hangInAdvanceTxnNumInterruptible.pauseWhileSet(opCtx);
-    sendToRecipient(opCtx, recipientId, updateOp, passthroughFields);
+    sendWriteCommandToRecipient(opCtx, recipientId, updateOp, passthroughFields);
 
     if (hangInAdvanceTxnNumThenSimulateErrorUninterruptible.shouldFail()) {
         hangInAdvanceTxnNumThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);
@@ -969,12 +952,17 @@ void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss)
     LOGV2_DEBUG(4798501, 2, "Starting migration recovery", "namespace"_attr = nss);
 
     unsigned migrationRecoveryCount = 0;
+
+    const auto acquireCSOnRecipient =
+        feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabled(
+            serverGlobalParams.featureCompatibility);
     PersistentTaskStore<MigrationCoordinatorDocument> store(
         NamespaceString::kMigrationCoordinatorsNamespace);
     store.forEach(
         opCtx,
         BSON(MigrationCoordinatorDocument::kNssFieldName << nss.toString()),
-        [&opCtx, &migrationRecoveryCount](const MigrationCoordinatorDocument& doc) {
+        [&opCtx, &migrationRecoveryCount, acquireCSOnRecipient](
+            const MigrationCoordinatorDocument& doc) {
             LOGV2_DEBUG(4798502,
                         2,
                         "Recovering migration",
@@ -990,7 +978,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss)
 
             if (doc.getDecision()) {
                 // The decision is already known.
-                coordinator.completeMigration(opCtx);
+                coordinator.completeMigration(opCtx, acquireCSOnRecipient);
                 return true;
             }
 
@@ -1061,10 +1049,131 @@ void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss)
                 coordinator.setMigrationDecision(DecisionEnum::kCommitted);
             }
 
-            coordinator.completeMigration(opCtx);
+            coordinator.completeMigration(opCtx, acquireCSOnRecipient);
             setFilteringMetadata();
             return true;
         });
+}
+
+ExecutorFuture<void> launchReleaseCriticalSectionOnRecipientFuture(
+    OperationContext* opCtx,
+    const ShardId& recipientShardId,
+    const NamespaceString& nss,
+    const MigrationSessionId& sessionId) {
+    const auto serviceContext = opCtx->getServiceContext();
+    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+
+    return ExecutorFuture<void>(executor).then([=] {
+        ThreadClient tc("releaseRecipientCritSec", serviceContext);
+        {
+            stdx::lock_guard<Client> lk(*tc.get());
+            tc->setSystemOperationKillableByStepdown(lk);
+        }
+        auto uniqueOpCtx = tc->makeOperationContext();
+        auto opCtx = uniqueOpCtx.get();
+
+        const auto recipientShard =
+            uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, recipientShardId));
+
+        BSONObjBuilder builder;
+        builder.append("_recvChunkReleaseCritSec", nss.ns());
+        sessionId.append(&builder);
+        const auto commandObj = CommandHelpers::appendMajorityWriteConcern(builder.obj());
+
+        retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
+            opCtx,
+            "release migration critical section on recipient",
+            [&](OperationContext* newOpCtx) {
+                try {
+                    const auto response = recipientShard->runCommandWithFixedRetryAttempts(
+                        newOpCtx,
+                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                        NamespaceString::kAdminDb.toString(),
+                        commandObj,
+                        Shard::RetryPolicy::kIdempotent);
+
+                    uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(response));
+                } catch (const ExceptionFor<ErrorCodes::ShardNotFound>& exShardNotFound) {
+                    LOGV2(5899106,
+                          "Failed to release critical section on recipient",
+                          "shardId"_attr = recipientShardId,
+                          "sessionId"_attr = sessionId,
+                          "error"_attr = exShardNotFound);
+                };
+            });
+    });
+}
+
+void persistMigrationRecipientRecoveryDocument(
+    OperationContext* opCtx, const MigrationRecipientRecoveryDocument& migrationRecipientDoc) {
+    PersistentTaskStore<MigrationRecipientRecoveryDocument> store(
+        NamespaceString::kMigrationRecipientsNamespace);
+    try {
+        store.add(opCtx, migrationRecipientDoc, WriteConcerns::kMajorityWriteConcern);
+    } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
+        // Convert a DuplicateKey error to an anonymous error.
+        uasserted(6064502,
+                  str::stream()
+                      << "While attempting to write migration recipient information for migration "
+                      << ", found document with the same migration id. Attempted migration: "
+                      << migrationRecipientDoc.toBSON());
+    }
+}
+
+void deleteMigrationRecipientRecoveryDocument(OperationContext* opCtx, const UUID& migrationId) {
+    // Before deleting the migration recipient recovery document, ensure that in the case of a
+    // crash, the node will start-up from a configTime that is inclusive of the migration that was
+    // committed during the critical section.
+    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
+
+    PersistentTaskStore<MigrationRecipientRecoveryDocument> store(
+        NamespaceString::kMigrationRecipientsNamespace);
+    store.remove(opCtx,
+                 BSON(MigrationRecipientRecoveryDocument::kIdFieldName << migrationId),
+                 ShardingCatalogClient::kMajorityWriteConcern);
+}
+
+void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx) {
+    LOGV2_DEBUG(6064504, 2, "Starting migration recipient step-up recovery");
+
+    unsigned long long ongoingMigrationRecipientsCount = 0;
+
+    PersistentTaskStore<MigrationRecipientRecoveryDocument> store(
+        NamespaceString::kMigrationRecipientsNamespace);
+
+    store.forEach(
+        opCtx,
+        BSONObj{},
+        [&opCtx, &ongoingMigrationRecipientsCount](const MigrationRecipientRecoveryDocument& doc) {
+            invariant(ongoingMigrationRecipientsCount == 0,
+                      str::stream()
+                          << "Upon step-up a second migration recipient recovery document was found"
+                          << redact(doc.toBSON()));
+            ongoingMigrationRecipientsCount++;
+            LOGV2_DEBUG(5899102,
+                        3,
+                        "Found ongoing migration recipient critical section on step-up",
+                        "migrationRecipientCoordinatorDoc"_attr = redact(doc.toBSON()));
+
+            const auto& nss = doc.getNss();
+
+            // Register this receiveChunk on the ActiveMigrationsRegistry before completing step-up
+            // to prevent a new migration from starting while a receiveChunk was ongoing.
+            auto scopedReceiveChunk(
+                uassertStatusOK(ActiveMigrationsRegistry::get(opCtx).registerReceiveChunk(
+                    opCtx, nss, doc.getRange(), doc.getDonorShardIdForLoggingPurposesOnly())));
+
+            const auto mdm = MigrationDestinationManager::get(opCtx);
+            uassertStatusOK(
+                mdm->restoreRecoveredMigrationState(opCtx, std::move(scopedReceiveChunk), doc));
+
+            return true;
+        });
+
+    LOGV2_DEBUG(6064505,
+                2,
+                "Finished migration recipient step-up recovery",
+                "ongoingRecipientCritSecCount"_attr = ongoingMigrationRecipientsCount);
 }
 
 }  // namespace migrationutil

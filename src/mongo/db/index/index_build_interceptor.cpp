@@ -59,8 +59,8 @@ MONGO_FAIL_POINT_DEFINE(hangIndexBuildDuringDrainWritesPhaseSecond);
 
 IndexBuildInterceptor::IndexBuildInterceptor(OperationContext* opCtx, IndexCatalogEntry* entry)
     : _indexCatalogEntry(entry),
-      _sideWritesTable(
-          opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(opCtx)),
+      _sideWritesTable(opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
+          opCtx, KeyFormat::Long)),
       _skippedRecordTracker(opCtx, entry, boost::none) {
 
     if (entry->descriptor()->unique()) {
@@ -80,11 +80,6 @@ IndexBuildInterceptor::IndexBuildInterceptor(OperationContext* opCtx,
       _skippedRecordTracker(opCtx, entry, skippedRecordTrackerIdent),
       _skipNumAppliedCheck(true) {
 
-    ScopeGuard finalizeTableOnFailure([&] {
-        _sideWritesTable->finalizeTemporaryTable(opCtx,
-                                                 TemporaryRecordStore::FinalizationAction::kDelete);
-    });
-
     auto dupKeyTrackerIdentExists = duplicateKeyTrackerIdent ? true : false;
     uassert(ErrorCodes::BadValue,
             str::stream() << "Resume info must contain the duplicate key tracker ident ["
@@ -95,17 +90,14 @@ IndexBuildInterceptor::IndexBuildInterceptor(OperationContext* opCtx,
         _duplicateKeyTracker =
             std::make_unique<DuplicateKeyTracker>(opCtx, entry, duplicateKeyTrackerIdent.get());
     }
-
-    finalizeTableOnFailure.dismiss();
 }
 
-void IndexBuildInterceptor::finalizeTemporaryTables(
-    OperationContext* opCtx, TemporaryRecordStore::FinalizationAction action) {
-    _sideWritesTable->finalizeTemporaryTable(opCtx, action);
+void IndexBuildInterceptor::keepTemporaryTables() {
+    _sideWritesTable->keep();
     if (_duplicateKeyTracker) {
-        _duplicateKeyTracker->finalizeTemporaryTable(opCtx, action);
+        _duplicateKeyTracker->keepTemporaryTable();
     }
-    _skippedRecordTracker.finalizeTemporaryTable(opCtx, action);
+    _skippedRecordTracker.keepTemporaryTable();
 }
 
 Status IndexBuildInterceptor::recordDuplicateKey(OperationContext* opCtx,

@@ -142,6 +142,12 @@ MONGO_FAIL_POINT_DEFINE(doNotRemoveNewlyAddedOnHeartbeats);
 MONGO_FAIL_POINT_DEFINE(hangDuringAutomaticReconfig);
 // Make reconfig command hang before validating new config.
 MONGO_FAIL_POINT_DEFINE(ReconfigHangBeforeConfigValidationCheck);
+// Blocks after reconfig runs.
+MONGO_FAIL_POINT_DEFINE(hangAfterReconfig);
+// Allows skipping fetching the config from ping sender.
+MONGO_FAIL_POINT_DEFINE(skipBeforeFetchingConfig);
+// Hang after grabbing the RSTL but before we start rejecting writes.
+MONGO_FAIL_POINT_DEFINE(stepdownHangAfterGrabbingRSTL);
 
 // Number of times we tried to go live as a secondary.
 Counter64 attemptsToBecomeSecondary;
@@ -769,30 +775,30 @@ void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
                   "Initial Sync has been cancelled",
                   "error"_attr = opTimeStatus.getStatus());
             return;
-        } else if (opTimeStatus == ErrorCodes::InvalidSyncSource &&
-                   _initialSyncer->getInitialSyncMethod() != "logical") {
-            LOGV2(5780600,
-                  "Falling back to logical initial sync: {error}",
-                  "Falling back to logical initial sync",
-                  "error"_attr = opTimeStatus.getStatus());
-            lock.unlock();
-            clearSyncSourceDenylist();
-            _scheduleWorkAt(_replExecutor->now(),
-                            [=](const mongo::executor::TaskExecutor::CallbackArgs& cbData) {
-                                _startInitialSync(
-                                    cc().makeOperationContext().get(),
-                                    [this](const StatusWith<OpTimeAndWallTime>& opTimeStatus) {
-                                        _initialSyncerCompletionFunction(opTimeStatus);
-                                    },
-                                    true /* fallbackToLogical */);
-                            });
-            return;
         } else if (!opTimeStatus.isOK()) {
             if (_inShutdown) {
                 LOGV2(21325,
                       "Initial Sync failed during shutdown due to {error}",
                       "Initial Sync failed during shutdown",
                       "error"_attr = opTimeStatus.getStatus());
+                return;
+            } else if (opTimeStatus == ErrorCodes::InvalidSyncSource &&
+                       _initialSyncer->getInitialSyncMethod() != "logical") {
+                LOGV2(5780600,
+                      "Falling back to logical initial sync: {error}",
+                      "Falling back to logical initial sync",
+                      "error"_attr = opTimeStatus.getStatus());
+                lock.unlock();
+                clearSyncSourceDenylist();
+                _scheduleWorkAt(_replExecutor->now(),
+                                [=](const mongo::executor::TaskExecutor::CallbackArgs& cbData) {
+                                    _startInitialSync(
+                                        cc().makeOperationContext().get(),
+                                        [this](const StatusWith<OpTimeAndWallTime>& opTimeStatus) {
+                                            _initialSyncerCompletionFunction(opTimeStatus);
+                                        },
+                                        true /* fallbackToLogical */);
+                                });
                 return;
             } else {
                 LOGV2_ERROR(21416,
@@ -2626,6 +2632,8 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
     AutoGetRstlForStepUpStepDown arsd(
         this, opCtx, ReplicationCoordinator::OpsKillingStateTransitionEnum::kStepDown, deadline);
 
+    stepdownHangAfterGrabbingRSTL.pauseWhileSet();
+
     stdx::unique_lock<Latch> lk(_mutex);
 
     opCtx->checkForInterrupt();
@@ -2961,6 +2969,24 @@ Status ReplicationCoordinatorImpl::checkCanServeReadsFor_UNSAFE(OperationContext
         }
     }
 
+    // Non-oplog local reads from the user are not allowed during initial sync when the initial
+    // sync method disallows it.  "isFromUserConnection" means DBDirectClient reads are not blocked;
+    // "isInternalClient" means reads from other cluster members are not blocked.
+    if (!isPrimaryOrSecondary && getReplicationMode() == modeReplSet && ns.db() == kLocalDB &&
+        client->isFromUserConnection()) {
+        stdx::lock_guard<Latch> lock(_mutex);
+        auto isInternalClient = !client->session() ||
+            (client->session()->getTags() & transport::Session::kInternalClient);
+        if (!isInternalClient && _memberState.startup2() && _initialSyncer &&
+            !_initialSyncer->allowLocalDbAccess()) {
+            return Status{ErrorCodes::NotPrimaryOrSecondary,
+                          str::stream() << "Local reads are not allowed during initial sync with "
+                                           "current initial sync method: "
+                                        << _initialSyncer->getInitialSyncMethod()};
+        }
+    }
+
+
     if (canAcceptWritesFor_UNSAFE(opCtx, ns)) {
         return Status::OK();
     }
@@ -3035,7 +3061,9 @@ StatusWith<BSONObj> ReplicationCoordinatorImpl::prepareReplSetUpdatePositionComm
 }
 
 Status ReplicationCoordinatorImpl::processReplSetGetStatus(
-    BSONObjBuilder* response, ReplSetGetStatusResponseStyle responseStyle) {
+    OperationContext* opCtx,
+    BSONObjBuilder* response,
+    ReplSetGetStatusResponseStyle responseStyle) {
 
     BSONObj initialSyncProgress;
     if (responseStyle == ReplSetGetStatusResponseStyle::kInitialSync) {
@@ -3058,6 +3086,32 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
     BSONObj electionParticipantMetrics =
         ReplicationMetrics::get(getServiceContext()).getElectionParticipantMetricsBSON();
 
+    boost::optional<Timestamp> lastStableRecoveryTimestamp = boost::none;
+    try {
+        // Retrieving last stable recovery timestamp should not be blocked by oplog
+        // application.
+        ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
+            opCtx->lockState());
+        opCtx->lockState()->skipAcquireTicket();
+        // We need to hold the lock so that we don't run when storage is being shutdown.
+        Lock::GlobalLock lk(opCtx,
+                            MODE_IS,
+                            Date_t::now() + Milliseconds(5),
+                            Lock::InterruptBehavior::kLeaveUnlocked,
+                            true /* skipRSTLLock */);
+        if (lk.isLocked()) {
+            lastStableRecoveryTimestamp = _storage->getLastStableRecoveryTimestamp(_service);
+        } else {
+            LOGV2_WARNING(6100702,
+                          "Failed to get last stable recovery timestamp due to {error}",
+                          "error"_attr = "lock acquire timeout"_sd);
+        }
+    } catch (const ExceptionForCat<ErrorCategory::Interruption>& ex) {
+        LOGV2_WARNING(6100703,
+                      "Failed to get last stable recovery timestamp due to {error}",
+                      "error"_attr = redact(ex));
+    }
+
     stdx::lock_guard<Latch> lk(_mutex);
     if (_inShutdown) {
         return Status(ErrorCodes::ShutdownInProgress, "shutdown in progress");
@@ -3072,7 +3126,7 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
             initialSyncProgress,
             electionCandidateMetrics,
             electionParticipantMetrics,
-            _storage->getLastStableRecoveryTimestamp(_service),
+            lastStableRecoveryTimestamp,
             _externalState->tooStale()},
         response,
         &result);
@@ -3688,6 +3742,11 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
 
     configStateGuard.dismiss();
     _finishReplSetReconfig(opCtx, newConfig, force, myIndex);
+
+    if (MONGO_unlikely(hangAfterReconfig.shouldFail())) {
+        LOGV2(5940904, "Hanging after reconfig on fail point");
+        hangAfterReconfig.pauseWhileSet();
+    }
 
     return Status::OK();
 }
@@ -4334,6 +4393,15 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator(WithLock l
           "Replica set state transition",
           "newState"_attr = newState,
           "oldState"_attr = _memberState);
+
+    // Initializes the featureCompatibilityVersion to the latest value, because arbiters do not
+    // receive the replicated version. This is to avoid bugs like SERVER-32639.
+    if (newState.arbiter()) {
+        // (Generic FCV reference): This FCV check should exist across LTS binary versions.
+        serverGlobalParams.mutableFeatureCompatibility.setVersion(
+            multiversion::GenericFCV::kLatest);
+    }
+
     _memberState = newState;
 
     _cancelAndRescheduleElectionTimeout_inlock();
@@ -5461,6 +5529,29 @@ bool ReplicationCoordinatorImpl::getWriteConcernMajorityShouldJournal_inlock() c
     return _rsConfig.getWriteConcernMajorityShouldJournal();
 }
 
+namespace {
+// Fail point to block and optionally skip fetching config. Supported arguments:
+//   versionAndTerm: [ v, t ]
+void _handleBeforeFetchingConfig(const BSONObj& customArgs,
+                                 ConfigVersionAndTerm versionAndTerm,
+                                 bool* skipFetchingConfig) {
+    if (customArgs.hasElement("versionAndTerm")) {
+        const auto nested = customArgs["versionAndTerm"].embeddedObject();
+        std::vector<BSONElement> elements;
+        nested.elems(elements);
+        invariant(elements.size() == 2);
+        ConfigVersionAndTerm patternVersionAndTerm =
+            ConfigVersionAndTerm(elements[0].numberInt(), elements[1].numberInt());
+        if (patternVersionAndTerm == versionAndTerm) {
+            LOGV2(5940905,
+                  "Failpoint is activated to skip fetching config for version and term",
+                  "versionAndTerm"_attr = versionAndTerm);
+            *skipFetchingConfig = true;
+        }
+    }
+}
+}  // namespace
+
 Status ReplicationCoordinatorImpl::processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
                                                       ReplSetHeartbeatResponse* response) {
     {
@@ -5514,8 +5605,16 @@ Status ReplicationCoordinatorImpl::processHeartbeatV1(const ReplSetHeartbeatArgs
         // We cannot cancel the enqueued heartbeat, but either this one or the enqueued heartbeat
         // will trigger reconfig, which cancels and reschedules all heartbeats.
         else if (args.hasSender()) {
-            LOGV2(21401, "Scheduling heartbeat to fetch a newer config", attr);
-            _scheduleHeartbeatToTarget_inlock(senderHost, now);
+            bool inTestSkipFetchingConfig = false;
+            skipBeforeFetchingConfig.execute([&](const BSONObj& customArgs) {
+                _handleBeforeFetchingConfig(
+                    customArgs, args.getConfigVersionAndTerm(), &inTestSkipFetchingConfig);
+            });
+
+            if (!inTestSkipFetchingConfig) {
+                LOGV2(21401, "Scheduling heartbeat to fetch a newer config", attr);
+                _scheduleHeartbeatToTarget_inlock(senderHost, now);
+            }
         }
     } else if (result.isOK() && args.getPrimaryId() >= 0 &&
                (!response->hasPrimaryId() || response->getPrimaryId() != args.getPrimaryId())) {

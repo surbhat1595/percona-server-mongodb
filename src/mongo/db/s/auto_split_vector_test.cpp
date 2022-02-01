@@ -88,12 +88,13 @@ public:
     void insertNDocsOf1MB(OperationContext* opCtx, int nDocs) {
         DBDirectClient client(opCtx);
 
-        std::string oneMBstr(1024 * 1024, 'a');
+        std::string s(1024 * 1024 - 24, 'a');  // To get a 1MB document
         for (int i = 0; i < nDocs; i++) {
             BSONObjBuilder builder;
             builder.append(kPattern, _nextShardKey++);
-            builder.append("str", oneMBstr);
+            builder.append("str", s);
             BSONObj obj = builder.obj();
+            ASSERT(obj.objsize() == 1024 * 1024);  // 1 MB document
             client.insert(kNss.toString(), obj);
         }
     }
@@ -175,12 +176,12 @@ TEST_F(AutoSplitVectorTest10MB, SplitIfDataSlightlyMoreThanThreshold) {
 
 // Split points if `data size > max chunk size * 2` and threshold reached
 TEST_F(AutoSplitVectorTest10MB, SplitIfDataMoreThanThreshold) {
-    const auto surplus = 13;
+    const auto surplus = 14;
     insertNDocsOf1MB(operationContext(), surplus /* nDocs */);
     std::vector<BSONObj> splitKeys = autoSplit(operationContext(), 10 /* maxChunkSizeMB */);
     ASSERT_EQ(splitKeys.size(), 2);
-    ASSERT_EQ(6, splitKeys.front().getIntField(kPattern));
-    ASSERT_EQ(13, splitKeys.back().getIntField(kPattern));
+    ASSERT_EQ(7, splitKeys.front().getIntField(kPattern));
+    ASSERT_EQ(15, splitKeys.back().getIntField(kPattern));
 }
 
 // Split points are not recalculated if the right-most chunk is at least `80% maxChunkSize`
@@ -218,11 +219,17 @@ public:
         for (const auto& splitKey : splitKeys) {
             int _id = splitKey.getIntField(kPattern);
             // Expect an approximate match due to integers rounding in the split points algorithm.
-            ASSERT(_id >= approximateNextMin - 2 && _id <= approximateNextMin + 2);
+            ASSERT(_id >= approximateNextMin - 2 && _id <= approximateNextMin + 2) << BSON(
+                "approximateNextMin"
+                << approximateNextMin << "splitKeys" << splitKeys << "maxDocsPerChunk"
+                << maxDocsPerChunk << "surplus" << surplus << "nSplitPoints" << nSplitPoints
+                << "maxDocsPerNewChunk" << maxDocsPerNewChunk << "mustReposition" << mustReposition
+                << "toInsert" << toInsert << "expectedChunkSize" << expectedChunkSize);
             approximateNextMin = _id + expectedChunkSize;
         }
     }
 };
+
 
 // Test that last split points are recalculated fairly (if the surplus allows so)
 TEST_F(RepositionLastSplitPointsTest, RandomRepositioningTest) {
@@ -243,6 +250,7 @@ TEST_F(RepositionLastSplitPointsTest, RandomRepositioningTest) {
         checkRepositioning(maxDocsPerChunk, surplus, nSplitPointsToReposition);
     }
 }
+
 
 }  // namespace
 }  // namespace mongo

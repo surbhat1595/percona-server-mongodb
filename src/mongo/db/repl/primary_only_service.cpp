@@ -153,12 +153,12 @@ void PrimaryOnlyServiceRegistry::registerService(std::unique_ptr<PrimaryOnlyServ
                             << ") with state document namespace \"" << ns
                             << "\" that is already in use by service "
                             << existingService->getServiceName());
-    LOGV2_INFO(
-        5123008,
-        "Successfully registered PrimaryOnlyService {service} with state documents stored in {ns}",
-        "Successfully registered PrimaryOnlyService",
-        "service"_attr = name,
-        "ns"_attr = ns);
+    LOGV2_INFO(5123008,
+               "Successfully registered PrimaryOnlyService {service} with state documents stored "
+               "in {namespace}",
+               "Successfully registered PrimaryOnlyService",
+               "service"_attr = name,
+               logAttrs(ns));
 }
 
 PrimaryOnlyService* PrimaryOnlyServiceRegistry::lookupServiceByName(StringData serviceName) {
@@ -525,8 +525,17 @@ PrimaryOnlyService::getOrCreateInstance(OperationContext* opCtx, BSONObj initial
     if (it != _activeInstances.end()) {
         return {it->second.getInstance(), false};
     }
+
+    // Lock _mutex, make this vector & call constructInstance so it can safely check for conflicts.
+    std::vector<const Instance*> existingInstances;
+    for (auto& [instanceId, instance] : _activeInstances) {
+        existingInstances.emplace_back(instance.getInstance().get());
+    }
+
     auto newInstance =
-        _insertNewInstance(lk, constructInstance(std::move(initialState)), std::move(instanceID));
+        _insertNewInstance(lk,
+                           constructInstance(opCtx, std::move(initialState), existingInstances),
+                           std::move(instanceID));
     return {newInstance, true};
 }
 
@@ -635,13 +644,14 @@ void PrimaryOnlyService::_rebuildInstances(long long term) noexcept {
 
     if (!MONGO_unlikely(PrimaryOnlyServiceSkipRebuildingInstances.shouldFail())) {
         auto ns = getStateDocumentsNS();
-        LOGV2_DEBUG(5123004,
-                    2,
-                    "Querying {ns} to look for state documents while rebuilding PrimaryOnlyService "
-                    "{service}",
-                    "Querying to look for state documents while rebuilding PrimaryOnlyService",
-                    "ns"_attr = ns,
-                    "service"_attr = serviceName);
+        LOGV2_DEBUG(
+            5123004,
+            2,
+            "Querying {namespace} to look for state documents while rebuilding PrimaryOnlyService "
+            "{service}",
+            "Querying to look for state documents while rebuilding PrimaryOnlyService",
+            logAttrs(ns),
+            "service"_attr = serviceName);
 
         // The PrimaryOnlyServiceClientObserver will make any OpCtx created as part of a
         // PrimaryOnlyService immediately get interrupted if the service is not in state kRunning.
@@ -664,11 +674,11 @@ void PrimaryOnlyService::_rebuildInstances(long long term) noexcept {
         } catch (const DBException& e) {
             LOGV2_ERROR(
                 4923601,
-                "Failed to start PrimaryOnlyService {service} because the query on {ns} "
+                "Failed to start PrimaryOnlyService {service} because the query on {namespace} "
                 "for state documents failed due to {error}",
                 "Failed to start PrimaryOnlyService because the query for state documents failed",
                 "service"_attr = serviceName,
-                "ns"_attr = ns,
+                logAttrs(ns),
                 "error"_attr = e);
 
             Status status = e.toStatus();
@@ -700,6 +710,9 @@ void PrimaryOnlyService::_rebuildInstances(long long term) noexcept {
         sleepmillis(100);
     }
 
+    // Must create opCtx before taking _mutex to avoid deadlock.
+    AllowOpCtxWhenServiceRebuildingBlock allowOpCtxBlock(Client::getCurrent());
+    auto opCtx = cc().makeOperationContext();
     stdx::lock_guard lk(_mutex);
     if (_state != State::kRebuilding || _term != term) {
         // Node stepped down before finishing rebuilding service from previous stepUp.
@@ -722,7 +735,9 @@ void PrimaryOnlyService::_rebuildInstances(long long term) noexcept {
         auto idElem = doc["_id"];
         fassert(4923602, !idElem.eoo());
         auto instanceID = idElem.wrap().getOwned();
-        auto instance = constructInstance(std::move(doc));
+        // Pass existingInstances={} to constructInstance. No need to check for conflicts since
+        // these instances didn't conflict before we rebuilt.
+        auto instance = constructInstance(opCtx.get(), std::move(doc), {});
         [[maybe_unused]] auto newInstance =
             _insertNewInstance(lk, std::move(instance), std::move(instanceID));
     }

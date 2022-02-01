@@ -54,7 +54,7 @@ namespace repl {
 
 void OplogApplierImplOpObserver::onInserts(OperationContext* opCtx,
                                            const NamespaceString& nss,
-                                           OptionalCollectionUUID uuid,
+                                           const UUID& uuid,
                                            std::vector<InsertStatement>::const_iterator begin,
                                            std::vector<InsertStatement>::const_iterator end,
                                            bool fromMigrate) {
@@ -71,9 +71,9 @@ void OplogApplierImplOpObserver::onInserts(OperationContext* opCtx,
 
 void OplogApplierImplOpObserver::onDelete(OperationContext* opCtx,
                                           const NamespaceString& nss,
-                                          OptionalCollectionUUID uuid,
+                                          const UUID& uuid,
                                           StmtId stmtId,
-                                          const OpObserver::OplogDeleteEntryArgs& args) {
+                                          const OplogDeleteEntryArgs& args) {
     if (!onDeleteFn) {
         return;
     }
@@ -103,7 +103,7 @@ void OplogApplierImplOpObserver::onCreateCollection(OperationContext* opCtx,
 void OplogApplierImplOpObserver::onRenameCollection(OperationContext* opCtx,
                                                     const NamespaceString& fromCollection,
                                                     const NamespaceString& toCollection,
-                                                    OptionalCollectionUUID uuid,
+                                                    const UUID& uuid,
                                                     OptionalCollectionUUID dropTargetUUID,
                                                     std::uint64_t numRecords,
                                                     bool stayTemp) {
@@ -127,7 +127,7 @@ void OplogApplierImplOpObserver::onCreateIndex(OperationContext* opCtx,
 
 void OplogApplierImplOpObserver::onDropIndex(OperationContext* opCtx,
                                              const NamespaceString& nss,
-                                             OptionalCollectionUUID uuid,
+                                             const UUID& uuid,
                                              const std::string& indexName,
                                              const BSONObj& idxDescriptor) {
     if (!onDropIndexFn) {
@@ -242,7 +242,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
                                   const NamespaceString& nss,
                                   OptionalCollectionUUID uuid,
                                   StmtId stmtId,
-                                  const OpObserver::OplogDeleteEntryArgs& args) {
+                                  const OplogDeleteEntryArgs& args) {
         applyOpCalled = true;
         checkOpCtx(opCtx);
         ASSERT_EQUALS(NamespaceString("test.t"), nss);
@@ -348,7 +348,7 @@ void checkTxnTable(OperationContext* opCtx,
                    boost::optional<repl::OpTime> expectedStartOpTime,
                    boost::optional<DurableTxnStateEnum> expectedState) {
     DBDirectClient client(opCtx);
-    auto result = client.findOne(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+    auto result = client.findOne(NamespaceString::kSessionTransactionsTableNamespace,
                                  BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()));
     ASSERT_FALSE(result.isEmpty());
 
@@ -392,7 +392,7 @@ StatusWith<BSONObj> CollectionReader::next() {
 
 bool docExists(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& doc) {
     DBDirectClient client(opCtx);
-    auto result = client.findOne(nss.ns(), doc);
+    auto result = client.findOne(nss, doc);
     return !result.isEmpty();
 }
 

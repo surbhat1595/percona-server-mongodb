@@ -85,13 +85,13 @@ public:
      * Iterator for reading pending values in Simple8bBuilder that has not yet been written to
      * Simple-8b blocks.
      *
-     * Provides forward iteration
+     * Provides bidirectional iteration
      */
     class PendingIterator {
     public:
         friend class Simple8bBuilder;
         // typedefs expected in iterators
-        using iterator_category = std::forward_iterator_tag;
+        using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = ptrdiff_t;
         using value_type = boost::optional<T>;
         using pointer = const boost::optional<T>*;
@@ -102,14 +102,20 @@ public:
 
         PendingIterator& operator++();
         PendingIterator operator++(int);
+
+        PendingIterator& operator--();
+        PendingIterator operator--(int);
+
         bool operator==(const PendingIterator& rhs) const;
         bool operator!=(const PendingIterator& rhs) const;
 
     private:
-        PendingIterator(typename std::deque<PendingValue>::const_iterator it,
+        PendingIterator(typename std::deque<PendingValue>::const_iterator beginning,
+                        typename std::deque<PendingValue>::const_iterator it,
                         reference rleValue,
                         uint32_t rleCount);
 
+        typename std::deque<PendingValue>::const_iterator _begin;
         typename std::deque<PendingValue>::const_iterator _it;
 
         const boost::optional<T>& _rleValue;
@@ -121,6 +127,12 @@ public:
      */
     PendingIterator begin() const;
     PendingIterator end() const;
+
+    /**
+     * Reverse iterators to read pending values
+     */
+    std::reverse_iterator<PendingIterator> rbegin() const;
+    std::reverse_iterator<PendingIterator> rend() const;
 
     /**
      * Set write callback
@@ -139,6 +151,7 @@ private:
      * in the cpp file.
      */
     struct PendingValue {
+        PendingValue() = default;
         PendingValue(boost::optional<T> val,
                      std::array<uint8_t, kNumOfSelectorTypes> bitCount,
                      std::array<uint8_t, kNumOfSelectorTypes> trailingZerosCount);
@@ -151,7 +164,7 @@ private:
             return val.value();
         }
 
-        boost::optional<T> val;
+        boost::optional<T> val = T{0};
         std::array<uint8_t, kNumOfSelectorTypes> bitCount = {0, 0, 0, 0};
         // This is not the total number of trailing zeros, but the trailing zeros that will be
         // stored given the selector chosen.
@@ -255,7 +268,7 @@ private:
     // If RLE is ongoing, the number of consecutive repeats fo lastValueInPrevWord.
     uint32_t _rleCount = 0;
     // If RLE is ongoing, the last value in the previous Simple8b word.
-    PendingValue _lastValueInPrevWord = {boost::optional<T>(0), {0, 0, 0, 0}, {0, 0, 0, 0}};
+    PendingValue _lastValueInPrevWord;
 
     // These variables hold the max amount of bits for each value in _pendingValues. They are
     // updated whenever values are added or removed from _pendingValues to always reflect the max
@@ -328,7 +341,7 @@ public:
         bool operator!=(const Iterator& rhs) const;
 
     private:
-        Iterator(const char* pos, const char* end);
+        Iterator(const char* pos, const char* end, const boost::optional<T>& previous);
 
         /**
          * Loads the current Simple8b block into the iterator
@@ -382,7 +395,7 @@ public:
     /**
      * Does not take ownership of buffer, must remain valid during the lifetime of this class.
      */
-    Simple8b(const char* buffer, int size);
+    Simple8b(const char* buffer, int size, boost::optional<T> previous = T{});
 
     /**
      * Forward iterators to read decompressed values
@@ -393,6 +406,8 @@ public:
 private:
     const char* _buffer;
     int _size;
+    // Previous value to be used in case the first block in the buffer is RLE.
+    boost::optional<T> _previous;
 };
 
 }  // namespace mongo

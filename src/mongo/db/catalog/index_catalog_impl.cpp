@@ -39,6 +39,7 @@
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/audit.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_build_block.h"
 #include "mongo/db/catalog/index_catalog_entry_impl.h"
@@ -124,6 +125,8 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
         auto descriptor = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
 
         // TTL indexes are not compatible with capped collections.
+        // Note that TTL deletion is supported on capped clustered collections via bounded
+        // collection scan, which does not use an index.
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName) &&
             !collection->isCapped()) {
             TTLCollectionCache::get(opCtx->getServiceContext())
@@ -265,9 +268,9 @@ void IndexCatalogImpl::_logInternalState(OperationContext* opCtx,
                 "Internal Index Catalog state",
                 "numIndexesTotal"_attr = numIndexesTotal(opCtx),
                 "numIndexesInCollectionCatalogEntry"_attr = numIndexesInCollectionCatalogEntry,
-                "readyIndexes_size"_attr = _readyIndexes.size(),
-                "buildingIndexes_size"_attr = _buildingIndexes.size(),
-                "indexNamesToDrop_size"_attr = indexNamesToDrop.size(),
+                "numReadyIndexes"_attr = _readyIndexes.size(),
+                "numBuildingIndexes"_attr = _buildingIndexes.size(),
+                "indexNamesToDrop"_attr = indexNamesToDrop,
                 "haveIdIndex"_attr = haveIdIndex);
 
     // Report the ready indexes.
@@ -275,17 +278,17 @@ void IndexCatalogImpl::_logInternalState(OperationContext* opCtx,
         const IndexDescriptor* desc = entry->descriptor();
         LOGV2_ERROR(20367,
                     "readyIndex",
-                    "desc_indexName"_attr = desc->indexName(),
-                    "desc_infoObj"_attr = redact(desc->infoObj()));
+                    "index"_attr = desc->indexName(),
+                    "indexInfo"_attr = redact(desc->infoObj()));
     }
 
     // Report the in-progress indexes.
     for (const auto& entry : _buildingIndexes) {
         const IndexDescriptor* desc = entry->descriptor();
         LOGV2_ERROR(20369,
-                    "inprogIndex",
-                    "desc_indexName"_attr = desc->indexName(),
-                    "desc_infoObj"_attr = redact(desc->infoObj()));
+                    "buildingIndex",
+                    "index"_attr = desc->indexName(),
+                    "indexInfo"_attr = redact(desc->infoObj()));
     }
 
     LOGV2_ERROR(20370, "Internal Collection Catalog Entry state:");
@@ -307,13 +310,6 @@ void IndexCatalogImpl::_logInternalState(OperationContext* opCtx,
                     "readyIndexes",
                     "index"_attr = index,
                     "spec"_attr = redact(collection->getIndexSpec(index)));
-    }
-
-    for (const auto& indexNameToDrop : indexNamesToDrop) {
-        LOGV2_ERROR(20376,
-                    "indexNamesToDrop",
-                    "index"_attr = indexNameToDrop,
-                    "spec"_attr = redact(collection->getIndexSpec(indexNameToDrop)));
     }
 }
 
@@ -437,6 +433,15 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
         opCtx, collection, ident, std::move(descriptor), frozen);
 
     IndexDescriptor* desc = entry->descriptor();
+
+    // In some cases, it may be necessary to update the index metadata in the storage engine in
+    // order to obtain the correct SortedDataInterface. One such scenario is found in converting an
+    // index to be unique.
+    bool isUpdateMetadata = CreateIndexEntryFlags::kUpdateMetadata & flags;
+    if (isUpdateMetadata) {
+        engine->getEngine()->alterIdentMetadata(opCtx, ident, desc);
+    }
+
     const auto& collOptions = collection->getCollectionOptions();
     std::unique_ptr<SortedDataInterface> sdi =
         engine->getEngine()->getSortedDataInterface(opCtx, collOptions, ident, desc);
@@ -793,14 +798,10 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
     }
 
-    uassert(ErrorCodes::InvalidOptions,
-            "Unique indexes are not supported on collections clustered by _id",
-            !collection->isClustered() || !spec[IndexDescriptor::kUniqueFieldName].trueValue());
-
     if (IndexDescriptor::isIdIndexPattern(key)) {
         if (collection->isClustered()) {
             return Status(ErrorCodes::CannotCreateIndex,
-                          "cannot create an _id index on a collection already clustered by _id");
+                          "cannot create the _id index on a clustered collection");
         }
 
         BSONElement uniqueElt = spec["unique"];
@@ -821,6 +822,13 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
                                                collection->getDefaultCollator())) {
             return Status(ErrorCodes::CannotCreateIndex,
                           "_id index must have the collection default collation");
+        }
+    } else {
+        // Non _id index
+        if (collection->isClustered() &&
+            clustered_util::matchesClusterKey(key, collection->getClusteredInfo())) {
+            return Status(ErrorCodes::CannotCreateIndex,
+                          "cannot create an index with the same key as the cluster key");
         }
     }
 
@@ -1316,7 +1324,8 @@ std::vector<std::shared_ptr<const IndexCatalogEntry>> IndexCatalogImpl::getAllRe
 
 const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
                                                       Collection* collection,
-                                                      const IndexDescriptor* oldDesc) {
+                                                      const IndexDescriptor* oldDesc,
+                                                      CreateIndexEntryFlags flags) {
     invariant(_buildingIndexes.size() == 0);
 
     const std::string indexName = oldDesc->indexName();
@@ -1339,8 +1348,7 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     // Re-register this index in the index catalog with the new spec. Also, add the new index
     // to the CollectionIndexUsageTrackerDecoration (shared state among Collection instances).
     auto newDesc = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
-    auto newEntry =
-        createIndexEntry(opCtx, collection, std::move(newDesc), CreateIndexEntryFlags::kIsReady);
+    auto newEntry = createIndexEntry(opCtx, collection, std::move(newDesc), flags);
     invariant(newEntry->isReady(opCtx, collection));
     auto desc = newEntry->descriptor();
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
@@ -1383,7 +1391,7 @@ Status IndexCatalogImpl::_indexKeys(OperationContext* opCtx,
             }
         }
 
-        int64_t inserted;
+        int64_t inserted = 0;
         status = index->indexBuildInterceptor()->sideWrite(opCtx,
                                                            keys,
                                                            multikeyMetadataKeys,
@@ -1395,7 +1403,7 @@ Status IndexCatalogImpl::_indexKeys(OperationContext* opCtx,
             *keysInsertedOut += inserted;
         }
     } else {
-        int64_t numInserted;
+        int64_t numInserted = 0;
         status = index->accessMethod()->insertKeysAndUpdateMultikeyPaths(
             opCtx,
             coll,
@@ -1419,6 +1427,7 @@ Status IndexCatalogImpl::_indexFilteredRecords(OperationContext* opCtx,
                                                const IndexCatalogEntry* index,
                                                const std::vector<BsonRecord>& bsonRecords,
                                                int64_t* keysInsertedOut) const {
+    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
     auto& executionCtx = StorageExecutionContext::get(opCtx);
 
     InsertDeleteOptions options;
@@ -1439,7 +1448,7 @@ Status IndexCatalogImpl::_indexFilteredRecords(OperationContext* opCtx,
 
         index->accessMethod()->getKeys(opCtx,
                                        coll,
-                                       executionCtx.pooledBufferBuilder(),
+                                       pooledBuilder,
                                        *bsonRecord.docPtr,
                                        options.getKeysMode,
                                        IndexAccessMethod::GetKeysContext::kAddingKeys,
@@ -1560,7 +1569,7 @@ void IndexCatalogImpl::_unindexKeys(OperationContext* opCtx,
             }
         }
 
-        int64_t removed;
+        int64_t removed = 0;
         fassert(31155,
                 index->indexBuildInterceptor()->sideWrite(
                     opCtx, keys, {}, {}, loc, IndexBuildInterceptor::Op::kDelete, &removed));
@@ -1580,7 +1589,7 @@ void IndexCatalogImpl::_unindexKeys(OperationContext* opCtx,
     // duplicates. See SERVER-17487 for more details.
     options.dupsAllowed = options.dupsAllowed || !index->isReady(opCtx, collection);
 
-    int64_t removed;
+    int64_t removed = 0;
     Status status = index->accessMethod()->removeKeys(opCtx, keys, loc, options, &removed);
 
     if (!status.isOK()) {
@@ -1604,6 +1613,7 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
                                       const RecordId& loc,
                                       bool logIfError,
                                       int64_t* keysDeletedOut) const {
+    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
     auto& executionCtx = StorageExecutionContext::get(opCtx);
 
     // There's no need to compute the prefixes of the indexed fields that cause the index to be
@@ -1612,7 +1622,7 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
     auto keys = executionCtx.keys();
     entry->accessMethod()->getKeys(opCtx,
                                    collection,
-                                   executionCtx.pooledBufferBuilder(),
+                                   pooledBuilder,
                                    obj,
                                    IndexAccessMethod::GetKeysMode::kRelaxConstraintsUnfiltered,
                                    IndexAccessMethod::GetKeysContext::kRemovingKeys,

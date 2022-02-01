@@ -665,7 +665,11 @@ StatusWith<OplogFetcher::Documents> OplogFetcher::_getNextBatch() {
         Timer timer;
         if (!_cursor) {
             // An error occurred and we should recreate the cursor.
-            auto status = _createNewCursor(false /* initialFind */);
+            // The OplogFetcher uses an aggregation command in tenant migrations, which does not
+            // support tailable cursors. When recreating the cursor, use the longer initial max time
+            // to avoid timing out.
+            const bool initialFind = _config.forTenantMigration;
+            auto status = _createNewCursor(initialFind /* initialFind */);
             if (!status.isOK()) {
                 return status;
             }
@@ -1038,10 +1042,11 @@ Status OplogFetcher::_checkTooStaleToSyncFromSource(const OpTime lastFetched,
     BSONObj remoteFirstOplogEntry;
     try {
         // Query for the first oplog entry in the sync source's oplog.
-        auto query = Query().sort(BSON("$natural" << 1));
+        FindCommandRequest findRequest{_nss};
+        findRequest.setSort(BSON("$natural" << 1));
         // Since this function is called after the first batch, the exhaust stream has not been
         // started yet. As a result, using the same connection is safe.
-        remoteFirstOplogEntry = _conn->findOne(_nss.ns(), BSONObj{}, query);
+        remoteFirstOplogEntry = _conn->findOne(std::move(findRequest));
     } catch (DBException& e) {
         // If an error occurs with the query, throw an error.
         return Status(ErrorCodes::TooStaleToSyncFromSource, e.reason());

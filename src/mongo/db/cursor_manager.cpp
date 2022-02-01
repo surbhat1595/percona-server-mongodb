@@ -37,6 +37,7 @@
 
 #include "mongo/base/data_cursor.h"
 #include "mongo/base/init.h"
+#include "mongo/db/allocate_cursor_id.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -150,13 +151,14 @@ std::pair<Status, int> CursorManager::killCursorsWithMatchingSessions(
 
 CursorManager::CursorManager(ClockSource* preciseClockSource)
     : _random(std::make_unique<PseudoRandom>(SecureRandom().nextInt64())),
-      _cursorMap(std::make_unique<Partitioned<stdx::unordered_map<CursorId, ClientCursor*>>>()),
+      _cursorMap(std::make_unique<Partitioned<stdx::unordered_map<CursorId, ClientCursor*>>>(
+          kNumPartitions)),
       _preciseClockSource(preciseClockSource) {}
 
 CursorManager::~CursorManager() {
     auto allPartitions = _cursorMap->lockAllPartitions();
     for (auto&& partition : allPartitions) {
-        for (auto&& cursor : partition) {
+        for (auto&& cursor : *partition) {
             // Callers must ensure that no cursors are in use.
             invariant(!cursor.second->_operationUsingCursor);
             cursor.second->dispose(nullptr);
@@ -290,7 +292,7 @@ void CursorManager::unpin(OperationContext* opCtx,
 void CursorManager::appendActiveSessions(LogicalSessionIdSet* lsids) const {
     auto allPartitions = _cursorMap->lockAllPartitions();
     for (auto&& partition : allPartitions) {
-        for (auto&& entry : partition) {
+        for (auto&& entry : *partition) {
             auto cursor = entry.second;
             if (auto id = cursor->getSessionId()) {
                 lsids->insert(id.value());
@@ -306,7 +308,7 @@ std::vector<GenericCursor> CursorManager::getIdleCursors(
 
     auto allPartitions = _cursorMap->lockAllPartitions();
     for (auto&& partition : allPartitions) {
-        for (auto&& entry : partition) {
+        for (auto&& entry : *partition) {
             auto cursor = entry.second;
 
             // Exclude cursors that this user does not own if auth is enabled.
@@ -331,7 +333,7 @@ stdx::unordered_set<CursorId> CursorManager::getCursorsForSession(LogicalSession
 
     auto allPartitions = _cursorMap->lockAllPartitions();
     for (auto&& partition : allPartitions) {
-        for (auto&& entry : partition) {
+        for (auto&& entry : *partition) {
             auto cursor = entry.second;
             if (cursor->getSessionId() == lsid) {
                 cursors.insert(cursor->cursorid());
@@ -358,38 +360,6 @@ size_t CursorManager::numCursors() const {
     return _cursorMap->size();
 }
 
-CursorId CursorManager::allocateCursorId_inlock() {
-    for (int i = 0; i < 10000; i++) {
-        CursorId id = _random->nextInt64();
-
-        // A cursor id of zero is reserved to indicate that the cursor has been closed. If the
-        // random number generator gives us zero, then try again.
-        if (id == 0) {
-            continue;
-        }
-
-        // Avoid negative cursor ids by taking the absolute value. If the cursor id is the minimum
-        // representable negative number, then just generate another random id.
-        if (id == std::numeric_limits<CursorId>::min()) {
-            continue;
-        }
-        id = std::abs(id);
-
-        auto partition = _cursorMap->lockOnePartition(id);
-        if (partition->count(id) == 0) {
-            // The cursor id is not already in use, so return it. Even though we drop the lock on
-            // the '_cursorMap' partition, another thread cannot register a cursor with the same id
-            // because we still hold '_registrationLock'.
-            return id;
-        }
-
-        // The cursor id is already in use. Generate another random id.
-    }
-
-    // We failed to generate a unique cursor id.
-    fassertFailed(17360);
-}
-
 ClientCursorPin CursorManager::registerCursor(OperationContext* opCtx,
                                               ClientCursorParams&& cursorParams) {
     // Avoid computing the current time within the critical section.
@@ -403,7 +373,15 @@ ClientCursorPin CursorManager::registerCursor(OperationContext* opCtx,
     // Note we must hold the registration lock from now until insertion into '_cursorMap' to ensure
     // we don't insert two cursors with the same cursor id.
     stdx::lock_guard<SimpleMutex> lock(_registrationLock);
-    CursorId cursorId = allocateCursorId_inlock();
+    CursorId cursorId = generic_cursor::allocateCursorId(
+        [&](CursorId cursorId) -> bool {
+            // Even though we drop the lock on the '_cursorMap' partition, another thread cannot
+            // register a cursor with the same id because we still hold '_registrationLock'.
+            auto partition = _cursorMap->lockOnePartition(cursorId);
+            return partition->count(cursorId) == 0;
+        },
+        *_random);
+
     std::unique_ptr<ClientCursor, ClientCursor::Deleter> clientCursor(
         new ClientCursor(std::move(cursorParams), cursorId, opCtx, now));
 
@@ -437,7 +415,7 @@ void CursorManager::deregisterCursor(ClientCursor* cursor) {
 }
 
 void CursorManager::deregisterAndDestroyCursor(
-    Partitioned<stdx::unordered_map<CursorId, ClientCursor*>, kNumPartitions>::OnePartition&& lk,
+    Partitioned<stdx::unordered_map<CursorId, ClientCursor*>>::OnePartition&& lk,
     OperationContext* opCtx,
     std::unique_ptr<ClientCursor, ClientCursor::Deleter> cursor) {
     {

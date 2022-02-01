@@ -48,6 +48,7 @@
 #include "mongo/db/command_can_run_here.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
+#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
@@ -119,6 +120,8 @@ MONGO_FAIL_POINT_DEFINE(waitAfterNewStatementBlocksBehindPrepare);
 MONGO_FAIL_POINT_DEFINE(waitAfterCommandFinishesExecution);
 MONGO_FAIL_POINT_DEFINE(failWithErrorCodeInRunCommand);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSessionCheckOut);
+MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
+MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -861,11 +864,11 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
         // transaction on that session.
         while (!beganOrContinuedTxn) {
             try {
-                _txnParticipant->beginOrContinue(opCtx,
-                                                 *sessionOptions.getTxnNumber(),
-                                                 sessionOptions.getAutocommit(),
-                                                 sessionOptions.getStartTransaction(),
-                                                 sessionOptions.getTxnRetryCounter());
+                _txnParticipant->beginOrContinue(
+                    opCtx,
+                    {*sessionOptions.getTxnNumber(), sessionOptions.getTxnRetryCounter()},
+                    sessionOptions.getAutocommit(),
+                    sessionOptions.getStartTransaction());
                 beganOrContinuedTxn = true;
             } catch (const ExceptionFor<ErrorCodes::PreparedTransactionInProgress>&) {
                 auto prepareCompleted = _txnParticipant->onExitPrepare();
@@ -892,7 +895,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
             // If this shard has been selected as the coordinator, set up the coordinator state
             // to be ready to receive votes.
             if (sessionOptions.getCoordinator() == boost::optional<bool>(true)) {
-                createTransactionCoordinator(opCtx, *sessionOptions.getTxnNumber());
+                createTransactionCoordinator(
+                    opCtx, *sessionOptions.getTxnNumber(), sessionOptions.getTxnRetryCounter());
             }
         }
 
@@ -1379,6 +1383,7 @@ void ExecCommandDatabase::_initiateCommand() {
         // Kill this operation on step down even if it hasn't taken write locks yet, because it
         // could conflict with transactions from a new primary.
         if (inMultiDocumentTransaction) {
+            hangBeforeSettingTxnInterruptFlag.pauseWhileSet();
             opCtx->setAlwaysInterruptAtStepDownOrUp();
         }
 
@@ -1416,6 +1421,18 @@ void ExecCommandDatabase::_initiateCommand() {
             uassert(ErrorCodes::NotPrimaryOrSecondary,
                     "node is in drain mode",
                     optedIn || alwaysAllowed);
+        }
+
+        // We acquire the RSTL which helps us here in two ways:
+        // 1) It forces us to wait out any outstanding stepdown attempts.
+        // 2) It guarantees that future RSTL holders will see the
+        // 'setAlwaysInterruptAtStepDownOrUp' flag we set above.
+        if (inMultiDocumentTransaction) {
+            hangAfterCheckingWritabilityForMultiDocumentTransactions.pauseWhileSet();
+            repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
+            uassert(ErrorCodes::NotWritablePrimary,
+                    "Cannot start a transaction in a non-primary state",
+                    replCoord->canAcceptWritesForDatabase(opCtx, dbname));
         }
     }
 
@@ -1519,11 +1536,6 @@ void ExecCommandDatabase::_initiateCommand() {
             : _invocation->ns();
 
         oss.initializeClientRoutingVersionsFromCommand(namespaceForSharding, request.body);
-
-        auto const shardingState = ShardingState::get(opCtx);
-        if (OperationShardingState::isOperationVersioned(opCtx) || oss.hasDbVersion()) {
-            uassertStatusOK(shardingState->canAcceptShardedCommands());
-        }
     }
 
     _scoped = _execContext->behaviors->scopedOperationCompletionShardingActions(opCtx);
@@ -1561,6 +1573,21 @@ Future<void> ExecCommandDatabase::_commandExec() {
 
     _execContext->behaviors->waitForReadConcern(opCtx, _invocation.get(), request);
     _execContext->behaviors->setPrepareConflictBehaviorForReadConcern(opCtx, _invocation.get());
+
+    const auto dbname = request.getDatabase().toString();
+    const bool iAmPrimary =
+        repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase_UNSAFE(opCtx, dbname);
+    auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    if (!opCtx->getClient()->isInDirectClient() &&
+        readConcernArgs.getLevel() != repl::ReadConcernLevel::kAvailableReadConcern &&
+        (iAmPrimary || (readConcernArgs.hasLevel() || readConcernArgs.getArgsAfterClusterTime()))) {
+        auto& oss = OperationShardingState::get(opCtx);
+        auto const shardingState = ShardingState::get(opCtx);
+        if (OperationShardingState::isOperationVersioned(opCtx) || oss.hasDbVersion()) {
+            uassertStatusOK(shardingState->canAcceptShardedCommands());
+        }
+    }
+
     _execContext->getReplyBuilder()->reset();
 
     auto runCommand = [&] {

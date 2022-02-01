@@ -76,7 +76,7 @@ StatusWith<DistributionStatus> createCollectionDistributionStatus(
 
     chunkMgr.forEachChunk([&](const auto& chunkEntry) {
         ChunkType chunk;
-        chunk.setCollectionUUID(*chunkMgr.getUUID());
+        chunk.setCollectionUUID(chunkMgr.getUUID());
         chunk.setMin(chunkEntry.getMin());
         chunk.setMax(chunkEntry.getMax());
         chunk.setJumbo(chunkEntry.isJumbo());
@@ -88,28 +88,14 @@ StatusWith<DistributionStatus> createCollectionDistributionStatus(
         return true;
     });
 
-    const auto swCollectionTags =
-        Grid::get(opCtx)->catalogClient()->getTagsForCollection(opCtx, nss);
-    if (!swCollectionTags.isOK()) {
-        return swCollectionTags.getStatus().withContext(
-            str::stream() << "Unable to load tags for collection " << nss);
-    }
-    const auto& collectionTags = swCollectionTags.getValue();
-
     DistributionStatus distribution(nss, std::move(shardToChunksMap));
 
-    // Cache the collection tags
     const auto& keyPattern = chunkMgr.getShardKeyPattern().getKeyPattern();
 
-    for (const auto& tag : collectionTags) {
-        auto status = distribution.addRangeToZone(
-            ZoneRange(keyPattern.extendRangeBound(tag.getMinKey(), false),
-                      keyPattern.extendRangeBound(tag.getMaxKey(), false),
-                      tag.getTag()));
-
-        if (!status.isOK()) {
-            return status;
-        }
+    // Cache the collection tags
+    auto status = ZoneInfo::addTagsFromCatalog(opCtx, nss, keyPattern, distribution.zoneInfo());
+    if (!status.isOK()) {
+        return status;
     }
 
     return {std::move(distribution)};
@@ -296,16 +282,6 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToSpli
     for (const auto& coll : collections) {
         const NamespaceString& nss(coll.getNss());
 
-        if (coll.getTimeseriesFields()) {
-            LOGV2_DEBUG(5559200,
-                        1,
-                        "Not splitting collection {namespace}; explicitly disabled.",
-                        "Not splitting explicitly disabled collection",
-                        "namespace"_attr = nss,
-                        "timeseriesFields"_attr = coll.getTimeseriesFields());
-            continue;
-        }
-
         auto candidatesStatus = _getSplitCandidatesForCollection(opCtx, nss, shardStats);
         if (candidatesStatus == ErrorCodes::NamespaceNotFound) {
             // Namespace got dropped before we managed to get to it, so just skip it
@@ -375,7 +351,7 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
     for (const auto& coll : collections) {
         const NamespaceString& nss(coll.getNss());
 
-        if (!coll.getAllowBalance() || !coll.getAllowMigrations() || coll.getTimeseriesFields()) {
+        if (!coll.getAllowBalance() || !coll.getAllowMigrations() || !coll.getPermitMigrations()) {
             LOGV2_DEBUG(21851,
                         1,
                         "Not balancing collection {namespace}; explicitly disabled.",
@@ -434,6 +410,7 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
 
 StatusWith<boost::optional<MigrateInfo>>
 BalancerChunkSelectionPolicyImpl::selectSpecificChunkToMove(OperationContext* opCtx,
+                                                            const NamespaceString& nss,
                                                             const ChunkType& chunk) {
     auto shardStatsStatus = _clusterStats->getStats(opCtx);
     if (!shardStatsStatus.isOK()) {
@@ -441,11 +418,6 @@ BalancerChunkSelectionPolicyImpl::selectSpecificChunkToMove(OperationContext* op
     }
 
     const auto& shardStats = shardStatsStatus.getValue();
-
-    const CollectionType collection = Grid::get(opCtx)->catalogClient()->getCollection(
-        opCtx, chunk.getCollectionUUID(), repl::ReadConcernLevel::kLocalReadConcern);
-
-    const auto& nss = collection.getNss();
 
     auto routingInfoStatus =
         Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx, nss);

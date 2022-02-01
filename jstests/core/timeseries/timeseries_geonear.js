@@ -3,7 +3,6 @@
  * and such queries fail cleanly.
  *
  * @tags: [
- *     assumes_unsharded_collection,
  *     does_not_support_transactions,
  *     does_not_support_stepdowns,
  *     requires_fcv_51,
@@ -14,13 +13,6 @@
 
 (function() {
 "use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
-
-if (!TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo())) {
-    jsTestLog("Skipping test because the time-series collection feature flag is disabled");
-    return;
-}
 
 const timeFieldName = "time";
 const metaFieldName = "tags";

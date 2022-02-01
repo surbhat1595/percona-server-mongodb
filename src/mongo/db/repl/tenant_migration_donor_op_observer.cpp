@@ -197,7 +197,7 @@ private:
 
 void TenantMigrationDonorOpObserver::onInserts(OperationContext* opCtx,
                                                const NamespaceString& nss,
-                                               OptionalCollectionUUID uuid,
+                                               const UUID& uuid,
                                                std::vector<InsertStatement>::const_iterator first,
                                                std::vector<InsertStatement>::const_iterator last,
                                                bool fromMigrate) {
@@ -233,7 +233,7 @@ void TenantMigrationDonorOpObserver::onUpdate(OperationContext* opCtx,
     if (args.nss == NamespaceString::kTenantMigrationDonorsNamespace &&
         !tenant_migration_access_blocker::inRecoveryMode(opCtx)) {
         auto donorStateDoc =
-            tenant_migration_access_blocker::parseDonorStateDocument(args.updateArgs.updatedDoc);
+            tenant_migration_access_blocker::parseDonorStateDocument(args.updateArgs->updatedDoc);
         switch (donorStateDoc.getState()) {
             case TenantMigrationDonorStateEnum::kDataSync:
                 break;
@@ -280,7 +280,7 @@ void TenantMigrationDonorOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void TenantMigrationDonorOpObserver::onDelete(OperationContext* opCtx,
                                               const NamespaceString& nss,
-                                              OptionalCollectionUUID uuid,
+                                              const UUID& uuid,
                                               StmtId stmtId,
                                               const OplogDeleteEntryArgs& args) {
     if (nss == NamespaceString::kTenantMigrationDonorsNamespace &&
@@ -296,7 +296,7 @@ void TenantMigrationDonorOpObserver::onDelete(OperationContext* opCtx,
 
 repl::OpTime TenantMigrationDonorOpObserver::onDropCollection(OperationContext* opCtx,
                                                               const NamespaceString& collectionName,
-                                                              OptionalCollectionUUID uuid,
+                                                              const UUID& uuid,
                                                               std::uint64_t numRecords,
                                                               const CollectionDropType dropType) {
     if (collectionName == NamespaceString::kTenantMigrationDonorsNamespace) {

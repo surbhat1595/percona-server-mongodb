@@ -260,7 +260,7 @@ RoleNameIterator AuthorizationSessionImpl::getAuthenticatedRoleNames() {
 
 void AuthorizationSessionImpl::grantInternalAuthorization(Client* client) {
     stdx::lock_guard<Client> lk(*client);
-    _authenticatedUsers.add(internalSecurity.user);
+    _authenticatedUsers.add(*internalSecurity.getUser());
     _buildAuthenticatedRolesVector();
 }
 
@@ -582,6 +582,20 @@ void AuthorizationSessionImpl::_refreshUserInfoAsNeeded(OperationContext* opCtx)
         auto swUser = authMan.reacquireUser(opCtx, currentUser);
         if (!swUser.isOK()) {
             auto& status = swUser.getStatus();
+            // If an external user is no longer in the cache and cannot be acquired from the cache's
+            // backing external service, it should be removed from _authenticatedUsers. This
+            // guarantees that no operations can be performed until the external authorization
+            // provider comes back up.
+            if (name.getDB() == "$external"_sd) {
+                removeUser(it++);
+                LOGV2(5914804,
+                      "Removed external user from session cache of user information because of "
+                      "error status",
+                      "user"_attr = name,
+                      "status"_attr = status);
+                continue;  // No need to advance "it" in this case.
+            }
+
             switch (status.code()) {
                 case ErrorCodes::UserNotFound: {
                     // User does not exist anymore; remove it from _authenticatedUsers.

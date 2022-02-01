@@ -415,6 +415,13 @@ void BuilderBase<BufferT>::appendOID(OID oid) {
 }
 
 template <class BufferT>
+void BuilderBase<BufferT>::appendDate(Date_t date) {
+    _verifyAppendingState();
+    _appendDate(date, _shouldInvertOnAppend());
+    _elemCount++;
+}
+
+template <class BufferT>
 void BuilderBase<BufferT>::appendDiscriminator(const Discriminator discriminator) {
     // The discriminator forces this KeyString to compare Less/Greater than any KeyString with
     // the same prefix of keys. As an example, this can be used to land on the first key in the
@@ -2548,9 +2555,9 @@ size_t sizeWithoutRecordIdStrAtEnd(const void* bufferRaw, size_t bufSize) {
     const size_t numSegments = sizeByteId + 1;
 
     for (; sizeByteId > 0; sizeByteId--) {
-        ridSize += sizes[sizeByteId] << ((numSegments - sizeByteId - 1) * 7);
+        ridSize += static_cast<size_t>(sizes[sizeByteId]) << ((numSegments - sizeByteId - 1) * 7);
     }
-    ridSize += sizes[sizeByteId] << ((numSegments - sizeByteId - 1) * 7);
+    ridSize += static_cast<size_t>(sizes[sizeByteId]) << ((numSegments - sizeByteId - 1) * 7);
 
     invariant(bufSize >= ridSize + numSegments);
     return bufSize - ridSize - numSegments;
@@ -2596,9 +2603,9 @@ RecordId decodeRecordIdStrAtEnd(const void* bufferRaw, size_t bufSize) {
     const size_t numSegments = sizeByteId + 1;
 
     for (; sizeByteId > 0; sizeByteId--) {
-        ridSize += sizes[sizeByteId] << ((numSegments - sizeByteId - 1) * 7);
+        ridSize += static_cast<size_t>(sizes[sizeByteId]) << ((numSegments - sizeByteId - 1) * 7);
     }
-    ridSize += sizes[sizeByteId] << ((numSegments - sizeByteId - 1) * 7);
+    ridSize += static_cast<size_t>(sizes[sizeByteId]) << ((numSegments - sizeByteId - 1) * 7);
 
     invariant(bufSize >= ridSize + numSegments);
 
@@ -2696,6 +2703,21 @@ void Value::serializeWithoutRecordIdLong(BufBuilder& buf) const {
     buf.appendNum(sizeWithoutRecordId);                 // Serialize size of KeyString
     buf.appendBuf(_buffer.get(), sizeWithoutRecordId);  // Serialize KeyString
     buf.appendBuf(_buffer.get() + _ksSize, _buffer.size() - _ksSize);  // Serialize TypeBits
+}
+
+void Value::serializeWithoutRecordIdStr(BufBuilder& buf) const {
+    dassert(decodeRecordIdStrAtEnd(_buffer.get(), _ksSize).isValid());
+
+    const int32_t sizeWithoutRecordId = sizeWithoutRecordIdStrAtEnd(_buffer.get(), _ksSize);
+    buf.appendNum(sizeWithoutRecordId);                 // Serialize size of KeyString
+    buf.appendBuf(_buffer.get(), sizeWithoutRecordId);  // Serialize KeyString
+    buf.appendBuf(_buffer.get() + _ksSize, _buffer.size() - _ksSize);  // Serialize TypeBits
+}
+
+size_t Value::getApproximateSize() const {
+    auto size = sizeof(Value);
+    size += !_buffer.isShared() ? SharedBuffer::kHolderSize + _buffer.size() : 0;
+    return size;
 }
 
 template class BuilderBase<Builder>;

@@ -572,8 +572,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
 
 template <typename T>
 StmtId getStmtIdForWriteOp(OperationContext* opCtx, const T& wholeOp, size_t opIndex) {
-    return opCtx->getTxnNumber() ? write_ops::getStmtIdForWriteAt(wholeOp, opIndex)
-                                 : kUninitializedStmtId;
+    return opCtx->isRetryableWrite() ? write_ops::getStmtIdForWriteAt(wholeOp, opIndex)
+                                     : kUninitializedStmtId;
 }
 
 SingleWriteResult makeWriteResultForInsertOrDeleteRetry() {
@@ -644,8 +644,7 @@ WriteResult performInserts(OperationContext* opCtx,
         bool containsDotsAndDollarsField = false;
         auto fixedDoc = fixDocumentForInsert(opCtx, doc, &containsDotsAndDollarsField);
         const StmtId stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
-        const bool wasAlreadyExecuted = opCtx->getTxnNumber() &&
-            !opCtx->inMultiDocumentTransaction() &&
+        const bool wasAlreadyExecuted = opCtx->isRetryableWrite() &&
             txnParticipant.checkStatementExecutedNoOplogEntryFetch(stmtId);
 
         if (!fixedDoc.isOK()) {
@@ -721,7 +720,8 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                                                const NamespaceString& ns,
                                                UpdateRequest* updateRequest,
                                                OperationSource source,
-                                               bool* containsDotsAndDollarsField) {
+                                               bool* containsDotsAndDollarsField,
+                                               bool forgoOpCounterIncrements) {
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchUpdate,
         opCtx,
@@ -810,7 +810,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
     }
 
     const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest->getNamespaceString());
-    ParsedUpdate parsedUpdate(opCtx, updateRequest, extensionsCallback);
+    ParsedUpdate parsedUpdate(opCtx, updateRequest, extensionsCallback, forgoOpCounterIncrements);
     uassertStatusOK(parsedUpdate.parseRequest());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -883,7 +883,8 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     const write_ops::UpdateOpEntry& op,
     LegacyRuntimeConstants runtimeConstants,
     const boost::optional<BSONObj>& letParams,
-    OperationSource source) {
+    OperationSource source,
+    bool forgoOpCounterIncrements) {
     globalOpCounters.gotUpdate();
     ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForUpdate(opCtx->getWriteConcern());
     auto& curOp = *CurOp::get(opCtx);
@@ -920,8 +921,12 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 
         try {
             bool containsDotsAndDollarsField = false;
-            const auto ret =
-                performSingleUpdateOp(opCtx, ns, &request, source, &containsDotsAndDollarsField);
+            const auto ret = performSingleUpdateOp(opCtx,
+                                                   ns,
+                                                   &request,
+                                                   source,
+                                                   &containsDotsAndDollarsField,
+                                                   forgoOpCounterIncrements);
 
             if (containsDotsAndDollarsField) {
                 // If it's an upsert, increment 'inserts' metric, otherwise increment 'updates'.
@@ -986,16 +991,17 @@ WriteResult performUpdates(OperationContext* opCtx,
     const auto& runtimeConstants =
         wholeOp.getLegacyRuntimeConstants().value_or(Variables::generateRuntimeConstants(opCtx));
 
+    // Increment operator counters only during the fisrt single update operation in a batch of
+    // updates.
+    bool forgoOpCounterIncrements = false;
     for (auto&& singleOp : wholeOp.getUpdates()) {
         const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
-        if (opCtx->getTxnNumber()) {
-            if (!opCtx->inMultiDocumentTransaction()) {
-                if (auto entry = txnParticipant.checkStatementExecuted(opCtx, stmtId)) {
-                    containsRetry = true;
-                    RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
-                    out.results.emplace_back(parseOplogEntryForUpdate(*entry));
-                    continue;
-                }
+        if (opCtx->isRetryableWrite()) {
+            if (auto entry = txnParticipant.checkStatementExecuted(opCtx, stmtId)) {
+                containsRetry = true;
+                RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
+                out.results.emplace_back(parseOplogEntryForUpdate(*entry));
+                continue;
             }
         }
 
@@ -1024,8 +1030,16 @@ WriteResult performUpdates(OperationContext* opCtx,
                 ? *wholeOp.getStmtIds()
                 : std::vector<StmtId>{stmtId};
 
-            out.results.emplace_back(performSingleUpdateOpWithDupKeyRetry(
-                opCtx, ns, stmtIds, singleOp, runtimeConstants, wholeOp.getLet(), source));
+            out.results.emplace_back(
+                performSingleUpdateOpWithDupKeyRetry(opCtx,
+                                                     ns,
+                                                     stmtIds,
+                                                     singleOp,
+                                                     runtimeConstants,
+                                                     wholeOp.getLet(),
+                                                     source,
+                                                     forgoOpCounterIncrements));
+            forgoOpCounterIncrements = true;
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
             out.canContinue = handleError(
@@ -1203,14 +1217,12 @@ WriteResult performDeletes(OperationContext* opCtx,
 
     for (auto&& singleOp : wholeOp.getDeletes()) {
         const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
-        if (opCtx->getTxnNumber()) {
-            if (!opCtx->inMultiDocumentTransaction() &&
-                txnParticipant.checkStatementExecutedNoOplogEntryFetch(stmtId)) {
-                containsRetry = true;
-                RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
-                out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
-                continue;
-            }
+        if (opCtx->isRetryableWrite() &&
+            txnParticipant.checkStatementExecutedNoOplogEntryFetch(stmtId)) {
+            containsRetry = true;
+            RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
+            out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
+            continue;
         }
 
         // TODO: don't create nested CurOp for legacy writes.

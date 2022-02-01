@@ -11,7 +11,6 @@
 "use strict";
 
 load("jstests/libs/fixture_helpers.js");  // For isReplSet().
-load("jstests/core/timeseries/libs/timeseries.js");
 
 const dbName = jsTestName();
 const collName = 'coll';
@@ -19,6 +18,10 @@ const collName = 'coll';
 const isLinux = getBuildInfo().buildEnvironment.target_os == "linux";
 const isDebugBuild = (db) => {
     return db.adminCommand('buildInfo').debug;
+};
+const isGroupPushdownEnabled = (db) => {
+    return assert.commandWorked(db.adminCommand({getParameter: 1, featureFlagSBEGroupPushdown: 1}))
+        .featureFlagSBEGroupPushdown.value;
 };
 
 const assertMetricsExist = (profilerEntry) => {
@@ -1056,7 +1059,7 @@ const operations = [
             assert.eq(profileDoc.idxEntryBytesWritten, 0);
             assert.eq(profileDoc.idxEntryUnitsWritten, 0);
             assert.eq(profileDoc.totalUnitsWritten, 0);
-            if (isDebugBuild(db)) {
+            if (isDebugBuild(db) && !isGroupPushdownEnabled(db)) {
                 // In debug builds we sort and spill for each of the first 20 documents. Once we
                 // reach that limit, we stop spilling as often. This 26 is the sum of 20 debug sorts
                 // and spills of documents in groups 0 through 3 plus 6 debug spills and sorts for
@@ -1267,9 +1270,6 @@ const operations = [
     resetProfileColl,
     {
         name: 'createTimeseries',
-        skipTest: (db) => {
-            return !TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo());
-        },
         command: (db) => {
             assert.commandWorked(
                 db.createCollection('ts', {timeseries: {timeField: 't', metaField: 'host'}}));
@@ -1294,9 +1294,6 @@ const operations = [
     },
     {
         name: 'insertTimeseriesNewBucketOrdered',
-        skipTest: (db) => {
-            return !TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo());
-        },
         command: (db) => {
             // Inserts a document that creates a new bucket.
             assert.commandWorked(db.ts.insert({t: new Date(), host: 0}, {ordered: true}));
@@ -1319,9 +1316,6 @@ const operations = [
     },
     {
         name: 'insertTimeseriesNewBucketUnordered',
-        skipTest: (db) => {
-            return !TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo());
-        },
         command: (db) => {
             // Inserts a document that creates a new bucket.
             assert.commandWorked(db.ts.insert({t: new Date(), host: 1}, {ordered: false}));
@@ -1344,9 +1338,6 @@ const operations = [
     resetProfileColl,
     {
         name: 'timeseriesUpdateBucketOrdered',
-        skipTest: (db) => {
-            return !TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo());
-        },
         command: (db) => {
             // Inserts a document by updating an existing bucket.
             assert.commandWorked(db.ts.insert({t: new Date(), host: 0}, {ordered: true}));
@@ -1369,9 +1360,6 @@ const operations = [
     },
     {
         name: 'timeseriesUpdateBucketUnordered',
-        skipTest: (db) => {
-            return !TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo());
-        },
         command: (db) => {
             // Inserts a document by updating an existing bucket.
             assert.commandWorked(db.ts.insert({t: new Date(), host: 1}, {ordered: false}));
@@ -1393,9 +1381,6 @@ const operations = [
     },
     {
         name: 'timeseriesQuery',
-        skipTest: (db) => {
-            return !TimeseriesTest.timeseriesCollectionsEnabled(db.getMongo());
-        },
         command: (db) => {
             assert.eq(4, db.ts.find().itcount());
         },

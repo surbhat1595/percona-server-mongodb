@@ -8,7 +8,6 @@ set -o errexit
 activate_venv
 PATH="$PATH:/data/multiversion"
 
-# TODO: remove this file and generate tags at execution time for suites defined in multiversion/
-if [ -n "${require_multiversion}" ]; then
-  $python buildscripts/resmoke.py generate-multiversion-exclude-tags --oldBinVersion=last_continuous
+if [[ "${require_multiversion_setup}" = "true" && -n "${multiversion_exclude_tags_version}" ]]; then
+  $python buildscripts/resmoke.py generate-multiversion-exclude-tags --oldBinVersion="${multiversion_exclude_tags_version}"
 fi

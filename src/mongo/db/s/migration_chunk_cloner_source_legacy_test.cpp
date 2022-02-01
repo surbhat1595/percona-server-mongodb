@@ -70,6 +70,10 @@ protected:
     void setUp() override {
         ShardServerTestFixture::setUp();
 
+        auto opCtx = operationContext();
+        DBDirectClient client(opCtx);
+        client.createCollection(NamespaceString::kSessionTransactionsTableNamespace.ns());
+
         // TODO: SERVER-26919 set the flag on the mock repl coordinator just for the window where it
         // actually needs to bypass the op observer.
         replicationCoordinator()->alwaysAllowWrites(true);
@@ -188,7 +192,7 @@ protected:
                     operationContext(),
                     CollectionMetadata(
                         ChunkManager(ShardId("dummyShardId"),
-                                     DatabaseVersion(UUID::gen(), Timestamp()),
+                                     DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
                                      makeStandaloneRoutingTableHistory(std::move(rt)),
                                      boost::none),
                         ShardId("dummyShardId")));
@@ -207,7 +211,7 @@ protected:
         MoveChunkRequest::appendAsCommand(
             &cmdBuilder,
             kNss,
-            ChunkVersion(1, 0, OID::gen(), Timestamp()),
+            ChunkVersion(1, 0, OID::gen(), Timestamp(1, 1)),
             kDonorConnStr.getSetName(),
             kRecipientConnStr.getSetName(),
             chunkRange,
@@ -378,7 +382,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, CorrectDocumentsFetched) {
         onCommand([&](const RemoteCommandRequest& request) { return BSON("ok" << true); });
     });
 
-    ASSERT_OK(cloner.commitClone(operationContext()));
+    ASSERT_OK(cloner.commitClone(operationContext(), true /* acquireCSOnRecipient */));
     futureCommit.default_timed_get();
 }
 
@@ -471,7 +475,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, RemoveDuplicateDocuments) {
         onCommand([&](const RemoteCommandRequest& request) { return BSON("ok" << true); });
     });
 
-    ASSERT_OK(cloner.commitClone(operationContext()));
+    ASSERT_OK(cloner.commitClone(operationContext(), true /* acquireCSOnRecipient */));
     futureCommit.default_timed_get();
 }
 
@@ -532,7 +536,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, OneLargeDocumentTransferMods) {
         onCommand([&](const RemoteCommandRequest& request) { return BSON("ok" << true); });
     });
 
-    ASSERT_OK(cloner.commitClone(operationContext()));
+    ASSERT_OK(cloner.commitClone(operationContext(), true /* acquireCSOnRecipient */));
     futureCommit.default_timed_get();
 }
 
@@ -607,7 +611,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, ManySmallDocumentsTransferMods) {
         onCommand([&](const RemoteCommandRequest& request) { return BSON("ok" << true); });
     });
 
-    ASSERT_OK(cloner.commitClone(operationContext()));
+    ASSERT_OK(cloner.commitClone(operationContext(), true /* acquireCSOnRecipient */));
     futureCommit.default_timed_get();
 }
 

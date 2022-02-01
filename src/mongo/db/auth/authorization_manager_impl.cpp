@@ -68,35 +68,66 @@
 namespace mongo {
 namespace {
 
-MONGO_INITIALIZER_GENERAL(SetupInternalSecurityUser,
-                          ("EndStartupOptionStorage"),
-                          ("CreateAuthorizationManager"))
-(InitializerContext* const context) try {
-    UserHandle user(User(UserName("__system", "local")));
+std::shared_ptr<UserHandle> createSystemUserHandle() {
+    auto user = std::make_shared<UserHandle>(User(UserName("__system", "local")));
 
     ActionSet allActions;
     allActions.addAllActions();
     PrivilegeVector privileges;
     auth::generateUniversalPrivileges(&privileges);
-    user->addPrivileges(privileges);
+    (*user)->addPrivileges(privileges);
 
-    if (mongodGlobalParams.allowlistedClusterNetwork) {
-        const auto& allowlist = *mongodGlobalParams.allowlistedClusterNetwork;
-
-        auto restriction = std::make_unique<ClientSourceRestriction>(allowlist);
-        auto restrictionSet = std::make_unique<RestrictionSet<>>(std::move(restriction));
-        auto restrictionDocument =
-            std::make_unique<RestrictionDocument<>>(std::move(restrictionSet));
-
-        RestrictionDocuments clusterAllowList(std::move(restrictionDocument));
-
-        user->setRestrictions(std::move(clusterAllowList));
+    if (internalSecurity.credentials) {
+        (*user)->setCredentials(internalSecurity.credentials.value());
     }
 
-    internalSecurity.user = user;
+    return user;
+}
+
+class ClusterNetworkRestrictionManagerImpl : public ClusterNetworkRestrictionManager {
+public:
+    static void configureClusterNetworkRestrictions(std::shared_ptr<UserHandle> user) {
+        const auto allowlistedClusterNetwork =
+            std::atomic_load(&mongodGlobalParams.allowlistedClusterNetwork);  // NOLINT
+        if (allowlistedClusterNetwork) {
+            auto restriction =
+                std::make_unique<ClientSourceRestriction>(*allowlistedClusterNetwork);
+            auto restrictionSet = std::make_unique<RestrictionSet<>>(std::move(restriction));
+            auto restrictionDocument =
+                std::make_unique<RestrictionDocument<>>(std::move(restrictionSet));
+
+            RestrictionDocuments clusterAllowList(std::move(restrictionDocument));
+            (*user)->setRestrictions(clusterAllowList);
+        }
+    }
+
+    void updateClusterNetworkRestrictions() override {
+        auto user = createSystemUserHandle();
+        configureClusterNetworkRestrictions(user);
+        auto originalUser = internalSecurity.setUser(user);
+
+        // TODO: Invalidate __system sessions falling under restrictions (SERVER-61038)
+        boost::ignore_unused_variable_warning(originalUser);
+    }
+};
+
+MONGO_INITIALIZER_GENERAL(SetupInternalSecurityUser,
+                          ("EndStartupOptionStorage"),
+                          ("CreateAuthorizationManager"))
+(InitializerContext* const context) try {
+    auto user = createSystemUserHandle();
+    ClusterNetworkRestrictionManagerImpl::configureClusterNetworkRestrictions(user);
+    internalSecurity.setUser(user);
 } catch (...) {
     uassertStatusOK(exceptionToStatus());
 }
+
+ServiceContext::ConstructorActionRegisterer setClusterNetworkRestrictionManager{
+    "SetClusterNetworkRestrictionManager", [](ServiceContext* service) {
+        std::unique_ptr<ClusterNetworkRestrictionManager> manager =
+            std::make_unique<ClusterNetworkRestrictionManagerImpl>();
+        ClusterNetworkRestrictionManager::set(service, std::move(manager));
+    }};
 
 class PinnedUserSetParameter {
 public:
@@ -178,7 +209,7 @@ public:
 private:
     Status _checkForSystemUser(const std::vector<UserName>& names) {
         if (std::any_of(names.begin(), names.end(), [&](const UserName& userName) {
-                return (userName == internalSecurity.user->getName());
+                return (userName == (*internalSecurity.getUser())->getName());
             })) {
             return {ErrorCodes::BadValue,
                     "Cannot set __system as a pinned user, it is always pinned"};
@@ -514,8 +545,9 @@ MONGO_FAIL_POINT_DEFINE(authUserCacheSleep);
 
 StatusWith<UserHandle> AuthorizationManagerImpl::acquireUser(OperationContext* opCtx,
                                                              const UserName& userName) try {
-    if (userName == internalSecurity.user->getName()) {
-        return internalSecurity.user;
+    auto systemUser = internalSecurity.getUser();
+    if (userName == (*systemUser)->getName()) {
+        return *systemUser;
     }
 
     UserRequest request(userName, boost::none);
@@ -585,7 +617,7 @@ StatusWith<UserHandle> AuthorizationManagerImpl::reacquireUser(OperationContext*
     auto ret = std::move(swUserHandle.getValue());
     if (user->getID() != ret->getID()) {
         return {ErrorCodes::UserNotFound,
-                str::stream() << "User id from privilege document '" << userName.toString()
+                str::stream() << "User id from privilege document '" << userName
                               << "' does not match user id in session."};
     }
 
@@ -682,7 +714,7 @@ void AuthorizationManagerImpl::_pinnedUsersThreadRoutine() noexcept try {
                 if (status != ErrorCodes::UserNotFound) {
                     LOGV2_WARNING(20239,
                                   "Unable to fetch pinned user",
-                                  "user"_attr = userName.toString(),
+                                  "user"_attr = userName,
                                   "error"_attr = status);
                 } else {
                     LOGV2_DEBUG(20233, 2, "Pinned user not found", "user"_attr = userName);
@@ -718,6 +750,45 @@ void AuthorizationManagerImpl::invalidateUserCache(OperationContext* opCtx) {
     _updateCacheGeneration();
     _authSchemaVersionCache.invalidateAll();
     _userCache.invalidateAll();
+}
+
+Status AuthorizationManagerImpl::refreshExternalUsers(OperationContext* opCtx) {
+    LOGV2_DEBUG(5914801, 2, "Refreshing all users from the $external database");
+    // First, get a snapshot of the UserHandles in the cache.
+    std::vector<UserHandle> cachedUsers = _userCache.getValueHandlesIfKey(
+        [&](const UserRequest& userRequest) { return userRequest.name.getDB() == "$external"_sd; });
+
+    // Then, retrieve the corresponding Users from the backing store for users in the $external
+    // database. Compare each of these user objects with the cached user object and call
+    // insertOrAssign if they differ.
+    bool isRefreshed{false};
+    for (const auto& cachedUser : cachedUsers) {
+        UserRequest request(cachedUser->getName(), boost::none);
+        auto storedUserStatus = _externalState->getUserObject(opCtx, request);
+        if (!storedUserStatus.isOK()) {
+            // If the user simply is not found, then just invalidate the cached user and continue.
+            if (storedUserStatus.getStatus().code() == ErrorCodes::UserNotFound) {
+                _userCache.invalidate(request);
+                continue;
+            } else {
+                return storedUserStatus.getStatus();
+            }
+        }
+
+        if (cachedUser->hasDifferentRoles(storedUserStatus.getValue())) {
+            _userCache.insertOrAssign(
+                request, std::move(storedUserStatus.getValue()), Date_t::now());
+            isRefreshed = true;
+        }
+    }
+
+    // If any entries were refreshed, then the cache generation must be bumped for mongos to refresh
+    // its cache.
+    if (isRefreshed) {
+        _updateCacheGeneration();
+    }
+
+    return Status::OK();
 }
 
 Status AuthorizationManagerImpl::initialize(OperationContext* opCtx) {

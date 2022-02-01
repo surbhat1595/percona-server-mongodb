@@ -61,10 +61,8 @@ boost::optional<repl::OplogEntry> forgeNoopEntryFromImageCollection(
 
     DBDirectClient client(opCtx);
     BSONObj imageObj =
-        client.findOne(NamespaceString::kConfigImagesNamespace.ns(),
-                       BSON("_id" << retryableFindAndModifyOplogEntry.getSessionId()->toBSON()),
-                       Query(),
-                       nullptr);
+        client.findOne(NamespaceString::kConfigImagesNamespace,
+                       BSON("_id" << retryableFindAndModifyOplogEntry.getSessionId()->toBSON()));
     if (imageObj.isEmpty()) {
         return boost::none;
     }
@@ -124,8 +122,7 @@ boost::optional<repl::OplogEntry> fetchPrePostImageOplog(OperationContext* opCtx
 
     auto opTime = opTimeToFetch.value();
     DBDirectClient client(opCtx);
-    auto oplogBSON =
-        client.findOne(NamespaceString::kRsOplogNamespace.ns(), opTime.asQuery(), Query(), nullptr);
+    auto oplogBSON = client.findOne(NamespaceString::kRsOplogNamespace, opTime.asQuery());
 
     return uassertStatusOK(repl::OplogEntry::parse(oplogBSON));
 }
@@ -238,6 +235,14 @@ SessionCatalogMigrationSource::SessionCatalogMigrationSource(OperationContext* o
     WriteConcernOptions majority(
         WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, 0);
     uassertStatusOK(waitForWriteConcern(opCtx, opTimeToWait, majority, &result));
+
+    AutoGetCollection collection(
+        opCtx, NamespaceString::kSessionTransactionsTableNamespace, MODE_IS);
+    // Session docs contain at least LSID, TxnNumber, Timestamp, and some BSON overhead.
+    const int64_t defaultSessionDocSize =
+        sizeof(LogicalSessionId) + sizeof(TxnNumber) + sizeof(Timestamp) + 16;
+    _averageSessionDocSize =
+        collection ? collection->averageObjectSize(opCtx) : defaultSessionDocSize;
 }
 
 bool SessionCatalogMigrationSource::hasMoreOplog() {
@@ -247,6 +252,15 @@ bool SessionCatalogMigrationSource::hasMoreOplog() {
 
     stdx::lock_guard<Latch> lk(_newOplogMutex);
     return _hasNewWrites(lk);
+}
+
+bool SessionCatalogMigrationSource::inCatchupPhase() {
+    return !_hasMoreOplogFromSessionCatalog();
+}
+
+int64_t SessionCatalogMigrationSource::untransferredCatchUpDataSize() {
+    invariant(inCatchupPhase());
+    return _newWriteOpTimeList.size() * _averageSessionDocSize;
 }
 
 void SessionCatalogMigrationSource::onCommitCloneStarted() {
@@ -335,8 +349,7 @@ bool SessionCatalogMigrationSource::_handleWriteHistory(WithLock, OperationConte
             }
 
             if (nextOplog->isCrudOpType()) {
-                auto shardKey =
-                    _keyPattern.extractShardKeyFromDoc(nextOplog->getObjectContainingDocumentKey());
+                auto shardKey = _keyPattern.extractShardKeyFromOplogEntry(*nextOplog);
                 if (!_chunkRange.containsKey(shardKey)) {
                     continue;
                 }
@@ -421,8 +434,8 @@ bool SessionCatalogMigrationSource::_fetchNextNewWriteOplog(OperationContext* op
     }
 
     DBDirectClient client(opCtx);
-    const auto& newWriteOplogDoc = client.findOne(
-        NamespaceString::kRsOplogNamespace.ns(), nextOpTimeToFetch.asQuery(), Query(), nullptr);
+    const auto& newWriteOplogDoc =
+        client.findOne(NamespaceString::kRsOplogNamespace, nextOpTimeToFetch.asQuery());
 
     uassert(40620,
             str::stream() << "Unable to fetch oplog entry with opTime: "

@@ -47,6 +47,7 @@ env.Library(
         'migration_chunk_cloner_source_legacy.cpp',
         'migration_chunk_cloner_source.cpp',
         'migration_coordinator_document.idl',
+        'migration_recipient_recovery_document.idl',
         'migration_coordinator.cpp',
         'migration_destination_manager.cpp',
         'migration_session_id.cpp',
@@ -58,7 +59,6 @@ env.Library(
         'op_observer_sharding_impl.cpp',
         'periodic_balancer_config_refresher.cpp',
         'periodic_sharded_index_consistency_checker.cpp',
-        'pm2423_feature_flags.idl',
         'range_deletion_task.idl',
         'range_deletion_util.cpp',
         'read_only_catalog_cache_loader.cpp',
@@ -178,6 +178,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands/server_status',
         '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
         '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/internal_transactions_feature_flag',
         '$BUILD_DIR/mongo/db/not_primary_error_tracker',
         '$BUILD_DIR/mongo/db/repl/wait_for_majority_service',
         '$BUILD_DIR/mongo/db/rw_concern_d',
@@ -201,21 +202,33 @@ env.Library(
 )
 
 env.Library(
+    target='forwardable_operation_metadata',
+    source=[
+        'forwardable_operation_metadata.cpp',
+        'forwardable_operation_metadata.idl'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/s/grid',
+    ]
+)
+
+env.Library(
     target='sharding_catalog_manager',
     source=[
         'add_shard_cmd.idl',
         'add_shard_util.cpp',
         'balancer/balance_stats.cpp',
+        'balancer/balancer_chunk_merger_impl.cpp',
         'balancer/balancer_chunk_selection_policy_impl.cpp',
         'balancer/balancer_chunk_selection_policy.cpp',
         'balancer/balancer_command_document.idl',
         'balancer/balancer_commands_scheduler_impl.cpp',
+        'balancer/balancer_dist_locks.cpp',
         'balancer/balancer_policy.cpp',
         'balancer/balancer.cpp',
         'balancer/cluster_statistics_impl.cpp',
         'balancer/cluster_statistics.cpp',
-        'balancer/migration_manager.cpp',
-        'balancer/scoped_migration_request.cpp',
         'balancer/type_migration.cpp',
         'config/initial_split_policy.cpp',
         'config/sharding_catalog_manager_chunk_operations.cpp',
@@ -261,6 +274,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/coreshard',
         '$BUILD_DIR/mongo/s/query/cluster_aggregate',
         '$BUILD_DIR/mongo/util/log_and_backoff',
+        'forwardable_operation_metadata',
         'sharding_logging',
     ],
 )
@@ -306,8 +320,6 @@ env.Library(
         'drop_database_coordinator_document.idl',
         'flush_database_cache_updates_command.cpp',
         'flush_routing_table_cache_updates_command.cpp',
-        'forwardable_operation_metadata.cpp',
-        'forwardable_operation_metadata.idl',
         'get_database_version_command.cpp',
         'get_shard_version_command.cpp',
         'merge_chunks_command.cpp',
@@ -369,9 +381,10 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
-        '$BUILD_DIR/mongo/s/commands/shared_cluster_commands',
+        '$BUILD_DIR/mongo/s/commands/sharded_cluster_sharding_commands',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         '$BUILD_DIR/mongo/s/sharding_router_api',
+        'forwardable_operation_metadata',
         'sharding_runtime_d',
     ],
 )
@@ -536,9 +549,7 @@ env.CppUnitTest(
         'balancer/cluster_statistics_test.cpp',
         'balancer/core_options_stub.cpp',
         'balancer/balancer_commands_scheduler_test.cpp',
-        'balancer/migration_manager_test.cpp',
         'balancer/migration_test_fixture.cpp',
-        'balancer/scoped_migration_request_test.cpp',
         'balancer/type_migration_test.cpp',
         'config_server_op_observer_test.cpp',
         'config/initial_split_policy_test.cpp',

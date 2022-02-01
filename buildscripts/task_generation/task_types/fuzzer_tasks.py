@@ -1,18 +1,16 @@
 """Task generation for fuzzer tasks."""
-from typing import NamedTuple, Set, Optional, Dict, List
+from typing import NamedTuple, Set, Optional, Dict
 
 from shrub.v2 import Task, FunctionCall, TaskDependency
 
 from buildscripts.patch_builds.task_generation import TimeoutInfo
-from buildscripts.task_generation.constants import ARCHIVE_DIST_TEST_DEBUG_TASK
+from buildscripts.task_generation.constants import ARCHIVE_DIST_TEST_DEBUG_TASK, CONFIGURE_EVG_CREDENTIALS, \
+    RUN_GENERATED_TESTS
+from buildscripts.task_generation.task_types.multiversion_decorator import MultiversionGenTaskDecorator, \
+    MultiversionDecoratorParams
 from buildscripts.util import taskname
 
-
-def get_multiversion_resmoke_args(is_sharded: bool) -> str:
-    """Return resmoke args used to configure a cluster for multiversion testing."""
-    if is_sharded:
-        return "--numShards=2 --numReplSetNodes=2 "
-    return "--numReplSetNodes=3 --linearChain=on "
+_MINIMIZABLE_FUZZERS = ["agg-fuzzer", "query-fuzzer"]
 
 
 class FuzzerTask(NamedTuple):
@@ -43,9 +41,8 @@ class FuzzerGenTaskParams(NamedTuple):
     resmoke_jobs_max: Maximum number of jobs resmoke should execute in parallel.
     should_shuffle: Should tests be executed out of order.
     timeout_secs: Timeout before test execution is considered hung.
-    require_multiversion: Requires downloading Multiversion binaries.
+    require_multiversion_setup: Requires downloading Multiversion binaries.
     use_large_distro: Should tests be generated on a large distro.
-    add_to_display_task: Should generated tasks be grouped in a display task.
     """
 
     task_name: str
@@ -60,13 +57,15 @@ class FuzzerGenTaskParams(NamedTuple):
     resmoke_jobs_max: int
     should_shuffle: bool
     timeout_secs: int
-    require_multiversion: Optional[bool]
+    require_multiversion_setup: Optional[bool]
     use_large_distro: Optional[bool]
     large_distro_name: Optional[str]
     config_location: str
-    add_to_display_task: bool = True
-    version_config: Optional[List[str]] = None
-    is_sharded: Optional[bool] = None
+
+    @property
+    def is_minimizable(self) -> bool:
+        """Return whether this fuzzer in minimizable."""
+        return self.npm_command in _MINIMIZABLE_FUZZERS
 
     def jstestfuzz_params(self) -> Dict[str, str]:
         """Build a dictionary of parameters to pass to jstestfuzz."""
@@ -75,22 +74,17 @@ class FuzzerGenTaskParams(NamedTuple):
             "npm_command": self.npm_command,
         }
 
-    def get_task_name(self, version: str) -> str:
-        """Get the name to use for generated tasks."""
-        if version:
-            return f"{self.suite}_multiversion_{version}"
-        return self.task_name
-
     def get_resmoke_args(self) -> str:
         """Get the resmoke arguments to use for generated tasks."""
-        if self.is_sharded is not None:
-            mv_args = get_multiversion_resmoke_args(self.is_sharded)
-            return f"{self.resmoke_args or ''} --mixedBinVersions={self.version_config} {mv_args}"
         return self.resmoke_args
 
 
 class FuzzerGenTaskService:
     """A service for generating fuzzer tasks."""
+
+    def __init__(self):
+        """Initialize the service."""
+        self.multiversion_decorator = MultiversionGenTaskDecorator()  # pylint: disable=no-value-for-parameter
 
     def generate_tasks(self, params: FuzzerGenTaskParams) -> FuzzerTask:
         """
@@ -99,62 +93,58 @@ class FuzzerGenTaskService:
         :param params: Parameters for how task should be generated.
         :return: Set of shrub tasks.
         """
-        version_list = params.version_config
-        if version_list is None:
-            version_list = [""]
-
         sub_tasks = set()
-        for version in version_list:
-            sub_tasks = sub_tasks.union({
-                self.build_fuzzer_sub_task(index, params, version)
-                for index in range(params.num_tasks)
-            })
+        sub_tasks = sub_tasks.union(
+            {self.build_fuzzer_sub_task(index, params)
+             for index in range(params.num_tasks)})
 
-        return FuzzerTask(task_name=params.get_task_name(""), sub_tasks=sub_tasks)
+        if params.require_multiversion_setup:
+            mv_params = MultiversionDecoratorParams(
+                base_suite=params.suite,
+                task=params.task_name,
+                variant=params.variant,
+                num_tasks=params.num_tasks,
+            )
+            sub_tasks = self.multiversion_decorator.decorate_tasks_with_dynamically_generated_files(
+                sub_tasks, mv_params)
+
+        return FuzzerTask(task_name=params.task_name, sub_tasks=sub_tasks)
 
     @staticmethod
-    def build_fuzzer_sub_task(task_index: int, params: FuzzerGenTaskParams, version: str) -> Task:
+    def build_fuzzer_sub_task(task_index: int, params: FuzzerGenTaskParams) -> Task:
         """
         Build a shrub task to run the fuzzer.
 
         :param task_index: Index of sub task being generated.
         :param params: Parameters describing how tasks should be generated.
-        :param version: Multiversion version to generate against.
         :return: Shrub task to run the fuzzer.
         """
-        sub_task_name = taskname.name_generated_task(
-            params.get_task_name(version), task_index, params.num_tasks, params.variant)
+        sub_task_name = taskname.name_generated_task(params.task_name, task_index, params.num_tasks,
+                                                     params.variant)
 
-        suite_arg = f"--suites={params.suite}"
         run_tests_vars = {
             "continue_on_failure": params.continue_on_failure,
-            "resmoke_args": f"{suite_arg} {params.get_resmoke_args()}",
+            "resmoke_args": params.get_resmoke_args(),
             "resmoke_jobs_max": params.resmoke_jobs_max,
             "should_shuffle": params.should_shuffle,
-            "require_multiversion": params.require_multiversion,
+            "require_multiversion_setup": params.require_multiversion_setup,
             "timeout_secs": params.timeout_secs,
-            "task": params.get_task_name(version),
+            "task": params.task_name,
             "gen_task_config_location": params.config_location,
+            "suite": params.suite,
         }  # yapf: disable
 
         timeout_info = TimeoutInfo.overridden(timeout=params.timeout_secs)
 
-        commands = []
-
-        if params.require_multiversion:
-            commands += [FunctionCall("git get project no modules")]
-            commands += [FunctionCall("add git tag")]
-
-        commands += [
+        commands = [
             timeout_info.cmd,
             FunctionCall("do setup"),
-            FunctionCall("configure evergreen api credentials")
-            if params.require_multiversion else None,
-            FunctionCall("do multiversion setup") if params.require_multiversion else None,
+            FunctionCall(CONFIGURE_EVG_CREDENTIALS),
             FunctionCall("setup jstestfuzz"),
             FunctionCall("run jstestfuzz", params.jstestfuzz_params()),
-            FunctionCall("run generated tests", run_tests_vars)
+            FunctionCall(RUN_GENERATED_TESTS, run_tests_vars)
         ]
-        commands = [command for command in commands if command is not None]
+        if params.is_minimizable:
+            commands.append(FunctionCall("minimize jstestfuzz", params.jstestfuzz_params()))
 
         return Task(sub_task_name, commands, {TaskDependency(ARCHIVE_DIST_TEST_DEBUG_TASK)})

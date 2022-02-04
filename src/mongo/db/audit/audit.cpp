@@ -667,6 +667,8 @@ namespace audit {
         }
     }
 
+    void rotateAuditLog() {}
+
     void logClientMetadata(Client* client) {
         if (!_auditLog) {
             return;

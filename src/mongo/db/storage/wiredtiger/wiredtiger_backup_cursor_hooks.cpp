@@ -46,8 +46,8 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(backupCursorErrorAfterOpen);
 
-auto initializer(StorageEngine* storageEngine) {
-    return std::make_unique<WiredTigerBackupCursorHooks>(storageEngine);
+auto initializer() {
+    return std::make_unique<WiredTigerBackupCursorHooks>();
 }
 }  // namespace
 
@@ -69,14 +69,16 @@ void WiredTigerBackupCursorHooks::fsyncLock(OperationContext* opCtx) {
             "The running hot backup ('createBackup' command) must be completed before fsyncLock "
             "can succeed.",
             _state != kHotBackup);
-    uassertStatusOK(_storageEngine->beginBackup(opCtx));
+    auto* engine = opCtx->getServiceContext()->getStorageEngine();
+    uassertStatusOK(engine->beginBackup(opCtx));
     _state = kFsyncLocked;
 }
 
 void WiredTigerBackupCursorHooks::fsyncUnlock(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     uassert(50888, "The node is not fsyncLocked.", _state == kFsyncLocked);
-    _storageEngine->endBackup(opCtx);
+    auto* engine = opCtx->getServiceContext()->getStorageEngine();
+    engine->endBackup(opCtx);
     _state = kInactive;
 }
 
@@ -113,15 +115,17 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
         }
     }
 
+    auto* engine = opCtx->getServiceContext()->getStorageEngine();
+
     // Capture the checkpointTimestamp before and after opening a cursor. If it hasn't moved,
     // the checkpointTimestamp is known to be exact. If it has moved, uassert and have the user
     // retry.
     boost::optional<Timestamp> checkpointTimestamp;
-    if (_storageEngine->supportsRecoverToStableTimestamp()) {
-        checkpointTimestamp = _storageEngine->getLastStableRecoveryTimestamp();
+    if (engine->supportsRecoverToStableTimestamp()) {
+        checkpointTimestamp = engine->getLastStableRecoveryTimestamp();
     };
 
-    auto filesToBackup = uassertStatusOK(_storageEngine->beginNonBlockingBackup(opCtx, options));
+    auto filesToBackup = uassertStatusOK(engine->beginNonBlockingBackup(opCtx, options));
     _state = kBackupCursorOpened;
     _openCursor = UUID::gen();
     LOGV2(29093, "Opened backup cursor", "backupId"_attr = _openCursor.get());
@@ -137,8 +141,8 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
 
     // Ensure the checkpointTimestamp hasn't moved. A subtle case to catch is the first stable
     // checkpoint coming out of initial sync racing with opening the backup cursor.
-    if (checkpointTimestamp && _storageEngine->supportsRecoverToStableTimestamp()) {
-        auto requeriedCheckpointTimestamp = _storageEngine->getLastStableRecoveryTimestamp();
+    if (checkpointTimestamp && engine->supportsRecoverToStableTimestamp()) {
+        auto requeriedCheckpointTimestamp = engine->getLastStableRecoveryTimestamp();
         if (!requeriedCheckpointTimestamp ||
             requeriedCheckpointTimestamp.get() < checkpointTimestamp.get()) {
             LOGV2_FATAL(50916,
@@ -210,7 +214,8 @@ void WiredTigerBackupCursorHooks::_closeBackupCursor(OperationContext* opCtx,
             str::stream() << "Can only close the running backup cursor. To close: " << backupId
                           << " Running: " << _openCursor.get(),
             backupId == _openCursor.get());
-    _storageEngine->endNonBlockingBackup(opCtx);
+    auto* engine = opCtx->getServiceContext()->getStorageEngine();
+    engine->endNonBlockingBackup(opCtx);
     auto* encHooks = EncryptionHooks::get(opCtx->getServiceContext());
     if (encHooks->enabled()) {
         fassert(50934, encHooks->endNonBlockingBackup());
@@ -247,7 +252,8 @@ BackupCursorExtendState WiredTigerBackupCursorHooks::extendBackupCursor(Operatio
     BackupCursorExtendState result;
     // use WiredTigerKVEngine::extendBackupCursor
     {
-        auto res = _storageEngine->extendBackupCursor(opCtx);
+        auto* engine = opCtx->getServiceContext()->getStorageEngine();
+        auto res = engine->extendBackupCursor(opCtx);
         if (!res.isOK()) {
             LOGV2_FATAL(29095, "Failed to extend backup cursor", "reason"_attr = res.getStatus());
         }

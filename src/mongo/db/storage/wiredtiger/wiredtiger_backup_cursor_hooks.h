@@ -40,7 +40,7 @@ class WiredTigerBackupCursorHooks : public BackupCursorHooks {
 public:
     static void registerInitializer();
 
-    WiredTigerBackupCursorHooks(StorageEngine* storageEngine) : _storageEngine(storageEngine) {}
+    WiredTigerBackupCursorHooks() {}
 
     virtual ~WiredTigerBackupCursorHooks() override = default;
 
@@ -69,8 +69,6 @@ private:
     void deactivateHotBackup();
 
     void _closeBackupCursor(OperationContext* opCtx, const UUID& backupId, WithLock);
-
-    StorageEngine* _storageEngine;
 
     enum State { kInactive, kFsyncLocked, kBackupCursorOpened, kHotBackup };
 

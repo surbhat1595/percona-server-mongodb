@@ -86,6 +86,7 @@
 #include "mongo/db/query/sbe_cached_solution_planner.h"
 #include "mongo/db/query/sbe_multi_planner.h"
 #include "mongo/db/query/sbe_sub_planner.h"
+#include "mongo/db/query/sbe_utils.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
@@ -358,7 +359,6 @@ void fillOutPlannerParams(OperationContext* opCtx,
 
     if (collection->isClustered()) {
         plannerParams->clusteredInfo = collection->getClusteredInfo();
-        plannerParams->allowRIDRange = true;
     }
 }
 
@@ -536,6 +536,11 @@ public:
         QueryPlannerParams plannerParams;
         plannerParams.options = _plannerOptions;
         fillOutPlannerParams(_opCtx, _collection, _cq, &plannerParams);
+        tassert(
+            5842901,
+            "Fast count queries aren't supported in SBE, therefore, should never lower parts of "
+            "the aggregation pipeline for these queries either.",
+            (!(plannerParams.options & QueryPlannerParams::IS_COUNT) || _cq->pipeline().empty()));
 
         // If the canonical query does not have a user-specified collation and no one has given the
         // CanonicalQuery a collation already, set it from the collection default.
@@ -544,10 +549,10 @@ public:
             _cq->setCollator(_collection->getDefaultCollator()->clone());
         }
 
-        const IndexDescriptor* idIndexDesc = _collection->getIndexCatalog()->findIdIndex(_opCtx);
-
         // If we have an _id index we can use an idhack plan.
-        if (idIndexDesc && isIdHackEligibleQuery(_collection, *_cq)) {
+        if (const IndexDescriptor* idIndexDesc =
+                _collection->getIndexCatalog()->findIdIndex(_opCtx);
+            idIndexDesc && isIdHackEligibleQuery(_collection, *_cq)) {
             LOGV2_DEBUG(
                 20922, 2, "Using idhack", "canonicalQuery"_attr = redact(_cq->toStringShort()));
             // If an IDHACK plan is not supported, we will use the normal plan generation process
@@ -598,9 +603,7 @@ public:
             }
         }
 
-
-        if (internalQueryPlanOrChildrenIndependently.load() &&
-            SubplanStage::canUseSubplanning(*_cq)) {
+        if (SubplanStage::needsSubplanning(*_cq)) {
             LOGV2_DEBUG(20924,
                         2,
                         "Running query as sub-queries",
@@ -608,14 +611,7 @@ public:
             return buildSubPlan(plannerParams);
         }
 
-        // 'postMultiPlan' might be necessary, if the query contains parts of a pipeline, pushed
-        // into the find subsystem. Currently, we only support this for SBE when a single solution
-        // is found.
-        auto&& [statusWithMultiPlanSolns, postMultiPlan] = QueryPlanner::plan(*_cq, plannerParams);
-        tassert(5842803,
-                "Extending multi-planned solutions is only supported in SBE",
-                (std::is_same<ResultType, SlotBasedPrepareExecutionResult>::value ||
-                 postMultiPlan == nullptr));
+        auto statusWithMultiPlanSolns = QueryPlanner::plan(*_cq, plannerParams);
 
         if (!statusWithMultiPlanSolns.isOK()) {
             return statusWithMultiPlanSolns.getStatus().withContext(
@@ -646,18 +642,10 @@ public:
         }
 
         if (1 == solutions.size()) {
+            // Only one possible plan. Build the stages from the solution.
             auto result = makeResult();
-            // Only one possible plan. Run it. Build the stages from the solution.
-            solutions[0]->extendWith(std::move(postMultiPlan));
-
-            // For performance reasons when executing $group plans, we need to eliminate a redundant
-            // PROJECTION_SIMPLE node if its required fields are a super set of the postMultiPlan's
-            // dependency set.
-            auto optimizedSoln =
-                QueryPlannerAnalysis::removeProjectSimpleBelowGroup(std::move(solutions[0]));
-
-            auto root = buildExecutableTree(*optimizedSoln);
-            result->emplace(std::move(root), std::move(optimizedSoln));
+            auto root = buildExecutableTree(*solutions[0]);
+            result->emplace(std::move(root), std::move(solutions[0]));
 
             LOGV2_DEBUG(20926,
                         2,
@@ -887,13 +875,13 @@ class SlotBasedPrepareExecutionHelper final
 public:
     using PrepareExecutionHelper::PrepareExecutionHelper;
 
-protected:
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> buildExecutableTree(
         const QuerySolution& solution) const final {
         return stage_builder::buildSlotBasedExecutableTree(
             _opCtx, _collection, *_cq, solution, _yieldPolicy);
     }
 
+protected:
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildIdHackPlan(
         const IndexDescriptor* descriptor, QueryPlannerParams* plannerParams) final {
         invariant(descriptor);
@@ -1128,6 +1116,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                                   plannerOptions)) {
         // Do the runtime planning and pick the best candidate plan.
         auto candidates = planner->plan(std::move(solutions), std::move(roots));
+
         return plan_executor_factory::make(opCtx,
                                            std::move(cq),
                                            std::move(candidates),
@@ -1136,9 +1125,14 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                            std::move(nss),
                                            std::move(yieldPolicy));
     }
-    // No need for runtime planning, just use the constructed plan stage tree.
-    invariant(roots.size() == 1);
 
+    invariant(solutions.size() == 1);
+    invariant(roots.size() == 1);
+    if (!cq->pipeline().empty()) {
+        // Need to extend the solution with the agg pipeline and rebuild the execution tree.
+        solutions[0] = QueryPlanner::extendWithAggPipeline(*cq, std::move(solutions[0]));
+        roots[0] = helper.buildExecutableTree(*(solutions[0]));
+    }
     return plan_executor_factory::make(opCtx,
                                        std::move(cq),
                                        std::move(solutions[0]),
@@ -1147,37 +1141,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                        plannerOptions,
                                        std::move(nss),
                                        std::move(yieldPolicy));
-}
-
-// Checks if the given query can be executed with the SBE engine.
-inline bool isQuerySbeCompatible(OperationContext* opCtx,
-                                 const CollectionPtr* collection,
-                                 const CanonicalQuery* const cq,
-                                 size_t plannerOptions) {
-    invariant(cq);
-    auto expCtx = cq->getExpCtxRaw();
-    const auto& sortPattern = cq->getSortPattern();
-    const bool allExpressionsSupported = expCtx && expCtx->sbeCompatible;
-    const bool isNotCount = !(plannerOptions & QueryPlannerParams::IS_COUNT);
-    const bool isNotOplog = !cq->nss().isOplog();
-    const bool doesNotContainMetadataRequirements = cq->metadataDeps().none();
-    const bool doesNotSortOnMetaOrPathWithNumericComponents =
-        !sortPattern || std::all_of(sortPattern->begin(), sortPattern->end(), [](auto&& part) {
-            return part.fieldPath &&
-                !FieldRef(part.fieldPath->fullPath()).hasNumericPathComponents();
-        });
-
-    // Queries against a time-series collection are not currently supported by SBE.
-    const bool isQueryNotAgainstTimeseriesCollection = !(cq->nss().isTimeseriesBucketsCollection());
-
-    // Queries against a clustered collection are not currently supported by SBE.
-    tassert(6038600, "Expected CollectionPtr to not be nullptr", collection);
-    const bool isQueryNotAgainstClusteredCollection =
-        !(collection->get() && collection->get()->isClustered());
-
-    return allExpressionsSupported && isNotCount && doesNotContainMetadataRequirements &&
-        isQueryNotAgainstTimeseriesCollection && isQueryNotAgainstClusteredCollection &&
-        doesNotSortOnMetaOrPathWithNumericComponents && isNotOplog;
 }
 }  // namespace
 
@@ -1189,7 +1152,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions) {
     canonicalQuery->setSbeCompatible(
-        isQuerySbeCompatible(opCtx, collection, canonicalQuery.get(), plannerOptions));
+        sbe::isQuerySbeCompatible(collection, canonicalQuery.get(), plannerOptions));
     return !canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()
         ? getSlotBasedExecutor(opCtx,
                                collection,
@@ -1623,18 +1586,25 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
 namespace {
 
 /**
- * If the given 'bounds' contains a single null interval return its position, otherwise return
- * boost::none.
+ * If 'isn' represents a non-multikey index and its bounds contain a single null interval, return
+ * its position. If 'isn' represents a multikey index and its bounds contain a single null and
+ * empty array interval, return its position. Otherwise return boost::none.
  */
-boost::optional<size_t> boundsHasExactlyOneNullInterval(const IndexBounds& bounds) {
+boost::optional<size_t> boundsHasExactlyOneNullOrNullAndEmptyInterval(const IndexScanNode* isn) {
     boost::optional<size_t> nullFieldNo;
-    for (size_t fieldNo = 0; fieldNo < bounds.fields.size(); ++fieldNo) {
-        const OrderedIntervalList& oil = bounds.fields[fieldNo];
-        if (IndexBoundsBuilder::isNullInterval(oil)) {
-            // Return boost::none if we have multiple null intervals.
-            if (nullFieldNo) {
-                return boost::none;
-            }
+    for (size_t fieldNo = 0; fieldNo < isn->bounds.fields.size(); ++fieldNo) {
+        const OrderedIntervalList& oil = isn->bounds.fields[fieldNo];
+
+        auto isNullInterval = IndexBoundsBuilder::isNullInterval(oil);
+        auto isNullAndEmptyArrayInterval = IndexBoundsBuilder::isNullAndEmptyArrayInterval(oil);
+
+        // Return boost::none if we have multiple null intervals.
+        if ((isNullInterval || isNullAndEmptyArrayInterval) && nullFieldNo) {
+            return boost::none;
+        }
+
+        if ((isNullInterval && !isn->index.multikey) ||
+            (isNullAndEmptyArrayInterval && isn->index.multikey)) {
             nullFieldNo = fieldNo;
         }
     }
@@ -1706,11 +1676,12 @@ bool turnIxscanIntoCount(QuerySolution* soln) {
     if (!IndexBoundsBuilder::isSingleInterval(
             isn->bounds, &startKey, &startKeyInclusive, &endKey, &endKeyInclusive)) {
         // If we have exactly one null interval, we should split the bounds and try to construct
-        // two COUNT_SCAN stages joined by an OR stage. If we had multiple null intervals, we would
-        // need 2^N count scans for N intervals, meaning this would quickly explode to a
-        // point where it would just be more efficient to use a single index scan. Consequently, we
-        // draw the line at one null interval.
-        if (auto nullFieldNo = boundsHasExactlyOneNullInterval(isn->bounds)) {
+        // two COUNT_SCAN stages joined by an OR stage. If we have exactly one null and empty array
+        // interval, we should do the same with three COUNT_SCAN stages. If we had multiple such
+        // intervals, we would need at least 2^N count scans for N intervals, meaning this would
+        // quickly explode to a point where it would just be more efficient to use a single index
+        // scan. Consequently, we draw the line at one such interval.
+        if (auto nullFieldNo = boundsHasExactlyOneNullOrNullAndEmptyInterval(isn)) {
             OrderedIntervalList undefinedPointOil, nullPointOil;
             undefinedPointOil.intervals.push_back(IndexBoundsBuilder::kUndefinedPointInterval);
             nullPointOil.intervals.push_back(IndexBoundsBuilder::kNullPointInterval);
@@ -1737,16 +1708,28 @@ bool turnIxscanIntoCount(QuerySolution* soln) {
 
             if (undefinedCsn) {
                 // If undefinedCsn is non-null, then we should also be able to successfully generate
-                // a count scan for the null interval case.
+                // a count scan for the null interval case and for the empty array interval case.
                 auto nullCsn = makeNullBoundsCountScan(nullPointOil);
                 tassert(5506500, "Invalid null bounds COUNT_SCAN", nullCsn);
 
                 auto csns = makeVector(std::move(undefinedCsn), std::move(nullCsn));
-
-                // Note that there is no need to deduplicate here because this optimization cannot
-                // be applied to multikey indexes.
                 auto orn = std::make_unique<OrNode>();
                 orn->addChildren(std::move(csns));
+
+                if (isn->index.multikey) {
+                    // For a multikey index, add the third COUNT_SCAN stage for empty array values.
+                    OrderedIntervalList emptyArrayPointOil;
+                    emptyArrayPointOil.intervals.push_back(
+                        IndexBoundsBuilder::kEmptyArrayPointInterval);
+                    auto emptyArrayCsn = makeNullBoundsCountScan(emptyArrayPointOil);
+                    tassert(6001000, "Invalid empty array bounds COUNT_SCAN", emptyArrayCsn);
+
+                    orn->addChildren(makeVector(std::move(emptyArrayCsn)));
+                } else {
+                    // Note that there is no need to deduplicate when the optimization is not
+                    // applied to multikey indexes.
+                    orn->dedup = false;
+                }
                 soln->setRoot(std::move(orn));
 
                 return true;
@@ -2415,8 +2398,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
 
     // Ask the QueryPlanner for a list of solutions that scan one of the indexes from
     // fillOutPlannerParamsForDistinct() (i.e., the indexes that include the distinct field).
-    auto statusWithMultiPlanSolns =
-        QueryPlanner::planForMultiPlanner(*parsedDistinct->getQuery(), plannerParams);
+    auto statusWithMultiPlanSolns = QueryPlanner::plan(*parsedDistinct->getQuery(), plannerParams);
     if (!statusWithMultiPlanSolns.isOK()) {
         if (plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY) {
             return {nullptr};
@@ -2455,5 +2437,4 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
         return {nullptr};
     }
 }
-
 }  // namespace mongo

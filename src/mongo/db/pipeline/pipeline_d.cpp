@@ -49,6 +49,7 @@
 #include "mongo/db/exec/sample_from_timeseries_bucket.h"
 #include "mongo/db/exec/shard_filter.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
+#include "mongo/db/exec/subplan.h"
 #include "mongo/db/exec/trial_stage.h"
 #include "mongo/db/exec/unpack_timeseries_bucket.h"
 #include "mongo/db/exec/working_set.h"
@@ -105,12 +106,8 @@ namespace {
  *    0. When the 'internalQueryForceClassicEngine' feature flag is 'false'.
  *    1. When 'allowDiskUse' is false. We currently don't support spilling in the SBE HashAgg
  *       stage. This will change once that is supported when SERVER-58436 is complete.
- *    2. When there's only a single index other than the implicit '_id' index on the provided
- *       collection. This case is necessary because we don't currently support extending the
- *       QuerySolution with the 'postMultiPlan' QuerySolutionNode when the PlanCache is involved in
- *       the query. This will be resolved when SERVER-58429 is complete.
- *    3. $match stage does not have $or and thus, does not need subplanning.
- *    4. When the DocumentSourceGroup has 'doingMerge=false', this will change when we implement
+ *    2. $match stage does not have $or and thus, does not need subplanning.
+ *    3. When the DocumentSourceGroup has 'doingMerge=false', this will change when we implement
  *       hash table spilling in SERVER-58436.
  */
 std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleGroupsForPushdown(
@@ -126,21 +123,16 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleGr
     // because subplanning does not expect that the base query has pushed down $group stage(s) but
     // it does when $group stage exist in pipeline.
     // TODO SERVER-60197: Remove this check after supporting this scenario.
-    auto queryNeedsSubplanning = cq->getQueryObj().hasField("$or");
+    auto queryNeedsSubplanning = SubplanStage::needsSubplanning(*cq);
 
     // This handles the case of unionWith against an unknown collection.
     if (collection == nullptr) {
         return {};
     }
 
-    const auto indexCatalog = collection->getIndexCatalog();
-    const auto isSingleIndex =
-        indexCatalog ? indexCatalog->numIndexesTotal(expCtx->opCtx) == 1 : false;
-
     if (!feature_flags::gFeatureFlagSBEGroupPushdown.isEnabled(
             serverGlobalParams.featureCompatibility) ||
-        cq->getForceClassicEngine() || expCtx->allowDiskUse || !isSingleIndex ||
-        queryNeedsSubplanning) {
+        cq->getForceClassicEngine() || expCtx->allowDiskUse || queryNeedsSubplanning) {
         return {};
     }
 

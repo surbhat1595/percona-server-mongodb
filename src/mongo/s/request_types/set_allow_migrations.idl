@@ -26,13 +26,13 @@
 # it in the license file.
 #
 
-# configsvrSetAllowMigrations IDL File
-
 global:
     cpp_namespace: "mongo"
 
 imports:
     - "mongo/idl/basic_types.idl"
+    - "mongo/db/s/sharding_ddl_coordinator.idl"
+    - "mongo/s/request_types/sharded_ddl_commands.idl"
 
 commands:
     _configsvrSetAllowMigrations:
@@ -52,3 +52,14 @@ commands:
               type: uuid
               description: "The uuid of the collection."
               optional: true # Optional for backwards compatibility
+                
+    setAllowMigrations:
+        command_name: setAllowMigrations
+        cpp_name: SetAllowMigrations
+        description: "user faced setAllowMigrations command"
+        namespace: type
+        api_version: ""
+        type: namespacestring
+        strict: false
+        chained_structs: 
+            SetAllowMigrationsRequest: SetAllowMigrationsRequest

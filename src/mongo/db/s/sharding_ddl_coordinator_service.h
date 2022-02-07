@@ -59,10 +59,13 @@ public:
         return limits;
     }
 
-    std::shared_ptr<Instance> constructInstance(
+    // The service implemented its own conflict check before this method was added.
+    void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
-        const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override;
+        const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) override{};
+
+    std::shared_ptr<Instance> constructInstance(BSONObj initialState) override;
 
     std::shared_ptr<Instance> getOrCreateInstance(OperationContext* opCtx, BSONObj initialState);
 

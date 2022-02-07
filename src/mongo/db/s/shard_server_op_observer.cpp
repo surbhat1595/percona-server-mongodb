@@ -100,30 +100,6 @@ private:
 };
 
 /**
- * Used to perform shard identity initialization once it is certain that the document is committed.
- */
-class ShardIdentityLogOpHandler final : public RecoveryUnit::Change {
-public:
-    ShardIdentityLogOpHandler(OperationContext* opCtx, ShardIdentityType shardIdentity)
-        : _opCtx(opCtx), _shardIdentity(std::move(shardIdentity)) {}
-
-    void commit(boost::optional<Timestamp>) override {
-        try {
-            ShardingInitializationMongoD::get(_opCtx)->initializeFromShardIdentity(_opCtx,
-                                                                                   _shardIdentity);
-        } catch (const AssertionException& ex) {
-            fassertFailedWithStatus(40071, ex.toStatus());
-        }
-    }
-
-    void rollback() override {}
-
-private:
-    OperationContext* _opCtx;
-    const ShardIdentityType _shardIdentity;
-};
-
-/**
  * Used to submit a range deletion task once it is certain that the update/insert to
  * config.rangeDeletions is committed.
  */
@@ -233,9 +209,9 @@ void incrementChunkOnInsertOrUpdate(OperationContext* opCtx,
 void abortOngoingMigrationIfNeeded(OperationContext* opCtx, const NamespaceString nss) {
     auto* const csr = CollectionShardingRuntime::get(opCtx, nss);
     auto csrLock = CollectionShardingRuntime::CSRLock::lockShared(opCtx, csr);
-    auto msm = MigrationSourceManager::get(csr, csrLock);
-    if (msm) {
-        msm->abortDueToConflictingIndexOperation(opCtx);
+    if (auto msm = MigrationSourceManager::get(csr, csrLock)) {
+        // Only interrupt the migration, but don't actually join
+        (void)msm->abort();
     }
 }
 
@@ -262,9 +238,20 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                     auto shardIdentityDoc =
                         uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(insertedDoc));
                     uassertStatusOK(shardIdentityDoc.validate());
-                    opCtx->recoveryUnit()->registerChange(
-                        std::make_unique<ShardIdentityLogOpHandler>(opCtx,
-                                                                    std::move(shardIdentityDoc)));
+                    /**
+                     * Perform shard identity initialization once we are certain that the document
+                     * is committed.
+                     */
+                    opCtx->recoveryUnit()->onCommit([opCtx,
+                                                     shardIdentity = std::move(shardIdentityDoc)](
+                                                        boost::optional<Timestamp>) {
+                        try {
+                            ShardingInitializationMongoD::get(opCtx)->initializeFromShardIdentity(
+                                opCtx, shardIdentity);
+                        } catch (const AssertionException& ex) {
+                            fassertFailedWithStatus(40071, ex.toStatus());
+                        }
+                    });
                 }
             }
         }
@@ -462,6 +449,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
 
 void ShardServerOpObserver::aboutToDelete(OperationContext* opCtx,
                                           NamespaceString const& nss,
+                                          const UUID& uuid,
                                           BSONObj const& doc) {
 
     if (nss == NamespaceString::kCollectionCriticalSectionsNamespace) {
@@ -613,12 +601,12 @@ repl::OpTime ShardServerOpObserver::onDropCollection(OperationContext* opCtx,
 
 void ShardServerOpObserver::onStartIndexBuild(OperationContext* opCtx,
                                               const NamespaceString& nss,
-                                              CollectionUUID collUUID,
+                                              const UUID& collUUID,
                                               const UUID& indexBuildUUID,
                                               const std::vector<BSONObj>& indexes,
                                               bool fromMigrate) {
     abortOngoingMigrationIfNeeded(opCtx, nss);
-};
+}
 
 void ShardServerOpObserver::onStartIndexBuildSinglePhase(OperationContext* opCtx,
                                                          const NamespaceString& nss) {

@@ -216,12 +216,10 @@ void deleteExpiredChangeStreamPreImages(Client* client) {
         return;
     }
 
-    const bool shouldReplicateDeletes = gIsChangeStreamExpiredPreImageRemovalJobReplicating.load();
+    // Do not run the job on secondaries.
     const auto isPrimary = repl::ReplicationCoordinator::get(opCtx.get())
                                ->canAcceptWritesForDatabase(opCtx.get(), NamespaceString::kAdminDb);
-
-    // Do not run the job on secondaries if we should explicitly replicate the deletes.
-    if (!isPrimary && shouldReplicateDeletes) {
+    if (!isPrimary) {
         return;
     }
 
@@ -244,13 +242,6 @@ void deleteExpiredChangeStreamPreImages(Client* client) {
             "ChangeStreamExpiredPreImagesRemover",
             NamespaceString::kChangeStreamPreImagesNamespace.ns(),
             [&] {
-                boost::optional<repl::UnreplicatedWritesBlock> unReplBlock;
-                // TODO SERVER-60238: write the tests for non-replicating deletes, when pre-image
-                // replication to secondaries is implemented.
-                if (!shouldReplicateDeletes) {
-                    unReplBlock.emplace(opCtx.get());
-                }
-
                 WriteUnitOfWork wuow(opCtx.get());
                 const auto recordId =
                     record_id_helpers::keyForElem(it->getField(ChangeStreamPreImage::kIdFieldName));

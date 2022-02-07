@@ -31,7 +31,10 @@
 
 #include "mongo/db/catalog/coll_mod_index.h"
 
+#include <fmt/format.h>
+
 #include "mongo/bson/simple_bsonelement_comparator.h"
+#include "mongo/db/catalog/cannot_enable_index_constraint_info.h"
 #include "mongo/db/catalog/throttle_cursor.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/storage/index_entry_comparison.h"
@@ -41,57 +44,13 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/shared_buffer_fragment.h"
 
 namespace mongo {
 
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(assertAfterIndexUpdate);
-
-class CollModResultChange : public RecoveryUnit::Change {
-public:
-    CollModResultChange(const BSONElement& oldExpireSecs,
-                        const BSONElement& newExpireSecs,
-                        const BSONElement& oldHidden,
-                        const BSONElement& newHidden,
-                        const BSONElement& newUnique,
-                        BSONObjBuilder* result)
-        : _oldExpireSecs(oldExpireSecs),
-          _newExpireSecs(newExpireSecs),
-          _oldHidden(oldHidden),
-          _newHidden(newHidden),
-          _newUnique(newUnique),
-          _result(result) {}
-
-    void commit(boost::optional<Timestamp>) override {
-        // add the fields to BSONObjBuilder result
-        if (!_oldExpireSecs.eoo()) {
-            _result->appendAs(_oldExpireSecs, "expireAfterSeconds_old");
-        }
-        if (!_newExpireSecs.eoo()) {
-            _result->appendAs(_newExpireSecs, "expireAfterSeconds_new");
-        }
-        if (!_newHidden.eoo()) {
-            bool oldValue = _oldHidden.eoo() ? false : _oldHidden.booleanSafe();
-            _result->append("hidden_old", oldValue);
-            _result->appendAs(_newHidden, "hidden_new");
-        }
-        if (!_newUnique.eoo()) {
-            invariant(_newUnique.trueValue());
-            _result->appendBool("unique_new", true);
-        }
-    }
-
-    void rollback() override {}
-
-private:
-    const BSONElement _oldExpireSecs;
-    const BSONElement _newExpireSecs;
-    const BSONElement _oldHidden;
-    const BSONElement _newHidden;
-    const BSONElement _newUnique;
-    BSONObjBuilder* _result;
-};
 
 /**
  * Adjusts expiration setting on an index.
@@ -141,6 +100,29 @@ void _processCollModIndexRequestHidden(OperationContext* opCtx,
 }
 
 /**
+ * Returns set of keys for a document in an index.
+ */
+void getKeysForIndex(OperationContext* opCtx,
+                     const CollectionPtr& collection,
+                     const IndexAccessMethod* accessMethod,
+                     const BSONObj& doc,
+                     KeyStringSet* keys) {
+    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
+
+    accessMethod->getKeys(opCtx,
+                          collection,
+                          pooledBuilder,
+                          doc,
+                          IndexAccessMethod::GetKeysMode::kEnforceConstraints,
+                          IndexAccessMethod::GetKeysContext::kAddingKeys,
+                          keys,
+                          nullptr,       //  multikeyMetadataKeys
+                          nullptr,       //  multikeyPaths
+                          boost::none);  // loc
+}
+
+
+/**
  * Adjusts unique setting on an index.
  * An index can be converted to unique but removing the uniqueness property is not allowed.
  */
@@ -148,6 +130,7 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
                                        AutoGetCollection* autoColl,
                                        const IndexDescriptor* idx,
                                        boost::optional<repl::OplogApplication::Mode> mode,
+                                       const CollModWriteOpsTracker::Docs* docsForUniqueIndex,
                                        BSONElement indexUnique,
                                        BSONElement* newUnique) {
     // Do not update catalog if index is already unique.
@@ -157,7 +140,38 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
 
     // Checks for duplicates on the primary or for the 'applyOps' command.
     // TODO(SERVER-61356): revisit this condition for tenant migration, which uses kInitialSync.
-    if (!mode || *mode == repl::OplogApplication::Mode::kApplyOpsCmd) {
+    if (!mode) {
+        const auto& collection = autoColl->getCollection();
+        auto entry = idx->getEntry();
+        auto accessMethod = entry->accessMethod();
+
+        invariant(docsForUniqueIndex,
+                  fmt::format("Unique index conversion requires valid set of changed docs from "
+                              "side write tracker: {} {} {}",
+                              collection->ns().toString(),
+                              idx->indexName(),
+                              collection->uuid().toString()));
+
+
+        // Gather the keys for all the side write activity in a single set of unique keys.
+        KeyStringSet keys;
+        for (const auto& doc : *docsForUniqueIndex) {
+            // The OpObserver records CRUD events in transactions that are about to be committed.
+            // We should not assume that inserts/updates can be conflated with deletes.
+            // TODO(SERVER-61913): Investigate recording delete operations.
+            getKeysForIndex(opCtx, collection, accessMethod, doc, &keys);
+        }
+
+        // Search the index for duplicates using keys derived from side write documents.
+        for (const auto& keyString : keys) {
+            // Inserts and updates should generally refer to existing index entries, but since we
+            // are recording uncommitted CRUD events, we should not always assume that searching
+            // for 'keyString' in the index must return a a valid index entry.
+            scanIndexForDuplicates(opCtx, collection, idx, keyString, /*limit=*/2);
+        }
+    } else if (*mode == repl::OplogApplication::Mode::kApplyOpsCmd) {
+        // We do not need to observe side writes under applyOps because applyOps runs under global
+        // write access.
         scanIndexForDuplicates(opCtx, autoColl->getCollection(), idx);
     }
 
@@ -170,6 +184,7 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
 void processCollModIndexRequest(OperationContext* opCtx,
                                 AutoGetCollection* autoColl,
                                 const ParsedCollModIndexRequest& collModIndexRequest,
+                                const CollModWriteOpsTracker::Docs* docsForUniqueIndex,
                                 boost::optional<IndexCollModInfo>* indexCollModInfo,
                                 BSONObjBuilder* result,
                                 boost::optional<repl::OplogApplication::Mode> mode) {
@@ -204,7 +219,8 @@ void processCollModIndexRequest(OperationContext* opCtx,
 
     // User wants to convert an index to be unique.
     if (indexUnique) {
-        _processCollModIndexRequestUnique(opCtx, autoColl, idx, mode, indexUnique, &newUnique);
+        _processCollModIndexRequestUnique(
+            opCtx, autoColl, idx, mode, docsForUniqueIndex, indexUnique, &newUnique);
     }
 
     *indexCollModInfo = IndexCollModInfo{
@@ -230,8 +246,26 @@ void processCollModIndexRequest(OperationContext* opCtx,
     autoColl->getWritableCollection()->getIndexCatalog()->refreshEntry(
         opCtx, autoColl->getWritableCollection(), idx, flags);
 
-    opCtx->recoveryUnit()->registerChange(std::make_unique<CollModResultChange>(
-        oldExpireSecs, newExpireSecs, oldHidden, newHidden, newUnique, result));
+    opCtx->recoveryUnit()->onCommit(
+        [oldExpireSecs, newExpireSecs, oldHidden, newHidden, newUnique, result](
+            boost::optional<Timestamp>) {
+            // add the fields to BSONObjBuilder result
+            if (!oldExpireSecs.eoo()) {
+                result->appendAs(oldExpireSecs, "expireAfterSeconds_old");
+            }
+            if (!newExpireSecs.eoo()) {
+                result->appendAs(newExpireSecs, "expireAfterSeconds_new");
+            }
+            if (!newHidden.eoo()) {
+                bool oldValue = oldHidden.eoo() ? false : oldHidden.booleanSafe();
+                result->append("hidden_old", oldValue);
+                result->appendAs(newHidden, "hidden_new");
+            }
+            if (!newUnique.eoo()) {
+                invariant(newUnique.trueValue());
+                result->appendBool("unique_new", true);
+            }
+        });
 
     if (MONGO_unlikely(assertAfterIndexUpdate.shouldFail())) {
         LOGV2(20307, "collMod - assertAfterIndexUpdate fail point enabled");
@@ -241,15 +275,21 @@ void processCollModIndexRequest(OperationContext* opCtx,
 
 void scanIndexForDuplicates(OperationContext* opCtx,
                             const CollectionPtr& collection,
-                            const IndexDescriptor* idx) {
+                            const IndexDescriptor* idx,
+                            boost::optional<KeyString::Value> firstKeyString,
+                            boost::optional<int64_t> limit) {
     auto entry = idx->getEntry();
     auto accessMethod = entry->accessMethod();
 
     // Starting point of index traversal.
-    auto keyStringVersion = accessMethod->getSortedDataInterface()->getKeyStringVersion();
-    KeyString::Builder firstKeyStringBuilder(
-        keyStringVersion, BSONObj(), entry->ordering(), KeyString::Discriminator::kExclusiveBefore);
-    KeyString::Value firstKeyString = firstKeyStringBuilder.getValueCopy();
+    if (!firstKeyString) {
+        auto keyStringVersion = accessMethod->getSortedDataInterface()->getKeyStringVersion();
+        KeyString::Builder firstKeyStringBuilder(keyStringVersion,
+                                                 BSONObj(),
+                                                 entry->ordering(),
+                                                 KeyString::Discriminator::kExclusiveBefore);
+        firstKeyString = firstKeyStringBuilder.getValueCopy();
+    }
 
     // Scan index for duplicates, comparing consecutive index entries.
     // KeyStrings will be in strictly increasing order because all keys are sorted and they are
@@ -258,24 +298,50 @@ void scanIndexForDuplicates(OperationContext* opCtx,
     dataThrottle.turnThrottlingOff();
     SortedDataInterfaceThrottleCursor indexCursor(opCtx, accessMethod, &dataThrottle);
     boost::optional<KeyStringEntry> prevIndexEntry;
-    for (auto indexEntry = indexCursor.seekForKeyString(opCtx, firstKeyString); indexEntry;
+    BSONArrayBuilder violations;
+    bool lastDocViolated = false;
+    BSONArrayBuilder lastViolatingIDs;
+    int64_t i = 0;
+    for (auto indexEntry = indexCursor.seekForKeyString(opCtx, *firstKeyString); indexEntry;
          indexEntry = indexCursor.nextKeyString(opCtx)) {
-
         if (prevIndexEntry &&
             indexEntry->keyString.compareWithoutRecordIdLong(prevIndexEntry->keyString) == 0) {
-            auto dupKeyErrorStatus =
-                buildDupKeyErrorStatus(opCtx, indexEntry->keyString, entry->ordering(), idx);
-            auto firstDoc = collection->docFor(opCtx, prevIndexEntry->loc);
-            auto secondDoc = collection->docFor(opCtx, indexEntry->loc);
-            uassertStatusOK(dupKeyErrorStatus.withContext(
-                str::stream() << "Failed to convert index to unique. firstRecordId: "
-                              << prevIndexEntry->loc << "; firstDoc: " << firstDoc.value()
-                              << "; secondRecordId" << indexEntry->loc << "; secondDoc: "
-                              << secondDoc.value() << "; collectionUUID: " << collection->uuid()));
+            auto currentEntry = collection->docFor(opCtx, indexEntry->loc).value();
+            if (!lastDocViolated) {
+                auto prevEntry = collection->docFor(opCtx, prevIndexEntry->loc).value();
+                invariant(lastViolatingIDs.arrSize() == 0);
+                lastViolatingIDs.append(std::move(prevEntry["_id"]));
+                lastDocViolated = true;
+            }
+            lastViolatingIDs.append(std::move(currentEntry["_id"]));
+        } else {
+            if (lastDocViolated) {
+                violations.append(BSON("ids"_sd << lastViolatingIDs.arr()));
+                // Destruct and reconstruct lastViolatingIDs so we can reuse it
+                lastViolatingIDs.~BSONArrayBuilder();
+                new (&lastViolatingIDs) BSONArrayBuilder();
+            }
+            lastDocViolated = false;
         }
-
         prevIndexEntry = indexEntry;
+
+        if (limit && ++i >= *limit) {
+            break;
+        }
     }
+    if (lastDocViolated) {
+        violations.append(BSON("ids"_sd << lastViolatingIDs.arr()));
+    }
+    if (violations.arrSize() != 0) {
+        uassertStatusOK(buildEnableConstraintErrorStatus("unique", violations.arr()));
+    }
+}
+
+Status buildEnableConstraintErrorStatus(const std::string& indexType, const BSONArray& violations) {
+    return Status(CannotEnableIndexConstraintInfo(violations),
+                  fmt::format("Cannot enable {} constraint. Please resolve conflicting documents "
+                              "before running collMod again.",
+                              indexType));
 }
 
 }  // namespace mongo

@@ -4,12 +4,17 @@ from bisect import bisect_left, bisect_right
 import os
 import re
 import shutil
-from subprocess import call, CalledProcessError, check_output, STDOUT
+from subprocess import call, CalledProcessError, check_output, STDOUT, DEVNULL
 import structlog
 import yaml
 
 from packaging.version import Version
-from buildscripts.resmokelib.setup_multiversion.config import USE_EXISTING_RELEASES_FILE
+try:
+    # when running resmoke
+    from buildscripts.resmokelib.multiversionsetupconstants import USE_EXISTING_RELEASES_FILE
+except ImportError:
+    # when running db-contrib-tool
+    from multiversionsetupconstants import USE_EXISTING_RELEASES_FILE
 
 LOGGER = structlog.getLogger(__name__)
 
@@ -47,7 +52,7 @@ def generate_releases_file():
 
 def in_git_root_dir():
     """Return True if we are in the root of a git directory."""
-    if call(["git", "branch"], stderr=STDOUT, stdout=open(os.devnull, 'w')) != 0:
+    if call(["git", "branch"], stderr=STDOUT, stdout=DEVNULL) != 0:
         # We are not in a git directory.
         return False
 

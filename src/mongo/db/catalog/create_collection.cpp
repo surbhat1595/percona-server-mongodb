@@ -139,6 +139,14 @@ void _createSystemDotViewsIfNecessary(OperationContext* opCtx, const Database* d
 Status _createView(OperationContext* opCtx,
                    const NamespaceString& nss,
                    CollectionOptions&& collectionOptions) {
+    // This must be checked before we take locks in order to avoid attempting to take multiple locks
+    // on the <db>.system.views namespace: first a IX lock on 'ns' and then a X lock on the database
+    // system.views collection.
+    uassert(ErrorCodes::InvalidNamespace,
+            str::stream() << "Cannot create a view called '" << nss.coll()
+                          << "': this is a reserved system namespace",
+            !nss.isSystemDotViews());
+
     return writeConflictRetry(opCtx, "create", nss.ns(), [&] {
         AutoGetDb autoDb(opCtx, nss.db(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
@@ -469,7 +477,7 @@ Status _createCollection(OperationContext* opCtx,
                                   << nss);
             }
 
-            if ((nss.isTimeseriesBucketsCollection()) != (clusteredIndex->getLegacyFormat())) {
+            if (clustered_util::requiresLegacyFormat(nss) != clusteredIndex->getLegacyFormat()) {
                 return Status(ErrorCodes::Error(5979703),
                               "The 'clusteredIndex' legacy format {clusteredIndex: <bool>} is only "
                               "supported for specific internal collections and vice versa");
@@ -568,16 +576,6 @@ Status createCollection(OperationContext* opCtx,
                 str::stream() << "Cannot create system collection " << ns
                               << " within a transaction.",
                 !opCtx->inMultiDocumentTransaction() || !ns.isSystem());
-        if (options.changeStreamPreAndPostImagesOptions.getEnabled()) {
-            tassert(5868500,
-                    "ChangeStreamPreAndPostImages feature flag must be enabled",
-                    feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
-                        serverGlobalParams.featureCompatibility));
-
-            // Create preimages collection if it doesn't already exist.
-            createChangeStreamPreImagesCollection(opCtx);
-        }
-
         return _createCollection(opCtx, ns, std::move(options), idIndex);
     }
 }
@@ -651,16 +649,13 @@ void createChangeStreamPreImagesCollection(OperationContext* opCtx) {
     uassert(5868501,
             "Failpoint failPreimagesCollectionCreation enabled. Throwing exception",
             !MONGO_unlikely(failPreimagesCollectionCreation.shouldFail()));
-    tassert(5882500,
-            "Failed to create the pre-images collection: clustered indexes feature is not enabled",
-            feature_flags::gClusteredIndexes.isEnabled(serverGlobalParams.featureCompatibility));
 
     const auto nss = NamespaceString::kChangeStreamPreImagesNamespace;
     CollectionOptions preImagesCollectionOptions;
 
     // Make the collection clustered by _id.
     preImagesCollectionOptions.clusteredIndex.emplace(
-        clustered_util::makeDefaultClusteredIdIndex());
+        clustered_util::makeCanonicalClusteredInfoForLegacyFormat());
     const auto status =
         _createCollection(opCtx, nss, std::move(preImagesCollectionOptions), BSONObj());
     uassert(status.code(),
@@ -671,7 +666,7 @@ void createChangeStreamPreImagesCollection(OperationContext* opCtx) {
 
 Status createCollectionForApplyOps(OperationContext* opCtx,
                                    const std::string& dbName,
-                                   const OptionalCollectionUUID& ui,
+                                   const boost::optional<UUID>& ui,
                                    const BSONObj& cmdObj,
                                    const bool allowRenameOutOfTheWay,
                                    boost::optional<BSONObj> idIndex) {

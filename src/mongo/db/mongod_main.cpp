@@ -54,6 +54,7 @@
 #include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/sasl_options.h"
+#include "mongo/db/catalog/coll_mod_op_observer.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_impl.h"
@@ -155,6 +156,7 @@
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/serverless/shard_split_donor_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
 #include "mongo/db/session_killer.h"
@@ -332,6 +334,7 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
     } else {
         services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
+        services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
     }
 
     for (auto& service : services) {
@@ -945,7 +948,17 @@ Status shutdownProcessByDBPathPidFile(const std::string& dbpath) {
                 str::stream() << "Failed to kill process: " << errnoWithDescription(e)};
     }
 
-    while (boost::filesystem::exists(pidfile)) {
+    // Wait for process to terminate.
+    for (;;) {
+        std::uintmax_t pidsize = boost::filesystem::file_size(pidfile);
+        if (pidsize == 0) {
+            // File empty.
+            break;
+        }
+        if (pidsize == static_cast<decltype(pidsize)>(-1)) {
+            // File does not exist.
+            break;
+        }
         sleepsecs(1);
     }
 
@@ -1131,6 +1144,8 @@ void setUpObservers(ServiceContext* serviceContext) {
     if (audit::opObserverRegistrar) {
         audit::opObserverRegistrar(opObserverRegistry.get());
     }
+
+    opObserverRegistry->addObserver(std::make_unique<CollModOpObserver>());
 
     serviceContext->setOpObserver(std::move(opObserverRegistry));
 }

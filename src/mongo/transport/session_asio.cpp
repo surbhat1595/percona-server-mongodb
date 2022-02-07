@@ -34,11 +34,14 @@
 #include "mongo/config.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/asio_utils.h"
+#include "mongo/transport/proxy_protocol_header_parser.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/future_util.h"
 
 namespace mongo::transport {
 
 MONGO_FAIL_POINT_DEFINE(transportLayerASIOshortOpportunisticReadWrite);
+MONGO_FAIL_POINT_DEFINE(transportLayerASIOSessionPauseBeforeSetSocketOption);
 
 namespace {
 
@@ -99,6 +102,7 @@ TransportLayerASIO::ASIOSession::ASIOSession(
     auto family = endpointToSockAddr(_socket.local_endpoint()).getType();
     auto sev = logv2::LogSeverity::Debug(3);
     if (family == AF_INET || family == AF_INET6) {
+        transportLayerASIOSessionPauseBeforeSetSocketOption.pauseWhileSet();
         setSocketOption(_socket, asio::ip::tcp::no_delay(true), "session no delay", sev);
         setSocketOption(_socket, asio::socket_base::keep_alive(true), "session keep alive", sev);
         setSocketKeepAliveParams(_socket.native_handle(), sev);
@@ -116,6 +120,10 @@ TransportLayerASIO::ASIOSession::ASIOSession(
     }
 
     _local = HostAndPort(_localAddr.toString(true));
+    if (tl->loadBalancerPort()) {
+        _isFromLoadBalancer = _local.port() == *tl->loadBalancerPort();
+    }
+
     _remote = HostAndPort(_remoteAddr.toString(true));
 #ifdef MONGO_CONFIG_SSL
     _sslContext = transientSSLContext ? transientSSLContext : *tl->_sslContext;
@@ -335,18 +343,14 @@ void TransportLayerASIO::ASIOSession::ensureSync() {
                         "session send timeout",
                         logv2::LogSeverity::Info(),
                         ec);
-        if (auto status = errorCodeToStatus(ec); !status.isOK()) {
-            tasserted(5342000, status.reason());
-        }
+        uassertStatusOK(errorCodeToStatus(ec));
 
         setSocketOption(getSocket(),
                         ASIOSocketTimeoutOption<SO_RCVTIMEO>(timeout),
                         "session receive timeout",
                         logv2::LogSeverity::Info(),
                         ec);
-        if (auto status = errorCodeToStatus(ec); !status.isOK()) {
-            tasserted(5342001, status.reason());
-        }
+        uassertStatusOK(errorCodeToStatus(ec));
 
         _socketTimeout = _configuredTimeout;
     }
@@ -373,6 +377,44 @@ auto TransportLayerASIO::ASIOSession::getSocket() -> GenericSocket& {
     }
 #endif
     return _socket;
+}
+
+ExecutorFuture<void> TransportLayerASIO::ASIOSession::parseProxyProtocolHeader(
+    const ReactorHandle& reactor) {
+    invariant(_isIngressSession);
+    invariant(reactor);
+    auto buffer = std::make_shared<std::array<char, kProxyProtocolHeaderSizeUpperBound>>();
+    return AsyncTry([this, buffer] {
+               const auto bytesRead = peekASIOStream(
+                   _socket, asio::buffer(buffer->data(), kProxyProtocolHeaderSizeUpperBound));
+               return transport::parseProxyProtocolHeader(StringData(buffer->data(), bytesRead));
+           })
+        .until([](StatusWith<boost::optional<ParserResults>> sw) {
+            return !sw.isOK() || sw.getValue();
+        })
+        .on(reactor, CancellationToken::uncancelable())
+        .then([this, buffer](const boost::optional<ParserResults>& results) mutable {
+            invariant(results);
+
+            // There may not be any endpoints if this connection is directly
+            // from the proxy itself or the information isn't available.
+            if (results->endpoints) {
+                _proxiedSrcEndpoint = results->endpoints->sourceAddress;
+                _proxiedDstEndpoint = results->endpoints->destinationAddress;
+            } else {
+                _proxiedSrcEndpoint = {};
+                _proxiedDstEndpoint = {};
+            }
+
+            // Drain the read buffer.
+            opportunisticRead(_socket, asio::buffer(buffer.get(), results->bytesParsed)).get();
+        })
+        .onError([this](Status s) {
+            LOGV2_ERROR(
+                6067900, "Error while parsing proxy protocol header", "error"_attr = redact(s));
+            end();
+            return s;
+        });
 }
 
 Future<Message> TransportLayerASIO::ASIOSession::sourceMessageImpl(const BatonHandle& baton) {

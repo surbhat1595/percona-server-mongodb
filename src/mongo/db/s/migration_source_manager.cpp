@@ -83,6 +83,8 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 WriteConcernOptions::kWriteConcernTimeoutMigration);
 
+std::string kEmptyErrMsgForMoveTimingHelper;
+
 /**
  * Best-effort attempt to ensure the recipient shard has refreshed its routing table to
  * 'newCollVersion'. Fires and forgets an asychronous remote setShardVersion command.
@@ -106,7 +108,12 @@ void refreshRecipientRoutingTable(OperationContext* opCtx,
     executor->scheduleRemoteCommand(request, noOp).getStatus().ignore();
 }
 
-}  // namespace
+MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep1);
+MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep2);
+MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep3);
+MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep4);
+MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep5);
+MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep6);
 
 MONGO_FAIL_POINT_DEFINE(doNotRefreshRecipientAfterCommit);
 MONGO_FAIL_POINT_DEFINE(failMigrationCommit);
@@ -114,9 +121,19 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeLeavingCriticalSection);
 MONGO_FAIL_POINT_DEFINE(migrationCommitNetworkError);
 MONGO_FAIL_POINT_DEFINE(hangBeforePostMigrationCommitRefresh);
 
+}  // namespace
+
 MigrationSourceManager* MigrationSourceManager::get(CollectionShardingRuntime* csr,
                                                     CollectionShardingRuntime::CSRLock& csrLock) {
     return msmForCsr(csr);
+}
+
+std::shared_ptr<MigrationChunkClonerSource> MigrationSourceManager::getCurrentCloner(
+    CollectionShardingRuntime* csr, CollectionShardingRuntime::CSRLock& csrLock) {
+    auto msm = get(csr, csrLock);
+    if (!msm)
+        return nullptr;
+    return msm->_cloneDriver;
 }
 
 MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
@@ -133,7 +150,16 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
                           << "fromShard" << _args.getFromShardId() << "toShard"
                           << _args.getToShardId())),
       _acquireCSOnRecipient(feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabled(
-          serverGlobalParams.featureCompatibility)) {
+          serverGlobalParams.featureCompatibility)),
+      _moveTimingHelper(_opCtx,
+                        "from",
+                        _args.getNss().ns(),
+                        _args.getMinKey(),
+                        _args.getMaxKey(),
+                        6,  // Total number of steps
+                        &kEmptyErrMsgForMoveTimingHelper,
+                        _args.getToShardId(),
+                        _args.getFromShardId()) {
     invariant(!_opCtx->lockState()->isLocked());
 
     LOGV2(22016,
@@ -143,22 +169,27 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
           "requestParameters"_attr = redact(_args.toString()),
           "collectionEpoch"_attr = _args.getVersionEpoch());
 
+    _moveTimingHelper.done(1);
+    moveChunkHangAtStep1.pauseWhileSet();
+
     // Make sure the latest shard version is recovered as of the time of the invocation of the
     // command.
-    onShardVersionMismatch(_opCtx, getNss(), boost::none);
+    onShardVersionMismatch(_opCtx, _args.getNss(), boost::none);
 
     // Snapshot the committed metadata from the time the migration starts
     const auto [collectionMetadata, collectionUUID] = [&] {
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-        AutoGetCollection autoColl(_opCtx, getNss(), MODE_IS);
+        AutoGetCollection autoColl(_opCtx, _args.getNss(), MODE_IS);
         uassert(ErrorCodes::InvalidOptions,
                 "cannot move chunks for a collection that doesn't exist",
                 autoColl.getCollection());
 
         UUID collectionUUID = autoColl.getCollection()->uuid();
 
-        auto optMetadata =
-            CollectionShardingRuntime::get(_opCtx, getNss())->getCurrentMetadataIfKnown();
+        auto* const csr = CollectionShardingRuntime::get(_opCtx, _args.getNss());
+        const auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
+
+        auto optMetadata = csr->getCurrentMetadataIfKnown();
         uassert(ErrorCodes::ConflictingOperationInProgress,
                 "The collection's sharding state was cleared by a concurrent operation",
                 optMetadata);
@@ -167,9 +198,16 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
         uassert(ErrorCodes::IncompatibleShardingMetadata,
                 "Cannot move chunks for an unsharded collection",
                 metadata.isSharded());
+
+        // Atomically (still under the CSR lock held above) check whether migrations are allowed and
+        // register the MigrationSourceManager on the CSR. This ensures that interruption due to the
+        // change of allowMigrations to false will properly serialise and not allow any new MSMs to
+        // be running after the change.
         uassert(ErrorCodes::ConflictingOperationInProgress,
                 "Collection is undergoing changes so moveChunk is not allowed.",
                 metadata.allowMigrations());
+
+        _scopedRegisterer.emplace(this, csr, csrLock);
 
         return std::make_tuple(std::move(metadata), std::move(collectionUUID));
     }();
@@ -204,33 +242,31 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
     _chunkVersion = collectionMetadata.getChunkManager()
                         ->findIntersectingChunkWithSimpleCollation(_args.getMinKey())
                         .getLastmod();
+
+    _moveTimingHelper.done(2);
+    moveChunkHangAtStep2.pauseWhileSet();
 }
 
 MigrationSourceManager::~MigrationSourceManager() {
     invariant(!_cloneDriver);
     _stats.totalDonorMoveChunkTimeMillis.addAndFetch(_entireOpTimer.millis());
+
+    _completion.emplaceValue();
 }
 
-NamespaceString MigrationSourceManager::getNss() const {
-    return _args.getNss();
-}
-
-Status MigrationSourceManager::startClone() {
+void MigrationSourceManager::startClone() {
     invariant(!_opCtx->lockState()->isLocked());
     invariant(_state == kCreated);
-    ScopeGuard scopedGuard([&] { cleanupOnError(); });
+    ScopeGuard scopedGuard([&] { _cleanupOnError(); });
     _stats.countDonorMoveChunkStarted.addAndFetch(1);
 
-    const Status logStatus = ShardingLogging::get(_opCtx)->logChangeChecked(
+    uassertStatusOK(ShardingLogging::get(_opCtx)->logChangeChecked(
         _opCtx,
         "moveChunk.start",
-        getNss().ns(),
+        _args.getNss().ns(),
         BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
                    << _args.getFromShardId() << "to" << _args.getToShardId()),
-        ShardingCatalogClient::kMajorityWriteConcern);
-    if (logStatus != Status::OK()) {
-        return logStatus;
-    }
+        ShardingCatalogClient::kMajorityWriteConcern));
 
     _cloneAndCommitTimer.reset();
 
@@ -240,33 +276,31 @@ Status MigrationSourceManager::startClone() {
     {
         const auto metadata = _getCurrentMetadataAndCheckEpoch();
 
-        // Having the metadata manager registered on the collection sharding state is what indicates
-        // that a chunk on that collection is being migrated. With an active migration, write
-        // operations require the cloner to be present in order to track changes to the chunk which
-        // needs to be transmitted to the recipient.
-        _cloneDriver = std::make_unique<MigrationChunkClonerSourceLegacy>(
-            _args, metadata.getKeyPattern(), _donorConnStr, _recipientHost);
-
         AutoGetCollection autoColl(_opCtx,
-                                   getNss(),
+                                   _args.getNss(),
                                    replEnabled ? MODE_IX : MODE_X,
                                    AutoGetCollectionViewMode::kViewsForbidden,
                                    _opCtx->getServiceContext()->getPreciseClockSource()->now() +
                                        Milliseconds(migrationLockAcquisitionMaxWaitMS.load()));
 
-        auto csr = CollectionShardingRuntime::get(_opCtx, getNss());
-        auto lockedCsr = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
-        invariant(nullptr == std::exchange(msmForCsr(csr), this));
+        auto* const csr = CollectionShardingRuntime::get(_opCtx, _args.getNss());
+        const auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
 
-        _coordinator = std::make_unique<migrationutil::MigrationCoordinator>(
-            _cloneDriver->getSessionId(),
-            _args.getFromShardId(),
-            _args.getToShardId(),
-            getNss(),
-            *_collectionUUID,
-            ChunkRange(_args.getMinKey(), _args.getMaxKey()),
-            _chunkVersion,
-            _args.getWaitForDelete());
+        // Having the metadata manager registered on the collection sharding state is what indicates
+        // that a chunk on that collection is being migrated to the OpObservers. With an active
+        // migration, write operations require the cloner to be present in order to track changes to
+        // the chunk which needs to be transmitted to the recipient.
+        _cloneDriver = std::make_shared<MigrationChunkClonerSourceLegacy>(
+            _args, metadata.getKeyPattern(), _donorConnStr, _recipientHost);
+
+        _coordinator.emplace(_cloneDriver->getSessionId(),
+                             _args.getFromShardId(),
+                             _args.getToShardId(),
+                             _args.getNss(),
+                             *_collectionUUID,
+                             ChunkRange(_args.getMinKey(), _args.getMaxKey()),
+                             *_chunkVersion,
+                             _args.getWaitForDelete());
 
         _state = kCloning;
     }
@@ -274,53 +308,45 @@ Status MigrationSourceManager::startClone() {
     if (replEnabled) {
         auto const readConcernArgs = repl::ReadConcernArgs(
             replCoord->getMyLastAppliedOpTime(), repl::ReadConcernLevel::kLocalReadConcern);
+        uassertStatusOK(waitForReadConcern(_opCtx, readConcernArgs, StringData(), false));
 
-        auto waitForReadConcernStatus =
-            waitForReadConcern(_opCtx, readConcernArgs, StringData(), false);
-        if (!waitForReadConcernStatus.isOK()) {
-            return waitForReadConcernStatus;
-        }
         setPrepareConflictBehaviorForReadConcern(
             _opCtx, readConcernArgs, PrepareConflictBehavior::kEnforce);
     }
 
     _coordinator->startMigration(_opCtx);
 
-    Status startCloneStatus = _cloneDriver->startClone(_opCtx,
-                                                       _coordinator->getMigrationId(),
-                                                       _coordinator->getLsid(),
-                                                       _coordinator->getTxnNumber());
-    if (!startCloneStatus.isOK()) {
-        return startCloneStatus;
-    }
+    uassertStatusOK(_cloneDriver->startClone(_opCtx,
+                                             _coordinator->getMigrationId(),
+                                             _coordinator->getLsid(),
+                                             _coordinator->getTxnNumber()));
 
+    _moveTimingHelper.done(3);
+    moveChunkHangAtStep3.pauseWhileSet();
     scopedGuard.dismiss();
-    return Status::OK();
 }
 
-Status MigrationSourceManager::awaitToCatchUp() {
+void MigrationSourceManager::awaitToCatchUp() {
     invariant(!_opCtx->lockState()->isLocked());
     invariant(_state == kCloning);
-    ScopeGuard scopedGuard([&] { cleanupOnError(); });
+    ScopeGuard scopedGuard([&] { _cleanupOnError(); });
     _stats.totalDonorChunkCloneTimeMillis.addAndFetch(_cloneAndCommitTimer.millis());
     _cloneAndCommitTimer.reset();
 
     // Block until the cloner deems it appropriate to enter the critical section.
-    Status catchUpStatus = _cloneDriver->awaitUntilCriticalSectionIsAppropriate(
-        _opCtx, kMaxWaitToEnterCriticalSectionTimeout);
-    if (!catchUpStatus.isOK()) {
-        return catchUpStatus;
-    }
+    uassertStatusOK(_cloneDriver->awaitUntilCriticalSectionIsAppropriate(
+        _opCtx, kMaxWaitToEnterCriticalSectionTimeout));
 
     _state = kCloneCaughtUp;
+    _moveTimingHelper.done(4);
+    moveChunkHangAtStep4.pauseWhileSet(_opCtx);
     scopedGuard.dismiss();
-    return Status::OK();
 }
 
-Status MigrationSourceManager::enterCriticalSection() {
+void MigrationSourceManager::enterCriticalSection() {
     invariant(!_opCtx->lockState()->isLocked());
     invariant(_state == kCloneCaughtUp);
-    ScopeGuard scopedGuard([&] { cleanupOnError(); });
+    ScopeGuard scopedGuard([&] { _cleanupOnError(); });
     _stats.totalDonorChunkCloneTimeMillis.addAndFetch(_cloneAndCommitTimer.millis());
     _cloneAndCommitTimer.reset();
 
@@ -331,10 +357,7 @@ Status MigrationSourceManager::enterCriticalSection() {
     // NOTE: The 'migrateChunkToNewShard' oplog message written by the above call to
     // '_notifyChangeStreamsOnRecipientFirstChunk' depends on this majority write to carry its local
     // write to majority committed.
-    Status status = ShardingStateRecovery::startMetadataOp(_opCtx);
-    if (!status.isOK()) {
-        return status;
-    }
+    uassertStatusOK(ShardingStateRecovery::startMetadataOp(_opCtx));
 
     LOGV2_DEBUG_OPTIONS(4817402,
                         2,
@@ -354,14 +377,14 @@ Status MigrationSourceManager::enterCriticalSection() {
     // will stall behind the flag.
     Status signalStatus = shardmetadatautil::updateShardCollectionsEntry(
         _opCtx,
-        BSON(ShardCollectionType::kNssFieldName << getNss().ns()),
+        BSON(ShardCollectionType::kNssFieldName << _args.getNss().ns()),
         BSON("$inc" << BSON(ShardCollectionType::kEnterCriticalSectionCounterFieldName << 1)),
         false /*upsert*/);
     if (!signalStatus.isOK()) {
-        return {
+        uasserted(
             ErrorCodes::OperationFailed,
             str::stream() << "Failed to persist critical section signal for secondaries due to: "
-                          << signalStatus.toString()};
+                          << signalStatus.toString());
     }
 
     LOGV2(22017,
@@ -369,13 +392,12 @@ Status MigrationSourceManager::enterCriticalSection() {
           "migrationId"_attr = _coordinator->getMigrationId());
 
     scopedGuard.dismiss();
-    return Status::OK();
 }
 
-Status MigrationSourceManager::commitChunkOnRecipient() {
+void MigrationSourceManager::commitChunkOnRecipient() {
     invariant(!_opCtx->lockState()->isLocked());
     invariant(_state == kCriticalSection);
-    ScopeGuard scopedGuard([&] { cleanupOnError(); });
+    ScopeGuard scopedGuard([&] { _cleanupOnError(); });
 
     // Tell the recipient shard to fetch the latest changes.
     auto commitCloneStatus = _cloneDriver->commitClone(_opCtx, _acquireCSOnRecipient);
@@ -385,21 +407,19 @@ Status MigrationSourceManager::commitChunkOnRecipient() {
                              "Failing _recvChunkCommit due to failpoint."};
     }
 
-    if (!commitCloneStatus.isOK()) {
-        return commitCloneStatus.getStatus().withContext("commit clone failed");
-    }
-
+    uassertStatusOKWithContext(commitCloneStatus, "commit clone failed");
     _recipientCloneCounts = commitCloneStatus.getValue()["counts"].Obj().getOwned();
 
     _state = kCloneCompleted;
+    _moveTimingHelper.done(5);
+    moveChunkHangAtStep5.pauseWhileSet();
     scopedGuard.dismiss();
-    return Status::OK();
 }
 
-Status MigrationSourceManager::commitChunkMetadataOnConfig() {
+void MigrationSourceManager::commitChunkMetadataOnConfig() {
     invariant(!_opCtx->lockState()->isLocked());
     invariant(_state == kCloneCompleted);
-    ScopeGuard scopedGuard([&] { cleanupOnError(); });
+    ScopeGuard scopedGuard([&] { _cleanupOnError(); });
 
     // If we have chunks left on the FROM shard, bump the version of one of them as well. This will
     // change the local collection major version, which indicates to other processes that the chunk
@@ -412,11 +432,11 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
         ChunkType migratedChunkType;
         migratedChunkType.setMin(_args.getMinKey());
         migratedChunkType.setMax(_args.getMaxKey());
-        migratedChunkType.setVersion(_chunkVersion);
+        migratedChunkType.setVersion(*_chunkVersion);
 
         const auto currentTime = VectorClock::get(_opCtx)->getTime();
         CommitChunkMigrationRequest::appendAsCommand(&builder,
-                                                     getNss(),
+                                                     _args.getNss(),
                                                      _args.getFromShardId(),
                                                      _args.getToShardId(),
                                                      migratedChunkType,
@@ -458,14 +478,14 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
     if (!migrationCommitStatus.isOK()) {
         {
             UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-            AutoGetCollection autoColl(_opCtx, getNss(), MODE_IX);
-            CollectionShardingRuntime::get(_opCtx, getNss())->clearFilteringMetadata(_opCtx);
+            AutoGetCollection autoColl(_opCtx, _args.getNss(), MODE_IX);
+            CollectionShardingRuntime::get(_opCtx, _args.getNss())->clearFilteringMetadata(_opCtx);
         }
         scopedGuard.dismiss();
         _cleanup(false);
         // Best-effort recover of the shard version.
-        onShardVersionMismatchNoExcept(_opCtx, getNss(), boost::none).ignore();
-        return migrationCommitStatus;
+        onShardVersionMismatchNoExcept(_opCtx, _args.getNss(), boost::none).ignore();
+        uassertStatusOK(migrationCommitStatus);
     }
 
     hangBeforePostMigrationCommitRefresh.pauseWhileSet();
@@ -477,7 +497,7 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
                             "Starting post-migration commit refresh on the shard",
                             "migrationId"_attr = _coordinator->getMigrationId());
 
-        forceShardFilteringMetadataRefresh(_opCtx, getNss());
+        forceShardFilteringMetadataRefresh(_opCtx, _args.getNss());
 
         LOGV2_DEBUG_OPTIONS(4817405,
                             2,
@@ -493,14 +513,14 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
                             "error"_attr = redact(ex));
         {
             UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-            AutoGetCollection autoColl(_opCtx, getNss(), MODE_IX);
-            CollectionShardingRuntime::get(_opCtx, getNss())->clearFilteringMetadata(_opCtx);
+            AutoGetCollection autoColl(_opCtx, _args.getNss(), MODE_IX);
+            CollectionShardingRuntime::get(_opCtx, _args.getNss())->clearFilteringMetadata(_opCtx);
         }
         scopedGuard.dismiss();
         _cleanup(false);
         // Best-effort recover of the shard version.
-        onShardVersionMismatchNoExcept(_opCtx, getNss(), boost::none).ignore();
-        return ex.toStatus();
+        onShardVersionMismatchNoExcept(_opCtx, _args.getNss(), boost::none).ignore();
+        throw;
     }
 
     // Migration succeeded
@@ -515,9 +535,9 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
 
     // If the migration has succeeded, clear the BucketCatalog so that the buckets that got migrated
     // out are no longer updatable.
-    if (getNss().isTimeseriesBucketsCollection()) {
+    if (_args.getNss().isTimeseriesBucketsCollection()) {
         auto& bucketCatalog = BucketCatalog::get(_opCtx);
-        bucketCatalog.clear(getNss().getTimeseriesViewNamespace());
+        bucketCatalog.clear(_args.getNss().getTimeseriesViewNamespace());
     }
 
     _coordinator->setMigrationDecision(DecisionEnum::kCommitted);
@@ -535,10 +555,10 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
     ShardingLogging::get(_opCtx)->logChange(
         _opCtx,
         "moveChunk.commit",
-        getNss().ns(),
+        _args.getNss().ns(),
         BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
                    << _args.getFromShardId() << "to" << _args.getToShardId() << "counts"
-                   << _recipientCloneCounts),
+                   << *_recipientCloneCounts),
         ShardingCatalogClient::kMajorityWriteConcern);
 
     const ChunkRange range(_args.getMinKey(), _args.getMaxKey());
@@ -547,11 +567,11 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
         // Best-effort make the recipient refresh its routing table to the new collection
         // version.
         refreshRecipientRoutingTable(
-            _opCtx, getNss(), _recipientHost, refreshedMetadata.getCollVersion());
+            _opCtx, _args.getNss(), _recipientHost, refreshedMetadata.getCollVersion());
     }
 
     std::string orphanedRangeCleanUpErrMsg = str::stream()
-        << "Moved chunks successfully but failed to clean up " << getNss().ns() << " range "
+        << "Moved chunks successfully but failed to clean up " << _args.getNss() << " range "
         << redact(range.toString()) << " due to: ";
 
     if (_args.getWaitForDelete()) {
@@ -559,7 +579,7 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
               "Waiting for migration cleanup after chunk commit for the namespace {namespace} "
               "and range {range}",
               "Waiting for migration cleanup after chunk commit",
-              "namespace"_attr = getNss().ns(),
+              "namespace"_attr = _args.getNss(),
               "range"_attr = redact(range.toString()),
               "migrationId"_attr = _coordinator->getMigrationId());
 
@@ -569,15 +589,16 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig() {
                      "Not honouring the 'waitForDelete' request because migration coordinator "
                      "cleanup didn't succeed");
         if (!deleteStatus.isOK()) {
-            return {ErrorCodes::OrphanedRangeCleanUpFailed,
-                    orphanedRangeCleanUpErrMsg + redact(deleteStatus)};
+            uasserted(ErrorCodes::OrphanedRangeCleanUpFailed,
+                      orphanedRangeCleanUpErrMsg + redact(deleteStatus));
         }
     }
 
-    return Status::OK();
+    _moveTimingHelper.done(6);
+    moveChunkHangAtStep6.pauseWhileSet();
 }
 
-void MigrationSourceManager::cleanupOnError() {
+void MigrationSourceManager::_cleanupOnError() noexcept {
     if (_state == kDone) {
         return;
     }
@@ -585,7 +606,7 @@ void MigrationSourceManager::cleanupOnError() {
     ShardingLogging::get(_opCtx)->logChange(
         _opCtx,
         "moveChunk.error",
-        getNss().ns(),
+        _args.getNss().ns(),
         BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
                    << _args.getFromShardId() << "to" << _args.getToShardId()),
         ShardingCatalogClient::kMajorityWriteConcern);
@@ -593,22 +614,19 @@ void MigrationSourceManager::cleanupOnError() {
     _cleanup(true);
 }
 
-void MigrationSourceManager::abortDueToConflictingIndexOperation(OperationContext* opCtx) {
-    // Index operations sent in the 4.4 protocol from internal clients are versioned and block
-    // behind both phases of the critical section, so there should never be an active critical
-    // section in this case.
-    dassert(!_critSec || !opCtx->getClient()->session() ||
-            !(opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient));
+SharedSemiFuture<void> MigrationSourceManager::abort() {
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
     _opCtx->markKilled();
     _stats.countDonorMoveChunkAbortConflictingIndexOperation.addAndFetch(1);
+
+    return _completion.getFuture();
 }
 
 CollectionMetadata MigrationSourceManager::_getCurrentMetadataAndCheckEpoch() {
     auto metadata = [&] {
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-        AutoGetCollection autoColl(_opCtx, getNss(), MODE_IS);
-        auto* const css = CollectionShardingRuntime::get(_opCtx, getNss());
+        AutoGetCollection autoColl(_opCtx, _args.getNss(), MODE_IS);
+        auto* const css = CollectionShardingRuntime::get(_opCtx, _args.getNss());
 
         const auto optMetadata = css->getCurrentMetadataIfKnown();
         uassert(ErrorCodes::ConflictingOperationInProgress,
@@ -652,7 +670,7 @@ void MigrationSourceManager::_notifyChangeStreamsOnRecipientFirstChunk(
         _opCtx, "migrateChunkToNewShard", NamespaceString::kRsOplogNamespace.ns(), [&] {
             WriteUnitOfWork uow(_opCtx);
             serviceContext->getOpObserver()->onInternalOpMessage(_opCtx,
-                                                                 getNss(),
+                                                                 _args.getNss(),
                                                                  *_collectionUUID,
                                                                  BSON("msg" << dbgMessage),
                                                                  o2Message,
@@ -670,20 +688,12 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
     auto cloneDriver = [&]() {
         // Unregister from the collection's sharding state and exit the migration critical section.
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-        AutoGetCollection autoColl(_opCtx, getNss(), MODE_IX);
-        auto* const csr = CollectionShardingRuntime::get(_opCtx, getNss());
-        auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
+        AutoGetCollection autoColl(_opCtx, _args.getNss(), MODE_IX);
+        auto* const csr = CollectionShardingRuntime::get(_opCtx, _args.getNss());
+        const auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
 
         if (_state != kCreated) {
-            invariant(msmForCsr(csr));
             invariant(_cloneDriver);
-        }
-
-        // While we are in kCreated, the MigrationSourceManager may or may not be already be
-        // installed on the CollectionShardingRuntime.
-        if (_state != kCreated || (_state == kCreated && msmForCsr(csr))) {
-            auto oldMsmOnCsr = std::exchange(msmForCsr(csr), nullptr);
-            invariant(this == oldMsmOnCsr);
         }
 
         _critSec.reset();
@@ -736,7 +746,7 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
                 // is possible that the persisted metadata is rolled back after step down, but the
                 // write which cleared the 'inMigration' flag is not, a secondary node will report
                 // itself at an older shard version.
-                CatalogCacheLoader::get(newOpCtx).waitForCollectionFlush(newOpCtx, getNss());
+                CatalogCacheLoader::get(newOpCtx).waitForCollectionFlush(newOpCtx, _args.getNss());
 
                 // Clear the 'minOpTime recovery' document so that the next time a node from this
                 // shard becomes a primary, it won't have to recover the config server optime.
@@ -763,18 +773,34 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
         // Something went really wrong when completing the migration just unset the metadata and let
         // the next op to recover.
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-        AutoGetCollection autoColl(_opCtx, getNss(), MODE_IX);
-        CollectionShardingRuntime::get(_opCtx, getNss())->clearFilteringMetadata(_opCtx);
+        AutoGetCollection autoColl(_opCtx, _args.getNss(), MODE_IX);
+        CollectionShardingRuntime::get(_opCtx, _args.getNss())->clearFilteringMetadata(_opCtx);
     }
 }
 
 BSONObj MigrationSourceManager::getMigrationStatusReport() const {
-    return migrationutil::makeMigrationStatusDocument(getNss(),
+    return migrationutil::makeMigrationStatusDocument(_args.getNss(),
                                                       _args.getFromShardId(),
                                                       _args.getToShardId(),
                                                       true,
                                                       _args.getMinKey(),
                                                       _args.getMaxKey());
+}
+
+MigrationSourceManager::ScopedRegisterer::ScopedRegisterer(
+    MigrationSourceManager* msm,
+    CollectionShardingRuntime* csr,
+    const CollectionShardingRuntime::CSRLock& csrLock)
+    : _msm(msm) {
+    invariant(nullptr == std::exchange(msmForCsr(csr), msm));
+}
+
+MigrationSourceManager::ScopedRegisterer::~ScopedRegisterer() {
+    UninterruptibleLockGuard noInterrupt(_msm->_opCtx->lockState());
+    AutoGetCollection autoColl(_msm->_opCtx, _msm->_args.getNss(), MODE_IX);
+    auto csr = CollectionShardingRuntime::get(_msm->_opCtx, _msm->_args.getNss());
+    auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_msm->_opCtx, csr);
+    invariant(_msm == std::exchange(msmForCsr(csr), nullptr));
 }
 
 }  // namespace mongo

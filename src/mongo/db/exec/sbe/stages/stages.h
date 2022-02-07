@@ -237,18 +237,19 @@ public:
     /**
      * Populates plan 'summary' object by walking through the entire PlanStage tree and for each
      * node whose plan node ID equals to the given 'nodeId', or if 'nodeId' is 'kEmptyPlanNodeId',
-     * invoking 'accumulate(summary)' on the SpecificStats instance obtained by calling
+     * invoking 'acceptVisitor(visitor)' on the SpecificStats instance obtained by calling
      * 'getSpecificStats()'.
      */
-    void accumulate(PlanNodeId nodeId, PlanSummaryStats& summary) const {
+    template <bool IsConst>
+    void accumulate(PlanNodeId nodeId, PlanStatsVisitor<IsConst>* visitor) const {
         if (auto stats = getSpecificStats();
             stats && (nodeId == kEmptyPlanNodeId || _commonStats.nodeId == nodeId)) {
-            stats->accumulate(summary);
+            stats->acceptVisitor(visitor);
         }
 
         auto stage = static_cast<const T*>(this);
         for (auto&& child : stage->_children) {
-            child->accumulate(nodeId, summary);
+            child->accumulate(nodeId, visitor);
         }
     }
 
@@ -261,13 +262,25 @@ public:
         stage->doDetachFromTrialRunTracker();
     }
 
-    void attachToTrialRunTracker(TrialRunTracker* tracker) {
+    // Bit flags to indicate what kinds of stages a TrialRunTracker was attached to by a call to the
+    // 'attachToTrialRunTracker()' method.
+    enum TrialRunTrackerAttachResultFlags : uint32_t {
+        NoAttachment = 0x0,
+        AttachedToStreamingStage = 1 << 0,
+        AttachedToBlockingStage = 1 << 1,
+    };
+
+    using TrialRunTrackerAttachResultMask = uint32_t;
+
+    TrialRunTrackerAttachResultMask attachToTrialRunTracker(TrialRunTracker* tracker) {
+        TrialRunTrackerAttachResultMask result = TrialRunTrackerAttachResultFlags::NoAttachment;
+
         auto stage = static_cast<T*>(this);
         for (auto&& child : stage->_children) {
-            child->attachToTrialRunTracker(tracker);
+            result |= child->attachToTrialRunTracker(tracker);
         }
 
-        stage->doAttachToTrialRunTracker(tracker);
+        return result | stage->doAttachToTrialRunTracker(tracker, result);
     }
 
     /**
@@ -465,7 +478,10 @@ protected:
     virtual void doDetachFromOperationContext() {}
     virtual void doAttachToOperationContext(OperationContext* opCtx) {}
     virtual void doDetachFromTrialRunTracker() {}
-    virtual void doAttachToTrialRunTracker(TrialRunTracker* tracker) {}
+    virtual TrialRunTrackerAttachResultMask doAttachToTrialRunTracker(
+        TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) {
+        return TrialRunTrackerAttachResultFlags::NoAttachment;
+    }
 
     Vector _children;
 };

@@ -709,26 +709,37 @@ public:
                 return {SingleWriteResult(), true};
             }
 
+            bool validateCompression = gValidateTimeseriesCompression.load();
+
             boost::optional<int> beforeSize;
-            boost::optional<int> afterSize;
+            TimeseriesStats::CompressedBucketInfo compressionStats;
 
             auto bucketCompressionFunc = [&](const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
                 beforeSize = bucketDoc.objsize();
                 // Reset every time we run to ensure we never use a stale value
-                afterSize = boost::none;
-                auto compressed = timeseries::compressBucket(bucketDoc, closedBucket.timeField);
-                // If compressed object size is larger than uncompressed, skip compression update.
-                if (compressed && compressed->objsize() >= *beforeSize) {
-                    LOGV2_DEBUG(5857802,
-                                1,
-                                "Skipping time-series bucket compression, compressed object is "
-                                "larger than original",
-                                "originalSize"_attr = bucketDoc.objsize(),
-                                "compressedSize"_attr = compressed->objsize());
-                    return boost::none;
+                compressionStats = {};
+                auto compressed = timeseries::compressBucket(
+                    bucketDoc, closedBucket.timeField, ns(), validateCompression);
+                if (compressed.compressedBucket) {
+                    // If compressed object size is larger than uncompressed, skip compression
+                    // update.
+                    if (compressed.compressedBucket->objsize() >= *beforeSize) {
+                        LOGV2_DEBUG(5857802,
+                                    1,
+                                    "Skipping time-series bucket compression, compressed object is "
+                                    "larger than original",
+                                    "originalSize"_attr = bucketDoc.objsize(),
+                                    "compressedSize"_attr = compressed.compressedBucket->objsize());
+                        return boost::none;
+                    }
+
+                    compressionStats.size = compressed.compressedBucket->objsize();
+                    compressionStats.numInterleaveRestarts = compressed.numInterleavedRestarts;
+                } else if (compressed.decompressionFailed) {
+                    compressionStats.decompressionFailed = true;
                 }
-                afterSize = compressed->objsize();
-                return compressed;
+
+                return compressed.compressedBucket;
             };
 
             auto compressionOp =
@@ -738,12 +749,15 @@ public:
 
             // Report stats, if we fail before running the transform function then just skip
             // reporting.
-            if (result.result.isOK() && beforeSize) {
+            if (beforeSize) {
+                compressionStats.result = result.result.getStatus();
+
+                // Report stats for the bucket collection
                 auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(
                     opCtx, compressionOp.getNamespace());
                 if (coll) {
                     const auto& stats = TimeseriesStats::get(coll.get());
-                    stats.onBucketClosed(*beforeSize, afterSize);
+                    stats.onBucketClosed(*beforeSize, compressionStats);
                 }
             }
 

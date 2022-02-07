@@ -33,7 +33,6 @@
 
 #include "mongo/s/chunk_manager.h"
 
-#include "mongo/base/owned_pointer_vector.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -567,9 +566,28 @@ IndexBounds ChunkManager::getIndexBoundsForQuery(const BSONObj& key,
 
     // Similarly, ignore GEO_NEAR queries in planning, since we do not have geo indexes on mongos.
     if (QueryPlannerCommon::hasNode(canonicalQuery.root(), MatchExpression::GEO_NEAR)) {
-        IndexBounds bounds;
-        IndexBoundsBuilder::allValuesBounds(key, &bounds);
-        return bounds;
+        // If the GEO_NEAR predicate is a child of AND, remove the GEO_NEAR and continue building
+        // bounds. Currently a CanonicalQuery can have at most one GEO_NEAR expression, and only at
+        // the top-level, so this check is sufficient.
+        auto geoIdx = [](auto root) -> boost::optional<size_t> {
+            if (root->matchType() == MatchExpression::AND) {
+                for (size_t i = 0; i < root->numChildren(); ++i) {
+                    if (MatchExpression::GEO_NEAR == root->getChild(i)->matchType()) {
+                        return boost::make_optional(i);
+                    }
+                }
+            }
+            return boost::none;
+        }(canonicalQuery.root());
+
+        if (!geoIdx) {
+            IndexBounds bounds;
+            IndexBoundsBuilder::allValuesBounds(key, &bounds);
+            return bounds;
+        }
+
+        canonicalQuery.root()->getChildVector()->erase(
+            canonicalQuery.root()->getChildVector()->begin() + geoIdx.get());
     }
 
     // Consider shard key as an index
@@ -599,8 +617,7 @@ IndexBounds ChunkManager::getIndexBoundsForQuery(const BSONObj& key,
                           nullptr /* projExec */);
     plannerParams.indices.push_back(std::move(indexEntry));
 
-    auto statusWithMultiPlanSolns =
-        QueryPlanner::planForMultiPlanner(canonicalQuery, plannerParams);
+    auto statusWithMultiPlanSolns = QueryPlanner::plan(canonicalQuery, plannerParams);
     if (statusWithMultiPlanSolns.getStatus().code() != ErrorCodes::NoQueryExecutionPlans) {
         auto solutions = uassertStatusOK(std::move(statusWithMultiPlanSolns));
 

@@ -153,7 +153,8 @@ protected:
      */
     void runAddToSetTest(StringData groupSpec,
                          std::vector<BSONArray> inputDocs,
-                         const BSONArray& expectedResult) {
+                         const BSONArray& expectedResult,
+                         std::unique_ptr<CollatorInterface> collator = nullptr) {
         using namespace mongo::sbe::value;
 
         // Create ArraySet Value from the expectedResult.
@@ -165,7 +166,7 @@ protected:
 
         // Run the accumulator.
         auto [resultsTag, resultsVal] =
-            getResultsForAggregation(fromjson(groupSpec.rawData()), inputDocs);
+            getResultsForAggregation(fromjson(groupSpec.rawData()), inputDocs, std::move(collator));
         ValueGuard resultGuard{resultsTag, resultsVal};
         ASSERT_EQ(resultsTag, TypeTags::Array);
 
@@ -1022,6 +1023,18 @@ TEST_F(SbeStageBuilderGroupTest, AddToSetAccumulatorTranslationAllMissingFields)
     runAddToSetTest("{_id: null, x: {$addToSet: '$b'}}", docs, BSONArray{});
 }
 
+TEST_F(SbeStageBuilderGroupTest, AddToSetAccumulatorTranslationWithCollation) {
+    auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << 1 << "b"
+                                                           << "x")),
+                                       BSON_ARRAY(BSON("a" << 2 << "b"
+                                                           << "y"))};
+    runAddToSetTest(
+        "{_id: null, x: {$addToSet: '$b'}}",
+        docs,
+        BSON_ARRAY("x"),
+        std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kAlwaysEqual));
+}
+
 TEST_F(SbeStageBuilderGroupTest, PushAccumulatorTranslationNoDocs) {
     auto docs = std::vector<BSONArray>{BSONArray{}};
     runGroupAggregationTest("{_id: null, x: {$push: '$b'}}",
@@ -1421,33 +1434,32 @@ REGISTER_ACCUMULATOR(
 
 TEST_F(SbeStageBuilderGroupTest, SbeGroupCompatibleFlag) {
     std::vector<std::string> testCases = {
-        // TODO (SERVER-XXXX): Uncomment the following two test cases when we support pushdown of
-        // accumlators to SBE.
-        // R"(_id: null, agg: {$addToSet: "$item"})",
-        // R"(_id: null, agg: {$avg: "$quantity"})",
-        // R"(_id: null, agg: {$first: "$item"})",
-        // R"(_id: null, agg: {$last: "$item"})",
+        R"(_id: null, agg: {$addToSet: "$item"})",
+        R"(_id: null, agg: {$avg: "$quantity"})",
+        R"(_id: null, agg: {$first: "$item"})",
+        R"(_id: null, agg: {$last: "$item"})",
         // TODO (SERVER-51541): Uncomment the following two test cases when $object supported is
         // added to SBE.
         // R"(_id: null, agg: {$_internalJsReduce: {data: {k: "$word", v: "$val"}, eval: "null"}})",
         //
         // R"(_id: null, agg: {$accumulator: {init: "a", accumulate: "b", accumulateArgs:
         // ["$copies"], merge: "c", lang: "js"}})",
-        // R"(_id: null, agg: {$mergeObjects: "$item"})",
-        // R"(_id: null, agg: {$min: "$item"})",
-        // R"(_id: null, agg: {$max: "$item"})",
-        // R"(_id: null, agg: {$push: "$item"})",
-        // R"(_id: null, agg: {$stdDevPop: "$item"})",
-        // R"(_id: null, agg: {$stdDevSamp: "$item"})",
+        R"(_id: null, agg: {$mergeObjects: "$item"})",
+        R"(_id: null, agg: {$min: "$item"})",
+        R"(_id: null, agg: {$max: "$item"})",
+        R"(_id: null, agg: {$push: "$item"})",
+        R"(_id: null, agg: {$max: "$item"})",
+        R"(_id: null, agg: {$stdDevPop: "$item"})",
+        R"(_id: null, agg: {$stdDevSamp: "$item"})",
         R"(_id: null, agg: {$sum: "$item"})",
         R"(_id: null, agg: {$sum: {$not: "$item"}})",
         // R"(_id: {a: "$a", b: "$b"})",
         // All supported case.
-        // R"(_id: null, agg1: {$sum: "$item"}, agg2: {$max: "$item"}, agg3: {$avg: "$quantity"})",
+        R"(_id: null, agg1: {$sum: "$item"}, agg2: {$stdDevPop: "$price"}, agg3: {$stdDevSamp: "$quantity"})",
         // Mix of supported/unsupported accumulators.
         R"(_id: null, agg1: {$sum: "$item"}, agg2: {$incompatible: "$item"}, agg3: {$avg: "$a"})",
-        // R"(_id: null, agg1: {$incompatible: "$item"}, agg2: {$min: "$item"}, agg3: {$avg:
-        // "$quantity"})",
+        R"(_id: null, agg1: {$incompatible: "$item"}, agg2: {$min: "$item"}, agg3: {$avg:
+         "$quantity"})",
         // No accumulator case
         R"(_id: "$a")",
     };

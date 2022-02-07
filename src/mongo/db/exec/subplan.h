@@ -33,7 +33,6 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/owned_pointer_vector.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/requires_all_indices_stage.h"
@@ -77,6 +76,10 @@ public:
                  CanonicalQuery* cq);
 
     static bool canUseSubplanning(const CanonicalQuery& query);
+    static bool needsSubplanning(const CanonicalQuery& query) {
+        return internalQueryPlanOrChildrenIndependently.load() &&
+            SubplanStage::canUseSubplanning(query);
+    }
 
     bool isEOF() final;
     StageState doWork(WorkingSetID* out) final;

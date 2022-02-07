@@ -2,9 +2,12 @@
  * Test that tenant migration donor and recipient correctly copy each other cluster time keys into
  * their config.external_validation_keys collection.
  *
+ * TODO (SERVER-61231): Adapt for shard merge.
+ *
  * @tags: [
  *   incompatible_with_eft,
  *   incompatible_with_macos,
+ *   incompatible_with_shard_merge,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
  *   requires_persistence,
@@ -57,6 +60,7 @@ function runMigrationAndAssertExternalKeysCopied(tenantMigrationTest, tenantId) 
     };
     TenantMigrationTest.assertCommitted(tenantMigrationTest.runMigration(migrationOpts));
     assertCopiedExternalKeys(tenantMigrationTest, migrationId);
+    tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString);
 }
 
 function assertHasExternalKeys(conn, migrationId) {
@@ -129,6 +133,11 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
         new ReplSetTest({nodes: 3, name: "donorRst", nodeOptions: migrationX509Options.donor});
     donorRst.startSet();
     donorRst.initiate();
+    if (TenantMigrationUtil.isShardMergeEnabled(donorRst.getPrimary().getDB("adminDB"))) {
+        jsTestLog("Skip: featureFlagShardMerge enabled, but shard merge does not survive failover");
+        donorRst.stopSet();
+        return;
+    }
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst});
 
@@ -169,6 +178,11 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
         {nodes: 3, name: "recipientRst", nodeOptions: migrationX509Options.recipient});
     recipientRst.startSet();
     recipientRst.initiate();
+    if (TenantMigrationUtil.isShardMergeEnabled(recipientRst.getPrimary().getDB("adminDB"))) {
+        jsTestLog("Skip: featureFlagShardMerge enabled, but shard merge does not survive failover");
+        recipientRst.stopSet();
+        return;
+    }
 
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), recipientRst});
 
@@ -217,6 +231,14 @@ const migrationX509Options = TenantMigrationUtil.makeX509OptionsForTest();
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName(), donorRst});
 
     function runTest(tenantId, withFailover) {
+        if (withFailover &&
+            TenantMigrationUtil.isShardMergeEnabled(donorRst.getPrimary().getDB("adminDB"))) {
+            jsTestLog(
+                "Skip: featureFlagShardMerge enabled, but shard merge does not survive failover");
+            tenantMigrationTest.stop();
+            return;
+        }
+
         const migrationId = UUID();
         const migrationOpts = {
             migrationIdString: extractUUIDFromObject(migrationId),

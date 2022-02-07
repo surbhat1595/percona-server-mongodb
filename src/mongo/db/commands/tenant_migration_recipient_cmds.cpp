@@ -70,10 +70,10 @@ public:
                 !serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading());
 
             const auto& cmd = request();
-            const auto migrationProtocol = cmd.getProtocol().value_or(kDefaulMigrationProtocol);
+            const auto migrationProtocol = cmd.getProtocol().value_or(kDefaultMigrationProtocol);
 
-            tenant_migration_util::protocolTenantIdCompatibilityCheck(migrationProtocol,
-                                                                      cmd.getTenantId().toString());
+            uassertStatusOK(tenant_migration_util::protocolTenantIdCompatibilityCheck(
+                migrationProtocol, cmd.getTenantId().toString()));
 
             TenantMigrationRecipientDocument stateDoc(cmd.getMigrationId(),
                                                       cmd.getDonorConnectionString().toString(),
@@ -117,24 +117,13 @@ public:
 
             auto returnAfterReachingDonorTs = cmd.getReturnAfterReachingDonorTimestamp();
 
-            try {
-                if (!returnAfterReachingDonorTs) {
-                    return Response(
-                        recipientInstance->waitUntilMigrationReachesConsistentState(opCtx));
-                }
-
-                return Response(
-                    recipientInstance->waitUntilMigrationReachesReturnAfterReachingTimestamp(
-                        opCtx, *returnAfterReachingDonorTs));
-            } catch (ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& ex) {
-                // A conflict may arise when inserting the recipientInstance's  state document.
-                // Since the conflict occurred at the insert stage, that means this instance's
-                // tenantId conflicts with an existing instance's tenantId. Therefore, remove the
-                // instance that was just created.
-                // The status from this exception will be passed to the instance interrupt() method.
-                recipientService->releaseInstance(stateDocBson["_id"].wrap(), ex.toStatus());
-                throw;
+            if (!returnAfterReachingDonorTs) {
+                return Response(recipientInstance->waitUntilMigrationReachesConsistentState(opCtx));
             }
+
+            return Response(
+                recipientInstance->waitUntilMigrationReachesReturnAfterReachingTimestamp(
+                    opCtx, *returnAfterReachingDonorTs));
         }
 
     private:
@@ -189,10 +178,10 @@ public:
                         serverGlobalParams.clusterRole == ClusterRole::ShardServer);
 
             const auto& cmd = request();
-            const auto migrationProtocol = cmd.getProtocol().value_or(kDefaulMigrationProtocol);
+            const auto migrationProtocol = cmd.getProtocol().value_or(kDefaultMigrationProtocol);
 
-            tenant_migration_util::protocolTenantIdCompatibilityCheck(migrationProtocol,
-                                                                      cmd.getTenantId().toString());
+            uassertStatusOK(tenant_migration_util::protocolTenantIdCompatibilityCheck(
+                migrationProtocol, cmd.getTenantId().toString()));
 
             opCtx->setAlwaysInterruptAtStepDownOrUp();
             auto recipientService =

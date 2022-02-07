@@ -150,6 +150,7 @@ let viewsCommandTests = {
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
+    _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrShardCollection:
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _transferMods: {skip: isAnInternalCommand},
@@ -276,12 +277,15 @@ let viewsCommandTests = {
     delete: {command: {delete: "view", deletes: [{q: {x: 1}, limit: 1}]}, expectFailure: true},
     distinct: {command: {distinct: "view", key: "_id"}},
     donorAbortMigration: {skip: isUnrelated},
+    // TODO : remove overrides once possible SERVER-61845
+    donorAbortSplit: {skip: "has been removed from the server"},
     donorForgetMigration: {skip: isUnrelated},
+    donorForgetSplit: {skip: "has been removed from the server"},
     donorStartMigration: {skip: isUnrelated},
+    donorStartSplit: {skip: "has been removed from the server"},
     donorWaitForMigrationToCommit: {skip: isUnrelated},
-    donorAbortSplit: {skip: isUnrelated},
-    donorForgetSplit: {skip: isUnrelated},
-    donorStartSplit: {skip: isUnrelated},
+    abortShardSplit: {skip: isUnrelated},
+    commitShardSplit: {skip: isUnrelated},
     driverOIDTest: {skip: isUnrelated},
     drop: {command: {drop: "view"}},
     dropAllRolesFromDatabase: {skip: isUnrelated},
@@ -534,6 +538,16 @@ let viewsCommandTests = {
     },
     revokeRolesFromRole: {skip: isUnrelated},
     revokeRolesFromUser: {skip: isUnrelated},
+    setAllowMigrations: {
+        command: {setAllowMigrations: "test.view", allowMigrations: false},
+        setup: function(conn) {
+            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
+        },
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true
+    },
     rolesInfo: {skip: isUnrelated},
     rotateCertificates: {skip: isUnrelated},
     saslContinue: {skip: isUnrelated},
@@ -624,6 +638,7 @@ let viewsCommandTests = {
     waitForOngoingChunkSplits: {skip: isUnrelated},
     voteCommitImportCollection: {skip: isUnrelated},
     voteCommitIndexBuild: {skip: isUnrelated},
+    voteCommitMigrationProgress: {skip: isUnrelated},
     voteCommitTransaction: {skip: isUnrelated},
     voteAbortTransaction: {skip: isUnrelated},
     waitForFailPoint: {skip: isUnrelated},

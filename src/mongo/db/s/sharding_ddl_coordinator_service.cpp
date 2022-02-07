@@ -48,6 +48,7 @@
 #include "mongo/db/s/move_primary_coordinator.h"
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
 #include "mongo/db/s/rename_collection_coordinator.h"
+#include "mongo/db/s/set_allow_migrations_coordinator.h"
 
 namespace mongo {
 namespace {
@@ -76,6 +77,9 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
             return std::make_shared<RefineCollectionShardKeyCoordinator>(service,
                                                                          std::move(initialState));
             break;
+        case DDLCoordinatorTypeEnum::kSetAllowMigrations:
+            return std::make_shared<SetAllowMigrationsCoordinator>(service,
+                                                                   std::move(initialState));
         default:
             uasserted(ErrorCodes::BadValue,
                       str::stream()
@@ -94,10 +98,7 @@ ShardingDDLCoordinatorService* ShardingDDLCoordinatorService::getService(Operati
 }
 
 std::shared_ptr<ShardingDDLCoordinatorService::Instance>
-ShardingDDLCoordinatorService::constructInstance(
-    OperationContext* opCtx,
-    BSONObj initialState,
-    const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) {
+ShardingDDLCoordinatorService::constructInstance(BSONObj initialState) {
     auto coord = constructShardingDDLCoordinatorInstance(this, std::move(initialState));
     coord->getConstructionCompletionFuture()
         .thenRunOn(getInstanceCleanupExecutor())

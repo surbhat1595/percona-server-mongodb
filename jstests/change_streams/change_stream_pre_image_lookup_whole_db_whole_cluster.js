@@ -8,25 +8,30 @@
  *   uses_change_streams,
  *   # TODO SERVER-58694: remove this tag.
  *   change_stream_does_not_expect_txns,
- *   # TODO SERVER-60238: remove this tag.
- *   assumes_read_preference_unchanged
  * ]
  */
 (function() {
 "use strict";
 
-load("jstests/libs/change_stream_util.js");  // For canRecordPreImagesInConfigDatabase.
+load("jstests/libs/change_stream_util.js");  // For isChangeStreamPreAndPostImagesEnabled.
 load("jstests/libs/fixture_helpers.js");     // For FixtureHelpers.
 
 const testDB = db.getSiblingDB(jsTestName());
 const adminDB = db.getSiblingDB("admin");
 const collWithPreImageName = "coll_with_pre_images";
 const collWithNoPreImageName = "coll_with_no_pre_images";
-const canRecordPreImagesInConfigDb = canRecordPreImagesInConfigDatabase(testDB);
+const canRecordPreImagesInConfigDb = isChangeStreamPreAndPostImagesEnabled(testDB);
 
 if (!canRecordPreImagesInConfigDb && FixtureHelpers.isMongos(db)) {
     jsTestLog("Skipping test as pre image lookup is not supported in sharded cluster with feature" +
               "flag 'featureFlagChangeStreamPreAndPostImages' disabled.");
+    return;
+}
+
+if (canRecordPreImagesInConfigDb &&
+    (jsTestOptions().shardMixedBinVersionss || jsTestOptions().mixedBinVersions)) {
+    jsTestLog("Skipping test because multiversion test-suite is unsupported when flag " +
+              "'featureFlagChangeStreamPreAndPostImages' enabled");
     return;
 }
 

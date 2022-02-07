@@ -28,12 +28,14 @@
  */
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/coll_mod_write_ops_tracker.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/storage/key_string.h"
 
 namespace mongo {
 
@@ -43,6 +45,8 @@ namespace mongo {
  * Refer to CollModRequest in coll_mod.cpp for non-index collMod options.
  */
 struct ParsedCollModIndexRequest {
+    // Internal fields of this 'cmdObj' are referenced by BSONElement fields here.
+    BSONObj indexObj;  // owned
     const IndexDescriptor* idx = nullptr;
     BSONElement indexExpireAfterSeconds = {};
     BSONElement indexHidden = {};
@@ -56,11 +60,17 @@ struct ParsedCollModIndexRequest {
  *
  * The appropriate collection locks should be acquired before calling this function.
  *
+ * 'docsForUniqueIndex' contains documents captured by the side writes tracker for unique index
+ * conversion.
+ * If no side writes tracker was installed (because a unique index conversion was not requested),
+ * 'docsForUniqueIndex' will be null.
+ *
  * Used by collMod implementation only.
  */
 void processCollModIndexRequest(OperationContext* opCtx,
                                 AutoGetCollection* autoColl,
                                 const ParsedCollModIndexRequest& collModIndexRequest,
+                                const CollModWriteOpsTracker::Docs* docsForUniqueIndex,
                                 boost::optional<IndexCollModInfo>* indexCollModInfo,
                                 BSONObjBuilder* result,
                                 boost::optional<repl::OplogApplication::Mode> mode);
@@ -70,6 +80,13 @@ void processCollModIndexRequest(OperationContext* opCtx,
  */
 void scanIndexForDuplicates(OperationContext* opCtx,
                             const CollectionPtr& collection,
-                            const IndexDescriptor* idx);
+                            const IndexDescriptor* idx,
+                            boost::optional<KeyString::Value> firstKeyString = {},
+                            boost::optional<int64_t> limit = {});
+
+/**
+ * Returns the formatted error status for not being able to enable the index constraint.
+ */
+Status buildEnableConstraintErrorStatus(const std::string& indexType, const BSONArray& violations);
 
 }  // namespace mongo

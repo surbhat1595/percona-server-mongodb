@@ -329,7 +329,7 @@ void checkShardedRenamePreconditions(OperationContext* opCtx,
         try {
             catalogClient->getCollection(opCtx, toNss);
             // If no exception is thrown, the collection exists and is sharded
-            uasserted(ErrorCodes::CommandFailed,
+            uasserted(ErrorCodes::NamespaceExists,
                       str::stream() << "Sharded target collection " << toNss.ns()
                                     << " exists but dropTarget is not set");
         } catch (const DBException& ex) {
@@ -415,7 +415,6 @@ void stopMigrations(OperationContext* opCtx,
                                              // idempotent (because it will cause the collection
                                              // version to be bumped), it is safe to be retried.
         );
-
 
     try {
         uassertStatusOKWithContext(

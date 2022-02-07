@@ -85,9 +85,11 @@ public:
     static constexpr auto kAllowMigrationsFieldName = kPre50CompatibleAllowMigrationsFieldName;
 
     using CollectionTypeBase::kBalancerShouldMergeChunksFieldName;
+    using CollectionTypeBase::kDefragmentationPhaseFieldName;
     using CollectionTypeBase::kMaxChunkSizeBytesFieldName;
     using CollectionTypeBase::kNoAutoSplitFieldName;
     using CollectionTypeBase::kNssFieldName;
+    using CollectionTypeBase::kPermitMigrationsFieldName;
     using CollectionTypeBase::kReshardingFieldsFieldName;
     using CollectionTypeBase::kSupportingLongNameFieldName;
     using CollectionTypeBase::kTimeseriesFieldsFieldName;
@@ -96,6 +98,7 @@ public:
     using CollectionTypeBase::kUpdatedAtFieldName;
 
     // Make getters and setters accessible.
+    using CollectionTypeBase::getDefragmentationPhase;
     using CollectionTypeBase::getMaxChunkSizeBytes;
     using CollectionTypeBase::getNss;
     using CollectionTypeBase::getReshardingFields;
@@ -103,6 +106,8 @@ public:
     using CollectionTypeBase::getTimestamp;
     using CollectionTypeBase::getUnique;
     using CollectionTypeBase::getUpdatedAt;
+    using CollectionTypeBase::setBalancerShouldMergeChunks;
+    using CollectionTypeBase::setDefragmentationPhase;
     using CollectionTypeBase::setNss;
     using CollectionTypeBase::setReshardingFields;
     using CollectionTypeBase::setTimeseriesFields;

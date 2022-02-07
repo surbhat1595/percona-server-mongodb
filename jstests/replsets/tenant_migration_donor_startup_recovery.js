@@ -3,10 +3,12 @@
  * randomly selects a point during the migration to shutdown the donor.
  *
  * Tenant migrations are not expected to be run on servers with ephemeralForTest.
+ * Incompatible with shard merge, which can't handle restart.
  *
  * @tags: [
  *   incompatible_with_eft,
  *   incompatible_with_macos,
+ *   incompatible_with_shard_merge,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
  *   requires_persistence,
@@ -71,52 +73,56 @@ if (donorDoc) {
     switch (donorDoc.state) {
         case TenantMigrationTest.DonorState.kAbortingIndexBuilds:
         case TenantMigrationTest.DonorState.kDataSync:
-            assert.soon(
-                () => tenantMigrationTest.getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                          .donor.state == TenantMigrationTest.DonorAccessState.kAllow);
+            assert.soon(() => tenantMigrationTest
+                                  .getTenantMigrationAccessBlocker(
+                                      {donorNode: donorPrimary, tenantId: kTenantId})
+                                  .donor.state == TenantMigrationTest.DonorAccessState.kAllow);
             break;
         case TenantMigrationTest.DonorState.kBlocking:
-            assert.soon(
-                () =>
-                    tenantMigrationTest.getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                        .donor.state == TenantMigrationTest.DonorAccessState.kBlockWritesAndReads);
-            assert.soon(
-                () => bsonWoCompare(tenantMigrationTest
-                                        .getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                                        .donor.blockTimestamp,
-                                    donorDoc.blockTimestamp) == 0);
+            assert.soon(() => tenantMigrationTest
+                                  .getTenantMigrationAccessBlocker(
+                                      {donorNode: donorPrimary, tenantId: kTenantId})
+                                  .donor.state ==
+                            TenantMigrationTest.DonorAccessState.kBlockWritesAndReads);
+            assert.soon(() => bsonWoCompare(tenantMigrationTest
+                                                .getTenantMigrationAccessBlocker(
+                                                    {donorNode: donorPrimary, tenantId: kTenantId})
+                                                .donor.blockTimestamp,
+                                            donorDoc.blockTimestamp) == 0);
             break;
         case TenantMigrationTest.DonorState.kCommitted:
-            assert.soon(
-                () => tenantMigrationTest.getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                          .donor.state == TenantMigrationTest.DonorAccessState.kReject);
-            assert.soon(
-                () => bsonWoCompare(tenantMigrationTest
-                                        .getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                                        .donor.commitOpTime,
-                                    donorDoc.commitOrAbortOpTime) == 0);
-            assert.soon(
-                () => bsonWoCompare(tenantMigrationTest
-                                        .getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                                        .donor.blockTimestamp,
-                                    donorDoc.blockTimestamp) == 0);
+            assert.soon(() => tenantMigrationTest
+                                  .getTenantMigrationAccessBlocker(
+                                      {donorNode: donorPrimary, tenantId: kTenantId})
+                                  .donor.state == TenantMigrationTest.DonorAccessState.kReject);
+            assert.soon(() => bsonWoCompare(tenantMigrationTest
+                                                .getTenantMigrationAccessBlocker(
+                                                    {donorNode: donorPrimary, tenantId: kTenantId})
+                                                .donor.commitOpTime,
+                                            donorDoc.commitOrAbortOpTime) == 0);
+            assert.soon(() => bsonWoCompare(tenantMigrationTest
+                                                .getTenantMigrationAccessBlocker(
+                                                    {donorNode: donorPrimary, tenantId: kTenantId})
+                                                .donor.blockTimestamp,
+                                            donorDoc.blockTimestamp) == 0);
             assert.commandWorked(
                 tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
             break;
         case TenantMigrationTest.DonorState.kAborted:
-            assert.soon(
-                () => tenantMigrationTest.getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                          .donor.state == TenantMigrationTest.DonorAccessState.kAborted);
-            assert.soon(
-                () => bsonWoCompare(tenantMigrationTest
-                                        .getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                                        .donor.abortOpTime,
-                                    donorDoc.commitOrAbortOpTime) == 0);
-            assert.soon(
-                () => bsonWoCompare(tenantMigrationTest
-                                        .getTenantMigrationAccessBlocker(donorPrimary, kTenantId)
-                                        .donor.blockTimestamp,
-                                    donorDoc.blockTimestamp) == 0);
+            assert.soon(() => tenantMigrationTest
+                                  .getTenantMigrationAccessBlocker(
+                                      {donorNode: donorPrimary, tenantId: kTenantId})
+                                  .donor.state == TenantMigrationTest.DonorAccessState.kAborted);
+            assert.soon(() => bsonWoCompare(tenantMigrationTest
+                                                .getTenantMigrationAccessBlocker(
+                                                    {donorNode: donorPrimary, tenantId: kTenantId})
+                                                .donor.abortOpTime,
+                                            donorDoc.commitOrAbortOpTime) == 0);
+            assert.soon(() => bsonWoCompare(tenantMigrationTest
+                                                .getTenantMigrationAccessBlocker(
+                                                    {donorNode: donorPrimary, tenantId: kTenantId})
+                                                .donor.blockTimestamp,
+                                            donorDoc.blockTimestamp) == 0);
             assert.commandWorked(
                 tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
             break;

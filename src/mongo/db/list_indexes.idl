@@ -49,113 +49,162 @@ structs:
             v:
                 type: safeInt
                 optional: true
+                unstable: false
             key:
                 type: object_owned
                 optional: true
+                unstable: false
             name:
                 type: string
                 optional: true
+                unstable: false
             ns:
                 # MongoDB 4.2 and older generate this field, see SERVER-41696.
                 type: string
                 ignore: true
+                unstable: false
             background:
                 type: safeBool
                 optional: true
+                unstable: false
             unique:
                 type: safeBool
                 optional: true
+                unstable: false
             hidden:
                 type: safeBool
                 optional: true
+                unstable: false
             partialFilterExpression:
                 type: object_owned
                 optional: true
+                unstable: false
             sparse:
                 type: safeBool
                 optional: true
+                unstable: false
             expireAfterSeconds:
                 type: safeInt
                 optional: true
+                unstable: false
             storageEngine:
                 type: object_owned
                 optional: true
+                unstable: false
             weights:
                 type:
                     variant: [string, object_owned]
                 optional: true
+                unstable: false
             default_language:
                 type: string
                 optional: true
+                unstable: false
             language_override:
                 type: string
                 optional: true
+                unstable: false
             textIndexVersion:
                 type: safeInt
                 optional: true
+                unstable: false
             2dsphereIndexVersion:
                 type: safeInt
                 optional: true
+                unstable: false
             bits:
                 type: safeInt
                 optional: true
+                unstable: false
             min:
                 type: safeDouble
                 optional: true
+                unstable: false
             max:
                 type: safeDouble
                 optional: true
+                unstable: false
             bucketSize:
                 type: safeDouble
                 optional: true
+                unstable: false
             collation:
                 type: object_owned
                 optional: true
+                unstable: false
             wildcardProjection:
                 type: object_owned
                 optional: true
+                unstable: false
             coarsestIndexedLevel:
                 type: safeInt
                 optional: true
+                unstable: false
             finestIndexedLevel:
                 type: safeInt
                 optional: true
+                unstable: false
             dropDups:
                 type: safeBool
                 optional: true
+                unstable: false
             originalSpec:
                 type: object_owned
                 optional: true
+                unstable: false
             clustered:
                 type: safeBool
                 optional: true
+                unstable: false
             #
-            # An index build in progress appears with these two fields. They're required, but marked
+            # Depending on the values of includeIndexBuildInfo and includeBuildUUIDs, indexes may
+            # appear with a combination of these three fields. Specifically, if includeIndexBuildInfo 
+            # is set, completed index builds will appear with spec, and in-progress index builds will
+            # appear with both spec and indexBuildInfo, while if includeBuildUUIDs is set, in-progress
+            # index builds will appear with both spec and buildUUID. They're required, but marked
             # optional to permit the built index format using the fields above instead.
             #
+            indexBuildInfo:
+                description: "Contains information about the build. Included if includeIndexBuildInfo is set and the index is currently building."
+                type: object_owned
+                optional: true
+                unstable: true
             buildUUID:
+                description: "The UUID of a two-phase index build. Included if includeBuildUUIDs is set and the index is currently building."
                 type: uuid
                 optional: true
+                unstable: false
             spec:
+                description: "Contains the index spec. If includeIndexBuildInfo is set, always included. If includeBuildUUIDs is set, included if the index is currently building."
                 type: NewIndexSpec
                 optional: true
+                unstable: false
 
     ListIndexesReplyCursor:
         description: "Cursor object"
         fields:
-            id: long
-            ns: namespacestring
-            firstBatch: array<ListIndexesReplyItem>
+            id:
+                type: long
+                unstable: false
+            ns:
+                type: namespacestring
+                unstable: false
+            firstBatch:
+                type: array<ListIndexesReplyItem>
+                unstable: false
 
     ListIndexesReply:
         description: "The listIndexes command's reply."
         fields:
-            cursor: ListIndexesReplyCursor
+            cursor: 
+                type: ListIndexesReplyCursor
+                unstable: false
             # Included so mongos can parse shards' listIndexes replies.
             ok:
                 type: safeDouble
                 validator: { gte: 0.0, lte: 1.0 }
                 optional: true
+                unstable: false
 
 commands:
     listIndexes:
@@ -178,7 +227,13 @@ commands:
             cursor:
                 type: SimpleCursorOptions
                 optional: true
+                unstable: false
             includeBuildUUIDs:
+                type: safeBool
+                optional: true
+                unstable: true
+            includeIndexBuildInfo:
+                description: "If true, the reply will include information about the build status for each index."
                 type: safeBool
                 optional: true
                 unstable: true
@@ -188,4 +243,5 @@ commands:
                               time-series buckets namespace before being sent to shards."
                 type: bool
                 optional: true
+                unstable: false
         reply_type: ListIndexesReply

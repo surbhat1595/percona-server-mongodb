@@ -35,6 +35,7 @@
 #include "mongo/db/repl/tenant_migration_recipient_access_blocker.h"
 #include "mongo/db/repl/tenant_migration_recipient_op_observer.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
+#include "mongo/db/repl/tenant_migration_util.h"
 #include "mongo/logv2/log.h"
 
 namespace mongo {
@@ -62,6 +63,7 @@ void createAccessBlockerIfNeeded(OperationContext* opCtx,
         opCtx->getServiceContext(),
         recipientStateDoc.getId(),
         recipientStateDoc.getTenantId().toString(),
+        recipientStateDoc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations),
         recipientStateDoc.getDonorConnectionString().toString());
 
     TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
@@ -110,9 +112,20 @@ void TenantMigrationRecipientOpObserver::onUpdate(OperationContext* opCtx,
                 mtab->stopBlockingTTL();
             }
 
-            switch (recipientStateDoc.getState()) {
+            auto state = recipientStateDoc.getState();
+            auto protocol = recipientStateDoc.getProtocol().value_or(kDefaultMigrationProtocol);
+            switch (state) {
                 case TenantMigrationRecipientStateEnum::kUninitialized:
                 case TenantMigrationRecipientStateEnum::kDone:
+                    break;
+                case TenantMigrationRecipientStateEnum::kLearnedFilenames:
+                case TenantMigrationRecipientStateEnum::kCopiedFiles:
+                    tassert(6112900,
+                            str::stream()
+                                << "Bad state " << TenantMigrationRecipientState_serializer(state)
+                                << " for protocol '" << MigrationProtocol_serializer(protocol)
+                                << "'",
+                            protocol == MigrationProtocolEnum::kMultitenantMigrations);
                     break;
                 case TenantMigrationRecipientStateEnum::kStarted:
                     createAccessBlockerIfNeeded(opCtx, recipientStateDoc);
@@ -129,6 +142,7 @@ void TenantMigrationRecipientOpObserver::onUpdate(OperationContext* opCtx,
 
 void TenantMigrationRecipientOpObserver::aboutToDelete(OperationContext* opCtx,
                                                        NamespaceString const& nss,
+                                                       const UUID& uuid,
                                                        BSONObj const& doc) {
     if (nss == NamespaceString::kTenantMigrationRecipientsNamespace &&
         !tenant_migration_access_blocker::inRecoveryMode(opCtx)) {

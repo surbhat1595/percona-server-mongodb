@@ -388,6 +388,10 @@ BufBuilder BSONColumnBuilder::detach() {
     return std::move(_bufBuilder);
 }
 
+int BSONColumnBuilder::numInterleavedStartWritten() const {
+    return _numInterleavedStartWritten;
+}
+
 BSONColumnBuilder::EncodingState::EncodingState(
     BufBuilder* bufBuilder, std::function<void(const char*, size_t)> controlBlockWriter)
     : _simple8bBuilder64(_createBufferWriter()),
@@ -470,6 +474,7 @@ void BSONColumnBuilder::EncodingState::append(BSONElement elem) {
 
             switch (type) {
                 case String:
+                case Code:
                     if (auto encoded = Simple8bTypeUtil::encodeString(elem.valueStringData())) {
                         appendEncoded(*encoded);
                     }
@@ -477,11 +482,12 @@ void BSONColumnBuilder::EncodingState::append(BSONElement elem) {
                 case BinData: {
                     int size;
                     const char* binary = elem.binData(size);
-                    // We only do delta encoding of binary if the binary size is exactly the
-                    // same. To support size difference we'd need to add a count to be able to
-                    // reconstruct binaries starting with zero bytes. We don't want to waste
-                    // bits for this.
-                    if (size != previous.valuestrsize())
+                    // We only do delta encoding of binary if the binary type and size are
+                    // exactly the same. To support size difference we'd need to add a count to
+                    // be able to reconstruct binaries starting with zero bytes. We don't want
+                    // to waste bits for this.
+                    if (size != previous.valuestrsize() ||
+                        elem.binDataType() != previous.binDataType())
                         break;
 
                     if (auto encoded = Simple8bTypeUtil::encodeBinary(binary, size)) {
@@ -521,10 +527,7 @@ void BSONColumnBuilder::EncodingState::append(BSONElement elem) {
                     break;
                 }
                 case bsonTimestamp: {
-                    int64_t currTimestampDelta =
-                        calcDelta(elem.timestampValue(), previous.timestampValue());
-                    value = calcDelta(currTimestampDelta, _prevDelta);
-                    _prevDelta = currTimestampDelta;
+                    value = calcDelta(elem.timestampValue(), previous.timestampValue());
                     break;
                 }
                 case Date:
@@ -549,6 +552,11 @@ void BSONColumnBuilder::EncodingState::append(BSONElement elem) {
                 default:
                     MONGO_UNREACHABLE;
             };
+            if (usesDeltaOfDelta(type)) {
+                int64_t currentDelta = value;
+                value = calcDelta(currentDelta, _prevDelta);
+                _prevDelta = currentDelta;
+            }
             if (encodingPossible) {
                 compressed = _simple8bBuilder64.append(Simple8bTypeUtil::encodeInt64(value));
             }
@@ -781,6 +789,7 @@ void BSONColumnBuilder::EncodingState::_initializeFromPrevious() {
             std::tie(_prevEncoded64, _scaleIndex) = scaleAndEncodeDouble(_lastValueInPrevBlock, 0);
             break;
         case String:
+        case Code:
             _prevEncoded128 = Simple8bTypeUtil::encodeString(prevElem.valueStringData());
             break;
         case BinData: {
@@ -921,6 +930,7 @@ void BSONColumnBuilder::_finishDetermineSubObjReference() {
     // Done determining reference sub-object. Write this control byte and object to stream.
     _bufBuilder.appendChar(bsoncolumn::kInterleavedStartControlByte);
     _bufBuilder.appendBuf(_referenceSubObj.objdata(), _referenceSubObj.objsize());
+    ++_numInterleavedStartWritten;
 
     // Initialize all encoding states. We do this by traversing in lock-step between the reference
     // object and first buffered element. We can use the fact if sub-element exists in reference to

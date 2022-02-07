@@ -81,6 +81,7 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/load_balancer_support.h"
 #include "mongo/s/mongos_topology_coordinator.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/query/cluster_find.h"
@@ -622,6 +623,8 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     if (_parc->_osi->getAutocommit()) {
         _routerSession.emplace(opCtx);
 
+        load_balancer_support::setMruSession(opCtx->getClient(), *opCtx->getLogicalSessionId());
+
         auto txnRouter = TransactionRouter::get(opCtx);
         invariant(txnRouter);
 
@@ -645,7 +648,8 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         })();
 
         startTransaction = (transactionAction == TransactionRouter::TransactionActions::kStart);
-        txnRouter.beginOrContinueTxn(opCtx, *txnNumber, transactionAction, *txnRetryCounter);
+        txnRouter.beginOrContinueTxn(
+            opCtx, TxnNumberAndRetryCounter(*txnNumber, *txnRetryCounter), transactionAction);
     }
 
     bool supportsWriteConcern = invocation->supportsWriteConcern();

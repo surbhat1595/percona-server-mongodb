@@ -132,6 +132,13 @@ public:
         return _elementMemory.front().firstElement();
     }
 
+    BSONElement createElementCode(StringData code) {
+        BSONObjBuilder ob;
+        ob.appendCode("0"_sd, code);
+        _elementMemory.emplace_front(ob.obj());
+        return _elementMemory.front().firstElement();
+    }
+
     BSONElement createCodeWScope(StringData code, const BSONObj& scope) {
         BSONObjBuilder ob;
         ob.appendCodeWScope("0"_sd, code, scope);
@@ -146,9 +153,9 @@ public:
         return _elementMemory.front().firstElement();
     }
 
-    BSONElement createElementBinData(const std::vector<uint8_t>& val) {
+    BSONElement createElementBinData(BinDataType binDataType, const std::vector<uint8_t>& val) {
         BSONObjBuilder ob;
-        ob.appendBinData("f", val.size(), BinDataGeneral, val.data());
+        ob.appendBinData("f", val.size(), binDataType, val.data());
         _elementMemory.emplace_front(ob.obj());
         return _elementMemory.front().firstElement();
     }
@@ -221,15 +228,33 @@ public:
         return b.append(val);
     }
 
-    static uint64_t deltaObjectId(BSONElement val, BSONElement prev) {
-        return Simple8bTypeUtil::encodeInt64(Simple8bTypeUtil::encodeObjectId(val.OID()) -
-                                             Simple8bTypeUtil::encodeObjectId(prev.OID()));
+    static uint64_t deltaOfDelta(int64_t delta, int64_t prevDelta) {
+        return Simple8bTypeUtil::encodeInt64(delta - prevDelta);
+    }
+
+    static uint64_t deltaOfDeltaObjectId(BSONElement val, BSONElement prev, BSONElement prevprev) {
+        ASSERT_EQ(memcmp(val.OID().getInstanceUnique().bytes,
+                         prev.OID().getInstanceUnique().bytes,
+                         OID::kInstanceUniqueSize),
+                  0);
+
+        ASSERT_EQ(memcmp(prevprev.OID().getInstanceUnique().bytes,
+                         prev.OID().getInstanceUnique().bytes,
+                         OID::kInstanceUniqueSize),
+                  0);
+
+        int64_t delta = Simple8bTypeUtil::encodeObjectId(val.OID()) -
+            Simple8bTypeUtil::encodeObjectId(prev.OID());
+        int64_t prevDelta = Simple8bTypeUtil::encodeObjectId(prev.OID()) -
+            Simple8bTypeUtil::encodeObjectId(prevprev.OID());
+        return deltaOfDelta(delta, prevDelta);
     }
 
     static uint128_t deltaDecimal128(BSONElement val, BSONElement prev) {
         return Simple8bTypeUtil::encodeInt128(Simple8bTypeUtil::encodeDecimal128(val.Decimal()) -
                                               Simple8bTypeUtil::encodeDecimal128(prev.Decimal()));
     }
+
 
     uint64_t deltaOfDeltaTimestamp(BSONElement val, BSONElement prev) {
         return Simple8bTypeUtil::encodeInt64(val.timestamp().asULL() - prev.timestamp().asULL());
@@ -238,7 +263,7 @@ public:
     static uint64_t deltaOfDeltaTimestamp(BSONElement val, BSONElement prev, BSONElement prevprev) {
         int64_t prevTimestampDelta = prev.timestamp().asULL() - prevprev.timestamp().asULL();
         int64_t currTimestampDelta = val.timestamp().asULL() - prev.timestamp().asULL();
-        return Simple8bTypeUtil::encodeInt64(currTimestampDelta - prevTimestampDelta);
+        return deltaOfDelta(currTimestampDelta, prevTimestampDelta);
     }
 
     template <typename It>
@@ -272,9 +297,10 @@ public:
         return Simple8bTypeUtil::encodeInt64(val.Bool() - prev.Bool());
     }
 
-    static uint64_t deltaDate(BSONElement val, BSONElement prev) {
-        return Simple8bTypeUtil::encodeInt64(val.Date().toMillisSinceEpoch() -
-                                             prev.Date().toMillisSinceEpoch());
+    static uint64_t deltaOfDeltaDate(BSONElement val, BSONElement prev, BSONElement prevprev) {
+        int64_t delta = val.Date().toMillisSinceEpoch() - prev.Date().toMillisSinceEpoch();
+        int64_t prevDelta = prev.Date().toMillisSinceEpoch() - prevprev.Date().toMillisSinceEpoch();
+        return deltaOfDelta(delta, prevDelta);
     }
 
     static void appendLiteral(BufBuilder& builder, BSONElement elem) {
@@ -1188,6 +1214,30 @@ TEST_F(BSONColumnTest, DoubleIntegerOverflow) {
     verifyDecompression(binData, {e1, e2});
 }
 
+TEST_F(BSONColumnTest, DoubleZerosSignDifference) {
+    BSONColumnBuilder cb("test"_sd);
+
+    // 0.0 compares equal to -0.0 when compared as double. Make sure we can handle this case without
+    // data loss.
+    auto d1 = createElementDouble(0.0);
+    auto d2 = createElementDouble(-0.0);
+    cb.append(d1);
+    cb.append(d2);
+
+    // These numbers are encoded as a large integer that does not fit in Simple8b so the result is
+    // two uncompressed literals.
+    ASSERT_EQ(deltaDoubleMemory(d2, d1), 0xFFFFFFFFFFFFFFFF);
+
+    BufBuilder expected;
+    appendLiteral(expected, d1);
+    appendLiteral(expected, d2);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {d1, d2});
+}
+
 TEST_F(BSONColumnTest, Decimal128Base) {
     BSONColumnBuilder cb("test"_sd);
 
@@ -1332,8 +1382,9 @@ TEST_F(BSONColumnTest, BasicObjectId) {
 
     auto first = createObjectId(OID("112233445566778899AABBCC"));
     // Increment the lower byte for timestamp and counter.
-    auto second = createObjectId(OID("112234445566778899AABBEE"));
-    auto third = createObjectId(OID("112234445566778899AABBFF"));
+    auto second = createObjectId(OID("112233455566778899AABBEE"));
+    // Increment the lower byte for counter.
+    auto third = createObjectId(OID("112233455566778899AABBFF"));
 
     cb.append(first);
     cb.append(second);
@@ -1344,7 +1395,9 @@ TEST_F(BSONColumnTest, BasicObjectId) {
     appendLiteral(expected, first);
     appendSimple8bControl(expected, 0b1000, 0b0000);
     std::vector<boost::optional<uint64_t>> expectedDeltas{
-        deltaObjectId(second, first), deltaObjectId(second, second), deltaObjectId(third, second)};
+        deltaOfDeltaObjectId(second, first, first),
+        deltaOfDeltaObjectId(second, second, first),
+        deltaOfDeltaObjectId(third, second, second)};
     appendSimple8bBlocks64(expected, expectedDeltas, 1);
     appendEOO(expected);
 
@@ -1389,13 +1442,13 @@ TEST_F(BSONColumnTest, ObjectIdAfterChangeBack) {
     BufBuilder expected;
     appendLiteral(expected, first);
     appendSimple8bControl(expected, 0b1000, 0b0000);
-    appendSimple8bBlock64(expected, deltaObjectId(second, first));
+    appendSimple8bBlock64(expected, deltaOfDeltaObjectId(second, first, first));
 
     appendLiteral(expected, elemInt32);
 
     appendLiteral(expected, first);
     appendSimple8bControl(expected, 0b1000, 0b0000);
-    appendSimple8bBlock64(expected, deltaObjectId(second, first));
+    appendSimple8bBlock64(expected, deltaOfDeltaObjectId(second, first, first));
 
     appendEOO(expected);
 
@@ -1544,8 +1597,8 @@ TEST_F(BSONColumnTest, DateBasic) {
     BufBuilder expected;
     appendLiteral(expected, first);
     appendSimple8bControl(expected, 0b1000, 0b0000);
-    std::vector<boost::optional<uint64_t>> expectedDeltaOfDeltas{deltaDate(second, first),
-                                                                 deltaDate(second, second)};
+    std::vector<boost::optional<uint64_t>> expectedDeltaOfDeltas{
+        deltaOfDeltaDate(second, first, first), deltaOfDeltaDate(second, second, first)};
     _appendSimple8bBlocks(expected, expectedDeltaOfDeltas, 1);
     appendEOO(expected);
 
@@ -1906,7 +1959,7 @@ TEST_F(BSONColumnTest, SymbolAfterChangeBack) {
 TEST_F(BSONColumnTest, BinDataBase) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{'1', '2', '3', '4'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
 
@@ -1922,7 +1975,7 @@ TEST_F(BSONColumnTest, BinDataBase) {
 TEST_F(BSONColumnTest, BinDataOdd) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{'\n', '2', '\n', '4'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
 
@@ -1938,7 +1991,7 @@ TEST_F(BSONColumnTest, BinDataOdd) {
 TEST_F(BSONColumnTest, BinDataDelta) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{'1', '2', '3', '4'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
     cb.append(elemBinData);
@@ -1954,15 +2007,15 @@ TEST_F(BSONColumnTest, BinDataDelta) {
     verifyDecompression(binData, {elemBinData, elemBinData});
 }
 
-TEST_F(BSONColumnTest, BinDataDeltaShouldFail) {
+TEST_F(BSONColumnTest, BinDataDeltaCountDifferenceShouldFail) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{'1', '2', '3', '4'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
 
     std::vector<uint8_t> inputLong{'1', '2', '3', '4', '5'};
-    auto elemBinDataLong = createElementBinData(inputLong);
+    auto elemBinDataLong = createElementBinData(BinDataGeneral, inputLong);
     cb.append(elemBinDataLong);
 
     BufBuilder expected;
@@ -1975,15 +2028,35 @@ TEST_F(BSONColumnTest, BinDataDeltaShouldFail) {
     verifyDecompression(binData, {elemBinData, elemBinDataLong});
 }
 
+TEST_F(BSONColumnTest, BinDataDeltaTypeDifferenceShouldFail) {
+    BSONColumnBuilder cb("test"_sd);
+    std::vector<uint8_t> input{'1', '2', '3', '4'};
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
+
+    cb.append(elemBinData);
+
+    auto elemBinDataDifferentType = createElementBinData(Function, input);
+    cb.append(elemBinDataDifferentType);
+
+    BufBuilder expected;
+    appendLiteral(expected, elemBinData);
+    appendLiteral(expected, elemBinDataDifferentType);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {elemBinData, elemBinDataDifferentType});
+}
+
 TEST_F(BSONColumnTest, BinDataDeltaCheckSkips) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{'1', '2', '3', '4'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
 
     std::vector<uint8_t> inputLong{'1', '2', '3', '3'};
-    auto elemBinDataLong = createElementBinData(inputLong);
+    auto elemBinDataLong = createElementBinData(BinDataGeneral, inputLong);
     cb.append(elemBinDataLong);
     cb.skip();
     cb.append(elemBinData);
@@ -2007,13 +2080,13 @@ TEST_F(BSONColumnTest, BinDataLargerThan16) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7', '8'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
 
     std::vector<uint8_t> inputLong{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7', '9'};
-    auto elemBinDataLong = createElementBinData(inputLong);
+    auto elemBinDataLong = createElementBinData(BinDataGeneral, inputLong);
     cb.append(elemBinDataLong);
 
     BufBuilder expected;
@@ -2030,13 +2103,13 @@ TEST_F(BSONColumnTest, BinDataEqualTo16) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
 
     std::vector<uint8_t> inputLong{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '8'};
-    auto elemBinDataLong = createElementBinData(inputLong);
+    auto elemBinDataLong = createElementBinData(BinDataGeneral, inputLong);
     cb.append(elemBinDataLong);
 
     BufBuilder expected;
@@ -2054,7 +2127,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16SameValue) {
     BSONColumnBuilder cb("test"_sd);
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7', '8'};
-    auto elemBinData = createElementBinData(input);
+    auto elemBinData = createElementBinData(BinDataGeneral, input);
 
     cb.append(elemBinData);
     cb.append(elemBinData);
@@ -2249,6 +2322,55 @@ TEST_F(BSONColumnTest, StringMultiType) {
                          elemDec128One,
                          elemString,
                          elemString2});
+}
+
+TEST_F(BSONColumnTest, CodeBase) {
+    BSONColumnBuilder cb("test"_sd);
+    auto elem = createElementCode("test");
+    cb.append(elem);
+
+    BufBuilder expected;
+    appendLiteral(expected, elem);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {elem});
+}
+
+TEST_F(BSONColumnTest, CodeDeltaSame) {
+    BSONColumnBuilder cb("test"_sd);
+    auto elemCode = createElementCode("test");
+    cb.append(elemCode);
+    cb.append(elemCode);
+
+    BufBuilder expected;
+    appendLiteral(expected, elemCode);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock128(expected, deltaString(elemCode, elemCode));
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {elemCode, elemCode});
+}
+
+TEST_F(BSONColumnTest, CodeDeltaDiff) {
+    BSONColumnBuilder cb("test"_sd);
+    auto elemCode = createElementCode("mongo");
+    cb.append(elemCode);
+    auto elemCode2 = createElementCode("tests");
+    cb.append(elemCode2);
+
+    BufBuilder expected;
+    appendLiteral(expected, elemCode);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock128(expected, deltaString(elemCode2, elemCode));
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {elemCode, elemCode2});
 }
 
 TEST_F(BSONColumnTest, ObjectUncompressed) {
@@ -3804,39 +3926,38 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterMerge) {
         cb.append(createElementObj(obj.obj())), DBException, ErrorCodes::InvalidBSONType);
 }
 
-// TODO SERVER-61410: Re-enable when binary has been regenerated with latest fixes included
 // The large literal emits this on Visual Studio: Fatal error C1091: compiler limit: string exceeds
 // 65535 bytes in length
-//#if !defined(_MSC_VER) || _MSC_VER >= 1929
-// TEST_F(BSONColumnTest, FTDCRoundTrip) {
-//    StringData compressedBase64Encoded = {
-//#include "mongo/bson/util/bson_column_compressed_data.inl"
-//    };
-//
-//    std::string compressed = base64::decode(compressedBase64Encoded);
-//
-//    auto roundtrip = [](const auto& compressed) {
-//        BSONObjBuilder builder;
-//        builder.appendBinData("data"_sd, compressed.size(), BinDataType::Column,
-//        compressed.data()); BSONElement compressedFTDCElement = builder.done().firstElement();
-//
-//        BSONColumnBuilder columnBuilder("");
-//        BSONColumn column(compressedFTDCElement);
-//        for (auto&& decompressed : column) {
-//            if (!decompressed.eoo()) {
-//                columnBuilder.append(decompressed);
-//            } else {
-//                columnBuilder.skip();
-//            }
-//        }
-//
-//        auto binData = columnBuilder.finalize();
-//        return std::string((const char*)binData.data, binData.length);
-//    };
-//
-//    ASSERT_EQ(roundtrip(compressed), compressed);
-//}
-//#endif
+#if !defined(_MSC_VER) || _MSC_VER >= 1929
+TEST_F(BSONColumnTest, FTDCRoundTrip) {
+    StringData compressedBase64Encoded = {
+#include "mongo/bson/util/bson_column_compressed_data.inl"
+    };
+
+    std::string compressed = base64::decode(compressedBase64Encoded);
+
+    auto roundtrip = [](const auto& compressed) {
+        BSONObjBuilder builder;
+        builder.appendBinData("data"_sd, compressed.size(), BinDataType::Column, compressed.data());
+        BSONElement compressedFTDCElement = builder.done().firstElement();
+
+        BSONColumnBuilder columnBuilder("");
+        BSONColumn column(compressedFTDCElement);
+        for (auto&& decompressed : column) {
+            if (!decompressed.eoo()) {
+                columnBuilder.append(decompressed);
+            } else {
+                columnBuilder.skip();
+            }
+        }
+
+        auto binData = columnBuilder.finalize();
+        return std::string((const char*)binData.data, binData.length);
+    };
+
+    ASSERT_EQ(roundtrip(compressed), compressed);
+}
+#endif
 
 }  // namespace
 }  // namespace mongo

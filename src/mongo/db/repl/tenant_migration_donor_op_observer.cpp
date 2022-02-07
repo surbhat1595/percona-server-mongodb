@@ -56,6 +56,7 @@ void onTransitionToAbortingIndexBuilds(OperationContext* opCtx,
     auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(
         opCtx->getServiceContext(),
         donorStateDoc.getTenantId().toString(),
+        donorStateDoc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations),
         donorStateDoc.getRecipientConnectionString().toString());
 
     TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
@@ -258,6 +259,7 @@ void TenantMigrationDonorOpObserver::onUpdate(OperationContext* opCtx,
 
 void TenantMigrationDonorOpObserver::aboutToDelete(OperationContext* opCtx,
                                                    NamespaceString const& nss,
+                                                   const UUID& uuid,
                                                    BSONObj const& doc) {
     if (nss == NamespaceString::kTenantMigrationDonorsNamespace &&
         !tenant_migration_access_blocker::inRecoveryMode(opCtx)) {

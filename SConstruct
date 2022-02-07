@@ -1536,6 +1536,13 @@ elif env.TargetOSIs('windows'):
             CCFLAGS_WERROR=["/WX"]
         )
 
+if env.ToolchainIs('clang'):
+    def assembler_with_cpp_gen(target, source, env, for_signature):
+        if source[0].get_suffix() == '.sx':
+            return '-x assembler-with-cpp'
+    env['CLANG_ASSEMBLER_WITH_CPP'] = assembler_with_cpp_gen
+    env.Append(ASFLAGS=['$CLANG_ASSEMBLER_WITH_CPP'])
+
 env['CC_VERSION'] = mongo_toolchain.get_toolchain_ver(env, 'CC')
 env['CXX_VERSION'] = mongo_toolchain.get_toolchain_ver(env, 'CXX')
 
@@ -2193,7 +2200,7 @@ elif env.TargetOSIs('windows'):
         "/wd4251",
     ])
 
-    # mozjs-60 requires the following
+    # mozjs requires the following
     #  'declaration' : no matching operator delete found; memory will not be freed if
     #  initialization throws an exception
     env.Append( CCFLAGS=["/wd4291"] )
@@ -3860,9 +3867,11 @@ def doConfigure(myenv):
 
         myenv = conf.Finish()
 
-    # We set this to work around https://gcc.gnu.org/bugzilla/show_bug.cgi?id=43052
-    if not myenv.ToolchainIs('msvc') and not 'builtin-memcmp' in selected_experimental_optimizations:
-        AddToCCFLAGSIfSupported(myenv, "-fno-builtin-memcmp")
+    # We set this with GCC on x86 platforms to work around
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=43052
+    if myenv.ToolchainIs('gcc') and (env['TARGET_ARCH'] in ['i386', 'x86_64']):
+        if not 'builtin-memcmp' in selected_experimental_optimizations:
+            AddToCCFLAGSIfSupported(myenv, '-fno-builtin-memcmp')
 
     # pthread_setname_np was added in GLIBC 2.12, and Solaris 11.3
     if posix_system:

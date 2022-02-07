@@ -55,11 +55,11 @@ let getCurrentOpOfDDL = (ddlOpThread, desc) => {
     assert.eq(shardKey, currOp[0].command.shardKey);
 }
 
-// TODO SERVER-58912: remove mixed bin versions check when 6.0 becomes LTS, the test requires both
+// TODO SERVER-61756: remove mixed bin versions check when 6.0 becomes LTS, the test requires both
 // refineCollectionShardKey and movePrimary to use the new DDLCoordinator.
 if (jsTestOptions().useRandomBinVersionsWithinReplicaSet || jsTestOptions().shardMixedBinVersions) {
     jsTest.log(
-        "Skipping checking refineCollectionShardKey and movePrimary due to the fact that they're not using a DDLCoordinator on 5.0");
+        "Skipping checking refineCollectionShardKey, movePrimary and setAllowMigrations due to the fact that they're not using a DDLCoordinator on 5.0");
 } else {
     {
         jsTestLog('Check refine collection shard key shows in current op');
@@ -97,6 +97,24 @@ if (jsTestOptions().useRandomBinVersionsWithinReplicaSet || jsTestOptions().shar
         assert(currOp[0].command.hasOwnProperty('request'));
         assert(currOp[0].command.request.hasOwnProperty('toShardId'));
         assert.eq(st.shard0.shardName, currOp[0].command.request.toShardId);
+    }
+
+    {
+        jsTestLog('Check set allow migrations shows in current op');
+
+        let ddlOpThread = new Thread((mongosConnString, nss) => {
+            let mongos = new Mongo(mongosConnString);
+            mongos.adminCommand({setAllowMigrations: nss, allowMigrations: true});
+        }, st.s0.host, nss);
+
+        let currOp = getCurrentOpOfDDL(ddlOpThread, 'SetAllowMigrationsCoordinator');
+
+        // There must be one operation running with the appropiate ns.
+        assert.eq(1, currOp.length);
+        assert.eq(nss, currOp[0].ns);
+        assert(currOp[0].hasOwnProperty('command'));
+        assert(currOp[0].command.hasOwnProperty('allowMigrations'));
+        assert.eq(true, currOp[0].command.allowMigrations);
     }
 }
 

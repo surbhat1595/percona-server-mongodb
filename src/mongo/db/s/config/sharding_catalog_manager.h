@@ -36,6 +36,7 @@
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
+#include "mongo/db/transaction_api.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -176,6 +177,12 @@ public:
     //
     // General utilities related to the ShardingCatalogManager
     //
+
+    static void withTransactionAPI(
+        OperationContext* opCtx,
+        const NamespaceString& namespaceForInitialFind,
+        unique_function<SemiFuture<void>(const txn_api::TransactionClient& txnClient,
+                                         ExecutorPtr txnExec)> func);
 
     /**
      * Starts and commits a transaction on the config server, with a no-op find on the specified
@@ -455,18 +462,29 @@ public:
     Status setFeatureCompatibilityVersionOnShards(OperationContext* opCtx, const BSONObj& cmdObj);
 
     /**
-     * Upgrade the persistent metadata to FCV 5.1 (phase 2).
+     * Enable the support for long collection name for each entity in 'config.collections' for
+     * which the support is unset, then force the catalog cache refresh of updated collections on
+     * each shard.
+     *
+     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
+     * phase 1 or 2.
      *
      * TODO: Remove once FCV 6.0 becomes last-lts
      */
-    void upgradeMetadataTo51Phase2(OperationContext* opCtx);
+    void enableSupportForLongCollectionName(OperationContext* opCtx);
 
     /**
-     * Upgrade the persistent metadata from FCV 5.1 (phase 2).
+     * Disable the support for long collection name for each entity in 'config.collections' for
+     * which the support is implicitely enabled, then force the catalog cache refresh of updated
+     * collections on each shard.
+     *
+     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
+     * phase 1 or 2.
      *
      * TODO: Remove once FCV 6.0 becomes last-lts
      */
-    void downgradeMetadataToPre51Phase2(OperationContext* opCtx);
+    void disableSupportForLongCollectionName(OperationContext* opCtx);
+
 
     /*
      * Rename collection metadata as part of a renameCollection operation.
@@ -602,30 +620,6 @@ private:
                                                       const ReadPreferenceSetting& readPref,
                                                       const std::string& shardName,
                                                       const std::string& zoneName);
-
-    /**
-     * Enable the support for long collection name for each entity in 'config.collections' for
-     * which the support is unset, then force the catalog cache refresh of updated collections on
-     * each shard.
-     *
-     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
-     * phase 1 or 2.
-     *
-     * TODO: Remove once FCV 6.0 becomes last-lts
-     */
-    void _enableSupportForLongCollectionName(OperationContext* opCtx);
-
-    /**
-     * Disable the support for long collection name for each entity in 'config.collections' for
-     * which the support is implicitely enabled, then force the catalog cache refresh of updated
-     * collections on each shard.
-     *
-     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
-     * phase 1 or 2.
-     *
-     * TODO: Remove once FCV 6.0 becomes last-lts
-     */
-    void _disableSupportForLongCollectionName(OperationContext* opCtx);
 
     // The owning service context
     ServiceContext* const _serviceContext;

@@ -13,8 +13,6 @@
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
  *   requires_persistence,
- *   # TODO SERVER-59090: Remove this tag.
- *   backport_required_multiversion,
  * ]
  */
 (function() {
@@ -28,11 +26,7 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 
 const tenantMigrationTest = new TenantMigrationTest({
     name: jsTestName(),
-    sharedOptions: {
-        setParameter:
-            // Allow non-timestamped reads on donor after migration completes for testing.
-            {'failpoint.tenantMigrationDonorAllowsNonTimestampedReads': tojson({mode: 'alwaysOn'})}
-    }
+    quickGarbageCollection: true,
 });
 
 const donorRst = tenantMigrationTest.getDonorRst();
@@ -72,7 +66,8 @@ function checkTenantMigrationAccessBlocker(node, tenantId, {
     numTenantMigrationCommittedErrors = 0,
     numTenantMigrationAbortedErrors = 0
 }) {
-    const mtab = TenantMigrationUtil.getTenantMigrationAccessBlocker(node, tenantId).donor;
+    const mtab =
+        TenantMigrationUtil.getTenantMigrationAccessBlocker({donorNode: node, tenantId}).donor;
     if (!mtab) {
         assert.eq(0, numBlockedWrites);
         assert.eq(0, numTenantMigrationCommittedErrors);
@@ -324,6 +319,7 @@ function testRejectWritesAfterMigrationCommitted(testCase, testOpts) {
         testOpts.primaryDB, tenantId, {numTenantMigrationCommittedErrors: 1});
 
     assert.commandWorked(tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationOpts.migrationIdString);
 }
 
 /**
@@ -346,9 +342,9 @@ function testDoNotRejectWritesAfterMigrationAborted(testCase, testOpts) {
     // committed the abort decision. Otherwise, the command below is expected to block and then get
     // rejected.
     assert.soon(() => {
-        const mtabs =
-            testOpts.primaryDB.adminCommand({serverStatus: 1}).tenantMigrationAccessBlocker;
-        return mtabs[tenantId].donor.state === TenantMigrationTest.DonorAccessState.kAborted;
+        const mtab = TenantMigrationUtil.getTenantMigrationAccessBlocker(
+            {donorNode: testOpts.primaryDB, tenantId});
+        return mtab.donor.state === TenantMigrationTest.DonorAccessState.kAborted;
     });
 
     runCommand(testOpts);
@@ -357,6 +353,7 @@ function testDoNotRejectWritesAfterMigrationAborted(testCase, testOpts) {
         testOpts.primaryDB, tenantId, {numTenantMigrationAbortedErrors: 0});
 
     assert.commandWorked(tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationOpts.migrationIdString);
 }
 
 /**
@@ -388,6 +385,7 @@ function testBlockWritesAfterMigrationEnteredBlocking(testCase, testOpts) {
     checkTenantMigrationAccessBlocker(testOpts.primaryDB, tenantId, {numBlockedWrites: 1});
 
     assert.commandWorked(tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationOpts.migrationIdString);
 }
 
 /**
@@ -426,6 +424,7 @@ function testRejectBlockedWritesAfterMigrationCommitted(testCase, testOpts) {
         testOpts.primaryDB, tenantId, {numBlockedWrites: 1, numTenantMigrationCommittedErrors: 1});
 
     assert.commandWorked(tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationOpts.migrationIdString);
 }
 
 /**
@@ -467,6 +466,7 @@ function testRejectBlockedWritesAfterMigrationAborted(testCase, testOpts) {
         testOpts.primaryDB, tenantId, {numBlockedWrites: 1, numTenantMigrationAbortedErrors: 1});
 
     assert.commandWorked(tenantMigrationTest.forgetMigration(migrationOpts.migrationIdString));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationOpts.migrationIdString);
 }
 
 const isNotWriteCommand = "not a write command";
@@ -521,6 +521,7 @@ const testCases = {
     _shardsvrCreateCollection: {skip: isOnlySupportedOnShardedCluster},
     _shardsvrCreateCollectionParticipant: {skip: isOnlySupportedOnShardedCluster},
     _shardsvrMovePrimary: {skip: isNotRunOnUserDatabase},
+    _shardsvrSetAllowMigrations: {skip: isOnlySupportedOnShardedCluster},
     _shardsvrShardCollection:
         {skip: isNotRunOnUserDatabase},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _shardsvrRenameCollection: {skip: isOnlySupportedOnShardedCluster},
@@ -922,6 +923,7 @@ const testCases = {
     saslStart: {skip: isAuthCommand},
     sbe: {skip: isNotRunOnUserDatabase},
     serverStatus: {skip: isNotRunOnUserDatabase},
+    setAllowMigrations: {skip: isNotRunOnUserDatabase},
     setCommittedSnapshot: {skip: isNotRunOnUserDatabase},
     setDefaultRWConcern: {skip: isNotRunOnUserDatabase},
     setFeatureCompatibilityVersion: {skip: isNotRunOnUserDatabase},
@@ -981,6 +983,7 @@ const testCases = {
     usersInfo: {skip: isNotRunOnUserDatabase},
     validate: {skip: isNotWriteCommand},
     voteCommitIndexBuild: {skip: isNotRunOnUserDatabase},
+    voteCommitMigrationProgress: {skip: isNotRunOnUserDatabase},
     waitForFailPoint: {skip: isNotRunOnUserDatabase},
     waitForOngoingChunkSplits: {skip: isNotRunOnUserDatabase},
     whatsmysni: {skip: isNotRunOnUserDatabase},

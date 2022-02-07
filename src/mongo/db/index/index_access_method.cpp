@@ -144,8 +144,7 @@ Status AbstractIndexAccessMethod::insert(OperationContext* opCtx,
             keys.get(),
             multikeyMetadataKeys.get(),
             multikeyPaths.get(),
-            loc,
-            kNoopOnSuppressedErrorFn);
+            loc);
 
     return insertKeysAndUpdateMultikeyPaths(opCtx,
                                             coll,
@@ -210,19 +209,28 @@ Status AbstractIndexAccessMethod::insertKeys(OperationContext* opCtx,
         : !unique;
     // Add all new keys into the index. The RecordId for each is already encoded in the KeyString.
     for (const auto& keyString : keys) {
-        Status status = _newInterface->insert(opCtx, keyString, dupsAllowed);
+        auto result = _newInterface->insert(opCtx, keyString, dupsAllowed);
 
         // When duplicates are encountered and allowed, retry with dupsAllowed. Call
         // onDuplicateKey() with the inserted duplicate key.
-        if (ErrorCodes::DuplicateKey == status.code() && options.dupsAllowed) {
+        if (ErrorCodes::DuplicateKey == result.getStatus().code() && options.dupsAllowed) {
             invariant(unique);
-            status = _newInterface->insert(opCtx, keyString, true /* dupsAllowed */);
 
-            if (status.isOK() && onDuplicateKey)
-                status = onDuplicateKey(keyString);
+            result = _newInterface->insert(opCtx, keyString, true /* dupsAllowed */);
+            if (!result.isOK()) {
+                return result.getStatus();
+            } else if (result.getValue() && onDuplicateKey) {
+                // Only run the duplicate key handler if we inserted the key ourselves. Someone else
+                // could have already inserted this exact key, but in that case we don't count it as
+                // a duplicate.
+                auto status = onDuplicateKey(keyString);
+                if (!status.isOK()) {
+                    return status;
+                }
+            }
+        } else if (!result.isOK()) {
+            return result.getStatus();
         }
-        if (!status.isOK())
-            return status;
     }
     if (numInserted) {
         *numInserted = keys.size();
@@ -303,8 +311,7 @@ RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
                     keys.get(),
                     multikeyMetadataKeys,
                     multikeyPaths,
-                    boost::none,  // loc
-                    kNoopOnSuppressedErrorFn);
+                    boost::none /* loc */);
             invariant(keys->size() == 1);
             return *keys->begin();
         } else {
@@ -316,20 +323,9 @@ RecordId AbstractIndexAccessMethod::findSingle(OperationContext* opCtx,
         }
     }();
 
-    std::unique_ptr<SortedDataInterface::Cursor> cursor(_newInterface->newCursor(opCtx));
-    const auto requestedInfo = kDebugBuild ? SortedDataInterface::Cursor::kKeyAndLoc
-                                           : SortedDataInterface::Cursor::kWantLoc;
-    if (auto kv = cursor->seekExact(actualKey, requestedInfo)) {
-        // StorageEngine should guarantee these.
-        dassert(!kv->loc.isNull());
-        dassert(kv->key.woCompare(KeyString::toBson(actualKey.getBuffer(),
-                                                    actualKey.getSize(),
-                                                    getSortedDataInterface()->getOrdering(),
-                                                    actualKey.getTypeBits()),
-                                  /*order*/ BSONObj(),
-                                  /*considerFieldNames*/ false) == 0);
-
-        return kv->loc;
+    if (auto loc = _newInterface->findLoc(opCtx, actualKey)) {
+        dassert(!loc->isNull());
+        return *loc;
     }
 
     return RecordId();
@@ -425,8 +421,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
                 &ticket->oldKeys,
                 nullptr,
                 nullptr,
-                record,
-                kNoopOnSuppressedErrorFn);
+                record);
     }
 
     if (!indexFilter || indexFilter->matchesBSON(to)) {
@@ -439,8 +434,7 @@ void AbstractIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
                 &ticket->newKeys,
                 &ticket->newMultikeyMetadataKeys,
                 &ticket->newMultikeyPaths,
-                record,
-                kNoopOnSuppressedErrorFn);
+                record);
     }
 
     ticket->loc = record;
@@ -475,9 +469,9 @@ Status AbstractIndexAccessMethod::update(OperationContext* opCtx,
 
     // Add all new data keys into the index.
     for (const auto& keyString : ticket.added) {
-        Status status = _newInterface->insert(opCtx, keyString, ticket.dupsAllowed);
-        if (!status.isOK())
-            return status;
+        auto result = _newInterface->insert(opCtx, keyString, ticket.dupsAllowed);
+        if (!result.isOK())
+            return result.getStatus();
     }
 
     // If these keys should cause the index to become multikey, pass them into the catalog.
@@ -888,17 +882,6 @@ void AbstractIndexAccessMethod::setIndexIsMultikey(OperationContext* opCtx,
     _indexCatalogEntry->setMultikey(opCtx, collection, multikeyMetadataKeys, paths);
 }
 
-IndexAccessMethod::OnSuppressedErrorFn IndexAccessMethod::kNoopOnSuppressedErrorFn =
-    [](Status status, const BSONObj& obj, boost::optional<RecordId> loc) {
-        LOGV2_DEBUG(
-            20686,
-            1,
-            "Suppressed key generation error: {error} when getting index keys for {loc}: {obj}",
-            "error"_attr = redact(status),
-            "loc"_attr = loc,
-            "obj"_attr = redact(obj));
-    };
-
 void AbstractIndexAccessMethod::getKeys(OperationContext* opCtx,
                                         const CollectionPtr& collection,
                                         SharedBufferFragmentBuilder& pooledBufferBuilder,
@@ -909,7 +892,7 @@ void AbstractIndexAccessMethod::getKeys(OperationContext* opCtx,
                                         KeyStringSet* multikeyMetadataKeys,
                                         MultikeyPaths* multikeyPaths,
                                         boost::optional<RecordId> id,
-                                        OnSuppressedErrorFn onSuppressedError) const {
+                                        OnSuppressedErrorFn&& onSuppressedError) const {
     invariant(!id || _newInterface->rsKeyFormat() != KeyFormat::String || id->isStr(),
               fmt::format("RecordId is not in the same string format as its RecordStore; id: {}",
                           id->toString()));
@@ -951,7 +934,16 @@ void AbstractIndexAccessMethod::getKeys(OperationContext* opCtx,
             throw;
         }
 
-        onSuppressedError(ex.toStatus(), obj, id);
+        if (onSuppressedError) {
+            onSuppressedError(ex.toStatus(), obj, id);
+        } else {
+            LOGV2_DEBUG(20686,
+                        1,
+                        "Suppressed key generation error",
+                        "error"_attr = redact(ex.toStatus()),
+                        "loc"_attr = id,
+                        "obj"_attr = redact(obj));
+        }
     }
 }
 

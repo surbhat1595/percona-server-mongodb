@@ -39,6 +39,7 @@
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
+#include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
@@ -73,6 +74,9 @@ ShardingDDLCoordinator::~ShardingDDLCoordinator() {
 }
 
 bool ShardingDDLCoordinator::_removeDocument(OperationContext* opCtx) {
+    // Checkpoint configTime and topologyTime to guarantee causality with respect to DDL operations
+    VectorClockMutable::get(opCtx)->waitForDurable().get(opCtx);
+
     DBDirectClient dbClient(opCtx);
     auto commandResponse = dbClient.runCommand([&] {
         write_ops::DeleteCommandRequest deleteOp(
@@ -214,7 +218,8 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     //  If the token is not cancelled we retry because it could have been generated
                     //  by a remote node.
                     if (!status.isOK() && !_completeOnError &&
-                        (status.isA<ErrorCategory::CursorInvalidatedError>() ||
+                        (_mustAlwaysMakeProgress() ||
+                         status.isA<ErrorCategory::CursorInvalidatedError>() ||
                          status.isA<ErrorCategory::ShutdownError>() ||
                          status.isA<ErrorCategory::RetriableError>() ||
                          status.isA<ErrorCategory::CancellationError>() ||
@@ -224,11 +229,10 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                          status == ErrorCodes::Interrupted || status == ErrorCodes::LockBusy ||
                          status == ErrorCodes::CommandNotFound) &&
                         !token.isCanceled()) {
-                        LOGV2_DEBUG(5656000,
-                                    1,
-                                    "Re-executing sharding DDL coordinator",
-                                    "coordinatorId"_attr = _coordId,
-                                    "reason"_attr = redact(status));
+                        LOGV2_INFO(5656000,
+                                   "Re-executing sharding DDL coordinator",
+                                   "coordinatorId"_attr = _coordId,
+                                   "reason"_attr = redact(status));
                         _firstExecution = false;
                         return false;
                     }

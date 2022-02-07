@@ -29,7 +29,8 @@ function makeTenantId() {
     return kTenantIdPrefix + testNum++;
 }
 
-const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
+const tenantMigrationTest =
+    new TenantMigrationTest({name: jsTestName(), quickGarbageCollection: true});
 
 (() => {
     const migrationId1 = extractUUIDFromObject(UUID());
@@ -60,6 +61,7 @@ const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
               migrationId2 + ", tenantId: " + tenantId);
     TenantMigrationTest.assertCommitted(
         tenantMigrationTest.runMigration({migrationIdString: migrationId2, tenantId: tenantId}));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationId2, tenantId);
 })();
 
 (() => {
@@ -87,9 +89,10 @@ const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
     // Wait for donorAbortMigration command to start.
     assert.soon(() => {
-        const res = assert.commandWorked(donorPrimary.adminCommand(
-            {currentOp: true, desc: "tenant donor migration", tenantId: tenantId}));
-        return res.inprog[0].receivedCancellation;
+        const res = assert.commandWorked(
+            donorPrimary.adminCommand({currentOp: true, desc: "tenant donor migration"}));
+        const op = res.inprog.find(op => extractUUIDFromObject(op.instanceID) === migrationId1);
+        return op.receivedCancellation;
     });
 
     fp.off();
@@ -110,6 +113,7 @@ const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
               migrationId2 + ", tenantId: " + tenantId);
     TenantMigrationTest.assertCommitted(
         tenantMigrationTest.runMigration({migrationIdString: migrationId2, tenantId: tenantId}));
+    tenantMigrationTest.waitForMigrationGarbageCollection(migrationId2, tenantId);
 })();
 
 tenantMigrationTest.stop();

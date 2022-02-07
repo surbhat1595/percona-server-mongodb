@@ -86,6 +86,7 @@
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
+#include "mongo/s/load_balancer_support.h"
 #include "mongo/s/mongos_options.h"
 #include "mongo/s/mongos_server_parameters_gen.h"
 #include "mongo/s/mongos_topology_coordinator.h"
@@ -655,8 +656,16 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>(serviceContext));
 
-    auto tl =
-        transport::TransportLayerManager::createWithConfig(&serverGlobalParams, serviceContext);
+    const auto loadBalancerPort = load_balancer_support::getLoadBalancerPort();
+    if (loadBalancerPort && *loadBalancerPort == serverGlobalParams.port) {
+        LOGV2_ERROR(6067901,
+                    "Load balancer port must be different from the normal ingress port.",
+                    "port"_attr = serverGlobalParams.port);
+        quickExit(EXIT_BADOPTIONS);
+    }
+
+    auto tl = transport::TransportLayerManager::createWithConfig(
+        &serverGlobalParams, serviceContext, loadBalancerPort);
     auto res = tl->setup();
     if (!res.isOK()) {
         LOGV2_ERROR(22856,
@@ -763,7 +772,15 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     PeriodicTask::startRunningPeriodicTasks();
 
-    process_health::FaultManager::get(serviceContext)->startPeriodicHealthChecks();
+    status =
+        process_health::FaultManager::get(serviceContext)->startPeriodicHealthChecks().getNoThrow();
+    if (!status.isOK()) {
+        LOGV2_ERROR(5936510,
+                    "Error completing initial health check: {error}",
+                    "Error completing initial health check",
+                    "error"_attr = redact(status));
+        return EXIT_PROCESS_HEALTH_CHECK;
+    }
 
     SessionKiller::set(serviceContext,
                        std::make_shared<SessionKiller>(serviceContext, killSessionsRemote));

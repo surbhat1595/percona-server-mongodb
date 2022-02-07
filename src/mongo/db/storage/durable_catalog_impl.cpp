@@ -198,39 +198,6 @@ public:
     const RecordId _catalogId;
 };
 
-class DurableCatalogImpl::RemoveIdentChange : public RecoveryUnit::Change {
-public:
-    RemoveIdentChange(DurableCatalogImpl* catalog, RecordId catalogId, const Entry& entry)
-        : _catalog(catalog), _catalogId(catalogId), _entry(entry) {}
-
-    virtual void commit(boost::optional<Timestamp>) {}
-    virtual void rollback() {
-        stdx::lock_guard<Latch> lk(_catalog->_catalogIdToEntryMapLock);
-        _catalog->_catalogIdToEntryMap[_catalogId] = _entry;
-    }
-
-    DurableCatalogImpl* const _catalog;
-    const RecordId _catalogId;
-    const Entry _entry;
-};
-
-class DurableCatalogImpl::AddIndexChange : public RecoveryUnit::Change {
-public:
-    AddIndexChange(RecoveryUnit* ru, StorageEngineInterface* engine, StringData ident)
-        : _recoveryUnit(ru), _engine(engine), _ident(ident.toString()) {}
-
-    virtual void commit(boost::optional<Timestamp>) {}
-    virtual void rollback() {
-        // Intentionally ignoring failure.
-        auto kvEngine = _engine->getEngine();
-        kvEngine->dropIdent(_recoveryUnit, _ident).ignore();
-    }
-
-    RecoveryUnit* const _recoveryUnit;
-    StorageEngineInterface* _engine;
-    const std::string _ident;
-};
-
 bool DurableCatalogImpl::isFeatureDocument(BSONObj obj) {
     BSONElement firstElem = obj.firstElement();
     if (firstElem.fieldNameStringData() == kIsFeatureDocumentFieldName) {
@@ -554,8 +521,10 @@ Status DurableCatalogImpl::_removeEntry(OperationContext* opCtx, RecordId catalo
         return Status(ErrorCodes::NamespaceNotFound, "collection not found");
     }
 
-    opCtx->recoveryUnit()->registerChange(
-        std::make_unique<RemoveIdentChange>(this, catalogId, it->second));
+    opCtx->recoveryUnit()->onRollback([this, catalogId, entry = it->second]() {
+        stdx::lock_guard<Latch> lk(_catalogIdToEntryMapLock);
+        _catalogIdToEntryMap[catalogId] = entry;
+    });
 
     LOGV2_DEBUG(22212,
                 1,
@@ -630,7 +599,7 @@ StatusWith<std::string> DurableCatalogImpl::newOrphanedIdent(OperationContext* o
 
     // Generate a new UUID for the orphaned collection.
     CollectionOptions optionsWithUUID;
-    optionsWithUUID.uuid.emplace(CollectionUUID::gen());
+    optionsWithUUID.uuid.emplace(UUID::gen());
     BSONObj obj;
     {
         BSONObjBuilder b;
@@ -677,12 +646,22 @@ StatusWith<std::pair<RecordId, std::unique_ptr<RecordStore>>> DurableCatalogImpl
         return swEntry.getStatus();
     Entry& entry = swEntry.getValue();
 
-    Status status = _engine->getEngine()->createRecordStore(opCtx, nss.ns(), entry.ident, options);
+    const auto keyFormat = [&] {
+        // Clustered collections require KeyFormat::String, but the opposite is not necessarily
+        // true: a clustered record store that is not associated with a collection has
+        // KeyFormat::String and and no CollectionOptions.
+        if (options.clusteredIndex) {
+            return KeyFormat::String;
+        }
+        return KeyFormat::Long;
+    }();
+    Status status =
+        _engine->getEngine()->createRecordStore(opCtx, nss.ns(), entry.ident, options, keyFormat);
     if (!status.isOK())
         return status;
 
     auto ru = opCtx->recoveryUnit();
-    CollectionUUID uuid = options.uuid.get();
+    UUID uuid = options.uuid.get();
     opCtx->recoveryUnit()->onRollback([ru, catalog = this, nss, ident = entry.ident, uuid]() {
         // Intentionally ignoring failure
         catalog->_engine->getEngine()->dropIdent(ru, ident).ignore();
@@ -703,8 +682,11 @@ Status DurableCatalogImpl::createIndex(OperationContext* opCtx,
     auto kvEngine = _engine->getEngine();
     const Status status = kvEngine->createSortedDataInterface(opCtx, collOptions, ident, spec);
     if (status.isOK()) {
-        opCtx->recoveryUnit()->registerChange(
-            std::make_unique<AddIndexChange>(opCtx->recoveryUnit(), _engine, ident));
+        opCtx->recoveryUnit()->onRollback([this, ident, recoveryUnit = opCtx->recoveryUnit()]() {
+            // Intentionally ignoring failure.
+            auto kvEngine = _engine->getEngine();
+            kvEngine->dropIdent(recoveryUnit, ident).ignore();
+        });
     }
     return status;
 }
@@ -734,7 +716,7 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
     const auto& catalogEntry = [&] {
         if (uuidOption == ImportCollectionUUIDOption::kGenerateNew) {
             // Generate a new UUID for the collection.
-            md.options.uuid = CollectionUUID::gen();
+            md.options.uuid = UUID::gen();
             BSONObjBuilder catalogEntryBuilder;
             // Generate a new "md" field after setting the new UUID.
             catalogEntryBuilder.append("md", md.toBSON());

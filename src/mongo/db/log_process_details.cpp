@@ -38,6 +38,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
@@ -103,6 +104,7 @@ void logProcessDetailsForLogRotate(ServiceContext* serviceContext) {
         }
     }
 
+    serverGlobalParams.featureCompatibility.logFCVWithContext("log rotation"_sd);
     logProcessDetails(nullptr);
 }
 

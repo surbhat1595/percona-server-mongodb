@@ -31,12 +31,16 @@
 
 #include "mongo/platform/basic.h"
 
+#include <boost/filesystem/operations.hpp>
+#include <fmt/format.h>
+
 #include "mongo/base/checked_cast.h"
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_manager.h"
 #include "mongo/config.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands/tenant_migration_donor_cmds_gen.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
@@ -57,13 +61,16 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
+#include "mongo/db/repl/tenant_migration_recipient_coordinator.h"
 #include "mongo/db/repl/tenant_migration_recipient_entry_helpers.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/repl/tenant_migration_statistics.h"
+#include "mongo/db/repl/vote_commit_migration_progress_gen.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/session_txn_record_gen.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_import.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern_options.h"
@@ -76,6 +83,7 @@
 namespace mongo {
 namespace repl {
 namespace {
+using namespace fmt;
 const std::string kTTLIndexName = "TenantMigrationRecipientTTLIndex";
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 constexpr StringData kOplogBufferPrefix = "repl.migration.oplog_"_sd;
@@ -123,6 +131,11 @@ bool isRetriableOplogFetcherError(Status oplogFetcherStatus) {
         oplogFetcherStatus == ErrorCodes::ShutdownInProgress;
 }
 
+boost::filesystem::path fileClonerTempDir(UUID migrationId) {
+    return boost::filesystem::path(storageGlobalParams.dbpath) /
+        ("migrationTmpFiles.{}"_format(migrationId.toString()));
+}
+
 }  // namespace
 
 // A convenient place to set test-specific parameters.
@@ -165,6 +178,7 @@ MONGO_FAIL_POINT_DEFINE(fpBeforeDroppingOplogBufferCollection);
 MONGO_FAIL_POINT_DEFINE(fpWaitUntilTimestampMajorityCommitted);
 MONGO_FAIL_POINT_DEFINE(fpAfterFetchingCommittedTransactions);
 MONGO_FAIL_POINT_DEFINE(hangAfterUpdatingTransactionEntry);
+MONGO_FAIL_POINT_DEFINE(fpBeforeAdvancingStableTimestamp);
 
 namespace {
 // We never restart just the oplog fetcher.  If a failure occurs, we restart the whole state machine
@@ -298,11 +312,33 @@ ExecutorFuture<void> TenantMigrationRecipientService::_rebuildService(
         .on(**executor, CancellationToken::uncancelable());
 }
 
-std::shared_ptr<PrimaryOnlyService::Instance> TenantMigrationRecipientService::constructInstance(
+void TenantMigrationRecipientService::checkIfConflictsWithOtherInstances(
     OperationContext* opCtx,
     BSONObj initialStateDoc,
     const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) {
-    // TODO (SERVER-59786): check for conflicts here, not RecipientSyncDataCmd::typedRun.
+    auto tenantId = initialStateDoc["tenantId"].valueStringData();
+
+    for (auto& instance : existingInstances) {
+        auto existingTypedInstance =
+            checked_cast<const TenantMigrationRecipientService::Instance*>(instance);
+        auto existingState = existingTypedInstance->getState();
+        auto isDone = existingState.getState() == TenantMigrationRecipientStateEnum::kDone &&
+            existingState.getExpireAt();
+
+        uassert(ErrorCodes::ConflictingOperationInProgress,
+                "an existing shard merge is in progress",
+                isDone ||
+                    (existingTypedInstance->getProtocol() != MigrationProtocolEnum::kShardMerge &&
+                     existingState.getProtocol() != MigrationProtocolEnum::kShardMerge));
+
+        uassert(ErrorCodes::ConflictingOperationInProgress,
+                str::stream() << "tenant " << tenantId << " is already migrating",
+                isDone || existingTypedInstance->getTenantId() != tenantId);
+    }
+}
+
+std::shared_ptr<PrimaryOnlyService::Instance> TenantMigrationRecipientService::constructInstance(
+    BSONObj initialStateDoc) {
     return std::make_shared<TenantMigrationRecipientService::Instance>(
         _serviceContext, this, initialStateDoc);
 }
@@ -524,15 +560,15 @@ TenantMigrationRecipientService::Instance::waitUntilMigrationReachesReturnAfterR
     // Note: tickClusterTimeTo() will not tick the recipient clock backwards in time.
     VectorClockMutable::get(opCtx)->tickClusterTimeTo(LogicalTime(returnAfterReachingTimestamp));
 
-    {
-        stdx::lock_guard lk(_mutex);
-        _stateDoc.setRejectReadsBeforeTimestamp(selectRejectReadsBeforeTimestamp(
-            opCtx, returnAfterReachingTimestamp, donorRecipientOpTimePair.recipientOpTime));
-    }
+    stdx::unique_lock lk(_mutex);
+    _stateDoc.setRejectReadsBeforeTimestamp(selectRejectReadsBeforeTimestamp(
+        opCtx, returnAfterReachingTimestamp, donorRecipientOpTimePair.recipientOpTime));
+    const auto stateDoc = _stateDoc;
+    lk.unlock();
     _stopOrHangOnFailPoint(&fpBeforePersistingRejectReadsBeforeTimestamp, opCtx);
 
     auto lastOpBeforeUpdate = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
-    uassertStatusOK(tenantMigrationRecipientEntryHelpers::updateStateDoc(opCtx, _stateDoc));
+    uassertStatusOK(tenantMigrationRecipientEntryHelpers::updateStateDoc(opCtx, stateDoc));
     auto lastOpAfterUpdate = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     auto replCoord = repl::ReplicationCoordinator::get(_serviceContext);
     if (lastOpBeforeUpdate == lastOpAfterUpdate) {
@@ -1147,7 +1183,11 @@ void TenantMigrationRecipientService::Instance::_createOplogBuffer() {
         _donorOplogBuffer = std::move(bufferCollection);
     }
 
-    invariant(_stateDoc.getStartFetchingDonorOpTime());
+    {
+        stdx::lock_guard lk(_mutex);
+        invariant(_stateDoc.getStartFetchingDonorOpTime());
+    }
+
     {
         // Ensure we are primary when trying to startup and create the oplog buffer collection.
         auto coordinator = repl::ReplicationCoordinator::get(opCtx.get());
@@ -1526,7 +1566,10 @@ bool TenantMigrationRecipientService::Instance::_isCloneCompletedMarkerSet(WithL
 
 OpTime TenantMigrationRecipientService::Instance::_getOplogResumeApplyingDonorOptime(
     const OpTime startApplyingDonorOpTime, const OpTime cloneFinishedRecipientOpTime) const {
-    invariant(_stateDoc.getCloneFinishedRecipientOpTime().has_value());
+    {
+        stdx::lock_guard lk(_mutex);
+        invariant(_stateDoc.getCloneFinishedRecipientOpTime().has_value());
+    }
     auto opCtx = cc().makeOperationContext();
     OplogInterfaceLocal oplog(opCtx.get());
     auto oplogIter = oplog.makeIterator();
@@ -1596,6 +1639,72 @@ Future<void> TenantMigrationRecipientService::Instance::_startTenantAllDatabaseC
     return std::move(startClonerFuture);
 }
 
+SemiFuture<void>
+TenantMigrationRecipientService::Instance::_advanceStableTimestampToStartApplyingDonorOpTime() {
+    Timestamp startApplyingDonorTimestamp;
+    {
+        stdx::lock_guard lk(_mutex);
+
+        if (_stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge) {
+            return SemiFuture<void>::makeReady();
+        }
+
+        auto opCtx = cc().makeOperationContext();
+
+        invariant(_stateDoc.getStartApplyingDonorOpTime());
+        startApplyingDonorTimestamp = _stateDoc.getStartApplyingDonorOpTime()->getTimestamp();
+        if (opCtx->getServiceContext()->getStorageEngine()->getStableTimestamp() >=
+            startApplyingDonorTimestamp) {
+            return SemiFuture<void>::makeReady();
+        }
+    }
+
+    LOGV2(6114000,
+          "Advancing recipient's stable timestamp to be at least the startApplyingDonorOpTime",
+          "migrationId"_attr = getMigrationUUID(),
+          "tenantId"_attr = getTenantId(),
+          "startApplyingDonorOpTime"_attr = startApplyingDonorTimestamp.toString());
+
+    return ExecutorFuture(**_scopedExecutor)
+        .then([this, self = shared_from_this(), startApplyingDonorTimestamp] {
+            auto opCtx = cc().makeOperationContext();
+
+            _stopOrHangOnFailPoint(&fpBeforeAdvancingStableTimestamp, opCtx.get());
+
+            // Advance the cluster time to the startApplyingDonorTimestamp so that we ensure we
+            // write the no-op entry below at ts > startApplyingDonorTimestamp.
+            VectorClockMutable::get(_serviceContext)
+                ->tickClusterTimeTo(LogicalTime(startApplyingDonorTimestamp));
+
+            writeConflictRetry(
+                opCtx.get(),
+                "mergeRecipientWriteNoopToAdvanceStableTimestamp",
+                NamespaceString::kRsOplogNamespace.ns(),
+                [&] {
+                    AutoGetOplog oplogWrite(opCtx.get(), OplogAccessMode::kWrite);
+
+                    WriteUnitOfWork wuow(opCtx.get());
+
+                    const std::string msg = str::stream()
+                        << "Merge recipient advancing stable timestamp";
+                    opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
+                        opCtx.get(), BSON("msg" << msg));
+
+                    wuow.commit();
+                });
+
+            // Get the timestamp of the no-op. This will have ts > startApplyingDonorTimestamp.
+            auto noOpTs = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+
+            // We do not have a mechanism to wait on the stableTimestamp reaching a specific ts, so
+            // we wait on the majority commit point instead.
+            // TODO SERVER-61731 Retry importing donor collections on failure
+            return WaitForMajorityService::get(opCtx->getServiceContext())
+                .waitUntilMajority(noOpTs, CancellationToken::uncancelable());
+        })
+        .semi();
+}
+
 SemiFuture<void> TenantMigrationRecipientService::Instance::_onCloneSuccess() {
     stdx::lock_guard lk(_mutex);
     // PrimaryOnlyService::onStepUp() before starting instance makes sure that the state doc
@@ -1625,6 +1734,31 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_onCloneSuccess() {
             auto writeOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
             return WaitForMajorityService::get(opCtx->getServiceContext())
                 .waitUntilMajority(writeOpTime, CancellationToken::uncancelable());
+        })
+        .semi();
+}
+
+SemiFuture<void> TenantMigrationRecipientService::Instance::_rollbackToStable() {
+    stdx::lock_guard lk(_mutex);
+
+    return ExecutorFuture(**_scopedExecutor)
+        .then([this, self = shared_from_this(), stateDoc = _stateDoc] {
+            if (stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge) {
+                return SemiFuture<void>::makeReady();
+            }
+
+            auto tempDirectory = fileClonerTempDir(stateDoc.getId());
+            if (!boost::filesystem::exists(tempDirectory)) {
+                // TODO (SERVER-61133): Abort the merge if no files.
+                LOGV2_WARNING(61137,
+                              "No temp directory of donor files to import",
+                              "tempDirectory"_attr = tempDirectory.string());
+                return SemiFuture<void>::makeReady();
+            }
+
+            auto opCtx = cc().makeOperationContext();
+            wiredTigerImportFromBackupCursor(opCtx.get(), tempDirectory.string());
+            return SemiFuture<void>::makeReady();
         })
         .semi();
 }
@@ -2110,16 +2244,21 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                                stateDoc = _stateDoc;
                            }
                            uassertStatusOK(tenantMigrationRecipientEntryHelpers::updateStateDoc(
-                               opCtx.get(), _stateDoc));
+                               opCtx.get(), stateDoc));
                        } else {
                            // Avoid fulfilling the promise twice on restart of the future chain.
                            _stateDocPersistedPromise.emplaceValue();
                        }
-                       uassert(ErrorCodes::TenantMigrationForgotten,
-                               str::stream() << "Migration " << getMigrationUUID()
-                                             << " already marked for garbage collect",
-                               _stateDoc.getState() != TenantMigrationRecipientStateEnum::kDone &&
-                                   !_stateDoc.getExpireAt());
+
+                       {
+                           stdx::lock_guard<Latch> lg(_mutex);
+                           uassert(ErrorCodes::TenantMigrationForgotten,
+                                   str::stream() << "Migration " << getMigrationUUID()
+                                                 << " already marked for garbage collect",
+                                   _stateDoc.getState() !=
+                                           TenantMigrationRecipientStateEnum::kDone &&
+                                       !_stateDoc.getExpireAt());
+                       }
 
                        // Must abort if flagged for cancellation above.
                        uassert(ErrorCodes::TenantMigrationAborted,
@@ -2273,6 +2412,14 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                                                                 _writerPool.get(),
                                                                 resumeBatchingTs);
 
+                       if (_stateDoc.getProtocol() == MigrationProtocolEnum::kShardMerge) {
+                           // TODO (SERVER-61135): Store the future, wait on it, kill backup cursor.
+                           [[maybe_unused]] auto copiedFilesFuture =
+                               TenantMigrationRecipientCoordinator::get(_serviceContext)
+                                   ->step(getMigrationUUID(),
+                                          MigrationProgressStepEnum::kCopiedFiles);
+                       }
+
                        // Start the cloner.
                        auto clonerFuture = _startTenantAllDatabaseCloner(lk);
 
@@ -2283,6 +2430,10 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                        return clonerFuture;
                    })
                    .then([this, self = shared_from_this()] { return _onCloneSuccess(); })
+                   .then([this, self = shared_from_this()] { return _rollbackToStable(); })
+                   .then([this, self = shared_from_this()] {
+                       return _advanceStableTimestampToStartApplyingDonorOpTime();
+                   })
                    .then([this, self = shared_from_this()] {
                        {
                            auto opCtx = cc().makeOperationContext();
@@ -2423,6 +2574,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                 hangBeforeTaskCompletion.pauseWhileSet();
             }
 
+            TenantMigrationRecipientCoordinator::get(_serviceContext)->reset();
             _cleanupOnDataSyncCompletion(status);
             _setMigrationStatsOnCompletion(status);
 
@@ -2501,6 +2653,7 @@ void TenantMigrationRecipientService::Instance::_setMigrationStatsOnCompletion(
     bool success = false;
 
     if (completionStatus.code() == ErrorCodes::TenantMigrationForgotten) {
+        stdx::lock_guard lk(_mutex);
         if (_stateDoc.getExpireAt()) {
             // Avoid double counting tenant migration statistics after failover.
             return;
@@ -2534,6 +2687,11 @@ const std::string& TenantMigrationRecipientService::Instance::getTenantId() cons
 
 const MigrationProtocolEnum& TenantMigrationRecipientService::Instance::getProtocol() const {
     return _protocol;
+}
+
+const TenantMigrationRecipientDocument TenantMigrationRecipientService::Instance::getState() const {
+    stdx::lock_guard lk(_mutex);
+    return _stateDoc;
 }
 
 }  // namespace repl

@@ -48,14 +48,17 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/s/balancer/balancer.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_util.h"
+#include "mongo/db/transaction_api.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/executor/task_executor.h"
@@ -291,7 +294,11 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
     Lock::ExclusiveLock chunkLk(opCtx, opCtx->lockState(), _kChunkOpLock);
     Lock::ExclusiveLock zoneLk(opCtx, opCtx->lockState(), _kZoneOpLock);
 
-    Timer executionTimer, totalTimer;
+    struct RefineTimers {
+        Timer executionTimer;
+        Timer totalTimer;
+    } timers;
+
     const auto newEpoch = OID::gen();
 
     auto collType = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
@@ -326,9 +333,9 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
               "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
               "refineCollectionShardKey updated collection entry",
               "namespace"_attr = nss.ns(),
-              "durationMillis"_attr = executionTimer.millis(),
-              "totalTimeMillis"_attr = totalTimer.millis());
-        executionTimer.reset();
+              "durationMillis"_attr = timers.executionTimer.millis(),
+              "totalTimeMillis"_attr = timers.totalTimer.millis());
+        timers.executionTimer.reset();
 
         if (MONGO_unlikely(hangRefineCollectionShardKeyBeforeUpdatingChunks.shouldFail())) {
             LOGV2(21934, "Hit hangRefineCollectionShardKeyBeforeUpdatingChunks failpoint");
@@ -357,9 +364,9 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
               "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
               "refineCollectionShardKey: updated chunk entries",
               "namespace"_attr = nss.ns(),
-              "durationMillis"_attr = executionTimer.millis(),
-              "totalTimeMillis"_attr = totalTimer.millis());
-        executionTimer.reset();
+              "durationMillis"_attr = timers.executionTimer.millis(),
+              "totalTimeMillis"_attr = timers.totalTimer.millis());
+        timers.executionTimer.reset();
 
         // Update all config.tags entries for the given namespace by setting their bounds for
         // each new field in the refined key to MinKey (except for the global max tag where the
@@ -381,8 +388,8 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
               "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
               "refineCollectionShardKey: updated zone entries",
               "namespace"_attr = nss.ns(),
-              "durationMillis"_attr = executionTimer.millis(),
-              "totalTimeMillis"_attr = totalTimer.millis());
+              "durationMillis"_attr = timers.executionTimer.millis(),
+              "totalTimeMillis"_attr = timers.totalTimer.millis());
 
         if (MONGO_unlikely(hangRefineCollectionShardKeyBeforeCommit.shouldFail())) {
             LOGV2(21937, "Hit hangRefineCollectionShardKeyBeforeCommit failpoint");
@@ -390,7 +397,104 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
         }
     };
 
-    withTransaction(opCtx, nss, std::move(updateCollectionAndChunksFn));
+    auto updateCollectionAndChunksWithAPIFn =
+        [collType, newFields, nss, &timers](const txn_api::TransactionClient& txnClient,
+                                            ExecutorPtr txnExec) -> SemiFuture<void> {
+        auto [chunkUpdates, tagUpdates] = makeChunkAndTagUpdatesForRefine(newFields);
+
+        // Update the config.collections entry for the given namespace.
+        auto catalogUpdateRequest =
+            BatchedCommandRequest::buildUpdateOp(CollectionType::ConfigNS,
+                                                 BSON(CollectionType::kNssFieldName << nss.ns()),
+                                                 collType.toBSON(),
+                                                 false /* upsert */,
+                                                 false /* multi */);
+        return txnClient.runCRUDOp(catalogUpdateRequest, {})
+            .thenRunOn(txnExec)
+            .then([&txnClient, &timers, collType, nss, chunkUpdates = std::move(chunkUpdates)](
+                      auto catalogResponse) {
+                uassertStatusOK(catalogResponse.toStatus());
+
+                LOGV2(5875906,
+                      "refineCollectionShardKey updated collection entry for {namespace}: took "
+                      "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
+                      "refineCollectionShardKey updated collection entry",
+                      "namespace"_attr = nss.ns(),
+                      "durationMillis"_attr = timers.executionTimer.millis(),
+                      "totalTimeMillis"_attr = timers.totalTimer.millis());
+                timers.executionTimer.reset();
+
+                if (MONGO_unlikely(hangRefineCollectionShardKeyBeforeUpdatingChunks.shouldFail())) {
+                    LOGV2(5875907,
+                          "Hit hangRefineCollectionShardKeyBeforeUpdatingChunks failpoint");
+                    hangRefineCollectionShardKeyBeforeUpdatingChunks.pauseWhileSet();
+                }
+
+                // Update all config.chunks entries for the given namespace by setting (i) their
+                // bounds for each new field in the refined key to MinKey (except for the global max
+                // chunk where the max bounds are set to MaxKey), and unsetting (ii) their jumbo
+                // field.
+                const auto chunksQuery = BSON(ChunkType::collectionUUID << collType.getUuid());
+                auto chunkUpdateRequest =
+                    BatchedCommandRequest::buildPipelineUpdateOp(ChunkType::ConfigNS,
+                                                                 chunksQuery,
+                                                                 chunkUpdates,
+                                                                 false /* upsert */,
+                                                                 true /* useMultiUpdate */);
+
+                return txnClient.runCRUDOp(chunkUpdateRequest, {});
+            })
+            .thenRunOn(txnExec)
+            .then([&txnClient, &timers, nss, tagUpdates = std::move(tagUpdates)](
+                      auto chunksResponse) {
+                uassertStatusOK(chunksResponse.toStatus());
+
+                LOGV2(5875908,
+                      "refineCollectionShardKey: updated chunk entries for {namespace}: took "
+                      "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
+                      "refineCollectionShardKey: updated chunk entries",
+                      "namespace"_attr = nss.ns(),
+                      "durationMillis"_attr = timers.executionTimer.millis(),
+                      "totalTimeMillis"_attr = timers.totalTimer.millis());
+                timers.executionTimer.reset();
+
+                // Update all config.tags entries for the given namespace by setting their bounds
+                // for each new field in the refined key to MinKey (except for the global max tag
+                // where the max bounds are set to MaxKey).
+                auto tagUpdateRequest =
+                    BatchedCommandRequest::buildPipelineUpdateOp(TagsType::ConfigNS,
+                                                                 BSON("ns" << nss.ns()),
+                                                                 tagUpdates,
+                                                                 false /* upsert */,
+                                                                 true /* useMultiUpdate */);
+                return txnClient.runCRUDOp(tagUpdateRequest, {});
+            })
+            .thenRunOn(txnExec)
+            .then([&txnClient, &timers, nss](auto tagsResponse) {
+                uassertStatusOK(tagsResponse.toStatus());
+
+                LOGV2(5875909,
+                      "refineCollectionShardKey: updated zone entries for {namespace}: took "
+                      "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
+                      "refineCollectionShardKey: updated zone entries",
+                      "namespace"_attr = nss.ns(),
+                      "durationMillis"_attr = timers.executionTimer.millis(),
+                      "totalTimeMillis"_attr = timers.totalTimer.millis());
+
+                if (MONGO_unlikely(hangRefineCollectionShardKeyBeforeCommit.shouldFail())) {
+                    LOGV2(5875910, "Hit hangRefineCollectionShardKeyBeforeCommit failpoint");
+                    hangRefineCollectionShardKeyBeforeCommit.pauseWhileSet();
+                }
+            })
+            .semi();
+    };
+
+    if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        withTransactionAPI(opCtx, nss, std::move(updateCollectionAndChunksWithAPIFn));
+    } else {
+        withTransaction(opCtx, nss, std::move(updateCollectionAndChunksFn));
+    }
 
     ShardingLogging::get(opCtx)->logChange(opCtx,
                                            "refineCollectionShardKey.end",
@@ -449,6 +553,7 @@ void ShardingCatalogManager::configureCollectionAutoSplit(
             maxChunkSizeBytes || balancerShouldMergeChunks || enableAutoSplitter);
 
     short updatedFields = 0;
+    bool doMerge, doSplit = false;
     BSONObjBuilder updateCmd;
     {
         BSONObjBuilder setBuilder(updateCmd.subobjStart("$set"));
@@ -464,12 +569,12 @@ void ShardingCatalogManager::configureCollectionAutoSplit(
             updatedFields++;
         }
         if (balancerShouldMergeChunks) {
-            const bool doMerge = balancerShouldMergeChunks.get();
+            doMerge = balancerShouldMergeChunks.get();
             setBuilder.append(CollectionType::kBalancerShouldMergeChunksFieldName, doMerge);
             updatedFields++;
         }
         if (enableAutoSplitter) {
-            const bool doSplit = enableAutoSplitter.get();
+            doSplit = enableAutoSplitter.get();
             setBuilder.append(CollectionType::kNoAutoSplitFieldName, !doSplit);
             updatedFields++;
         }
@@ -478,6 +583,11 @@ void ShardingCatalogManager::configureCollectionAutoSplit(
         BSONObjBuilder unsetBuilder(updateCmd.subobjStart("$unset"));
         unsetBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, 0);
         updatedFields++;
+    }
+    if (balancerShouldMergeChunks && enableAutoSplitter) {
+        uassert(ErrorCodes::InvalidOptions,
+                "Autosplitter and defragmentation cannot both be enabled for a collection",
+                !(doMerge && doSplit));
     }
 
     if (updatedFields == 0) {
@@ -490,10 +600,10 @@ void ShardingCatalogManager::configureCollectionAutoSplit(
     std::set<ShardId> shardsIds;
     cm.getAllShardIds(&shardsIds);
 
+    const auto update = updateCmd.obj();
+
     withTransaction(
         opCtx, CollectionType::ConfigNS, [&](OperationContext* opCtx, TxnNumber txnNumber) {
-            const auto update = updateCmd.obj();
-
             const auto query = BSON(CollectionType::kNssFieldName
                                     << nss.ns() << CollectionType::kUuidFieldName << uuid);
             const auto res = writeToConfigDocumentInTxn(
@@ -521,6 +631,8 @@ void ShardingCatalogManager::configureCollectionAutoSplit(
         {std::make_move_iterator(shardsIds.begin()), std::make_move_iterator(shardsIds.end())},
         nss,
         executor);
+
+    Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged();
 }
 
 void ShardingCatalogManager::renameShardedMetadata(

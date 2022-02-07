@@ -311,6 +311,7 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
         auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(
             opCtx->getServiceContext(),
             doc.getTenantId().toString(),
+            doc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations),
             doc.getRecipientConnectionString().toString());
 
         TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
@@ -362,6 +363,7 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
             opCtx->getServiceContext(),
             doc.getId(),
             doc.getTenantId().toString(),
+            doc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations),
             doc.getDonorConnectionString().toString());
 
         TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
@@ -369,6 +371,8 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
 
         switch (doc.getState()) {
             case TenantMigrationRecipientStateEnum::kStarted:
+            case TenantMigrationRecipientStateEnum::kLearnedFilenames:
+            case TenantMigrationRecipientStateEnum::kCopiedFiles:
                 invariant(!doc.getRejectReadsBeforeTimestamp());
                 break;
             case TenantMigrationRecipientStateEnum::kConsistent:

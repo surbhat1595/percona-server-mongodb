@@ -105,7 +105,7 @@ public:
     MigrationDestinationManager::CollectionOptionsAndUUID getCollectionOptions(
         OperationContext* opCtx,
         const NamespaceString& nss,
-        const CollectionUUID& uuid,
+        const UUID& uuid,
         Timestamp afterClusterTime,
         StringData reason) override {
         invariant(nss == _sourceNss);
@@ -115,7 +115,7 @@ public:
     MigrationDestinationManager::IndexesAndIdIndex getCollectionIndexes(
         OperationContext* opCtx,
         const NamespaceString& nss,
-        const CollectionUUID& uuid,
+        const UUID& uuid,
         Timestamp afterClusterTime,
         StringData reason) override {
         invariant(nss == _sourceNss);
@@ -146,7 +146,7 @@ private:
     const StringData _currentShardKey = "oldKey";
 
     const NamespaceString _sourceNss{"sourcedb", "sourcecollection"};
-    const CollectionUUID _sourceUUID = UUID::gen();
+    const UUID _sourceUUID = UUID::gen();
 
     const ShardId _someDonorId{"myDonorId"};
 };
@@ -184,6 +184,8 @@ public:
     };
 
     void shutdown() override {}
+
+    void join() override {}
 };
 
 class ReshardingRecipientServiceForTest : public ReshardingRecipientService {
@@ -192,9 +194,7 @@ public:
         : ReshardingRecipientService(serviceContext) {}
 
     std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
-        OperationContext* opCtx,
-        BSONObj initialState,
-        const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override {
+        BSONObj initialState) override {
         return std::make_shared<RecipientStateMachine>(
             this,
             ReshardingRecipientDocument::parse({"ReshardingRecipientServiceForTest"}, initialState),

@@ -113,6 +113,16 @@ void checkOplogFormatVersion(OperationContext* opCtx, const std::string& uri) {
 
     fassertNoTrace(39998, appMetadata.getValue().getIntField("oplogKeyExtractionVersion") == 1);
 }
+
+void appendNumericStats(WT_SESSION* s, const std::string& uri, BSONObjBuilder& bob) {
+    Status status =
+        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, "statistics=(fast)", &bob);
+    if (!status.isOK()) {
+        bob.append("error", "unable to retrieve statistics");
+        bob.append("code", static_cast<int>(status.code()));
+        bob.append("reason", status.reason());
+    }
+}
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(WTCompactRecordStoreEBUSY);
@@ -174,24 +184,6 @@ private:
     int64_t _countInserted;
     OperationContext* _opCtx;
     Date_t _wall;
-};
-
-class WiredTigerRecordStore::OplogStones::TruncateChange final : public RecoveryUnit::Change {
-public:
-    TruncateChange(OplogStones* oplogStones) : _oplogStones(oplogStones) {}
-
-    void commit(boost::optional<Timestamp>) final {
-        _oplogStones->_currentRecords.store(0);
-        _oplogStones->_currentBytes.store(0);
-
-        stdx::lock_guard<Latch> lk(_oplogStones->_mutex);
-        _oplogStones->_stones.clear();
-    }
-
-    void rollback() final {}
-
-private:
-    OplogStones* _oplogStones;
 };
 
 WiredTigerRecordStore::OplogStones::OplogStones(OperationContext* opCtx, WiredTigerRecordStore* rs)
@@ -371,7 +363,13 @@ void WiredTigerRecordStore::OplogStones::updateCurrentStoneAfterInsertOnCommit(
 }
 
 void WiredTigerRecordStore::OplogStones::clearStonesOnCommit(OperationContext* opCtx) {
-    opCtx->recoveryUnit()->registerChange(std::make_unique<TruncateChange>(this));
+    opCtx->recoveryUnit()->onCommit([this](boost::optional<Timestamp>) {
+        _currentRecords.store(0);
+        _currentBytes.store(0);
+
+        stdx::lock_guard<Latch> lk(_mutex);
+        _stones.clear();
+    });
 }
 
 void WiredTigerRecordStore::OplogStones::updateStonesAfterCappedTruncateAfter(
@@ -666,8 +664,12 @@ public:
     }
 
     ~RandomCursor() {
-        if (_cursor)
+        if (_cursor) {
+            // On destruction, we must always handle freeing the underlying raw WT_CURSOR pointer.
+            _saveStorageCursorOnDetachFromOperationContext = false;
+
             detachFromOperationContext();
+        }
     }
 
     boost::optional<Record> next() final {
@@ -732,10 +734,10 @@ public:
     void detachFromOperationContext() final {
         invariant(_opCtx);
         _opCtx = nullptr;
-        if (_cursor) {
+        if (_cursor && !_saveStorageCursorOnDetachFromOperationContext) {
             invariantWTOK(_cursor->close(_cursor));
+            _cursor = nullptr;
         }
-        _cursor = nullptr;
     }
 
     void reattachToOperationContext(OperationContext* opCtx) final {
@@ -743,11 +745,16 @@ public:
         _opCtx = opCtx;
     }
 
+    void setSaveStorageCursorOnDetachFromOperationContext(bool saveCursor) override {
+        _saveStorageCursorOnDetachFromOperationContext = saveCursor;
+    }
+
 private:
     WT_CURSOR* _cursor;
     const WiredTigerRecordStore* _rs;
     OperationContext* _opCtx;
     const std::string _config;
+    bool _saveStorageCursorOnDetachFromOperationContext = false;
 };
 
 
@@ -755,8 +762,11 @@ private:
 StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     const std::string& engineName,
     StringData ns,
+    StringData ident,
     const CollectionOptions& options,
-    StringData extraStrings) {
+    StringData extraStrings,
+    KeyFormat keyFormat) {
+
     // Separate out a prefix and suffix in the default string. User configuration will
     // override values in the prefix, but not values in the suffix.
     str::stream ss;
@@ -768,6 +778,19 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     // for workloads where updates increase the size of documents.
     ss << "split_pct=90,";
     ss << "leaf_value_max=64MB,";
+    if (TestingProctor::instance().isEnabled() &&
+        // TODO (SERVER-60719): Remove special handling for index build side tables.
+        !ident.startsWith("internal-") &&
+        // TODO (SERVER-60754): Remove special handling for setting multikey.
+        !ident.startsWith("_mdb_catalog") &&
+        // TODO (SERVER-58410): Remove special handling for minValid.
+        ns != "local.replset.minvalid" &&
+        // TODO (SERVER-60753): Remove special handling for index build during recovery.
+        ns != "config.system.indexBuilds") {
+        ss << "write_timestamp_usage=ordered,";
+        ss << "assert=(write_timestamp=on),";
+        ss << "verbose=[write_timestamp],";
+    }
     ss << "checksum=on,";
     if (wiredTigerGlobalOptions.useCollectionPrefixCompression) {
         ss << "prefix_compression,";
@@ -805,6 +828,14 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     // WARNING: No user-specified config can appear below this line. These options are required
     // for correct behavior of the server.
     if (options.clusteredIndex) {
+        // A clustered collection requires both CollectionOptions.clusteredIndex and
+        // KeyFormat::String. For a clustered record store that is not associated with a clustered
+        // collection KeyFormat::String is sufficient.
+        uassert(6144101,
+                "RecordStore with CollectionOptions.clusteredIndex requires KeyFormat::String",
+                keyFormat == KeyFormat::String);
+    }
+    if (keyFormat == KeyFormat::String) {
         // If the RecordId format is a String, assume a byte array key format.
         ss << "key_format=u";
     } else {
@@ -859,6 +890,16 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
       _tracksSizeAdjustments(params.tracksSizeAdjustments),
       _kvEngine(kvEngine) {
     invariant(getIdent().size() > 0);
+
+    if (kDebugBuild && _keyFormat == KeyFormat::String) {
+        // This is a clustered record store. Its WiredTiger table requires key_format='u' for
+        // correct operation.
+        const std::string wtTableConfig =
+            uassertStatusOK(WiredTigerUtil::getMetadataCreate(ctx, _uri));
+        const bool wtTableConfigMatchesStringKeyFormat =
+            wtTableConfig.find("key_format=u") != string::npos;
+        invariant(wtTableConfigMatchesStringKeyFormat);
+    }
 
     if (_oplogMaxSize) {
         invariant(_isOplog, str::stream() << "Namespace " << params.ns);
@@ -1668,9 +1709,20 @@ void WiredTigerRecordStore::validate(OperationContext* opCtx,
     results->valid = false;
 }
 
-void WiredTigerRecordStore::appendCustomStats(OperationContext* opCtx,
-                                              BSONObjBuilder* result,
-                                              double scale) const {
+void WiredTigerRecordStore::appendNumericCustomStats(OperationContext* opCtx,
+                                                     BSONObjBuilder* result,
+                                                     double scale) const {
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn();
+    WT_SESSION* s = session->getSession();
+
+    BSONObjBuilder bob(result->subobjStart(_engineName));
+
+    appendNumericStats(s, getURI(), bob);
+}
+
+void WiredTigerRecordStore::appendAllCustomStats(OperationContext* opCtx,
+                                                 BSONObjBuilder* result,
+                                                 double scale) const {
     WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn();
     WT_SESSION* s = session->getSession();
     BSONObjBuilder bob(result->subobjStart(_engineName));
@@ -1699,13 +1751,7 @@ void WiredTigerRecordStore::appendCustomStats(OperationContext* opCtx,
         bob.append("type", type);
     }
 
-    Status status =
-        WiredTigerUtil::exportTableToBSON(s, "statistics:" + getURI(), "statistics=(fast)", &bob);
-    if (!status.isOK()) {
-        bob.append("error", "unable to retrieve statistics");
-        bob.append("code", static_cast<int>(status.code()));
-        bob.append("reason", status.reason());
-    }
+    appendNumericStats(s, getURI(), bob);
 }
 
 void WiredTigerRecordStore::waitForAllEarlierOplogWritesToBeVisibleImpl(
@@ -1804,23 +1850,6 @@ RecordId WiredTigerRecordStore::_nextId(OperationContext* opCtx) {
     return out;
 }
 
-class WiredTigerRecordStore::NumRecordsChange : public RecoveryUnit::Change {
-public:
-    NumRecordsChange(WiredTigerRecordStore* rs, int64_t diff) : _rs(rs), _diff(diff) {}
-    virtual void commit(boost::optional<Timestamp>) {}
-    virtual void rollback() {
-        LOGV2_DEBUG(
-            22404, 3, "WiredTigerRecordStore: rolling back NumRecordsChange", "diff"_attr = -_diff);
-        if (_rs->_sizeInfo->numRecords.addAndFetch(-_diff) < 0) {
-            _rs->_sizeInfo->numRecords.store(0);
-        }
-    }
-
-private:
-    WiredTigerRecordStore* _rs;
-    int64_t _diff;
-};
-
 void WiredTigerRecordStore::_changeNumRecords(OperationContext* opCtx, int64_t diff) {
     if (!_tracksSizeAdjustments) {
         return;
@@ -1830,23 +1859,16 @@ void WiredTigerRecordStore::_changeNumRecords(OperationContext* opCtx, int64_t d
         return;
     }
 
-    opCtx->recoveryUnit()->registerChange(std::make_unique<NumRecordsChange>(this, diff));
+    opCtx->recoveryUnit()->onRollback([this, diff]() {
+        LOGV2_DEBUG(
+            22404, 3, "WiredTigerRecordStore: rolling back NumRecordsChange", "diff"_attr = -diff);
+        if (_sizeInfo->numRecords.addAndFetch(-diff) < 0) {
+            _sizeInfo->numRecords.store(0);
+        }
+    });
     if (_sizeInfo->numRecords.addAndFetch(diff) < 0)
         _sizeInfo->numRecords.store(0);
 }
-
-class WiredTigerRecordStore::DataSizeChange : public RecoveryUnit::Change {
-public:
-    DataSizeChange(WiredTigerRecordStore* rs, int64_t amount) : _rs(rs), _amount(amount) {}
-    virtual void commit(boost::optional<Timestamp>) {}
-    virtual void rollback() {
-        _rs->_increaseDataSize(nullptr, -_amount);
-    }
-
-private:
-    WiredTigerRecordStore* _rs;
-    int64_t _amount;
-};
 
 void WiredTigerRecordStore::_increaseDataSize(OperationContext* opCtx, int64_t amount) {
     if (!_tracksSizeAdjustments) {
@@ -1858,7 +1880,8 @@ void WiredTigerRecordStore::_increaseDataSize(OperationContext* opCtx, int64_t a
     }
 
     if (opCtx)
-        opCtx->recoveryUnit()->registerChange(std::make_unique<DataSizeChange>(this, amount));
+        opCtx->recoveryUnit()->onRollback(
+            [this, amount]() { _increaseDataSize(nullptr, -amount); });
 
     if (_sizeInfo->dataSize.fetchAndAdd(amount) < 0)
         _sizeInfo->dataSize.store(std::max(amount, int64_t(0)));
@@ -2271,7 +2294,9 @@ bool WiredTigerRecordStoreCursorBase::restore(bool tolerateCappedRepositioning) 
 
 void WiredTigerRecordStoreCursorBase::detachFromOperationContext() {
     _opCtx = nullptr;
-    _cursor = boost::none;
+    if (!_saveStorageCursorOnDetachFromOperationContext) {
+        _cursor = boost::none;
+    }
 }
 
 void WiredTigerRecordStoreCursorBase::reattachToOperationContext(OperationContext* opCtx) {

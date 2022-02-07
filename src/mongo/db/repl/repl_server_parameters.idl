@@ -567,9 +567,8 @@ server_parameters:
         set_at: startup
         cpp_vartype: int
         cpp_varname: fileBasedInitialSyncMaxLagSec
-        # TODO (SERVER-59729): determine the best default value.
         default: 
-                expr: 5 * 60 * 60
+                expr: 5 * 60
         validator:
             gte: 0
     
@@ -581,8 +580,7 @@ server_parameters:
         set_at: startup
         cpp_vartype: int
         cpp_varname: fileBasedInitialSyncMaxCyclesWithoutProgress
-        # TODO (SERVER-59729): determine the best default value.
-        default: 5
+        default: 3
         validator:
             gte: 1
     
@@ -612,7 +610,8 @@ feature_flags:
         description: >-
             When enabled, file copy based initial sync will be supported in Enterprise Server.
         cpp_varname: feature_flags::gFileCopyBasedInitialSync
-        default: false
+        default: true
+        version: 5.2
 
     featureFlagShardMerge:
         description: When enabled, multitenant migration uses the "shard merge" protocol.

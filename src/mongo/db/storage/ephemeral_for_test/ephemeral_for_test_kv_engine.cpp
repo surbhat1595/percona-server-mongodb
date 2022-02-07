@@ -69,7 +69,8 @@ mongo::RecoveryUnit* KVEngine::newRecoveryUnit() {
 Status KVEngine::createRecordStore(OperationContext* opCtx,
                                    StringData ns,
                                    StringData ident,
-                                   const CollectionOptions& options) {
+                                   const CollectionOptions& options,
+                                   KeyFormat keyFormat) {
     stdx::lock_guard lock(_identsLock);
     _idents[ident.toString()] = true;
     return Status::OK();
@@ -278,6 +279,7 @@ public:
     }
     void detachFromOperationContext() final {}
     void reattachToOperationContext(OperationContext* opCtx) final {}
+    void setSaveStorageCursorOnDetachFromOperationContext(bool) final {}
 };
 }  // namespace ephemeral_for_test
 }  // namespace mongo

@@ -711,7 +711,7 @@ void ReplicationCoordinatorImpl::_startInitialSync(
         {
             // Must take the lock to set _initialSyncer, but not call it.
             stdx::lock_guard<Latch> lock(_mutex);
-            if (_inShutdown) {
+            if (_inShutdown || _inTerminalShutdown) {
                 LOGV2(21326, "Initial Sync not starting because replication is shutting down");
                 return;
             }
@@ -943,8 +943,24 @@ void ReplicationCoordinatorImpl::_setImplicitDefaultWriteConcern(OperationContex
 }
 
 void ReplicationCoordinatorImpl::enterTerminalShutdown() {
-    stdx::lock_guard lk(_mutex);
-    _inTerminalShutdown = true;
+    std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
+    {
+        stdx::lock_guard lk(_mutex);
+        _inTerminalShutdown = true;
+        initialSyncerCopy = _initialSyncer;
+    }
+    // Shutting down the initial syncer early works around an issue where an initial syncer may not
+    // be able to shut down with an opCtx active.  No opCtx is active when enterTerminalShutdown is
+    // called due to a signal.
+    if (initialSyncerCopy) {
+        const auto status = initialSyncerCopy->shutdown();
+        if (!status.isOK()) {
+            LOGV2_WARNING(6137700,
+                          "InitialSyncer shutdown failed: {error}",
+                          "InitialSyncer shutdown failed",
+                          "error"_attr = status);
+        }
+    }
 }
 
 bool ReplicationCoordinatorImpl::enterQuiesceModeIfSecondary(Milliseconds quiesceTime) {
@@ -1058,7 +1074,8 @@ MemberState ReplicationCoordinatorImpl::_getMemberState_inlock() const {
     return _memberState;
 }
 
-Status ReplicationCoordinatorImpl::waitForMemberState(MemberState expectedState,
+Status ReplicationCoordinatorImpl::waitForMemberState(Interruptible* interruptible,
+                                                      MemberState expectedState,
                                                       Milliseconds timeout) {
     if (timeout < Milliseconds(0)) {
         return Status(ErrorCodes::BadValue, "Timeout duration cannot be negative");
@@ -1066,7 +1083,7 @@ Status ReplicationCoordinatorImpl::waitForMemberState(MemberState expectedState,
 
     stdx::unique_lock<Latch> lk(_mutex);
     auto pred = [this, expectedState]() { return _memberState == expectedState; };
-    if (!_memberStateChange.wait_for(lk, timeout.toSystemDuration(), pred)) {
+    if (!interruptible->waitForConditionOrInterruptFor(_memberStateChange, lk, timeout, pred)) {
         return Status(ErrorCodes::ExceededTimeLimit,
                       str::stream()
                           << "Timed out waiting for state to become " << expectedState.toString()
@@ -4400,6 +4417,7 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator(WithLock l
         // (Generic FCV reference): This FCV check should exist across LTS binary versions.
         serverGlobalParams.mutableFeatureCompatibility.setVersion(
             multiversion::GenericFCV::kLatest);
+        serverGlobalParams.featureCompatibility.logFCVWithContext("arbiter"_sd);
     }
 
     _memberState = newState;

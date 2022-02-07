@@ -503,10 +503,6 @@ Status storeMongodOptions(const moe::Environment& params) {
         ldapGlobalParams.ldapQueryTemplate = params["security.ldap.authz.queryTemplate"].as<std::string>();
     }
 
-    if (params.count("cpu")) {
-        serverGlobalParams.cpu = params["cpu"].as<bool>();
-    }
-
     if (params.count("storage.journal.enabled")) {
         storageGlobalParams.dur = params["storage.journal.enabled"].as<bool>();
     }
@@ -679,7 +675,7 @@ Status storeMongodOptions(const moe::Environment& params) {
             return Status(ErrorCodes::BadValue,
                           str::stream() << "Cannot start a " << clusterRoleParam
                                         << " as a standalone server. Please use the option "
-                                           "--replset to start the node as a replica set.");
+                                           "--replSet to start the node as a replica set.");
         }
         if (clusterRoleParam == "configsvr") {
             serverGlobalParams.clusterRole = ClusterRole::ConfigServer;

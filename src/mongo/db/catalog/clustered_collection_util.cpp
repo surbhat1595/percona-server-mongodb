@@ -87,7 +87,7 @@ boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& e
 }
 
 bool requiresLegacyFormat(const NamespaceString& nss) {
-    return nss.isTimeseriesBucketsCollection();
+    return nss.isTimeseriesBucketsCollection() || nss.isChangeStreamPreImagesCollection();
 }
 
 BSONObj formatClusterKeyForListIndexes(const ClusteredCollectionInfo& collInfo) {
@@ -97,8 +97,22 @@ BSONObj formatClusterKeyForListIndexes(const ClusteredCollectionInfo& collInfo) 
     return bob.obj();
 }
 
+
+bool isClusteredOnId(const boost::optional<ClusteredCollectionInfo>& collInfo) {
+    if (!collInfo) {
+        return false;
+    }
+    return clustered_util::matchesClusterKey(BSON("_id" << 1), collInfo);
+}
+
 bool matchesClusterKey(const BSONObj& obj,
                        const boost::optional<ClusteredCollectionInfo>& collInfo) {
+    const auto nFields = obj.nFields();
+    invariant(nFields > 0);
+    if (nFields > 1) {
+        // Clustered key cannot be compound.
+        return false;
+    }
     return obj.firstElement().fieldNameStringData() ==
         collInfo->getIndexSpec().getKey().firstElement().fieldNameStringData();
 }

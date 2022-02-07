@@ -213,10 +213,7 @@ public:
     static const BSONField<long long> estimatedSizeBytes;
 
     ChunkType();
-    ChunkType(CollectionUUID collectionUUID,
-              ChunkRange range,
-              ChunkVersion version,
-              ShardId shardId);
+    ChunkType(UUID collectionUUID, ChunkRange range, ChunkVersion version, ShardId shardId);
 
     /**
      * Constructs a new ChunkType object from BSON that has the config server's config.chunks
@@ -270,11 +267,11 @@ public:
         return (bool)_collectionUUID;
     }
 
-    const CollectionUUID& getCollectionUUID() const {
+    const UUID& getCollectionUUID() const {
         invariant(_collectionUUID);
         return *_collectionUUID;
     }
-    void setCollectionUUID(const CollectionUUID& uuid);
+    void setCollectionUUID(const UUID& uuid);
 
     const BSONObj& getMin() const {
         return _min.get();
@@ -306,6 +303,8 @@ public:
     boost::optional<long long> getEstimatedSizeBytes() const {
         return _estimatedSizeBytes;
     }
+
+    void setEstimatedSizeBytes(const boost::optional<long long>& estimatedSize);
 
     bool getJumbo() const {
         return _jumbo.get_value_or(false);
@@ -341,7 +340,7 @@ private:
     // (M)(C)     auto-generated object id
     boost::optional<OID> _id;
     // (O)(C)     uuid of the collection in the CollectionCatalog
-    boost::optional<CollectionUUID> _collectionUUID;
+    boost::optional<UUID> _collectionUUID;
     // (M)(C)(S)  first key of the range, inclusive
     boost::optional<BSONObj> _min;
     // (M)(C)(S)  last key of the range, non-inclusive

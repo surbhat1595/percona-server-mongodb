@@ -292,7 +292,7 @@ __wt_rec_row_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
     WT_REF *ref;
     WT_TIME_AGGREGATE ta;
     size_t size;
-    bool hazard, key_onpage_ovfl;
+    bool hazard;
     const void *p;
 
     btree = S2BT(session);
@@ -309,7 +309,7 @@ __wt_rec_row_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
     ikey = NULL; /* -Wuninitialized */
     cell = NULL;
 
-    WT_RET(__wt_rec_split_init(session, r, page, 0, btree->maxintlpage_precomp));
+    WT_RET(__wt_rec_split_init(session, r, page, 0, btree->maxintlpage_precomp, 0));
 
     /*
      * Ideally, we'd never store the 0th key on row-store internal pages because it's never used
@@ -336,13 +336,18 @@ __wt_rec_row_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
          * instantiated, off-page key, we don't bother setting them if that's not possible.
          */
         cell = NULL;
-        key_onpage_ovfl = false;
         ikey = __wt_ref_key_instantiated(ref);
         if (ikey != NULL && ikey->cell_offset != 0) {
             cell = WT_PAGE_REF_OFFSET(page, ikey->cell_offset);
             __wt_cell_unpack_addr(session, page->dsk, cell, kpack);
-            key_onpage_ovfl =
-              F_ISSET(kpack, WT_CELL_UNPACK_OVERFLOW) && kpack->raw != WT_CELL_KEY_OVFL_RM;
+
+            /*
+             * Historically, we stored overflow cookies on internal pages, discard any underlying
+             * blocks. We have a copy to build the key (the key was instantiated when we read the
+             * page into memory), they won't be needed in the future as we're rewriting the page.
+             */
+            if (F_ISSET(kpack, WT_CELL_UNPACK_OVERFLOW) && kpack->raw != WT_CELL_KEY_OVFL_RM)
+                WT_ERR(__wt_ovfl_discard_add(session, page, kpack->cell));
         }
 
         WT_ERR(__wt_rec_child_modify(session, r, ref, &hazard, &state));
@@ -353,14 +358,7 @@ __wt_rec_row_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
         case WT_CHILD_IGNORE:
             /*
              * Ignored child.
-             *
-             * Overflow keys referencing pages we're not writing are no longer useful, schedule them
-             * for discard. Don't worry about instantiation, internal page keys are always
-             * instantiated. Don't worry about reuse, reusing this key in this reconciliation is
-             * unlikely.
              */
-            if (key_onpage_ovfl)
-                WT_ERR(__wt_ovfl_discard_add(session, page, kpack->cell));
             WT_CHILD_RELEASE_ERR(session, hazard, ref);
             continue;
 
@@ -370,26 +368,9 @@ __wt_rec_row_int(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
              */
             switch (child->modify->rec_result) {
             case WT_PM_REC_EMPTY:
-                /*
-                 * Overflow keys referencing empty pages are no longer useful, schedule them for
-                 * discard. Don't worry about instantiation, internal page keys are always
-                 * instantiated. Don't worry about reuse, reusing this key in this reconciliation is
-                 * unlikely.
-                 */
-                if (key_onpage_ovfl)
-                    WT_ERR(__wt_ovfl_discard_add(session, page, kpack->cell));
                 WT_CHILD_RELEASE_ERR(session, hazard, ref);
                 continue;
             case WT_PM_REC_MULTIBLOCK:
-                /*
-                 * Overflow keys referencing split pages are no longer useful (the split page's key
-                 * is the interesting key); schedule them for discard. Don't worry about
-                 * instantiation, internal page keys are always instantiated. Don't worry about
-                 * reuse, reusing this key in this reconciliation is unlikely.
-                 */
-                if (key_onpage_ovfl)
-                    WT_ERR(__wt_ovfl_discard_add(session, page, kpack->cell));
-
                 WT_ERR(__rec_row_merge(session, r, child));
                 WT_CHILD_RELEASE_ERR(session, hazard, ref);
                 continue;
@@ -559,7 +540,7 @@ __rec_row_leaf_insert(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins)
              */
             cbt->slot = UINT32_MAX;
             WT_RET(__wt_modify_reconstruct_from_upd_list(session, cbt, upd, cbt->upd_value));
-            WT_RET(__wt_value_return(cbt, cbt->upd_value));
+            __wt_value_return(cbt, cbt->upd_value);
             WT_RET(__wt_rec_cell_build_val(
               session, r, cbt->iface.value.data, cbt->iface.value.size, &tw, 0));
             break;
@@ -658,7 +639,6 @@ __wt_rec_row_leaf(
     WT_BTREE *btree;
     WT_CELL *cell;
     WT_CELL_UNPACK_KV *kpack, _kpack, *vpack, _vpack;
-    WT_CURSOR *hs_cursor;
     WT_CURSOR_BTREE *cbt;
     WT_DECL_ITEM(tmpkey);
     WT_DECL_RET;
@@ -674,7 +654,7 @@ __wt_rec_row_leaf(
     uint64_t slvg_skip;
     uint32_t i;
     uint8_t key_prefix;
-    bool dictionary, hs_clear, key_onpage_ovfl, ovfl_key;
+    bool dictionary, key_onpage_ovfl, ovfl_key;
     void *copy;
     const void *key_data;
 
@@ -691,24 +671,7 @@ __wt_rec_row_leaf(
     cbt = &r->update_modify_cbt;
     cbt->iface.session = (WT_SESSION *)session;
 
-    /*
-     * When removing a key due to a tombstone with a durable timestamp of "none", also remove the
-     * history store contents associated with that key. It's safe to do even if we fail
-     * reconciliation after the removal, the history store content must be obsolete in order for us
-     * to consider removing the key.
-     *
-     * Ignore if this is metadata, as metadata doesn't have any history.
-     *
-     * Some code paths, such as schema removal, involve deleting keys in metadata and assert that
-     * they shouldn't open new dhandles. In those cases we won't ever need to blow away history
-     * store content, so we can skip this.
-     */
-    hs_cursor = NULL;
-    hs_clear = F_ISSET(S2C(session), WT_CONN_HS_OPEN) &&
-      !F_ISSET(session, WT_SESSION_NO_DATA_HANDLES) && !WT_IS_HS(btree->dhandle) &&
-      !WT_IS_METADATA(btree->dhandle);
-
-    WT_RET(__wt_rec_split_init(session, r, page, 0, btree->maxleafpage_precomp));
+    WT_RET(__wt_rec_split_init(session, r, page, 0, btree->maxleafpage_precomp, 0));
 
     /*
      * Write any K/V pairs inserted into the page before the first from-disk key on the page.
@@ -770,6 +733,9 @@ __wt_rec_row_leaf(
 
         /* Build value cell. */
         if (upd == NULL) {
+            /* Clear the on-disk cell time window if it is obsolete. */
+            __wt_rec_time_window_clear_obsolete(session, NULL, vpack, r);
+
             /*
              * When the page was read into memory, there may not have been a value item.
              *
@@ -833,7 +799,7 @@ __wt_rec_row_leaf(
             case WT_UPDATE_MODIFY:
                 cbt->slot = WT_ROW_SLOT(page, rip);
                 WT_ERR(__wt_modify_reconstruct_from_upd_list(session, cbt, upd, cbt->upd_value));
-                WT_ERR(__wt_value_return(cbt, cbt->upd_value));
+                __wt_value_return(cbt, cbt->upd_value);
                 WT_ERR(__wt_rec_cell_build_val(
                   session, r, cbt->iface.value.data, cbt->iface.value.size, twp, 0));
                 dictionary = true;
@@ -868,29 +834,9 @@ __wt_rec_row_leaf(
                  * When removing a key due to a tombstone with a durable timestamp of "none", also
                  * remove the history store contents associated with that key.
                  */
-                if (twp->durable_stop_ts == WT_TS_NONE && hs_clear) {
+                if (twp->durable_stop_ts == WT_TS_NONE && r->hs_clear_on_tombstone) {
                     WT_ERR(__wt_row_leaf_key(session, page, rip, tmpkey, true));
-
-                    /* Open a history store cursor if we don't yet have one. */
-                    if (hs_cursor == NULL)
-                        WT_ERR(__wt_curhs_open(session, NULL, &hs_cursor));
-
-                    /*
-                     * From WT_TS_NONE delete all the history store content of the key. This path
-                     * will never be taken for a mixed-mode deletion being evicted and with a
-                     * checkpoint that started prior to the eviction starting its reconciliation as
-                     * previous checks done while selecting an update will detect that.
-                     */
-                    WT_ERR(__wt_hs_delete_key_from_ts(
-                      session, hs_cursor, btree->id, tmpkey, WT_TS_NONE, false, false));
-
-                    /* Fail 1% of the time. */
-                    if (F_ISSET(r, WT_REC_EVICT) &&
-                      __wt_failpoint(
-                        session, WT_TIMING_STRESS_FAILPOINT_HISTORY_STORE_DELETE_KEY_FROM_TS, 1))
-                        WT_ERR(EBUSY);
-                    WT_STAT_CONN_INCR(session, cache_hs_key_truncate_onpage_removal);
-                    WT_STAT_DATA_INCR(session, cache_hs_key_truncate_onpage_removal);
+                    WT_ERR(__wt_rec_hs_clear_on_tombstone(session, r, WT_RECNO_OOB, tmpkey));
                 }
 
                 /*
@@ -1022,8 +968,6 @@ leaf_insert:
     ret = __wt_rec_split_finish(session, r);
 
 err:
-    if (hs_cursor != NULL)
-        WT_TRET(hs_cursor->close(hs_cursor));
     __wt_scr_free(session, &tmpkey);
     return (ret);
 }

@@ -27,8 +27,6 @@ load("jstests/replsets/libs/tenant_migration_test.js");
 load("jstests/replsets/libs/tenant_migration_util.js");
 load("jstests/replsets/rslib.js");
 
-const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
-
 const kCollName = "testColl";
 const kTenantDefinedDbName = "0";
 
@@ -56,7 +54,7 @@ function runCommand(db, cmd, expectedError) {
 /**
  * Tests that the recipient starts rejecting all reads after cloning is done.
  */
-function testRejectAllReadsAfterCloningDone(testCase, dbName, collName) {
+function testRejectAllReadsAfterCloningDone({testCase, dbName, collName, tenantMigrationTest}) {
     const tenantId = dbName.split('_')[0];
     const migrationOpts = {
         migrationIdString: extractUUIDFromObject(UUID()),
@@ -100,7 +98,7 @@ function testRejectAllReadsAfterCloningDone(testCase, dbName, collName) {
  * rejectReadsBeforeTimestamp.
  */
 function testRejectOnlyReadsWithAtClusterTimeLessThanRejectReadsBeforeTimestamp(
-    testCase, dbName, collName) {
+    {testCase, dbName, collName, tenantMigrationTest}) {
     const tenantId = dbName.split('_')[0];
     const migrationOpts = {
         migrationIdString: extractUUIDFromObject(UUID()),
@@ -178,7 +176,7 @@ function testRejectOnlyReadsWithAtClusterTimeLessThanRejectReadsBeforeTimestamp(
  * recipient keeps rejecting all reads until the state doc is marked as garbage collectable.
  */
 function testDoNotRejectReadsAfterMigrationAbortedBeforeReachingRejectReadsBeforeTimestamp(
-    testCase, dbName, collName) {
+    {testCase, dbName, collName, tenantMigrationTest}) {
     const tenantId = dbName.split('_')[0];
     const migrationOpts = {
         migrationIdString: extractUUIDFromObject(UUID()),
@@ -231,7 +229,7 @@ function testDoNotRejectReadsAfterMigrationAbortedBeforeReachingRejectReadsBefor
  * collected.
  */
 function testDoNotRejectReadsAfterMigrationAbortedAfterReachingRejectReadsBeforeTimestamp(
-    testCase, dbName, collName) {
+    {testCase, dbName, collName, tenantMigrationTest}) {
     const tenantId = dbName.split('_')[0];
     const migrationId = UUID();
     const migrationOpts = {
@@ -405,13 +403,6 @@ const testCases = {
     },
 };
 
-// Force the recipient to preserve all snapshot history to ensure that snapshot reads do not fail
-// with SnapshotTooOld due to snapshot being unavailable.
-const recipientRst = tenantMigrationTest.getRecipientRst();
-recipientRst.nodes.forEach(node => {
-    configureFailPoint(node, "WTPreserveSnapshotHistoryIndefinitely");
-});
-
 const testFuncs = {
     afterCloningDone: testRejectAllReadsAfterCloningDone,
     afterReachingBlockTs: testRejectOnlyReadsWithAtClusterTimeLessThanRejectReadsBeforeTimestamp,
@@ -425,9 +416,19 @@ for (const [testName, testFunc] of Object.entries(testFuncs)) {
     for (const [testCaseName, testCase] of Object.entries(testCases)) {
         jsTest.log("Testing " + testName + " with testCase " + testCaseName);
         let dbName = testCaseName + "-" + testName + "_" + kTenantDefinedDbName;
-        testFunc(testCase, dbName, kCollName);
+        const tenantMigrationTest = new TenantMigrationTest({
+            name: jsTestName(),
+            quickGarbageCollection: true,
+        });
+
+        // Force the recipient to preserve all snapshot history to ensure that snapshot reads do not
+        // fail with SnapshotTooOld due to snapshot being unavailable.
+        tenantMigrationTest.getRecipientRst().nodes.forEach(node => {
+            configureFailPoint(node, "WTPreserveSnapshotHistoryIndefinitely");
+        });
+
+        testFunc({testCase, dbName, collName: kCollName, tenantMigrationTest});
+        tenantMigrationTest.stop();
     }
 }
-
-tenantMigrationTest.stop();
 })();

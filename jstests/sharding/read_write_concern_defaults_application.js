@@ -152,6 +152,7 @@ let testCases = {
     _shardsvrRenameCollectionParticipantUnblock: {skip: "internal command"},
     _shardsvrReshardCollection: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
+    _shardsvrSetAllowMigrations: {skip: "internal command"},
     _shardsvrShardCollection:
         {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _transferMods: {skip: "internal command"},
@@ -339,12 +340,15 @@ let testCases = {
         checkWriteConcern: false,
     },
     donorAbortMigration: {skip: "does not accept read or write concern"},
+    // TODO : remove overrides once possible SERVER-61845
+    donorAbortSplit: {skip: "has been removed from the server"},
     donorForgetMigration: {skip: "does not accept read or write concern"},
+    donorForgetSplit: {skip: "has been removed from the server"},
     donorStartMigration: {skip: "does not accept read or write concern"},
+    donorStartSplit: {skip: "has been removed from the server"},
     donorWaitForMigrationToCommit: {skip: "does not accept read or write concern"},
-    donorAbortSplit: {skip: "does not accept read or write concern"},
-    donorForgetSplit: {skip: "does not accept read or write concern"},
-    donorStartSplit: {skip: "does not accept read or write concern"},
+    abortShardSplit: {skip: "does not accept read or write concern"},
+    commitShardSplit: {skip: "does not accept read or write concern"},
     driverOIDTest: {skip: "internal command"},
     drop: {
         setUp: function(conn) {
@@ -643,6 +647,7 @@ let testCases = {
     saslStart: {skip: "does not accept read or write concern"},
     sbe: {skip: "internal command"},
     serverStatus: {skip: "does not accept read or write concern"},
+    setAllowMigrations: {skip: "does not accept read or write concern"},
     setAuditConfig: {skip: "does not accept read or write concern"},
     setCommittedSnapshot: {skip: "internal command"},
     setDefaultRWConcern: {skip: "special case (must run after all other commands)"},
@@ -708,6 +713,7 @@ let testCases = {
     validateDBMetadata: {skip: "does not accept read or write concern"},
     voteCommitImportCollection: {skip: "internal command"},
     voteCommitIndexBuild: {skip: "internal command"},
+    voteCommitMigrationProgress: {skip: "internal command"},
     waitForFailPoint: {skip: "does not accept read or write concern"},
     waitForOngoingChunkSplits: {skip: "does not accept read or write concern"},
     whatsmysni: {skip: "does not accept read or write concern"},

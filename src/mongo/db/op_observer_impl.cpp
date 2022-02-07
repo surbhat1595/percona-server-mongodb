@@ -40,6 +40,7 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
@@ -53,6 +54,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer_util.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/change_stream_pre_image_helpers.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/image_collection_entry_gen.h"
@@ -169,6 +171,12 @@ struct OpTimeBundle {
     Date_t wallClockTime;
 };
 
+struct ImageBundle {
+    repl::RetryImageEnum imageKind;
+    BSONObj imageDoc;
+    Timestamp timestamp;
+};
+
 /**
  * Write oplog entry(ies) for the update operation.
  */
@@ -195,6 +203,20 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
         invariant(args.updateArgs->preImageDoc);
         noopEntry.setOpType(repl::OpTypeEnum::kNoop);
         noopEntry.setObject(*args.updateArgs->preImageDoc);
+        if (args.updateArgs->preImageRecordingEnabledForCollection &&
+            args.retryableFindAndModifyLocation ==
+                RetryableFindAndModifyLocation::kSideCollection) {
+            // We are writing a no-op pre-image oplog entry and storing a post-image into a side
+            // collection. In this case, we expect to have already reserved 3 oplog slots:
+            // TS - 2: Oplog slot for the current no-op preimage oplog entry
+            // TS - 1: Oplog slot for the forged no-op oplog entry that may eventually get used by
+            //         tenant migrations or resharding.
+            // TS:     Oplog slot for the actual update oplog entry.
+            const auto reservedOplogSlots = args.updateArgs->oplogSlots;
+            invariant(reservedOplogSlots.size() == 3);
+            noopEntry.setOpTime(repl::OpTime(reservedOplogSlots.front().getTimestamp(),
+                                             reservedOplogSlots.front().getTerm()));
+        }
         oplogLink.preImageOpTime = logOperation(opCtx, &noopEntry);
         if (storePreImageInOplogForRetryableWrite) {
             opTimes.prePostImageOpTime = oplogLink.preImageOpTime;
@@ -218,8 +240,8 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
     oplogEntry->setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
     // oplogLink could have been changed to include pre/postImageOpTime by the previous no-op write.
     repl::appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, args.updateArgs->stmtIds);
-    if (args.updateArgs->oplogSlot) {
-        oplogEntry->setOpTime(*args.updateArgs->oplogSlot);
+    if (!args.updateArgs->oplogSlots.empty()) {
+        oplogEntry->setOpTime(args.updateArgs->oplogSlots.back());
     }
     opTimes.writeOpTime = logOperation(opCtx, oplogEntry);
     opTimes.wallClockTime = oplogEntry->getWallClockTime();
@@ -232,7 +254,7 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
 OpTimeBundle replLogDelete(OperationContext* opCtx,
                            const NamespaceString& nss,
                            MutableOplogEntry* oplogEntry,
-                           OptionalCollectionUUID uuid,
+                           const boost::optional<UUID>& uuid,
                            StmtId stmtId,
                            bool fromMigrate,
                            const boost::optional<BSONObj>& deletedDoc) {
@@ -279,6 +301,8 @@ void writeToImageCollection(OperationContext* opCtx,
     imageEntry.setImage(dataImage);
 
     repl::UnreplicatedWritesBlock unreplicated(opCtx);
+    DisableDocumentValidation documentValidationDisabler(
+        opCtx, DocumentValidationSettings::kDisableInternalValidation);
 
     // In practice, this lock acquisition on kConfigImagesNamespace cannot block. The only time a
     // stronger lock acquisition is taken on this namespace is during step up to create the
@@ -289,23 +313,6 @@ void writeToImageCollection(OperationContext* opCtx,
     UpdateResult res = Helpers::upsert(
         opCtx, NamespaceString::kConfigImagesNamespace.toString(), imageEntry.toBSON());
     invariant(res.numDocsModified == 1 || !res.upsertedId.isEmpty());
-}
-
-// Inserts document pre-image 'preImage' into the change stream pre-images collection.
-void writeToChangeStreamPreImagesCollection(OperationContext* opCtx,
-                                            const ChangeStreamPreImage& preImage) {
-    const auto collectionNamespace = NamespaceString::kChangeStreamPreImagesNamespace;
-
-    // This lock acquisition can block on a stronger lock held by another operation modifying the
-    // pre-images collection. There are no known cases where an operation holding an exclusive lock
-    // on the pre-images collection also waits for oplog visibility.
-    repl::UnreplicatedWritesBlock unreplicated(opCtx);
-    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
-    AutoGetCollection preimagesCollectionRaii(opCtx, collectionNamespace, LockMode::MODE_IX);
-    UpdateResult res = Helpers::upsert(opCtx, collectionNamespace.toString(), preImage.toBSON());
-    tassert(5868601,
-            "Failed to insert a new document into pre-images collection",
-            !res.existing && !res.upsertedId.isEmpty());
 }
 
 bool shouldTimestampIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) {
@@ -373,7 +380,7 @@ OpObserverImpl::DocumentKey OpObserverImpl::getDocumentKey(OperationContext* opC
 
 void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
                                    const NamespaceString& nss,
-                                   CollectionUUID uuid,
+                                   const UUID& uuid,
                                    BSONObj indexDoc,
                                    bool fromMigrate) {
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -400,7 +407,7 @@ void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
 
 void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
                                        const NamespaceString& nss,
-                                       CollectionUUID collUUID,
+                                       const UUID& collUUID,
                                        const UUID& indexBuildUUID,
                                        const std::vector<BSONObj>& indexes,
                                        bool fromMigrate) {
@@ -463,7 +470,7 @@ void OpObserverImpl::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
 
 void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
                                         const NamespaceString& nss,
-                                        CollectionUUID collUUID,
+                                        const UUID& collUUID,
                                         const UUID& indexBuildUUID,
                                         const std::vector<BSONObj>& indexes,
                                         bool fromMigrate) {
@@ -489,7 +496,7 @@ void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
 
 void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
                                        const NamespaceString& nss,
-                                       CollectionUUID collUUID,
+                                       const UUID& collUUID,
                                        const UUID& indexBuildUUID,
                                        const std::vector<BSONObj>& indexes,
                                        const Status& cause,
@@ -668,14 +675,29 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             args.nss, args.uuid, args.updateArgs->update, args.updateArgs->criteria);
         if (inRetryableInternalTransaction) {
             operation.setInitializedStatementIds(args.updateArgs->stmtIds);
-        }
-        operation.setDestinedRecipient(
-            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
-
-        if (args.updateArgs->preImageRecordingEnabledForCollection) {
+            if (args.updateArgs->storeDocOption == CollectionUpdateArgs::StoreDocOption::PreImage) {
+                invariant(args.updateArgs->preImageDoc);
+                operation.setPreImage(args.updateArgs->preImageDoc->getOwned());
+                if (args.retryableFindAndModifyLocation ==
+                    RetryableFindAndModifyLocation::kSideCollection) {
+                    operation.setNeedsRetryImage(repl::RetryImageEnum::kPreImage);
+                }
+            }
+            if (args.updateArgs->storeDocOption ==
+                CollectionUpdateArgs::StoreDocOption::PostImage) {
+                invariant(!args.updateArgs->updatedDoc.isEmpty());
+                operation.setPostImage(args.updateArgs->updatedDoc.getOwned());
+                if (args.retryableFindAndModifyLocation ==
+                    RetryableFindAndModifyLocation::kSideCollection) {
+                    operation.setNeedsRetryImage(repl::RetryImageEnum::kPostImage);
+                }
+            }
+        } else if (args.updateArgs->preImageRecordingEnabledForCollection) {
             invariant(args.updateArgs->preImageDoc);
             operation.setPreImage(args.updateArgs->preImageDoc->getOwned());
         }
+        operation.setDestinedRecipient(
+            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
 
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
@@ -716,12 +738,15 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
                                    dataImage);
         }
 
-        // Write a pre-image to the change streams pre-images collection if the node is the primary
-        // and not performing an initial sync or a tenant migration. A request to update a pre-image
-        // can come from chunk-migrate, ie. source of the request is 'fromMigrate', such events are
-        // filtered out by change streams and storing them in pre-image collection is redundant.
-        if (opCtx->isEnforcingConstraints() &&
-            args.updateArgs->changeStreamPreAndPostImagesEnabledForCollection &&
+        // Write a pre-image to the change streams pre-images collection when following conditions
+        // are met:
+        // 1. The collection has 'changeStreamPreAndPostImages' enabled.
+        // 2. The node wrote the oplog entry for the corresponding operation.
+        // 3. The request to write the pre-image does not come from chunk-migrate event, i.e. source
+        //    of the request is not 'fromMigrate'. The 'fromMigrate' events are filtered out by
+        //    change streams and storing them in pre-image collection is redundant.
+        if (args.updateArgs->changeStreamPreAndPostImagesEnabledForCollection &&
+            !opTime.writeOpTime.isNull() &&
             args.updateArgs->source != OperationSource::kFromMigrate) {
             const auto& preImageDoc = args.updateArgs->preImageDoc;
             tassert(5868600, "PreImage must be set", preImageDoc && !preImageDoc.get().isEmpty());
@@ -771,6 +796,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
 
 void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
                                    NamespaceString const& nss,
+                                   const UUID& uuid,
                                    BSONObj const& doc) {
     documentKeyDecoration(opCtx).emplace(getDocumentKey(opCtx, nss, doc));
 
@@ -803,19 +829,29 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
     OpTimeBundle opTime;
     if (inMultiDocumentTransaction) {
-        tassert(5868700,
-                "Attempted a retryable write within a multi-document transaction",
-                args.retryableFindAndModifyLocation == RetryableFindAndModifyLocation::kNone);
-
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
+
+        tassert(5868700,
+                "Attempted a retryable write within a non-retryable multi-document transaction",
+                inRetryableInternalTransaction ||
+                    args.retryableFindAndModifyLocation == RetryableFindAndModifyLocation::kNone);
 
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
         if (inRetryableInternalTransaction) {
             operation.setInitializedStatementIds({stmtId});
+            if (args.retryableFindAndModifyLocation != RetryableFindAndModifyLocation::kNone) {
+                tassert(6054000,
+                        "Deleted document must be present for pre-image recording",
+                        args.deletedDoc);
+                operation.setPreImage(args.deletedDoc->getOwned());
+                if (args.retryableFindAndModifyLocation ==
+                    RetryableFindAndModifyLocation::kSideCollection) {
+                    operation.setNeedsRetryImage(repl::RetryImageEnum::kPreImage);
+                }
+            }
         }
-
         if (args.preImageRecordingEnabledForCollection) {
             tassert(5868701,
                     "Deleted document must be present for pre-image recording",
@@ -843,8 +879,8 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             invariant(opCtx->getTxnNumber());
 
             oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPreImage});
-            if (args.oplogSlot) {
-                oplogEntry.setOpTime(*args.oplogSlot);
+            if (!args.oplogSlots.empty()) {
+                oplogEntry.setOpTime(args.oplogSlots.back());
             }
         }
         opTime = replLogDelete(
@@ -858,12 +894,15 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
                                    *(args.deletedDoc));
         }
 
-        // Write a pre-image to the change streams pre-images collection if the node is the primary
-        // and not performing an initial sync or a tenant migration. A request to delete a pre-image
-        // can come from chunk-migrate, ie. source of the request is 'fromMigrate', such events are
-        // filtered out by change streams and storing them in pre-image collection is redundant.
-        if (opCtx->isEnforcingConstraints() &&
-            args.changeStreamPreAndPostImagesEnabledForCollection && !args.fromMigrate) {
+        // Write a pre-image to the change streams pre-images collection when following conditions
+        // are met:
+        // 1. The collection has 'changeStreamPreAndPostImages' enabled.
+        // 2. The node wrote the oplog entry for the corresponding operation.
+        // 3. The request to write the pre-image does not come from chunk-migrate event, i.e. source
+        //    of the request is not 'fromMigrate'. The 'fromMigrate' events are filtered out by
+        //    change streams and storing them in pre-image collection is redundant.
+        if (args.changeStreamPreAndPostImagesEnabledForCollection && !opTime.writeOpTime.isNull() &&
+            !args.fromMigrate) {
             tassert(5868704, "Deleted document must be set", args.deletedDoc);
 
             ChangeStreamPreImageId id(uuid, opTime.writeOpTime.getTimestamp(), 0);
@@ -906,7 +945,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 void OpObserverImpl::onInternalOpMessage(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    OptionalCollectionUUID uuid,
+    const boost::optional<UUID>& uuid,
     const BSONObj& msgObj,
     const boost::optional<BSONObj> o2MsgObj,
     const boost::optional<repl::OpTime> preImageOpTime,
@@ -1102,7 +1141,7 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  const NamespaceString& fromCollection,
                                                  const NamespaceString& toCollection,
                                                  const UUID& uuid,
-                                                 OptionalCollectionUUID dropTargetUUID,
+                                                 const boost::optional<UUID>& dropTargetUUID,
                                                  std::uint64_t numRecords,
                                                  bool stayTemp) {
     return preRenameCollection(opCtx,
@@ -1119,7 +1158,7 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  const NamespaceString& fromCollection,
                                                  const NamespaceString& toCollection,
                                                  const UUID& uuid,
-                                                 OptionalCollectionUUID dropTargetUUID,
+                                                 const boost::optional<UUID>& dropTargetUUID,
                                                  std::uint64_t numRecords,
                                                  bool stayTemp,
                                                  bool markFromMigrate) {
@@ -1148,7 +1187,7 @@ void OpObserverImpl::postRenameCollection(OperationContext* const opCtx,
                                           const NamespaceString& fromCollection,
                                           const NamespaceString& toCollection,
                                           const UUID& uuid,
-                                          OptionalCollectionUUID dropTargetUUID,
+                                          const boost::optional<UUID>& dropTargetUUID,
                                           bool stayTemp) {
     if (fromCollection.isSystemDotViews())
         DurableViewCatalog::onExternalChange(opCtx, fromCollection);
@@ -1160,7 +1199,7 @@ void OpObserverImpl::onRenameCollection(OperationContext* const opCtx,
                                         const NamespaceString& fromCollection,
                                         const NamespaceString& toCollection,
                                         const UUID& uuid,
-                                        OptionalCollectionUUID dropTargetUUID,
+                                        const boost::optional<UUID>& dropTargetUUID,
                                         std::uint64_t numRecords,
                                         bool stayTemp) {
     onRenameCollection(opCtx,
@@ -1177,7 +1216,7 @@ void OpObserverImpl::onRenameCollection(OperationContext* const opCtx,
                                         const NamespaceString& fromCollection,
                                         const NamespaceString& toCollection,
                                         const UUID& uuid,
-                                        OptionalCollectionUUID dropTargetUUID,
+                                        const boost::optional<UUID>& dropTargetUUID,
                                         std::uint64_t numRecords,
                                         bool stayTemp,
                                         bool markFromMigrate) {
@@ -1238,14 +1277,40 @@ namespace {
 // Accepts an empty BSON builder and appends the given transaction statements to an 'applyOps' array
 // field. Appends as many operations as possible to the array (and their corresponding statement
 // ids to 'stmtIdsWritten') until either the constructed object exceeds the 16MB limit or the
-// maximum number of transaction statements allowed in one entry.
+// maximum number of transaction statements allowed in one entry. If any of the statements has
+// a pre-image or post-image that needs to be stored in the image collection, stores it to
+// 'imageToWrite'.
 //
 // Returns an iterator to the first statement that wasn't packed into the applyOps object.
 std::vector<repl::ReplOperation>::iterator packTransactionStatementsForApplyOps(
     BSONObjBuilder* applyOpsBuilder,
     std::vector<StmtId>* stmtIdsWritten,
+    boost::optional<std::pair<repl::RetryImageEnum, BSONObj>>* imageToWrite,
     std::vector<repl::ReplOperation>::iterator stmtBegin,
     std::vector<repl::ReplOperation>::iterator stmtEnd) {
+    auto setImageToWrite = [&](const repl::ReplOperation& stmt) {
+        uassert(6054001,
+                str::stream() << NamespaceString::kConfigImagesNamespace
+                              << " can only store the pre or post image of one "
+                                 "findAndModify operation for each "
+                                 "transaction",
+                !(*imageToWrite));
+        switch (*stmt.getNeedsRetryImage()) {
+            case repl::RetryImageEnum::kPreImage: {
+                invariant(!stmt.getPreImage().isEmpty());
+                *imageToWrite = std::make_pair(repl::RetryImageEnum::kPreImage, stmt.getPreImage());
+                break;
+            }
+            case repl::RetryImageEnum::kPostImage: {
+                invariant(!stmt.getPostImage().isEmpty());
+                *imageToWrite =
+                    std::make_pair(repl::RetryImageEnum::kPostImage, stmt.getPostImage());
+                break;
+            }
+            default:
+                MONGO_UNREACHABLE;
+        }
+    };
 
     std::vector<repl::ReplOperation>::iterator stmtIter;
     BSONArrayBuilder opsArray(applyOpsBuilder->subarrayStart("applyOps"_sd));
@@ -1265,6 +1330,9 @@ std::vector<repl::ReplOperation>::iterator packTransactionStatementsForApplyOps(
         opsArray.append(stmt.toBSON());
         const auto stmtIds = stmt.getStatementIds();
         stmtIdsWritten->insert(stmtIdsWritten->end(), stmtIds.begin(), stmtIds.end());
+        if (stmt.getNeedsRetryImage()) {
+            setImageToWrite(stmt);
+        }
     }
     try {
         // BSONArrayBuilder will throw a BSONObjectTooLarge exception if we exceeded the max BSON
@@ -1359,11 +1427,13 @@ OpTimeBundle logApplyOpsForTransaction(OperationContext* opCtx,
 // skipping over some reserved slots.
 //
 // The number of oplog entries written is returned.
-int logOplogEntriesForTransaction(OperationContext* opCtx,
-                                  std::vector<repl::ReplOperation>* stmts,
-                                  const std::vector<OplogSlot>& oplogSlots,
-                                  size_t numberOfPreImagesToWrite,
-                                  bool prepare) {
+int logOplogEntriesForTransaction(
+    OperationContext* opCtx,
+    std::vector<repl::ReplOperation>* stmts,
+    const std::vector<OplogSlot>& oplogSlots,
+    boost::optional<ImageBundle>* prePostImageToWriteToImageCollection,
+    size_t numberOfPrePostImagesToWrite,
+    bool prepare) {
     invariant(!stmts->empty());
     invariant(stmts->size() <= oplogSlots.size());
 
@@ -1383,28 +1453,44 @@ int logOplogEntriesForTransaction(OperationContext* opCtx,
 
     prevWriteOpTime.writeOpTime = txnParticipant.getLastWriteOpTime();
     auto currOplogSlot = oplogSlots.begin();
-    // We never want to store pre-images when we're migrating oplog entries from another
-    // replica set.
+    // We never want to store pre-images or post-images when we're migrating oplog entries from
+    // another replica set.
     const auto& migrationRecipientInfo = repl::tenantMigrationRecipientInfo(opCtx);
 
-    if (numberOfPreImagesToWrite > 0 && !migrationRecipientInfo) {
+    auto logPrePostImageNoopEntry = [&](const repl::ReplOperation& statement,
+                                        const BSONObj& imageDoc) {
+        auto slot = *currOplogSlot;
+        ++currOplogSlot;
+
+        MutableOplogEntry imageEntry;
+        imageEntry.setOpType(repl::OpTypeEnum::kNoop);
+        imageEntry.setObject(imageDoc);
+        imageEntry.setNss(statement.getNss());
+        imageEntry.setUuid(statement.getUuid());
+        imageEntry.setOpTime(slot);
+
+        return logOperation(opCtx, &imageEntry);
+    };
+
+    if (numberOfPrePostImagesToWrite > 0 && !migrationRecipientInfo) {
         for (auto& statement : *stmts) {
-            if (statement.getPreImage().isEmpty()) {
-                continue;
+            if (!statement.getPreImage().isEmpty() &&
+                statement.getNeedsRetryImage() != repl::RetryImageEnum::kPreImage) {
+                // Note that 'needsRetryImage' stores the image kind that needs to stored in the
+                // image collection. Therefore, when 'needsRetryImage' is equal to kPreImage, the
+                // pre-image will be written to the image collection (after all the applyOps oplog
+                // entries are written).
+                auto opTime = logPrePostImageNoopEntry(statement, statement.getPreImage());
+                statement.setPreImageOpTime(opTime);
             }
-
-            auto slot = *currOplogSlot;
-            ++currOplogSlot;
-
-            MutableOplogEntry preImageEntry;
-            preImageEntry.setOpType(repl::OpTypeEnum::kNoop);
-            preImageEntry.setObject(statement.getPreImage());
-            preImageEntry.setNss(statement.getNss());
-            preImageEntry.setUuid(statement.getUuid());
-            preImageEntry.setOpTime(slot);
-
-            auto opTime = logOperation(opCtx, &preImageEntry);
-            statement.setPreImageOpTime(opTime);
+            if (!statement.getPostImage().isEmpty() &&
+                statement.getNeedsRetryImage() != repl::RetryImageEnum::kPostImage) {
+                // Likewise, when 'needsRetryImage' is equal to kPostImage, the post-image will be
+                // written to the image collection (after all the applyOps oplog entries are
+                // written).
+                auto opTime = logPrePostImageNoopEntry(statement, statement.getPostImage());
+                statement.setPostImageOpTime(opTime);
+            }
         }
     }
 
@@ -1417,10 +1503,11 @@ int logOplogEntriesForTransaction(OperationContext* opCtx,
     // termination condition.
     auto stmtsIter = stmts->begin();
     while (stmtsIter != stmts->end()) {
-
         BSONObjBuilder applyOpsBuilder;
+        boost::optional<std::pair<repl::RetryImageEnum, BSONObj>> imageToWrite;
+
         auto nextStmt = packTransactionStatementsForApplyOps(
-            &applyOpsBuilder, &stmtIdsWritten, stmtsIter, stmts->end());
+            &applyOpsBuilder, &stmtIdsWritten, &imageToWrite, stmtsIter, stmts->end());
 
         // If we packed the last op, then the next oplog entry we log should be the implicit
         // commit or implicit prepare, i.e. we omit the 'partialTxn' field.
@@ -1430,9 +1517,23 @@ int logOplogEntriesForTransaction(OperationContext* opCtx,
         auto implicitCommit = lastOp && !prepare;
         auto implicitPrepare = lastOp && prepare;
         auto isPartialTxn = !lastOp;
-        if (isPartialTxn) {
-            // Partial transactions create multiple oplog entries in the same WriteUnitOfWork.
-            // Because of this, partial transactions will set multiple timestamps, violating the
+
+        if (imageToWrite) {
+            // Reserve an oplog slot for potential forged noop oplog entry for the pre-image or
+            // post-image.
+            uassert(6054002,
+                    str::stream() << NamespaceString::kConfigImagesNamespace
+                                  << " can only store the pre or post image of one "
+                                     "findAndModify operation for each "
+                                     "transaction",
+                    !(*prePostImageToWriteToImageCollection));
+            ++currOplogSlot;
+        }
+
+        if (isPartialTxn || (imageToWrite && !prepare)) {
+            // Partial transactions and unprepared transactions with pre or post image stored in the
+            // image collection create/reserve multiple oplog entries in the same WriteUnitOfWork.
+            // Because of this, such transactions will set multiple timestamps, violating the
             // multi timestamp constraint. It's safe to ignore the multi timestamp constraints here
             // as additional rollback logic is in place for this case.
             opCtx->recoveryUnit()->ignoreAllMultiTimestampConstraints();
@@ -1489,6 +1590,14 @@ int logOplogEntriesForTransaction(OperationContext* opCtx,
                                       updateTxnTable);
 
         hangAfterLoggingApplyOpsForTransaction.pauseWhileSet();
+
+        if (imageToWrite) {
+            invariant(!(*prePostImageToWriteToImageCollection));
+            *prePostImageToWriteToImageCollection =
+                ImageBundle{imageToWrite->first,
+                            imageToWrite->second,
+                            prevWriteOpTime.writeOpTime.getTimestamp()};
+        }
 
         // Advance the iterator to the beginning of the remaining unpacked statements.
         stmtsIter = nextStmt;
@@ -1550,7 +1659,7 @@ void logCommitOrAbortForPreparedTransaction(OperationContext* opCtx,
 
 void OpObserverImpl::onUnpreparedTransactionCommit(OperationContext* opCtx,
                                                    std::vector<repl::ReplOperation>* statements,
-                                                   size_t numberOfPreImagesToWrite) {
+                                                   size_t numberOfPrePostImagesToWrite) {
     invariant(opCtx->getTxnNumber());
 
     if (!opCtx->writesAreReplicated()) {
@@ -1565,7 +1674,8 @@ void OpObserverImpl::onUnpreparedTransactionCommit(OperationContext* opCtx,
     repl::OpTime commitOpTime;
     // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
     // reserve enough entries for all statements in the transaction.
-    auto oplogSlots = repl::getNextOpTimes(opCtx, statements->size() + numberOfPreImagesToWrite);
+    auto oplogSlots =
+        repl::getNextOpTimes(opCtx, statements->size() + numberOfPrePostImagesToWrite);
 
     // Throw TenantMigrationConflict error if the database for the transaction statements is being
     // migrated. We only need check the namespace of the first statement since a transaction's
@@ -1579,8 +1689,17 @@ void OpObserverImpl::onUnpreparedTransactionCommit(OperationContext* opCtx,
     }
 
     // Log in-progress entries for the transaction along with the implicit commit.
+    boost::optional<ImageBundle> imageToWrite;
     int numOplogEntries = logOplogEntriesForTransaction(
-        opCtx, statements, oplogSlots, numberOfPreImagesToWrite, false);
+        opCtx, statements, oplogSlots, &imageToWrite, numberOfPrePostImagesToWrite, false);
+    if (imageToWrite) {
+        writeToImageCollection(opCtx,
+                               *opCtx->getLogicalSessionId(),
+                               imageToWrite->timestamp,
+                               imageToWrite->imageKind,
+                               imageToWrite->imageDoc);
+    }
+
     commitOpTime = oplogSlots[numOplogEntries - 1];
     invariant(!commitOpTime.isNull());
     shardObserveTransactionPrepareOrUnpreparedCommit(opCtx, *statements, commitOpTime);
@@ -1612,7 +1731,7 @@ void OpObserverImpl::onPreparedTransactionCommit(
 void OpObserverImpl::onTransactionPrepare(OperationContext* opCtx,
                                           const std::vector<OplogSlot>& reservedSlots,
                                           std::vector<repl::ReplOperation>* statements,
-                                          size_t numberOfPreImagesToWrite) {
+                                          size_t numberOfPrePostImagesToWrite) {
     invariant(!reservedSlots.empty());
     const auto prepareOpTime = reservedSlots.back();
     invariant(opCtx->getTxnNumber());
@@ -1643,12 +1762,20 @@ void OpObserverImpl::onTransactionPrepare(OperationContext* opCtx,
                     // will waste the extra slots.  The implicit prepare oplog entry will still use
                     // the last reserved slot, because the transaction participant has already used
                     // that as the prepare time.
+                    boost::optional<ImageBundle> imageToWrite;
                     logOplogEntriesForTransaction(opCtx,
                                                   statements,
                                                   reservedSlots,
-                                                  numberOfPreImagesToWrite,
+                                                  &imageToWrite,
+                                                  numberOfPrePostImagesToWrite,
                                                   true /* prepare */);
-
+                    if (imageToWrite) {
+                        writeToImageCollection(opCtx,
+                                               *opCtx->getLogicalSessionId(),
+                                               imageToWrite->timestamp,
+                                               imageToWrite->imageKind,
+                                               imageToWrite->imageDoc);
+                    }
                 } else {
                     // Log an empty 'prepare' oplog entry.
                     // We need to have at least one reserved slot.

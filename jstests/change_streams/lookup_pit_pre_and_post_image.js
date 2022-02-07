@@ -4,19 +4,17 @@
 //   # TODO SERVER-58694: remove this tag.
 //   change_stream_does_not_expect_txns,
 //   multiversion_incompatible,
-//   # TODO SERVER-60238: remove this tag.
-//   assumes_read_preference_unchanged
 // ]
 (function() {
 "use strict";
 
 load("jstests/libs/collection_drop_recreate.js");  // For assertDropAndRecreateCollection.
-load("jstests/libs/change_stream_util.js");        // For canRecordPreImagesInConfigDatabase.
+load("jstests/libs/change_stream_util.js");        // For isChangeStreamPreAndPostImagesEnabled.
 
 const testDB = db.getSiblingDB(jsTestName());
 const collName = "test";
 
-if (!canRecordPreImagesInConfigDatabase(testDB)) {
+if (!isChangeStreamPreAndPostImagesEnabled(testDB)) {
     const coll = assertDropAndRecreateCollection(testDB, collName);
 
     // If feature flag is off, creating changeStream with new fullDocument arguments should throw.

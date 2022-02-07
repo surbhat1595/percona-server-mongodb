@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/s/balancer/balancer_policy.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/request_types/move_chunk_request.h"
 #include "mongo/s/shard_id.h"
@@ -39,6 +40,18 @@ namespace mongo {
 class ChunkType;
 class KeyPattern;
 class MigrationSecondaryThrottleOptions;
+
+/**
+ * Configuration be applied on every MoveChunkRequest that the Scheduler might recover from a prior
+ * step-down or crash as part of its self-initialisation
+ */
+struct MigrationsRecoveryConfiguration {
+    MigrationsRecoveryConfiguration(int64_t maxChunkSizeBytes,
+                                    const MigrationSecondaryThrottleOptions& secondaryThrottle)
+        : maxChunkSizeBytes(maxChunkSizeBytes), secondaryThrottle(secondaryThrottle) {}
+    int64_t maxChunkSizeBytes;
+    MigrationSecondaryThrottleOptions secondaryThrottle;
+};
 
 /**
  * Set of command-specific aggregations of submission settings
@@ -81,45 +94,6 @@ struct SplitVectorSettings {
 };
 
 /**
- * Common interface for any response generated from a command issued through the
- * BalancerCommandsScheduler.
- */
-class DeferredResponse {
-public:
-    virtual ~DeferredResponse() = default;
-
-    virtual UUID getRequestId() const = 0;
-
-    virtual bool hasFinalised() const = 0;
-
-    /**
-     * Blocking as long as hasFinalised() is false.
-     */
-    virtual Status getOutcome() = 0;
-};
-
-/**
- * Set of command-specific subclasses of DeferredResponse,
- * adding helper functions to deserialise the response payload (where this applies).
- */
-class MoveChunkResponse : public DeferredResponse {};
-
-class MergeChunksResponse : public DeferredResponse {};
-
-class SplitVectorResponse : public DeferredResponse {
-public:
-    virtual StatusWith<std::vector<BSONObj>> getSplitKeys() = 0;
-};
-
-class SplitChunkResponse : public DeferredResponse {};
-
-class ChunkDataSizeResponse : public DeferredResponse {
-public:
-    virtual StatusWith<long long> getSize() = 0;
-    virtual StatusWith<long long> getNumObjects() = 0;
-};
-
-/**
  * Interface for the asynchronous submission of chunk-related commands.
  * Every method assumes that the ChunkType input parameter is filled up with information about
  * version and location (shard ID).
@@ -132,7 +106,8 @@ public:
      * Triggers an asynchronous self-initialisation of the component,
      * which will start accepting request<Command>() invocations.
      */
-    virtual void start(OperationContext* opCtx) = 0;
+    virtual void start(OperationContext* opCtx,
+                       const MigrationsRecoveryConfiguration& configuration) = 0;
 
     /**
      * Stops the scheduler and the processing of any outstanding and incoming request
@@ -140,42 +115,43 @@ public:
      */
     virtual void stop() = 0;
 
-    virtual std::unique_ptr<MoveChunkResponse> requestMoveChunk(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const ChunkType& chunk,
-        const ShardId& recipient,
-        const MoveChunkSettings& commandSettings,
-        bool issuedByRemoteUser = false) = 0;
+    virtual SemiFuture<void> requestMoveChunk(OperationContext* opCtx,
+                                              const NamespaceString& nss,
+                                              const ChunkType& chunk,
+                                              const ShardId& recipient,
+                                              const MoveChunkSettings& commandSettings,
+                                              bool issuedByRemoteUser = false) = 0;
 
-    virtual std::unique_ptr<MergeChunksResponse> requestMergeChunks(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const ShardId& shardId,
-        const ChunkRange& chunkRange,
-        const ChunkVersion& version) = 0;
+    virtual SemiFuture<void> requestMergeChunks(OperationContext* opCtx,
+                                                const NamespaceString& nss,
+                                                const ShardId& shardId,
+                                                const ChunkRange& chunkRange,
+                                                const ChunkVersion& version) = 0;
 
-    virtual std::unique_ptr<SplitVectorResponse> requestSplitVector(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const ChunkType& chunk,
-        const KeyPattern& keyPattern,
-        const SplitVectorSettings& commandSettings) = 0;
+    virtual SemiFuture<std::vector<BSONObj>> requestAutoSplitVector(OperationContext* opCtx,
+                                                                    const NamespaceString& nss,
+                                                                    const ShardId& shardId,
+                                                                    const BSONObj& keyPattern,
+                                                                    const BSONObj& minKey,
+                                                                    const BSONObj& maxKey,
+                                                                    int64_t maxChunkSizeBytes) = 0;
 
-    virtual std::unique_ptr<SplitChunkResponse> requestSplitChunk(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const ChunkType& chunk,
-        const KeyPattern& keyPattern,
-        const std::vector<BSONObj>& splitPoints) = 0;
+    virtual SemiFuture<void> requestSplitChunk(OperationContext* opCtx,
+                                               const NamespaceString& nss,
+                                               const ShardId& shardId,
+                                               const ChunkVersion& collectionVersion,
+                                               const KeyPattern& keyPattern,
+                                               const BSONObj& minKey,
+                                               const BSONObj& maxKey,
+                                               const std::vector<BSONObj>& splitPoints) = 0;
 
-    virtual std::unique_ptr<ChunkDataSizeResponse> requestDataSize(OperationContext* opCtx,
-                                                                   const NamespaceString& nss,
-                                                                   const ShardId& shardId,
-                                                                   const ChunkRange& chunkRange,
-                                                                   const ChunkVersion& version,
-                                                                   const KeyPattern& keyPattern,
-                                                                   bool estimatedValue) = 0;
+    virtual SemiFuture<DataSizeResponse> requestDataSize(OperationContext* opCtx,
+                                                         const NamespaceString& nss,
+                                                         const ShardId& shardId,
+                                                         const ChunkRange& chunkRange,
+                                                         const ChunkVersion& version,
+                                                         const KeyPattern& keyPattern,
+                                                         bool estimatedValue) = 0;
 };
 
 }  // namespace mongo

@@ -95,14 +95,17 @@ public:
      * @param dupsAllowed true if duplicate keys are allowed, and false
      *        otherwise
      *
-     * @return Status::OK() if the insert succeeded,
+     * @return true if the key was inserted
      *
-     *         ErrorCodes::DuplicateKey if 'keyString' already exists in 'this' index
-     *         at a RecordId other than 'loc' and duplicates were not allowed
+     *         false if 'dupsAllowed' is true the exact key (including RecordId) already existed in
+     *         the index
+     *
+     *         ErrorCodes::DuplicateKey if 'dupsAllowed' is false and the prefix key (ignoring
+     *         RecordId) already existed in the index
      */
-    virtual Status insert(OperationContext* opCtx,
-                          const KeyString::Value& keyString,
-                          bool dupsAllowed) = 0;
+    virtual StatusWith<bool> insert(OperationContext* opCtx,
+                                    const KeyString::Value& keyString,
+                                    bool dupsAllowed) = 0;
 
     /**
      * Remove the entry from the index with the specified KeyString, which must have a RecordId
@@ -115,6 +118,14 @@ public:
     virtual void unindex(OperationContext* opCtx,
                          const KeyString::Value& keyString,
                          bool dupsAllowed) = 0;
+
+    /**
+     * Retuns the RecordId of the first key whose prefix matches this KeyString.
+     *
+     * This will not accept a KeyString with a Discriminator other than kInclusive.
+     */
+    virtual boost::optional<RecordId> findLoc(OperationContext* opCtx,
+                                              const KeyString::Value& keyString) const = 0;
 
     /**
      * Return ErrorCodes::DuplicateKey if there is more than one occurence of 'KeyString' in this
@@ -294,31 +305,6 @@ public:
         virtual boost::optional<IndexKeyEntry> seek(const KeyString::Value& keyString,
                                                     RequestedInfo parts = kKeyAndLoc) = 0;
 
-        /**
-         * Seeks to a key with a hint to the implementation that you only want exact matches. If
-         * an exact match can't be found, boost::none will be returned and the resulting
-         * position of the cursor is unspecified.
-         *
-         * This will not accept a KeyString with a Discriminator other than kInclusive. Since
-         * keys are not stored with Discriminators, an exact match would never be found.
-         */
-        virtual boost::optional<KeyStringEntry> seekExactForKeyString(
-            const KeyString::Value& keyString) = 0;
-
-        /**
-         * Seeks to a key with a hint to the implementation that you only want exact matches. If
-         * an exact match can't be found, boost::none will be returned and the resulting
-         * position of the cursor is unspecified.
-         *
-         * This will not accept a KeyString with a Discriminator other than kInclusive. Since
-         * keys are not stored with Discriminators, an exact match would never be found.
-         *
-         * Unlike the previous method, this one will return IndexKeyEntry if an exact match is
-         * found.
-         */
-        virtual boost::optional<IndexKeyEntry> seekExact(const KeyString::Value& keyString,
-                                                         RequestedInfo parts = kKeyAndLoc) = 0;
-
         //
         // Saving and restoring state
         //
@@ -357,21 +343,26 @@ public:
         virtual void restore() = 0;
 
         /**
-         * Detaches from the OperationContext and releases any storage-engine state.
-         *
-         * It is only legal to call this when in a "saved" state. While in the "detached" state, it
-         * is only legal to call reattachToOperationContext or the destructor. It is not legal to
-         * call detachFromOperationContext() while already in the detached state.
+         * Detaches from the OperationContext. Releases storage-engine resources, unless
+         * setSaveStorageCursorOnDetachFromOperationContext() has been set to true.
          */
         virtual void detachFromOperationContext() = 0;
 
         /**
-         * Reattaches to the OperationContext and reacquires any storage-engine state.
+         * Reattaches to the OperationContext and reacquires any storage-engine state if necessary.
          *
-         * It is only legal to call this in the "detached" state. On return, the cursor is left in a
-         * "saved" state, so callers must still call restoreState to use this object.
+         * It is only legal to call this in the "detached" state. On return, the cursor may still
+         * be a "saved" state if there was a prior call to save(). In this case, callers must still
+         * call restore() to use this object.
          */
         virtual void reattachToOperationContext(OperationContext* opCtx) = 0;
+
+        /**
+         * Toggles behavior on whether to give up the underlying storage cursor (and any record
+         * pointed to by it) on detachFromOperationContext(). This supports the query layer
+         * retaining valid and positioned cursors across commands.
+         */
+        virtual void setSaveStorageCursorOnDetachFromOperationContext(bool) = 0;
     };
 
     /**

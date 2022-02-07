@@ -113,6 +113,32 @@ TEST_F(StorageEngineTest, LoadCatalogDropsOrphansAfterUncleanShutdown) {
     ASSERT(!collectionExists(opCtx.get(), collNs));
 }
 
+TEST_F(StorageEngineTest, TemporaryRecordStoreClustered) {
+    auto opCtx = cc().makeOperationContext();
+
+    Lock::GlobalLock lk(&*opCtx, MODE_IS);
+
+    const auto trs = makeTemporaryClustered(opCtx.get());
+    ASSERT(trs.get());
+    const auto rs = trs->rs();
+    ASSERT(identExists(opCtx.get(), rs->getIdent()));
+
+    // Insert record with RecordId of KeyFormat::String.
+    const auto id = StringData{"1"};
+    const auto rid = RecordId(id.rawData(), id.size());
+    const auto data = "data";
+    WriteUnitOfWork wuow(opCtx.get());
+    StatusWith<RecordId> s = rs->insertRecord(opCtx.get(), rid, data, strlen(data), Timestamp());
+    ASSERT_TRUE(s.isOK());
+    ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
+    wuow.commit();
+
+    // Read the record back.
+    RecordData rd;
+    ASSERT_TRUE(rs->findRecord(opCtx.get(), rid, &rd));
+    ASSERT_EQ(0, memcmp(data, rd.data(), strlen(data)));
+}
+
 TEST_F(StorageEngineTest, ReconcileDropsTemporary) {
     auto opCtx = cc().makeOperationContext();
 
@@ -220,7 +246,7 @@ TEST_F(StorageEngineTimestampMonitorTest, TemporaryRecordStoreKeep) {
 TEST_F(StorageEngineTest, ReconcileUnfinishedIndex) {
     auto opCtx = cc().makeOperationContext();
 
-    Lock::GlobalLock lk(&*opCtx, MODE_IS);
+    Lock::GlobalLock lk(&*opCtx, MODE_IX);
 
     const NamespaceString ns("db.coll1");
     const std::string indexName("a_1");
@@ -259,7 +285,7 @@ TEST_F(StorageEngineTest, ReconcileUnfinishedIndex) {
 TEST_F(StorageEngineTest, ReconcileUnfinishedBackgroundSecondaryIndex) {
     auto opCtx = cc().makeOperationContext();
 
-    Lock::GlobalLock lk(&*opCtx, MODE_IS);
+    Lock::GlobalLock lk(&*opCtx, MODE_IX);
 
     const NamespaceString ns("db.coll1");
     const std::string indexName("a_1");
@@ -301,7 +327,7 @@ TEST_F(StorageEngineTest, ReconcileUnfinishedBackgroundSecondaryIndex) {
 TEST_F(StorageEngineTest, ReconcileTwoPhaseIndexBuilds) {
     auto opCtx = cc().makeOperationContext();
 
-    Lock::GlobalLock lk(&*opCtx, MODE_IS);
+    Lock::GlobalLock lk(&*opCtx, MODE_IX);
 
     const NamespaceString ns("db.coll1");
     const std::string indexA("a_1");
@@ -656,9 +682,12 @@ TEST_F(StorageEngineDurableTest, UseAlternateStorageLocation) {
 
     LOGV2(5781102, "Starting up storage engine in alternate location");
     const auto oldPath = storageGlobalParams.dbpath;
-    storageGlobalParams.dbpath = boost::filesystem::path(oldPath).append(".alternate").string();
-    boost::filesystem::create_directory(storageGlobalParams.dbpath);
-    auto lastShutdownState = reinitializeStorageEngine(opCtx.get(), StorageEngineInitFlags{});
+    const auto newPath = boost::filesystem::path(oldPath).append(".alternate").string();
+    boost::filesystem::create_directory(newPath);
+    auto lastShutdownState =
+        reinitializeStorageEngine(opCtx.get(), StorageEngineInitFlags{}, [&newPath] {
+            storageGlobalParams.dbpath = newPath;
+        });
     getGlobalServiceContext()->getStorageEngine()->notifyStartupComplete();
     LOGV2(5781103, "Started up storage engine in alternate location");
     ASSERT(StorageEngine::LastShutdownState::kClean == lastShutdownState);
@@ -673,8 +702,10 @@ TEST_F(StorageEngineDurableTest, UseAlternateStorageLocation) {
     ASSERT_TRUE(collectionExists(opCtx.get(), coll2Ns));
 
     LOGV2(5781104, "Starting up storage engine in original location");
-    storageGlobalParams.dbpath = oldPath;
-    lastShutdownState = reinitializeStorageEngine(opCtx.get(), StorageEngineInitFlags{});
+    lastShutdownState =
+        reinitializeStorageEngine(opCtx.get(), StorageEngineInitFlags{}, [&oldPath] {
+            storageGlobalParams.dbpath = oldPath;
+        });
     getGlobalServiceContext()->getStorageEngine()->notifyStartupComplete();
     ASSERT(StorageEngine::LastShutdownState::kClean == lastShutdownState);
     StorageEngineTest::_storageEngine = getServiceContext()->getStorageEngine();

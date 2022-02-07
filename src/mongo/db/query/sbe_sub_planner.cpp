@@ -41,6 +41,10 @@ namespace mongo::sbe {
 CandidatePlans SubPlanner::plan(
     std::vector<std::unique_ptr<QuerySolution>> solutions,
     std::vector<std::pair<std::unique_ptr<PlanStage>, stage_builder::PlanStageData>> roots) {
+    tassert(5842900,
+            "Lowering parts of aggregation pipeline into SBE isn't supported with sub-planning",
+            _cq.pipeline().empty());
+
     std::function<mongo::PlanCacheKey(const CanonicalQuery& cq, const CollectionPtr& coll)>
         createPlanCacheKey = [](const CanonicalQuery& cq, const CollectionPtr& coll) {
             return plan_cache_key_factory::make<mongo::PlanCacheKey>(cq, coll);
@@ -121,7 +125,7 @@ CandidatePlans SubPlanner::plan(
 
 CandidatePlans SubPlanner::planWholeQuery() const {
     // Use the query planning module to plan the whole query.
-    auto statusWithMultiPlanSolns = QueryPlanner::planForMultiPlanner(_cq, _queryParams);
+    auto statusWithMultiPlanSolns = QueryPlanner::plan(_cq, _queryParams);
     auto solutions = uassertStatusOK(std::move(statusWithMultiPlanSolns));
 
     // Only one possible plan. Build the stages from the solution.

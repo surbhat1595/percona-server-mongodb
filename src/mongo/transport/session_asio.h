@@ -54,6 +54,7 @@
 namespace mongo::transport {
 
 extern FailPoint transportLayerASIOshortOpportunisticReadWrite;
+extern FailPoint transportLayerASIOSessionPauseBeforeSetSocketOption;
 
 template <typename SuccessValue>
 auto futurize(const std::error_code& ec, SuccessValue&& successValue) {
@@ -134,6 +135,10 @@ public:
 
     bool isConnected() override;
 
+    bool isFromLoadBalancer() const override {
+        return _isFromLoadBalancer;
+    }
+
 #ifdef MONGO_CONFIG_SSL
     const SSLConfiguration* getSSLConfiguration() const override;
 
@@ -163,6 +168,7 @@ protected:
 private:
     GenericSocket& getSocket();
 
+    ExecutorFuture<void> parseProxyProtocolHeader(const ReactorHandle& reactor);
     Future<Message> sourceMessageImpl(const BatonHandle& baton = nullptr);
 
     template <typename MutableBufferSequence>
@@ -254,6 +260,9 @@ private:
 
     TransportLayerASIO* const _tl;
     bool _isIngressSession;
+    bool _isFromLoadBalancer = false;
+    boost::optional<SockAddr> _proxiedSrcEndpoint;
+    boost::optional<SockAddr> _proxiedDstEndpoint;
 };
 
 }  // namespace mongo::transport

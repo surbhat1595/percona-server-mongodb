@@ -8,12 +8,14 @@ env.Library(
     target='timeseries_options',
     source=[
         'timeseries.idl',
+        'timeseries_global_options.cpp',
         'timeseries_options.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/idl/server_parameter',
+        '$BUILD_DIR/mongo/util/processinfo'
     ],
 )
 
@@ -21,7 +23,7 @@ env.Library(
     target='bucket_catalog',
     source=[
         'bucket_catalog.cpp',
-        'minmax.cpp',
+        'flat_bson.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/database_holder',
@@ -43,6 +45,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/bson/util/bson_column',
+        '$BUILD_DIR/mongo/util/fail_point',
     ]
 )
 
@@ -86,6 +89,24 @@ env.Library(
         '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
         '$BUILD_DIR/mongo/db/storage/storage_options',
+        'timeseries_options',
+    ],
+)
+
+env.Library(
+    target='timeseries_collmod',
+    source=[
+        'timeseries_collmod.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
+        '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/exec/bucket_unpacker',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        'catalog_helper',
+        'timeseries_conversion_util',
         'timeseries_options',
     ],
 )

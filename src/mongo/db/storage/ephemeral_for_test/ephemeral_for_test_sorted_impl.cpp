@@ -518,14 +518,13 @@ public:
                                                 RequestedInfo parts = kKeyAndLoc) override;
     virtual boost::optional<KeyStringEntry> seekForKeyString(
         const KeyString::Value& keyStringValue) override;
-    virtual boost::optional<KeyStringEntry> seekExactForKeyString(
-        const KeyString::Value& keyStringValue) override;
-    virtual boost::optional<IndexKeyEntry> seekExact(const KeyString::Value& keyStringValue,
-                                                     RequestedInfo) override;
     virtual void save() override;
     virtual void restore() override;
     virtual void detachFromOperationContext() override;
     virtual void reattachToOperationContext(OperationContext* opCtx) override;
+    void setSaveStorageCursorOnDetachFromOperationContext(bool) override {
+        // Noop for EFT, since we always keep the cursor's contents valid across save/restore.
+    }
 
 private:
     // CRTP Interface
@@ -790,52 +789,6 @@ boost::optional<KeyStringEntry> CursorBase<CursorImpl>::seekForKeyString(
     _lastMoveWasRestore = false;
     _atEOF = false;
     return seekAfterProcessing(keyStringValue);
-}
-
-template <class CursorImpl>
-boost::optional<KeyStringEntry> CursorBase<CursorImpl>::seekExactForKeyString(
-    const KeyString::Value& keyStringValue) {
-    advanceSnapshotIfChanged();
-
-    dassert(KeyString::decodeDiscriminator(keyStringValue.getBuffer(),
-                                           keyStringValue.getSize(),
-                                           _order,
-                                           keyStringValue.getTypeBits()) ==
-            KeyString::Discriminator::kInclusive);
-    auto ksEntry = seekForKeyString(keyStringValue);
-    if (!ksEntry) {
-        return {};
-    }
-    auto sizeWithoutRecordId = KeyFormat::Long == _keyFormat
-        ? KeyString::sizeWithoutRecordIdLongAtEnd(ksEntry->keyString.getBuffer(),
-                                                  ksEntry->keyString.getSize())
-        : KeyString::sizeWithoutRecordIdStrAtEnd(ksEntry->keyString.getBuffer(),
-                                                 ksEntry->keyString.getSize());
-    if (KeyString::compare(ksEntry->keyString.getBuffer(),
-                           keyStringValue.getBuffer(),
-                           sizeWithoutRecordId,
-                           keyStringValue.getSize()) == 0) {
-        return KeyStringEntry(ksEntry->keyString, ksEntry->loc);
-    }
-    return {};
-}
-
-template <class CursorImpl>
-boost::optional<IndexKeyEntry> CursorBase<CursorImpl>::seekExact(
-    const KeyString::Value& keyStringValue, RequestedInfo parts) {
-    auto ksEntry = seekExactForKeyString(keyStringValue);
-    if (!ksEntry) {
-        return {};
-    }
-
-    BSONObj bson;
-    if (parts & SortedDataInterface::Cursor::kWantKey) {
-        bson = KeyString::toBson(ksEntry->keyString.getBuffer(),
-                                 ksEntry->keyString.getSize(),
-                                 _order,
-                                 ksEntry->keyString.getTypeBits());
-    }
-    return IndexKeyEntry(std::move(bson), ksEntry->loc);
 }
 
 template <class CursorImpl>
@@ -1397,9 +1350,9 @@ SortedDataInterfaceUnique::SortedDataInterfaceUnique(const Ordering& ordering, S
     _KSForIdentEnd = createRadixKeyWithoutLocFromObj(BSONObj(), _identEnd, _ordering);
 }
 
-Status SortedDataInterfaceUnique::insert(OperationContext* opCtx,
-                                         const KeyString::Value& keyString,
-                                         bool dupsAllowed) {
+StatusWith<bool> SortedDataInterfaceUnique::insert(OperationContext* opCtx,
+                                                   const KeyString::Value& keyString,
+                                                   bool dupsAllowed) {
     StringStore* workingCopy(RecoveryUnit::get(opCtx)->getHead());
     RecordId loc = decodeRecordId(keyString, rsKeyFormat());
 
@@ -1416,7 +1369,7 @@ Status SortedDataInterfaceUnique::insert(OperationContext* opCtx,
         auto added = data.add(loc, keyString.getTypeBits());
         if (!added) {
             // Already indexed
-            return Status::OK();
+            return false;
         }
 
         workingCopy->update({std::move(key), *added});
@@ -1425,7 +1378,7 @@ Status SortedDataInterfaceUnique::insert(OperationContext* opCtx,
         workingCopy->insert({std::move(key), *data.add(loc, keyString.getTypeBits())});
     }
     RecoveryUnit::get(opCtx)->makeDirty();
-    return Status::OK();
+    return true;
 }
 
 void SortedDataInterfaceUnique::unindex(OperationContext* opCtx,
@@ -1525,6 +1478,33 @@ bool SortedDataInterfaceBase::isEmpty(OperationContext* opCtx) {
                                  workingCopy->upper_bound(_KSForIdentEnd)) == 0;
 }
 
+boost::optional<RecordId> SortedDataInterfaceBase::findLoc(
+    OperationContext* opCtx, const KeyString::Value& keyStringValue) const {
+    dassert(KeyString::decodeDiscriminator(keyStringValue.getBuffer(),
+                                           keyStringValue.getSize(),
+                                           _ordering,
+                                           keyStringValue.getTypeBits()) ==
+            KeyString::Discriminator::kInclusive);
+    auto cursor = newCursor(opCtx);
+    auto ksEntry = cursor->seekForKeyString(keyStringValue);
+    if (!ksEntry) {
+        return boost::none;
+    }
+
+    auto sizeWithoutRecordId = KeyFormat::Long == _rsKeyFormat
+        ? KeyString::sizeWithoutRecordIdLongAtEnd(ksEntry->keyString.getBuffer(),
+                                                  ksEntry->keyString.getSize())
+        : KeyString::sizeWithoutRecordIdStrAtEnd(ksEntry->keyString.getBuffer(),
+                                                 ksEntry->keyString.getSize());
+    if (KeyString::compare(ksEntry->keyString.getBuffer(),
+                           keyStringValue.getBuffer(),
+                           sizeWithoutRecordId,
+                           keyStringValue.getSize()) == 0) {
+        return ksEntry->loc;
+    }
+    return boost::none;
+}
+
 std::unique_ptr<mongo::SortedDataInterface::Cursor> SortedDataInterfaceUnique::newCursor(
     OperationContext* opCtx, bool isForward) const {
     return std::make_unique<CursorUnique>(opCtx,
@@ -1593,9 +1573,9 @@ SortedDataInterfaceStandard::SortedDataInterfaceStandard(const Ordering& orderin
     _KSForIdentEnd = createMinRadixKeyFromObj(BSONObj(), _identEnd, _ordering);
 }
 
-Status SortedDataInterfaceStandard::insert(OperationContext* opCtx,
-                                           const KeyString::Value& keyString,
-                                           bool dupsAllowed) {
+StatusWith<bool> SortedDataInterfaceStandard::insert(OperationContext* opCtx,
+                                                     const KeyString::Value& keyString,
+                                                     bool dupsAllowed) {
     StringStore* workingCopy(RecoveryUnit::get(opCtx)->getHead());
     RecordId loc = decodeRecordId(keyString, rsKeyFormat());
 
@@ -1605,7 +1585,7 @@ Status SortedDataInterfaceStandard::insert(OperationContext* opCtx,
             .second;
     if (inserted)
         RecoveryUnit::get(opCtx)->makeDirty();
-    return Status::OK();
+    return inserted;
 }
 
 void SortedDataInterfaceStandard::unindex(OperationContext* opCtx,

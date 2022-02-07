@@ -106,6 +106,7 @@ env.Library(
         'variables.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/bson/dotted_path_support',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
@@ -114,6 +115,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/stats/counters',
+        '$BUILD_DIR/mongo/db/update/pattern_cmp',
         '$BUILD_DIR/mongo/scripting/scripting',
         '$BUILD_DIR/mongo/scripting/scripting_common',
         '$BUILD_DIR/mongo/util/intrusive_counter',
@@ -281,6 +283,7 @@ pipelineEnv.Library(
         'document_source_documents.cpp',
         'document_source_exchange.cpp',
         'document_source_facet.cpp',
+        'document_source_fill.cpp',
         'document_source_find_and_modify_image_lookup.cpp',
         'document_source_geo_near.cpp',
         'document_source_graph_lookup.cpp',
@@ -360,6 +363,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/sessions_collection',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
         '$BUILD_DIR/mongo/db/storage/encryption_hooks',
+        '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/update/update_document_diff',
         '$BUILD_DIR/mongo/db/views/resolved_view',
@@ -431,6 +435,7 @@ env.Library(
         'document_source_change_stream.idl',
         'document_source_coll_stats.idl',
         'document_source_densify.idl',
+        'document_source_fill.idl',
         'document_source_list_sessions.idl',
         'document_source_merge.idl',
         'document_source_merge_modes.idl',
@@ -467,6 +472,23 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/storage_interface',
         '$BUILD_DIR/mongo/util/periodic_runner',
         'change_stream_preimage',
+    ]
+)
+
+env.Library(
+    target='change_stream_pre_image_helpers',
+    source=[
+        'change_stream_pre_image_helpers.cpp'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/service_context',
+        'change_stream_preimage',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog_raii',
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager_defs',
+        '$BUILD_DIR/mongo/db/dbhelpers',
+        '$BUILD_DIR/mongo/db/namespace_string',
     ]
 )
 

@@ -679,6 +679,10 @@ public:
             return p().transactionOperations;
         }
 
+        size_t getNumberOfPrePostImagesToWriteForTest() const {
+            return p().numberOfPrePostImagesToWrite;
+        }
+
         const Locker* getTxnResourceStashLockerForTest() const {
             invariant(o().txnResourceStash);
             return o().txnResourceStash->locker();
@@ -1007,8 +1011,9 @@ private:
         // Total size in bytes of all operations within the _transactionOperations vector.
         size_t transactionOperationBytes{0};
 
-        // Number of operations that have pre-images to be written to noop oplog entries.
-        size_t numberOfPreImagesToWrite{0};
+        // Number of operations that have pre-images or post-images to be written to noop oplog
+        // entries or the image collection.
+        size_t numberOfPrePostImagesToWrite{0};
 
         // The autocommit setting of this transaction. Should always be false for multi-statement
         // transaction. Currently only needed for diagnostics reporting.

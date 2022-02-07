@@ -54,14 +54,68 @@ assert.commandFailedWithCode(db.runCommand({
 }),
                              ErrorCodes.BadValue);
 
+// Tries to modify a non-existent collection.
+assert.commandFailedWithCode(db.runCommand({
+    collMod: collName + '_missing',
+    index: {keyPattern: {a: 1}, unique: true},
+}),
+                             ErrorCodes.NamespaceNotFound);
+
 // Conversion should fail when there are existing duplicates.
 assert.commandWorked(coll.insert({_id: 1, a: 100}));
 assert.commandWorked(coll.insert({_id: 2, a: 100}));
-const duplicateKeyError = assert.commandFailedWithCode(
+const cannotEnableIndexConstraintError = assert.commandFailedWithCode(
     db.runCommand({collMod: collName, index: {keyPattern: {a: 1}, unique: true}}),
-    ErrorCodes.DuplicateKey);
-jsTestLog('Duplicate key error from failed conversion: ' + tojson(duplicateKeyError));
+    ErrorCodes.CannotEnableIndexConstraint);
+jsTestLog('Cannot enable index constraint error from failed conversion: ' +
+          tojson(cannotEnableIndexConstraintError));
+
 assert.commandWorked(coll.remove({_id: 2}));
+
+//
+// Dry-run mode tests.
+//
+
+// Currently, support for dry run mode should be limited to unique conversion.
+assert.commandFailedWithCode(db.runCommand({
+    collMod: collName,
+    index: {keyPattern: {a: 1}, hidden: true},
+    dryRun: true,
+}),
+                             ErrorCodes.InvalidOptions);
+assert.commandFailedWithCode(db.runCommand({
+    collMod: collName,
+    validationLevel: 'off',
+    dryRun: true,
+}),
+                             ErrorCodes.InvalidOptions);
+
+// Unique may not be combined with any other modification in dry run mode.
+assert.commandFailedWithCode(db.runCommand({
+    collMod: collName,
+    index: {keyPattern: {a: 1}, hidden: true, unique: true},
+    dryRun: true,
+}),
+                             ErrorCodes.InvalidOptions);
+assert.commandFailedWithCode(db.runCommand({
+    collMod: collName,
+    index: {keyPattern: {a: 1}, unique: true},
+    validationLevel: 'off',
+    dryRun: true,
+}),
+                             ErrorCodes.InvalidOptions);
+
+// Conversion should not update the catalog in dry run mode.
+assert.commandWorked(
+    db.runCommand({collMod: collName, index: {keyPattern: {a: 1}, unique: true}, dryRun: true}));
+assert.eq(countUnique({a: 1}), 0, 'index should not be unique: ' + tojson(coll.getIndexes()));
+
+// Conversion should report errors if there are duplicates.
+assert.commandWorked(coll.insert({_id: 3, a: 100}));
+assert.commandFailedWithCode(
+    db.runCommand({collMod: collName, index: {keyPattern: {a: 1}, unique: true}, dryRun: true}),
+    ErrorCodes.CannotEnableIndexConstraint);
+assert.commandWorked(coll.remove({_id: 3}));
 
 // Successfully converts to a unique index.
 const result = assert.commandWorked(

@@ -90,6 +90,9 @@ namespace mongo {
 MONGO_FAIL_POINT_DEFINE(skipUnindexingDocumentWhenDeleted);
 MONGO_FAIL_POINT_DEFINE(skipIndexNewRecords);
 
+// This failpoint causes the check for TTL indexes on capped collections to be ignored.
+MONGO_FAIL_POINT_DEFINE(ignoreTTLIndexCappedCollectionCheck);
+
 using std::endl;
 using std::string;
 using std::unique_ptr;
@@ -325,6 +328,18 @@ StatusWith<BSONObj> IndexCatalogImpl::prepareSpecForCreate(
     }
 
     auto validatedSpec = swValidatedAndFixed.getValue();
+
+    // Check whether this is a TTL index being created on a capped collection.
+    // TODO SERVER-61545 The feature compatibility version check in this if statement can be removed
+    // once 6.0 is LTS.
+    if (collection && collection->isCapped() &&
+        validatedSpec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName) &&
+        ((!serverGlobalParams.featureCompatibility.isVersionInitialized()) ||
+         serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
+             multiversion::FeatureCompatibilityVersion::kVersion_5_2)) &&
+        MONGO_likely(!ignoreTTLIndexCappedCollectionCheck.shouldFail())) {
+        return {ErrorCodes::CannotCreateIndex, "Cannot create TTL index on a capped collection"};
+    }
 
     // Check whether this is a non-_id index and there are any settings disallowing this server
     // from building non-_id indexes.
@@ -1104,12 +1119,9 @@ Status IndexCatalogImpl::dropUnfinishedIndex(OperationContext* opCtx,
 namespace {
 class IndexRemoveChange final : public RecoveryUnit::Change {
 public:
-    IndexRemoveChange(IndexCatalogEntryContainer* entries,
-                      std::shared_ptr<IndexCatalogEntry> entry,
+    IndexRemoveChange(std::shared_ptr<IndexCatalogEntry> entry,
                       SharedCollectionDecorations* collectionDecorations)
-        : _entries(entries),
-          _entry(std::move(entry)),
-          _collectionDecorations(collectionDecorations) {}
+        : _entry(std::move(entry)), _collectionDecorations(collectionDecorations) {}
 
     void commit(boost::optional<Timestamp> commitTime) final {
         _entry->setDropped();
@@ -1125,7 +1137,6 @@ public:
     }
 
 private:
-    IndexCatalogEntryContainer* _entries;
     std::shared_ptr<IndexCatalogEntry> _entry;
     SharedCollectionDecorations* _collectionDecorations;
 };
@@ -1145,12 +1156,12 @@ Status IndexCatalogImpl::dropIndexEntry(OperationContext* opCtx,
     if (released) {
         invariant(released.get() == entry);
         opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
-            &_readyIndexes, std::move(released), collection->getSharedDecorations()));
+            std::move(released), collection->getSharedDecorations()));
     } else {
         released = _buildingIndexes.release(entry->descriptor());
         invariant(released.get() == entry);
         opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
-            &_buildingIndexes, std::move(released), collection->getSharedDecorations()));
+            std::move(released), collection->getSharedDecorations()));
     }
 
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
@@ -1337,7 +1348,7 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     auto oldEntry = _readyIndexes.release(oldDesc);
     invariant(oldEntry);
     opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
-        &_readyIndexes, std::move(oldEntry), collection->getSharedDecorations()));
+        std::move(oldEntry), collection->getSharedDecorations()));
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
         .unregisterIndex(indexName);
 
@@ -1455,8 +1466,7 @@ Status IndexCatalogImpl::_indexFilteredRecords(OperationContext* opCtx,
                                        keys.get(),
                                        multikeyMetadataKeys.get(),
                                        multikeyPaths.get(),
-                                       bsonRecord.id,
-                                       IndexAccessMethod::kNoopOnSuppressedErrorFn);
+                                       bsonRecord.id);
 
         Status status = _indexKeys(opCtx,
                                    coll,
@@ -1629,8 +1639,7 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
                                    keys.get(),
                                    nullptr,
                                    nullptr,
-                                   loc,
-                                   IndexAccessMethod::kNoopOnSuppressedErrorFn);
+                                   loc);
 
     // Tests can enable this failpoint to produce index corruption scenarios where an index has
     // extra keys.

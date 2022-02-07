@@ -202,7 +202,8 @@ env.Library(
 env.Library(
     target='collection',
     source=[
-        "collection.cpp",
+        'collection.cpp',
+        'collection_operation_source.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -409,6 +410,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/bson/util/bson_column',
         '$BUILD_DIR/mongo/db/catalog/index_key_validate',
         '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
         '$BUILD_DIR/mongo/db/curop',
@@ -463,6 +465,8 @@ env.Library(
         'capped_utils.cpp',
         'coll_mod.cpp',
         'coll_mod_index.cpp',
+        'coll_mod_op_observer.cpp',
+        'coll_mod_write_ops_tracker.cpp',
         "collection_compact.cpp",
         'create_collection.cpp',
         'drop_collection.cpp',
@@ -485,6 +489,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/views/views',
         '$BUILD_DIR/mongo/db/write_ops',
+        'cannot_enable_index_constraint_info',
         'clustered_collection_options',
         'collection',
         'collection_options',
@@ -502,11 +507,11 @@ env.Library(
     source=[
         "$BUILD_DIR/mongo/db/query/collection_query_info.cpp",
         "$BUILD_DIR/mongo/db/query/collection_index_usage_tracker_decoration.cpp",
-        "$BUILD_DIR/mongo/db/query/plan_cache_invalidator.cpp",
         "$BUILD_DIR/mongo/db/query/plan_cache_key_factory.cpp",
         "$BUILD_DIR/mongo/db/query/query_settings_decoration.cpp",
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/query_plan_cache',
         '$BUILD_DIR/mongo/db/query/query_planner',
         '$BUILD_DIR/mongo/db/update_index_data',
     ],
@@ -545,6 +550,16 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
         'catalog_helpers',
+    ],
+)
+
+env.Library(
+    target='cannot_enable_index_constraint_info',
+    source=[
+        'cannot_enable_index_constraint_info.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
     ],
 )
 

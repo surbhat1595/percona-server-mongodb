@@ -36,12 +36,13 @@
 #include <algorithm>
 #include <vector>
 
-#include "mongo/base/owned_pointer_vector.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/bson/dotted_path_support.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_query_noop.h"
 #include "mongo/db/fts/fts_spec.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_text.h"
@@ -211,11 +212,68 @@ bool isOplogTsLowerBoundPred(const mongo::MatchExpression* me) {
 }
 
 /**
+ * Helper function that checks to see if min() or max() were provided along with the query. If so,
+ * adjusts the collection scan bounds to fit the constraints.
+ */
+void handleRIDRangeMinMax(const CanonicalQuery& query, CollectionScanNode* collScan) {
+    BSONObj minObj = query.getFindCommandRequest().getMin();
+    BSONObj maxObj = query.getFindCommandRequest().getMax();
+    if (minObj.isEmpty() && maxObj.isEmpty()) {
+        return;
+    }
+
+    // If either min() or max() were provided, we can assume they are on the cluster key due to the
+    // following.
+    // (1) min() / max() are only legal when they match the pattern in hint()
+    // (2) Only hint() on a cluster key will generate collection scan rather than an index scan
+    uassert(
+        6137402,
+        "min() / max() are only supported for forward collection scans on clustered collections",
+        collScan->direction == 1);
+
+    boost::optional<RecordId> newMinRecord, newMaxRecord;
+    if (!maxObj.isEmpty()) {
+        // max() is exclusive.
+        // Assumes clustered collection scans are only supported with the forward direction.
+        collScan->boundInclusion =
+            CollectionScanParams::ScanBoundInclusion::kIncludeStartRecordOnly;
+        newMaxRecord = record_id_helpers::keyForElem(maxObj.firstElement());
+    }
+
+    if (!minObj.isEmpty()) {
+        // The min() is inclusive as are bounded collection scans by default.
+        newMinRecord = record_id_helpers::keyForElem(minObj.firstElement());
+    }
+
+    if (!collScan->minRecord) {
+        collScan->minRecord = newMinRecord;
+    } else if (newMinRecord) {
+        if (*newMinRecord > *collScan->minRecord) {
+            // The newMinRecord is more restrictive than the existing minRecord.
+            collScan->minRecord = newMinRecord;
+        }
+    }
+
+    if (!collScan->maxRecord) {
+        collScan->maxRecord = newMaxRecord;
+    } else if (newMaxRecord) {
+        if (*newMaxRecord < *collScan->maxRecord) {
+            // The newMaxRecord is more restrictive than the existing maxRecord.
+            collScan->maxRecord = newMaxRecord;
+        }
+    }
+}
+
+/**
  * Helper function to add an RID range to collection scans.
  * If the query solution tree contains a collection scan node with a suitable comparison
  * predicate on '_id', we add a minRecord and maxRecord on the collection node.
  */
-void handleRIDRangeScan(const MatchExpression* conjunct, CollectionScanNode* collScan) {
+void handleRIDRangeScan(const MatchExpression* conjunct,
+                        CollectionScanNode* collScan,
+                        const QueryPlannerParams& params) {
+    invariant(params.clusteredInfo);
+
     if (conjunct == nullptr) {
         return;
     }
@@ -223,12 +281,14 @@ void handleRIDRangeScan(const MatchExpression* conjunct, CollectionScanNode* col
     auto* andMatchPtr = dynamic_cast<const AndMatchExpression*>(conjunct);
     if (andMatchPtr != nullptr) {
         for (size_t index = 0; index < andMatchPtr->numChildren(); index++) {
-            handleRIDRangeScan(andMatchPtr->getChild(index), collScan);
+            handleRIDRangeScan(andMatchPtr->getChild(index), collScan, params);
         }
         return;
     }
 
-    if (conjunct->path() != "_id") {
+    if (conjunct->path() !=
+        clustered_util::getClusterKeyFieldName(params.clusteredInfo->getIndexSpec())) {
+        // No match on the cluster key.
         return;
     }
 
@@ -274,11 +334,11 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     csn->shouldWaitForOplogVisibility =
         params.options & QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
 
-    // If the hint is {$natural: +-1} this changes the direction of the collection scan.
     const BSONObj& hint = query.getFindCommandRequest().getHint();
     if (!hint.isEmpty()) {
         BSONElement natural = hint[query_request_helper::kNaturalSortField];
         if (natural) {
+            // If the hint is {$natural: +-1} this changes the direction of the collection scan.
             csn->direction = natural.safeNumberInt() >= 0 ? 1 : -1;
         }
     }
@@ -341,8 +401,10 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
                 csn->assertTsHasNotFallenOffOplog);
     }
 
-    if (params.allowRIDRange && !csn->resumeAfterRecordId) {
-        handleRIDRangeScan(csn->filter.get(), csn.get());
+    if (params.clusteredInfo && !csn->resumeAfterRecordId) {
+        // This is a clustered collection. Attempt to perform an efficient, bounded collection scan
+        // via minRecord and maxRecord if applicable.
+        handleRIDRangeScan(csn->filter.get(), csn.get(), params);
     }
 
     return csn;
@@ -985,20 +1047,32 @@ bool isCoveredNullQuery(const CanonicalQuery& query,
                         IndexTag* tag,
                         const vector<IndexEntry>& indices,
                         const QueryPlannerParams& params) {
-    // We are only interested in queries checking for an indexed field equalling null.
-    // This optimization can only be done when the index is not multikey, otherwise empty arrays
-    // in the collection will be treated as null/undefined by the index. Additionally,
-    // sparse indexes and hashed indexes should not use this optimization as they will require a
+    // Sparse indexes and hashed indexes should not use this optimization as they will require a
     // FETCH stage with a filter.
-    if (indices[tag->index].multikey || indices[tag->index].sparse ||
-        indices[tag->index].type == IndexType::INDEX_HASHED ||
-        !ComparisonMatchExpressionBase::isEquality(root->matchType())) {
+    if (indices[tag->index].sparse || indices[tag->index].type == IndexType::INDEX_HASHED) {
         return false;
     }
 
-    // Check if the query is looking for null values.
-    const auto node = static_cast<const ComparisonMatchExpressionBase*>(root);
-    if (node->getData().type() != BSONType::jstNULL) {
+    // When the index is not multikey, we can support a query on an indexed field searching for null
+    // values. This optimization can only be done when the index is not multikey, otherwise empty
+    // arrays in the collection will be treated as null/undefined by the index. When the index is
+    // multikey, we can support a query searching for both null and empty array values.
+    const auto multikeyIndex = indices[tag->index].multikey;
+    if (root->matchType() == MatchExpression::MatchType::MATCH_IN) {
+        // Check that the query matches null values, if the index is not multikey, or null and empty
+        // array values, if the index is multikey. Note that the query may match values other than
+        // null (and empty array).
+        const auto node = static_cast<const InMatchExpression*>(root);
+        if (!node->hasNull() || (multikeyIndex && !node->hasEmptyArray())) {
+            return false;
+        }
+    } else if (ComparisonMatchExpressionBase::isEquality(root->matchType()) && !multikeyIndex) {
+        // Check that the query matches null values.
+        const auto node = static_cast<const ComparisonMatchExpressionBase*>(root);
+        if (node->getData().type() != BSONType::jstNULL) {
+            return false;
+        }
+    } else {
         return false;
     }
 
@@ -1010,8 +1084,8 @@ bool isCoveredNullQuery(const CanonicalQuery& query,
 
     // This optimization can only be used for find when the index covers the projection completely.
     // However, if the indexed field is in the projection, the index may return an incorrect value
-    // for the field, since it does not distinguish between null and undefined. Hence, only find
-    // queries projecting _id are covered.
+    // for the field, since it does not distinguish between null and undefined (and the empty list,
+    // in the multikey case). Hence, only find queries projecting _id are covered.
     auto proj = query.getProj();
     if (!proj) {
         return false;

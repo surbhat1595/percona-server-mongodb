@@ -73,10 +73,12 @@ public:
 
     ThreadPool::Limits getThreadPoolLimits() const final;
 
-    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(
+    void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialStateDoc,
         const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) final;
+
+    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialStateDoc) final;
 
     /**
      * Sends an abort to all tenant migration instances on this recipient.
@@ -145,6 +147,11 @@ public:
          *  Returns the migration protocol.
          */
         const MigrationProtocolEnum& getProtocol() const;
+
+        /*
+         * Returns the recipient document state
+         */
+        const TenantMigrationRecipientDocument getState() const;
 
         /**
          * To be called on the instance returned by PrimaryOnlyService::getOrCreate(). Returns an
@@ -443,11 +450,24 @@ public:
         Future<void> _startTenantAllDatabaseCloner(WithLock lk);
 
         /*
+         * Advances the stableTimestamp to be >= startApplyingDonorOpTime by:
+         * 1. Advancing the clusterTime to startApplyingDonorOpTime
+         * 2. Writing a no-op oplog entry with ts > startApplyingDonorOpTime
+         * 3. Waiting for the majority commit timestamp to be the time of the no-op write
+         */
+        SemiFuture<void> _advanceStableTimestampToStartApplyingDonorOpTime();
+
+        /*
          * Gets called when the cloner completes cloning data successfully.
          * And, it is responsible to populate the 'dataConsistentStopDonorOpTime'
          * and 'cloneFinishedRecipientOpTime' fields in the state doc.
          */
         SemiFuture<void> _onCloneSuccess();
+
+        /*
+         * For protocol "shard merge", revert copied files to a consistent snapshot.
+         */
+        SemiFuture<void> _rollbackToStable();
 
         /*
          * Returns a future that will be fulfilled when the tenant migration reaches consistent

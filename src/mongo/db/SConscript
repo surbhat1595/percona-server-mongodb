@@ -75,12 +75,24 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/cannot_enable_index_constraint_info',
         '$BUILD_DIR/mongo/db/index_names',
         '$BUILD_DIR/mongo/db/repl/tenant_migration_errors',
         '$BUILD_DIR/mongo/db/write_concern_options',
         'process_health_feature_flag',
         'shutdown_in_progress_quiesce_info',
     ]
+)
+
+env.Library(
+    target='multitenancy',
+    source=[
+        'multitenancy.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        'auth/security_token',
+    ],
 )
 
 env.Library(
@@ -809,6 +821,27 @@ env.Library(
 )
 
 env.Library(
+    target='transaction_api',
+    source=[
+        'transaction_api.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/auth',
+        '$BUILD_DIR/mongo/db/query/command_request_response',
+        '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/rpc/command_status',
+        '$BUILD_DIR/mongo/rpc/rpc',
+        '$BUILD_DIR/mongo/transport/service_entry_point',
+        'logical_session_id',
+        'logical_session_id_helpers',
+        'repl/repl_coordinator_interface',
+        'service_context',
+        'shared_request_handling',
+        'write_ops',
+    ],
+)
+
+env.Library(
     target='dbdirectclient',
     source=[
         'dbdirectclient.cpp',
@@ -932,6 +965,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/commit_quorum_options',
         '$BUILD_DIR/mongo/db/catalog/import_collection_oplog_entry',
+        '$BUILD_DIR/mongo/db/pipeline/change_stream_pre_image_helpers',
         'dbhelpers',
         'internal_transactions_feature_flag',
         'repl/image_collection_entry',
@@ -1337,7 +1371,6 @@ env.Library(
         'query/sbe_cached_solution_planner.cpp',
         'query/sbe_multi_planner.cpp',
         'query/sbe_plan_ranker.cpp',
-        'query/sbe_plan_cache.cpp',
         'query/sbe_runtime_planner.cpp',
         'query/sbe_stage_builder.cpp',
         'query/sbe_stage_builder_accumulator.cpp',
@@ -1347,6 +1380,7 @@ env.Library(
         'query/sbe_stage_builder_index_scan.cpp',
         'query/sbe_stage_builder_projection.cpp',
         'query/sbe_sub_planner.cpp',
+        'query/sbe_utils.cpp',
         'query/shard_filterer_factory_impl.cpp',
         'query/stage_builder_util.cpp',
         'query/wildcard_multikey_paths.cpp',
@@ -1388,6 +1422,7 @@ env.Library(
         'pipeline/pipeline',
         'query/plan_yield_policy',
         'query/query_common',
+        'query/query_plan_cache',
         'query/query_planner',
         'query/sbe_stage_builder_helpers',
         'repl/repl_coordinator_interface',
@@ -2236,7 +2271,7 @@ env.Library(
         'repl/storage_interface_impl',
         'repl/topology_coordinator',
         'rw_concern_d',
-        'serverless/tenant_split_commands',
+        'serverless/shard_split_commands',
         'service_liaison_mongod',
         'sessions_collection_rs',
         'sessions_collection_standalone',
@@ -2338,6 +2373,7 @@ env.Library(
         's/sharding_commands_d',
         's/sharding_runtime_d',
         'serverinit',
+        'serverless/shard_split_donor_service',
         'service_context_d',
         'service_liaison_mongod',
         'sessions_collection_rs',
@@ -2497,6 +2533,7 @@ if wiredtiger:
             'startup_warnings_mongod_test.cpp',
             'thread_client_test.cpp',
             'time_proof_service_test.cpp',
+            'transaction_api_test.cpp',
             'transaction_history_iterator_test.cpp',
             'transaction_participant_retryable_writes_test.cpp',
             'transaction_participant_test.cpp',
@@ -2516,6 +2553,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
             '$BUILD_DIR/mongo/db/catalog/import_collection_oplog_entry',
             '$BUILD_DIR/mongo/db/catalog/index_build_entry_idl',
+            '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
             '$BUILD_DIR/mongo/db/mongohasher',
             '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
             '$BUILD_DIR/mongo/db/query/query_test_service_context',
@@ -2584,6 +2622,7 @@ if wiredtiger:
             'stats/transaction_stats',
             'time_proof_service',
             'transaction',
+            'transaction_api',
             'update_index_data',
             'vector_clock',
             'vector_clock_test_fixture',

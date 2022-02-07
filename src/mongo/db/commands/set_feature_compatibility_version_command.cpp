@@ -36,6 +36,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/collection_catalog_helper.h"
+#include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
@@ -68,11 +69,14 @@
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/session_catalog.h"
+#include "mongo/db/session_txn_record_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/long_collection_names_gen.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
@@ -324,12 +328,13 @@ public:
         if (!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kStart) {
             {
                 boost::optional<MigrationBlockingGuard> drainNewMoveChunks;
-                // Downgrades from a version >= 5.2 to 5.1 or lower must drain new protocol
-                // moveChunks
-                if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection
-                        .isEnabledAndIgnoreFCV() &&
-                    actualVersion > multiversion::FeatureCompatibilityVersion::kVersion_5_1 &&
-                    requestedVersion <= multiversion::FeatureCompatibilityVersion::kVersion_5_1)
+
+                // Drain moveChunks if the actualVersion relies on the new migration protocol but
+                // the requestedVersion uses the old one (downgrading).
+                if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                        actualVersion) &&
+                    !feature_flags::gFeatureFlagMigrationRecipientCriticalSection
+                         .isEnabledOnVersion(requestedVersion))
                     drainNewMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
 
                 // Start transition to 'requestedVersion' by updating the local FCV document to a
@@ -357,18 +362,20 @@ public:
         invariant(!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kComplete);
 
         if (requestedVersion > actualVersion) {
-            _runUpgrade(opCtx, request, changeTimestamp);
+            _runUpgrade(opCtx, actualVersion, request, changeTimestamp);
         } else {
-            _runDowngrade(opCtx, request, changeTimestamp);
+            _runDowngrade(opCtx, actualVersion, request, changeTimestamp);
         }
 
         {
             boost::optional<MigrationBlockingGuard> drainOldMoveChunks;
-            // Upgrades from a version <= 5.1 to 5.2 or greater must drain old protocol moveChunks
-            if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection
-                    .isEnabledAndIgnoreFCV() &&
-                actualVersion <= multiversion::FeatureCompatibilityVersion::kVersion_5_1 &&
-                requestedVersion > multiversion::FeatureCompatibilityVersion::kVersion_5_1)
+
+            // Drain moveChunks if the actualVersion relies on the old migration protocol but the
+            // requestedVersion uses the new one (upgrading).
+            if (!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                    actualVersion) &&
+                feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                    requestedVersion))
                 drainOldMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
 
             // Complete transition by updating the local FCV document to the fully upgraded or
@@ -391,8 +398,10 @@ public:
 
 private:
     void _runUpgrade(OperationContext* opCtx,
+                     mongo::multiversion::FeatureCompatibilityVersion originalVersion,
                      const SetFeatureCompatibilityVersion& request,
                      boost::optional<Timestamp> changeTimestamp) {
+        const auto requestedVersion = request.getCommandParameter();
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-1 of setFCV
@@ -475,9 +484,11 @@ private:
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
 
             // TODO: Remove once FCV 6.0 becomes last-lts
-            const auto requestedVersion = request.getCommandParameter();
-            if (requestedVersion >= multiversion::FeatureCompatibilityVersion::kVersion_5_1) {
-                ShardingCatalogManager::get(opCtx)->upgradeMetadataTo51Phase2(opCtx);
+            if (!feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
+                    originalVersion) &&
+                feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
+                    requestedVersion)) {
+                ShardingCatalogManager::get(opCtx)->enableSupportForLongCollectionName(opCtx);
             }
 
             // Always abort the reshardCollection regardless of version to ensure that it will run
@@ -486,13 +497,24 @@ private:
             abortAllReshardCollection(opCtx);
         }
 
+        // Create the pre-images collection if the feature flag is enabled on the requested version.
+        // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
+        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledOnVersion(
+                requestedVersion)) {
+            createChangeStreamPreImagesCollection(opCtx);
+        }
+
         hangWhileUpgrading.pauseWhileSet(opCtx);
     }
 
     void _runDowngrade(OperationContext* opCtx,
+                       mongo::multiversion::FeatureCompatibilityVersion originalVersion,
                        const SetFeatureCompatibilityVersion& request,
                        boost::optional<Timestamp> changeTimestamp) {
         const auto requestedVersion = request.getCommandParameter();
+        const bool preImagesFeatureFlagDisabledOnDowngradeVersion =
+            !feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledOnVersion(
+                requestedVersion);
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-1 of setFCV
@@ -528,6 +550,16 @@ private:
                     dbName,
                     MODE_X,
                     [&](const CollectionPtr& collection) {
+                        // Fail to downgrade if there exists a collection with
+                        // 'changeStreamPreAndPostImages' enabled.
+                        // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
+                        uassert(ErrorCodes::CannotDowngrade,
+                                str::stream() << "Cannot downgrade the cluster as collection "
+                                              << collection->ns()
+                                              << " has 'changeStreamPreAndPostImages' enabled",
+                                preImagesFeatureFlagDisabledOnDowngradeVersion &&
+                                    !collection->isChangeStreamPreAndPostImagesEnabled());
+
                         invariant(collection->getTimeseriesOptions());
 
                         auto indexCatalog = collection->getIndexCatalog();
@@ -599,9 +631,70 @@ private:
                         return true;
                     },
                     [&](const CollectionPtr& collection) {
-                        return collection->getTimeseriesOptions() != boost::none;
+                        // TODO SERVER-61770: Remove 'changeStreamPreAndPostImages' check once
+                        // FCV 6.0 becomes last-lts.
+                        return collection->getTimeseriesOptions() != boost::none ||
+                            (preImagesFeatureFlagDisabledOnDowngradeVersion &&
+                             collection->isChangeStreamPreAndPostImagesEnabled());
                     });
             }
+
+            // Drop the pre-images collection if 'changeStreamPreAndPostImages' feature flag is not
+            // enabled on the downgrade version.
+            // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
+            if (preImagesFeatureFlagDisabledOnDowngradeVersion) {
+                DropReply dropReply;
+                const auto deletionStatus =
+                    dropCollection(opCtx,
+                                   NamespaceString::kChangeStreamPreImagesNamespace,
+                                   &dropReply,
+                                   DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops);
+                uassert(6023700,
+                        str::stream() << "Failed to drop the change stream pre-images collection"
+                                      << causedBy(deletionStatus.reason()),
+                        deletionStatus.isOK() ||
+                            deletionStatus.code() == ErrorCodes::NamespaceNotFound);
+            }
+        }
+
+        {
+
+            LOGV2(5876100, "Starting removal of internal sessions from config.transactions.");
+
+            // Due to the possibility that the shell or drivers have implicit sessions enabled, we
+            // cannot write to the config.transactions collection while we're in a session. So we
+            // construct a temporary client to as a work around.
+            auto newClient = opCtx->getServiceContext()->makeClient("InternalSessionsCleanup");
+
+            {
+                stdx::lock_guard<Client> lk(*newClient.get());
+                newClient->setSystemOperationKillableByStepdown(lk);
+            }
+
+            AlternativeClientRegion acr(newClient);
+
+            auto setFcvCancellationThreadPool([] {
+                ThreadPool::Options options;
+                options.poolName = "SetFcvDowngradeCancellableOpCtxPool";
+                options.minThreads = 1;
+                options.maxThreads = 1;
+
+                auto threadPool = std::make_shared<ThreadPool>(std::move(options));
+                threadPool->startup();
+                return threadPool;
+            }());
+
+            CancelableOperationContextFactory factory(opCtx->getCancellationToken(),
+                                                      setFcvCancellationThreadPool);
+
+            // We use a CancelableOperationContext in order to stop cleanup if the original opCtx
+            // has been interrupted.
+            auto newOpCtxPtr = factory.makeOperationContext(&cc());
+            auto newOpCtx = newOpCtxPtr.get();
+
+            _cleanupInternalSessions(newOpCtx);
+
+            LOGV2(5876101, "Completed removal of internal sessions from config.transactions.");
         }
 
         uassert(ErrorCodes::Error(549181),
@@ -624,8 +717,11 @@ private:
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
 
             // TODO: Remove once FCV 6.0 becomes last-lts
-            if (requestedVersion < multiversion::FeatureCompatibilityVersion::kVersion_5_1) {
-                ShardingCatalogManager::get(opCtx)->downgradeMetadataToPre51Phase2(opCtx);
+            if (feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
+                    originalVersion) &&
+                !feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
+                    requestedVersion)) {
+                ShardingCatalogManager::get(opCtx)->disableSupportForLongCollectionName(opCtx);
             }
         }
 
@@ -665,6 +761,132 @@ private:
                                               kTenantMigrationRecipientServiceName));
             recipientService->abortAllMigrations(opCtx);
         }
+    }
+
+    /**
+     * Removes all child sessions from the config.transactions collection and updates the parent
+     * sessions to have the highest txnNumber of either itself or its child sessions.
+     */
+    void _cleanupInternalSessions(OperationContext* opCtx) {
+        _updateSessionDocuments(opCtx, _constructParentLsidToTxnNumberMap(opCtx));
+        _deleteChildSessionDocuments(opCtx);
+    }
+
+    /**
+     * Constructs a map consisting of a mapping between the parent session and the highest
+     * txnNumber of its child sessions.
+     */
+    LogicalSessionIdMap<TxnNumber> _constructParentLsidToTxnNumberMap(OperationContext* opCtx) {
+        DBDirectClient client(opCtx);
+
+        LogicalSessionIdMap<TxnNumber> parentLsidToTxnNum;
+        auto projection = BSON("_id" << 1 << "parentLsid" << 1);
+        auto cursor = client.query(NamespaceString::kSessionTransactionsTableNamespace,
+                                   BSON("parentLsid" << BSON("$exists" << true)),
+                                   {},
+                                   0,
+                                   0,
+                                   &projection);
+
+        while (cursor->more()) {
+            auto doc = cursor->next();
+            auto lsid = LogicalSessionId::parse(
+                IDLParserErrorContext("parse lsid for session document modification"),
+                doc.getField("_id").Obj());
+            auto parentLsid = LogicalSessionId::parse(
+                IDLParserErrorContext("parse parentLsid for session document modification"),
+                doc.getField("parentLsid").Obj());
+            auto txnNum = lsid.getTxnNumber();
+            if (auto it = parentLsidToTxnNum.find(parentLsid); it != parentLsidToTxnNum.end()) {
+                it->second = std::max(*txnNum, it->second);
+            } else {
+                parentLsidToTxnNum[parentLsid] = *txnNum;
+            }
+        }
+
+        return parentLsidToTxnNum;
+    }
+
+    /**
+     * Update each parent session's txnNumber to the highest txnNumber seen for that session
+     * (including child sessions). We do this to account for the case where a child session
+     * ran a transaction with a higher txnNumber than the last recorded txnNumber for a
+     * parent session. The parent session should know what the most recent txnNumber sent by
+     * the driver is.
+     */
+    void _updateSessionDocuments(OperationContext* opCtx,
+                                 const LogicalSessionIdMap<TxnNumber>& parentLsidToTxnNum) {
+        DBDirectClient client(opCtx);
+        write_ops::UpdateCommandRequest updateOp(
+            NamespaceString::kSessionTransactionsTableNamespace);
+        std::vector<write_ops::UpdateOpEntry> updates;
+        for (const auto& [lsid, txnNumber] : parentLsidToTxnNum) {
+            SessionTxnRecord modifiedDoc;
+            bool parentSessionExists = false;
+            auto cursor = client.query(NamespaceString::kSessionTransactionsTableNamespace,
+                                       BSON("_id" << lsid.toBSON()));
+            if ((parentSessionExists = cursor->more())) {
+                modifiedDoc = SessionTxnRecord::parse(
+                    IDLParserErrorContext("parse transaction document to modify"), cursor->next());
+
+                // We do not want to override the transaction state of a parent session with a
+                // greater txnNumber than that of its child sessions.
+                if (modifiedDoc.getTxnNum() > txnNumber) {
+                    continue;
+                }
+            }
+
+            // Upsert a new transaction document for a parent session if it doesn't already
+            // exist in the config.transactions collection.
+            if (!parentSessionExists) {
+                modifiedDoc.setSessionId(lsid);
+            }
+
+            modifiedDoc.setLastWriteDate(Date_t::now());
+            modifiedDoc.setTxnNum(txnNumber);
+
+            // We set this timestamp to ensure that retry attempts fail with
+            // IncompleteTransactionHistory. This is to stop us from double applying an
+            // operation.
+            modifiedDoc.setLastWriteOpTime(repl::OpTime(Timestamp(1, 0), 1));
+
+            write_ops::UpdateOpEntry updateEntry;
+            updateEntry.setQ(BSON("_id" << lsid.toBSON()));
+            updateEntry.setU(
+                write_ops::UpdateModification::parseFromClassicUpdate(modifiedDoc.toBSON()));
+            updateEntry.setUpsert(true);
+            updates.push_back(updateEntry);
+
+            if (updates.size() == write_ops::kMaxWriteBatchSize) {
+                updateOp.setUpdates(updates);
+                auto response = client.runCommand(updateOp.serialize({}));
+                uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
+                updates.clear();
+            }
+        }
+
+        if (updates.size() > 0) {
+            updateOp.setUpdates(updates);
+            auto response = client.runCommand(updateOp.serialize({}));
+            uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
+        }
+    }
+
+    /**
+     * Delete the remaining child sessions from the config.transactions collection.
+     */
+    void _deleteChildSessionDocuments(OperationContext* opCtx) {
+        DBDirectClient client(opCtx);
+
+        write_ops::DeleteCommandRequest deleteOp(
+            NamespaceString::kSessionTransactionsTableNamespace);
+        write_ops::DeleteOpEntry deleteEntry;
+        deleteEntry.setQ(BSON("_id.txnUUID" << BSON("$exists" << true)));
+        deleteEntry.setMulti(true);
+        deleteOp.setDeletes({deleteEntry});
+
+        auto response = client.runCommand(deleteOp.serialize({}));
+        uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
     }
 
 } setFeatureCompatibilityVersionCommand;

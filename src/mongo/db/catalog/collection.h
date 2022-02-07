@@ -97,8 +97,8 @@ struct CollectionUpdateArgs {
     bool preImageRecordingEnabledForCollection = false;
     bool changeStreamPreAndPostImagesEnabledForCollection = false;
 
-    // Set if an OpTime was reserved for the update ahead of time.
-    boost::optional<OplogSlot> oplogSlot = boost::none;
+    // Set if OpTimes were reserved for the update ahead of time.
+    std::vector<OplogSlot> oplogSlots;
 };
 
 /**
@@ -817,7 +817,7 @@ public:
 
     // Function for the implementation on how we load a new Collection pointer when restoring from
     // yield
-    using RestoreFn = std::function<const Collection*(OperationContext*, CollectionUUID)>;
+    using RestoreFn = std::function<const Collection*(OperationContext*, UUID)>;
 
     CollectionPtr();
 

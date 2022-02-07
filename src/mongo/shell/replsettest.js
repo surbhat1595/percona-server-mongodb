@@ -2434,12 +2434,10 @@ var ReplSetTest = function(opts) {
 
                 const dbHashes = rst.getHashes(dbName, secondaries);
                 const primaryDBHash = dbHashes.primary;
-                // The `config.image_collection` is not necessarily consistent after an initial
-                // sync. It's guaranteed to be eventually consistent. However, tests that initial
-                // sync concurrently with retryable findAndModify statements cannot make this
-                // assumption.
-                // TODO SERVER-60238: remove system.preimages check when replication to secondaries
-                // is implemented.
+                // The `config.preimages` is not necessarily consistent at any time, but it is
+                // guaranteed to be eventually consistent.
+                // TODO SERVER-61564: remove "system.preimages" exception according to the decision
+                // made if deletes of pre-images are explicitly replicated.
                 const primaryCollections =
                     Object.keys(primaryDBHash.collections).filter((x) => x !== "system.preimages");
                 assert.commandWorked(primaryDBHash);
@@ -3338,17 +3336,19 @@ var ReplSetTest = function(opts) {
         self.nodeOptions = nodeOptions;
     }
 
+    // If opts is passed in as a string, let it pass unmodified since strings are pass-by-value.
+    // if it is an object, though, pass in a deep copy.
     if (typeof opts === 'string' || opts instanceof String) {
         retryOnNetworkError(function() {
             // The primary may unexpectedly step down during startup if under heavy load
             // and too slowly processing heartbeats. When it steps down, it closes all of
             // its connections.
             _constructFromExistingSeedNode(opts);
-        }, 120);
+        }, ReplSetTest.kDefaultRetries);
     } else if (typeof opts.rstArgs === "object") {
-        _constructFromExistingNodes(opts.rstArgs);
+        _constructFromExistingNodes(Object.extend({}, opts.rstArgs, true));
     } else {
-        _constructStartNewInstances(opts);
+        _constructStartNewInstances(Object.extend({}, opts, true));
     }
 
     /**
@@ -3376,6 +3376,7 @@ var ReplSetTest = function(opts) {
  *  Global default timeout (10 minutes).
  */
 ReplSetTest.kDefaultTimeoutMS = 10 * 60 * 1000;
+ReplSetTest.kDefaultRetries = 240;
 
 /**
  *  Global default number that's effectively infinite.

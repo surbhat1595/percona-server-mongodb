@@ -37,13 +37,13 @@ class OpObserverNoop : public OpObserver {
 public:
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
-                       CollectionUUID uuid,
+                       const UUID& uuid,
                        BSONObj indexDoc,
                        bool fromMigrate) override {}
 
     void onStartIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
-                           CollectionUUID collUUID,
+                           const UUID& collUUID,
                            const UUID& indexBuildUUID,
                            const std::vector<BSONObj>& indexes,
                            bool fromMigrate) override {}
@@ -56,14 +56,14 @@ public:
 
     void onCommitIndexBuild(OperationContext* opCtx,
                             const NamespaceString& nss,
-                            CollectionUUID collUUID,
+                            const UUID& collUUID,
                             const UUID& indexBuildUUID,
                             const std::vector<BSONObj>& indexes,
                             bool fromMigrate) override {}
 
     void onAbortIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
-                           CollectionUUID collUUID,
+                           const UUID& collUUID,
                            const UUID& indexBuildUUID,
                            const std::vector<BSONObj>& indexes,
                            const Status& cause,
@@ -78,6 +78,7 @@ public:
     void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) override{};
     void aboutToDelete(OperationContext* opCtx,
                        const NamespaceString& nss,
+                       const UUID& uuid,
                        const BSONObj& doc) override {}
     void onDelete(OperationContext* opCtx,
                   const NamespaceString& nss,
@@ -86,7 +87,7 @@ public:
                   const OplogDeleteEntryArgs& args) override {}
     void onInternalOpMessage(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             OptionalCollectionUUID uuid,
+                             const boost::optional<UUID>& uuid,
                              const BSONObj& msgObj,
                              const boost::optional<BSONObj> o2MsgObj,
                              const boost::optional<repl::OpTime> preImageOpTime,
@@ -124,7 +125,7 @@ public:
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
                             const UUID& uuid,
-                            OptionalCollectionUUID dropTargetUUID,
+                            const boost::optional<UUID>& dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp) override {}
     void onImportCollection(OperationContext* opCtx,
@@ -140,7 +141,7 @@ public:
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
                                      const UUID& uuid,
-                                     OptionalCollectionUUID dropTargetUUID,
+                                     const boost::optional<UUID>& dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp) override {
         return {};
@@ -149,7 +150,7 @@ public:
                               const NamespaceString& fromCollection,
                               const NamespaceString& toCollection,
                               const UUID& uuid,
-                              OptionalCollectionUUID dropTargetUUID,
+                              const boost::optional<UUID>& dropTargetUUID,
                               bool stayTemp) override {}
     void onApplyOps(OperationContext* opCtx,
                     const std::string& dbName,
@@ -159,7 +160,7 @@ public:
                        const UUID& uuid) override {}
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
                                        std::vector<repl::ReplOperation>* statements,
-                                       size_t numberOfPreImagesToWrite) override {}
+                                       size_t numberOfPrePostImagesToWrite) override {}
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
         OplogSlot commitOplogEntryOpTime,
@@ -168,7 +169,7 @@ public:
     void onTransactionPrepare(OperationContext* opCtx,
                               const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>* statements,
-                              size_t numberOfPreImagesToWrite) override{};
+                              size_t numberOfPrePostImagesToWrite) override{};
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) override{};
     void onMajorityCommitPointUpdate(ServiceContext* service,

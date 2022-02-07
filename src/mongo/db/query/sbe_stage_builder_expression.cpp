@@ -387,6 +387,7 @@ public:
     void visit(const ExpressionSetUnion* expr) final {}
     void visit(const ExpressionSize* expr) final {}
     void visit(const ExpressionReverseArray* expr) final {}
+    void visit(const ExpressionSortArray* expr) final {}
     void visit(const ExpressionSlice* expr) final {}
     void visit(const ExpressionIsArray* expr) final {}
     void visit(const ExpressionRound* expr) final {}
@@ -617,6 +618,7 @@ public:
     void visit(const ExpressionSetUnion* expr) final {}
     void visit(const ExpressionSize* expr) final {}
     void visit(const ExpressionReverseArray* expr) final {}
+    void visit(const ExpressionSortArray* expr) final {}
     void visit(const ExpressionSlice* expr) final {}
     void visit(const ExpressionIsArray* expr) final {}
     void visit(const ExpressionRound* expr) final {}
@@ -2572,6 +2574,35 @@ public:
         _context->pushExpr(
             sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(exprRevArr)));
     }
+
+    void visit(const ExpressionSortArray* expr) final {
+        auto frameId = _context->state.frameId();
+        auto binds = sbe::makeEs(_context->popExpr());
+        sbe::EVariable inputRef{frameId, 0};
+
+        auto [specTag, specVal] = makeValue(expr->getSortPattern());
+        auto specConstant = makeConstant(specTag, specVal);
+
+        auto collatorSlot = _context->state.env->getSlotIfExists("collator"_sd);
+
+        auto argumentIsNotArray = makeNot(makeFunction("isArray", inputRef.clone()));
+        auto exprSortArr = buildMultiBranchConditional(
+            CaseValuePair{generateNullOrMissing(inputRef),
+                          makeConstant(sbe::value::TypeTags::Null, 0)},
+            CaseValuePair{std::move(argumentIsNotArray),
+                          sbe::makeE<sbe::EFail>(ErrorCodes::Error{6096700},
+                                                 "$sortArray input argument must be an array")},
+            collatorSlot ? makeFunction("sortArray",
+                                        inputRef.clone(),
+                                        std::move(specConstant),
+                                        makeVariable(*collatorSlot))
+                         : makeFunction("sortArray", inputRef.clone(), std::move(specConstant)));
+
+
+        _context->pushExpr(
+            sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(exprSortArr)));
+    }
+
     void visit(const ExpressionSlice* expr) final {
         unsupportedExpression(expr->getOpName());
     }

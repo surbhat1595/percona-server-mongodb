@@ -27,6 +27,8 @@
 
 global:
     cpp_namespace: "mongo"
+    cpp_includes:
+        - "mongo/db/timeseries/timeseries_global_options.h"
 
 imports:
     - "mongo/idl/basic_types.idl"
@@ -47,12 +49,10 @@ server_parameters:
         default: 128000 # 125KB
         validator: { gte: 1 }
     "timeseriesIdleBucketExpiryMemoryUsageThreshold":
-        description: "The threshold for bucket catalog memory usage above which idle buckets will be
-                      expired"
+        description: "The threshold in bytes for bucket catalog memory usage above which idle
+                      buckets will be expired"
         set_at: [ startup, runtime ]
-        cpp_vartype: "AtomicWord<std::int32_t>"
-        cpp_varname: "gTimeseriesIdleBucketExpiryMemoryUsageThreshold"
-        default:  104857600 # 100MB
+        cpp_varname: "gTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes"
         validator: { gte: 1 }
     "timeseriesIdleBucketExpiryMaxCountPerAttempt":
         description: "The maximum number of buckets that may be closed due to expiry at each attempt"
@@ -82,18 +82,31 @@ structs:
                               documents must have this field, and the field must be of the BSON UTC
                               datetime type (0x9)"
                 type: string
+                unstable: false
             metaField:
                 description: "The name of the top-level field describing the series. This field is
                               used to group related data and may be of any BSON type. This may not 
                               be \"_id\" or the same as 'timeField'."
                 type: string
                 optional: true
+                unstable: false
             granularity:
                 description: "Describes the expected interval between subsequent measurements"
                 type: BucketGranularity
                 default: Seconds
+                unstable: false
             bucketMaxSpanSeconds:
                 description: "The maximum range of time values for a bucket, in seconds"
                 type: safeInt
                 optional: true
                 validator: { gte: 1 }
+                unstable: false
+
+    CollModTimeseries:
+        description: "A type representing the adjustable options on timeseries collections"
+        strict: true
+        fields:
+            granularity:
+                optional: true
+                type: BucketGranularity
+                unstable: false

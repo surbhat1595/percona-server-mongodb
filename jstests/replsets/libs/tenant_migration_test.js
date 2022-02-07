@@ -33,7 +33,8 @@ function TenantMigrationTest({
     sharedOptions = {},
     // Default this to true so it is easier for data consistency checks.
     allowStaleReadsOnDonor = true,
-    initiateRstWithHighElectionTimeout = true
+    initiateRstWithHighElectionTimeout = true,
+    quickGarbageCollection = false,
 }) {
     const donorPassedIn = (donorRst !== undefined);
     const recipientPassedIn = (recipientRst !== undefined);
@@ -42,7 +43,11 @@ function TenantMigrationTest({
     const migrationCertificates = TenantMigrationUtil.makeMigrationCertificatesForTest();
 
     const nodes = sharedOptions.nodes || 2;
-    let setParameterOpts = sharedOptions.setParameter || {};
+    const setParameterOpts = sharedOptions.setParameter || {};
+    if (quickGarbageCollection) {
+        setParameterOpts.tenantMigrationGarbageCollectionDelayMS = 3 * 1000;
+        setParameterOpts.ttlMonitorSleepSecs = 3;
+    }
 
     donorRst = donorPassedIn ? donorRst : performSetUp(true /* isDonor */);
     recipientRst = recipientPassedIn ? recipientRst : performSetUp(false /* isDonor */);
@@ -138,14 +143,22 @@ function TenantMigrationTest({
      *
      * Returns the result of the last 'donorStartMigration' command executed.
      */
-    this.waitForMigrationToComplete = function(migrationOpts, retryOnRetryableErrors = false) {
+    this.waitForMigrationToComplete = function(
+        migrationOpts, retryOnRetryableErrors = false, forgetMigration = false) {
         // Assert that the migration has already been started.
         const tenantId = migrationOpts.tenantId;
         assert(this.getDonorPrimary()
                    .getCollection(TenantMigrationTest.kConfigDonorsNS)
                    .findOne({tenantId}));
-        return this.runDonorStartMigration(
+
+        const donorStartReply = this.runDonorStartMigration(
             migrationOpts, true /* waitForMigrationToComplete */, retryOnRetryableErrors);
+        if (!forgetMigration) {
+            return donorStartReply;
+        }
+
+        this.forgetMigration(migrationOpts.migrationIdString, retryOnRetryableErrors);
+        return donorStartReply;
     };
 
     /**
@@ -283,12 +296,11 @@ function TenantMigrationTest({
             const configDonorsColl = node.getCollection(TenantMigrationTest.kConfigDonorsNS);
             assert.soon(() => 0 === configDonorsColl.count({_id: migrationId}), tojson(node));
 
-            let mtabs;
+            let mtab;
             assert.soon(() => {
-                mtabs = assert.commandWorked(node.adminCommand({serverStatus: 1}))
-                            .tenantMigrationAccessBlocker;
-                return !mtabs || !mtabs[tenantId];
-            }, tojson(mtabs));
+                mtab = this.getTenantMigrationAccessBlocker({donorNode: node, tenantId});
+                return !mtab;
+            }, tojson(mtab));
         });
 
         recipientNodes.forEach(node => {
@@ -334,9 +346,8 @@ function TenantMigrationTest({
         const expectedAccessState = (expectedState === TenantMigrationTest.State.kCommitted)
             ? TenantMigrationTest.DonorAccessState.kReject
             : TenantMigrationTest.DonorAccessState.kAborted;
-        const mtabs =
-            assert.commandWorked(node.adminCommand({serverStatus: 1})).tenantMigrationAccessBlocker;
-        return (mtabs[tenantId].donor.state === expectedAccessState);
+        const mtab = this.getTenantMigrationAccessBlocker({donorNode: node, tenantId});
+        return (mtab.donor.state === expectedAccessState);
     };
 
     /**
@@ -376,9 +387,8 @@ function TenantMigrationTest({
             return false;
         }
 
-        const mtabs =
-            assert.commandWorked(node.adminCommand({serverStatus: 1})).tenantMigrationAccessBlocker;
-        return (mtabs[tenantId].recipient.state === expectedAccessState);
+        const mtab = this.getTenantMigrationAccessBlocker({recipientNode: node, tenantId});
+        return (mtab.recipient.state === expectedAccessState);
     };
 
     function loadDummyData() {
@@ -452,12 +462,11 @@ function TenantMigrationTest({
     };
 
     /**
-     * Returns the TenantMigrationAccessBlocker associated with the given tenantId on the
-     * node.
+     * Returns the TenantMigrationAccessBlocker serverStatus output for the migration or shard merge
+     * for the given node.
      */
-    this.getTenantMigrationAccessBlocker = function(node, tenantId) {
-        return assert.commandWorked(node.adminCommand({serverStatus: 1}))
-            .tenantMigrationAccessBlocker[tenantId];
+    this.getTenantMigrationAccessBlocker = function(obj) {
+        return TenantMigrationUtil.getTenantMigrationAccessBlocker(obj);
     };
 
     /**

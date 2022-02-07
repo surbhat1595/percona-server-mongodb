@@ -39,7 +39,7 @@
 #include "mongo/db/index/index_access_method.h"
 
 namespace mongo::sbe {
-IndexScanStage::IndexScanStage(CollectionUUID collUuid,
+IndexScanStage::IndexScanStage(UUID collUuid,
                                StringData indexName,
                                bool forward,
                                boost::optional<value::SlotId> recordSlot,
@@ -185,6 +185,10 @@ void IndexScanStage::doSaveState(bool relinquishCursor) {
         }
     }
 
+    if (_cursor) {
+        _cursor->setSaveStorageCursorOnDetachFromOperationContext(!relinquishCursor);
+    }
+
     _coll.reset();
 }
 
@@ -237,8 +241,10 @@ void IndexScanStage::doDetachFromTrialRunTracker() {
     _tracker = nullptr;
 }
 
-void IndexScanStage::doAttachToTrialRunTracker(TrialRunTracker* tracker) {
+PlanStage::TrialRunTrackerAttachResultMask IndexScanStage::doAttachToTrialRunTracker(
+    TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) {
     _tracker = tracker;
+    return childrenAttachResult | TrialRunTrackerAttachResultFlags::AttachedToStreamingStage;
 }
 
 void IndexScanStage::open(bool reOpen) {

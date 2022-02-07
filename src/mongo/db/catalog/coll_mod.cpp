@@ -38,6 +38,7 @@
 
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/coll_mod_index.h"
+#include "mongo/db/catalog/coll_mod_write_ops_tracker.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/index_catalog.h"
@@ -63,12 +64,14 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/version/releases.h"
+#include "mongo/util/visit_helper.h"
 
 namespace mongo {
 
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAfterDatabaseLock);
+MONGO_FAIL_POINT_DEFINE(hangAfterCollModIndexUniqueSideWriteTracker);
 
 void assertMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
     Lock::DBLock dblock(opCtx, nss.db(), MODE_IS);
@@ -101,19 +104,15 @@ void assertMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const&
 }
 
 struct ParsedCollModRequest {
-    // Internal fields of this 'cmdObj' are referenced by BSONElement fields here
-    // and ParsedCollModIndexRequest.
-    BSONObj cmdObj;  // owned
     ParsedCollModIndexRequest indexRequest;
-    BSONElement clusteredIndexExpireAfterSeconds = {};
-    BSONElement viewPipeLine = {};
-    BSONElement timeseries = {};
     std::string viewOn = {};
     boost::optional<Collection::Validator> collValidator;
     boost::optional<ValidationActionEnum> collValidationAction;
     boost::optional<ValidationLevelEnum> collValidationLevel;
     bool recordPreImages = false;
     boost::optional<ChangeStreamPreAndPostImagesOptions> changeStreamPreAndPostImagesOptions;
+    int numModifications = 0;
+    bool dryRun = false;
 };
 
 StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
@@ -127,15 +126,17 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
 
     ParsedCollModRequest cmr;
 
-    cmr.cmdObj = cmd.toBSON(BSONObj());
-    for (const auto& e : cmr.cmdObj) {
+    auto cmdObj = cmd.toBSON(BSONObj());
+    for (const auto& e : cmdObj) {
         const auto fieldName = e.fieldNameStringData();
         if (isGenericArgument(fieldName)) {
             continue;  // Don't add to oplog builder.
         } else if (fieldName == "collMod") {
             // no-op
         } else if (fieldName == "index" && !isView) {
-            BSONObj indexObj = e.Obj();
+            auto cmrIndex = &cmr.indexRequest;
+            cmrIndex->indexObj = e.Obj().getOwned();
+            const auto& indexObj = cmrIndex->indexObj;
             StringData indexName;
             BSONObj keyPattern;
 
@@ -175,7 +176,6 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 keyPattern = keyPatternElem.embeddedObject();
             }
 
-            auto cmrIndex = &cmr.indexRequest;
             cmrIndex->indexExpireAfterSeconds = indexObj["expireAfterSeconds"];
             cmrIndex->indexHidden = indexObj["hidden"];
             cmrIndex->indexUnique = indexObj["unique"];
@@ -265,6 +265,7 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             if (!cmrIndex->indexExpireAfterSeconds.eoo()) {
+                cmr.numModifications++;
                 BSONElement oldExpireSecs = cmrIndex->idx->infoObj().getField("expireAfterSeconds");
                 if (oldExpireSecs.eoo()) {
                     if (cmrIndex->idx->isIdIndex()) {
@@ -283,6 +284,7 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             if (cmrIndex->indexHidden) {
+                cmr.numModifications++;
                 // Hiding a hidden index or unhiding a visible index should be treated as a no-op.
                 if (cmrIndex->idx->hidden() == cmrIndex->indexHidden.booleanSafe()) {
                     // If the collMod includes "expireAfterSeconds", remove the no-op "hidden"
@@ -311,11 +313,13 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             if (cmrIndex->indexUnique) {
+                cmr.numModifications++;
                 if (!cmrIndex->indexUnique.trueValue()) {
                     return Status(ErrorCodes::BadValue, "Cannot make index non-unique");
                 }
             }
         } else if (fieldName == "validator" && !isView && !isTimeseries) {
+            cmr.numModifications++;
             // If the feature compatibility version is not kLatest, and we are validating features
             // as primary, ban the use of new agg features introduced in kLatest to prevent them
             // from being persisted in the catalog.
@@ -336,27 +340,29 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 return cmr.collValidator->getStatus();
             }
         } else if (fieldName == "validationLevel" && !isView && !isTimeseries) {
+            cmr.numModifications++;
             try {
                 cmr.collValidationLevel = ValidationLevel_parse({"validationLevel"}, e.String());
             } catch (const DBException& exc) {
                 return exc.toStatus();
             }
         } else if (fieldName == "validationAction" && !isView && !isTimeseries) {
+            cmr.numModifications++;
             try {
                 cmr.collValidationAction = ValidationAction_parse({"validationAction"}, e.String());
             } catch (const DBException& exc) {
                 return exc.toStatus();
             }
         } else if (fieldName == "pipeline") {
+            cmr.numModifications++;
             if (!isView) {
                 return Status(ErrorCodes::InvalidOptions,
                               "'pipeline' option only supported on a view");
             }
-            if (e.type() != mongo::Array) {
-                return Status(ErrorCodes::InvalidOptions, "not a valid aggregation pipeline");
-            }
-            cmr.viewPipeLine = e;
+            // Access this value through the generated CollMod IDL type.
+            // See CollModRequest::getPipeline().
         } else if (fieldName == "viewOn") {
+            cmr.numModifications++;
             if (!isView) {
                 return Status(ErrorCodes::InvalidOptions,
                               "'viewOn' option only supported on a view");
@@ -366,9 +372,11 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
             cmr.viewOn = e.str();
         } else if (fieldName == "recordPreImages" && !isView && !isTimeseries) {
+            cmr.numModifications++;
             cmr.recordPreImages = e.trueValue();
         } else if (fieldName == CollMod::kChangeStreamPreAndPostImagesFieldName && !isView &&
                    !isTimeseries) {
+            cmr.numModifications++;
             if (e.type() != mongo::Object) {
                 return {ErrorCodes::InvalidOptions,
                         str::stream() << "'" << CollMod::kChangeStreamPreAndPostImagesFieldName
@@ -383,6 +391,7 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 return ex.toStatus();
             }
         } else if (fieldName == "expireAfterSeconds") {
+            cmr.numModifications++;
             if (coll->getRecordStore()->keyFormat() != KeyFormat::String) {
                 return Status(ErrorCodes::InvalidOptions,
                               "'expireAfterSeconds' option is only supported on collections "
@@ -404,15 +413,21 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 uassertStatusOK(index_key_validate::validateExpireAfterSeconds(elemNum));
             }
 
-            cmr.clusteredIndexExpireAfterSeconds = e;
-        } else if (fieldName == "timeseries") {
+            // Access this value through the generated CollMod IDL type.
+            // See CollModRequest::getExpireAfterSeconds().
+        } else if (fieldName == CollMod::kTimeseriesFieldName) {
+            cmr.numModifications++;
             if (!isTimeseries) {
                 return Status(ErrorCodes::InvalidOptions,
                               str::stream() << "option only supported on a time-series collection: "
                                             << fieldName);
             }
 
-            cmr.timeseries = e;
+            // Access the parsed CollModTimeseries through the generated CollMod IDL type.
+        } else if (fieldName == CollMod::kDryRunFieldName) {
+            cmr.dryRun = e.trueValue();
+            // The dry run option should never be included in a collMod oplog entry.
+            continue;
         } else {
             if (isTimeseries) {
                 return Status(ErrorCodes::InvalidOptions,
@@ -435,43 +450,125 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
     return {std::move(cmr)};
 }
 
-void _setClusteredExpireAfterSeconds(OperationContext* opCtx,
-                                     const CollectionOptions& oldCollOptions,
-                                     Collection* coll,
-                                     const BSONElement& clusteredIndexExpireAfterSeconds) {
+void _setClusteredExpireAfterSeconds(
+    OperationContext* opCtx,
+    const CollectionOptions& oldCollOptions,
+    Collection* coll,
+    const stdx::variant<std::string, std::int64_t>& clusteredIndexExpireAfterSeconds) {
     invariant(oldCollOptions.clusteredIndex);
 
     boost::optional<int64_t> oldExpireAfterSeconds = oldCollOptions.expireAfterSeconds;
 
-    if (clusteredIndexExpireAfterSeconds.type() == mongo::String) {
-        const std::string newExpireAfterSeconds = clusteredIndexExpireAfterSeconds.String();
-        invariant(newExpireAfterSeconds == "off");
-        if (!oldExpireAfterSeconds) {
-            // expireAfterSeconds is already disabled on the clustered index.
-            return;
-        }
+    stdx::visit(
+        visit_helper::Overloaded{
+            [&](const std::string& newExpireAfterSeconds) {
+                invariant(newExpireAfterSeconds == "off");
+                if (!oldExpireAfterSeconds) {
+                    // expireAfterSeconds is already disabled on the clustered index.
+                    return;
+                }
 
-        coll->updateClusteredIndexTTLSetting(opCtx, boost::none);
-        return;
+                coll->updateClusteredIndexTTLSetting(opCtx, boost::none);
+            },
+            [&](std::int64_t newExpireAfterSeconds) {
+                if (oldExpireAfterSeconds && *oldExpireAfterSeconds == newExpireAfterSeconds) {
+                    // expireAfterSeconds is already the requested value on the clustered index.
+                    return;
+                }
+
+                // If this collection was not previously TTL, inform the TTL monitor when we commit.
+                if (!oldExpireAfterSeconds) {
+                    auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
+                    opCtx->recoveryUnit()->onCommit([ttlCache, uuid = coll->uuid()](auto _) {
+                        ttlCache->registerTTLInfo(uuid, TTLCollectionCache::ClusteredId());
+                    });
+                }
+
+                invariant(newExpireAfterSeconds >= 0);
+                coll->updateClusteredIndexTTLSetting(opCtx, newExpireAfterSeconds);
+            }},
+        clusteredIndexExpireAfterSeconds);
+}
+
+Status _processCollModDryRunMode(OperationContext* opCtx,
+                                 const NamespaceStringOrUUID& nsOrUUID,
+                                 const CollMod& cmd,
+                                 BSONObjBuilder* result,
+                                 boost::optional<repl::OplogApplication::Mode> mode) {
+    // Ensure that the unique option is specified before validation the rest of the request
+    // and resolving the index descriptor.
+    if (!cmd.getIndex()) {
+        return {ErrorCodes::InvalidOptions, "dry run mode requires an valid index modification."};
+    }
+    if (!cmd.getIndex()->getUnique().value_or(false)) {
+        return {ErrorCodes::InvalidOptions,
+                "dry run mode requires an index modification with unique: true."};
     }
 
-    invariant(clusteredIndexExpireAfterSeconds.type() == mongo::NumberLong);
-    int64_t newExpireAfterSeconds = clusteredIndexExpireAfterSeconds.safeNumberLong();
-    if (oldExpireAfterSeconds && *oldExpireAfterSeconds == newExpireAfterSeconds) {
-        // expireAfterSeconds is already the requested value on the clustered index.
-        return;
+    // A collMod operation with dry run mode requested is not meant for replicated oplog entries.
+    if (mode) {
+        return {ErrorCodes::InvalidOptions,
+                "dry run mode is not applicable to oplog application or applyOps"};
     }
 
-    // If this collection was not previously TTL, inform the TTL monitor when we commit.
-    if (!oldExpireAfterSeconds) {
-        auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
-        opCtx->recoveryUnit()->onCommit([ttlCache, uuid = coll->uuid()](auto _) {
-            ttlCache->registerTTLInfo(uuid, TTLCollectionCache::ClusteredId());
-        });
+    // We do not need write access in dry run mode.
+    AutoGetCollection coll(opCtx, nsOrUUID, MODE_IS);
+    auto nss = coll.getNss();
+
+    // Validate collMod request and look up index descriptor for checking duplicates.
+    BSONObjBuilder oplogEntryBuilderWeDontCareAbout;
+    auto statusW = parseCollModRequest(
+        opCtx, nss, coll.getCollection(), cmd, &oplogEntryBuilderWeDontCareAbout);
+    if (!statusW.isOK()) {
+        return statusW.getStatus();
+    }
+    const auto& cmr = statusW.getValue();
+
+    // The unique option should be set according to the checks at the top of this function.
+    // Any other modification requested should lead to us refusing to run collMod in dry run mode.
+    if (cmr.numModifications > 1) {
+        return {ErrorCodes::InvalidOptions,
+                "unique: true cannot be combined with any other modification in dry run mode."};
     }
 
-    invariant(newExpireAfterSeconds >= 0);
-    coll->updateClusteredIndexTTLSetting(opCtx, newExpireAfterSeconds);
+    // Throws exception if index contains duplicates.
+    scanIndexForDuplicates(opCtx, coll.getCollection(), cmr.indexRequest.idx);
+
+    return Status::OK();
+}
+
+StatusWith<std::unique_ptr<CollModWriteOpsTracker::Token>> _setUpCollModIndexUnique(
+    OperationContext* opCtx, const NamespaceStringOrUUID& nsOrUUID, const CollMod& cmd) {
+    AutoGetCollection coll(opCtx, nsOrUUID, MODE_IS);
+    auto nss = coll.getNss();
+
+    const auto& collection = coll.getCollection();
+    if (!collection) {
+        return Status(ErrorCodes::NamespaceNotFound,
+                      str::stream() << "ns does not exist for unique index conversion: " << nss);
+    }
+
+    // Install side write tracker.
+    auto opsTracker = CollModWriteOpsTracker::get(opCtx->getServiceContext());
+    auto writeOpsToken = opsTracker->startTracking(collection->uuid());
+
+    // Scan index for duplicates without exclusive access.
+    BSONObjBuilder unused;
+    auto statusW = parseCollModRequest(opCtx, nss, collection, cmd, &unused);
+    if (!statusW.isOK()) {
+        return statusW.getStatus();
+    }
+    const auto& cmr = statusW.getValue();
+    auto idx = cmr.indexRequest.idx;
+    scanIndexForDuplicates(opCtx, collection, idx);
+
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(&hangAfterCollModIndexUniqueSideWriteTracker,
+                                                     opCtx,
+                                                     "hangAfterCollModIndexUniqueSideWriteTracker",
+                                                     []() {},
+                                                     nss);
+
+    return std::move(writeOpsToken);
 }
 
 Status _collModInternal(OperationContext* opCtx,
@@ -479,6 +576,23 @@ Status _collModInternal(OperationContext* opCtx,
                         const CollMod& cmd,
                         BSONObjBuilder* result,
                         boost::optional<repl::OplogApplication::Mode> mode) {
+    if (cmd.getDryRun().value_or(false)) {
+        return _processCollModDryRunMode(opCtx, nsOrUUID, cmd, result, mode);
+    }
+
+    // Before acquiring exclusive access to the collection for unique index conversion, we will
+    // track concurrent writes while performing a preliminary index scan here. After we obtain
+    // exclusive access for the actual conversion, we will reconcile the concurrent writes with
+    // the state of the index before updating the catalog.
+    std::unique_ptr<CollModWriteOpsTracker::Token> writeOpsToken;
+    if (cmd.getIndex() && cmd.getIndex()->getUnique().value_or(false) && !mode) {
+        auto statusW = _setUpCollModIndexUnique(opCtx, nsOrUUID, cmd);
+        if (!statusW.isOK()) {
+            return statusW.getStatus();
+        }
+        writeOpsToken = std::move(statusW.getValue());
+    }
+
     AutoGetCollection coll(opCtx, nsOrUUID, MODE_X, AutoGetCollectionViewMode::kViewsPermitted);
     auto nss = coll.getNss();
     StringData dbName = nss.db();
@@ -543,19 +657,21 @@ Status _collModInternal(OperationContext* opCtx,
 
     // Save both states of the ParsedCollModRequest to allow writeConflictRetries.
     ParsedCollModRequest cmrNew = std::move(statusW.getValue());
-    auto viewPipeline = cmrNew.viewPipeLine;
     auto viewOn = cmrNew.viewOn;
-    auto clusteredIndexExpireAfterSeconds = cmrNew.clusteredIndexExpireAfterSeconds;
-    auto ts = cmrNew.timeseries;
+    auto ts = cmd.getTimeseries();
 
     if (!serverGlobalParams.quiet.load()) {
         LOGV2(5324200, "CMD: collMod", "cmdObj"_attr = cmd.toBSON(BSONObj()));
     }
 
-    if (cmrNew.changeStreamPreAndPostImagesOptions.has_value() &&
-        cmrNew.changeStreamPreAndPostImagesOptions->getEnabled()) {
-        // Create pre-images collection if it doesn't already exist.
-        createChangeStreamPreImagesCollection(opCtx);
+    // With exclusive access to the collection, we can take ownership of the modified docs observed
+    // by the side write tracker if a unique index conversion is requested.
+    // This step releases the resources associated with the token and therefore should not be
+    // performed inside the write conflict retry loop.
+    std::unique_ptr<CollModWriteOpsTracker::Docs> docsForUniqueIndex;
+    if (writeOpsToken) {
+        auto opsTracker = CollModWriteOpsTracker::get(opCtx->getServiceContext());
+        docsForUniqueIndex = opsTracker->stopTracking(std::move(writeOpsToken));
     }
 
     return writeConflictRetry(opCtx, "collMod", nss.ns(), [&] {
@@ -564,8 +680,8 @@ Status _collModInternal(OperationContext* opCtx,
         // Handle collMod on a view and return early. The View Catalog handles the creation of oplog
         // entries for modifications on a view.
         if (view) {
-            if (viewPipeline)
-                view->setPipeline(viewPipeline);
+            if (cmd.getPipeline())
+                view->setPipeline(*cmd.getPipeline());
 
             if (!viewOn.empty())
                 view->setViewOn(NamespaceString(dbName, viewOn));
@@ -610,16 +726,19 @@ Status _collModInternal(OperationContext* opCtx,
         boost::optional<IndexCollModInfo> indexCollModInfo;
 
         // Handle collMod operation type appropriately.
-        if (clusteredIndexExpireAfterSeconds) {
-            _setClusteredExpireAfterSeconds(opCtx,
-                                            oldCollOptions,
-                                            coll.getWritableCollection(),
-                                            clusteredIndexExpireAfterSeconds);
+        if (cmd.getExpireAfterSeconds()) {
+            _setClusteredExpireAfterSeconds(
+                opCtx, oldCollOptions, coll.getWritableCollection(), *cmd.getExpireAfterSeconds());
         }
 
         // Handle index modifications.
-        processCollModIndexRequest(
-            opCtx, &coll, cmrNew.indexRequest, &indexCollModInfo, result, mode);
+        processCollModIndexRequest(opCtx,
+                                   &coll,
+                                   cmrNew.indexRequest,
+                                   docsForUniqueIndex.get(),
+                                   &indexCollModInfo,
+                                   result,
+                                   mode);
 
         if (cmrNew.collValidator) {
             coll.getWritableCollection()->setValidator(opCtx, *cmrNew.collValidator);
@@ -647,9 +766,9 @@ Status _collModInternal(OperationContext* opCtx,
                 opCtx, *cmrNew.changeStreamPreAndPostImagesOptions);
         }
 
-        if (ts.isABSONObj()) {
-            auto res = timeseries::applyTimeseriesOptionsModifications(*oldCollOptions.timeseries,
-                                                                       ts.Obj());
+        if (ts) {
+            auto res =
+                timeseries::applyTimeseriesOptionsModifications(*oldCollOptions.timeseries, *ts);
             uassertStatusOK(res);
             auto [newOptions, changed] = res.getValue();
             if (changed) {

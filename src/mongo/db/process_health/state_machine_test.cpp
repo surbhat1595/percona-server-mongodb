@@ -38,7 +38,7 @@ namespace process_health {
 class StateMachineTestFixture : public unittest::Test {
 public:
     enum class MachineState { A, B, C, NoHandlerDefined };
-    static const MachineState kInitialState = MachineState::A;
+    static constexpr MachineState kInitialState = MachineState::A;
     struct Message {
         boost::optional<MachineState> nextState;
     };
@@ -58,8 +58,8 @@ public:
     public:
         using StateMachineTest::StateHandler::StateHandler;
 
-        boost::optional<MachineState> accept(const Message& m) noexcept override {
-            return m.nextState;
+        boost::optional<MachineState> accept(const SM::OptionalMessageType& m) noexcept override {
+            return m->nextState;
         }
     };
 
@@ -95,7 +95,8 @@ TEST_F(StateMachineTestFixture, RegistersMessageHandlerAndStateHooksFluently) {
     };
 
     subject()
-        ->registerHandler(MachineState::B, [](const Message& m) { return m.nextState; })
+        ->registerHandler(MachineState::B,
+                          [](const SM::OptionalMessageType& m) { return m->nextState; })
         // hooks registerd for state B
         ->enter(hook())
         ->exit(hook());
@@ -226,7 +227,7 @@ TEST_F(StateMachineTestFixture, MoveWorks) {
     ASSERT_TRUE(MachineState::B == stateMachine2.state());
 }
 
-DEATH_TEST_F(StateMachineTestFixture, CrashIfHooksAreRegisteredAfterStart, "invariant") {
+DEATH_TEST_F(StateMachineTestFixture, CrashIfHooksAreRegisteredAfterStart, "5936505") {
     auto hook = []() {
         return
             [](MachineState oldState, MachineState newState, const SM::OptionalMessageType& m) {};
@@ -235,7 +236,7 @@ DEATH_TEST_F(StateMachineTestFixture, CrashIfHooksAreRegisteredAfterStart, "inva
     subject()->on(MachineState::B)->enter(hook())->exit(hook());
 }
 
-DEATH_TEST_F(StateMachineTestFixture, CrashOnInvalidTransition, "invariant") {
+DEATH_TEST_F(StateMachineTestFixture, CrashOnInvalidTransition, "5936506") {
     subject()->start();
     subject()->accept(Message{MachineState::C});
 }

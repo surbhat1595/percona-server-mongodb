@@ -65,6 +65,10 @@ struct WiredTigerFileVersion {
     // (IS_44_FCV_42). MongoDB 4.2.x always writes out IS_42.
     enum class StartupVersion { IS_42, IS_44_FCV_42, IS_44_FCV_44 };
 
+    inline static const std::string kLastLTSWTRelease = "compatibility=(release=10.0)";
+    inline static const std::string kLastContinuousWTRelease = "compatibility=(release=10.0)";
+    inline static const std::string kLatestWTRelease = "compatibility=(release=10.0)";
+
     StartupVersion _startupVersion;
     bool shouldDowngrade(bool readOnly, bool hasRecoveryTimestamp);
     std::string getDowngradeString();
@@ -130,7 +134,8 @@ public:
     Status createRecordStore(OperationContext* opCtx,
                              StringData ns,
                              StringData ident,
-                             const CollectionOptions& options) override;
+                             const CollectionOptions& options,
+                             KeyFormat keyFormat = KeyFormat::Long) override;
 
     std::unique_ptr<RecordStore> getRecordStore(OperationContext* opCtx,
                                                 StringData ns,

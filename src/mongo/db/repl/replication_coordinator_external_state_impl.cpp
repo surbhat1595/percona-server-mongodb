@@ -42,6 +42,7 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/coll_mod.h"
+#include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/local_oplog_info.h"
@@ -60,6 +61,7 @@
 #include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -460,11 +462,18 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                                // Permit writing to the oplog before we step up to primary.
                                AllowNonLocalWritesBlock allowNonLocalWrites(opCtx);
                                Lock::GlobalWrite globalWrite(opCtx);
-                               WriteUnitOfWork wuow(opCtx);
-                               Helpers::putSingleton(opCtx, configCollectionName, config);
-                               const auto msgObj = BSON("msg" << kInitiatingSetMsg);
-                               _service->getOpObserver()->onOpMessage(opCtx, msgObj);
-                               wuow.commit();
+                               {
+                                   // Writes to 'local.system.replset' must be untimestamped.
+                                   WriteUnitOfWork wuow(opCtx);
+                                   Helpers::putSingleton(opCtx, configCollectionName, config);
+                                   wuow.commit();
+                               }
+                               {
+                                   WriteUnitOfWork wuow(opCtx);
+                                   const auto msgObj = BSON("msg" << kInitiatingSetMsg);
+                                   _service->getOpObserver()->onOpMessage(opCtx, msgObj);
+                                   wuow.commit();
+                               }
                            });
 
         // ReplSetTest assumes that immediately after the replSetInitiate command returns, it can
@@ -575,6 +584,12 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
         }
     });
 
+    // Create the pre-images collection if it doesn't exist yet.
+    if (::mongo::feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        createChangeStreamPreImagesCollection(opCtx);
+    }
+
     serverGlobalParams.validateFeaturesAsPrimary.store(true);
 
     return opTimeToReturn;
@@ -607,17 +622,27 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
                                                                          bool writeOplog) {
     try {
         writeConflictRetry(opCtx, "save replica set config", configCollectionName, [&] {
-            WriteUnitOfWork wuow(opCtx);
-            Lock::DBLock dbWriteLock(opCtx, configDatabaseName, MODE_X);
-            Helpers::putSingleton(opCtx, configCollectionName, config);
+            {
+                // Writes to 'local.system.replset' must be untimestamped.
+                WriteUnitOfWork wuow(opCtx);
+                Lock::DBLock dbWriteLock(opCtx, configDatabaseName, MODE_X);
+                Helpers::putSingleton(opCtx, configCollectionName, config);
+                wuow.commit();
+            }
 
             if (writeOplog) {
+                // The no-op write doesn't affect the correctness of the safe reconfig protocol and
+                // so it doesn't have to be written in the same WUOW as the config write. In fact,
+                // the no-op write is only needed for some corner cases where the committed snapshot
+                // is dropped after a force reconfig that changes the config content or a safe
+                // reconfig that changes writeConcernMajorityJournalDefault.
+                WriteUnitOfWork wuow(opCtx);
                 auto msgObj = BSON("msg"
                                    << "Reconfig set"
                                    << "version" << config["version"]);
                 _service->getOpObserver()->onOpMessage(opCtx, msgObj);
+                wuow.commit();
             }
-            wuow.commit();
         });
         return Status::OK();
     } catch (const DBException& ex) {

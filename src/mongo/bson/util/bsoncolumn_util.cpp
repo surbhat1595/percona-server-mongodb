@@ -31,11 +31,11 @@
 
 namespace mongo::bsoncolumn {
 bool usesDeltaOfDelta(BSONType type) {
-    return type == bsonTimestamp;
+    return type == jstOID || type == Date || type == bsonTimestamp;
 }
 
 bool uses128bit(BSONType type) {
-    return type == NumberDecimal || type == BinData || type == String;
+    return type == NumberDecimal || type == BinData || type == String || type == Code;
 }
 
 int64_t calcDelta(int64_t val, int64_t prev) {

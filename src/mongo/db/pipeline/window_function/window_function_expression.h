@@ -257,20 +257,24 @@ public:
 /**
  * Similar to ExpressionFromAccumulator except only an expression argument is allowed.
  */
-template <typename NonRemovableType>
-class ExpressionFromWindowlessAccumulator : public Expression {
+template <typename FunctionType>
+class ExpressionFromLeftUnboundedWindowFunction : public Expression {
 public:
-    ExpressionFromWindowlessAccumulator(ExpressionContext* expCtx,
-                                        std::string accumulatorName,
-                                        boost::intrusive_ptr<::mongo::Expression> input,
-                                        WindowBounds bounds)
+    ExpressionFromLeftUnboundedWindowFunction(ExpressionContext* expCtx,
+                                              std::string accumulatorName,
+                                              boost::intrusive_ptr<::mongo::Expression> input,
+                                              WindowBounds bounds)
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {}
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
         // 'obj' is something like '{$func: <expressionArg>}'
         boost::optional<StringData> accumulatorName;
-        WindowBounds bounds = WindowBounds::defaultBounds();
+        // These expressions have variable lower bounds, but the functions themselves will handle
+        // the specifics of what documents to count. All documents preceding current must be
+        // seen by the function.
+        WindowBounds bounds = WindowBounds{
+            WindowBounds::DocumentBased{WindowBounds::Unbounded{}, WindowBounds::Current{}}};
         boost::intrusive_ptr<::mongo::Expression> input;
         bool windowFieldMissing = true;
         for (const auto& arg : obj) {
@@ -296,18 +300,18 @@ public:
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << "'window' field is not allowed in " << accumulatorName,
                 windowFieldMissing);
-        return make_intrusive<ExpressionFromWindowlessAccumulator<NonRemovableType>>(
+        return make_intrusive<ExpressionFromLeftUnboundedWindowFunction<FunctionType>>(
             expCtx, accumulatorName->toString(), std::move(input), std::move(bounds));
     }
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        return NonRemovableType::create(_expCtx);
+        return FunctionType::create(_expCtx);
     }
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
         tasserted(6050101,
                   str::stream() << "Window function " << _accumulatorName
-                                << " is not supported with a window");
+                                << " is not supported as a removable window function");
     }
 
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain) const final {
@@ -803,9 +807,10 @@ public:
 /**
  * Describes a window function expression that accepts 'n' as a parameter. Templated by
  * 'WindowFunctionN', which corresponds to the 'WindowFunctionState' removable type associated
- * with this expression.
+ * with this expression. It is also templated by AccumulatorType which is the AccumulatorState
+ * associated with this expression.
  */
-template <typename WindowFunctionN>
+template <typename WindowFunctionN, typename AcumulatorNType>
 class ExpressionN : public Expression {
 public:
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
@@ -816,9 +821,11 @@ public:
                 boost::intrusive_ptr<::mongo::Expression> input,
                 std::string name,
                 WindowBounds bounds,
-                boost::intrusive_ptr<::mongo::Expression> nExpr)
+                boost::intrusive_ptr<::mongo::Expression> nExpr,
+                boost::optional<SortPattern> sortPattern)
         : Expression(expCtx, std::move(name), std::move(input), std::move(bounds)),
-          nExpr(std::move(nExpr)) {}
+          nExpr(std::move(nExpr)),
+          sortPattern(std::move(sortPattern)) {}
 
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain) const final;
 
@@ -826,6 +833,8 @@ public:
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final;
 
+    // TODO SERVER-59327 make these members private
     boost::intrusive_ptr<::mongo::Expression> nExpr;
+    boost::optional<SortPattern> sortPattern;
 };
 }  // namespace mongo::window_function

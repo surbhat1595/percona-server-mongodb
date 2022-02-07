@@ -96,8 +96,10 @@ public:
      */
     static StatusWith<std::string> generateCreateString(const std::string& engineName,
                                                         StringData ns,
+                                                        StringData ident,
                                                         const CollectionOptions& options,
-                                                        StringData extraStrings);
+                                                        StringData extraStrings,
+                                                        KeyFormat keyFormat);
 
     struct Params {
         StringData ns;
@@ -187,9 +189,13 @@ public:
                           ValidateResults* results,
                           BSONObjBuilder* output);
 
-    virtual void appendCustomStats(OperationContext* opCtx,
-                                   BSONObjBuilder* result,
-                                   double scale) const;
+    virtual void appendNumericCustomStats(OperationContext* opCtx,
+                                          BSONObjBuilder* result,
+                                          double scale) const;
+
+    virtual void appendAllCustomStats(OperationContext* opCtx,
+                                      BSONObjBuilder* result,
+                                      double scale) const;
 
     virtual void cappedTruncateAfter(OperationContext* opCtx, RecordId end, bool inclusive);
 
@@ -278,9 +284,6 @@ protected:
 
 private:
     class RandomCursor;
-
-    class NumRecordsChange;
-    class DataSizeChange;
 
     Status _insertRecords(OperationContext* opCtx,
                           Record* records,
@@ -402,6 +405,10 @@ public:
 
     void reattachToOperationContext(OperationContext* opCtx);
 
+    void setSaveStorageCursorOnDetachFromOperationContext(bool saveCursor) override {
+        _saveStorageCursorOnDetachFromOperationContext = saveCursor;
+    }
+
 protected:
     virtual RecordId getKey(WT_CURSOR* cursor) const = 0;
 
@@ -430,6 +437,7 @@ private:
      * established.
      */
     boost::optional<std::int64_t> _oplogVisibleTs = boost::none;
+    bool _saveStorageCursorOnDetachFromOperationContext = false;
 };
 
 class WiredTigerRecordStoreStandardCursor final : public WiredTigerRecordStoreCursorBase {

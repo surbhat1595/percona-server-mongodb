@@ -93,7 +93,7 @@ struct ScanCallbacks {
  */
 class ScanStage final : public PlanStage {
 public:
-    ScanStage(CollectionUUID collectionUuid,
+    ScanStage(UUID collectionUuid,
               boost::optional<value::SlotId> recordSlot,
               boost::optional<value::SlotId> recordIdSlot,
               boost::optional<value::SlotId> snapshotIdSlot,
@@ -128,10 +128,11 @@ protected:
     void doDetachFromOperationContext() override;
     void doAttachToOperationContext(OperationContext* opCtx) override;
     void doDetachFromTrialRunTracker() override;
-    void doAttachToTrialRunTracker(TrialRunTracker* tracker) override;
+    TrialRunTrackerAttachResultMask doAttachToTrialRunTracker(
+        TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) override;
 
 private:
-    const CollectionUUID _collUuid;
+    const UUID _collUuid;
     const boost::optional<value::SlotId> _recordSlot;
     const boost::optional<value::SlotId> _recordIdSlot;
     const boost::optional<value::SlotId> _snapshotIdSlot;
@@ -179,6 +180,10 @@ private:
 
     ScanStats _specificStats;
 
+    // Flag set upon restoring the stage that indicates whether the cursor's position in the
+    // collection is still valid. Only relevant to capped collections.
+    bool _needsToCheckCappedPositionLost = false;
+
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
     // Debug-only buffer used to track the last thing returned from the stage. Between
     // saves/restores this is used to check that the storage cursor has not changed position.
@@ -198,7 +203,7 @@ class ParallelScanStage final : public PlanStage {
     };
 
 public:
-    ParallelScanStage(CollectionUUID collectionUuid,
+    ParallelScanStage(UUID collectionUuid,
                       boost::optional<value::SlotId> recordSlot,
                       boost::optional<value::SlotId> recordIdSlot,
                       boost::optional<value::SlotId> snapshotIdSlot,
@@ -212,7 +217,7 @@ public:
                       ScanCallbacks callbacks);
 
     ParallelScanStage(const std::shared_ptr<ParallelState>& state,
-                      CollectionUUID collectionUuid,
+                      const UUID& collectionUuid,
                       boost::optional<value::SlotId> recordSlot,
                       boost::optional<value::SlotId> recordIdSlot,
                       boost::optional<value::SlotId> snapshotIdSlot,
@@ -253,7 +258,7 @@ private:
         _currentRange = std::numeric_limits<std::size_t>::max();
     }
 
-    const CollectionUUID _collUuid;
+    const UUID _collUuid;
     const boost::optional<value::SlotId> _recordSlot;
     const boost::optional<value::SlotId> _recordIdSlot;
     const boost::optional<value::SlotId> _snapshotIdSlot;

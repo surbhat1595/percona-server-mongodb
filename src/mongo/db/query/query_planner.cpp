@@ -260,17 +260,12 @@ static BSONObj getKeyFromQuery(const BSONObj& keyPattern, const BSONObj& query) 
 
 static bool indexCompatibleMaxMin(const BSONObj& obj,
                                   const CollatorInterface* queryCollator,
-                                  const IndexEntry& indexEntry) {
-    // Wildcard indexes should have been filtered out by the time this is called.
-    if (indexEntry.type == IndexType::INDEX_WILDCARD) {
-        return false;
-    }
-
-    BSONObjIterator kpIt(indexEntry.keyPattern);
+                                  const CollatorInterface* indexCollator,
+                                  const BSONObj& keyPattern) {
+    BSONObjIterator kpIt(keyPattern);
     BSONObjIterator objIt(obj);
 
-    const bool collatorsMatch =
-        CollatorInterface::collatorsMatch(queryCollator, indexEntry.collator);
+    const bool collatorsMatch = CollatorInterface::collatorsMatch(queryCollator, indexCollator);
 
     for (;;) {
         // Every element up to this point has matched so the KP matches
@@ -296,6 +291,16 @@ static bool indexCompatibleMaxMin(const BSONObj& obj,
             return false;
         }
     }
+}
+
+static bool indexCompatibleMaxMin(const BSONObj& obj,
+                                  const CollatorInterface* queryCollator,
+                                  const IndexEntry& indexEntry) {
+    // Wildcard indexes should have been filtered out by the time this is called.
+    if (indexEntry.type == IndexType::INDEX_WILDCARD) {
+        return false;
+    }
+    return indexCompatibleMaxMin(obj, queryCollator, indexEntry.collator, indexEntry.keyPattern);
 }
 
 static BSONObj stripFieldNamesAndApplyCollation(const BSONObj& obj,
@@ -637,30 +642,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     return {std::move(soln)};
 }
 
-// static
-QueryPlanner::QueryPlannerResult QueryPlanner::plan(const CanonicalQuery& query,
-                                                    const QueryPlannerParams& params) {
-    if (query.pipeline().empty()) {
-        return {planForMultiPlanner(query, params), nullptr};
-    }
-
-    std::unique_ptr<QuerySolutionNode> postMultiPlannedQSN = std::make_unique<SentinelNode>();
-    for (auto& innerStage : query.pipeline()) {
-        auto groupStage = dynamic_cast<DocumentSourceGroup*>(innerStage->documentSource());
-        tassert(5842400,
-                "Cannot support pushdown of a stage other than $group at the moment",
-                groupStage != nullptr);
-
-        postMultiPlannedQSN = std::make_unique<GroupNode>(std::move(postMultiPlannedQSN),
-                                                          groupStage->getIdFields(),
-                                                          groupStage->getAccumulatedFields(),
-                                                          groupStage->doingMerge());
-    }
-    return {planForMultiPlanner(query, params), std::move(postMultiPlannedQSN)};
-}
-
-// static
-StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::planForMultiPlanner(
+StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     const CanonicalQuery& query, const QueryPlannerParams& params) {
     // It's a little silly to ask for a count and for owned data. This could indicate a bug earlier
     // on.
@@ -725,6 +707,29 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::planForMul
                     !query.getFindCommandRequest().getMax().isEmpty()) {
                     return Status(ErrorCodes::NoQueryExecutionPlans,
                                   "min and max are incompatible with $natural");
+                }
+            } else {
+                // Perform validation specific to hinting on a cluster key.
+                BSONObj minObj = query.getFindCommandRequest().getMin();
+                BSONObj maxObj = query.getFindCommandRequest().getMax();
+
+                const auto clusterKey = params.clusteredInfo->getIndexSpec().getKey();
+
+                // Since the clusteredIndex doesn't have a specific collator, check if it is
+                // compatible with the max and min using the same collator as the query.
+                if ((!minObj.isEmpty() &&
+                     !indexCompatibleMaxMin(
+                         minObj, query.getCollator(), query.getCollator(), clusterKey)) ||
+                    (!maxObj.isEmpty() &&
+                     !indexCompatibleMaxMin(
+                         maxObj, query.getCollator(), query.getCollator(), clusterKey))) {
+                    return Status(ErrorCodes::Error(6137400),
+                                  "The clustered index is not compatible with the values provided "
+                                  "for min/max");
+                }
+
+                if (!minObj.isEmpty() && !maxObj.isEmpty() && minObj.woCompare(maxObj) >= 0) {
+                    return Status(ErrorCodes::Error(6137401), "max() must be greater than min()");
                 }
             }
 
@@ -1214,6 +1219,32 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::planForMul
 
     invariant(out.size() > 0);
     return {std::move(out)};
+}
+
+/**
+ * The 'query' might contain parts of aggregation pipeline. For now, we plan those separately
+ * and later attach the agg portion of the plan to the solution(s) for the "find" part of the query.
+ */
+std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
+    const CanonicalQuery& query, std::unique_ptr<QuerySolution>&& solution) {
+    if (query.pipeline().empty()) {
+        return nullptr;
+    }
+
+    std::unique_ptr<QuerySolutionNode> solnForAgg = std::make_unique<SentinelNode>();
+    for (auto& innerStage : query.pipeline()) {
+        auto groupStage = dynamic_cast<DocumentSourceGroup*>(innerStage->documentSource());
+        tassert(5842400,
+                "Cannot support pushdown of a stage other than $group at the moment",
+                groupStage != nullptr);
+
+        solnForAgg = std::make_unique<GroupNode>(std::move(solnForAgg),
+                                                 groupStage->getIdFields(),
+                                                 groupStage->getAccumulatedFields(),
+                                                 groupStage->doingMerge());
+    }
+    solution->extendWith(std::move(solnForAgg));
+    return QueryPlannerAnalysis::removeProjectSimpleBelowGroup(std::move(solution));
 }
 
 StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries(

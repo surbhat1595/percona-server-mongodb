@@ -53,6 +53,7 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
+#include "mongo/db/logical_session_id.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/query/get_executor.h"
@@ -260,7 +261,10 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
     return result;
 }
 
-void updateSessionEntry(OperationContext* opCtx, const UpdateRequest& updateRequest) {
+void updateSessionEntry(OperationContext* opCtx,
+                        const UpdateRequest& updateRequest,
+                        const LogicalSessionId& sessionId,
+                        TxnNumber txnNum) {
     // Current code only supports replacement update.
     dassert(UpdateDriver::isDocReplacement(updateRequest.getUpdateModification()));
 
@@ -300,7 +304,9 @@ void updateSessionEntry(OperationContext* opCtx, const UpdateRequest& updateRequ
         auto status = collection->insertDocument(opCtx, InsertStatement(updateMod), nullptr, false);
 
         if (status == ErrorCodes::DuplicateKey) {
-            throw WriteConflictException();
+            throw WriteConflictException(
+                str::stream() << "Updating session entry failed with duplicate key, session "_sd
+                              << sessionId << ", transaction "_sd << txnNum);
         }
 
         uassertStatusOK(status);
@@ -326,7 +332,9 @@ void updateSessionEntry(OperationContext* opCtx, const UpdateRequest& updateRequ
         fassert(40673, MatchExpressionParser::parse(updateRequest.getQuery(), std::move(expCtx)));
     if (!matcher->matchesBSON(originalDoc)) {
         // Document no longer match what we expect so throw WCE to make the caller re-examine.
-        throw WriteConflictException();
+        throw WriteConflictException(
+            str::stream() << "Updating session entry failed as document no longer matches, "_sd
+                          << "session "_sd << sessionId << ", transaction "_sd << txnNum);
     }
 
     CollectionUpdateArgs args;
@@ -653,6 +661,13 @@ void TransactionParticipant::Participant::beginOrContinue(
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
     boost::optional<bool> startTransaction) {
+    if (getParentSessionId(_sessionId()) && startTransaction) {
+        uassert(ErrorCodes::InternalTransactionNotSupported,
+                "Internal transactions are not enabled",
+                feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                    serverGlobalParams.featureCompatibility));
+    }
+
     // Make sure we are still a primary. We need to hold on to the RSTL through the end of this
     // method, as we otherwise risk stepping down in the interim and incorrectly updating the
     // transaction number, which can abort active transactions.
@@ -837,10 +852,7 @@ TransactionParticipant::OplogSlotReserver::OplogSlotReserver(OperationContext* o
     // We must lock the Client to change the Locker on the OperationContext.
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     // Save the RecoveryUnit from the new transaction and replace it with an empty one.
-    _recoveryUnit = opCtx->releaseRecoveryUnit();
-    opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(
-                               opCtx->getServiceContext()->getStorageEngine()->newRecoveryUnit()),
-                           WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+    _recoveryUnit = opCtx->releaseAndReplaceRecoveryUnit();
 
     // End two-phase locking on locker manually since the WUOW has been released.
     _opCtx->lockState()->endWriteUnitOfWork();
@@ -898,10 +910,7 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     // On secondaries, max lock timeout must not be set.
     invariant(!(stashStyle == StashStyle::kSecondary && opCtx->lockState()->hasMaxLockTimeout()));
 
-    _recoveryUnit = opCtx->releaseRecoveryUnit();
-    opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(
-                               opCtx->getServiceContext()->getStorageEngine()->newRecoveryUnit()),
-                           WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+    _recoveryUnit = opCtx->releaseAndReplaceRecoveryUnit();
 
     _apiParameters = APIParameters::get(opCtx);
     _readConcernArgs = repl::ReadConcernArgs::get(opCtx);
@@ -1013,10 +1022,7 @@ TransactionParticipant::SideTransactionBlock::SideTransactionBlock(OperationCont
 
     // Release recovery unit, saving the recovery unit off to the side, keeping open the storage
     // transaction.
-    _recoveryUnit = opCtx->releaseRecoveryUnit();
-    opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(
-                               opCtx->getServiceContext()->getStorageEngine()->newRecoveryUnit()),
-                           WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+    _recoveryUnit = opCtx->releaseAndReplaceRecoveryUnit();
 }
 
 TransactionParticipant::SideTransactionBlock::~SideTransactionBlock() {
@@ -1331,7 +1337,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
         // Even if the prepared transaction contained no statements, we always reserve at least
         // 1 oplog slot for the prepare oplog entry.
         auto numSlotsToReserve = retrieveCompletedTransactionOperations(opCtx).size();
-        numSlotsToReserve += p().numberOfPreImagesToWrite;
+        numSlotsToReserve += p().numberOfPrePostImagesToWrite;
         oplogSlotReserver.emplace(opCtx, std::max(1, static_cast<int>(numSlotsToReserve)));
         invariant(oplogSlotReserver->getSlots().size() >= 1);
         prepareOplogSlot = oplogSlotReserver->getLastSlot();
@@ -1359,7 +1365,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
     opCtx->getServiceContext()->getOpObserver()->onTransactionPrepare(
-        opCtx, reservedSlots, &completedTransactionOperations, p().numberOfPreImagesToWrite);
+        opCtx, reservedSlots, &completedTransactionOperations, p().numberOfPrePostImagesToWrite);
 
     abortGuard.dismiss();
 
@@ -1431,7 +1437,11 @@ void TransactionParticipant::Participant::addTransactionOperation(
         repl::DurableOplogEntry::getDurableReplOperationSize(operation);
     if (!operation.getPreImage().isEmpty()) {
         p().transactionOperationBytes += operation.getPreImage().objsize();
-        ++p().numberOfPreImagesToWrite;
+        ++p().numberOfPrePostImagesToWrite;
+    }
+    if (!operation.getPostImage().isEmpty()) {
+        p().transactionOperationBytes += operation.getPostImage().objsize();
+        ++p().numberOfPrePostImagesToWrite;
     }
 
     auto transactionSizeLimitBytes = gTransactionSizeLimitBytes.load();
@@ -1469,7 +1479,7 @@ void TransactionParticipant::Participant::clearOperationsInMemory(OperationConte
     p().transactionOperationBytes = 0;
     p().transactionOperations.clear();
     p().transactionStmtIds.clear();
-    p().numberOfPreImagesToWrite = 0;
+    p().numberOfPrePostImagesToWrite = 0;
 }
 
 void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationContext* opCtx) {
@@ -1481,7 +1491,7 @@ void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationC
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
     invariant(opObserver);
 
-    opObserver->onUnpreparedTransactionCommit(opCtx, &txnOps, p().numberOfPreImagesToWrite);
+    opObserver->onUnpreparedTransactionCommit(opCtx, &txnOps, p().numberOfPrePostImagesToWrite);
 
     // Read-only transactions with all read concerns must wait for any data they read to be majority
     // committed. For local read concern this is to match majority read concern. For both local and
@@ -2485,7 +2495,7 @@ void TransactionParticipant::Participant::onWriteOpCompletedOnPrimary(
 
     repl::UnreplicatedWritesBlock doNotReplicateWrites(opCtx);
 
-    updateSessionEntry(opCtx, updateRequest);
+    updateSessionEntry(opCtx, updateRequest, _sessionId(), sessionTxnRecord.getTxnNum());
     _registerUpdateCacheOnCommit(
         opCtx, std::move(stmtIdsWritten), sessionTxnRecord.getLastWriteOpTime());
 }
@@ -2502,7 +2512,7 @@ void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
 
     repl::UnreplicatedWritesBlock doNotReplicateWrites(opCtx);
 
-    updateSessionEntry(opCtx, updateRequest);
+    updateSessionEntry(opCtx, updateRequest, _sessionId(), sessionTxnRecord.getTxnNum());
     _registerUpdateCacheOnCommit(
         opCtx, std::move(stmtIdsWritten), sessionTxnRecord.getLastWriteOpTime());
 }

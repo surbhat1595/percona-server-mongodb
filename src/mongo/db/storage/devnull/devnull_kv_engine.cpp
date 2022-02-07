@@ -56,6 +56,7 @@ public:
     }
     void detachFromOperationContext() final {}
     void reattachToOperationContext(OperationContext* opCtx) final {}
+    void setSaveStorageCursorOnDetachFromOperationContext(bool) override {}
 };
 
 class DevNullRecordStore : public RecordStore {
@@ -144,9 +145,9 @@ public:
 
     virtual void cappedTruncateAfter(OperationContext* opCtx, RecordId end, bool inclusive) {}
 
-    virtual void appendCustomStats(OperationContext* opCtx,
-                                   BSONObjBuilder* result,
-                                   double scale) const {
+    virtual void appendNumericCustomStats(OperationContext* opCtx,
+                                          BSONObjBuilder* result,
+                                          double scale) const {
         result->appendNumber("numInserts", _numInserts);
     }
 
@@ -191,10 +192,10 @@ public:
         return {};
     }
 
-    virtual Status insert(OperationContext* opCtx,
-                          const KeyString::Value& keyString,
-                          bool dupsAllowed) {
-        return Status::OK();
+    virtual StatusWith<bool> insert(OperationContext* opCtx,
+                                    const KeyString::Value& keyString,
+                                    bool dupsAllowed) {
+        return true;
     }
 
     virtual void unindex(OperationContext* opCtx,
@@ -203,6 +204,11 @@ public:
 
     virtual Status dupKeyCheck(OperationContext* opCtx, const KeyString::Value& keyString) {
         return Status::OK();
+    }
+
+    virtual boost::optional<RecordId> findLoc(OperationContext* opCtx,
+                                              const KeyString::Value& keyString) const override {
+        return boost::none;
     }
 
     virtual void fullValidate(OperationContext* opCtx,

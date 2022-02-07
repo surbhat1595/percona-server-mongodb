@@ -35,93 +35,94 @@ namespace mongo {
 using FirstLastSense = AccumulatorFirstLastN::Sense;
 using MinMaxSense = AccumulatorMinMax::Sense;
 
-// TODO SERVER-52247 Replace boost::none with 'gFeatureFlagExactTopNAccumulator.getVersion()' below
-// once 'gFeatureFlagExactTopNAccumulator' is set to true by default and is configured with an FCV.
+// Register macros for the various accumulators/expressions in this file. Note that we check
+// 'isEnabledAndIgnoreFCV()' because the feature flag is a property set at startup, while FCV can
+// change while the server is running.
+// TODO SERVER-61855 Add these accumulators/expressions to the stable API.
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     maxN,
     AccumulatorMinMaxN::parseMinMaxN<MinMaxSense::kMax>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     minN,
     AccumulatorMinMaxN::parseMinMaxN<MinMaxSense::kMin>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_EXPRESSION_CONDITIONALLY(
     maxN,
     AccumulatorMinMaxN::parseExpression<MinMaxSense::kMax>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_EXPRESSION_CONDITIONALLY(
     minN,
     AccumulatorMinMaxN::parseExpression<MinMaxSense::kMin>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     firstN,
     AccumulatorFirstLastN::parseFirstLastN<FirstLastSense::kFirst>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     lastN,
     AccumulatorFirstLastN::parseFirstLastN<FirstLastSense::kLast>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_EXPRESSION_CONDITIONALLY(
     firstN,
     AccumulatorFirstLastN::parseExpression<FirstLastSense::kFirst>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_EXPRESSION_CONDITIONALLY(
     lastN,
     AccumulatorFirstLastN::parseExpression<FirstLastSense::kLast>,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     topN,
     (AccumulatorTopBottomN<TopBottomSense::kTop, false>::parseTopBottomN),
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     bottomN,
     (AccumulatorTopBottomN<TopBottomSense::kBottom, false>::parseTopBottomN),
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     top,
     (AccumulatorTopBottomN<TopBottomSense::kTop, true>::parseTopBottomN),
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
 REGISTER_ACCUMULATOR_CONDITIONALLY(
     bottom,
     (AccumulatorTopBottomN<TopBottomSense::kBottom, true>::parseTopBottomN),
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::none,
+    feature_flags::gFeatureFlagExactTopNAccumulator.getVersion(),
     feature_flags::gFeatureFlagExactTopNAccumulator.isEnabledAndIgnoreFCV());
-// TODO SERVER-57886 Add $topN/$bottomN/$top/$bottom as window functions.
 
 AccumulatorN::AccumulatorN(ExpressionContext* const expCtx)
     : AccumulatorState(expCtx), _maxMemUsageBytes(internalQueryTopNAccumulatorBytes.load()) {}
@@ -352,6 +353,9 @@ AccumulationExpression AccumulatorFirstLastN::parseFirstLastN(ExpressionContext*
 }
 
 void AccumulatorFirstLastN::_processValue(const Value& val) {
+    // Convert missing values to null.
+    auto valToProcess = val.missing() ? Value(BSONNULL) : val;
+
     // Only insert in the lastN case if we have 'n' elements.
     if (static_cast<long long>(_deque.size()) == *_n) {
         if (_variant == Sense::kLast) {
@@ -362,8 +366,8 @@ void AccumulatorFirstLastN::_processValue(const Value& val) {
         }
     }
 
-    updateAndCheckMemUsage(val.getApproximateSize());
-    _deque.push_back(val);
+    updateAndCheckMemUsage(valToProcess.getApproximateSize());
+    _deque.push_back(valToProcess);
 }
 
 const char* AccumulatorFirstLastN::getOpName() const {
@@ -452,7 +456,8 @@ accumulatorNParseArgs(ExpressionContext* expCtx,
         } else if (fieldName == AccumulatorN::kFieldNameSortBy && needSortBy) {
             sortBy = element.Obj();
         } else {
-            uasserted(5788002, str::stream() << "Unknown argument to " << name << " " << fieldName);
+            uasserted(5788002,
+                      str::stream() << "Unknown argument to " << name << " '" << fieldName << "'");
         }
     }
 
@@ -477,8 +482,9 @@ accumulatorNParseArgs(ExpressionContext* expCtx,
 
 template <TopBottomSense sense, bool single>
 AccumulatorTopBottomN<sense, single>::AccumulatorTopBottomN(ExpressionContext* const expCtx,
-                                                            SortPattern sp)
-    : AccumulatorN(expCtx), _sortPattern(sp) {
+                                                            SortPattern sp,
+                                                            bool isRemovable)
+    : AccumulatorN(expCtx), _isRemovable(isRemovable), _sortPattern(std::move(sp)) {
 
     // Modify sortPattern to sort based on fields where they are in the evaluated argument instead
     // of where they would be in the raw document received by $group and friends.
@@ -583,7 +589,8 @@ AccumulationExpression AccumulatorTopBottomN<sense, single>::parseTopBottomN(
     boost::intrusive_ptr<Expression> argument = Expression::parseObject(
         expCtx, BSON(output << AccumulatorN::kFieldNameSortFields << sortFieldsExp), vps);
     auto factory = [expCtx, sortPattern = std::move(sortPattern)] {
-        return make_intrusive<AccumulatorTopBottomN<sense, single>>(expCtx, sortPattern);
+        return make_intrusive<AccumulatorTopBottomN<sense, single>>(
+            expCtx, sortPattern, /* isRemovable */ false);
     };
 
     return {std::move(n), std::move(argument), std::move(factory), name};
@@ -591,14 +598,31 @@ AccumulationExpression AccumulatorTopBottomN<sense, single>::parseTopBottomN(
 
 template <TopBottomSense sense, bool single>
 boost::intrusive_ptr<AccumulatorState> AccumulatorTopBottomN<sense, single>::create(
-    ExpressionContext* expCtx, BSONObj sortBy) {
+    ExpressionContext* expCtx, BSONObj sortBy, bool isRemovable) {
     return make_intrusive<AccumulatorTopBottomN<sense, single>>(
-        expCtx, parseAccumulatorTopBottomNSortBy<sense>(expCtx, sortBy).first);
+        expCtx, parseAccumulatorTopBottomNSortBy<sense>(expCtx, sortBy).first, isRemovable);
 }
 
 template <TopBottomSense sense, bool single>
-void AccumulatorTopBottomN<sense, single>::_processValue(const Value& val) {
-    Value output = val[AccumulatorN::kFieldNameOutput];
+boost::intrusive_ptr<AccumulatorState> AccumulatorTopBottomN<sense, single>::create(
+    ExpressionContext* expCtx, SortPattern sortPattern) {
+    return make_intrusive<AccumulatorTopBottomN<sense, single>>(
+        expCtx, sortPattern, /* isRemovable */ false);
+}
+
+template <TopBottomSense sense, bool single>
+std::pair<Value, Value> AccumulatorTopBottomN<sense, single>::_genKeyOutPair(const Value& val) {
+    tassert(5788014,
+            str::stream() << getName()
+                          << " tried to get a sort key on something that wasn't a BSON object",
+            val.isObject());
+
+    Value output = val[kFieldNameOutput];
+
+    // Upconvert to 'null' if the output field is missing.
+    if (output.missing())
+        output = Value(BSONNULL);
+
     Value sortKey;
 
     // In the case that _processValue() is getting called in the context of merging, a previous
@@ -609,10 +633,15 @@ void AccumulatorTopBottomN<sense, single>::_processValue(const Value& val) {
     } else {
         sortKey = _sortKeyGenerator->computeSortKeyFromDocument(val.getDocument());
     }
-    KeyOutPair keyOutPair(sortKey, output);
+    return {sortKey, output};
+}
+
+template <TopBottomSense sense, bool single>
+void AccumulatorTopBottomN<sense, single>::_processValue(const Value& val) {
+    auto keyOutPair = _genKeyOutPair(val);
 
     // Only compare if we have 'n' elements.
-    if (static_cast<long long>(_map->size()) == *_n) {
+    if (static_cast<long long>(_map->size()) == *_n && !_isRemovable) {
         // Get an iterator to the element we want to compare against. In particular, $top will
         // insert items less than the max, and $bottom will insert greater than the min.
         auto [cmpElem, cmp] = [&]() {
@@ -637,10 +666,27 @@ void AccumulatorTopBottomN<sense, single>::_processValue(const Value& val) {
         }
     }
 
-    const auto memUsage =
-        sortKey.getApproximateSize() + output.getApproximateSize() + sizeof(KeyOutPair);
+    const auto memUsage = keyOutPair.first.getApproximateSize() +
+        keyOutPair.second.getApproximateSize() + sizeof(KeyOutPair);
     updateAndCheckMemUsage(memUsage);
     _map->emplace(keyOutPair);
+}
+
+template <TopBottomSense sense, bool single>
+void AccumulatorTopBottomN<sense, single>::remove(const Value& val) {
+    tassert(5788605,
+            str::stream() << "Tried to remove() from a non-removable " << getName(),
+            _isRemovable);
+    tassert(5788600, str::stream() << "Can't remove from an empty " << getName(), !_map->empty());
+    auto keyOutPair = _genKeyOutPair(val);
+
+    // std::multimap::insert is guaranteed to put the element after any equal elements
+    // already in the container. So lower_bound() / erase() will remove the oldest equal element,
+    // which is what we want, to satisfy "remove() undoes add() when called in FIFO order".
+    auto it = _map->lower_bound(keyOutPair.first);
+    _map->erase(it);
+    _memUsageBytes -= keyOutPair.first.getApproximateSize() +
+        keyOutPair.second.getApproximateSize() + sizeof(KeyOutPair);
 }
 
 template <TopBottomSense sense, bool single>
@@ -674,9 +720,22 @@ void AccumulatorTopBottomN<sense, single>::processInternal(const Value& input, b
 }
 
 template <TopBottomSense sense, bool single>
-Value AccumulatorTopBottomN<sense, single>::getValue(bool toBeMerged) {
+Value AccumulatorTopBottomN<sense, single>::getValueConst(bool toBeMerged) const {
     std::vector<Value> result;
-    for (const auto& keyOutPair : *_map) {
+    auto begin = _map->begin();
+    auto end = _map->end();
+    if constexpr (sense == kBottom) {
+        // If this accumulator is removable there may be more than n elements in the map, so we must
+        // skip elements that shouldn't be in the result.
+        if (static_cast<long long>(_map->size()) > *_n) {
+            std::advance(begin, _map->size() - *_n);
+        }
+    }
+
+    // Insert at most _n values into result.
+    auto it = begin;
+    for (auto inserted = 0; inserted < *_n && it != end; ++inserted, ++it) {
+        const auto& keyOutPair = *it;
         if (toBeMerged) {
             result.emplace_back(BSON(kFieldNameGeneratedSortKey
                                      << keyOutPair.first << kFieldNameOutput << keyOutPair.second));
@@ -688,12 +747,14 @@ Value AccumulatorTopBottomN<sense, single>::getValue(bool toBeMerged) {
     if constexpr (!single) {
         return Value(result);
     } else {
-        tassert(5788015,
-                str::stream() << getName() << " group did not contain exactly one value",
-                result.size() == 1);
         if (toBeMerged) {
             return Value(result);
         } else {
+            if (result.empty()) {
+                // This only occurs in a window function scenario, an accumulator will always have
+                // at least one value processed.
+                return Value(BSONNULL);
+            }
             return Value(result[0]);
         }
     }

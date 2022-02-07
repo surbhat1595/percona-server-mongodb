@@ -49,13 +49,13 @@ public:
 
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
-                       CollectionUUID uuid,
+                       const UUID& uuid,
                        BSONObj indexDoc,
                        bool fromMigrate) final {}
 
     void onStartIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
-                           CollectionUUID collUUID,
+                           const UUID& collUUID,
                            const UUID& indexBuildUUID,
                            const std::vector<BSONObj>& indexes,
                            bool fromMigrate) final {}
@@ -66,14 +66,14 @@ public:
 
     void onCommitIndexBuild(OperationContext* opCtx,
                             const NamespaceString& nss,
-                            CollectionUUID collUUID,
+                            const UUID& collUUID,
                             const UUID& indexBuildUUID,
                             const std::vector<BSONObj>& indexes,
                             bool fromMigrate) final {}
 
     void onAbortIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
-                           CollectionUUID collUUID,
+                           const UUID& collUUID,
                            const UUID& indexBuildUUID,
                            const std::vector<BSONObj>& indexes,
                            const Status& cause,
@@ -90,6 +90,7 @@ public:
 
     void aboutToDelete(OperationContext* opCtx,
                        const NamespaceString& nss,
+                       const UUID& uuid,
                        const BSONObj& doc) final;
 
     void onDelete(OperationContext* opCtx,
@@ -100,7 +101,7 @@ public:
 
     void onInternalOpMessage(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             OptionalCollectionUUID uuid,
+                             const boost::optional<UUID>& uuid,
                              const BSONObj& msgObj,
                              const boost::optional<BSONObj> o2MsgObj,
                              const boost::optional<repl::OpTime> preImageOpTime,
@@ -142,7 +143,7 @@ public:
                             const NamespaceString& fromCollection,
                             const NamespaceString& toCollection,
                             const UUID& uuid,
-                            OptionalCollectionUUID dropTargetUUID,
+                            const boost::optional<UUID>& dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp) final {}
 
@@ -160,7 +161,7 @@ public:
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
                                      const UUID& uuid,
-                                     OptionalCollectionUUID dropTargetUUID,
+                                     const boost::optional<UUID>& dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp) final {
         return repl::OpTime();
@@ -169,7 +170,7 @@ public:
                               const NamespaceString& fromCollection,
                               const NamespaceString& toCollection,
                               const UUID& uuid,
-                              OptionalCollectionUUID dropTargetUUID,
+                              const boost::optional<UUID>& dropTargetUUID,
                               bool stayTemp) final {}
     void onApplyOps(OperationContext* opCtx,
                     const std::string& dbName,
@@ -181,7 +182,7 @@ public:
 
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
                                        std::vector<repl::ReplOperation>* statements,
-                                       size_t numberOfPreImagesToWrite) final {}
+                                       size_t numberOfPrePostImagesToWrite) final {}
 
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
@@ -192,7 +193,7 @@ public:
     void onTransactionPrepare(OperationContext* opCtx,
                               const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>* statements,
-                              size_t numberOfPreImagesToWrite) final {}
+                              size_t numberOfPrePostImagesToWrite) final {}
 
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) final {}

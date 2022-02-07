@@ -70,8 +70,6 @@ struct ServerGlobalParams {
 
     ClusterRole clusterRole = ClusterRole::None;  // --configsvr/--shardsvr
 
-    bool cpu = false;  // --cpu show cpu time periodically
-
     bool objcheck = true;  // --objcheck
 
     // Shell parameter, used for testing only, to tell the shell to crash on InvalidBSON errors.
@@ -245,6 +243,13 @@ struct ServerGlobalParams {
         void setVersion(FCV version) {
             return _version.store(version);
         }
+
+        /**
+         * Logs the current FCV global state.
+         * context: the context in which this function was called, to differentiate logs (e.g.
+         * startup, log rotation).
+         */
+        void logFCVWithContext(StringData context) const;
 
     private:
         AtomicWord<FCV> _version{FCV::kUnsetDefaultLastLTSBehavior};

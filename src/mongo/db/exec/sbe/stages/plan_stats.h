@@ -30,7 +30,7 @@
 #pragma once
 
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/exec/plan_stats_visitor.h"
 
 namespace mongo::sbe {
 struct CommonStats {
@@ -79,8 +79,12 @@ struct ScanStats final : public SpecificStats {
         return sizeof(*this);
     }
 
-    void accumulate(PlanSummaryStats& stats) const final {
-        stats.totalDocsExamined += numReads;
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
     }
 
     size_t numReads{0};
@@ -95,8 +99,12 @@ struct IndexScanStats final : public SpecificStats {
         return sizeof(*this);
     }
 
-    void accumulate(PlanSummaryStats& stats) const final {
-        stats.totalKeysExamined += keysExamined;
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
     }
 
     size_t seeks{0};
@@ -113,6 +121,14 @@ struct FilterStats final : public SpecificStats {
         return sizeof(*this);
     }
 
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
     size_t numTested{0};
 };
 
@@ -123,6 +139,14 @@ struct LimitSkipStats final : public SpecificStats {
 
     uint64_t estimateObjectSizeInBytes() const final {
         return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
     }
 
     boost::optional<long long> limit;
@@ -138,6 +162,14 @@ struct UniqueStats : public SpecificStats {
         return sizeof(*this);
     }
 
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
     size_t dupsTested = 0;
     size_t dupsDropped = 0;
 };
@@ -149,6 +181,14 @@ struct BranchStats final : public SpecificStats {
 
     uint64_t estimateObjectSizeInBytes() const final {
         return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
     }
 
     size_t numTested{0};
@@ -167,6 +207,14 @@ struct CheckBoundsStats final : public SpecificStats {
         return sizeof(*this);
     }
 
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
     size_t seeks{0};
 };
 
@@ -177,6 +225,14 @@ struct LoopJoinStats final : public SpecificStats {
 
     uint64_t estimateObjectSizeInBytes() const final {
         return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
     }
 
     size_t innerOpens{0};
@@ -192,8 +248,33 @@ struct TraverseStats : public SpecificStats {
         return sizeof(*this);
     }
 
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
     size_t innerOpens{0};
     size_t innerCloses{0};
+};
+
+/**
+ * Visitor for calculating the number of storage reads during plan execution.
+ */
+struct PlanStatsNumReadsVisitor : PlanStatsVisitorBase<true> {
+    // To avoid overloaded-virtual warnings.
+    using PlanStatsConstVisitor::visit;
+
+    void visit(tree_walker::MaybeConstPtr<true, sbe::ScanStats> stats) override final {
+        numReads += stats->numReads;
+    }
+    void visit(tree_walker::MaybeConstPtr<true, sbe::IndexScanStats> stats) override final {
+        numReads += stats->numReads;
+    }
+
+    size_t numReads = 0;
 };
 
 /**

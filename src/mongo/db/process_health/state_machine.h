@@ -30,6 +30,7 @@
 
 #include <vector>
 
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/functional.h"
@@ -52,7 +53,7 @@ public:
     using StateCallback = unique_function<void(State, State, const OptionalMessageType&)>;
 
     // State machine accepts InputMessage and optionally transitions to state in the return value
-    using MessageHandler = unique_function<boost::optional<State>(InputMessage)>;
+    using MessageHandler = unique_function<boost::optional<State>(const OptionalMessageType&)>;
 
     using TransitionsContainer = stdx::unordered_map<State, std::vector<State>>;
 
@@ -82,22 +83,33 @@ public:
         return *this;
     }
 
+    void tassertNotStarted() const {
+        tassert(
+            5936505, "operation cannot be performed after the state machine is started", !_started);
+    }
+
+    void tassertStarted() const {
+        tassert(
+            5936508, "operation cannot be performed before the state machine is started", _started);
+    }
+
     // Transitions the state machine into the initial state.
     // Can only be called once.
     void start() {
-        invariant(!_started, "cannot call start twice");
+        tassertNotStarted();
         _started = true;
 
         auto& initialState = getContextOrFatal(_initial);
         _current = &initialState;
         auto& handler = initialState.stateHandler;
-        handler->fireEnter(_current->state(), boost::none);
+        if (handler)
+            handler->fireEnter(_current->state(), boost::none);
     }
 
     // Define a valid transition.
     // Must be called prior to starting the state machine.
     void validTransition(State from, State to) noexcept {
-        invariant(!_started, "operation cannot be performed after the state machine is started");
+        tassertNotStarted();
         auto& context = _states[from];
         context.validTransitions.insert(to);
     }
@@ -113,9 +125,19 @@ public:
     }
 
     // Accept message m, transition the state machine, and return the resulting state.
-    State accept(const InputMessage& m) {
-        invariant(_started, "operation cannot be performed before the state machine is started");
+    // Upon the transition to the new state the state machine will call any registered hooks.
+    //
+    // In order to avoid deadlock while calling this function, authors should ensure
+    // that:
+    //	1. A recursive call only occurs from the current thread; or
+    //	2. For any hooks run as a result of accepting this message, no blocking calls are made
+    // involving shared resources with another thread that may call this function.
+    State accept(const OptionalMessageType& m) {
+        tassertStarted();
+        stdx::lock_guard<stdx::recursive_mutex> lk(_mutex);
+
         auto& handler = _current->stateHandler;
+
         auto result = handler->accept(m);
         if (result) {
             setState(*result, m);
@@ -125,7 +147,7 @@ public:
 
     // Return the current state.
     State state() const {
-        invariant(_started, "operation cannot be performed before the state machine is started");
+        tassertStarted();
         invariant(_current);
         return _current->state();
     }
@@ -150,7 +172,7 @@ public:
         // Accepts input message m when state machine is in state _state. Optionally, the
         // state machine transitions to the state specified in the return value. Entry and exit
         // hooks will not fire if this method returns boost::none.
-        virtual boost::optional<State> accept(const InputMessage& m) noexcept = 0;
+        virtual boost::optional<State> accept(const OptionalMessageType& message) noexcept = 0;
 
         // The state this handler is defined for
         State state() const {
@@ -177,6 +199,8 @@ public:
                 cb(_state, newState, message);
         }
 
+        bool _isTransient = false;
+
     protected:
         // The state we are handling
         const State _state;
@@ -194,7 +218,7 @@ public:
             : StateHandler(state), _messageHandler(std::move(m)) {}
         ~LambdaStateHandler() override {}
 
-        boost::optional<State> accept(const InputMessage& m) noexcept override {
+        boost::optional<State> accept(const OptionalMessageType& m) noexcept override {
             return _messageHandler(m);
         }
 
@@ -203,17 +227,26 @@ public:
     };
 
     StateEventRegistryPtr registerHandler(StateHandlerPtr handler) {
-        invariant(!_started, "operation cannot be performed after the state machine is started");
+        tassertNotStarted();
         auto& context = _states[handler->state()];
         context.stateHandler = std::move(handler);
         return context.stateHandler.get();
     }
 
-    StateEventRegistryPtr registerHandler(State s, MessageHandler&& handler) {
-        invariant(!_started, "operation cannot be performed after the state machine is started");
+    StateEventRegistryPtr registerHandler(State s, MessageHandler&& handler, bool isTransient) {
+        tassertNotStarted();
+
         auto& context = _states[s];
         context.stateHandler = std::make_unique<LambdaStateHandler>(s, std::move(handler));
+        if (isTransient) {
+            context.stateHandler->_isTransient = true;
+        }
+
         return context.stateHandler.get();
+    }
+
+    StateEventRegistryPtr registerHandler(State s, MessageHandler&& handler) {
+        return registerHandler(s, std::move(handler), false);
     }
 
 protected:
@@ -228,14 +261,18 @@ protected:
     using StateContexts = stdx::unordered_map<State, StateContext>;
 
     void setState(State s, const OptionalMessageType& message) {
-        invariant(_started, "operation cannot be performed before the state machine is started");
+        tassertStarted();
 
         invariant(_current);
         auto& previousContext = *_current;
 
         auto& transitions = previousContext.validTransitions;
         auto it = transitions.find(s);
-        invariant(it != transitions.end(), "invalid state transition");
+        tassert(5936506, "invalid state transition", it != transitions.end());
+
+        // in production, an illegal transition is a noop
+        if (it == transitions.end())
+            return;
 
         // switch to new state
         _current = &getContextOrFatal(s);
@@ -245,6 +282,10 @@ protected:
 
         // fire entry hooks for new state
         _current->stateHandler->fireEnter(previousContext.state(), message);
+
+        if (_current->stateHandler->_isTransient) {
+            accept(message);
+        }
     }
 
     StateHandler* getHandlerOrFatal(State s) {
@@ -263,10 +304,11 @@ protected:
     }
 
     StateEventRegistryPtr on(State s) {
-        invariant(!_started, "operation cannot be performed after the state machine is started");
+        tassertNotStarted();
         return getHandlerOrFatal(s);
     }
 
+    stdx::recursive_mutex _mutex;
     bool _started;
     State _initial;
     StateContext* _current = nullptr;

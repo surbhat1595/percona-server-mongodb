@@ -76,7 +76,7 @@ public:
     ReshardingCollectionCloner(std::unique_ptr<Env> env,
                                ShardKeyPattern newShardKeyPattern,
                                NamespaceString sourceNss,
-                               CollectionUUID sourceUUID,
+                               const UUID& sourceUUID,
                                ShardId recipientShard,
                                Timestamp atClusterTime,
                                NamespaceString outputNss);
@@ -107,15 +107,14 @@ public:
     bool doOneBatch(OperationContext* opCtx, Pipeline& pipeline);
 
 private:
-    std::unique_ptr<Pipeline, PipelineDeleter> _targetAggregationRequest(OperationContext* opCtx,
-                                                                         const Pipeline& pipeline);
+    std::unique_ptr<Pipeline, PipelineDeleter> _targetAggregationRequest(const Pipeline& pipeline);
 
     std::unique_ptr<Pipeline, PipelineDeleter> _restartPipeline(OperationContext* opCtx);
 
     const std::unique_ptr<Env> _env;
     const ShardKeyPattern _newShardKeyPattern;
     const NamespaceString _sourceNss;
-    const CollectionUUID _sourceUUID;
+    const UUID _sourceUUID;
     const ShardId _recipientShard;
     const Timestamp _atClusterTime;
     const NamespaceString _outputNss;

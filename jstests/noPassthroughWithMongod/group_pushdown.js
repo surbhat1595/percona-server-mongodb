@@ -5,11 +5,9 @@
 "use strict";
 
 load("jstests/libs/analyze_plan.js");
+load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
 
-const featureEnabled =
-    assert.commandWorked(db.adminCommand({getParameter: 1, featureFlagSBEGroupPushdown: 1}))
-        .featureFlagSBEGroupPushdown.value;
-if (!featureEnabled) {
+if (!checkSBEEnabled(db, ["featureFlagSBEGroupPushdown"])) {
     jsTestLog("Skipping test because the sbe group pushdown feature flag is disabled");
     return;
 }
@@ -29,7 +27,11 @@ let assertGroupPushdown = function(coll, pipeline, expectedResults, expectedGrou
     const explain = coll.explain().aggregate(pipeline);
     // When $group is pushed down it will never be present as a stage in the 'winningPlan' of
     // $cursor.
-    assert.eq(expectedGroupCountInExplain, getAggPlanStages(explain, "GROUP").length, explain);
+    if (expectedGroupCountInExplain > 1) {
+        assert.eq(expectedGroupCountInExplain, getAggPlanStages(explain, "GROUP").length, explain);
+    } else {
+        assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
+    }
 
     let results = coll.aggregate(pipeline).toArray();
     assert.sameMembers(results, expectedResults);
@@ -61,6 +63,42 @@ let assertResultsMatchWithAndWithoutPushdown = function(
 
     let resultWithGroupPushdown = coll.aggregate(pipeline).toArray();
     assert.sameMembers(resultNoGroupPushdown, resultWithGroupPushdown);
+};
+
+let assertShardedGroupResultsMatch = function(coll, pipeline, expectedGroupCountInExplain = 1) {
+    const originalClassicEngineStatus =
+        assert
+            .commandWorked(
+                db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: true}))
+            .was;
+
+    const cmd = {
+        aggregate: coll.getName(),
+        pipeline: pipeline,
+        needsMerge: true,
+        fromMongos: true,
+        cursor: {}
+    };
+
+    const classicalRes = coll.runCommand(cmd).cursor.firstBatch;
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: false}));
+    const explainCmd = {
+        aggregate: coll.getName(),
+        pipeline: pipeline,
+        needsMerge: true,
+        fromMongos: true,
+        explain: true,
+        cursor: {}
+    };
+    const explain = coll.runCommand(explainCmd);
+    assert.eq(expectedGroupCountInExplain, getAggPlanStages(explain, "GROUP").length, explain);
+    const sbeRes = coll.runCommand(cmd).cursor.firstBatch;
+
+    assert.sameMembers(sbeRes, classicalRes);
+
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, internalQueryForceClassicEngine: originalClassicEngineStatus}));
 };
 
 // Try a pipeline with no group stage.
@@ -200,12 +238,15 @@ assertResultsMatchWithAndWithoutPushdown(
 // enable $mergeObject or document id expression. As of now we don't have a way to produce valid
 // subdocuments from a $group stage.
 
-// Run a group with an unsupported accumultor and check that it doesn't get pushed down.
-assertNoGroupPushdown(coll, [{$group: {_id: "$item", s: {$stdDevSamp: "$quantity"}}}], [
-    {"_id": "a", "s": 2.1213203435596424},
-    {"_id": "b", "s": 6.363961030678928},
-    {"_id": "c", "s": null}
-]);
+// Run a group with a supported $stdDevSamp accumultor and check that it gets pushed down.
+assertGroupPushdown(coll,
+                    [{$group: {_id: "$item", s: {$stdDevSamp: "$quantity"}}}],
+                    [
+                        {"_id": "a", "s": 2.1213203435596424},
+                        {"_id": "b", "s": 6.363961030678928},
+                        {"_id": "c", "s": null}
+                    ],
+                    1);
 
 // Run a simple group with $sum and object _id, check if it doesn't get pushed down.
 assertNoGroupPushdown(coll,
@@ -224,7 +265,7 @@ assertGroupPushdown(coll,
                     [{"_id": "a"}],
                     1);
 
-// Make sure the DISTINCT_SCAN case where the sort is proided by an index still works and is not
+// Make sure the DISTINCT_SCAN case where the sort is provided by an index still works and is not
 // executed in SBE.
 assert.commandWorked(coll.createIndex({item: 1}));
 let explain = coll.explain().aggregate([{$sort: {item: 1}}, {$group: {_id: "$item"}}]);
@@ -232,18 +273,51 @@ assert.neq(null, getAggPlanStage(explain, "DISTINCT_SCAN"), explain);
 assert.eq(null, getAggPlanStage(explain, "SORT"), explain);
 assert.commandWorked(coll.dropIndex({item: 1}));
 
-// Time to see if indexes prevent pushdown. Add an index on item, and make sure we don't execute in
-// sbe because we won't support $group pushdown until SERVER-58429.
+// Time to check that indexes don't prevent pushdown.
+// The $match stage should trigger usage of indexed plans if there is an index for it. Indexes on
+// the fields involved in $group stage should make no difference.
+// data schema: {"_id": 1, "item": "a", "price": 10, "quantity": 2, "date": ISODate()}
+// The existing index is irrelevant.
+assert.commandWorked(coll.createIndex({quantity: 1}));
+assertGroupPushdown(coll,
+                    [{$match: {price: {$gt: 0}}}, {$group: {_id: "$item", s: {$sum: "$price"}}}],
+                    [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
+                    1 /* expectedGroupCountInExplain */);
+// Index on the group by field but the accumulator prevents distinct scan.
 assert.commandWorked(coll.createIndex({item: 1}));
-assertNoGroupPushdown(coll,
-                      [{$group: {_id: "$item", s: {$sum: "$price"}}}],
-                      [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}]);
+assertGroupPushdown(coll,
+                    [{$group: {_id: "$item", s: {$sum: "$price"}}}],
+                    [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
+                    1 /* expectedGroupCountInExplain */);
+// Multiple relevant indexes.
+assert.commandWorked(coll.createIndex({price: 1}));
+assertGroupPushdown(coll,
+                    [{$match: {price: {$gt: 0}}}, {$group: {_id: "$item", s: {$sum: "$price"}}}],
+                    [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
+                    1 /* expectedGroupCountInExplain */);
+// Index on the accumulator field only.
 assert.commandWorked(coll.dropIndex({item: 1}));
+assertGroupPushdown(coll,
+                    [{$group: {_id: "$item", s: {$sum: "$price"}}}],
+                    [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
+                    1 /* expectedGroupCountInExplain */);
+assertGroupPushdown(coll,
+                    [{$match: {price: {$gt: 0}}}, {$group: {_id: "$item", s: {$sum: "$price"}}}],
+                    [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
+                    1 /* expectedGroupCountInExplain */);
+assert.commandWorked(coll.dropIndex({price: 1}));
+assert.commandWorked(coll.dropIndex({quantity: 1}));
 
-// Supported group and then a group with no supported accumulators.
+// Supported group and then a group with unsupported accumulators. JS accumulators are not
+// currently pushed down.
 explain = coll.explain().aggregate([
     {$group: {_id: "$item", s: {$sum: "$price"}}},
-    {$group: {_id: "$quantity", c: {$stdDevPop: "$price"}}}
+    {
+        $group: {
+            _id: "$quantity",
+            c: {$_internalJsReduce: {data: {k: "$word", v: "$val"}, eval: "null"}}
+        }
+    }
 ]);
 
 assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
@@ -263,8 +337,7 @@ assert(explain.stages[1].hasOwnProperty("$group"));
 // A group with one supported and one unsupported accumulators.
 explain = coll.explain().aggregate(
     [{$group: {_id: "$item", s: {$sum: "$price"}, stdev: {$stdDevPop: "$price"}}}]);
-assert.eq(null, getAggPlanStage(explain, "GROUP"), explain);
-assert(explain.stages[1].hasOwnProperty("$group"));
+assert.neq(null, getAggPlanStage(explain, "GROUP", true), explain);
 
 // $group cannot be pushed down to SBE when there's $match with $or due to an issue with
 // subplanning even though $group alone can be pushed down.
@@ -276,6 +349,13 @@ const groupPossiblyPushedDown = {
 };
 assertNoGroupPushdown(coll,
                       [matchWithOr, groupPossiblyPushedDown],
+                      [{_id: "a", quantity: 7}, {_id: "b", quantity: 10}]);
+// A trival $and with only one $or will be optimized away and thus $or will be the top expression.
+const matchWithTrivialAndOr = {
+    $match: {$and: [{$or: [{"item": "a"}, {"price": 10}]}]}
+};
+assertNoGroupPushdown(coll,
+                      [matchWithTrivialAndOr, groupPossiblyPushedDown],
                       [{_id: "a", quantity: 7}, {_id: "b", quantity: 10}]);
 
 // $bucketAuto/$bucket/$sortByCount are sugared $group stages which are not compatible with SBE.
@@ -326,58 +406,34 @@ explain = coll.runCommand({
 });
 assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
 
-const originalClassicEngineStatus =
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: true}))
-        .was;
-
-const pipeline1 = [{$group: {_id: "$item", s: {$sum: "$quantity"}}}];
-const classicalRes1 = coll.runCommand({
-                              aggregate: coll.getName(),
-                              pipeline: pipeline1,
-                              needsMerge: true,
-                              fromMongos: true,
-                              cursor: {}
-                          })
-                          .cursor.firstBatch;
+// Verifies that a basic sharded $sum accumulator works.
+assertShardedGroupResultsMatch(coll, [{$group: {_id: "$item", s: {$sum: "$quantity"}}}]);
 
 // When there's overflow for 'NumberLong', the mongod sends back the partial sum as a doc with
 // 'subTotal' and 'subTotalError' fields. So, we need an overflow case to verify such behavior.
 const tcoll = db.group_pushdown1;
 assert.commandWorked(tcoll.insert([{a: NumberLong("9223372036854775807")}, {a: NumberLong("10")}]));
-const pipeline2 = [{$group: {_id: null, s: {$sum: "$a"}}}];
-const classicalRes2 = tcoll
-                          .runCommand({
-                              aggregate: tcoll.getName(),
-                              pipeline: pipeline2,
-                              needsMerge: true,
-                              fromMongos: true,
-                              cursor: {}
-                          })
-                          .cursor.firstBatch;
+assertShardedGroupResultsMatch(tcoll, [{$group: {_id: null, s: {$sum: "$a"}}}]);
 
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: false}));
+// Verifies that the shard-side $stdDevPop and $stdDevSamp work.
+assertShardedGroupResultsMatch(coll, [{$group: {_id: "$item", s: {$stdDevPop: "$price"}}}]);
+assertShardedGroupResultsMatch(coll, [{$group: {_id: "$item", s: {$stdDevSamp: "$price"}}}]);
 
-const sbeRes1 = coll.runCommand({
-                        aggregate: coll.getName(),
-                        pipeline: pipeline1,
-                        needsMerge: true,
-                        fromMongos: true,
-                        cursor: {}
-                    })
-                    .cursor.firstBatch;
-assert.sameMembers(sbeRes1, classicalRes1);
+// Verifies that a sharded $avg works when there's no numeric data.
+assertShardedGroupResultsMatch(coll, [{$group: {_id: "$item", a: {$avg: "$missing"}}}]);
 
-const sbeRes2 = tcoll
-                    .runCommand({
-                        aggregate: tcoll.getName(),
-                        pipeline: pipeline2,
-                        needsMerge: true,
-                        fromMongos: true,
-                        cursor: {}
-                    })
-                    .cursor.firstBatch;
-assert.docEq(sbeRes2, classicalRes2);
+// When sum of numeric data is a non-decimal, shard(s) should return data in the form of {subTotal:
+// val1, count: val2, subTotalError: val3}.
+assertShardedGroupResultsMatch(coll, [{$group: {_id: "$item", a: {$avg: "$quantity"}}}]);
 
-assert.commandWorked(db.adminCommand(
-    {setParameter: 1, internalQueryForceClassicEngine: originalClassicEngineStatus}));
+// When sum of numeric data is a decimal, shard(s) should return data in the form of {subTotal:
+// val1, count: val2}.
+tcoll.drop();
+// Prices for group "a" are all decimals.
+assert.commandWorked(tcoll.insert(
+    [{item: "a", price: NumberDecimal("10.7")}, {item: "a", price: NumberDecimal("20.3")}]));
+// Prices for group "b" are one decimal and one non-decimal.
+assert.commandWorked(
+    tcoll.insert([{item: "b", price: NumberDecimal("3.7")}, {item: "b", price: 2.3}]));
+assertShardedGroupResultsMatch(tcoll, [{$group: {_id: "$item", a: {$avg: "$price"}}}]);
 })();

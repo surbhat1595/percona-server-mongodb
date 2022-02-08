@@ -377,7 +377,7 @@ install_deps() {
       elif [ x"$RHEL" = x7 ]; then
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel
-        yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel scons rpmlint
+        yum -y install cyrus-sasl-devel cyrus-sasl-plain snappy-devel zlib-devel bzip2-devel scons rpmlint
         yum -y install rpm-build git python-pip python-devel libopcodes libcurl-devel rpmlint e2fsprogs-devel expat-devel lz4-devel which
         yum -y install openldap-devel krb5-devel xz-devel
         pip install --upgrade pip

@@ -26,8 +26,9 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
+#include <kmippp/kmippp.h>
+
 #include "mongo/db/encryption/encryption_kmip.h"
-#include "kmippp.h"
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/json.h"
 #include "mongo/logv2/log.h"

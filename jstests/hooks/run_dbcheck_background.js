@@ -68,7 +68,8 @@ function runBackgroundDbCheck(hosts) {
             assert.commandWorked(primary.getDB(dbName).runCommand({dbCheck: 1}));
             jsTestLog("dbCheck done on database " + dbName);
         } catch (e) {
-            if (e.code === ErrorCodes.NamespaceNotFound || e.code === ErrorCodes.LockTimeout) {
+            if (e.code === ErrorCodes.NamespaceNotFound || e.code === ErrorCodes.LockTimeout ||
+                e.code == ErrorCodes.Interrupted) {
                 jsTestLog("Skipping dbCheck on database " + dbName +
                           " due to transient error: " + tojson(e));
                 return;
@@ -95,9 +96,14 @@ function runBackgroundDbCheck(hosts) {
         })
     ];
     nodes.forEach((node) => {
-        // Assert no errors (i.e., found inconsistencies). Allow warnings.
+        // Assert no errors (i.e., found inconsistencies). Allow warnings. Tolerate SnapshotTooOld
+        // errors, as they can occur if the primary is slow enough processing a batch that the
+        // secondary is unable to obtain the timestamp the primary used.
         const healthlog = node.getDB('local').system.healthlog;
-        let errs = healthlog.find({"severity": "error"});
+        // Regex matching strings that start without "SnapshotTooOld"
+        const regexStringWithoutSnapTooOld = /^((?!^SnapshotTooOld).)*$/;
+        let errs =
+            healthlog.find({"severity": "error", "data.error": regexStringWithoutSnapTooOld});
         if (errs.hasNext()) {
             const err = "dbCheck found inconsistency on " + node.host;
             jsTestLog(err + ". Errors: ");

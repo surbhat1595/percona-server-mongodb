@@ -215,9 +215,9 @@ int decryptGCM(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
 }
 
 
-int decryptMain(int argc, char** argv, char** envp) {
+int decryptMain(int argc, char** argv) {
     int ret{EXIT_BADOPTIONS};
-    runGlobalInitializersOrDie(argc, argv, envp);
+    runGlobalInitializersOrDie(std::vector<std::string>(argv, argv + argc));
 
     try{
         std::string encoded_key;
@@ -306,6 +306,6 @@ int decryptMain(int argc, char** argv, char** envp) {
 
 }  // namespace mongo
 
-int main(int argc, char* argv[], char** envp) {
-    return mongo::decryptMain(argc, argv, envp);
+int main(int argc, char* argv[]) {
+    return mongo::decryptMain(argc, argv);
 }

@@ -190,25 +190,30 @@ public:
     using element_type = typename SW::type;
 
     IDLServerParameterWithStorage(StringData name, T& storage)
-        : ServerParameter(ServerParameterSet::getGlobal(),
-                          name,
-                          paramType == SPT::kStartupOnly || paramType == SPT::kStartupAndRuntime,
-                          paramType == SPT::kRuntimeOnly || paramType == SPT::kStartupAndRuntime),
-          _storage(storage) {
-        static_assert(thread_safe || paramType == SPT::kStartupOnly,
-                      "Runtime server parameters must be thread safe");
+        : ServerParameter(name, paramType), _storage(storage) {
+        constexpr bool notRuntime =
+            (paramType == SPT::kStartupOnly) || (paramType == SPT::kReadOnly);
+        static_assert(thread_safe || notRuntime, "Runtime server parameters must be thread safe");
     }
 
-    /**
-     * Convenience wrapper for storing a value.
-     */
-    Status setValue(const element_type& newValue) {
+    Status validateValue(const element_type& newValue) const {
         for (const auto& validator : _validators) {
             const auto status = validator(newValue);
             if (!status.isOK()) {
                 return status;
             }
         }
+        return Status::OK();
+    }
+
+    /**
+     * Convenience wrapper for storing a value.
+     */
+    Status setValue(const element_type& newValue) {
+        if (auto status = validateValue(newValue); !status.isOK()) {
+            return status;
+        }
+
         SW::store(_storage, newValue);
 
         if (_onUpdate) {
@@ -237,6 +242,17 @@ public:
         } else {
             b.append(name, getValue());
         }
+    }
+
+    Status validate(const BSONElement& newValueElement) const final {
+        element_type newValue;
+
+        if (auto status = newValueElement.tryCoerce(&newValue); !status.isOK()) {
+            return {status.code(),
+                    str::stream() << "Failed validating " << name() << ": " << status.reason()};
+        }
+
+        return validateValue(newValue);
     }
 
     /**

@@ -159,7 +159,7 @@ BSONArray buildMergeChunksTransactionPrecond(const std::vector<ChunkType>& chunk
     return preCond.arr();
 }
 
-/*
+/**
  * Check that the chunk still exists and return its metadata.
  */
 StatusWith<ChunkType> getCurrentChunk(OperationContext* opCtx,
@@ -282,7 +282,9 @@ boost::optional<ChunkType> getControlChunkForMigrate(OperationContext* opCtx,
     return uassertStatusOK(ChunkType::fromConfigBSON(response.docs.front(), epoch, timestamp));
 }
 
-// Helper function to find collection version and shard version.
+/**
+ * Helper function to find collection version and shard version.
+ */
 StatusWith<ChunkVersion> getMaxChunkVersionFromQueryResponse(
     const CollectionType& coll, const StatusWith<Shard::QueryResponse>& queryResponse) {
 
@@ -303,7 +305,9 @@ StatusWith<ChunkVersion> getMaxChunkVersionFromQueryResponse(
     return chunk.getVersion();
 }
 
-// Helper function to get the collection version for nss. Always uses kLocalReadConcern.
+/**
+ * Helper function to get the collection version for nss. Always uses kLocalReadConcern.
+ */
 StatusWith<ChunkVersion> getCollectionVersion(OperationContext* opCtx, const NamespaceString& nss) {
     auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto findCollResponse =
@@ -354,8 +358,6 @@ ChunkVersion getShardVersion(OperationContext* opCtx,
             chunksQuery,
             BSON(ChunkType::lastmod << -1),  // Sort by version.
             1));
-
-
     if (!swDonorShardVersion.isOK()) {
         if (swDonorShardVersion.getStatus().code() == 50577) {
             // The query to find 'nss' chunks belonging to the donor shard didn't return any chunks,
@@ -483,22 +485,11 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
     const OID& requestEpoch,
     const ChunkRange& range,
     const std::vector<BSONObj>& splitPoints,
-    const std::string& shardName) {
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel
+    const std::string& shardName,
+    const bool fromChunkSplitter) {
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
-
-    // Get the max chunk version for this namespace.
-    auto swCollVersion = getCollectionVersion(opCtx, nss);
-
-    if (!swCollVersion.isOK()) {
-        return swCollVersion.getStatus().withContext(
-            str::stream() << "splitChunk cannot split chunk " << range.toString() << ".");
-    }
-
-    auto collVersion = swCollVersion.getValue();
 
     auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto findCollResponse = uassertStatusOK(
@@ -509,10 +500,27 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
                                             BSON(CollectionType::kNssFieldName << nss.ns()),
                                             {},
                                             1));
+
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Collection does not exist",
             !findCollResponse.docs.empty());
     const CollectionType coll(findCollResponse.docs[0]);
+
+    // Don't allow auto-splitting if the collection is being defragmented
+    uassert(ErrorCodes::ConflictingOperationInProgress,
+            str::stream() << "Can't commit auto-split while `" << nss.ns()
+                          << "` is undergoing a defragmentation.",
+            !(coll.getBalancerShouldMergeChunks() && fromChunkSplitter));
+
+    // Get the max chunk version for this namespace.
+    auto swCollVersion = getCollectionVersion(opCtx, nss);
+
+    if (!swCollVersion.isOK()) {
+        return swCollVersion.getStatus().withContext(
+            str::stream() << "splitChunk cannot split chunk " << range.toString() << ".");
+    }
+
+    auto collVersion = swCollVersion.getValue();
 
     // Return an error if collection epoch does not match epoch of request.
     if (coll.getEpoch() != requestEpoch) {
@@ -703,12 +711,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
         return {ErrorCodes::IllegalOperation, "chunk operation requires validAfter timestamp"};
     }
 
-    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
 
     // 1. Retrieve the initial collection version info to build up the logging info.
@@ -719,6 +723,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
     }
 
     // 2. Retrieve the list of chunks belonging to the requested shard + key range.
+    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto findCollResponse = uassertStatusOK(
         configShard->exhaustiveFindOnConfig(opCtx,
                                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
@@ -727,7 +732,6 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
                                             BSON(CollectionType::kNssFieldName << nss.ns()),
                                             {},
                                             1));
-
     if (findCollResponse.docs.empty()) {
         return {ErrorCodes::Error(5678601),
                 str::stream() << "Collection '" << nss.ns() << "' no longer either exists"};
@@ -857,11 +861,14 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     const ShardId& fromShard,
     const ShardId& toShard,
     const boost::optional<Timestamp>& validAfter) {
-
-    auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    if (!validAfter) {
+        return {ErrorCodes::IllegalOperation, "chunk operation requires validAfter timestamp"};
+    }
 
     // Must hold the shard lock until the entire commit finishes to serialize with removeShard.
     Lock::SharedLock shardLock(opCtx->lockState(), _kShardMembershipLock);
+
+    auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto shardResult = uassertStatusOK(
         configShard->exhaustiveFindOnConfig(opCtx,
                                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
@@ -870,7 +877,6 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
                                             BSON(ShardType::name(toShard.toString())),
                                             {},
                                             boost::none));
-
     uassert(ErrorCodes::ShardNotFound,
             str::stream() << "Shard " << toShard << " does not exist",
             !shardResult.docs.empty());
@@ -880,21 +886,9 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
             str::stream() << "Shard " << toShard << " is currently draining",
             !shard.getDraining());
 
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations.
-    //
-    // ConfigSvrCommitChunkMigration commands must be run serially because the new ChunkVersions
-    // for migrated chunks are generated within the command and must be committed to the database
-    // before another chunk commit generates new ChunkVersions in the same manner.
-    //
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel.
-    // (Note: This is not needed while we have a global lock, taken here only for consistency.)
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
-
-    if (!validAfter) {
-        return {ErrorCodes::IllegalOperation, "chunk operation requires validAfter timestamp"};
-    }
 
     auto findCollResponse = uassertStatusOK(
         configShard->exhaustiveFindOnConfig(opCtx,
@@ -907,6 +901,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Collection does not exist",
             !findCollResponse.docs.empty());
+
     const CollectionType coll(findCollResponse.docs[0]);
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Collection is undergoing changes and chunks cannot be moved",
@@ -955,7 +950,6 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     // Check if chunk still exists and which shard owns it
     auto swCurrentChunk =
         getCurrentChunk(opCtx, coll.getUuid(), coll.getEpoch(), coll.getTimestamp(), migratedChunk);
-
     if (!swCurrentChunk.isOK()) {
         return swCurrentChunk.getStatus();
     }
@@ -1127,24 +1121,150 @@ StatusWith<ChunkType> ShardingCatalogManager::_findChunkOnConfig(OperationContex
     return ChunkType::fromConfigBSON(origChunks.front(), epoch, timestamp);
 }
 
+void ShardingCatalogManager::upgradeChunksHistory(OperationContext* opCtx,
+                                                  const NamespaceString& nss,
+                                                  bool force,
+                                                  const Timestamp& validAfter) {
+    auto const catalogClient = Grid::get(opCtx)->catalogClient();
+    const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
+    // migrations.
+    Lock::ExclusiveLock lk(opCtx->lockState(), _kChunkOpLock);
+
+    auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    const auto coll = [&] {
+        auto collDocs = uassertStatusOK(configShard->exhaustiveFindOnConfig(
+                                            opCtx,
+                                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                            repl::ReadConcernLevel::kLocalReadConcern,
+                                            CollectionType::ConfigNS,
+                                            BSON(CollectionType::kNssFieldName << nss.ns()),
+                                            {},
+                                            1))
+                            .docs;
+        uassert(ErrorCodes::NamespaceNotFound, "Collection does not exist", !collDocs.empty());
+
+        return CollectionType(collDocs[0].getOwned());
+    }();
+
+    if (force) {
+        LOGV2(620650,
+              "Resetting the 'historyIsAt40' field for all chunks in collection {namespace} in "
+              "order to force all chunks' history to get recreated",
+              "namespace"_attr = nss.ns());
+
+        BatchedCommandRequest request([&] {
+            write_ops::UpdateCommandRequest updateOp(ChunkType::ConfigNS);
+            updateOp.setUpdates({[&] {
+                write_ops::UpdateOpEntry entry;
+                entry.setQ(BSON(ChunkType::collectionUUID() << coll.getUuid()));
+                entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
+                    BSON("$unset" << BSON(ChunkType::historyIsAt40() << ""))));
+                entry.setUpsert(false);
+                entry.setMulti(true);
+                return entry;
+            }()});
+            return updateOp;
+        }());
+        request.setWriteConcern(ShardingCatalogClient::kLocalWriteConcern.toBSON());
+
+        auto response = configShard->runBatchWriteCommand(
+            opCtx, Shard::kDefaultConfigCommandTimeout, request, Shard::RetryPolicy::kIdempotent);
+        uassertStatusOK(response.toStatus());
+
+        uassert(ErrorCodes::Error(5760502),
+                str::stream() << "No chunks found for collection " << nss.ns(),
+                response.getN() > 0);
+    }
+
+    // Find the collection version
+    const auto collVersion = uassertStatusOK(getCollectionVersion(opCtx, nss));
+
+    // Find the chunk history
+    const auto allChunksVector = [&] {
+        auto findChunksResponse = uassertStatusOK(
+            configShard->exhaustiveFindOnConfig(opCtx,
+                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                                repl::ReadConcernLevel::kLocalReadConcern,
+                                                ChunkType::ConfigNS,
+                                                BSON(ChunkType::collectionUUID() << coll.getUuid()),
+                                                BSONObj(),
+                                                boost::none));
+        uassert(ErrorCodes::Error(5760503),
+                str::stream() << "No chunks found for collection " << nss.ns(),
+                !findChunksResponse.docs.empty());
+        return std::move(findChunksResponse.docs);
+    }();
+
+    // Bump the major version in order to be guaranteed to trigger refresh on every shard
+    ChunkVersion newCollectionVersion(
+        collVersion.majorVersion() + 1, 0, collVersion.epoch(), collVersion.getTimestamp());
+    std::set<ShardId> changedShardIds;
+    for (const auto& chunk : allChunksVector) {
+        auto upgradeChunk = uassertStatusOK(
+            ChunkType::fromConfigBSON(chunk, collVersion.epoch(), collVersion.getTimestamp()));
+        bool historyIsAt40 = chunk[ChunkType::historyIsAt40()].booleanSafe();
+        if (historyIsAt40) {
+            uassert(
+                ErrorCodes::Error(5760504),
+                str::stream() << "Chunk " << upgradeChunk.getName() << " in collection " << nss.ns()
+                              << " indicates that it has been upgraded to version 4.0, but is "
+                                 "missing the history field. This indicates a corrupted routing "
+                                 "table and requires a manual intervention to be fixed.",
+                !upgradeChunk.getHistory().empty());
+            continue;
+        }
+
+        upgradeChunk.setVersion(newCollectionVersion);
+        newCollectionVersion.incMinor();
+        changedShardIds.emplace(upgradeChunk.getShard());
+
+        // Construct the fresh history.
+        upgradeChunk.setHistory({ChunkHistory{validAfter, upgradeChunk.getShard()}});
+
+        // Set the 'historyIsAt40' field so that it gets skipped if the command is re-run
+        BSONObjBuilder chunkObjBuilder(upgradeChunk.toConfigBSON());
+        chunkObjBuilder.appendBool(ChunkType::historyIsAt40(), true);
+
+        // Run the update
+        uassertStatusOK(
+            catalogClient->updateConfigDocument(opCtx,
+                                                ChunkType::ConfigNS,
+                                                BSON(ChunkType::name(upgradeChunk.getName())),
+                                                chunkObjBuilder.obj(),
+                                                false,
+                                                ShardingCatalogClient::kLocalWriteConcern));
+    }
+
+    // Wait for the writes to become majority committed so that the subsequent shard refreshes can
+    // see them
+    const auto clientOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    WriteConcernResult unusedWCResult;
+    uassertStatusOK(waitForWriteConcern(
+        opCtx, clientOpTime, ShardingCatalogClient::kMajorityWriteConcern, &unusedWCResult));
+
+    for (const auto& shardId : changedShardIds) {
+        auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
+        uassertStatusOK(
+            Shard::CommandResponse::getEffectiveStatus(shard->runCommandWithFixedRetryAttempts(
+                opCtx,
+                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                "admin",
+                BSON("_flushRoutingTableCacheUpdates" << nss.ns()),
+                Shard::RetryPolicy::kIdempotent)));
+    }
+}
+
 void ShardingCatalogManager::clearJumboFlag(OperationContext* opCtx,
                                             const NamespaceString& nss,
                                             const OID& collectionEpoch,
                                             const ChunkRange& chunk) {
-    auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations.
-    //
-    // ConfigSvrClearJumboFlag commands must be run serially because the new ChunkVersions
-    // for the modified chunks are generated within the command and must be committed to the
-    // database before another chunk operation generates new ChunkVersions in the same manner.
-    //
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel.
-    // (Note: This is not needed while we have a global lock, taken here only for consistency.)
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
 
+    auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto findCollResponse = uassertStatusOK(
         configShard->exhaustiveFindOnConfig(opCtx,
                                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
@@ -1258,15 +1378,14 @@ void ShardingCatalogManager::ensureChunkVersionIsGreaterThan(OperationContext* o
                                                              const BSONObj& minKey,
                                                              const BSONObj& maxKey,
                                                              const ChunkVersion& version) {
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
+    Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
+
     ScopeGuard earlyReturnBeforeDoingWriteGuard([&] {
         // Ensure waiting for writeConcern of the data read.
         repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
     });
-
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk operations.
-    // TODO (SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel.
-    Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
 
     const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
@@ -1475,9 +1594,11 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
 
             auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
-            // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk operations.
-            // TODO (SERVER-25359): Replace with a collection-specific lock map to allow
-            // splits/merges/ move chunks on different collections to proceed in parallel.
+            // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications. Note
+            // that the operation below doesn't increment the chunk marked as jumbo's version, which
+            // means that a subsequent incremental refresh will not see it. However, it is being
+            // marked in memory through the call to 'markAsJumbo' above so subsequent balancer
+            // iterations will not consider it for migration.
             Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
 
             const auto findCollResponse = uassertStatusOK(configShard->exhaustiveFindOnConfig(
@@ -1610,10 +1731,8 @@ void ShardingCatalogManager::setChunkEstimatedSize(OperationContext* opCtx,
     // ensure the unsigned value fits in the signed long long
     uassert(6049442, "Estimated chunk size cannot be negative", estimatedDataSizeBytes >= 0);
 
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
 
     const auto chunkQuery = BSON(ChunkType::collectionUUID()

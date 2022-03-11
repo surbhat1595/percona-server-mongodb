@@ -969,8 +969,8 @@ env_vars.Add('MSVC_USE_SCRIPT',
     help='Sets the script used to setup Visual Studio.')
 
 env_vars.Add('MSVC_VERSION',
-    help='Sets the version of Visual C++ to use (e.g. 14.1 for VS2017, 14.2 for VS2019)',
-    default="14.2")
+    help='Sets the version of Visual C++ to use (e.g. 14.2 for VS2019, 14.3 for VS2022)',
+    default="14.3")
 
 env_vars.Add('NINJA_PREFIX',
     default="build",
@@ -1048,6 +1048,10 @@ env_vars.Add('SHELL',
 
 env_vars.Add('SHLINKFLAGS',
     help='Sets flags for the linker when building shared libraries',
+    converter=variable_shlex_converter)
+
+env_vars.Add('SHLINKFLAGS_EXTRA',
+    help='Adds additional flags for shared links without overwriting tool configured SHLINKFLAGS values',
     converter=variable_shlex_converter)
 
 env_vars.Add('STRIP',
@@ -1369,26 +1373,17 @@ endian = get_option( "endian" )
 if endian == "auto":
     endian = sys.byteorder
 
-# These preprocessor macros came from
-# http://nadeausoftware.com/articles/2012/02/c_c_tip_how_detect_processor_type_using_compiler_predefined_macros
-#
-# NOTE: Remember to add a trailing comma to form any required one
-# element tuples, or your configure checks will fail in strange ways.
 processor_macros = {
-    'arm'        : { 'endian': 'little', 'defines': ('__arm__',) },
-    'aarch64'    : { 'endian': 'little', 'defines': ('__arm64__', '__aarch64__')},
-    'i386'       : { 'endian': 'little', 'defines': ('__i386', '_M_IX86')},
-    'ppc64le'    : { 'endian': 'little', 'defines': ('__powerpc64__',)},
-    's390x'      : { 'endian': 'big',    'defines': ('__s390x__',)},
-    'sparc'      : { 'endian': 'big',    'defines': ('__sparc',)},
-    'x86_64'     : { 'endian': 'little', 'defines': ('__x86_64', '_M_AMD64')},
-    'emscripten' : { 'endian': 'little', 'defines': ('__EMSCRIPTEN__', )},
+    'aarch64'    : { 'endian': 'little', 'check': '(defined(__arm64__) || defined(__aarch64__))' },
+    'emscripten' : { 'endian': 'little', 'check': '(defined(__EMSCRIPTEN__))' },
+    'ppc64le'    : { 'endian': 'little', 'check': '(defined(__powerpc64__))' },
+    'riscv64'    : { 'endian': 'little', 'check': '(defined(__riscv)) && (__riscv_xlen == 64)' },
+    's390x'      : { 'endian': 'big',    'check': '(defined(__s390x__))' },
+    'x86_64'     : { 'endian': 'little', 'check': '(defined(__x86_64) || defined(_M_AMD64))' },
 }
 
 def CheckForProcessor(context, which_arch):
     def run_compile_check(arch):
-        full_macros = " || ".join([ "defined(%s)" % (v) for v in processor_macros[arch]['defines']])
-
         if not endian == processor_macros[arch]['endian']:
             return False
 
@@ -1398,7 +1393,7 @@ def CheckForProcessor(context, which_arch):
         #else
         #error not {1}
         #endif
-        """.format(full_macros, arch)
+        """.format(processor_macros[arch]['check'], arch)
 
         return context.TryCompile(textwrap.dedent(test_body), ".c")
 
@@ -1833,6 +1828,10 @@ if not env.TargetOSIs('windows'):
     env["LINKCOM"] = env["LINKCOM"].replace("$LINKFLAGS", "$PROGLINKFLAGS")
     env["PROGLINKFLAGS"] = ['$LINKFLAGS']
 
+# When it is necessary to supply additional SHLINKFLAGS without modifying the toolset default,
+# following appends contents of SHLINKFLAGS_EXTRA variable to the linker command
+env.AppendUnique(SHLINKFLAGS=['$SHLINKFLAGS_EXTRA'])
+
 if not env.Verbose():
     env.Append( CCCOMSTR = "Compiling $TARGET" )
     env.Append( CXXCOMSTR = env["CCCOMSTR"] )
@@ -2131,6 +2130,12 @@ elif env.TargetOSIs('windows'):
         "_SILENCE_CXX17_ALLOCATOR_VOID_DEPRECATION_WARNING",
         "_SILENCE_CXX17_OLD_ALLOCATOR_MEMBERS_DEPRECATION_WARNING",
         "_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING",
+
+        # TODO(SERVER-60151): Until we are fully in C++20 mode, it is
+        # easier to simply suppress C++20 deprecations. After we have
+        # switched over we should address any actual deprecated usages
+        # and then remove this flag.
+        "_SILENCE_ALL_CXX20_DEPRECATION_WARNINGS",
     ])
 
     # /EHsc exception handling style for visual studio
@@ -2649,14 +2654,14 @@ def doConfigure(myenv):
     # bare compilers, and we should re-check at the very end that TryCompile and TryLink still
     # work with the flags we have selected.
     if myenv.ToolchainIs('msvc'):
-        compiler_minimum_string = "Microsoft Visual Studio 2019 16.4"
+        compiler_minimum_string = "Microsoft Visual Studio 2022 17.0"
         compiler_test_body = textwrap.dedent(
         """
         #if !defined(_MSC_VER)
         #error
         #endif
 
-        #if _MSC_VER < 1924
+        #if _MSC_VER < 1930
         #error %s or newer is required to build MongoDB
         #endif
 

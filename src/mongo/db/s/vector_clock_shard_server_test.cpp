@@ -153,7 +153,7 @@ TEST_F(VectorClockShardServerTest, GossipOutInternal) {
     const auto clusterTime = vc->tickClusterTime(1);
 
     BSONObjBuilder bob;
-    vc->gossipOut(nullptr, &bob, transport::Session::kInternalClient);
+    vc->gossipOut(operationContext(), &bob, true /*force internal*/);
     auto obj = bob.obj();
 
     // On shard servers, gossip out to internal clients should have $clusterTime, $configTime, and
@@ -176,7 +176,7 @@ TEST_F(VectorClockShardServerTest, GossipOutExternal) {
     const auto clusterTime = vc->tickClusterTime(1);
 
     BSONObjBuilder bob;
-    vc->gossipOut(nullptr, &bob);
+    vc->gossipOut(operationContext(), &bob);
     auto obj = bob.obj();
 
     // On shard servers, gossip out to external clients should have $clusterTime, but not
@@ -326,7 +326,7 @@ TEST_F(VectorClockPersistenceTest, PrimaryRecoverWithoutExistingVectorClockDocum
     PersistentTaskStore<VectorClockDocument> store(NamespaceString::kVectorClockNamespace);
     ASSERT_EQ(store.count(opCtx, kVectorClockQuery), 0);
 
-    vc->recover().get();
+    vc->recoverDirect(opCtx);
 
     auto time = vc->getTime();
     ASSERT_EQ(Timestamp(0), time.configTime().asTimestamp());
@@ -343,7 +343,7 @@ TEST_F(VectorClockPersistenceTest, PrimaryRecoverWithExistingVectorClockDocument
     ASSERT_EQ(store.count(opCtx, kVectorClockQuery), 0);
     store.add(opCtx, VectorClockDocument(Timestamp(100), Timestamp(50)));
 
-    vc->recover().get();
+    vc->recoverDirect(opCtx);
 
     auto time = vc->getTime();
     ASSERT_EQ(Timestamp(100), time.configTime().asTimestamp());
@@ -366,7 +366,7 @@ TEST_F(VectorClockPersistenceTest, PrimaryRecoverWithIllegalVectorClockDocument)
                        << "IllegalValue"));
 
     const int kParseErrorCode = 40414;
-    ASSERT_THROWS_CODE(vc->recover().get(), DBException, ErrorCodes::Error(kParseErrorCode));
+    ASSERT_THROWS_CODE(vc->recoverDirect(opCtx), DBException, ErrorCodes::Error(kParseErrorCode));
 }
 
 }  // namespace

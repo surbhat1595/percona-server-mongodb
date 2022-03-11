@@ -50,7 +50,11 @@ public:
 
     HealthCheckStatus getStatus() const override;
 
+    Milliseconds getDuration() const override;
+
     void update(HealthCheckStatus status) override;
+
+    void appendDescription(BSONObjBuilder* builder) const override;
 
 private:
     const FaultFacetType _type;
@@ -60,7 +64,7 @@ private:
 
     mutable Mutex _mutex =
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(1), "FaultFacetImpl::_mutex");
-    double _severity = 0;
+    Severity _severity = Severity::kOk;
     std::string _description;
 };
 

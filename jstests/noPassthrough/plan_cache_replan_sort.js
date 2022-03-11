@@ -17,6 +17,8 @@ const db = conn.getDB("test");
 const coll = db.plan_cache_replan_sort;
 coll.drop();
 
+// Replanning is not supported yet without auto-parameterization. TODO SERVER-61314: Remove this
+// check together with removal of "featureFlagSbePlanCache".
 if (checkSBEEnabled(db, ["featureFlagSbePlanCache"])) {
     jsTest.log("Skipping test because SBE and SBE plan cache are both enabled.");
     MongoRunner.stopMongod(conn);
@@ -33,7 +35,7 @@ assert.commandWorked(coll.insert({x: 5, y: 1}));
 
 // Set the memory limit to be large enough to sort a single document in the collection.
 const documentBsonSize = Object.bsonsize(docs[0]);
-const sizeMultiplier = 4.0;
+const sizeMultiplier = 5.0;
 assert.commandWorked(db.adminCommand({
     setParameter: 1,
     internalQueryMaxBlockingSortMemoryUsageBytes: documentBsonSize * sizeMultiplier

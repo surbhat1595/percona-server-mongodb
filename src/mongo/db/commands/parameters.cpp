@@ -41,6 +41,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/parameters_gen.h"
 #include "mongo/db/commands/parse_log_component_settings.h"
+#include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
@@ -57,7 +58,7 @@ using logv2::LogSeverity;
 
 void appendParameterNames(std::string* help) {
     *help += "supported:\n";
-    for (const auto& kv : ServerParameterSet::getGlobal()->getMap()) {
+    for (const auto& kv : ServerParameterSet::getNodeParameterSet()->getMap()) {
         *help += "  ";
         *help += kv.first;
         *help += '\n';
@@ -222,14 +223,13 @@ public:
                    const BSONObj& cmdObj,
                    string& errmsg,
                    BSONObjBuilder& result) {
-        bool all = *cmdObj.firstElement().valuestrsafe() == '*';
+        bool all = cmdObj.firstElement().str() == "*";
 
         int before = result.len();
 
-        const ServerParameter::Map& m = ServerParameterSet::getGlobal()->getMap();
-        for (ServerParameter::Map::const_iterator i = m.begin(); i != m.end(); ++i) {
-            if (all || cmdObj.hasElement(i->first.c_str())) {
-                i->second->append(opCtx, result, i->second->name());
+        for (const auto& param : ServerParameterSet::getNodeParameterSet()->getMap()) {
+            if (all || cmdObj.hasElement(param.first.c_str())) {
+                param.second->append(opCtx, result, param.second->name());
             }
         }
 
@@ -275,7 +275,8 @@ public:
         int numSet = 0;
         bool found = false;
 
-        const ServerParameter::Map& parameterMap = ServerParameterSet::getGlobal()->getMap();
+        const ServerParameter::Map& parameterMap =
+            ServerParameterSet::getNodeParameterSet()->getMap();
 
         // First check that we aren't setting the same parameter twice and that we actually are
         // setting parameters that we have registered and can change at runtime
@@ -374,6 +375,15 @@ public:
                       "newValue"_attr = redact(parameter.toString(false)),
                       "error"_attr = redact(ex));
                 throw;
+            }
+
+            if (parameterName == "logComponentVerbosity") {
+                const BSONObj obj = parameter.Obj();
+                auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+                if (storageEngine != nullptr && obj.hasField("storage") &&
+                    obj.getObjectField("storage").hasField("wt")) {
+                    uassertStatusOK(storageEngine->getEngine()->reconfigureLogging());
+                }
             }
 
             if (oldValue) {

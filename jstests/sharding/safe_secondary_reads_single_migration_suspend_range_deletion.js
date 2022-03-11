@@ -60,7 +60,10 @@ let testCases = {
     _configsvrCommitChunkSplit: {skip: "primary only"},
     _configsvrCommitMovePrimary:
         {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
-    _configsvrConfigureAutoSplit: {skip: "primary only"},
+    _configsvrConfigureAutoSplit: {
+        skip: "primary only"
+    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
+    _configsvrConfigureCollectionBalancing: {skip: "primary only"},
     _configsvrDropCollection:
         {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrDropDatabase:
@@ -134,7 +137,10 @@ let testCases = {
     cloneCollectionAsCapped: {skip: "primary only"},
     commitReshardCollection: {skip: "primary only"},
     commitTransaction: {skip: "primary only"},
-    configureCollectionAutoSplitter: {skip: "does not return user data"},
+    configureCollectionAutoSplitter: {
+        skip: "does not return user data"
+    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
+    configureCollectionBalancing: {skip: "does not return user data"},
     collMod: {skip: "primary only"},
     collStats: {skip: "does not return user data"},
     compact: {skip: "does not return user data"},
@@ -226,6 +232,7 @@ let testCases = {
     fsync: {skip: "does not return user data"},
     fsyncUnlock: {skip: "does not return user data"},
     getAuditConfig: {skip: "does not return user data"},
+    getChangeStreamOptions: {skip: "does not return user data"},
     getCmdLineOpts: {skip: "does not return user data"},
     getDefaultRWConcern: {skip: "does not return user data"},
     getDiagnosticData: {skip: "does not return user data"},
@@ -341,6 +348,7 @@ let testCases = {
     removeShard: {skip: "primary only"},
     removeShardFromZone: {skip: "primary only"},
     renameCollection: {skip: "primary only"},
+    repairShardedCollectionChunksHistory: {skip: "does not return user data"},
     replSetAbortPrimaryCatchUp: {skip: "does not return user data"},
     replSetFreeze: {skip: "does not return user data"},
     replSetGetConfig: {skip: "does not return user data"},
@@ -370,6 +378,7 @@ let testCases = {
     serverStatus: {skip: "does not return user data"},
     setAllowMigrations: {skip: "primary only"},
     setAuditConfig: {skip: "does not return user data"},
+    setChangeStreamOptions: {skip: "primary only"},
     setCommittedSnapshot: {skip: "does not return user data"},
     setDefaultRWConcern: {skip: "primary only"},
     setIndexCommitQuorum: {skip: "primary only"},

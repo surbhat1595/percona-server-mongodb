@@ -241,7 +241,7 @@ UniqueIndexData::const_iterator UniqueIndexData::upper_bound(RecordId loc) const
 }
 
 size_t UniqueIndexData::_memoryUsage() const {
-    return sizeof(_size) + _end - _begin;
+    return sizeof(_size) + (_end - _begin);
 }
 
 boost::optional<std::string> UniqueIndexData::add(RecordId loc,
@@ -450,7 +450,7 @@ BSONObj createObjFromRadixKey(const std::string& radixKey,
     auto it = BSONObjIterator(bsonObj);
     ++it;  // We want the second part
     KeyString::Builder ks(version);
-    ks.resetFromBuffer((*it).valuestr(), (*it).valuestrsize());
+    ks.resetFromBuffer((*it).valueStringDataSafe().rawData(), (*it).valueStringDataSafe().size());
 
     return KeyString::toBsonSafe(ks.getBuffer(), ks.getSize(), order, typeBits);
 }

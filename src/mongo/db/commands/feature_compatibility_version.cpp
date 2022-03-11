@@ -247,7 +247,7 @@ void runUpdateCommand(OperationContext* opCtx, const FeatureCompatibilityVersion
 boost::optional<BSONObj> FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(
     OperationContext* opCtx) {
     AutoGetCollection autoColl(opCtx, NamespaceString::kServerConfigurationNamespace, MODE_IX);
-    invariant(autoColl.ensureDbExists(), NamespaceString::kServerConfigurationNamespace.ns());
+    invariant(autoColl.ensureDbExists(opCtx), NamespaceString::kServerConfigurationNamespace.ns());
 
     const auto query = BSON("_id" << multiversion::kParameterName);
     const auto swFcv = repl::StorageInterface::get(opCtx)->findById(
@@ -341,7 +341,7 @@ void FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
 
 void FeatureCompatibilityVersion::setIfCleanStartup(OperationContext* opCtx,
                                                     repl::StorageInterface* storageInterface) {
-    if (!isCleanStartUp())
+    if (!hasNoReplicatedCollections(opCtx))
         return;
 
     // If the server was not started with --shardsvr, the default featureCompatibilityVersion on
@@ -377,13 +377,16 @@ void FeatureCompatibilityVersion::setIfCleanStartup(OperationContext* opCtx,
                                              // replicated.
 }
 
-bool FeatureCompatibilityVersion::isCleanStartUp() {
+bool FeatureCompatibilityVersion::hasNoReplicatedCollections(OperationContext* opCtx) {
     StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
     std::vector<std::string> dbNames = storageEngine->listDatabases();
-
+    auto catalog = CollectionCatalog::get(opCtx);
     for (auto&& dbName : dbNames) {
-        if (dbName != "local") {
-            return false;
+        Lock::DBLock dbLock(opCtx, dbName, MODE_S);
+        for (auto&& collNss : catalog->getAllCollectionNamesFromDb(opCtx, dbName)) {
+            if (collNss.isReplicated()) {
+                return false;
+            }
         }
     }
     return true;
@@ -517,15 +520,6 @@ void FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp() {
     lastFCVUpdateTimestamp = Timestamp();
 }
 
-
-/**
- * Read-only server parameter for featureCompatibilityVersion.
- */
-// No ability to specify 'none' as set_at type,
-// so use 'startup' in the IDL file, then override to none here.
-FeatureCompatibilityVersionParameter::FeatureCompatibilityVersionParameter(StringData name,
-                                                                           ServerParameterType)
-    : ServerParameter(ServerParameterSet::getGlobal(), name, false, false) {}
 
 void FeatureCompatibilityVersionParameter::append(OperationContext* opCtx,
                                                   BSONObjBuilder& b,

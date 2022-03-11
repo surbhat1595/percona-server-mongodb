@@ -396,7 +396,7 @@ __sync_page_skip(WT_SESSION_IMPL *session, WT_REF *ref, void *context, bool *ski
     }
 
     /* Don't read pages into cache during startup or shutdown phase. */
-    if (F_ISSET(S2C(session), WT_CONN_RECOVERING | WT_CONN_CLOSING_TIMESTAMP)) {
+    if (F_ISSET(S2C(session), WT_CONN_RECOVERING | WT_CONN_CLOSING_CHECKPOINT)) {
         *skipp = true;
         return (0);
     }
@@ -449,15 +449,6 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 
     /* Don't bump page read generations. */
     flags = WT_READ_NO_GEN;
-
-    /*
-     * Skip all deleted pages. For a page to be marked deleted, it must have been evicted from cache
-     * and marked clean. Checkpoint should never instantiate deleted pages: if a truncate is not
-     * visible to the checkpoint, the on-disk version is correct. If the truncate is visible to
-     * checkpoint, we write a proxy cell to its parent. We check whether a truncate is visible in
-     * the checkpoint as part of reconciling internal pages (specifically in __rec_child_deleted).
-     */
-    LF_SET(WT_READ_DELETED_SKIP);
 
     internal_bytes = leaf_bytes = 0;
     internal_pages = leaf_pages = 0;
@@ -566,7 +557,7 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
          * reads all of the internal pages to improve cleanup).
          */
         if (btree->type == BTREE_ROW)
-            internal_cleanup = !F_ISSET(conn, WT_CONN_RECOVERING | WT_CONN_CLOSING_TIMESTAMP);
+            internal_cleanup = !F_ISSET(conn, WT_CONN_RECOVERING | WT_CONN_CLOSING_CHECKPOINT);
         else {
             LF_SET(WT_READ_CACHE);
             internal_cleanup = false;

@@ -110,7 +110,7 @@ protected:
 
         auto opCtx = cc().makeOperationContext();
         PersistentTaskStore<StateDoc> store(NamespaceString::kShardingDDLCoordinatorsNamespace);
-        store.add(opCtx.get(), newDoc, WriteConcerns::kMajorityWriteConcern);
+        store.add(opCtx.get(), newDoc, WriteConcerns::kMajorityWriteConcernShardingTimeout);
 
         return std::move(newDoc);
     }
@@ -122,7 +122,7 @@ protected:
         store.update(opCtx,
                      BSON(StateDoc::kIdFieldName << newDoc.getId().toBSON()),
                      newDoc.toBSON(),
-                     WriteConcerns::kMajorityWriteConcern);
+                     WriteConcerns::kMajorityWriteConcernShardingTimeout);
         return std::move(newDoc);
     }
 
@@ -160,6 +160,15 @@ protected:
     }
 
     /*
+     * Performs a noop write on all shards and the configsvr using the sessionId and txnNumber
+     * specified in 'osi'.
+     */
+    void _performNoopRetryableWriteOnAllShardsAndConfigsvr(
+        OperationContext* opCtx,
+        const OperationSessionInfo& osi,
+        const std::shared_ptr<executor::TaskExecutor>& executor);
+
+    /*
      * Specify if the coordinator must indefinitely be retried in case of exceptions. It is always
      * expected for a coordinator to make progress after performing intermediate operations that
      * can't be rollbacked.
@@ -187,6 +196,10 @@ private:
     void interrupt(Status status) override final;
 
     bool _removeDocument(OperationContext* opCtx);
+
+    ExecutorFuture<bool> _removeDocumentUntillSuccessOrStepdown(
+        std::shared_ptr<executor::TaskExecutor> executor);
+
     ExecutorFuture<void> _acquireLockAsync(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                            const CancellationToken& token,
                                            StringData resource);
@@ -196,19 +209,6 @@ private:
     SharedPromise<void> _completionPromise;
 
     std::stack<DistLockManager::ScopedLock> _scopedLocks;
-};
-
-class ShardingDDLCoordinator_NORESILIENT {
-public:
-    ShardingDDLCoordinator_NORESILIENT(OperationContext* opCtx, const NamespaceString& nss);
-    SemiFuture<void> run(OperationContext* opCtx);
-
-protected:
-    NamespaceString _nss;
-    ForwardableOperationMetadata _forwardableOpMetadata;
-
-private:
-    virtual SemiFuture<void> runImpl(std::shared_ptr<executor::TaskExecutor>) = 0;
 };
 
 }  // namespace mongo

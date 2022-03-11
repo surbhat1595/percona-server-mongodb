@@ -45,12 +45,10 @@ namespace mongo {
  * Refer to CollModRequest in coll_mod.cpp for non-index collMod options.
  */
 struct ParsedCollModIndexRequest {
-    // Internal fields of this 'cmdObj' are referenced by BSONElement fields here.
-    BSONObj indexObj;  // owned
     const IndexDescriptor* idx = nullptr;
-    BSONElement indexExpireAfterSeconds = {};
-    BSONElement indexHidden = {};
-    BSONElement indexUnique = {};
+    boost::optional<long long> indexExpireAfterSeconds;
+    boost::optional<bool> indexHidden;
+    boost::optional<bool> indexUnique;
 };
 
 /**
@@ -76,13 +74,22 @@ void processCollModIndexRequest(OperationContext* opCtx,
                                 boost::optional<repl::OplogApplication::Mode> mode);
 
 /**
- * Scans index to ensure there are no duplicates.
+ * Scans index to return the record ids of duplicates.
+ * Performs a scan on the whole index if 'firstKeyString' is not provided. Otherwise, only scans
+ * documents with 'firstKeyString'.
  */
-void scanIndexForDuplicates(OperationContext* opCtx,
-                            const CollectionPtr& collection,
-                            const IndexDescriptor* idx,
-                            boost::optional<KeyString::Value> firstKeyString = {},
-                            boost::optional<int64_t> limit = {});
+std::list<std::set<RecordId>> scanIndexForDuplicates(
+    OperationContext* opCtx,
+    const CollectionPtr& collection,
+    const IndexDescriptor* idx,
+    boost::optional<KeyString::Value> firstKeyString = {});
+
+/**
+ * Builds the BSONArray of the violations with duplicate index keys.
+ */
+BSONArray buildDuplicateViolations(OperationContext* opCtx,
+                                   const CollectionPtr& collection,
+                                   const std::list<std::set<RecordId>>& duplicateRecordsList);
 
 /**
  * Returns the formatted error status for not being able to enable the index constraint.

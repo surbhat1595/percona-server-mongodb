@@ -60,19 +60,19 @@ const ReadPreferenceSetting kPrimaryOnlyReadPreference{ReadPreference::PrimaryOn
 
 bool checkIfSingleDoc(OperationContext* opCtx,
                       const CollectionPtr& collection,
-                      const IndexDescriptor* idx,
+                      const IndexCatalog::ShardKeyIndex& idx,
                       const ChunkType* chunk) {
-    KeyPattern kp(idx->keyPattern());
+    KeyPattern kp(idx.keyPattern());
     BSONObj newmin = Helpers::toKeyFormat(kp.extendRangeBound(chunk->getMin(), false));
     BSONObj newmax = Helpers::toKeyFormat(kp.extendRangeBound(chunk->getMax(), true));
 
-    auto exec = InternalPlanner::indexScan(opCtx,
-                                           &collection,
-                                           idx,
-                                           newmin,
-                                           newmax,
-                                           BoundInclusion::kIncludeStartKeyOnly,
-                                           PlanYieldPolicy::YieldPolicy::NO_YIELD);
+    auto exec = InternalPlanner::shardKeyIndexScan(opCtx,
+                                                   &collection,
+                                                   idx,
+                                                   newmin,
+                                                   newmax,
+                                                   BoundInclusion::kIncludeStartKeyOnly,
+                                                   PlanYieldPolicy::YieldPolicy::NO_YIELD);
     // check if exactly one document found
     PlanExecutor::ExecState state;
     BSONObj obj;
@@ -132,7 +132,8 @@ StatusWith<boost::optional<ChunkRange>> splitChunk(OperationContext* opCtx,
                                                    const ChunkRange& chunkRange,
                                                    const std::vector<BSONObj>& splitKeys,
                                                    const std::string& shardName,
-                                                   const OID& expectedCollectionEpoch) {
+                                                   const OID& expectedCollectionEpoch,
+                                                   const bool fromChunkSplitter) {
     auto scopedSplitOrMergeChunk(uassertStatusOK(
         ActiveMigrationsRegistry::get(opCtx).registerSplitOrMergeChunk(opCtx, nss, chunkRange)));
 
@@ -153,8 +154,8 @@ StatusWith<boost::optional<ChunkRange>> splitChunk(OperationContext* opCtx,
     }
 
     // Commit the split to the config server.
-    auto request =
-        SplitChunkRequest(nss, shardName, expectedCollectionEpoch, chunkRange, splitKeys);
+    auto request = SplitChunkRequest(
+        nss, shardName, expectedCollectionEpoch, chunkRange, splitKeys, fromChunkSplitter);
 
     auto configCmdObj =
         request.toConfigCommandBSON(ShardingCatalogClient::kMajorityWriteConcern.toBSON());
@@ -241,10 +242,10 @@ StatusWith<boost::optional<ChunkRange>> splitChunk(OperationContext* opCtx,
 
     KeyPattern shardKeyPattern(keyPatternObj);
     if (shardKeyPattern.globalMax().woCompare(backChunk.getMax()) == 0 &&
-        checkIfSingleDoc(opCtx, collection.getCollection(), shardKeyIdx, &backChunk)) {
+        checkIfSingleDoc(opCtx, collection.getCollection(), *shardKeyIdx, &backChunk)) {
         return boost::optional<ChunkRange>(ChunkRange(backChunk.getMin(), backChunk.getMax()));
     } else if (shardKeyPattern.globalMin().woCompare(frontChunk.getMin()) == 0 &&
-               checkIfSingleDoc(opCtx, collection.getCollection(), shardKeyIdx, &frontChunk)) {
+               checkIfSingleDoc(opCtx, collection.getCollection(), *shardKeyIdx, &frontChunk)) {
         return boost::optional<ChunkRange>(ChunkRange(frontChunk.getMin(), frontChunk.getMax()));
     }
     return boost::optional<ChunkRange>(boost::none);

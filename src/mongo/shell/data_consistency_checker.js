@@ -335,7 +335,13 @@ var {DataConsistencyChecker} = (function() {
                         collectionPrinted, sourceCollInfos, syncingCollInfos, collName);
                     const shouldIgnoreFailure =
                         this.canIgnoreCollectionDiff(sourceCollInfos, syncingCollInfos, collName);
-                    success = shouldIgnoreFailure;
+                    if (shouldIgnoreFailure) {
+                        prettyPrint(
+                            `Collection diff in ${dbName}.${collName} can be ignored: ${dbHashesMsg}
+                            . Inconsistencies in the image collection can be expected in certain
+                            restart scenarios.`);
+                    }
+                    success = shouldIgnoreFailure && success;
                 }
             });
 
@@ -465,7 +471,7 @@ var {DataConsistencyChecker} = (function() {
                 // collections in the database and there aren't any capped collections,
                 // then the hashes for the whole database should match.
                 if (sourceDBHash.md5 !== syncingDBHash.md5) {
-                    prettyPrint(`the two nodes have a different has for the ${dbName} database: ${
+                    prettyPrint(`the two nodes have a different hash for the ${dbName} database: ${
                         dbHashesMsg}`);
                     success = false;
                 }

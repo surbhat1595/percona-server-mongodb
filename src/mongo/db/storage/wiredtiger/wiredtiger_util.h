@@ -36,6 +36,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -64,6 +65,10 @@ Status wtRCToStatus(int retCode, ContextExpr&& contextExpr) {
         return Status::OK();
 
     return wtRCToStatus_slow(retCode, std::forward<ContextExpr>(contextExpr)());
+}
+
+inline void uassertWTOK(int ret) {
+    uassertStatusOK(wtRCToStatus(ret));
 }
 
 #define MONGO_invariantWTOK_1(expression)                                               \
@@ -183,7 +188,8 @@ public:
      * Returns the FailedToParse status if the storage engine metadata object is malformed.
      */
     static StatusWith<std::string> generateImportString(const StringData& ident,
-                                                        const BSONObj& storageMetadata);
+                                                        const BSONObj& storageMetadata,
+                                                        const ImportOptions& importOptions);
 
     /**
      * Appends information about the storage engine's currently available snapshots and the settings
@@ -300,6 +306,12 @@ public:
     static Status setTableLogging(OperationContext* opCtx, const std::string& uri, bool on);
 
     static Status setTableLogging(WT_SESSION* session, const std::string& uri, bool on);
+
+    /**
+     * Generates a WiredTiger connection configuration given the LOGV2 WiredTiger components
+     * verbosity levels.
+     */
+    static std::string generateWTVerboseConfiguration();
 
     /**
      * Casts unsigned 64-bit statistics value to T.

@@ -174,7 +174,7 @@ void ReadWriteConcernDefaults::observeDirectWriteToConfigSettings(OperationConte
 }
 
 void ReadWriteConcernDefaults::invalidate() {
-    _defaults.invalidate(Type::kReadWriteConcernEntry);
+    _defaults.invalidateKey(Type::kReadWriteConcernEntry);
 }
 
 void ReadWriteConcernDefaults::setDefault(OperationContext* opCtx, RWConcernDefault&& rwc) {
@@ -194,8 +194,22 @@ void ReadWriteConcernDefaults::refreshIfNecessary(OperationContext* opCtx) {
         (possibleNewDefaults->getUpdateOpTime() > currentDefaultsHandle->getUpdateOpTime())) {
         // Use the new defaults if they have a higher epoch, if there are no defaults in the cache,
         // or if the found defaults have no epoch, meaning there are no defaults in config.settings.
-        LOGV2(20997, "Refreshed RWC defaults", "newDefaults"_attr = possibleNewDefaults->toBSON());
+        auto possibleNewDefaultsBSON = possibleNewDefaults->toBSON();
+        auto defaultsBefore = currentDefaultsHandle ? *currentDefaultsHandle : RWConcernDefault();
+
         setDefault(opCtx, std::move(*possibleNewDefaults));
+
+        auto postUpdateDefaultsHandle = _defaults.acquire(opCtx, Type::kReadWriteConcernEntry);
+        auto defaultsAfter =
+            postUpdateDefaultsHandle ? *postUpdateDefaultsHandle : RWConcernDefault();
+
+        // Log only if we updated the read- or write-concern defaults themselves.
+        if (defaultsBefore.getDefaultWriteConcern() != defaultsAfter.getDefaultWriteConcern() ||
+            (defaultsBefore.getDefaultReadConcern() && defaultsAfter.getDefaultReadConcern() &&
+             (defaultsBefore.getDefaultReadConcern().get().getLevel() !=
+              defaultsAfter.getDefaultReadConcern().get().getLevel()))) {
+            LOGV2(20997, "Refreshed RWC defaults", "newDefaults"_attr = possibleNewDefaultsBSON);
+        }
     }
 }
 

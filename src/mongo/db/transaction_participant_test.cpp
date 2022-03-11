@@ -262,7 +262,7 @@ protected:
             // Set up a collection so that TransactionParticipant::prepareTransaction() can safely
             // access it.
             AutoGetDb autoDb(opCtx(), kNss.db(), MODE_X);
-            auto db = autoDb.ensureDbExists();
+            auto db = autoDb.ensureDbExists(opCtx());
             ASSERT_TRUE(db);
 
             WriteUnitOfWork wuow(opCtx());
@@ -342,7 +342,7 @@ void insertTxnRecord(OperationContext* opCtx, unsigned i, DurableTxnStateEnum st
     record.setLastWriteDate(Date_t::now());
 
     AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
-    auto db = autoDb.ensureDbExists();
+    auto db = autoDb.ensureDbExists(opCtx);
     ASSERT(db);
     WriteUnitOfWork wuow(opCtx);
     auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
@@ -520,8 +520,8 @@ TEST_F(TxnParticipantTest, SameTransactionPreservesStoredStatements) {
 
     // We must have stashed transaction resources to re-open the transaction.
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
     ASSERT_BSONOBJ_EQ(operation.toBSON(),
                       txnParticipant.getTransactionOperationsForTest()[0].toBSON());
@@ -546,8 +546,8 @@ TEST_F(TxnParticipantTest, AbortClearsStoredStatements) {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
     ASSERT_BSONOBJ_EQ(operation.toBSON(),
                       txnParticipant.getTransactionOperationsForTest()[0].toBSON());
@@ -617,7 +617,7 @@ TEST_F(TxnParticipantTest, PrepareFailsOnTemporaryCollection) {
     // Create a temporary collection so that we can write to it.
     {
         AutoGetDb autoDb(opCtx(), kNss.db(), MODE_X);
-        auto db = autoDb.ensureDbExists();
+        auto db = autoDb.ensureDbExists(opCtx());
         ASSERT_TRUE(db);
 
         WriteUnitOfWork wuow(opCtx());
@@ -635,7 +635,7 @@ TEST_F(TxnParticipantTest, PrepareFailsOnTemporaryCollection) {
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
     auto operation = repl::DurableOplogEntry::makeInsertOperation(
-        tempCollNss, tempCollUUID, BSON("TestValue" << 0));
+        tempCollNss, tempCollUUID, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
 
     ASSERT_THROWS_CODE(txnParticipant.prepareTransaction(opCtx(), {}),
@@ -1319,8 +1319,8 @@ TEST_F(TxnParticipantTest, CannotInsertInPreparedTransaction) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
 
     txnParticipant.prepareTransaction(opCtx(), {});
@@ -1363,7 +1363,8 @@ TEST_F(TxnParticipantTest, TransactionExceedsSizeParameterObjectField) {
     auto operation = repl::DurableOplogEntry::makeInsertOperation(
         kNss,
         _uuid,
-        BSON("_id" << 0 << "data" << BSONBinData(bigData.get(), kBigDataSize, BinDataGeneral)));
+        BSON("_id" << 0 << "data" << BSONBinData(bigData.get(), kBigDataSize, BinDataGeneral)),
+        BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
     txnParticipant.addTransactionOperation(opCtx(), operation);
     ASSERT_THROWS_CODE(txnParticipant.addTransactionOperation(opCtx(), operation),
@@ -1388,7 +1389,8 @@ TEST_F(TxnParticipantTest, TransactionExceedsSizeParameterStmtIdsField) {
         std::vector<StmtId> stmtIds;
         stmtIds.resize(1024 * 1024 / sizeof(StmtId));
         std::generate(stmtIds.begin(), stmtIds.end(), [&stmtId] { return stmtId++; });
-        auto operation = repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSONObj());
+        auto operation = repl::DurableOplogEntry::makeInsertOperation(
+            kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
         operation.setInitializedStatementIds(stmtIds);
         return operation;
     };
@@ -1535,8 +1537,8 @@ protected:
         ASSERT(txnParticipant.transactionIsOpen());
 
         txnParticipant.unstashTransactionResources(opCtx(), "insert");
-        auto operation =
-            repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+        auto operation = repl::DurableOplogEntry::makeInsertOperation(
+            kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
         txnParticipant.addTransactionOperation(opCtx(), operation);
         txnParticipant.prepareTransaction(opCtx(), {});
 
@@ -3709,8 +3711,8 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowCommit) {
     setupAdditiveMetrics(metricValue, opCtx());
 
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
 
     const auto originalSlowMS = serverGlobalParams.slowMS;
@@ -4138,8 +4140,8 @@ TEST_F(TxnParticipantTest, RollbackResetsInMemoryStateOfPreparedTransaction) {
 
     // Perform an insert as a part of a transaction so that we have a transaction operation.
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
     ASSERT_BSONOBJ_EQ(operation.toBSON(),
                       txnParticipant.getTransactionOperationsForTest()[0].toBSON());
@@ -4328,8 +4330,8 @@ TEST_F(TxnParticipantTest,
     ASSERT_TRUE(txnParticipant.getResponseMetadata().getReadOnly());
 
     // Simulate an insert.
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
     ASSERT_FALSE(txnParticipant.getResponseMetadata().getReadOnly());
 }
@@ -4357,7 +4359,7 @@ TEST_F(TxnParticipantTest, OldestActiveTransactionTimestamp) {
     auto deleteTxnRecord = [&](unsigned i) {
         Timestamp ts(1, i);
         AutoGetDb autoDb(opCtx(), nss.db(), MODE_X);
-        auto db = autoDb.ensureDbExists();
+        auto db = autoDb.ensureDbExists(opCtx());
         ASSERT(db);
         WriteUnitOfWork wuow(opCtx());
         auto coll = CollectionCatalog::get(opCtx())->lookupCollectionByNamespace(opCtx(), nss);
@@ -4414,7 +4416,7 @@ TEST_F(TxnParticipantTest, OldestActiveTransactionTimestampTimeout) {
     // Block getOldestActiveTimestamp() by locking the config database.
     auto nss = NamespaceString::kSessionTransactionsTableNamespace;
     AutoGetDb autoDb(opCtx(), nss.db(), MODE_X);
-    auto db = autoDb.ensureDbExists();
+    auto db = autoDb.ensureDbExists(opCtx());
     ASSERT(db);
     auto statusWith = TransactionParticipant::getOldestActiveTimestamp(Timestamp());
     ASSERT_FALSE(statusWith.isOK());
@@ -4757,6 +4759,7 @@ TEST_F(ShardTxnParticipantTest, CannotRetryInProgressTransactionForRetryableWrit
 }
 
 TEST_F(ShardTxnParticipantTest, CannotRetryPreparedTransactionForRetryableWrites) {
+    opCtx()->setLogicalSessionId(makeLogicalSessionIdWithTxnNumberAndUUIDForTest());
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     ASSERT(txnParticipant.transactionIsInProgress());
@@ -4764,8 +4767,6 @@ TEST_F(ShardTxnParticipantTest, CannotRetryPreparedTransactionForRetryableWrites
     txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT_TRUE(txnParticipant.transactionIsPrepared());
 
-    // TODO (SERVER-60917): Make transaction participants throw RetryableTransactionInProgress if a
-    // retry arrives while the transaction has been committed or aborted
     ASSERT_THROWS_CODE(txnParticipant.beginOrContinue(opCtx(),
                                                       {*opCtx()->getTxnNumber(), 0},
                                                       false /* autocommit */,
@@ -4848,8 +4849,8 @@ TEST_F(ShardTxnParticipantTest,
     ASSERT(txnParticipant.transactionIsCommitted());
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     ASSERT_THROWS_CODE(
         txnParticipant.addTransactionOperation(opCtx(), operation), AssertionException, 5875606);
     ASSERT(txnParticipant.transactionIsCommitted());
@@ -4869,8 +4870,8 @@ TEST_F(ShardTxnParticipantTest,
     ASSERT_TRUE(txnParticipant.transactionIsCommitted());
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     ASSERT_THROWS_CODE(
         txnParticipant.addTransactionOperation(opCtx(), operation), AssertionException, 5875606);
     ASSERT(txnParticipant.transactionIsCommitted());
@@ -4887,8 +4888,8 @@ TEST_F(ShardTxnParticipantTest,
     ASSERT_TRUE(txnParticipant.transactionIsAborted());
     ASSERT(txnParticipant.getTransactionOperationsForTest().empty());
 
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     ASSERT_THROWS_CODE(
         txnParticipant.addTransactionOperation(opCtx(), operation), AssertionException, 5875606);
     ASSERT(txnParticipant.getTransactionOperationsForTest().empty());
@@ -4903,8 +4904,8 @@ TEST_F(ShardTxnParticipantTest, CannotAddOperationToAbortedPreparedTransactionFo
     txnParticipant.abortTransaction(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsAborted());
 
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     ASSERT_THROWS_CODE(
         txnParticipant.addTransactionOperation(opCtx(), operation), AssertionException, 5875606);
     ASSERT(txnParticipant.getTransactionOperationsForTest().empty());
@@ -4918,8 +4919,8 @@ TEST_F(ShardTxnParticipantTest, CannotAddOperationToPreparedTransactionForRetrya
     txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT_TRUE(txnParticipant.transactionIsPrepared());
 
-    auto operation =
-        repl::DurableOplogEntry::makeInsertOperation(kNss, _uuid, BSON("TestValue" << 0));
+    auto operation = repl::DurableOplogEntry::makeInsertOperation(
+        kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     ASSERT_THROWS_CODE(
         txnParticipant.addTransactionOperation(opCtx(), operation), AssertionException, 5875606);
     ASSERT(txnParticipant.getTransactionOperationsForTest().empty());

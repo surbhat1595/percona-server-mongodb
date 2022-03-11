@@ -65,6 +65,7 @@
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
@@ -334,13 +335,43 @@ public:
                 if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
                         actualVersion) &&
                     !feature_flags::gFeatureFlagMigrationRecipientCriticalSection
-                         .isEnabledOnVersion(requestedVersion))
-                    drainNewMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
+                         .isEnabledOnVersion(requestedVersion)) {
+                    drainNewMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionDowngrade");
+
+                    // At this point, because we are holding the MigrationBlockingGuard, no new
+                    // migrations can start and there are no active ongoing ones. Still, there could
+                    // be migrations pending recovery. Drain them.
+                    migrationutil::drainMigrationsPendingRecovery(opCtx);
+                }
 
                 // Start transition to 'requestedVersion' by updating the local FCV document to a
                 // 'kUpgrading' or 'kDowngrading' state, respectively.
                 const auto fcvChangeRegion(
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+
+                if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+                    if (requestedVersion < actualVersion) {
+                        // TODO SERVER-62584 review/adapt this scope before v6.0 branches out
+                        // Make sure no collection is currently being defragmented
+                        DBDirectClient client(opCtx);
+
+                        const BSONObj collBeingDefragmentedQuery =
+                            BSON(CollectionType::kBalancerShouldMergeChunksFieldName
+                                 << BSON("$exists" << true));
+
+                        const bool isDefragmenting = client.count(CollectionType::ConfigNS,
+                                                                  collBeingDefragmentedQuery,
+                                                                  0 /*options*/,
+                                                                  1 /* limit */);
+
+                        uassert(ErrorCodes::CannotDowngrade,
+                                str::stream()
+                                    << "Cannot downgrade the cluster when there are collections "
+                                       "being defragmented. Please drain all the defragmentation "
+                                       "processes before downgrading.",
+                                !isDefragmenting);
+                    }
+                }
 
                 FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
                     opCtx,
@@ -375,8 +406,14 @@ public:
             if (!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
                     actualVersion) &&
                 feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
-                    requestedVersion))
+                    requestedVersion)) {
                 drainOldMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
+
+                // At this point, because we are holding the MigrationBlockingGuard, no new
+                // migrations can start and there are no active ongoing ones. Still, there could
+                // be migrations pending recovery. Drain them.
+                migrationutil::drainMigrationsPendingRecovery(opCtx);
+            }
 
             // Complete transition by updating the local FCV document to the fully upgraded or
             // downgraded requestedVersion.
@@ -426,9 +463,9 @@ private:
             Lock::GlobalLock lk(opCtx, MODE_S);
         }
 
-        // TODO SERVER-60911: When kLatest is 5.3, only check when upgrading from kLastLTS (5.0).
-        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated upgrade code.
-        if (serverGlobalParams.featureCompatibility.isFCVUpgradingToOrAlreadyLatest()) {
+        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
+        // upgrade code.
+        if (requestedVersion == multiversion::GenericFCV::kLatest) {
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
                 Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
                 catalog::forEachCollectionFromDb(
@@ -539,10 +576,9 @@ private:
             Lock::GlobalLock lk(opCtx, MODE_S);
         }
 
-        // TODO SERVER-60911: When kLatest is 5.3, only check when downgrading to kLastLTS (5.0).
-        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated downgrade code.
-        if (serverGlobalParams.featureCompatibility
-                .isFCVDowngradingOrAlreadyDowngradedFromLatest()) {
+        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
+        // downgrade code.
+        if (requestedVersion == multiversion::GenericFCV::kLastLTS) {
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
                 Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
                 catalog::forEachCollectionFromDb(
@@ -550,16 +586,6 @@ private:
                     dbName,
                     MODE_X,
                     [&](const CollectionPtr& collection) {
-                        // Fail to downgrade if there exists a collection with
-                        // 'changeStreamPreAndPostImages' enabled.
-                        // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
-                        uassert(ErrorCodes::CannotDowngrade,
-                                str::stream() << "Cannot downgrade the cluster as collection "
-                                              << collection->ns()
-                                              << " has 'changeStreamPreAndPostImages' enabled",
-                                preImagesFeatureFlagDisabledOnDowngradeVersion &&
-                                    !collection->isChangeStreamPreAndPostImagesEnabled());
-
                         invariant(collection->getTimeseriesOptions());
 
                         auto indexCatalog = collection->getIndexCatalog();
@@ -631,11 +657,36 @@ private:
                         return true;
                     },
                     [&](const CollectionPtr& collection) {
+                        return collection->getTimeseriesOptions() != boost::none;
+                    });
+            }
+        }
+
+        if (serverGlobalParams.featureCompatibility
+                .isFCVDowngradingOrAlreadyDowngradedFromLatest()) {
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_X,
+                    [&](const CollectionPtr& collection) {
+                        // Fail to downgrade if there exists a collection with
+                        // 'changeStreamPreAndPostImages' enabled.
+                        // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
+                        uassert(ErrorCodes::CannotDowngrade,
+                                str::stream() << "Cannot downgrade the cluster as collection "
+                                              << collection->ns()
+                                              << " has 'changeStreamPreAndPostImages' enabled",
+                                preImagesFeatureFlagDisabledOnDowngradeVersion &&
+                                    !collection->isChangeStreamPreAndPostImagesEnabled());
+                        return true;
+                    },
+                    [&](const CollectionPtr& collection) {
                         // TODO SERVER-61770: Remove 'changeStreamPreAndPostImages' check once
                         // FCV 6.0 becomes last-lts.
-                        return collection->getTimeseriesOptions() != boost::none ||
-                            (preImagesFeatureFlagDisabledOnDowngradeVersion &&
-                             collection->isChangeStreamPreAndPostImagesEnabled());
+                        return preImagesFeatureFlagDisabledOnDowngradeVersion &&
+                            collection->isChangeStreamPreAndPostImagesEnabled();
                     });
             }
 
@@ -780,13 +831,10 @@ private:
         DBDirectClient client(opCtx);
 
         LogicalSessionIdMap<TxnNumber> parentLsidToTxnNum;
-        auto projection = BSON("_id" << 1 << "parentLsid" << 1);
-        auto cursor = client.query(NamespaceString::kSessionTransactionsTableNamespace,
-                                   BSON("parentLsid" << BSON("$exists" << true)),
-                                   {},
-                                   0,
-                                   0,
-                                   &projection);
+        FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
+        findRequest.setFilter(BSON("parentLsid" << BSON("$exists" << true)));
+        findRequest.setProjection(BSON("_id" << 1 << "parentLsid" << 1));
+        auto cursor = client.find(std::move(findRequest));
 
         while (cursor->more()) {
             auto doc = cursor->next();
@@ -823,8 +871,9 @@ private:
         for (const auto& [lsid, txnNumber] : parentLsidToTxnNum) {
             SessionTxnRecord modifiedDoc;
             bool parentSessionExists = false;
-            auto cursor = client.query(NamespaceString::kSessionTransactionsTableNamespace,
-                                       BSON("_id" << lsid.toBSON()));
+            FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
+            findRequest.setFilter(BSON("_id" << lsid.toBSON()));
+            auto cursor = client.find(std::move(findRequest));
             if ((parentSessionExists = cursor->more())) {
                 modifiedDoc = SessionTxnRecord::parse(
                     IDLParserErrorContext("parse transaction document to modify"), cursor->next());

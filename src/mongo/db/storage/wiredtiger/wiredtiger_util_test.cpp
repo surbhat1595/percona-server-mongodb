@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 #include "mongo/platform/basic.h"
 
 #include <sstream>
@@ -38,6 +40,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/unittest/log_test.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/system_clock_source.h"
@@ -49,13 +52,16 @@ using std::stringstream;
 
 class WiredTigerConnection {
 public:
-    WiredTigerConnection(StringData dbpath, StringData extraStrings) : _conn(nullptr) {
+    WiredTigerConnection(StringData dbpath,
+                         StringData extraStrings,
+                         WT_EVENT_HANDLER* eventHandler = nullptr)
+        : _conn(nullptr) {
         std::stringstream ss;
         ss << "create,";
         ss << extraStrings;
         string config = ss.str();
         _fastClockSource = std::make_unique<SystemClockSource>();
-        int ret = wiredtiger_open(dbpath.toString().c_str(), nullptr, config.c_str(), &_conn);
+        int ret = wiredtiger_open(dbpath.toString().c_str(), eventHandler, config.c_str(), &_conn);
         ASSERT_OK(wtRCToStatus(ret));
         ASSERT(_conn);
     }
@@ -76,9 +82,12 @@ private:
 
 class WiredTigerUtilHarnessHelper {
 public:
-    WiredTigerUtilHarnessHelper(StringData extraStrings)
+    explicit WiredTigerUtilHarnessHelper(StringData extraStrings,
+                                         WiredTigerEventHandler* eventHandler = nullptr)
         : _dbpath("wt_test"),
-          _connection(_dbpath.path(), extraStrings),
+          _connection(_dbpath.path(),
+                      extraStrings,
+                      eventHandler == nullptr ? nullptr : eventHandler->getWtEventHandler()),
           _sessionCache(_connection.getConnection(), _connection.getClockSource()) {}
 
 
@@ -346,6 +355,99 @@ TEST(WiredTigerUtilTest, GetStatisticsValueValidKey) {
     ASSERT_OK(result.getStatus());
     // Expect statistics value to be zero for a LSM key on a Btree.
     ASSERT_EQUALS(0U, result.getValue());
+}
+
+TEST(WiredTigerUtilTest, ParseAPIMessages) {
+    // Custom event handler.
+    WiredTigerEventHandler eventHandler;
+
+    // Define a WiredTiger connection configuration that enables JSON encoding for all messages
+    // related to the WT_VERB_API category.
+    const std::string connection_cfg = "json_output=[error,message],verbose=[api]";
+
+    // Initialize WiredTiger.
+    WiredTigerUtilHarnessHelper harnessHelper(connection_cfg.c_str(), &eventHandler);
+
+    // Create a session.
+    WiredTigerRecoveryUnit recoveryUnit(harnessHelper.getSessionCache(),
+                                        harnessHelper.getOplogManager());
+    WT_SESSION* wtSession = recoveryUnit.getSession()->getSession();
+
+    // Perform simple WiredTiger operations while capturing the generated logs.
+    startCapturingLogMessages();
+    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:ev_api", nullptr)));
+    stopCapturingLogMessages();
+
+    // Verify there is at least one message from WiredTiger and their content.
+    bool foundWTMessage = false;
+    for (auto&& bson : getCapturedBSONFormatLogMessages()) {
+        if (bson["c"].String() == "WT") {
+            foundWTMessage = true;
+            ASSERT_EQUALS(bson["attr"]["message"]["category"].String(), "WT_VERB_API");
+            ASSERT_EQUALS(bson["attr"]["message"]["category_id"].Int(), WT_VERB_API);
+        }
+    }
+    ASSERT_TRUE(foundWTMessage);
+}
+
+TEST(WiredTigerUtilTest, ParseCompactMessages) {
+    // Custom event handler.
+    WiredTigerEventHandler eventHandler;
+
+    // Define a WiredTiger connection configuration that enables JSON encoding for all messages
+    // related to the WT_VERB_COMPACT category.
+    const std::string connection_cfg = "json_output=[error,message],verbose=[compact]";
+
+    // Initialize WiredTiger.
+    WiredTigerUtilHarnessHelper harnessHelper(connection_cfg.c_str(), &eventHandler);
+
+    // Create a session.
+    WT_SESSION* wtSession;
+    ASSERT_OK(wtRCToStatus(harnessHelper.getSessionCache()->conn()->open_session(
+        harnessHelper.getSessionCache()->conn(), nullptr, nullptr, &wtSession)));
+
+    // Perform simple WiredTiger operations while capturing the generated logs.
+    const std::string uri = "table:ev_compact";
+    startCapturingLogMessages();
+    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, uri.c_str(), nullptr)));
+    ASSERT_OK(wtRCToStatus(wtSession->compact(wtSession, uri.c_str(), nullptr)));
+    stopCapturingLogMessages();
+
+    // Verify there is at least one message from WiredTiger and their content.
+    bool foundWTMessage = false;
+    for (auto&& bson : getCapturedBSONFormatLogMessages()) {
+        if (bson["c"].String() == "WTCMPCT") {
+            foundWTMessage = true;
+            ASSERT_EQUALS(bson["attr"]["message"]["category"].String(), "WT_VERB_COMPACT");
+            ASSERT_EQUALS(bson["attr"]["message"]["category_id"].Int(), WT_VERB_COMPACT);
+        }
+    }
+    ASSERT_TRUE(foundWTMessage);
+}
+
+TEST(WiredTigerUtilTest, GenerateVerboseConfiguration) {
+    // Perform each test in their own limited scope in order to establish different
+    // severity levels.
+    {
+        // Set the WiredTiger Checkpoint LOGV2 component severity to the Log level.
+        auto severityGuard = unittest::MinimumLoggedSeverityGuard{
+            logv2::LogComponent::kWiredTigerCheckpoint, logv2::LogSeverity::Log()};
+        // Generate the configuration string and verify the default severity of the
+        // checkpoint component is at the Log level.
+        std::string config = WiredTigerUtil::generateWTVerboseConfiguration();
+        ASSERT_TRUE(config.find("checkpoint:0") != std::string::npos);
+        ASSERT_TRUE(config.find("checkpoint:1") == std::string::npos);
+    }
+    {
+        // Set the WiredTiger Checkpoint LOGV2 component severity to the Debug(1) level.
+        // We want to ensure this setting is subsequently reflected in a new WiredTiger
+        // verbose configuration string.
+        auto severityGuard = unittest::MinimumLoggedSeverityGuard{
+            logv2::LogComponent::kWiredTigerCheckpoint, logv2::LogSeverity::Debug(1)};
+        std::string config = WiredTigerUtil::generateWTVerboseConfiguration();
+        ASSERT_TRUE(config.find("checkpoint:1") != std::string::npos);
+        ASSERT_TRUE(config.find("checkpoint:0") == std::string::npos);
+    }
 }
 
 }  // namespace mongo

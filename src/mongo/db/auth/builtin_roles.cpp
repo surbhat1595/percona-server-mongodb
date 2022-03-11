@@ -127,7 +127,6 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::createCollection  // db admin gets this also
         << ActionType::dropCollection
         << ActionType::dropIndex
-        << ActionType::emptycapped
         << ActionType::createIndex
         << ActionType::insert
         << ActionType::remove
@@ -253,7 +252,9 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::runTenantMigration
         << ActionType::setDefaultRWConcern
         << ActionType::setFeatureCompatibilityVersion
-        << ActionType::setFreeMonitoring;
+        << ActionType::setFreeMonitoring
+        << ActionType::setChangeStreamOptions
+        << ActionType::getChangeStreamOptions;
 
     clusterManagerRoleDatabaseActions
         << ActionType::clearJumboFlag
@@ -458,6 +459,9 @@ void addClusterManagerPrivileges(PrivilegeVector* privileges) {
         Privilege(ResourcePattern::forAnyNormalResource(), clusterManagerRoleDatabaseActions));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
+        Privilege(ResourcePattern::forAnySystemBuckets(), clusterManagerRoleDatabaseActions));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
         Privilege(ResourcePattern::forDatabaseName("config"), clusterManagerRoleDatabaseActions));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
@@ -467,6 +471,13 @@ void addClusterManagerPrivileges(PrivilegeVector* privileges) {
         Privilege(ResourcePattern::forExactNamespace(NamespaceString("local", "system.replset")),
                   readRoleActions));
     addReadOnlyDbPrivileges(privileges, "config");
+
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forAnyResource(), ActionType::dbCheck));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(ResourcePattern::forExactNamespace(NamespaceString("local", "system.healthlog")),
+                  readRoleActions));
 
     ActionSet writeActions;
     writeActions << ActionType::insert << ActionType::update << ActionType::remove;
@@ -680,8 +691,16 @@ void addRootRolePrivileges(PrivilegeVector* privileges) {
     addReadWriteAnyDbPrivileges(privileges);
     addBackupPrivileges(privileges);
     addRestorePrivileges(privileges);
+
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyResource(), ActionType::validate));
+
+    // Grant privilege to 'root' to perform 'find' and 'remove' on pre-images collection.
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(
+            ResourcePattern::forExactNamespace(NamespaceString::kChangeStreamPreImagesNamespace),
+            {ActionType::find, ActionType::remove}));
 }
 
 void addInternalRolePrivileges(PrivilegeVector* privileges) {

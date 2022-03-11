@@ -241,7 +241,8 @@ public:
                                          const OID& requestEpoch,
                                          const ChunkRange& range,
                                          const std::vector<BSONObj>& splitPoints,
-                                         const std::string& shardName);
+                                         const std::string& shardName,
+                                         bool fromChunkSplitter);
 
     /**
      * Updates metadata in the config.chunks collection so the chunks with given boundaries are seen
@@ -413,9 +414,9 @@ public:
                                                       TxnNumber txnNumber);
 
 
-    void configureCollectionAutoSplit(OperationContext* opCtx,
+    void configureCollectionBalancing(OperationContext* opCtx,
                                       const NamespaceString& nss,
-                                      boost::optional<int64_t> maxChunkSizeBytes,
+                                      boost::optional<int64_t> chunkSizeBytes,
                                       boost::optional<bool> balancerShouldMergeChunks,
                                       boost::optional<bool> enableAutoSplitter);
 
@@ -512,6 +513,18 @@ public:
      * service context, so that 'create' can be called again.
      */
     static void clearForTests(ServiceContext* serviceContext);
+
+    //
+    // Upgrade/downgrade
+    //
+
+    /**
+     * Upgrade the chunk metadata to include the history field.
+     */
+    void upgradeChunksHistory(OperationContext* opCtx,
+                              const NamespaceString& nss,
+                              bool force,
+                              const Timestamp& validAfter);
 
 private:
     /**

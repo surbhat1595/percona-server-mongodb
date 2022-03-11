@@ -92,21 +92,21 @@ public:
         return getHealthObservers();
     }
 
-    FaultFacetsContainerPtr getOrCreateFaultFacetsContainerTest() {
-        return getOrCreateFaultFacetsContainer();
+    FaultPtr getOrCreateFaultTest() {
+        return getOrCreateFault();
     }
 
-    FaultInternal& getFault() {
-        FaultFacetsContainerPtr fault = getFaultFacetsContainer();
+    Fault& getFault() {
+        FaultPtr fault = FaultManager::getFault();
         invariant(fault);
-        return *(static_cast<FaultInternal*>(fault.get()));
+        return *(static_cast<Fault*>(fault.get()));
     }
 
     void progressMonitorCheckTest(std::function<void(std::string cause)> crashCb) {
         progressMonitorCheckForTests(crashCb);
     }
 
-    FaultManagerConfig getConfigTest() {
+    const FaultManagerConfig& getConfigTest() {
         return getConfig();
     }
 
@@ -176,11 +176,18 @@ public:
     }
 
     void registerMockHealthObserver(FaultFacetType mockType,
-                                    std::function<double()> getSeverityCallback) {
+                                    std::function<Severity()> getSeverityCallback,
+                                    Milliseconds timeout) {
         HealthObserverRegistration::registerObserverFactory(
-            [mockType, getSeverityCallback](ServiceContext* svcCtx) {
-                return std::make_unique<HealthObserverMock>(mockType, svcCtx, getSeverityCallback);
+            [mockType, getSeverityCallback, timeout](ServiceContext* svcCtx) {
+                return std::make_unique<HealthObserverMock>(
+                    mockType, svcCtx, getSeverityCallback, timeout);
             });
+    }
+
+    void registerMockHealthObserver(FaultFacetType mockType,
+                                    std::function<Severity()> getSeverityCallback) {
+        registerMockHealthObserver(mockType, getSeverityCallback, Milliseconds(Seconds(30)));
     }
 
     template <typename Observer>
@@ -229,8 +236,14 @@ public:
         tickSource().advance(d);
     }
 
-    static inline const Seconds kWaitTimeout{30};
+    static inline const Seconds kWaitTimeout{10};
     static inline const Milliseconds kSleepTime{1};
+
+    static inline const int kActiveFaultDurationSecs = 5;
+
+    RAIIServerParameterControllerForTest serverParamController{"activeFaultDurationSecs",
+                                                               kActiveFaultDurationSecs};
+
     void assertSoon(std::function<bool()> predicate, Milliseconds timeout = kWaitTimeout) {
         Timer t;
         while (t.elapsed() < timeout) {
@@ -238,7 +251,7 @@ public:
                 return;
             sleepFor(kSleepTime);
         }
-        invariant(false);
+        ASSERT(false);
     }
 
     static inline const Milliseconds kCheckTimeIncrement{100};

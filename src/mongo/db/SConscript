@@ -76,6 +76,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/cannot_enable_index_constraint_info',
+        '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/index_names',
         '$BUILD_DIR/mongo/db/repl/tenant_migration_errors',
         '$BUILD_DIR/mongo/db/write_concern_options',
@@ -513,6 +514,17 @@ env.Library(
 )
 
 env.Library(
+    target='change_stream_options_manager',
+    source=[
+        'change_stream_options_manager.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/change_stream_options',
+        '$BUILD_DIR/mongo/idl/feature_flag',
+    ],
+)
+
+env.Library(
     target="read_write_concern_defaults_mock",
     source=[
         "read_write_concern_defaults_cache_lookup_mock.cpp",
@@ -553,6 +565,7 @@ env.Library(
         'write_concern_options',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/storage/storage_change_lock',
         '$BUILD_DIR/mongo/util/processinfo',
     ],
 )
@@ -649,9 +662,23 @@ env.CppUnitTest(
 )
 
 env.Library(
-    target="commands",
+    target="coll_mod_command_idl",
     source=[
         'coll_mod.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/authprivilege',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
+    target="commands",
+    source=[
         'coll_mod_reply_validation.cpp',
         'commands.cpp',
         'drop.idl',
@@ -680,6 +707,7 @@ env.Library(
         '$BUILD_DIR/mongo/rpc/rewrite_state_change_errors',
         '$BUILD_DIR/mongo/rpc/rpc',
         'audit',
+        'coll_mod_command_idl',
         'index_commands_idl',
         'namespace_string',
     ],
@@ -935,8 +963,10 @@ env.Library(
         '$BUILD_DIR/mongo/base',
     ],
     LIBDEPS_PRIVATE=[
+        'bson/dotted_path_support',
         'catalog/collection_options',
         'index/index_descriptor',
+        's/sharding_api_d',
     ],
 )
 
@@ -1304,7 +1334,7 @@ env.Library(
         'exec/collection_scan.cpp',
         'exec/count.cpp',
         'exec/count_scan.cpp',
-        'exec/delete.cpp',
+        'exec/delete_stage.cpp',
         'exec/distinct_scan.cpp',
         'exec/eof.cpp',
         'exec/fetch.cpp',
@@ -2320,6 +2350,7 @@ env.Library(
         # please add that library as a private libdep of
         # mongod_initializers.
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
+        '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
@@ -2531,6 +2562,8 @@ if wiredtiger:
             'session_catalog_mongod_test.cpp',
             'session_catalog_test.cpp',
             'startup_warnings_mongod_test.cpp',
+            'tenant_database_name_test.cpp',
+            'tenant_namespace_test.cpp',
             'thread_client_test.cpp',
             'time_proof_service_test.cpp',
             'transaction_api_test.cpp',
@@ -2587,6 +2620,7 @@ if wiredtiger:
             'logical_session_id_helpers',
             'logical_time',
             'mirror_maestro',
+            'multitenancy_params',
             'namespace_string',
             'op_observer',
             'op_observer_impl',
@@ -2604,6 +2638,7 @@ if wiredtiger:
             'repl/storage_interface_impl',
             'rw_concern_d',
             's/shard_server_test_fixture',
+            'server_feature_flags',
             'server_options_core',
             'server_options_servers',
             'service_context',

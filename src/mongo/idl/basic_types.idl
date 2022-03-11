@@ -242,12 +242,7 @@ types:
         deserializer: mongo::IDLAnyTypeOwned::parseFromBSON
 
     writeConcernW:
-        bson_serialization_type:
-                                 - string
-                                 - int
-                                 - decimal
-                                 - double
-                                 - long
+        bson_serialization_type: any
         description: >-
             A string or integer representing the 'w' option in a document specifying write concern.
             See https://docs.mongodb.com/manual/reference/write-concern/"
@@ -255,6 +250,14 @@ types:
         default: "mongo::WriteConcernW()"
         serializer: "mongo::WriteConcernW::serializeWriteConcernW"
         deserializer: "mongo::WriteConcernW::deserializeWriteConcernW"
+
+    writeConcernWTimeout:
+        bson_serialization_type: any
+        description: >-
+            An integer representing the 'wtimeout' option in a document specifying write concern.
+            See https://docs.mongodb.com/manual/reference/write-concern/"
+        cpp_type: std::int64_t
+        deserializer: "mongo::parseWTimeoutFromBSON"
 
 enums:
     ReadWriteConcernProvenanceSource:
@@ -348,7 +351,7 @@ structs:
                 optional: true
                 unstable: false
             wtimeout:
-                type: safeInt64
+                type: writeConcernWTimeout
                 default: 0
                 unstable: false
             fsync:

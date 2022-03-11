@@ -48,6 +48,7 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
@@ -167,7 +168,7 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx, const Collectio
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                 NamespaceString::kAdminDb.toString(),
-                BSON(_flushRoutingTableCacheUpdates::kCommandName << coll.getNss().ns()));
+                BSON("_flushRoutingTableCacheUpdates" << coll.getNss().ns()));
         }
     }
 }
@@ -287,10 +288,8 @@ std::pair<std::vector<BSONObj>, std::vector<BSONObj>> makeChunkAndTagUpdatesForR
 void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
                                                       const NamespaceString& nss,
                                                       const ShardKeyPattern& newShardKeyPattern) {
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations. Take _kZoneOpLock in exclusive mode to prevent concurrent zone operations.
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel.
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock chunkLk(opCtx, opCtx->lockState(), _kChunkOpLock);
     Lock::ExclusiveLock zoneLk(opCtx, opCtx->lockState(), _kZoneOpLock);
 
@@ -491,6 +490,15 @@ void ShardingCatalogManager::refineCollectionShardKey(OperationContext* opCtx,
 
     if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
             serverGlobalParams.featureCompatibility)) {
+        // The transaction API will use the write concern on the opCtx, which will have the default
+        // sharding wTimeout of 60 seconds. Refining a shard key may involve writing many more
+        // documents than a normal operation, so we override the write concern to not use a
+        // wTimeout, matching the behavior before the API was introduced.
+        WriteConcernOptions originalWC = opCtx->getWriteConcern();
+        opCtx->setWriteConcern(WriteConcernOptions(
+            WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, 0));
+        ON_BLOCK_EXIT([opCtx, originalWC] { opCtx->setWriteConcern(originalWC); });
+
         withTransactionAPI(opCtx, nss, std::move(updateCollectionAndChunksWithAPIFn));
     } else {
         withTransaction(opCtx, nss, std::move(updateCollectionAndChunksFn));
@@ -541,31 +549,39 @@ void ShardingCatalogManager::updateShardingCatalogEntryForCollectionInTxn(
 }
 
 
-void ShardingCatalogManager::configureCollectionAutoSplit(
+void ShardingCatalogManager::configureCollectionBalancing(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    boost::optional<int64_t> maxChunkSizeBytes,
+    boost::optional<int64_t> chunkSizeBytes,
     boost::optional<bool> balancerShouldMergeChunks,
     boost::optional<bool> enableAutoSplitter) {
 
+    // Hold the FCV region to serialize with the setFeatureCompatibilityVersion command
+    FixedFCVRegion fcvRegion(opCtx);
+    uassert(ErrorCodes::IllegalOperation,
+            "_configsvrConfigureAutoSplit can only be run when the cluster is in feature "
+            "compatibility versions greater or equal than 5.3.",
+            serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
+                multiversion::FeatureCompatibilityVersion::kVersion_5_3));
+
     uassert(ErrorCodes::InvalidOptions,
             "invalid collection auto splitter config update",
-            maxChunkSizeBytes || balancerShouldMergeChunks || enableAutoSplitter);
+            chunkSizeBytes || balancerShouldMergeChunks || enableAutoSplitter);
 
     short updatedFields = 0;
     bool doMerge, doSplit = false;
     BSONObjBuilder updateCmd;
     {
         BSONObjBuilder setBuilder(updateCmd.subobjStart("$set"));
-        if (maxChunkSizeBytes && *maxChunkSizeBytes != 0) {
+        if (chunkSizeBytes && *chunkSizeBytes != 0) {
             // verify we got a positive integer in range [1MB, 1GB]
             uassert(ErrorCodes::InvalidOptions,
-                    str::stream() << "Chunk size '" << *maxChunkSizeBytes
+                    str::stream() << "Chunk size '" << *chunkSizeBytes
                                   << "' out of range [1MB, 1GB]",
-                    *maxChunkSizeBytes > 0 &&
-                        ChunkSizeSettingsType::checkMaxChunkSizeValid(*maxChunkSizeBytes));
+                    *chunkSizeBytes > 0 &&
+                        ChunkSizeSettingsType::checkMaxChunkSizeValid(*chunkSizeBytes));
 
-            setBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, *maxChunkSizeBytes);
+            setBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, *chunkSizeBytes);
             updatedFields++;
         }
         if (balancerShouldMergeChunks) {
@@ -579,15 +595,10 @@ void ShardingCatalogManager::configureCollectionAutoSplit(
             updatedFields++;
         }
     }
-    if (maxChunkSizeBytes && *maxChunkSizeBytes == 0) {
+    if (chunkSizeBytes && *chunkSizeBytes == 0) {
         BSONObjBuilder unsetBuilder(updateCmd.subobjStart("$unset"));
         unsetBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, 0);
         updatedFields++;
-    }
-    if (balancerShouldMergeChunks && enableAutoSplitter) {
-        uassert(ErrorCodes::InvalidOptions,
-                "Autosplitter and defragmentation cannot both be enabled for a collection",
-                !(doMerge && doSplit));
     }
 
     if (updatedFields == 0) {
@@ -641,10 +652,8 @@ void ShardingCatalogManager::renameShardedMetadata(
     const NamespaceString& to,
     const WriteConcernOptions& writeConcern,
     boost::optional<CollectionType> optFromCollType) {
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations. Take _kZoneOpLock in exclusive mode to prevent concurrent zone operations.
-    // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
-    // move chunks on different collections to proceed in parallel.
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications and generate
+    // strictly monotonously increasing collection versions
     Lock::ExclusiveLock chunkLk(opCtx, opCtx->lockState(), _kChunkOpLock);
     Lock::ExclusiveLock zoneLk(opCtx, opCtx->lockState(), _kZoneOpLock);
 

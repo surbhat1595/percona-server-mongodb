@@ -96,18 +96,26 @@ CollectionShardingRuntime* CollectionShardingRuntime::get(CollectionShardingStat
 }
 
 ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
-    OperationContext* opCtx, OrphanCleanupPolicy orphanCleanupPolicy) {
-    const auto optReceivedShardVersion = getOperationReceivedVersion(opCtx, _nss);
-    // No operations should be calling getOwnershipFilter without a shard version
-    invariant(optReceivedShardVersion,
-              "getOwnershipFilter called by operation that doesn't specify shard version");
+    OperationContext* opCtx,
+    OrphanCleanupPolicy orphanCleanupPolicy,
+    bool supportNonVersionedOperations) {
+    boost::optional<ChunkVersion> optReceivedShardVersion = boost::none;
+    if (!supportNonVersionedOperations) {
+        optReceivedShardVersion = getOperationReceivedVersion(opCtx, _nss);
+        // No operations should be calling getOwnershipFilter without a shard version
+        invariant(optReceivedShardVersion,
+                  "getOwnershipFilter called by operation that doesn't specify shard version");
+    }
 
     auto metadata = _getMetadataWithVersionCheckAt(
         opCtx, repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime());
-    invariant(!ChunkVersion::isIgnoredVersion(*optReceivedShardVersion) ||
-                  !metadata->get().allowMigrations() || !metadata->get().isSharded(),
-              "For sharded collections getOwnershipFilter cannot be relied on without a valid "
-              "shard version");
+
+    if (!supportNonVersionedOperations) {
+        invariant(!ChunkVersion::isIgnoredVersion(*optReceivedShardVersion) ||
+                      !metadata->get().allowMigrations() || !metadata->get().isSharded(),
+                  "For sharded collections getOwnershipFilter cannot be relied on without a valid "
+                  "shard version");
+    }
 
     return {std::move(metadata)};
 }
@@ -179,10 +187,16 @@ boost::optional<SharedSemiFuture<void>> CollectionShardingRuntime::getCriticalSe
 
 void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
                                                      CollectionMetadata newMetadata) {
+    const auto csrLock = CSRLock::lockExclusive(opCtx, this);
+    setFilteringMetadata_withLock(opCtx, newMetadata, csrLock);
+}
+
+void CollectionShardingRuntime::setFilteringMetadata_withLock(OperationContext* opCtx,
+                                                              CollectionMetadata newMetadata,
+                                                              const CSRLock& csrExclusiveLock) {
     invariant(!newMetadata.isSharded() || !_nss.isNamespaceAlwaysUnsharded(),
               str::stream() << "Namespace " << _nss.ns() << " must never be sharded.");
 
-    auto csrLock = CSRLock::lockExclusive(opCtx, this);
     stdx::lock_guard lk(_metadataManagerLock);
 
     if (!newMetadata.isSharded()) {
@@ -206,6 +220,10 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
 
 void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) {
     const auto csrLock = CSRLock::lockExclusive(opCtx, this);
+    if (_shardVersionInRecoverOrRefresh) {
+        _shardVersionInRecoverOrRefresh->cancellationSource.cancel();
+    }
+
     stdx::lock_guard lk(_metadataManagerLock);
     if (!_nss.isNamespaceAlwaysUnsharded()) {
         LOGV2_DEBUG(4798530,
@@ -388,16 +406,18 @@ size_t CollectionShardingRuntime::numberOfRangesScheduledForDeletion() const {
 }
 
 
-void CollectionShardingRuntime::setShardVersionRecoverRefreshFuture(SharedSemiFuture<void> future,
-                                                                    const CSRLock&) {
+void CollectionShardingRuntime::setShardVersionRecoverRefreshFuture(
+    SharedSemiFuture<void> future, CancellationSource cancellationSource, const CSRLock&) {
     invariant(!_shardVersionInRecoverOrRefresh);
-    _shardVersionInRecoverOrRefresh.emplace(std::move(future));
+    _shardVersionInRecoverOrRefresh.emplace(std::move(future), std::move(cancellationSource));
 }
 
 boost::optional<SharedSemiFuture<void>>
 CollectionShardingRuntime::getShardVersionRecoverRefreshFuture(OperationContext* opCtx) {
     auto csrLock = CSRLock::lockShared(opCtx, this);
-    return _shardVersionInRecoverOrRefresh;
+    return _shardVersionInRecoverOrRefresh
+        ? boost::optional<SharedSemiFuture<void>>(_shardVersionInRecoverOrRefresh->future)
+        : boost::none;
 }
 
 void CollectionShardingRuntime::resetShardVersionRecoverRefreshFuture(const CSRLock&) {

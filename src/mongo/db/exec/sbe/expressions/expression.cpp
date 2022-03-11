@@ -61,6 +61,10 @@ vm::CodeFragment wrapNothingTest(vm::CodeFragment&& code, F&& generator) {
     return std::move(code);
 }
 
+std::string EExpression::toString() const {
+    return DebugPrinter{}.print(debugPrint());
+}
+
 std::unique_ptr<EExpression> EConstant::clone() const {
     auto [tag, val] = value::copyValue(_tag, _val);
     return std::make_unique<EConstant>(tag, val);
@@ -103,7 +107,9 @@ vm::CodeFragment EVariable::compileDirect(CompileCtx& ctx) const {
         int offset = -_var - 1;
         code.appendLocalVal(*_frameId, offset, _moveFrom);
     } else {
-        auto accessor = ctx.root->getAccessor(ctx, _var);
+        // ctx.root is optional. If root stage is not specified, then resolve the variable using
+        // default context rules.
+        auto accessor = ctx.root ? ctx.root->getAccessor(ctx, _var) : ctx.getAccessor(_var);
         if (_moveFrom) {
             code.appendMoveVal(accessor);
         } else {

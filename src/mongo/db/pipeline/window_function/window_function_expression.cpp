@@ -57,12 +57,10 @@ using namespace window_function_n_traits;
 REGISTER_WINDOW_FUNCTION(derivative, ExpressionDerivative::parse);
 REGISTER_WINDOW_FUNCTION(first, ExpressionFirst::parse);
 REGISTER_WINDOW_FUNCTION(last, ExpressionLast::parse);
-
-// TODO SERVER-59327 Consider moving ExpressionN implementations and register calls into its own cpp
-// file.
-// Register macros for the various accumulators/expressions in this file. Note that we check
-// 'isEnabledAndIgnoreFCV()' because the feature flag is a property set at startup, while FCV can
-// change while the server is running.
+REGISTER_WINDOW_FUNCTION_CONDITIONALLY(linearFill,
+                                       (ExpressionLinearFill::parse),
+                                       feature_flags::gFeatureFlagFill.getVersion(),
+                                       feature_flags::gFeatureFlagFill.isEnabledAndIgnoreFCV());
 REGISTER_WINDOW_FUNCTION_CONDITIONALLY(
     minN,
     (ExpressionN<WindowFunctionMinN, AccumulatorMinN>::parse),

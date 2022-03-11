@@ -121,7 +121,8 @@ std::vector<RequestData> rebuildRequestsFromRecoveryInfo(
     };
     DBDirectClient dbClient(opCtx);
     try {
-        dbClient.query(documentProcessor, MigrationType::ConfigNS, BSONObj());
+        FindCommandRequest findRequest{MigrationType::ConfigNS};
+        dbClient.find(std::move(findRequest), ReadPreferenceSetting{}, documentProcessor);
     } catch (const DBException& e) {
         LOGV2_ERROR(5847215, "Failed to load requests to recover", "error"_attr = redact(e));
     }
@@ -246,7 +247,7 @@ SemiFuture<void> BalancerCommandsSchedulerImpl::requestMergeChunks(OperationCont
         .semi();
 }
 
-SemiFuture<std::vector<BSONObj>> BalancerCommandsSchedulerImpl::requestAutoSplitVector(
+SemiFuture<SplitPoints> BalancerCommandsSchedulerImpl::requestAutoSplitVector(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const ShardId& shardId,
@@ -278,7 +279,7 @@ SemiFuture<void> BalancerCommandsSchedulerImpl::requestSplitChunk(
     const KeyPattern& keyPattern,
     const BSONObj& minKey,
     const BSONObj& maxKey,
-    const std::vector<BSONObj>& splitPoints) {
+    const SplitPoints& splitPoints) {
 
     auto commandInfo = std::make_shared<SplitChunkCommandInfo>(
         nss, shardId, keyPattern.toBSON(), minKey, maxKey, collectionVersion, splitPoints);
@@ -381,11 +382,11 @@ CommandSubmissionResult BalancerCommandsSchedulerImpl::_submit(
         }
     }
 
-    const executor::RemoteCommandRequest remoteCommand(shardHostWithStatus.getValue(),
-                                                       NamespaceString::kAdminDb.toString(),
-                                                       params.commandInfo->serialise(),
-                                                       opCtx);
-
+    const executor::RemoteCommandRequest remoteCommand =
+        executor::RemoteCommandRequest(shardHostWithStatus.getValue(),
+                                       params.commandInfo->getTargetDb(),
+                                       params.commandInfo->serialise(),
+                                       opCtx);
     auto onRemoteResponseReceived =
         [this,
          requestId = params.id](const executor::TaskExecutor::RemoteCommandCallbackArgs& args) {
@@ -504,7 +505,7 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
             _recentlyCompletedRequestIds.clear();
 
             if (_state == SchedulerState::Stopping) {
-                // reset the internal state and
+                // Reset the internal state and prepare to leave
                 _unsubmittedRequestIds.clear();
                 _requests.swap(requestsToCleanUpOnExit);
                 stopWorkerRequested = true;

@@ -339,14 +339,17 @@ StatusWith<DurableCatalog::Entry> DurableCatalogImpl::_addEntry(OperationContext
         md.ns = nss.ns();
         md.options = options;
 
-        // TODO SERVER-60911: When kLatest is 5.3, only check when upgrading from kLastLTS (5.0).
-        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated upgrade code.
+        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
+        // upgrade code.
         if (options.timeseries &&
-            serverGlobalParams.featureCompatibility.isFCVUpgradingToOrAlreadyLatest()) {
-            // When the server has begun upgrading FCV to 5.2, all newly created catalog entries for
+            (serverGlobalParams.featureCompatibility.getVersion() ==
+                 multiversion::GenericFCV::kUpgradingFromLastLTSToLatest ||
+             serverGlobalParams.featureCompatibility.getVersion() ==
+                 multiversion::GenericFCV::kLatest)) {
+            // When upgrading FCV from kLastLTS to kLatest, all newly created catalog entries for
             // time-series collections will have this flag set to false by default as mixed-schema
             // data is only possible in versions 5.1 and earlier. We do not have to wait for FCV to
-            // be fully upgraded to 5.2 to start this process.
+            // be fully upgraded to start this process.
             md.timeseriesBucketsMayHaveMixedSchemaData = false;
         }
         b.append("md", md.toBSON());
@@ -696,7 +699,7 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
     const NamespaceString& nss,
     const BSONObj& metadata,
     const BSONObj& storageMetadata,
-    DurableCatalogImpl::ImportCollectionUUIDOption uuidOption) {
+    const ImportOptions& importOptions) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X));
     invariant(nss.coll().size() > 0);
 
@@ -714,7 +717,8 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
             metadata.hasField("ident"));
 
     const auto& catalogEntry = [&] {
-        if (uuidOption == ImportCollectionUUIDOption::kGenerateNew) {
+        if (importOptions.importCollectionUUIDOption ==
+            ImportOptions::ImportCollectionUUIDOption::kGenerateNew) {
             // Generate a new UUID for the collection.
             md.options.uuid = UUID::gen();
             BSONObjBuilder catalogEntryBuilder;
@@ -763,18 +767,6 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
         return swEntry.getStatus();
     Entry& entry = swEntry.getValue();
 
-    auto kvEngine = _engine->getEngine();
-    Status status = kvEngine->importRecordStore(opCtx, entry.ident, storageMetadata);
-    if (!status.isOK())
-        return status;
-
-    for (const std::string& indexIdent : indexIdents) {
-        status = kvEngine->importSortedDataInterface(opCtx, indexIdent, storageMetadata);
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-
     opCtx->recoveryUnit()->onRollback(
         [opCtx, catalog = this, ident = entry.ident, indexIdents = indexIdents]() {
             catalog->_engine->getEngine()->dropIdentForImport(opCtx, ident);
@@ -782,6 +774,19 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
                 catalog->_engine->getEngine()->dropIdentForImport(opCtx, indexIdent);
             }
         });
+
+    auto kvEngine = _engine->getEngine();
+    Status status = kvEngine->importRecordStore(opCtx, entry.ident, storageMetadata, importOptions);
+    if (!status.isOK())
+        return status;
+
+    for (const std::string& indexIdent : indexIdents) {
+        status =
+            kvEngine->importSortedDataInterface(opCtx, indexIdent, storageMetadata, importOptions);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
 
     auto rs = _engine->getEngine()->getRecordStore(opCtx, nss.ns(), entry.ident, md.options);
     invariant(rs);

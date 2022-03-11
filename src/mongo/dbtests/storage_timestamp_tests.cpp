@@ -243,18 +243,18 @@ public:
 
             if (collRaii) {
                 WriteUnitOfWork wunit(_opCtx);
-                invariant(collRaii.getWritableCollection()->truncate(_opCtx).isOK());
+                invariant(collRaii.getWritableCollection(_opCtx)->truncate(_opCtx).isOK());
                 if (_opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
                     ASSERT_OK(_opCtx->recoveryUnit()->setTimestamp(Timestamp(1, 1)));
                 }
-                collRaii.getWritableCollection()->getIndexCatalog()->dropAllIndexes(
-                    _opCtx, collRaii.getWritableCollection(), false);
+                collRaii.getWritableCollection(_opCtx)->getIndexCatalog()->dropAllIndexes(
+                    _opCtx, collRaii.getWritableCollection(_opCtx), false);
                 wunit.commit();
                 return;
             }
 
             AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
-            auto db = autoColl.ensureDbExists();
+            auto db = autoColl.ensureDbExists(_opCtx);
             WriteUnitOfWork wunit(_opCtx);
             if (_opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
                 ASSERT_OK(_opCtx->recoveryUnit()->setTimestamp(Timestamp(1, 1)));
@@ -1847,68 +1847,14 @@ public:
         expectedMinValidWithSetFlag.setInitialSyncFlag(true);
 
         assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidWithSetFlag);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidWithSetFlag);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidWithSetFlag);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidWithSetFlag);
 
         consistencyMarkers.clearInitialSyncFlag(_opCtx);
 
         repl::MinValidDocument expectedMinValidWithUnsetFlag;
-        expectedMinValidWithUnsetFlag.setMinValidTerm(presentTerm);
-        expectedMinValidWithUnsetFlag.setMinValidTimestamp(presentTs);
-        expectedMinValidWithUnsetFlag.setAppliedThrough(repl::OpTime(presentTs, presentTerm));
+        expectedMinValidWithSetFlag.setMinValidTerm(repl::OpTime::kUninitializedTerm);
+        expectedMinValidWithSetFlag.setMinValidTimestamp(nullTs);
 
         assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidWithUnsetFlag);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidWithUnsetFlag);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidWithUnsetFlag);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidWithUnsetFlag);
-    }
-};
-
-class SetMinValidToAtLeast : public StorageTimestampTest {
-public:
-    void run() {
-        NamespaceString nss(repl::ReplicationConsistencyMarkersImpl::kDefaultMinValidNamespace);
-        reset(nss);
-
-        repl::ReplicationConsistencyMarkersImpl consistencyMarkers(
-            repl::StorageInterface::get(_opCtx));
-        consistencyMarkers.initializeMinValidDocument(_opCtx);
-
-        // Setting minValid sets it at the provided OpTime.
-        consistencyMarkers.setMinValidToAtLeast(_opCtx, repl::OpTime(presentTs, presentTerm));
-
-        repl::MinValidDocument expectedMinValidInit;
-        expectedMinValidInit.setMinValidTerm(repl::OpTime::kUninitializedTerm);
-        expectedMinValidInit.setMinValidTimestamp(nullTs);
-
-        repl::MinValidDocument expectedMinValidPresent;
-        expectedMinValidPresent.setMinValidTerm(presentTerm);
-        expectedMinValidPresent.setMinValidTimestamp(presentTs);
-
-        assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidInit);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidPresent);
-
-        consistencyMarkers.setMinValidToAtLeast(_opCtx, repl::OpTime(futureTs, presentTerm));
-
-        repl::MinValidDocument expectedMinValidFuture;
-        expectedMinValidFuture.setMinValidTerm(presentTerm);
-        expectedMinValidFuture.setMinValidTimestamp(futureTs);
-
-        assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidFuture);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidInit);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidFuture);
-
-        // Setting the timestamp to the past should be a noop.
-        consistencyMarkers.setMinValidToAtLeast(_opCtx, repl::OpTime(pastTs, presentTerm));
-
-        assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidFuture);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidInit);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidFuture);
     }
 };
 
@@ -1922,11 +1868,12 @@ public:
             repl::StorageInterface::get(_opCtx));
         consistencyMarkers.initializeMinValidDocument(_opCtx);
 
-        consistencyMarkers.setAppliedThrough(_opCtx, repl::OpTime(presentTs, presentTerm));
-
         repl::MinValidDocument expectedMinValidInit;
         expectedMinValidInit.setMinValidTerm(repl::OpTime::kUninitializedTerm);
         expectedMinValidInit.setMinValidTimestamp(nullTs);
+        assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidInit);
+
+        consistencyMarkers.setAppliedThrough(_opCtx, repl::OpTime(presentTs, presentTerm));
 
         repl::MinValidDocument expectedMinValidPresent;
         expectedMinValidPresent.setMinValidTerm(repl::OpTime::kUninitializedTerm);
@@ -1934,17 +1881,10 @@ public:
         expectedMinValidPresent.setAppliedThrough(repl::OpTime(presentTs, presentTerm));
 
         assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidInit);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidPresent);
 
         // appliedThrough opTime can be unset.
-        consistencyMarkers.clearAppliedThrough(_opCtx, futureTs);
-
+        consistencyMarkers.clearAppliedThrough(_opCtx);
         assertMinValidDocumentAtTimestamp(nss, nullTs, expectedMinValidInit);
-        assertMinValidDocumentAtTimestamp(nss, pastTs, expectedMinValidInit);
-        assertMinValidDocumentAtTimestamp(nss, presentTs, expectedMinValidPresent);
-        assertMinValidDocumentAtTimestamp(nss, futureTs, expectedMinValidInit);
     }
 };
 
@@ -2085,7 +2025,7 @@ public:
         reset(nss);
 
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter coll(autoColl);
+        CollectionWriter coll(_opCtx, autoColl);
 
         RecordId catalogId = autoColl.getCollection()->getCatalogId();
 
@@ -2148,7 +2088,7 @@ public:
             // timestamp.
             ASSERT_OK(
                 indexer.commit(_opCtx,
-                               autoColl.getWritableCollection(),
+                               autoColl.getWritableCollection(_opCtx),
                                [&](const BSONObj& indexSpec) {
                                    if (SimulatePrimary) {
                                        // The timestamping responsibility for each index is placed
@@ -2216,7 +2156,7 @@ public:
         reset(nss);
 
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter collection(autoColl);
+        CollectionWriter collection(_opCtx, autoColl);
 
         // Build an index on `{a: 1}`.
         MultiIndexBlock indexer;
@@ -2708,7 +2648,7 @@ public:
         reset(nss);
 
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter coll(autoColl);
+        CollectionWriter coll(_opCtx, autoColl);
 
         const LogicalTime insertTimestamp = _clock->tickClusterTime(1);
         {
@@ -2783,7 +2723,7 @@ public:
         reset(nss);
 
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter coll(autoColl);
+        CollectionWriter coll(_opCtx, autoColl);
 
         const LogicalTime insertTimestamp = _clock->tickClusterTime(1);
         {
@@ -2930,7 +2870,7 @@ public:
         reset(nss);
 
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter collection(autoColl);
+        CollectionWriter collection(_opCtx, autoColl);
 
         // Indexing of parallel arrays is not allowed, so these are deemed "bad".
         const auto badDoc1 =
@@ -3488,7 +3428,7 @@ public:
         RAIIServerParameterControllerForTest storeImageInSideCollection(
             "storeFindAndModifyImagesInSideCollection", true);
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter collection(autoColl);
+        CollectionWriter collection(_opCtx, autoColl);
         const auto newObj = BSON("_id" << 0 << "a" << 1 << "b" << 1);
         CollectionUpdateArgs args;
         args.stmtIds = {1};
@@ -3550,7 +3490,7 @@ public:
         // Enable in-place mutation for this document
         ASSERT_EQUALS(mmb::Document::kInPlaceEnabled, doc.getCurrentInPlaceMode());
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter collection(autoColl);
+        CollectionWriter collection(_opCtx, autoColl);
         const auto newObj = BSON("_id" << 0 << "a" << 0);
         CollectionUpdateArgs args;
         args.stmtIds = {1};
@@ -3598,7 +3538,7 @@ public:
         RAIIServerParameterControllerForTest storeImageInSideCollection(
             "storeFindAndModifyImagesInSideCollection", true);
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter collection(autoColl);
+        CollectionWriter collection(_opCtx, autoColl);
         const auto bsonObj = BSON("_id" << 0 << "a" << 1);
 
         {
@@ -3636,6 +3576,7 @@ class MultiDocumentTransactionTest : public StorageTimestampTest {
 public:
     const StringData dbName = "unittest"_sd;
     const BSONObj doc = BSON("_id" << 1 << "TestValue" << 1);
+    const BSONObj docKey = BSON("_id" << 1);
 
     MultiDocumentTransactionTest(const std::string& collName) : nss(dbName, collName) {
         auto service = _opCtx->getServiceContext();
@@ -3797,6 +3738,7 @@ public:
         txnParticipant.unstashTransactionResources(_opCtx, "insert");
 
         const BSONObj doc2 = BSON("_id" << 2 << "TestValue" << 2);
+        const BSONObj doc2Key = BSON("_id" << 2);
         {
             AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
             insertDocument(autoColl.getCollection(), InsertStatement(doc2));
@@ -3823,11 +3765,12 @@ public:
             // Implicit commit oplog entry should exist at commitEntryTs.
             const auto commitFilter =
                 BSON("ts" << commitEntryTs << "o"
-                          << BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                                << "i"
-                                                                << "ns" << nss.ns() << "ui"
-                                                                << coll->uuid() << "o" << doc2))
-                                             << "count" << 2));
+                          << BSON("applyOps"
+                                  << BSON_ARRAY(BSON("op"
+                                                     << "i"
+                                                     << "ns" << nss.ns() << "ui" << coll->uuid()
+                                                     << "o" << doc2 << "o2" << doc2Key))
+                                  << "count" << 2));
             assertOplogDocumentExistsAtTimestamp(commitFilter, presentTs, false);
             assertOplogDocumentExistsAtTimestamp(commitFilter, beforeTxnTs, false);
             assertOplogDocumentExistsAtTimestamp(commitFilter, firstOplogEntryTs, false);
@@ -3845,11 +3788,12 @@ public:
             // first oplog entry should exist at firstOplogEntryTs and after it.
             const auto firstOplogEntryFilter =
                 BSON("ts" << firstOplogEntryTs << "o"
-                          << BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                                << "i"
-                                                                << "ns" << nss.ns() << "ui"
-                                                                << coll->uuid() << "o" << doc))
-                                             << "partialTxn" << true));
+                          << BSON("applyOps"
+                                  << BSON_ARRAY(BSON("op"
+                                                     << "i"
+                                                     << "ns" << nss.ns() << "ui" << coll->uuid()
+                                                     << "o" << doc << "o2" << docKey))
+                                  << "partialTxn" << true));
             assertOplogDocumentExistsAtTimestamp(firstOplogEntryFilter, presentTs, false);
             assertOplogDocumentExistsAtTimestamp(firstOplogEntryFilter, beforeTxnTs, false);
             assertOplogDocumentExistsAtTimestamp(firstOplogEntryFilter, firstOplogEntryTs, true);
@@ -3934,6 +3878,7 @@ public:
         }
         txnParticipant.unstashTransactionResources(_opCtx, "insert");
         const BSONObj doc2 = BSON("_id" << 2 << "TestValue" << 2);
+        const BSONObj doc2Key = BSON("_id" << 2);
         {
             AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
             insertDocument(autoColl.getCollection(), InsertStatement(doc2));
@@ -4021,11 +3966,12 @@ public:
             // The first oplog entry should exist at firstOplogEntryTs and onwards.
             const auto firstOplogEntryFilter =
                 BSON("ts" << firstOplogEntryTs << "o"
-                          << BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                                << "i"
-                                                                << "ns" << nss.ns() << "ui"
-                                                                << coll->uuid() << "o" << doc))
-                                             << "partialTxn" << true));
+                          << BSON("applyOps"
+                                  << BSON_ARRAY(BSON("op"
+                                                     << "i"
+                                                     << "ns" << nss.ns() << "ui" << coll->uuid()
+                                                     << "o" << doc << "o2" << docKey))
+                                  << "partialTxn" << true));
             assertOplogDocumentExistsAtTimestamp(firstOplogEntryFilter, presentTs, false);
             assertOplogDocumentExistsAtTimestamp(firstOplogEntryFilter, beforeTxnTs, false);
             assertOplogDocumentExistsAtTimestamp(firstOplogEntryFilter, firstOplogEntryTs, true);
@@ -4035,11 +3981,12 @@ public:
             // The prepare oplog entry should exist at prepareEntryTs and onwards.
             const auto prepareOplogEntryFilter =
                 BSON("ts" << prepareEntryTs << "o"
-                          << BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                                << "i"
-                                                                << "ns" << nss.ns() << "ui"
-                                                                << coll->uuid() << "o" << doc2))
-                                             << "prepare" << true << "count" << 2));
+                          << BSON("applyOps"
+                                  << BSON_ARRAY(BSON("op"
+                                                     << "i"
+                                                     << "ns" << nss.ns() << "ui" << coll->uuid()
+                                                     << "o" << doc2 << "o2" << doc2Key))
+                                  << "prepare" << true << "count" << 2));
             assertOplogDocumentExistsAtTimestamp(prepareOplogEntryFilter, presentTs, false);
             assertOplogDocumentExistsAtTimestamp(prepareOplogEntryFilter, beforeTxnTs, false);
             assertOplogDocumentExistsAtTimestamp(prepareOplogEntryFilter, firstOplogEntryTs, false);
@@ -4152,13 +4099,13 @@ public:
             }
 
             // The prepare oplog entry should exist at firstOplogEntryTs and onwards.
-            const auto prepareOplogEntryFilter = BSON(
-                "ts" << prepareEntryTs << "o"
-                     << BSON("applyOps"
-                             << BSON_ARRAY(BSON("op"
-                                                << "i"
-                                                << "ns" << nss.ns() << "ui" << ui << "o" << doc))
-                             << "prepare" << true));
+            const auto prepareOplogEntryFilter =
+                BSON("ts" << prepareEntryTs << "o"
+                          << BSON("applyOps" << BSON_ARRAY(BSON("op"
+                                                                << "i"
+                                                                << "ns" << nss.ns() << "ui" << ui
+                                                                << "o" << doc << "o2" << docKey))
+                                             << "prepare" << true));
             assertOplogDocumentExistsAtTimestamp(prepareOplogEntryFilter, presentTs, false);
             assertOplogDocumentExistsAtTimestamp(prepareOplogEntryFilter, beforeTxnTs, false);
             assertOplogDocumentExistsAtTimestamp(prepareOplogEntryFilter, prepareEntryTs, true);
@@ -4434,7 +4381,6 @@ public:
         addIf<PrimarySetsMultikeyInsideMultiDocumentTransaction>();
         addIf<InitializeMinValid>();
         addIf<SetMinValidInitialSyncFlag>();
-        addIf<SetMinValidToAtLeast>();
         addIf<SetMinValidAppliedThrough>();
         // KVDropDatabase<SimulatePrimary>
         addIf<KVDropDatabase<false>>();

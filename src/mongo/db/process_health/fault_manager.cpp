@@ -33,8 +33,10 @@
 
 #include "mongo/db/process_health/fault_manager.h"
 
+#include <algorithm>
+
+#include "mongo/db/process_health/fault.h"
 #include "mongo/db/process_health/fault_facet_impl.h"
-#include "mongo/db/process_health/fault_impl.h"
 #include "mongo/db/process_health/fault_manager_config.h"
 #include "mongo/db/process_health/health_monitoring_gen.h"
 #include "mongo/db/process_health/health_observer_registration.h"
@@ -84,6 +86,73 @@ void FaultManager::set(ServiceContext* svcCtx, std::unique_ptr<FaultManager> new
     invariant(newFaultManager);
     auto& faultManager = sFaultManager(svcCtx);
     faultManager = std::move(newFaultManager);
+}
+
+
+bool FaultManager::isInitialized() {
+    stdx::lock_guard lock(_mutex);
+    return _initialized;
+}
+
+
+// Start health checks if observer turned on via setParamater. Cleanup if the observer is turned
+// off.
+void FaultManager::healthMonitoringIntensitiesUpdated(HealthObserverIntensities oldValue,
+                                                      HealthObserverIntensities newValue) {
+    if (!hasGlobalServiceContext())
+        return;
+
+    auto manager = FaultManager::get(getGlobalServiceContext());
+    if (manager && manager->isInitialized()) {
+        auto cancellationToken = manager->_managerShuttingDownCancellationSource.token();
+        auto findByType =
+            [](const auto& values,
+               HealthObserverTypeEnum type) -> boost::optional<HealthObserverIntensitySetting> {
+            if (!values) {
+                return boost::none;
+            }
+            auto it = std::find_if(values->begin(),
+                                   values->end(),
+                                   [type](const HealthObserverIntensitySetting& setting) {
+                                       return setting.getType() == type;
+                                   });
+            if (it != values->end()) {
+                return *it;
+            }
+            return boost::none;
+        };
+
+        auto optionalNewValues = newValue.getValues();
+        if (!optionalNewValues) {
+            return;  // Nothing was updated.
+        }
+        for (auto& setting : *optionalNewValues) {
+            auto oldSetting = findByType(oldValue.getValues(), setting.getType());
+            if (!oldSetting) {
+                continue;
+            }
+            if (cancellationToken.isCanceled()) {
+                break;
+            }
+            auto oldIntensity = oldSetting->getIntensity();
+            auto newIntensity = setting.getIntensity();
+            if (oldIntensity != newIntensity) {
+                if (oldIntensity == HealthObserverIntensityEnum::kOff) {
+                    // off -> {critical, non-critical}
+                    if (auto* observer =
+                            manager->getHealthObserver(toFaultFacetType(setting.getType()));
+                        observer != nullptr) {
+                        manager->healthCheck(observer, cancellationToken);
+                    }
+                } else if (newIntensity == HealthObserverIntensityEnum::kOff) {
+                    // {critical, non-critical} -> off
+                    // Resolve any faults for this observer with a synthetic health check result.
+                    auto successfulHealthCheckResult = HealthCheckStatus(setting.getType());
+                    manager->accept(successfulHealthCheckResult);
+                }
+            }
+        }
+    }
 }
 
 FaultManager::TransientFaultDeadline::TransientFaultDeadline(
@@ -188,29 +257,32 @@ boost::optional<FaultState> FaultManager::handleStartupCheck(const OptionalMessa
                   });
 
 
-    auto lk = stdx::lock_guard(_stateMutex);
-    logMessageReceived(state(), status);
+    {
+        auto lk = stdx::lock_guard(_stateMutex);
+        logMessageReceived(state(), status);
 
-    if (status.isActiveFault()) {
-        _healthyObservations.erase(status.getType());
-    } else {
-        _healthyObservations.insert(status.getType());
+        if (status.isActiveFault()) {
+            _healthyObservations.erase(status.getType());
+        } else {
+            _healthyObservations.insert(status.getType());
+        }
     }
 
     updateWithCheckStatus(HealthCheckStatus(status));
-    auto optionalActiveFault = getFaultFacetsContainer();
-    if (optionalActiveFault) {
-        optionalActiveFault->garbageCollectResolvedFacets();
+    auto optionalFault = getFault();
+    if (optionalFault) {
+        optionalFault->garbageCollectResolvedFacets();
     }
 
-    if (optionalActiveFault && hasCriticalFacet(_fault.get()) && !_transientFaultDeadline) {
+    if (optionalFault) {
         setTransientFaultDeadline(
             FaultState::kStartupCheck, FaultState::kStartupCheck, boost::none);
     }
 
     // If the whole fault becomes resolved, garbage collect it
     // with proper locking.
-    std::shared_ptr<FaultInternal> faultToDelete;
+    std::shared_ptr<Fault> faultToDelete;
+
     {
         auto lk = stdx::lock_guard(_mutex);
         if (_fault && _fault->getFacets().empty()) {
@@ -218,6 +290,7 @@ boost::optional<FaultState> FaultManager::handleStartupCheck(const OptionalMessa
         }
     }
 
+    auto lk = stdx::lock_guard(_stateMutex);
     if (activeObserversTypes == _healthyObservations) {
         return FaultState::kOk;
     }
@@ -228,11 +301,12 @@ boost::optional<FaultState> FaultManager::handleOk(const OptionalMessageType& me
     invariant(message);
 
     HealthCheckStatus status = message.get();
-    auto lk = stdx::lock_guard(_stateMutex);
-    logMessageReceived(state(), status);
+    {
+        auto lk = stdx::lock_guard(_stateMutex);
+        logMessageReceived(state(), status);
+    }
 
-    if (_config->getHealthObserverIntensity(status.getType()) ==
-        HealthObserverIntensityEnum::kOff) {
+    if (!_config->isHealthObserverEnabled(status.getType())) {
         return boost::none;
     }
 
@@ -251,18 +325,22 @@ boost::optional<FaultState> FaultManager::handleTransientFault(const OptionalMes
     }
 
     HealthCheckStatus status = message.get();
-    auto lk = stdx::lock_guard(_stateMutex);
-    logMessageReceived(state(), status);
+
+    {
+        auto lk = stdx::lock_guard(_stateMutex);
+        logMessageReceived(state(), status);
+    }
 
     updateWithCheckStatus(HealthCheckStatus(status));
 
-    auto optionalActiveFault = getFaultFacetsContainer();
+    auto optionalActiveFault = getFault();
     if (optionalActiveFault) {
         optionalActiveFault->garbageCollectResolvedFacets();
     }
 
     // If the whole fault becomes resolved, garbage collect it
     // with proper locking.
+    auto lk = stdx::lock_guard(_mutex);
     if (_fault && _fault->getFacets().empty()) {
         _fault.reset();
         return FaultState::kOk;
@@ -271,7 +349,8 @@ boost::optional<FaultState> FaultManager::handleTransientFault(const OptionalMes
 }
 
 boost::optional<FaultState> FaultManager::handleActiveFault(const OptionalMessageType& message) {
-    LOGV2_FATAL(5936509, "Fault manager received active fault");
+    invariant(_fault);
+    LOGV2_FATAL(5936509, "Halting Process due to ongoing fault", "fault"_attr = *_fault);
     return boost::none;
 }
 
@@ -280,17 +359,27 @@ void FaultManager::logMessageReceived(FaultState state, const HealthCheckStatus&
                 1,
                 "Fault manager recieved health check result",
                 "state"_attr = (str::stream() << state),
+                "observer_type"_attr = (str::stream() << status.getType()),
                 "result"_attr = status,
                 "passed"_attr = (!status.isActiveFault(status.getSeverity())));
 }
 
 void FaultManager::logCurrentState(FaultState, FaultState newState, const OptionalMessageType&) {
-    LOGV2(5936503, "Fault manager changed state ", "state"_attr = (str::stream() << newState));
+    if (_fault) {
+        LOGV2(5939703,
+              "Fault manager changed state ",
+              "state"_attr = (str::stream() << newState),
+              "fault"_attr = *_fault);
+    } else {
+        LOGV2(5936503, "Fault manager changed state ", "state"_attr = (str::stream() << newState));
+    }
 }
 
 void FaultManager::setTransientFaultDeadline(FaultState, FaultState, const OptionalMessageType&) {
-    _transientFaultDeadline = std::make_unique<TransientFaultDeadline>(
-        this, _taskExecutor, _config->getActiveFaultDuration());
+    if (_fault->hasCriticalFacet(getConfig()) && !_transientFaultDeadline) {
+        _transientFaultDeadline = std::make_unique<TransientFaultDeadline>(
+            this, _taskExecutor, _config->getActiveFaultDuration());
+    }
 }
 
 void FaultManager::clearTransientFaultDeadline(FaultState, FaultState, const OptionalMessageType&) {
@@ -314,18 +403,34 @@ void FaultManager::schedulePeriodicHealthCheckThread() {
         return;
     }
 
-    auto observers = getHealthObservers();
-    for (auto observer : observers) {
-        LOGV2_DEBUG(
-            59365, 1, "starting health observer", "observerType"_attr = observer->getType());
-
-        // TODO (SERVER-59368): The system should properly handle a health checker being turned
-        // on/off
-        auto token = _managerShuttingDownCancellationSource.token();
-        if (_config->isHealthObserverEnabled(observer->getType())) {
-            healthCheck(observer, token);
-        }
+    auto observers = getActiveHealthObservers();
+    if (observers.size() == 0) {
+        LOGV2(5936511, "No active health observers are configured.");
+        setState(FaultState::kOk, HealthCheckStatus(FaultFacetType::kSystem));
+        return;
     }
+
+    str::stream listOfActiveObservers;
+    for (auto observer : observers) {
+        LOGV2_DEBUG(5936501,
+                    1,
+                    "starting health observer",
+                    "observerType"_attr = str::stream() << observer->getType());
+        listOfActiveObservers << observer->getType() << " ";
+
+        auto token = _managerShuttingDownCancellationSource.token();
+        if (!observer->isConfigured()) {
+            // Transition to an active fault if a health observer is not configured properly.
+            updateWithCheckStatus(HealthCheckStatus(
+                observer->getType(),
+                Severity::kFailure,
+                "Health observer failed to start because it was not configured properly."_sd));
+            setState(FaultState::kActiveFault, HealthCheckStatus(observer->getType()));
+            return;
+        }
+        healthCheck(observer, token);
+    }
+    LOGV2(5936804, "Health observers started", "detail"_attr = listOfActiveObservers);
 }
 
 FaultManager::~FaultManager() {
@@ -333,10 +438,13 @@ FaultManager::~FaultManager() {
     _taskExecutor->shutdown();
 
     LOGV2(5936601, "Shutting down periodic health checks");
-    for (auto& pair : _healthCheckContexts) {
-        auto cbHandle = pair.second.resultStatus;
-        if (cbHandle) {
-            _taskExecutor->cancel(cbHandle.get());
+    {
+        stdx::lock_guard lock(_mutex);
+        for (auto& pair : _healthCheckContexts) {
+            auto cbHandle = pair.second.resultStatus;
+            if (cbHandle) {
+                _taskExecutor->cancel(cbHandle.get());
+            }
         }
     }
 
@@ -368,19 +476,12 @@ SharedSemiFuture<void> FaultManager::startPeriodicHealthChecks() {
     invariant(state() == FaultState::kStartupCheck);
 
     _init();
-
-    if (getActiveHealthObservers().size() == 0) {
-        LOGV2_DEBUG(5936511, 2, "No active health observers are configured.");
-        setState(FaultState::kOk, HealthCheckStatus(FaultFacetType::kSystem));
-    } else {
-        schedulePeriodicHealthCheckThread();
-    }
+    schedulePeriodicHealthCheckThread();
 
     return _initialHealthCheckCompletedPromise.getFuture();
 }
 
 FaultState FaultManager::getFaultState() const {
-    stdx::lock_guard<Latch> lk(_stateMutex);
     return state();
 }
 
@@ -391,30 +492,53 @@ Date_t FaultManager::getLastTransitionTime() const {
 
 FaultConstPtr FaultManager::currentFault() const {
     auto lk = stdx::lock_guard(_mutex);
-    return std::static_pointer_cast<const Fault>(_fault);
+    return _fault;
 }
 
-FaultFacetsContainerPtr FaultManager::getFaultFacetsContainer() const {
+FaultPtr FaultManager::getFault() const {
     auto lk = stdx::lock_guard(_mutex);
-    return std::static_pointer_cast<FaultFacetsContainer>(_fault);
+    return _fault;
 }
 
-FaultFacetsContainerPtr FaultManager::getOrCreateFaultFacetsContainer() {
+FaultPtr FaultManager::createFault() {
+    auto lk = stdx::lock_guard(_mutex);
+    _fault = std::make_shared<Fault>(_svcCtx->getFastClockSource());
+    return _fault;
+}
+
+FaultPtr FaultManager::getOrCreateFault() {
     auto lk = stdx::lock_guard(_mutex);
     if (!_fault) {
         // Create a new one.
-        _fault = std::make_shared<FaultImpl>(_svcCtx->getFastClockSource());
+        _fault = std::make_shared<Fault>(_svcCtx->getFastClockSource());
     }
-    return std::static_pointer_cast<FaultFacetsContainer>(_fault);
+    return _fault;
 }
 
 void FaultManager::healthCheck(HealthObserver* observer, CancellationToken token) {
     auto schedulerCb = [this, observer, token] {
-        auto periodicThreadCbHandleStatus = this->_taskExecutor->scheduleWorkAt(
-            _taskExecutor->now() + this->_config->kPeriodicHealthCheckInterval,
+        auto scheduledTime = _taskExecutor->now() +
+            _config->getPeriodicHealthCheckInterval(observer->getType()) +
+            std::min(observer->healthCheckJitter(),
+                     FaultManagerConfig::kPeriodicHealthCheckMaxJitter);
+        LOGV2_DEBUG(5939701,
+                    3,
+                    "Schedule next health check",
+                    "observerType"_attr = str::stream() << observer->getType(),
+                    "scheduledTime"_attr = scheduledTime);
+
+        auto periodicThreadCbHandleStatus = _taskExecutor->scheduleWorkAt(
+            scheduledTime,
             [this, observer, token](const mongo::executor::TaskExecutor::CallbackArgs& cbData) {
                 if (!cbData.status.isOK()) {
-                    return;
+                    LOGV2_DEBUG(5939702,
+                                1,
+                                "Fault manager received an error",
+                                "status"_attr = cbData.status);
+                    if (ErrorCodes::isA<ErrorCategory::CancellationError>(cbData.status.code())) {
+                        return;
+                    }
+                    // continue health checking otherwise
                 }
                 healthCheck(observer, token);
             });
@@ -426,118 +550,112 @@ void FaultManager::healthCheck(HealthObserver* observer, CancellationToken token
             }
 
             uassert(5936101,
-                    fmt::format("Failed to initialize periodic health check work. Reason: {}",
-                                periodicThreadCbHandleStatus.getStatus().codeString()),
+                    str::stream() << "Failed to schedule periodic health check for "
+                                  << observer->getType() << ": "
+                                  << periodicThreadCbHandleStatus.getStatus().codeString(),
                     periodicThreadCbHandleStatus.isOK());
         }
 
+        stdx::lock_guard lock(_mutex);
         _healthCheckContexts.at(observer->getType()).resultStatus =
             std::move(periodicThreadCbHandleStatus.getValue());
     };
 
     auto acceptNotOKStatus = [this, observer](Status s) {
-        auto healthCheckStatus = HealthCheckStatus(observer->getType(), 1.0, s.reason());
+        auto healthCheckStatus =
+            HealthCheckStatus(observer->getType(), Severity::kFailure, s.reason());
         LOGV2_ERROR(
             6007901, "Unexpected failure during health check", "status"_attr = healthCheckStatus);
-        this->accept(healthCheckStatus);
+        accept(healthCheckStatus);
         return healthCheckStatus;
     };
 
-    // If health observer is disabled, then do nothing and schedule another run (health observer may
-    // become enabled).
-    // TODO (SERVER-59368): The system should properly handle a health checker being turned on/off
-    if (!_config->isHealthObserverEnabled(observer->getType())) {
-        schedulerCb();
-        return;
+    {
+        stdx::lock_guard lock(_mutex);
+        _healthCheckContexts.insert(
+            {observer->getType(), HealthCheckContext(nullptr, boost::none)});
     }
 
-    _healthCheckContexts.insert({observer->getType(), HealthCheckContext(nullptr, boost::none)});
-    // Run asynchronous health check.  When complete, check for state transition (and perform if
-    // necessary). Then schedule the next run.
-    auto healthCheckFuture = observer->periodicCheck(*this, _taskExecutor, token)
-                                 .thenRunOn(_taskExecutor)
-                                 .onCompletion([this, acceptNotOKStatus, schedulerCb](
-                                                   StatusWith<HealthCheckStatus> status) {
-                                     ON_BLOCK_EXIT([this, schedulerCb]() {
-                                         if (!_config->periodicChecksDisabledForTests()) {
-                                             schedulerCb();
-                                         }
-                                     });
+    // Run asynchronous health check.  Send output to the state machine. Schedule next run.
+    auto healthCheckFuture =
+        observer->periodicCheck(_taskExecutor, token)
+            .thenRunOn(_taskExecutor)
+            .onCompletion([this, acceptNotOKStatus, schedulerCb, observer](
+                              StatusWith<HealthCheckStatus> status) {
+                ON_BLOCK_EXIT([this, schedulerCb, observer]() {
+                    if (!_config->periodicChecksDisabledForTests() &&
+                        _config->isHealthObserverEnabled(observer->getType())) {
+                        schedulerCb();
+                    }
+                });
 
-                                     if (!status.isOK()) {
-                                         return acceptNotOKStatus(status.getStatus());
-                                     }
+                if (!status.isOK()) {
+                    return acceptNotOKStatus(status.getStatus());
+                }
 
-                                     this->accept(status.getValue());
-                                     return status.getValue();
-                                 });
-    auto futurePtr =
+                accept(status.getValue());
+                return status.getValue();
+            });
+
+    stdx::lock_guard lock(_mutex);
+    _healthCheckContexts.at(observer->getType()).result =
         std::make_unique<ExecutorFuture<HealthCheckStatus>>(std::move(healthCheckFuture));
-    _healthCheckContexts.at(observer->getType()).result = std::move(futurePtr);
 }
 
 void FaultManager::updateWithCheckStatus(HealthCheckStatus&& checkStatus) {
+    auto fault = getFault();
+    // Remove resolved facet from the fault.
     if (HealthCheckStatus::isResolved(checkStatus.getSeverity())) {
-        auto container = getFaultFacetsContainer();
-        if (container) {
-            container->updateWithSuppliedFacet(checkStatus.getType(), nullptr);
+        if (fault) {
+            fault->removeFacet(checkStatus.getType());
         }
-
         return;
     }
 
-    auto container = getOrCreateFaultFacetsContainer();
-    auto facet = container->getFaultFacet(checkStatus.getType());
-    if (!facet) {
-        const auto type = checkStatus.getType();
-        auto newFacet =
-            new FaultFacetImpl(type, _svcCtx->getFastClockSource(), std::move(checkStatus));
-        container->updateWithSuppliedFacet(type, FaultFacetPtr(newFacet));
-    } else {
-        facet->update(std::move(checkStatus));
+    if (!_fault) {
+        fault = createFault();  // Create fault if it doesn't exist.
     }
+
+    const auto type = checkStatus.getType();
+    fault->upsertFacet(std::make_shared<FaultFacetImpl>(
+        type, _svcCtx->getFastClockSource(), std::move(checkStatus)));
 }
 
-bool FaultManager::hasCriticalFacet(const FaultInternal* fault) const {
-    invariant(fault);
-    const auto& facets = fault->getFacets();
-    for (const auto& facet : facets) {
-        auto facetType = facet->getType();
-        if (_config->getHealthObserverIntensity(facetType) ==
-            HealthObserverIntensityEnum::kCritical)
-            return true;
-    }
-    return false;
-}
-
-FaultManagerConfig FaultManager::getConfig() const {
+const FaultManagerConfig& FaultManager::getConfig() const {
     auto lk = stdx::lock_guard(_mutex);
     return *_config;
 }
 
 void FaultManager::_init() {
-    auto lk = stdx::lock_guard(_mutex);
+    std::set<FaultFacetType> allTypes;
+    std::vector<std::unique_ptr<HealthObserver>>::size_type observersSize = _observers.size();
+    {
+        auto lk = stdx::lock_guard(_mutex);
 
-    _observers = HealthObserverRegistration::instantiateAllObservers(_svcCtx);
+        _observers = HealthObserverRegistration::instantiateAllObservers(_svcCtx);
+
+        for (const auto& observer : _observers) {
+            allTypes.insert(observer->getType());
+        }
+        observersSize = _observers.size();
+    }
 
     // Verify that all observer types are unique.
-    std::set<FaultFacetType> allTypes;
-    for (const auto& observer : _observers) {
-        allTypes.insert(observer->getType());
-    }
-    invariant(allTypes.size() == _observers.size());
+    invariant(allTypes.size() == observersSize);
 
     // Start the monitor thread after all observers are initialized.
     _progressMonitor = std::make_unique<ProgressMonitor>(this, _svcCtx, _crashCb);
 
-    auto lk2 = stdx::lock_guard(_stateMutex);
-    LOGV2(5956701,
-          "Instantiated health observers, periodic health checking starts",
-          "managerState"_attr = state(),
-          "observersCount"_attr = _observers.size());
+    _initialized = true;
+
+    LOGV2_DEBUG(5956701,
+                1,
+                "Instantiated health observers",
+                "managerState"_attr = str::stream() << state(),
+                "observersCount"_attr = observersSize);
 }
 
-std::vector<HealthObserver*> FaultManager::getHealthObservers() {
+std::vector<HealthObserver*> FaultManager::getHealthObservers() const {
     std::vector<HealthObserver*> result;
     stdx::lock_guard<Latch> lk(_mutex);
     result.reserve(_observers.size());
@@ -548,17 +666,73 @@ std::vector<HealthObserver*> FaultManager::getHealthObservers() {
     return result;
 }
 
-std::vector<HealthObserver*> FaultManager::getActiveHealthObservers() {
+std::vector<HealthObserver*> FaultManager::getActiveHealthObservers() const {
     auto allObservers = getHealthObservers();
     std::vector<HealthObserver*> result;
     result.reserve(allObservers.size());
     for (auto observer : allObservers) {
-        if (_config->getHealthObserverIntensity(observer->getType()) !=
-            HealthObserverIntensityEnum::kOff) {
+        if (_config->isHealthObserverEnabled(observer->getType())) {
             result.push_back(observer);
         }
     }
     return result;
+}
+
+HealthObserver* FaultManager::getHealthObserver(FaultFacetType type) const {
+    stdx::lock_guard<Latch> lk(_mutex);
+    auto observerIt = std::find_if(
+        _observers.begin(), _observers.end(), [type](auto& o) { return o->getType() == type; });
+    if (observerIt != _observers.end()) {
+        return (*observerIt).get();
+    }
+    return nullptr;
+}
+
+void FaultManager::appendDescription(BSONObjBuilder* result, bool appendDetails) const {
+    static constexpr auto kDurationThreshold = Hours{24};
+    const auto now = _svcCtx->getFastClockSource()->now();
+    StringBuilder faultStateStr;
+    faultStateStr << getFaultState();
+
+    result->append("state", faultStateStr.str());
+    result->appendDate("enteredStateAtTime", getLastTransitionTime());
+
+    auto fault = currentFault();
+    if (fault) {
+        BSONObjBuilder sub_result;
+        fault->appendDescription(&sub_result);
+        result->append("faultInformation", sub_result.obj());
+    }
+
+    auto allObservers = getHealthObservers();
+    for (auto observer : allObservers) {
+        if (!appendDetails && !_config->isHealthObserverEnabled(observer->getType())) {
+            continue;
+        }
+        BSONObjBuilder sub_result;
+        sub_result.append("intensity",
+                          HealthObserverIntensity_serializer(
+                              _config->getHealthObserverIntensity(observer->getType())));
+
+        HealthObserverLivenessStats stats = observer->getStats();
+        sub_result.append("totalChecks", stats.completedChecksCount);
+        if (appendDetails) {
+            sub_result.append("totalChecksWithFailure", stats.completedChecksWithFaultCount);
+            if (now - stats.lastTimeCheckStarted < kDurationThreshold) {
+                sub_result.append("timeSinceLastCheckStartedMs",
+                                  durationCount<Milliseconds>(now - stats.lastTimeCheckStarted));
+                sub_result.append("timeSinceLastCheckCompletedMs",
+                                  durationCount<Milliseconds>(now - stats.lastTimeCheckCompleted));
+            }
+        }
+        // Report how long the current check is running, if it's longer than 10% of deadline.
+        if (stats.currentlyRunningHealthCheck &&
+            now - stats.lastTimeCheckStarted > getConfig().getPeriodicLivenessDeadline() / 10) {
+            sub_result.append("runningCheckForMs",
+                              durationCount<Milliseconds>(now - stats.lastTimeCheckStarted));
+        }
+        result->append(FaultFacetType_serializer(observer->getType()), sub_result.obj());
+    }
 }
 
 void FaultManager::progressMonitorCheckForTests(std::function<void(std::string cause)> crashCb) {

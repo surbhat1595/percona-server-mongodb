@@ -783,8 +783,6 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
         !ident.startsWith("internal-") &&
         // TODO (SERVER-60754): Remove special handling for setting multikey.
         !ident.startsWith("_mdb_catalog") &&
-        // TODO (SERVER-58410): Remove special handling for minValid.
-        ns != "local.replset.minvalid" &&
         // TODO (SERVER-60753): Remove special handling for index build during recovery.
         ns != "config.system.indexBuilds") {
         ss << "write_timestamp_usage=ordered,";
@@ -1991,8 +1989,8 @@ void WiredTigerRecordStore::cappedTruncateAfter(OperationContext* opCtx,
             _kvEngine->setOldestTimestamp(truncTs, force);
         } else {
             auto conn = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->conn();
-            auto commitTSConfigString = "commit_timestamp={:x}"_format(truncTs.asULL());
-            invariantWTOK(conn->set_timestamp(conn, commitTSConfigString.c_str()));
+            auto durableTSConfigString = "durable_timestamp={:x}"_format(truncTs.asULL());
+            invariantWTOK(conn->set_timestamp(conn, durableTSConfigString.c_str()));
         }
 
         _kvEngine->getOplogManager()->setOplogReadTimestamp(truncTs);

@@ -134,65 +134,45 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
         } else if (fieldName == "collMod") {
             // no-op
         } else if (fieldName == "index" && !isView) {
-            auto cmrIndex = &cmr.indexRequest;
-            cmrIndex->indexObj = e.Obj().getOwned();
-            const auto& indexObj = cmrIndex->indexObj;
+            const auto& cmdIndex = *cmd.getIndex();
             StringData indexName;
             BSONObj keyPattern;
 
-            for (auto&& elem : indexObj) {
-                const auto field = elem.fieldNameStringData();
-                if (field != "name" && field != "keyPattern" && field != "expireAfterSeconds" &&
-                    field != "hidden" && field != "unique") {
-                    return {ErrorCodes::InvalidOptions,
-                            str::stream()
-                                << "Unrecognized field '" << field << "' in 'index' option"};
-                }
-            }
-
-            BSONElement nameElem = indexObj["name"];
-            BSONElement keyPatternElem = indexObj["keyPattern"];
-            if (nameElem && keyPatternElem) {
+            if (cmdIndex.getName() && cmdIndex.getKeyPattern()) {
                 return Status(ErrorCodes::InvalidOptions,
                               "Cannot specify both key pattern and name.");
             }
 
-            if (!nameElem && !keyPatternElem) {
+            if (!cmdIndex.getName() && !cmdIndex.getKeyPattern()) {
                 return Status(ErrorCodes::InvalidOptions,
                               "Must specify either index name or key pattern.");
             }
 
-            if (nameElem) {
-                if (nameElem.type() != BSONType::String) {
-                    return Status(ErrorCodes::InvalidOptions, "Index name must be a string.");
-                }
-                indexName = nameElem.valueStringData();
+            if (cmdIndex.getName()) {
+                indexName = *cmdIndex.getName();
             }
 
-            if (keyPatternElem) {
-                if (keyPatternElem.type() != BSONType::Object) {
-                    return Status(ErrorCodes::InvalidOptions, "Key pattern must be an object.");
-                }
-                keyPattern = keyPatternElem.embeddedObject();
+            if (cmdIndex.getKeyPattern()) {
+                keyPattern = *cmdIndex.getKeyPattern();
             }
 
-            cmrIndex->indexExpireAfterSeconds = indexObj["expireAfterSeconds"];
-            cmrIndex->indexHidden = indexObj["hidden"];
-            cmrIndex->indexUnique = indexObj["unique"];
+            if (!cmdIndex.getExpireAfterSeconds() && !cmdIndex.getHidden() &&
+                !cmdIndex.getUnique()) {
+                return Status(ErrorCodes::InvalidOptions,
+                              "no expireAfterSeconds, hidden, or unique field");
+            }
 
-            if (cmrIndex->indexUnique) {
+            auto cmrIndex = &cmr.indexRequest;
+            auto indexObj = e.Obj();
+
+            if (cmdIndex.getUnique()) {
                 uassert(ErrorCodes::InvalidOptions,
                         "collMod does not support converting an index to unique",
                         feature_flags::gCollModIndexUnique.isEnabled(
                             serverGlobalParams.featureCompatibility));
             }
 
-            if (cmrIndex->indexExpireAfterSeconds.eoo() && cmrIndex->indexHidden.eoo() &&
-                cmrIndex->indexUnique.eoo()) {
-                return Status(ErrorCodes::InvalidOptions,
-                              "no expireAfterSeconds, hidden, or unique field");
-            }
-            if (!cmrIndex->indexExpireAfterSeconds.eoo()) {
+            if (cmdIndex.getExpireAfterSeconds()) {
                 if (isTimeseries) {
                     return Status(ErrorCodes::InvalidOptions,
                                   "TTL indexes are not supported for time-series collections. "
@@ -204,18 +184,13 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                                   "TTL indexes are not supported for capped collections.");
                 }
                 if (auto status = index_key_validate::validateExpireAfterSeconds(
-                        cmrIndex->indexExpireAfterSeconds.safeNumberLong());
+                        *cmdIndex.getExpireAfterSeconds());
                     !status.isOK()) {
                     return {ErrorCodes::InvalidOptions, status.reason()};
                 }
             }
-            if (!cmrIndex->indexHidden.eoo() && !cmrIndex->indexHidden.isBoolean()) {
-                return Status(ErrorCodes::InvalidOptions, "hidden field must be a boolean");
-            }
-            if (!cmrIndex->indexUnique.eoo() && !cmrIndex->indexUnique.isBoolean()) {
-                return Status(ErrorCodes::InvalidOptions, "unique field must be a boolean");
-            }
-            if (!cmrIndex->indexHidden.eoo() && coll->isClustered() &&
+
+            if (cmdIndex.getHidden() && coll->isClustered() &&
                 !nss.isTimeseriesBucketsCollection()) {
                 auto clusteredInfo = coll->getClusteredInfo();
                 tassert(6011801,
@@ -264,7 +239,7 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 cmrIndex->idx = indexes[0];
             }
 
-            if (!cmrIndex->indexExpireAfterSeconds.eoo()) {
+            if (cmdIndex.getExpireAfterSeconds()) {
                 cmr.numModifications++;
                 BSONElement oldExpireSecs = cmrIndex->idx->infoObj().getField("expireAfterSeconds");
                 if (oldExpireSecs.eoo()) {
@@ -281,23 +256,31 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                     return Status(ErrorCodes::InvalidOptions,
                                   "existing expireAfterSeconds field is not a number");
                 }
+
+                cmrIndex->indexExpireAfterSeconds = *cmdIndex.getExpireAfterSeconds();
             }
 
-            if (cmrIndex->indexHidden) {
+            // Make a copy of the index options doc for writing to the oplog.
+            // This index options doc should exclude the options that do not need
+            // to be modified.
+            auto indexObjForOplog = indexObj;
+
+            if (cmdIndex.getUnique()) {
                 cmr.numModifications++;
-                // Hiding a hidden index or unhiding a visible index should be treated as a no-op.
-                if (cmrIndex->idx->hidden() == cmrIndex->indexHidden.booleanSafe()) {
-                    // If the collMod includes "expireAfterSeconds", remove the no-op "hidden"
-                    // parameter and write the remaining "index" object to the oplog entry builder.
-                    if (!cmrIndex->indexExpireAfterSeconds.eoo()) {
-                        oplogEntryBuilder->append(fieldName, indexObj.removeField("hidden"));
-                    }
-                    // Un-set "indexHidden" in ParsedCollModRequest, and skip the automatic write to
-                    // the oplogEntryBuilder that occurs at the end of the parsing loop.
-                    cmrIndex->indexHidden = {};
-                    continue;
+                if (bool unique = *cmdIndex.getUnique(); !unique) {
+                    return Status(ErrorCodes::BadValue, "Cannot make index non-unique");
                 }
 
+                // Attempting to converting a unique index should be treated as a no-op.
+                if (cmrIndex->idx->unique()) {
+                    indexObjForOplog = indexObjForOplog.removeField(CollModIndex::kUniqueFieldName);
+                } else {
+                    cmrIndex->indexUnique = true;
+                }
+            }
+
+            if (cmdIndex.getHidden()) {
+                cmr.numModifications++;
                 // Disallow index hiding/unhiding on system collections.
                 // Bucket collections, which hold data for user-created time-series collections, do
                 // not have this restriction.
@@ -310,14 +293,26 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 if (cmrIndex->idx->isIdIndex()) {
                     return Status(ErrorCodes::BadValue, "can't hide _id index");
                 }
-            }
 
-            if (cmrIndex->indexUnique) {
-                cmr.numModifications++;
-                if (!cmrIndex->indexUnique.trueValue()) {
-                    return Status(ErrorCodes::BadValue, "Cannot make index non-unique");
+                // Hiding a hidden index or unhiding a visible index should be treated as a no-op.
+                if (cmrIndex->idx->hidden() == *cmdIndex.getHidden()) {
+                    indexObjForOplog = indexObjForOplog.removeField(CollModIndex::kHiddenFieldName);
+                } else {
+                    cmrIndex->indexHidden = cmdIndex.getHidden();
                 }
             }
+
+            // The index options doc must contain either the name or key pattern, but not both.
+            // If we have just one field, the index modifications requested matches the current
+            // state in catalog and there is nothing further to do.
+            if (indexObjForOplog.nFields() > 1) {
+                oplogEntryBuilder->append(CollMod::kIndexFieldName, indexObjForOplog);
+            }
+
+            // Skip the automatic write to the oplogEntryBuilder that occurs at the end of the
+            // parsing loop because we have already written the normalized index options in
+            // 'indexObjForOplog'.
+            continue;
         } else if (fieldName == "validator" && !isView && !isTimeseries) {
             cmr.numModifications++;
             // If the feature compatibility version is not kLatest, and we are validating features
@@ -514,11 +509,12 @@ Status _processCollModDryRunMode(OperationContext* opCtx,
     // We do not need write access in dry run mode.
     AutoGetCollection coll(opCtx, nsOrUUID, MODE_IS);
     auto nss = coll.getNss();
+    const auto& collection = coll.getCollection();
 
     // Validate collMod request and look up index descriptor for checking duplicates.
     BSONObjBuilder oplogEntryBuilderWeDontCareAbout;
-    auto statusW = parseCollModRequest(
-        opCtx, nss, coll.getCollection(), cmd, &oplogEntryBuilderWeDontCareAbout);
+    auto statusW =
+        parseCollModRequest(opCtx, nss, collection, cmd, &oplogEntryBuilderWeDontCareAbout);
     if (!statusW.isOK()) {
         return statusW.getStatus();
     }
@@ -532,7 +528,11 @@ Status _processCollModDryRunMode(OperationContext* opCtx,
     }
 
     // Throws exception if index contains duplicates.
-    scanIndexForDuplicates(opCtx, coll.getCollection(), cmr.indexRequest.idx);
+    auto violatingRecordsList = scanIndexForDuplicates(opCtx, collection, cmr.indexRequest.idx);
+    if (!violatingRecordsList.empty()) {
+        uassertStatusOK(buildEnableConstraintErrorStatus(
+            "unique", buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
+    }
 
     return Status::OK();
 }
@@ -560,7 +560,11 @@ StatusWith<std::unique_ptr<CollModWriteOpsTracker::Token>> _setUpCollModIndexUni
     }
     const auto& cmr = statusW.getValue();
     auto idx = cmr.indexRequest.idx;
-    scanIndexForDuplicates(opCtx, collection, idx);
+    auto violatingRecordsList = scanIndexForDuplicates(opCtx, collection, idx);
+    if (!violatingRecordsList.empty()) {
+        uassertStatusOK(buildEnableConstraintErrorStatus(
+            "unique", buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
+    }
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(&hangAfterCollModIndexUniqueSideWriteTracker,
                                                      opCtx,
@@ -727,8 +731,10 @@ Status _collModInternal(OperationContext* opCtx,
 
         // Handle collMod operation type appropriately.
         if (cmd.getExpireAfterSeconds()) {
-            _setClusteredExpireAfterSeconds(
-                opCtx, oldCollOptions, coll.getWritableCollection(), *cmd.getExpireAfterSeconds());
+            _setClusteredExpireAfterSeconds(opCtx,
+                                            oldCollOptions,
+                                            coll.getWritableCollection(opCtx),
+                                            *cmd.getExpireAfterSeconds());
         }
 
         // Handle index modifications.
@@ -741,20 +747,20 @@ Status _collModInternal(OperationContext* opCtx,
                                    mode);
 
         if (cmrNew.collValidator) {
-            coll.getWritableCollection()->setValidator(opCtx, *cmrNew.collValidator);
+            coll.getWritableCollection(opCtx)->setValidator(opCtx, *cmrNew.collValidator);
         }
         if (cmrNew.collValidationAction)
-            uassertStatusOKWithContext(coll.getWritableCollection()->setValidationAction(
+            uassertStatusOKWithContext(coll.getWritableCollection(opCtx)->setValidationAction(
                                            opCtx, *cmrNew.collValidationAction),
                                        "Failed to set validationAction");
         if (cmrNew.collValidationLevel) {
-            uassertStatusOKWithContext(coll.getWritableCollection()->setValidationLevel(
+            uassertStatusOKWithContext(coll.getWritableCollection(opCtx)->setValidationLevel(
                                            opCtx, *cmrNew.collValidationLevel),
                                        "Failed to set validationLevel");
         }
 
         if (cmrNew.recordPreImages != oldCollOptions.recordPreImages) {
-            coll.getWritableCollection()->setRecordPreImages(opCtx, cmrNew.recordPreImages);
+            coll.getWritableCollection(opCtx)->setRecordPreImages(opCtx, cmrNew.recordPreImages);
         }
 
         // TODO SERVER-58584: remove the feature flag.
@@ -762,7 +768,7 @@ Status _collModInternal(OperationContext* opCtx,
             cmrNew.changeStreamPreAndPostImagesOptions.has_value() &&
             *cmrNew.changeStreamPreAndPostImagesOptions !=
                 oldCollOptions.changeStreamPreAndPostImagesOptions) {
-            coll.getWritableCollection()->setChangeStreamPreAndPostImages(
+            coll.getWritableCollection(opCtx)->setChangeStreamPreAndPostImages(
                 opCtx, *cmrNew.changeStreamPreAndPostImagesOptions);
         }
 
@@ -772,42 +778,44 @@ Status _collModInternal(OperationContext* opCtx,
             uassertStatusOK(res);
             auto [newOptions, changed] = res.getValue();
             if (changed) {
-                coll.getWritableCollection()->setTimeseriesOptions(opCtx, newOptions);
+                coll.getWritableCollection(opCtx)->setTimeseriesOptions(opCtx, newOptions);
             }
         }
 
         // Remove any invalid index options for indexes belonging to this collection.
         std::vector<std::string> indexesWithInvalidOptions =
-            coll.getWritableCollection()->removeInvalidIndexOptions(opCtx);
+            coll.getWritableCollection(opCtx)->removeInvalidIndexOptions(opCtx);
         for (const auto& indexWithInvalidOptions : indexesWithInvalidOptions) {
             const IndexDescriptor* desc =
                 coll->getIndexCatalog()->findIndexByName(opCtx, indexWithInvalidOptions);
             invariant(desc);
 
             // Notify the index catalog that the definition of this index changed.
-            coll.getWritableCollection()->getIndexCatalog()->refreshEntry(
-                opCtx, coll.getWritableCollection(), desc, CreateIndexEntryFlags::kIsReady);
+            coll.getWritableCollection(opCtx)->getIndexCatalog()->refreshEntry(
+                opCtx, coll.getWritableCollection(opCtx), desc, CreateIndexEntryFlags::kIsReady);
         }
 
-        // TODO SERVER-60911: When kLatest is 5.3, only check when upgrading from or downgrading to
-        // kLastLTS (5.0).
-        // TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated upgrade/downgrade code.
+        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
+        // upgrade/downgrade code.
+        const auto currentVersion = serverGlobalParams.featureCompatibility.getVersion();
         if (coll->getTimeseriesOptions() && !coll->getTimeseriesBucketsMayHaveMixedSchemaData() &&
-            serverGlobalParams.featureCompatibility.isFCVUpgradingToOrAlreadyLatest()) {
-            // While upgrading the FCV to 5.2+, collMod is called as part of the upgrade process to
-            // add the 'timeseriesBucketsMayHaveMixedSchemaData=true' catalog entry flag for
-            // time-series collections that are missing the flag. This indicates that the
-            // time-series collection existed in earlier server versions and may have mixed-schema
-            // data.
-            coll.getWritableCollection()->setTimeseriesBucketsMayHaveMixedSchemaData(opCtx, true);
+            (currentVersion == multiversion::GenericFCV::kUpgradingFromLastLTSToLatest ||
+             currentVersion == multiversion::GenericFCV::kLatest)) {
+            // (Generic FCV reference): While upgrading the FCV from kLastLTS to kLatest, collMod is
+            // called as part of the upgrade process to add the
+            // 'timeseriesBucketsMayHaveMixedSchemaData=true' catalog entry flag for time-series
+            // collections that are missing the flag. This indicates that the time-series collection
+            // existed in earlier server versions and may have mixed-schema data.
+            coll.getWritableCollection(opCtx)->setTimeseriesBucketsMayHaveMixedSchemaData(opCtx,
+                                                                                          true);
         } else if (coll->getTimeseriesBucketsMayHaveMixedSchemaData() &&
-                   serverGlobalParams.featureCompatibility
-                       .isFCVDowngradingOrAlreadyDowngradedFromLatest()) {
-            // While downgrading the FCV from 5.2, collMod is called as part of the downgrade
-            // process to remove the 'timeseriesBucketsMayHaveMixedSchemaData' catalog entry
-            // flag for time-series collections that have the flag.
-            coll.getWritableCollection()->setTimeseriesBucketsMayHaveMixedSchemaData(opCtx,
-                                                                                     boost::none);
+                   (currentVersion == multiversion::GenericFCV::kDowngradingFromLatestToLastLTS ||
+                    currentVersion == multiversion::GenericFCV::kLastLTS)) {
+            // (Generic FCV reference): While downgrading the FCV to kLastLTS, collMod is called as
+            // part of the downgrade process to remove the 'timeseriesBucketsMayHaveMixedSchemaData'
+            // catalog entry flag for time-series collections that have the flag.
+            coll.getWritableCollection(opCtx)->setTimeseriesBucketsMayHaveMixedSchemaData(
+                opCtx, boost::none);
         }
 
         // Only observe non-view collMods, as view operations are observed as operations on the

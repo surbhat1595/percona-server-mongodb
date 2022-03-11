@@ -44,16 +44,26 @@ class HealthObserverMock : public HealthObserverBase {
 public:
     HealthObserverMock(FaultFacetType mockType,
                        ServiceContext* svcCtx,
-                       std::function<double()> getSeverityCallback)
+                       std::function<Severity()> getSeverityCallback,
+                       Milliseconds observerTimeout)
         : HealthObserverBase(svcCtx),
           _mockType(mockType),
-          _getSeverityCallback(getSeverityCallback) {}
+          _getSeverityCallback(getSeverityCallback),
+          _observerTimeout(observerTimeout) {}
 
     virtual ~HealthObserverMock() = default;
+
+    bool isConfigured() const override {
+        return true;
+    }
 
 protected:
     FaultFacetType getType() const override {
         return _mockType;
+    }
+
+    Milliseconds getObserverTimeout() const override {
+        return _observerTimeout;
     }
 
     Future<HealthCheckStatus> periodicCheckImpl(
@@ -85,7 +95,8 @@ protected:
 
 private:
     const FaultFacetType _mockType;
-    std::function<double()> _getSeverityCallback;
+    std::function<Severity()> _getSeverityCallback;
+    const Milliseconds _observerTimeout;
 };
 
 }  // namespace process_health

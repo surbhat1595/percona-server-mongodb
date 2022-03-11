@@ -317,7 +317,7 @@ void ScanStage::open(bool reOpen) {
                     str::stream() << "seek key is wrong type: " << msgTag,
                     tag == value::TypeTags::RecordId);
 
-            _key = RecordId{value::bitcastTo<int64_t>(val)};
+            _key = *value::getRecordIdView(val);
         }
 
         if (!_cursor || !_seekKeyAccessor) {
@@ -338,6 +338,12 @@ PlanState ScanStage::getNext() {
     // case it yields as the state will be completely overwritten after the next() call.
     disableSlotAccess();
 
+    // This call to checkForInterrupt() may result in a call to save() or restore() on the entire
+    // PlanStage tree if a yield occurs. It's important that we call checkForInterrupt() before
+    // checking '_needsToCheckCappedPositionLost' since a call to restoreState() may set
+    // '_needsToCheckCappedPositionLost'.
+    checkForInterrupt(_opCtx);
+
     if (_needsToCheckCappedPositionLost) {
         _cursor->save();
         if (!_cursor->restore(false /* do not tolerate capped position lost */)) {
@@ -347,8 +353,6 @@ PlanState ScanStage::getNext() {
 
         _needsToCheckCappedPositionLost = false;
     }
-
-    checkForInterrupt(_opCtx);
 
     auto res = _firstGetNext && _seekKeyAccessor;
     auto nextRecord = res ? _cursor->seekExact(_key) : _cursor->next();
@@ -387,9 +391,9 @@ PlanState ScanStage::getNext() {
     }
 
     if (_recordIdAccessor) {
-        _recordIdAccessor->reset(false,
-                                 value::TypeTags::RecordId,
-                                 value::bitcastFrom<int64_t>(nextRecord->id.getLong()));
+        _recordId = nextRecord->id;
+        _recordIdAccessor->reset(
+            false, value::TypeTags::RecordId, value::bitcastFrom<RecordId*>(&_recordId));
     }
 
     if (!_fieldAccessors.empty()) {
@@ -895,9 +899,9 @@ PlanState ParallelScanStage::getNext() {
     }
 
     if (_recordIdAccessor) {
-        _recordIdAccessor->reset(false,
-                                 value::TypeTags::RecordId,
-                                 value::bitcastFrom<int64_t>(nextRecord->id.getLong()));
+        _recordId = nextRecord->id;
+        _recordIdAccessor->reset(
+            false, value::TypeTags::RecordId, value::bitcastFrom<RecordId*>(&_recordId));
     }
 
 

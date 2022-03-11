@@ -106,6 +106,15 @@ static const std::set<StringData> allowedIdIndexFieldNames = {
     // Index creation under legacy writeMode can result in an index spec with an _id field.
     "_id"};
 
+static const std::set<StringData> allowedClusteredIndexFieldNames = {
+    ClusteredIndexSpec::kNameFieldName,
+    ClusteredIndexSpec::kUniqueFieldName,
+    ClusteredIndexSpec::kVFieldName,
+    ClusteredIndexSpec::kKeyFieldName,
+    // This is for indexSpec creation only.
+    "clustered",
+};
+
 /**
  * Returns Status::OK() if indexes of version 'indexVersion' are allowed to be created, and
  * returns ErrorCodes::CannotCreateIndex otherwise.
@@ -215,11 +224,10 @@ Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion inde
 
         // "$**" is acceptable for a text index or wildcard index.
         if ((keyElement.fieldNameStringData() == "$**") &&
-            ((keyElement.isNumber()) || (keyElement.valuestrsafe() == IndexNames::TEXT)))
+            ((keyElement.isNumber()) || (keyElement.str() == IndexNames::TEXT)))
             continue;
 
-        if ((keyElement.fieldNameStringData() == "_fts") &&
-            keyElement.valuestrsafe() != IndexNames::TEXT) {
+        if ((keyElement.fieldNameStringData() == "_fts") && keyElement.str() != IndexNames::TEXT) {
             return Status(code, "Index key contains an illegal field name: '_fts'");
         }
 
@@ -279,6 +287,7 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
     bool hasCollationField = false;
     bool hasWeightsField = false;
     bool hasOriginalSpecField = false;
+    bool hasClusteredField = indexSpec.hasField("clustered");
     bool apiStrict = opCtx && APIParameters::get(opCtx).getAPIStrict().value_or(false);
 
     auto fieldNamesValidStatus = validateIndexSpecFieldNames(indexSpec);
@@ -487,7 +496,8 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
                     IndexDescriptor::kSparseFieldName == indexSpecElemFieldName ||
                     IndexDescriptor::k2dsphereCoarsestIndexedLevel == indexSpecElemFieldName ||
                     IndexDescriptor::k2dsphereFinestIndexedLevel == indexSpecElemFieldName ||
-                    IndexDescriptor::kDropDuplicatesFieldName == indexSpecElemFieldName) &&
+                    IndexDescriptor::kDropDuplicatesFieldName == indexSpecElemFieldName ||
+                    "clustered" == indexSpecElemFieldName) &&
                    !indexSpecElem.isNumber() && !indexSpecElem.isBoolean()) {
             return {ErrorCodes::TypeMismatch,
                     str::stream() << "The field '" << indexSpecElemFieldName << " has value "
@@ -531,6 +541,15 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
         return {ErrorCodes::FailedToParse,
                 str::stream() << "The '" << IndexDescriptor::kIndexNameFieldName
                               << "' field is a required property of an index specification"};
+    }
+
+    if (hasClusteredField &&
+        (!indexSpec.hasField(IndexDescriptor::kUniqueFieldName) ||
+         indexSpec.getBoolField(IndexDescriptor::kUniqueFieldName) == false)) {
+        // Only require 'unique' if clustered is specified.
+        return {ErrorCodes::CannotCreateIndex,
+                str::stream() << "The '" << IndexDescriptor::kUniqueFieldName
+                              << "' field is required when 'clustered' is specified"};
     }
 
     if (hasCollationField && *resolvedIndexVersion < IndexVersion::kV2) {
@@ -582,14 +601,21 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
 }
 
 Status validateIdIndexSpec(const BSONObj& indexSpec) {
-    for (auto&& indexSpecElem : indexSpec) {
-        auto indexSpecElemFieldName = indexSpecElem.fieldNameStringData();
-        if (!allowedIdIndexFieldNames.count(indexSpecElemFieldName)) {
-            return {
-                ErrorCodes::InvalidIndexSpecificationOption,
-                str::stream() << "The field '" << indexSpecElemFieldName
-                              << "' is not valid for an _id index specification. Specification: "
-                              << indexSpec};
+    bool isClusteredIndexSpec = indexSpec.hasField("clustered");
+
+    if (!isClusteredIndexSpec) {
+        // Field names for a 'clustered' index spec have already been validated through
+        // allowedClusteredIndexFieldNames.
+
+        for (auto&& indexSpecElem : indexSpec) {
+            auto indexSpecElemFieldName = indexSpecElem.fieldNameStringData();
+            if (!allowedIdIndexFieldNames.count(indexSpecElemFieldName)) {
+                return {ErrorCodes::InvalidIndexSpecificationOption,
+                        str::stream()
+                            << "The field '" << indexSpecElemFieldName
+                            << "' is not valid for an _id index specification. Specification: "
+                            << indexSpec};
+            }
         }
     }
 
@@ -611,6 +637,23 @@ Status validateIdIndexSpec(const BSONObj& indexSpec) {
 }
 
 /**
+ * Top-level index spec field names for a "clustered" index are specified here.
+ */
+Status validateClusteredSpecFieldNames(const BSONObj& indexSpec) {
+    for (auto&& indexSpecElem : indexSpec) {
+        auto indexSpecElemFieldName = indexSpecElem.fieldNameStringData();
+        if (!allowedClusteredIndexFieldNames.count(indexSpecElemFieldName)) {
+            return {ErrorCodes::InvalidIndexSpecificationOption,
+                    str::stream()
+                        << "The field '" << indexSpecElemFieldName
+                        << "' is not valid for a clustered index specification. Specification: "
+                        << indexSpec};
+        }
+    }
+    return Status::OK();
+}
+
+/**
  * Top-level index spec field names are validated here. When adding a new field with a document as
  * value, is the the sub-module's responsibility to ensure that the content is valid and that only
  * expected fields are present at creation time
@@ -618,6 +661,10 @@ Status validateIdIndexSpec(const BSONObj& indexSpec) {
 Status validateIndexSpecFieldNames(const BSONObj& indexSpec) {
     if (MONGO_unlikely(skipIndexCreateFieldNameValidation.shouldFail())) {
         return Status::OK();
+    }
+
+    if (indexSpec.hasField("clustered")) {
+        return validateClusteredSpecFieldNames(indexSpec);
     }
 
     for (auto&& indexSpecElem : indexSpec) {

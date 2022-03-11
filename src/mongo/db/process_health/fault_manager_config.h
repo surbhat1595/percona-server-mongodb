@@ -55,65 +55,135 @@ enum class FaultState {
     kActiveFault
 };
 
-
 StringBuilder& operator<<(StringBuilder& s, const FaultState& state);
 std::ostream& operator<<(std::ostream& os, const FaultState& state);
-
 
 /**
  * Types of health observers available.
  */
-enum class FaultFacetType { kSystem, kMock1, kMock2, kLdap, kDns };
+enum class FaultFacetType { kSystem, kMock1, kMock2, kTestObserver, kLdap, kDns };
+static const StringData FaultFacetTypeStrings[] = {
+    "systemObserver", "mock1", "mock2", "testObserver", "LDAP", "DNS"};
 
+FaultFacetType toFaultFacetType(HealthObserverTypeEnum type);
+
+
+static const StringData FaultFacetType_serializer(const FaultFacetType value) {
+    return FaultFacetTypeStrings[static_cast<int>(value)];
+}
+
+inline StringBuilder& operator<<(StringBuilder& s, const FaultFacetType& type) {
+    return s << FaultFacetType_serializer(type);
+}
+
+inline std::ostream& operator<<(std::ostream& os, const FaultFacetType& type) {
+    StringBuilder sb;
+    sb << type;
+    os << sb.stringData();
+    return os;
+}
 
 class FaultManagerConfig {
 public:
-    static auto inline constexpr kPeriodicHealthCheckInterval{Milliseconds(50)};
+    /* Maximum possible jitter added to the time between health checks */
+    static auto inline constexpr kPeriodicHealthCheckMaxJitter{Milliseconds{100}};
 
-    HealthObserverIntensityEnum getHealthObserverIntensity(FaultFacetType type) {
-        auto intensities = getHealthObserverIntensities();
+    static constexpr auto toObserverType =
+        [](FaultFacetType type) -> boost::optional<HealthObserverTypeEnum> {
         switch (type) {
             case FaultFacetType::kLdap:
-                return intensities->_data->getLdap();
+                return HealthObserverTypeEnum::kLdap;
             case FaultFacetType::kDns:
-                return intensities->_data->getDns();
-                // TODO: update this function with additional fault facets when they are added
-            case FaultFacetType::kSystem:
-                return HealthObserverIntensityEnum::kCritical;
-            case FaultFacetType::kMock1:
+                return HealthObserverTypeEnum::kDns;
+            case FaultFacetType::kTestObserver:
+                return HealthObserverTypeEnum::kTest;
+            default:
+                return boost::none;
+        }
+    };
+
+    HealthObserverIntensityEnum getHealthObserverIntensity(FaultFacetType type) const {
+        auto intensities = _getHealthObserverIntensities();
+
+        auto toObserverType = [](FaultFacetType type) -> boost::optional<HealthObserverTypeEnum> {
+            switch (type) {
+                case FaultFacetType::kLdap:
+                    return HealthObserverTypeEnum::kLdap;
+                case FaultFacetType::kDns:
+                    return HealthObserverTypeEnum::kDns;
+                case FaultFacetType::kTestObserver:
+                    return HealthObserverTypeEnum::kTest;
+                default:
+                    return boost::none;
+            }
+        };
+
+        auto getIntensity = [this, intensities, &toObserverType](FaultFacetType type) {
+            auto observerType = toObserverType(type);
+            if (observerType) {
+                auto x = intensities->_data->getValues();
+                if (x) {
+                    for (auto setting : *x) {
+                        if (setting.getType() == observerType) {
+                            return setting.getIntensity();
+                        }
+                    }
+                }
+                return HealthObserverIntensityEnum::kOff;
+            } else {
+                // TODO SERVER-61944: this is for kMock1 & kMock2. Remove this branch once mock
+                // types are deleted.
+                stdx::lock_guard lock(_mutex);
                 if (_facetToIntensityMapForTest.contains(type)) {
                     return _facetToIntensityMapForTest.at(type);
                 }
                 return HealthObserverIntensityEnum::kCritical;
-            case FaultFacetType::kMock2:
-                return HealthObserverIntensityEnum::kCritical;
-            default:
-                MONGO_UNREACHABLE;
-        }
+            }
+        };
+
+        return getIntensity(type);
     }
 
-    bool isHealthObserverEnabled(FaultFacetType type) {
+    bool isHealthObserverEnabled(FaultFacetType type) const {
         return getHealthObserverIntensity(type) != HealthObserverIntensityEnum::kOff;
     }
 
     void setIntensityForType(FaultFacetType type, HealthObserverIntensityEnum intensity) {
+        stdx::lock_guard lock(_mutex);
         _facetToIntensityMapForTest.insert({type, intensity});
     }
 
+    // If the server persists in TransientFault for more than this duration
+    // it will move to the ActiveFault state and terminate.
     Milliseconds getActiveFaultDuration() const {
-        return _activeFaultDuration;
+        return Milliseconds(Seconds(mongo::gActiveFaultDurationSecs.load()));
     }
 
-    Milliseconds getPeriodicHealthCheckInterval() const {
-        return kPeriodicHealthCheckInterval;
+    Milliseconds getPeriodicHealthCheckInterval(FaultFacetType type) const {
+        auto intervals = _getHealthObserverIntervals();
+        // TODO(SERVER-62125): replace with unified type from IDL.
+        const auto convertedType = toObserverType(type);
+        if (convertedType) {
+            const auto values = intervals->_data->getValues();
+            if (values) {
+                const auto intervalIt =
+                    std::find_if(values->begin(), values->end(), [&](const auto& v) {
+                        return v.getType() == *convertedType;
+                    });
+                if (intervalIt != values->end()) {
+                    return Milliseconds(intervalIt->getInterval());
+                }
+            }
+        }
+        return _getDefaultObserverInterval(type);
     }
 
     Milliseconds getPeriodicLivenessCheckInterval() const {
-        return Milliseconds(50);
+        return Milliseconds(_getLivenessConfig()->_data->getInterval());
     }
 
     Seconds getPeriodicLivenessDeadline() const {
-        return Seconds(300);
+        return Seconds(_getLivenessConfig()->_data->getDeadline());
     }
 
     /** @returns true if the periodic checks are disabled for testing purposes. This is
@@ -127,25 +197,58 @@ public:
         _periodicChecksDisabledForTests = true;
     }
 
-    void setActiveFaultDurationForTests(Milliseconds duration) {
-        _activeFaultDuration = duration;
+private:
+    static HealthMonitoringIntensitiesServerParameter* _getHealthObserverIntensities() {
+        return ServerParameterSet::getNodeParameterSet()
+            ->get<HealthMonitoringIntensitiesServerParameter>("healthMonitoringIntensities");
     }
 
-protected:
-    // If the server persists in TransientFault for more than this duration
-    // it will move to the ActiveFault state and terminate.
-    static inline const auto kActiveFaultDuration = Seconds(120);
+    static PeriodicHealthCheckIntervalsServerParameter* _getHealthObserverIntervals() {
+        return ServerParameterSet::getNodeParameterSet()
+            ->get<PeriodicHealthCheckIntervalsServerParameter>("healthMonitoringIntervals");
+    }
 
-private:
-    static HealthMonitoringIntensitiesServerParameter* getHealthObserverIntensities() {
-        return ServerParameterSet::getGlobal()->get<HealthMonitoringIntensitiesServerParameter>(
-            "healthMonitoring");
+    static HealthMonitoringProgressMonitorServerParameter* _getLivenessConfig() {
+        return ServerParameterSet::getNodeParameterSet()
+            ->get<HealthMonitoringProgressMonitorServerParameter>("progressMonitor");
+    }
+
+    static Milliseconds _getDefaultObserverInterval(FaultFacetType type);
+
+    template <typename T, typename R>
+    R _getPropertyByType(FaultFacetType type, synchronized_value<T>* data, R defaultValue) const {
+        // TODO: update this function with additional fault facets when they are added
+        boost::optional<R> result;
+        switch (type) {
+            case FaultFacetType::kLdap:
+                result = (*data)->getLdap();
+                break;
+            case FaultFacetType::kDns:
+                result = (*data)->getDns();
+                break;
+            case FaultFacetType::kTestObserver:
+                result = (*data)->getTest();
+                break;
+            case FaultFacetType::kSystem:
+                result = defaultValue;
+                break;
+            case FaultFacetType::kMock1:
+                result = defaultValue;
+                break;
+            case FaultFacetType::kMock2:
+                result = defaultValue;
+                break;
+            default:
+                MONGO_UNREACHABLE;
+        }
+        return *result;
     }
 
     bool _periodicChecksDisabledForTests = false;
-    Milliseconds _activeFaultDuration = kActiveFaultDuration;
 
     stdx::unordered_map<FaultFacetType, HealthObserverIntensityEnum> _facetToIntensityMapForTest;
+    mutable Mutex _mutex =
+        MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(5), "FaultManagerConfig::_mutex");
 };
 
 }  // namespace process_health

@@ -164,7 +164,7 @@ void persistAbortDecision(OperationContext* opCtx,
 void deleteRangeDeletionTaskLocally(
     OperationContext* opCtx,
     const UUID& deletionTaskId,
-    const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern);
+    const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcernShardingTimeout);
 
 /**
  * Deletes the range deletion task document with the specified id from config.rangeDeletions on the
@@ -224,7 +224,9 @@ void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx);
  * Drive each unfished migration coordination in the given namespace to completion.
  * Assumes the caller to have entered CollectionCriticalSection.
  */
-void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss);
+void recoverMigrationCoordinations(OperationContext* opCtx,
+                                   NamespaceString nss,
+                                   CancellationToken cancellationToken);
 
 /**
  * Instructs the recipient shard to release its critical section.
@@ -253,6 +255,12 @@ void deleteMigrationRecipientRecoveryDocument(OperationContext* opCtx, const UUI
  * section stage), restores the MigrationDestinationManager state.
  */
 void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx);
+
+/**
+ * Recovers all unfinished migrations pending recovery.
+ * Note: This method assumes its caller is preventing new migrations from starting.
+ */
+void drainMigrationsPendingRecovery(OperationContext* opCtx);
 
 }  // namespace migrationutil
 }  // namespace mongo

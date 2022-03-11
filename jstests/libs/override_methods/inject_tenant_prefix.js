@@ -12,7 +12,7 @@ load("jstests/libs/transactions_util.js");
 // Save references to the original methods in the IIFE's scope.
 // This scoping allows the original methods to be called by the overrides below.
 let originalRunCommand = Mongo.prototype.runCommand;
-let originalRunCommandWithMetadata = Mongo.prototype.runCommandWithMetadata;
+let originalMarkNodeAsFailed = Mongo.prototype._markNodeAsFailed;
 
 const denylistedDbNames = ["config", "admin", "local"];
 
@@ -606,31 +606,12 @@ Mongo.prototype.runCommand = function(dbName, cmdObj, options) {
         removeTenantId(resObj);
     }
 
-    return resObj;
-};
-
-Mongo.prototype.runCommandWithMetadata = function(dbName, metadata, cmdObj) {
-    const dbNameWithTenantId = prependTenantIdToDbNameIfApplicable(dbName);
-
-    // Use cmdObj with TestData.tenantId prepended to all the applicable database names and
-    // namespaces.
-    const originalCmdObjContainsTenantId = isCmdObjWithTenantId(cmdObj);
-    let cmdObjWithTenantId =
-        originalCmdObjContainsTenantId ? cmdObj : createCmdObjWithTenantId(cmdObj);
-
-    let resObj = this.runCommandRetryOnTenantMigrationErrors(
-        dbNameWithTenantId,
-        cmdObjWithTenantId,
-        () => originalRunCommandWithMetadata.apply(
-            this, [dbNameWithTenantId, metadata, cmdObjWithTenantId]),
-        () => this.reroutingMongo.runCommandWithMetadata(
-            dbNameWithTenantId, metadata, cmdObjWithTenantId));
-
-    if (!originalCmdObjContainsTenantId) {
-        // Remove TestData.tenantId from all database names and namespaces in the resObj since tests
-        // assume the command was run against the original database.
-        removeTenantId(resObj);
-    }
+    Mongo.prototype._markNodeAsFailed = function(hostName, errorCode, errorReason) {
+        if (this.reroutingMongo)
+            originalMarkNodeAsFailed.apply(this.reroutingMongo, [hostName, errorCode, errorReason]);
+        else
+            originalMarkNodeAsFailed.apply(this, [hostName, errorCode, errorReason]);
+    };
 
     return resObj;
 };

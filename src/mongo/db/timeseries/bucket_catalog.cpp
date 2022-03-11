@@ -88,8 +88,7 @@ void normalizeObject(BSONObjBuilder* builder, const BSONObj& obj) {
         BSONElement element() const {
             return BSONElement(fieldName.rawData() - 1,  // Include type byte before field name
                                fieldName.size() + 1,     // Include null terminator after field name
-                               totalSize,
-                               BSONElement::CachedSizeTag{});
+                               totalSize);
         }
         bool operator<(const Field& rhs) const {
             return fieldName < rhs.fieldName;
@@ -427,13 +426,6 @@ void BucketCatalog::abort(std::shared_ptr<WriteBatch> batch,
     invariant(batch->_commitRights.load());
 
     if (batch->finished()) {
-        auto batchStatus = batch->getResult().getStatus();
-        tassert(5916403,
-                str::stream() << "Unexpected error when aborting time-series batch: "
-                              << batchStatus,
-                batchStatus == ErrorCodes::TimeseriesBucketCleared ||
-                    batchStatus.isA<ErrorCategory::Interruption>() ||
-                    batchStatus.isA<ErrorCategory::StaleShardVersionError>());
         return;
     }
 
@@ -1132,6 +1124,12 @@ bool BucketCatalog::BucketAccess::schemaIncompatible(
     const BSONObj& input,
     boost::optional<StringData> metaField,
     const StringData::ComparatorInterface* comparator) {
+    // (Generic FCV reference): TODO (SERVER-60912): Update once kLastLTS is 6.0
+    if (serverGlobalParams.featureCompatibility.getVersion() ==
+        multiversion::GenericFCV::kLastLTS) {
+        return false;
+    }
+
     auto result = _bucket->_schema.update(input, metaField, comparator);
     return (result == timeseries::Schema::UpdateStatus::Failed);
 }

@@ -31,33 +31,33 @@
 
 #include "mongo/db/process_health/health_observer_base.h"
 
+#include "mongo/db/process_health/deadline_future.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 
 namespace mongo {
 namespace process_health {
 
-HealthObserverBase::HealthObserverBase(ServiceContext* svcCtx) : _svcCtx(svcCtx) {}
+HealthObserverBase::HealthObserverBase(ServiceContext* svcCtx)
+    : _svcCtx(svcCtx), _rand(PseudoRandom(SecureRandom().nextInt64())) {}
 
 SharedSemiFuture<HealthCheckStatus> HealthObserverBase::periodicCheck(
-    FaultFacetsContainerFactory& factory,
-    std::shared_ptr<executor::TaskExecutor> taskExecutor,
-    CancellationToken token) {
+    std::shared_ptr<executor::TaskExecutor> taskExecutor, CancellationToken token) {
     // If we have reached here, the intensity of this health observer must not be off
     {
         auto lk = stdx::lock_guard(_mutex);
         if (_currentlyRunningHealthCheck) {
-            return _periodicCheckPromise->getFuture();
+            return _deadlineFuture->get();
         }
 
         LOGV2_DEBUG(6007902, 2, "Start periodic health check", "observerType"_attr = getType());
         const auto now = _svcCtx->getPreciseClockSource()->now();
         _lastTimeTheCheckWasRun = now;
         _currentlyRunningHealthCheck = true;
-        _periodicCheckPromise = std::make_unique<SharedPromise<HealthCheckStatus>>();
     }
 
-    _periodicCheckPromise->setFrom(
+    _deadlineFuture = DeadlineFuture<HealthCheckStatus>::create(
+        taskExecutor,
         periodicCheckImpl({token, taskExecutor})
             .onCompletion([this](StatusWith<HealthCheckStatus> status) {
                 if (!status.isOK()) {
@@ -76,20 +76,21 @@ SharedSemiFuture<HealthCheckStatus> HealthObserverBase::periodicCheck(
                 _currentlyRunningHealthCheck = false;
                 _lastTimeCheckCompleted = now;
                 return status;
-            }));
+            }),
+        getObserverTimeout());
 
-    return _periodicCheckPromise->getFuture();
+    return _deadlineFuture->get();
 }
 
 HealthCheckStatus HealthObserverBase::makeHealthyStatus() const {
     return HealthCheckStatus(getType());
 }
 
-HealthCheckStatus HealthObserverBase::makeSimpleFailedStatus(double severity,
+HealthCheckStatus HealthObserverBase::makeSimpleFailedStatus(Severity severity,
                                                              std::vector<Status>&& failures) const {
-    if (severity <= 0) {
+    if (severity == Severity::kOk) {
         LOGV2_WARNING(6007903,
-                      "Creating faulty health check status requires positive severity",
+                      "Creating faulty health check status requires non-ok severity",
                       "observerType"_attr = getType());
     }
     StringBuilder sb;
@@ -114,6 +115,10 @@ HealthObserverLivenessStats HealthObserverBase::getStatsLocked(WithLock) const {
     stats.completedChecksCount = _completedChecksCount;
     stats.completedChecksWithFaultCount = _completedChecksWithFaultCount;
     return stats;
+}
+
+Milliseconds HealthObserverBase::healthCheckJitter() const {
+    return randDuration(FaultManagerConfig::kPeriodicHealthCheckMaxJitter);
 }
 
 }  // namespace process_health

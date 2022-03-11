@@ -307,6 +307,9 @@ public:
     bool isSystemDotProfile() const {
         return coll() == "system.profile";
     }
+    bool isChangeCollection() const {
+        return (db() == kConfigDb) && coll().startsWith("changes.");
+    }
     bool isSystemDotViews() const {
         return coll() == kSystemDotViewsCollectionName;
     }
@@ -379,6 +382,16 @@ public:
     bool isChangeStreamPreImagesCollection() const;
 
     /**
+     * Returns whether the specified namespace is config.image_collection.
+     */
+    bool isConfigImagesCollection() const;
+
+    /**
+     * Returns whether the specified namespace is config.transactions.
+     */
+    bool isConfigTransactionsCollection() const;
+
+    /**
      * Returns the time-series buckets namespace for this view.
      */
     NamespaceString makeTimeseriesBucketsNamespace() const;
@@ -387,6 +400,15 @@ public:
      * Returns the time-series view namespace for this buckets namespace.
      */
     NamespaceString getTimeseriesViewNamespace() const;
+
+    /**
+     * Returns whether the namespace is implicitly replicated, based only on its string value.
+     *
+     * An implicitly replicated namespace is an internal namespace which does not replicate writes
+     * via the oplog, with the exception of deletions. Writes are not replicated as an optimization
+     * because their content can be reliably derived from entries in the oplog.
+     */
+    bool isImplicitlyReplicated() const;
 
     /**
      * Returns whether a namespace is replicated, based only on its string value. One notable
@@ -588,6 +610,12 @@ public:
     StringData db() const {
         return _nss ? _nss->db() : StringData(_dbname);
     }
+
+    /**
+     * Returns OK if either the nss is not set or is a valid nss. Otherwise returns an
+     * InvalidNamespace error.
+     */
+    Status isNssValid() const;
 
     std::string toString() const;
 

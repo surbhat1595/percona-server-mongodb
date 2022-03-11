@@ -38,6 +38,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
@@ -47,7 +48,7 @@
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/error_labels.h"
-#include "mongo/db/exec/delete.h"
+#include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
@@ -242,7 +243,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
                 unsafeCreateCollection(opCtx);
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions defaultCollectionOptions;
-            auto db = autoDb.ensureDbExists();
+            auto db = autoDb.ensureDbExists(opCtx);
             uassertStatusOK(db->userCreateNS(opCtx, ns, defaultCollectionOptions));
             wuow.commit();
         }
@@ -487,6 +488,9 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
     if (shouldProceedWithBatchInsert) {
         try {
             if (!collection->getCollection()->isCapped() && !inTxn && batch.size() > 1) {
+                checkCollectionUUIDMismatch(
+                    opCtx, collection->getCollection(), wholeOp.getCollectionUUID());
+
                 // First try doing it all together. If all goes well, this is all we need to do.
                 // See Collection::_insertDocuments for why we do all capped inserts one-at-a-time.
                 lastOpFixer->startingOp();
@@ -529,6 +533,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     // Transactions are not allowed to operate on capped collections.
                     uassertStatusOK(
                         checkIfTransactionOnCappedColl(opCtx, collection->getCollection()));
+                    checkCollectionUUIDMismatch(
+                        opCtx, collection->getCollection(), wholeOp.getCollectionUUID());
                     lastOpFixer->startingOp();
                     insertDocuments(opCtx,
                                     collection->getCollection(),
@@ -645,7 +651,7 @@ WriteResult performInserts(OperationContext* opCtx,
         auto fixedDoc = fixDocumentForInsert(opCtx, doc, &containsDotsAndDollarsField);
         const StmtId stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
         const bool wasAlreadyExecuted = opCtx->isRetryableWrite() &&
-            txnParticipant.checkStatementExecutedNoOplogEntryFetch(stmtId);
+            txnParticipant.checkStatementExecutedNoOplogEntryFetch(opCtx, stmtId);
 
         if (!fixedDoc.isOK()) {
             // Handled after we insert anything in the batch to be sure we report errors in the
@@ -718,6 +724,7 @@ WriteResult performInserts(OperationContext* opCtx,
 
 static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                                                const NamespaceString& ns,
+                                               const boost::optional<mongo::UUID>& opCollectionUUID,
                                                UpdateRequest* updateRequest,
                                                OperationSource source,
                                                bool* containsDotsAndDollarsField,
@@ -809,6 +816,8 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
 
+    checkCollectionUUIDMismatch(opCtx, collection->getCollection(), opCollectionUUID);
+
     const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest->getNamespaceString());
     ParsedUpdate parsedUpdate(opCtx, updateRequest, extensionsCallback, forgoOpCounterIncrements);
     uassertStatusOK(parsedUpdate.parseRequest());
@@ -879,6 +888,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     OperationContext* opCtx,
     const NamespaceString& ns,
+    const boost::optional<mongo::UUID>& opCollectionUUID,
     const std::vector<StmtId>& stmtIds,
     const write_ops::UpdateOpEntry& op,
     LegacyRuntimeConstants runtimeConstants,
@@ -923,6 +933,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
             bool containsDotsAndDollarsField = false;
             const auto ret = performSingleUpdateOp(opCtx,
                                                    ns,
+                                                   opCollectionUUID,
                                                    &request,
                                                    source,
                                                    &containsDotsAndDollarsField,
@@ -1033,6 +1044,7 @@ WriteResult performUpdates(OperationContext* opCtx,
             out.results.emplace_back(
                 performSingleUpdateOpWithDupKeyRetry(opCtx,
                                                      ns,
+                                                     wholeOp.getCollectionUUID(),
                                                      stmtIds,
                                                      singleOp,
                                                      runtimeConstants,
@@ -1055,6 +1067,7 @@ WriteResult performUpdates(OperationContext* opCtx,
 
 static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                                                const NamespaceString& ns,
+                                               const boost::optional<mongo::UUID>& opCollectionUUID,
                                                StmtId stmtId,
                                                const write_ops::DeleteOpEntry& op,
                                                const LegacyRuntimeConstants& runtimeConstants,
@@ -1140,6 +1153,8 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
             timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
+    checkCollectionUUIDMismatch(opCtx, collection.getCollection(), opCollectionUUID);
+
     ParsedDelete parsedDelete(opCtx, &request);
     uassertStatusOK(parsedDelete.parseRequest());
 
@@ -1218,7 +1233,7 @@ WriteResult performDeletes(OperationContext* opCtx,
     for (auto&& singleOp : wholeOp.getDeletes()) {
         const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
         if (opCtx->isRetryableWrite() &&
-            txnParticipant.checkStatementExecutedNoOplogEntryFetch(stmtId)) {
+            txnParticipant.checkStatementExecutedNoOplogEntryFetch(opCtx, stmtId)) {
             containsRetry = true;
             RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
             out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
@@ -1247,8 +1262,14 @@ WriteResult performDeletes(OperationContext* opCtx,
         });
         try {
             lastOpFixer.startingOp();
-            out.results.push_back(performSingleDeleteOp(
-                opCtx, ns, stmtId, singleOp, runtimeConstants, wholeOp.getLet(), source));
+            out.results.push_back(performSingleDeleteOp(opCtx,
+                                                        ns,
+                                                        wholeOp.getCollectionUUID(),
+                                                        stmtId,
+                                                        singleOp,
+                                                        runtimeConstants,
+                                                        wholeOp.getLet(),
+                                                        source));
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
             out.canContinue = handleError(

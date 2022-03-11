@@ -813,10 +813,32 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
     }
 
+    BSONElement clusteredElt = spec["clustered"];
+    if (clusteredElt && clusteredElt.trueValue() && !collection->isClustered()) {
+        return Status(ErrorCodes::Error(6100905),
+                      "Cannot have the 'clustered' option on a non-clustered collection");
+    }
+
+    if (collection->isClustered()) {
+        auto status = clustered_util::checkSpecDoesNotConflictWithClusteredIndex(
+            spec, collection->getClusteredInfo()->getIndexSpec());
+        if (!status.isOK()) {
+            return status;
+        }
+
+        if (clustered_util::matchesClusterKey(key, collection->getClusteredInfo())) {
+            // The index matches the clusteredIndex which already exists implicitly.
+            return Status(ErrorCodes::IndexAlreadyExists,
+                          "The collection is clustered implicitly by the index");
+        }
+    }
+
     if (IndexDescriptor::isIdIndexPattern(key)) {
-        if (collection->isClustered()) {
-            return Status(ErrorCodes::CannotCreateIndex,
-                          "cannot create the _id index on a clustered collection");
+        if (collection->isClustered() &&
+            !clustered_util::matchesClusterKey(key, collection->getClusteredInfo())) {
+            return Status(
+                ErrorCodes::CannotCreateIndex,
+                "cannot create the _id index on a clustered collection not clustered by _id");
         }
 
         BSONElement uniqueElt = spec["unique"];
@@ -837,13 +859,6 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
                                                collection->getDefaultCollator())) {
             return Status(ErrorCodes::CannotCreateIndex,
                           "_id index must have the collection default collation");
-        }
-    } else {
-        // Non _id index
-        if (collection->isClustered() &&
-            clustered_util::matchesClusterKey(key, collection->getClusteredInfo())) {
-            return Status(ErrorCodes::CannotCreateIndex,
-                          "cannot create an index with the same key as the cluster key");
         }
     }
 
@@ -878,10 +893,20 @@ Status IndexCatalogImpl::_doesSpecConflictWithExisting(OperationContext* opCtx,
                                                        const CollectionPtr& collection,
                                                        const BSONObj& spec,
                                                        const bool includeUnfinishedIndexes) const {
-    const char* name = spec.getStringField(IndexDescriptor::kIndexNameFieldName);
+    StringData name = spec.getStringField(IndexDescriptor::kIndexNameFieldName);
     invariant(name[0]);
 
     const BSONObj key = spec.getObjectField(IndexDescriptor::kKeyPatternFieldName);
+
+    // Check if the spec conflicts with the clusteredIndex.
+    if (spec["clustered"]) {
+        uassert(6243700,
+                "Cannot create index with option 'clustered' that does not match an existing "
+                "clustered index",
+                clustered_util::matchesClusterKey(
+                    spec.getObjectField(IndexDescriptor::kKeyPatternFieldName),
+                    collection->getClusteredInfo()));
+    }
 
     {
         // Check whether an index with the specified candidate name already exists in the catalog.
@@ -1276,10 +1301,17 @@ void IndexCatalogImpl::findIndexesByKeyPattern(OperationContext* opCtx,
     }
 }
 
-const IndexDescriptor* IndexCatalogImpl::findShardKeyPrefixedIndex(OperationContext* opCtx,
-                                                                   const CollectionPtr& collection,
-                                                                   const BSONObj& shardKey,
-                                                                   bool requireSingleKey) const {
+const boost::optional<IndexCatalog::ShardKeyIndex> IndexCatalogImpl::findShardKeyPrefixedIndex(
+    OperationContext* opCtx,
+    const CollectionPtr& collection,
+    const BSONObj& shardKey,
+    bool requireSingleKey) const {
+    if (collection->isClustered() &&
+        clustered_util::matchesClusterKey(shardKey, collection->getClusteredInfo())) {
+        auto clusteredIndexSpec = collection->getClusteredInfo()->getIndexSpec();
+        return IndexCatalog::ShardKeyIndex(clusteredIndexSpec);
+    }
+
     const IndexDescriptor* best = nullptr;
 
     std::unique_ptr<IndexIterator> ii = getIndexIterator(opCtx, false);
@@ -1294,14 +1326,19 @@ const IndexDescriptor* IndexCatalogImpl::findShardKeyPrefixedIndex(OperationCont
         if (!shardKey.isPrefixOf(desc->keyPattern(), SimpleBSONElementComparator::kInstance))
             continue;
 
-        if (!entry->isMultikey(opCtx, collection) && hasSimpleCollation)
-            return desc;
+        if (!entry->isMultikey(opCtx, collection) && hasSimpleCollation) {
+            return IndexCatalog::ShardKeyIndex(desc);
+        }
 
         if (!requireSingleKey && hasSimpleCollation)
             best = desc;
     }
 
-    return best;
+    if (best != nullptr) {
+        return IndexCatalog::ShardKeyIndex(best);
+    }
+
+    return boost::none;
 }
 
 void IndexCatalogImpl::findIndexByType(OperationContext* opCtx,

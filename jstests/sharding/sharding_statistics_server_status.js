@@ -83,7 +83,10 @@ function runConcurrentMoveChunk(host, ns, toShard) {
                            result.code == ErrorCodes.ConflictingOperationInProgress);
         if (shouldRetry) {
             jsTestLog("Retrying moveChunk due to ConflictingOperationInProgress");
+        } else if (!result.ok) {
+            jsTestLog("moveChunk encountered an error: " + tojson(result));
         }
+
         return shouldRetry ? runMoveChunkUntilSuccessOrUnexpectedError() : result;
     }
     // Kick off the recursive helper function.
@@ -116,8 +119,11 @@ const coll = mongos.getCollection(dbName + "." + collName);
 const numDocsToInsert = 3;
 const shardArr = [st.shard0, st.shard1];
 const stats = [new ShardStat(), new ShardStat()];
-const index = {
+const index1 = {
     x: 1
+};
+const index2 = {
+    y: 1
 };
 let numDocsInserted = 0;
 
@@ -242,7 +248,7 @@ moveChunkThread.start();
 waitForMoveChunkStep(donorConn, moveChunkStepNames.startedMoveChunk);
 
 // Run an index command.
-assert.commandWorked(coll.createIndexes([index]));
+assert.commandWorked(coll.createIndexes([index1]));
 
 // Unpause the migration and verify that it gets aborted.
 unpauseMoveChunkAtStep(donorConn, moveChunkStepNames.startedMoveChunk);
@@ -259,8 +265,7 @@ moveChunkThread.start();
 waitForMoveChunkStep(donorConn, moveChunkStepNames.reachedSteadyState);
 
 // Run an index command.
-assert.commandWorked(
-    st.s.getDB(dbName).runCommand({collMod: collName, validator: {x: {$type: "string"}}}));
+assert.commandWorked(coll.createIndexes([index2]));
 
 // Unpause the migration and verify that it gets aborted.
 unpauseMoveChunkAtStep(donorConn, moveChunkStepNames.reachedSteadyState);

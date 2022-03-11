@@ -40,6 +40,7 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/wiredtiger/encryption_keydb.h"
@@ -159,11 +160,13 @@ public:
 
     Status importRecordStore(OperationContext* opCtx,
                              StringData ident,
-                             const BSONObj& storageMetadata) override;
+                             const BSONObj& storageMetadata,
+                             const ImportOptions& importOptions) override;
 
     Status importSortedDataInterface(OperationContext* opCtx,
                                      StringData ident,
-                                     const BSONObj& storageMetadata) override;
+                                     const BSONObj& storageMetadata,
+                                     const ImportOptions& importOptions) override;
 
     /**
      * Drops the specified ident for resumable index builds.
@@ -380,6 +383,8 @@ public:
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) override;
 
     void dump() const override;
+
+    Status reconfigureLogging() override;
 
 private:
     class WiredTigerSessionSweeper;

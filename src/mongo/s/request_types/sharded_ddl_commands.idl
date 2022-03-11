@@ -35,6 +35,7 @@ imports:
     - "mongo/db/commands/rename_collection.idl"
     - "mongo/db/drop_database.idl"
     - "mongo/db/keypattern.idl"
+    - "mongo/db/coll_mod.idl"
     - "mongo/idl/basic_types.idl"
     - "mongo/s/chunk_version.idl"
     - "mongo/s/database_version.idl"
@@ -148,6 +149,37 @@ structs:
                 type: KeyPattern
                 description: "The index specification document to use as the new shard key."
                 optional: false
+
+    ReshardCollectionRequest:
+        description: "Parameters for the reshard collection command"
+        strict: false
+        fields:
+            key:
+                type: object
+                description: "The index specification document to use as the new shard key."
+                optional: false
+            unique:
+                type: bool
+                description: "Whether the shard key index should enforce a unique constraint."
+                optional: true
+            numInitialChunks:
+                type: safeInt64
+                description: "The number of chunks to create initially."
+                optional: true
+            collation:
+                type: object
+                description: "The collation to use for the shard key index."
+                optional: true
+            zones:
+                type: array<ReshardingZoneType>
+                description: "The zones associated with the new shard key."
+                optional: true
+            _presetReshardedChunks:
+                type: array<ReshardedChunk>
+                description: >-
+                    "Mapping of chunk ranges to be used as the initial split output. This is only
+                    for testing purposes."
+                optional: true
 
     SetAllowMigrationsRequest:
         description: "Parameters sent for the set allow migrations command"
@@ -267,33 +299,8 @@ commands:
         namespace: type
         api_version: ""
         type: namespacestring
-        fields:
-            key:
-                type: object
-                description: "The index specification document to use as the new shard key."
-                optional: false
-            unique:
-                type: bool
-                description: "Whether the shard key index should enforce a unique constraint."
-                optional: true
-            numInitialChunks:
-                type: safeInt64
-                description: "The number of chunks to create initially."
-                optional: true
-            collation:
-                type: object
-                description: "The collation to use for the shard key index."
-                optional: true
-            zones:
-                type: array<ReshardingZoneType>
-                description: "The zones associated with the new shard key."
-                optional: true
-            _presetReshardedChunks:
-                type: array<ReshardedChunk>
-                description: >-
-                    "Mapping of chunk ranges to be used as the initial split output. This is only for 
-                    testing purposes."
-                optional: true
+        chained_structs:
+            ReshardCollectionRequest: ReshardCollectionRequest
 
     _shardsvrRefineCollectionShardKey:
         description: "Parser for the _shardsvrRefineCollectionShardKey command"
@@ -326,3 +333,13 @@ commands:
                 description: "May only be set to 'true'. If set, indicates to the config server that
                               it must turn on the 'enableSharding' bit for that database."
                 optional: true
+
+    _shardsvrCollMod:
+        command_name: _shardsvrCollMod
+        cpp_name: ShardsvrCollMod
+        description: "Internal command sent to the primary shard in a collMod procedure"
+        strict: false
+        api_version: ""
+        namespace: concatenate_with_db
+        chained_structs:
+            CollModRequest: CollModRequest

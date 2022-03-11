@@ -246,7 +246,7 @@ intrusive_ptr<Expression> Expression::parseOperand(ExpressionContext* const expC
                                                    const VariablesParseState& vps) {
     BSONType type = exprElement.type();
 
-    if (type == String && exprElement.valuestr()[0] == '$') {
+    if (type == String && exprElement.valueStringData()[0] == '$') {
         /* if we got here, this is a field path expression */
         return ExpressionFieldPath::parse(expCtx, exprElement.str(), vps);
     } else if (type == Object) {
@@ -2426,10 +2426,10 @@ Value ExpressionFieldPath::evaluatePath(size_t index, const Document& input) con
 
     /* if we've hit the end of the path, stop */
     if (index == _fieldPath.getPathLength() - 1)
-        return input[_fieldPath.getFieldName(index)];
+        return input[_fieldPath.getFieldNameHashed(index)];
 
     // Try to dive deeper
-    const Value val = input[_fieldPath.getFieldName(index)];
+    const Value val = input[_fieldPath.getFieldNameHashed(index)];
     switch (val.getType()) {
         case Object:
             return evaluatePath(index + 1, val.getDocument());
@@ -3443,14 +3443,14 @@ public:
     }
 
     virtual Value evaluate(const Document& root, Variables* variables) const {
-
-        auto args = evaluateAndValidateArguments(root, _children, _indexMap.size(), variables);
+        int arraySize = _children[0]->evaluate(root, variables).getArrayLength();
+        auto args = evaluateAndValidateArguments(root, _children, arraySize, variables);
         auto indexVec = _indexMap.find(args.targetOfSearch);
 
         if (indexVec == _indexMap.end())
             return Value(-1);
 
-        // Search through the vector of indecies for first index in our range.
+        // Search through the vector of indexes for first index in our range.
         for (auto index : indexVec->second) {
             if (index >= args.startIndex && index < args.endIndex) {
                 return Value(index);

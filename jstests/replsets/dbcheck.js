@@ -35,6 +35,8 @@ function forEachNode(f) {
 let dbName = "dbCheck-test";
 let collName = "dbcheck-collection";
 
+const debugBuild = replSet.getPrimary().getDB('admin').adminCommand('buildInfo').debug;
+
 // Clear local.system.healthlog.
 function clearLog() {
     forEachNode(conn => conn.getDB("local").system.healthlog.drop());
@@ -46,8 +48,10 @@ function addEnoughForMultipleBatches(collection) {
 
 // Name for a collection which takes multiple batches to check and which shouldn't be modified
 // by any of the tests.
-let multiBatchSimpleCollName = "dbcheck-simple-collection";
-addEnoughForMultipleBatches(replSet.getPrimary().getDB(dbName)[multiBatchSimpleCollName]);
+const multiBatchSimpleCollName = "dbcheck-simple-collection";
+const multiBatchSimpleCollSize = 10000;
+replSet.getPrimary().getDB(dbName)[multiBatchSimpleCollName].insertMany(
+    [...Array(10000).keys()].map(x => ({_id: x})));
 
 function dbCheckCompleted(db) {
     return db.currentOp().inprog.filter(x => x["desc"] == "dbCheck")[0] === undefined;
@@ -86,10 +90,10 @@ function awaitDbCheckCompletion(db, collName, maxKey, maxSize, maxCount) {
     replSet.awaitReplication();
 
     forEachNode(function(node) {
-        const nodeDB = node.getDB(db);
-        const nodeColl = node.getDB(db)[collName];
-        assert.soon(() => dbCheckHealthLogCompleted(nodeDB, nodeColl, maxKey, maxSize, maxCount),
-                    "dbCheck wait for health log timed out");
+        const healthlog = node.getDB('local').system.healthlog;
+        assert.soon(function() {
+            return (healthlog.find({"operation": "dbCheckStop"}).itcount() == 1);
+        }, "dbCheck command didn't complete");
     });
 }
 
@@ -98,20 +102,27 @@ function awaitDbCheckCompletion(db, collName, maxKey, maxSize, maxCount) {
 function checkLogAllConsistent(conn) {
     let healthlog = conn.getDB("local").system.healthlog;
 
-    assert(healthlog.find().count(), "dbCheck put no batches in health log");
+    if (debugBuild) {
+        // These tests only run on debug builds because they rely on dbCheck health-logging
+        // all info-level batch results.
+        assert(healthlog.find().count(), "dbCheck put no batches in health log");
 
-    let maxResult = healthlog.aggregate(
-        [{$match: {operation: "dbCheckBatch"}}, {$group: {_id: 1, key: {$max: "$data.maxKey"}}}]);
+        let maxResult = healthlog.aggregate([
+            {$match: {operation: "dbCheckBatch"}},
+            {$group: {_id: 1, key: {$max: "$data.maxKey"}}}
+        ]);
 
-    assert(maxResult.hasNext(), "dbCheck put no batches in health log");
-    assert.eq(maxResult.next().key, {"$maxKey": 1}, "dbCheck batches should end at MaxKey");
+        assert(maxResult.hasNext(), "dbCheck put no batches in health log");
+        assert.eq(maxResult.next().key, {"$maxKey": 1}, "dbCheck batches should end at MaxKey");
 
-    let minResult = healthlog.aggregate(
-        [{$match: {operation: "dbCheckBatch"}}, {$group: {_id: 1, key: {$min: "$data.minKey"}}}]);
+        let minResult = healthlog.aggregate([
+            {$match: {operation: "dbCheckBatch"}},
+            {$group: {_id: 1, key: {$min: "$data.minKey"}}}
+        ]);
 
-    assert(minResult.hasNext(), "dbCheck put no batches in health log");
-    assert.eq(minResult.next().key, {"$minKey": 1}, "dbCheck batches should start at MinKey");
-
+        assert(minResult.hasNext(), "dbCheck put no batches in health log");
+        assert.eq(minResult.next().key, {"$minKey": 1}, "dbCheck batches should start at MinKey");
+    }
     // Assert no errors (i.e., found inconsistencies).
     let errs = healthlog.find({"severity": {"$ne": "info"}});
     if (errs.hasNext()) {
@@ -124,25 +135,29 @@ function checkLogAllConsistent(conn) {
         assert(false, "dbCheck batch failed: " + tojson(failedChecks.next()));
     }
 
-    // Finds an entry with data.minKey === MinKey, and then matches its maxKey against
-    // another document's minKey, and so on, and then checks that the result of that search
-    // has data.maxKey === MaxKey.
-    let completeCoverage = healthlog.aggregate([
-            {$match: {"operation": "dbCheckBatch", "data.minKey": MinKey}},
-            {
-              $graphLookup: {
-                  from: "system.healthlog",
-                  startWith: "$data.minKey",
-                  connectToField: "data.minKey",
-                  connectFromField: "data.maxKey",
-                  as: "batchLimits",
-                  restrictSearchWithMatch: {"operation": "dbCheckBatch"}
-              }
-            },
-            {$match: {"batchLimits.data.maxKey": MaxKey}}
-        ]);
+    if (debugBuild) {
+        // These tests only run on debug builds because they rely on dbCheck health-logging
+        // all info-level batch results.
 
-    assert(completeCoverage.hasNext(), "dbCheck batches do not cover full key range");
+        // Finds an entry with data.minKey === MinKey, and then matches its maxKey against
+        // another document's minKey, and so on, and then checks that the result of that search
+        // has data.maxKey === MaxKey.
+        let completeCoverage = healthlog.aggregate([
+                {$match: {"operation": "dbCheckBatch", "data.minKey": MinKey}},
+                {
+                $graphLookup: {
+                    from: "system.healthlog",
+                    startWith: "$data.minKey",
+                    connectToField: "data.minKey",
+                    connectFromField: "data.maxKey",
+                    as: "batchLimits",
+                    restrictSearchWithMatch: {"operation": "dbCheckBatch"}
+                }
+                },
+                {$match: {"batchLimits.data.maxKey": MaxKey}}
+            ]);
+        assert(completeCoverage.hasNext(), "dbCheck batches do not cover full key range");
+    }
 }
 
 // Check that the total of all batches in the health log on `conn` is equal to the total number
@@ -151,6 +166,11 @@ function checkLogAllConsistent(conn) {
 // Returns a document with fields "totalDocs" and "totalBytes", representing the total size of
 // the batches in the health log.
 function healthLogCounts(healthlog) {
+    // These tests only run on debug builds because they rely on dbCheck health-logging
+    // all info-level batch results.
+    if (!debugBuild) {
+        return;
+    }
     let result = healthlog.aggregate([
         {$match: {"operation": "dbCheckBatch"}},
         {
@@ -168,6 +188,11 @@ function healthLogCounts(healthlog) {
 }
 
 function checkTotalCounts(conn, coll) {
+    // These tests only run on debug builds because they rely on dbCheck health-logging
+    // all info-level batch results.
+    if (!debugBuild) {
+        return;
+    }
     let result = healthLogCounts(conn.getDB("local").system.healthlog);
 
     assert.eq(result.totalDocs, coll.count(), "dbCheck batches do not count all documents");
@@ -199,9 +224,29 @@ function simpleTestConsistent() {
     });
 }
 
+function simpleTestNonSnapshot() {
+    let primary = replSet.getPrimary();
+    clearLog();
+
+    assert.neq(primary, undefined);
+    let db = primary.getDB(dbName);
+    assert.commandWorked(db.runCommand({"dbCheck": multiBatchSimpleCollName, snapshotRead: false}));
+
+    awaitDbCheckCompletion(db, multiBatchSimpleCollName);
+
+    checkLogAllConsistent(primary);
+    checkTotalCounts(primary, db[multiBatchSimpleCollName]);
+
+    forEachSecondary(function(secondary) {
+        checkLogAllConsistent(secondary);
+        checkTotalCounts(secondary, secondary.getDB(dbName)[multiBatchSimpleCollName]);
+    });
+}
+
 // Same thing, but now with concurrent updates.
 function concurrentTestConsistent() {
     let primary = replSet.getPrimary();
+    clearLog();
 
     let db = primary.getDB(dbName);
 
@@ -227,6 +272,7 @@ function concurrentTestConsistent() {
 }
 
 simpleTestConsistent();
+simpleTestNonSnapshot();
 concurrentTestConsistent();
 
 // Test the various other parameters.
@@ -240,6 +286,11 @@ function testDbCheckParameters() {
     let docSize = bsonsize({_id: 10});
 
     function checkEntryBounds(start, end) {
+        // These tests only run on debug builds because they rely on dbCheck health-logging
+        // all info-level batch results.
+        if (!debugBuild) {
+            return;
+        }
         forEachNode(function(node) {
             let healthlog = node.getDB("local").system.healthlog;
             let keyBoundsResult = healthlog.aggregate([
@@ -293,6 +344,60 @@ function testDbCheckParameters() {
         {dbCheck: multiBatchSimpleCollName, minKey: start, maxKey: end, maxSize: maxSize}));
     awaitDbCheckCompletion(db, multiBatchSimpleCollName, end, maxSize);
     checkEntryBounds(start, start + maxCount);
+
+    // The remaining tests only run on debug builds because they rely on dbCheck health-logging
+    // all info-level batch results.
+
+    if (!debugBuild) {
+        return;
+    }
+
+    const healthlog = db.getSiblingDB('local').system.healthlog;
+    {
+        // Validate custom maxDocsPerBatch
+        clearLog();
+        const maxDocsPerBatch = 100;
+        assert.commandWorked(
+            db.runCommand({dbCheck: multiBatchSimpleCollName, maxDocsPerBatch: maxDocsPerBatch}));
+
+        const healthlog = db.getSiblingDB('local').system.healthlog;
+        assert.soon(function() {
+            const expectedBatches = multiBatchSimpleCollSize / maxDocsPerBatch +
+                (multiBatchSimpleCollSize % maxDocsPerBatch ? 1 : 0);
+            return (healthlog.find({"operation": "dbCheckBatch"}).itcount() == expectedBatches);
+        }, "dbCheck doesn't seem to complete", 60 * 1000);
+
+        assert.eq(
+            db.getSiblingDB('local')
+                .system.healthlog.find({"operation": "dbCheckBatch", "data.count": maxDocsPerBatch})
+                .itcount(),
+            multiBatchSimpleCollSize / maxDocsPerBatch);
+    }
+    {
+        // Validate custom maxBytesPerBatch
+        clearLog();
+        const coll = db.getSiblingDB("maxBytesPerBatch").maxBytesPerBatch;
+
+        // Insert nDocs, each of which being slightly larger than 1MB, and then run dbCheck with
+        // maxBytesPerBatch := 1MB
+        const nDocs = 5;
+        coll.insertMany([...Array(nDocs).keys()].map(x => ({a: 'a'.repeat(1024 * 1024)})));
+        const maxBytesPerBatch = 1024 * 1024;
+        assert.commandWorked(db.getSiblingDB("maxBytesPerBatch").runCommand({
+            dbCheck: coll.getName(),
+            maxBytesPerBatch: maxBytesPerBatch
+        }));
+
+        // Confirm dbCheck logs nDocs batches.
+        assert.soon(function() {
+            return (healthlog.find({"operation": "dbCheckBatch"}).itcount() == nDocs);
+        }, "dbCheck doesn't seem to complete", 60 * 1000);
+
+        assert.eq(db.getSiblingDB('local')
+                      .system.healthlog.find({"operation": "dbCheckBatch", "data.count": 1})
+                      .itcount(),
+                  nDocs);
+    }
 }
 
 testDbCheckParameters();
@@ -406,6 +511,12 @@ function simpleTestCatchesExtra() {
         assert.commandWorked(db.runCommand({dbCheck: collName}));
         awaitDbCheckCompletion(db, collName);
     }
+    assert.soon(function() {
+        return (replSet.getSecondary()
+                    .getDB("local")
+                    .system.healthlog.find({"operation": "dbCheckStop"})
+                    .itcount() === 1);
+    }, "dbCheck didn't complete on secondary");
     const errors = replSet.getSecondary().getDB("local").system.healthlog.find(
         {operation: /dbCheck.*/, severity: "error"});
 
@@ -415,43 +526,7 @@ function simpleTestCatchesExtra() {
                   JSON.stringify(errors.toArray()));
 }
 
-// Test that dbCheck catches an extra index on the secondary.
-function testCollectionMetadataChanges() {
-    {
-        const primary = replSet.getPrimary();
-        const db = primary.getDB(dbName);
-        db[collName].drop();
-        clearLog();
-
-        // Create the collection on the primary.
-        db.createCollection(collName, {validationLevel: "off"});
-    }
-
-    replSet.awaitReplication();
-    injectInconsistencyOnSecondary(
-        {createIndexes: collName, indexes: [{key: {whatever: 1}, name: "whatever"}]});
-    replSet.awaitReplication();
-
-    {
-        const primary = replSet.getPrimary();
-        const db = primary.getDB(dbName);
-        assert.commandWorked(db.runCommand({dbCheck: collName}));
-        awaitDbCheckCompletion(db, collName);
-    }
-
-    const errors = replSet.getSecondary().getDB("local").system.healthlog.find(
-        {"operation": /dbCheck.*/, "severity": "error", "data.success": true});
-
-    assert.eq(errors.count(),
-              1,
-              "expected exactly 1 inconsistency after single inconsistent index creation, found: " +
-                  JSON.stringify(errors.toArray()));
-
-    clearLog();
-}
-
 simpleTestCatchesExtra();
-testCollectionMetadataChanges();
 
 replSet.stopSet();
 })();

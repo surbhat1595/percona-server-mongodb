@@ -43,7 +43,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/exec/delete.h"
+#include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/keypattern.h"
@@ -160,18 +160,6 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
                 "max"_attr = max,
                 "namespace"_attr = nss.ns());
 
-    const auto indexName = shardKeyIdx->indexName();
-    const IndexDescriptor* descriptor =
-        collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    if (!descriptor) {
-        LOGV2_ERROR_OPTIONS(23767,
-                            {logv2::UserAssertAfterLog(ErrorCodes::InternalError)},
-                            "Shard key index with name {indexName} on {namespace} was dropped",
-                            "Shard key index was dropped",
-                            "indexName"_attr = indexName,
-                            "namespace"_attr = nss.ns());
-    }
-
     auto deleteStageParams = std::make_unique<DeleteStageParams>();
     deleteStageParams->fromMigrate = true;
     deleteStageParams->isMulti = true;
@@ -182,10 +170,11 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
             std::make_unique<RemoveSaver>("moveChunk", nss.ns(), "cleaning");
     }
 
-    auto exec = InternalPlanner::deleteWithIndexScan(opCtx,
+    auto exec =
+        InternalPlanner::deleteWithShardKeyIndexScan(opCtx,
                                                      &collection,
                                                      std::move(deleteStageParams),
-                                                     descriptor,
+                                                     *shardKeyIdx,
                                                      min,
                                                      max,
                                                      BoundInclusion::kIncludeStartKeyOnly,
@@ -353,10 +342,10 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                    },
                    nss);
            })
-        .until([](StatusWith<int> swNumDeleted) {
+        .until([=](StatusWith<int> swNumDeleted) {
             // Continue iterating until there are no more documents to delete, retrying on
             // any error that doesn't indicate that this node is stepping down.
-            return (swNumDeleted.isOK() && swNumDeleted.getValue() == 0) ||
+            return (swNumDeleted.isOK() && swNumDeleted.getValue() < numDocsToRemovePerBatch) ||
                 swNumDeleted.getStatus() ==
                 ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist ||
                 swNumDeleted.getStatus() ==

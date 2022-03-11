@@ -42,12 +42,14 @@
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 #include "mongo/logv2/log.h"
 
+#include "mongo/db/s/collmod_coordinator.h"
 #include "mongo/db/s/create_collection_coordinator.h"
 #include "mongo/db/s/drop_collection_coordinator.h"
 #include "mongo/db/s/drop_database_coordinator.h"
 #include "mongo/db/s/move_primary_coordinator.h"
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
 #include "mongo/db/s/rename_collection_coordinator.h"
+#include "mongo/db/s/reshard_collection_coordinator.h"
 #include "mongo/db/s/set_allow_migrations_coordinator.h"
 
 namespace mongo {
@@ -80,6 +82,17 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kSetAllowMigrations:
             return std::make_shared<SetAllowMigrationsCoordinator>(service,
                                                                    std::move(initialState));
+            break;
+        case DDLCoordinatorTypeEnum::kCollMod:
+            return std::make_shared<CollModCoordinator>(service, std::move(initialState));
+            break;
+        case DDLCoordinatorTypeEnum::kReshardCollection:
+            return std::make_shared<ReshardCollectionCoordinator>(service, std::move(initialState));
+            break;
+        case DDLCoordinatorTypeEnum::kReshardCollectionNoResilient:
+            return std::make_shared<ReshardCollectionCoordinator_NORESILIENT>(
+                service, std::move(initialState));
+            break;
         default:
             uasserted(ErrorCodes::BadValue,
                       str::stream()
@@ -229,6 +242,12 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx, BSON
     }
 
     return coordinator;
+}
+
+
+std::shared_ptr<executor::TaskExecutor> ShardingDDLCoordinatorService::getInstanceCleanupExecutor()
+    const {
+    return PrimaryOnlyService::getInstanceCleanupExecutor();
 }
 
 }  // namespace mongo

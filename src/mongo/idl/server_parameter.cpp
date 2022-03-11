@@ -41,51 +41,71 @@ MONGO_INITIALIZER_GROUP(EndServerParameterRegistration,
                         ("BeginServerParameterRegistration"),
                         ("BeginStartupOptionHandling"))
 
-ServerParameter::ServerParameter(StringData name, ServerParameterType spt)
-    : ServerParameter(ServerParameterSet::getGlobal(),
-                      name,
-                      spt != SPT::kRuntimeOnly,
-                      spt != SPT::kStartupOnly) {}
-
-ServerParameter::ServerParameter(ServerParameterSet* sps,
-                                 StringData name,
-                                 bool allowedToChangeAtStartup,
-                                 bool allowedToChangeAtRuntime)
-    : _name(name.toString()),
-      _allowedToChangeAtStartup(allowedToChangeAtStartup),
-      _allowedToChangeAtRuntime(allowedToChangeAtRuntime) {
-    if (sps) {
-        sps->add(this);
-    }
+ServerParameter::ServerParameter(StringData name, ServerParameterType spt, NoRegistrationTag)
+    : _name(name.toString()), _type(spt) {
+    _generation.clear();
 }
 
-ServerParameter::ServerParameter(ServerParameterSet* sps, StringData name)
-    : _name(name.toString()), _allowedToChangeAtStartup(true), _allowedToChangeAtRuntime(true) {
-    if (sps) {
-        sps->add(this);
-    }
+ServerParameter::ServerParameter(StringData name, ServerParameterType spt)
+    : ServerParameter(name, spt, NoRegistrationTag{}) {
+    ServerParameterSet::getParameterSet(spt)->add(this);
+}
+
+void ServerParameter::setGeneration(const OID& generation) {
+    uassert(6225101,
+            "Invalid call to setGeneration on locally scoped server parameter",
+            isClusterWide());
+    _generation = generation;
 }
 
 namespace {
-ServerParameterSet* gGlobalServerParameterSet = nullptr;
+class NodeParameterSet : public ServerParameterSet {
+public:
+    void add(ServerParameter* sp) final {
+        uassert(6225102,
+                str::stream() << "Registering cluster-wide parameter '" << sp->name()
+                              << "' as node-local server parameter",
+                sp->isNodeLocal());
+        ServerParameter*& x = _map[sp->name()];
+        uassert(23784,
+                str::stream() << "Duplicate server parameter registration for '" << x->name()
+                              << "'",
+                !x);
+        x = sp;
+    }
+};
+NodeParameterSet* gNodeServerParameters = nullptr;
+
+class ClusterParameterSet : public ServerParameterSet {
+public:
+    void add(ServerParameter* sp) final {
+        uassert(6225103,
+                str::stream() << "Registering node-local parameter '" << sp->name()
+                              << "' as cluster-wide server parameter",
+                sp->isClusterWide());
+        ServerParameter*& x = _map[sp->name()];
+        uassert(6225104,
+                str::stream() << "Duplicate cluster-wide server parameter registration for '"
+                              << x->name() << "'",
+                !x);
+        x = sp;
+    }
+};
+ClusterParameterSet* gClusterServerParameters;
 }  // namespace
 
-ServerParameterSet* ServerParameterSet::getGlobal() {
-    if (!gGlobalServerParameterSet) {
-        gGlobalServerParameterSet = new ServerParameterSet();
+ServerParameterSet* ServerParameterSet::getNodeParameterSet() {
+    if (!gNodeServerParameters) {
+        gNodeServerParameters = new NodeParameterSet();
     }
-    return gGlobalServerParameterSet;
+    return gNodeServerParameters;
 }
 
-void ServerParameterSet::add(ServerParameter* sp) {
-    ServerParameter*& x = _map[sp->name()];
-    if (x) {
-        LOGV2_FATAL(23784,
-                    "'{name}' already exists in the server parameter set",
-                    "Duplicate server parameter registration",
-                    "name"_attr = x->name());
+ServerParameterSet* ServerParameterSet::getClusterParameterSet() {
+    if (!gClusterServerParameters) {
+        gClusterServerParameters = new ClusterParameterSet();
     }
-    x = sp;
+    return gClusterServerParameters;
 }
 
 StatusWith<std::string> ServerParameter::coerceToString(const BSONElement& element, bool redact) {
@@ -119,11 +139,7 @@ void ServerParameterSet::remove(const std::string& name) {
 
 IDLServerParameterDeprecatedAlias::IDLServerParameterDeprecatedAlias(StringData name,
                                                                      ServerParameter* sp)
-    : ServerParameter(ServerParameterSet::getGlobal(),
-                      name,
-                      sp->allowedToChangeAtStartup(),
-                      sp->allowedToChangeAtRuntime()),
-      _sp(sp) {
+    : ServerParameter(name, sp->getServerParameterType()), _sp(sp) {
     if (_sp->isTestOnly()) {
         setTestOnly();
     }
@@ -173,9 +189,7 @@ public:
     DisabledTestParameter() = delete;
 
     DisabledTestParameter(ServerParameter* sp)
-        : ServerParameter(
-              nullptr, sp->name(), sp->allowedToChangeAtStartup(), sp->allowedToChangeAtRuntime()),
-          _sp(sp) {
+        : ServerParameter(sp->name(), sp->getServerParameterType(), NoRegistrationTag{}), _sp(sp) {
         setTestOnly();
     }
 

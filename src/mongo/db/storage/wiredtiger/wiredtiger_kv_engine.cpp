@@ -141,6 +141,8 @@ namespace {
 MONGO_FAIL_POINT_DEFINE(WTPauseStableTimestamp);
 MONGO_FAIL_POINT_DEFINE(WTPreserveSnapshotHistoryIndefinitely);
 MONGO_FAIL_POINT_DEFINE(WTSetOldestTSToStableTS);
+MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportCollection);
+MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportIndex);
 
 const std::string kPinOldestTimestampAtStartupName = "_wt_startup";
 
@@ -672,11 +674,11 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
        << ",close_handle_minimum=" << gWiredTigerFileHandleCloseMinimum << "),";
     ss << "statistics_log=(wait=" << wiredTigerGlobalOptions.statisticsLogDelaySecs << "),";
 
-    if (shouldLog(::mongo::logv2::LogComponent::kStorageRecovery, logv2::LogSeverity::Debug(3))) {
-        ss << "verbose=[recovery_progress,checkpoint_progress,compact_progress,recovery],";
-    } else {
-        ss << "verbose=[recovery_progress,checkpoint_progress,compact_progress],";
-    }
+    // Enable JSON output for errors and messages.
+    ss << "json_output=(error,message),";
+
+    // Generate the settings related to the verbose configuration.
+    ss << WiredTigerUtil::generateWTVerboseConfiguration() << ",";
 
     if (kDebugBuild) {
         // Do not abort the process when corruption is found in debug builds, which supports
@@ -887,7 +889,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
 WiredTigerKVEngine::~WiredTigerKVEngine() {
     // Remove server parameters that we added in the constructor, to enable unit tests to reload the
     // storage engine again in this same process.
-    ServerParameterSet::getGlobal()->remove("wiredTigerEngineRuntimeConfig");
+    ServerParameterSet::getNodeParameterSet()->remove("wiredTigerEngineRuntimeConfig");
 
     cleanShutdown();
 
@@ -1244,6 +1246,14 @@ void WiredTigerKVEngine::flushAllFiles(OperationContext* opCtx, bool callerHolds
     if (_ephemeral) {
         return;
     }
+
+    const Timestamp stableTimestamp = getStableTimestamp();
+    const Timestamp initialDataTimestamp = getInitialDataTimestamp();
+    uassert(
+        5841000,
+        "Cannot take checkpoints when the stable timestamp is less than the initial data timestamp",
+        initialDataTimestamp == Timestamp::kAllowUnstableCheckpointsSentinel ||
+            stableTimestamp >= initialDataTimestamp);
 
     // Immediately flush the size storer information to disk. When the node is fsync locked for
     // operations such as backup, it's imperative that we copy the most up-to-date data files.
@@ -2620,12 +2630,21 @@ Status WiredTigerKVEngine::createRecordStore(OperationContext* opCtx,
 
 Status WiredTigerKVEngine::importRecordStore(OperationContext* opCtx,
                                              StringData ident,
-                                             const BSONObj& storageMetadata) {
+                                             const BSONObj& storageMetadata,
+                                             const ImportOptions& importOptions) {
     _ensureIdentPath(ident);
     WiredTigerSession session(_conn);
 
-    std::string config =
-        uassertStatusOK(WiredTigerUtil::generateImportString(ident, storageMetadata));
+    if (MONGO_unlikely(WTWriteConflictExceptionForImportCollection.shouldFail())) {
+        LOGV2(6177300,
+              "Failpoint WTWriteConflictExceptionForImportCollection enabled. Throwing "
+              "WriteConflictException",
+              "ident"_attr = ident);
+        throw WriteConflictException();
+    }
+
+    std::string config = uassertStatusOK(
+        WiredTigerUtil::generateImportString(ident, storageMetadata, importOptions));
 
     string uri = _uri(ident);
     WT_SESSION* s = session.getSession();
@@ -2634,6 +2653,7 @@ Status WiredTigerKVEngine::importRecordStore(OperationContext* opCtx,
                 "WiredTigerKVEngine::importRecordStore",
                 "uri"_attr = uri,
                 "config"_attr = config);
+
     return wtRCToStatus(s->create(s, uri.c_str(), config.c_str()));
 }
 
@@ -2781,7 +2801,7 @@ Status WiredTigerKVEngine::createSortedDataInterface(OperationContext* opCtx,
     if (auto storageEngineOptions = collOptions.indexOptionDefaults.getStorageEngine()) {
         collIndexOptions =
             dps::extractElementAtPath(*storageEngineOptions, _canonicalName + ".configString")
-                .valuestrsafe();
+                .str();
     }
     // Some unittests use a OperationContextNoop that can't support such lookups.
     auto ns = collOptions.uuid
@@ -2809,11 +2829,20 @@ Status WiredTigerKVEngine::createSortedDataInterface(OperationContext* opCtx,
 
 Status WiredTigerKVEngine::importSortedDataInterface(OperationContext* opCtx,
                                                      StringData ident,
-                                                     const BSONObj& storageMetadata) {
+                                                     const BSONObj& storageMetadata,
+                                                     const ImportOptions& importOptions) {
     _ensureIdentPath(ident);
 
-    std::string config =
-        uassertStatusOK(WiredTigerUtil::generateImportString(ident, storageMetadata));
+    if (MONGO_unlikely(WTWriteConflictExceptionForImportIndex.shouldFail())) {
+        LOGV2(6177301,
+              "Failpoint WTWriteConflictExceptionForImportIndex enabled. Throwing "
+              "WriteConflictException",
+              "ident"_attr = ident);
+        throw WriteConflictException();
+    }
+
+    std::string config = uassertStatusOK(
+        WiredTigerUtil::generateImportString(ident, storageMetadata, importOptions));
 
     LOGV2_DEBUG(5095103,
                 2,
@@ -3323,7 +3352,7 @@ void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp, bool forc
     auto ts = stableTimestamp.asULL();
     if (force) {
         stableTSConfigString =
-            "force=true,oldest_timestamp={0:x},commit_timestamp={0:x},stable_timestamp={0:x}"_format(
+            "force=true,oldest_timestamp={0:x},durable_timestamp={0:x},stable_timestamp={0:x}"_format(
                 ts);
         stdx::lock_guard<Latch> lk(_highestDurableTimestampMutex);
         _highestSeenDurableTimestamp = ts;
@@ -3397,7 +3426,7 @@ void WiredTigerKVEngine::setOldestTimestamp(Timestamp newOldestTimestamp, bool f
 
     if (force) {
         auto oldestTSConfigString =
-            "force=true,oldest_timestamp={0:x},commit_timestamp={0:x}"_format(
+            "force=true,oldest_timestamp={0:x},durable_timestamp={0:x}"_format(
                 newOldestTimestamp.asULL());
         invariantWTOK(_conn->set_timestamp(_conn, oldestTSConfigString.c_str()));
         _oldestTimestamp.store(newOldestTimestamp.asULL());
@@ -3405,7 +3434,7 @@ void WiredTigerKVEngine::setOldestTimestamp(Timestamp newOldestTimestamp, bool f
         _highestSeenDurableTimestamp = newOldestTimestamp.asULL();
         LOGV2_DEBUG(22342,
                     2,
-                    "oldest_timestamp and commit_timestamp force set to {newOldestTimestamp}",
+                    "oldest_timestamp and durable_timestamp force set to {newOldestTimestamp}",
                     "newOldestTimestamp"_attr = newOldestTimestamp);
     } else {
         auto oldestTSConfigString = "oldest_timestamp={:x}"_format(newOldestTimestamp.asULL());
@@ -3812,6 +3841,11 @@ void WiredTigerKVEngine::dump() const {
     } else {
         LOGV2(6117701, "WiredTigerKVEngine::dump() failed", "error"_attr = status);
     }
+}
+
+Status WiredTigerKVEngine::reconfigureLogging() {
+    auto verboseConfig = WiredTigerUtil::generateWTVerboseConfiguration();
+    return wtRCToStatus(_conn->reconfigure(_conn, verboseConfig.c_str()));
 }
 
 }  // namespace mongo

@@ -518,7 +518,7 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
 void dropRangeDeletionsCollection(OperationContext* opCtx) {
     DBDirectClient client(opCtx);
     client.dropCollection(NamespaceString::kRangeDeletionNamespace.toString(),
-                          WriteConcerns::kMajorityWriteConcern);
+                          WriteConcerns::kMajorityWriteConcernShardingTimeout);
 }
 
 template <typename Callable>
@@ -816,7 +816,12 @@ void markAsReadyRangeDeletionTaskLocally(OperationContext* opCtx, const UUID& mi
     auto update = BSON("$unset" << BSON(RangeDeletionTask::kPendingFieldName << ""));
 
     hangInReadyRangeDeletionLocallyInterruptible.pauseWhileSet(opCtx);
-    store.update(opCtx, query, update);
+    try {
+        store.update(opCtx, query, update);
+    } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
+        // If we are recovering the migration, the range-deletion may have already finished. So its
+        // associated document may already have been removed.
+    }
 
     if (hangInReadyRangeDeletionLocallyThenSimulateErrorUninterruptible.shouldFail()) {
         hangInReadyRangeDeletionLocallyThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);
@@ -884,16 +889,6 @@ void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx) {
     store.forEach(opCtx,
                   BSONObj{},
                   [&opCtx, &unfinishedMigrationsCount](const MigrationCoordinatorDocument& doc) {
-                      // MigrationCoordinators are only created under the MigrationBlockingGuard,
-                      // which means that only one can possibly exist on an instance at a time.
-                      // Furthermore, recovery of an incomplete MigrationCoordator also acquires the
-                      // MigrationBlockingGuard. Because of this it is not possible to have more
-                      // than one unfinished migration.
-                      invariant(unfinishedMigrationsCount == 0,
-                                str::stream()
-                                    << "Upon step-up a second migration coordinator was found"
-                                    << redact(doc.toBSON()));
-
                       unfinishedMigrationsCount++;
                       LOGV2_DEBUG(4798511,
                                   3,
@@ -908,14 +903,8 @@ void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx) {
                           CollectionShardingRuntime::get(opCtx, nss)->clearFilteringMetadata(opCtx);
                       }
 
-                      auto mbg = std::make_shared<MigrationBlockingGuard>(
-                          opCtx,
-                          str::stream() << "Recovery of migration session "
-                                        << doc.getMigrationSessionId().toString()
-                                        << " on collection " << nss);
-
                       ExecutorFuture<void>(getMigrationUtilExecutor(opCtx->getServiceContext()))
-                          .then([serviceContext = opCtx->getServiceContext(), nss, mbg] {
+                          .then([serviceContext = opCtx->getServiceContext(), nss] {
                               ThreadClient tc("TriggerMigrationRecovery", serviceContext);
                               {
                                   stdx::lock_guard<Client> lk(*tc.get());
@@ -948,7 +937,9 @@ void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx) {
                 "unfinishedMigrationsCount"_attr = unfinishedMigrationsCount);
 }
 
-void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss) {
+void recoverMigrationCoordinations(OperationContext* opCtx,
+                                   NamespaceString nss,
+                                   CancellationToken cancellationToken) {
     LOGV2_DEBUG(4798501, 2, "Starting migration recovery", "namespace"_attr = nss);
 
     unsigned migrationRecoveryCount = 0;
@@ -961,7 +952,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss)
     store.forEach(
         opCtx,
         BSON(MigrationCoordinatorDocument::kNssFieldName << nss.toString()),
-        [&opCtx, &migrationRecoveryCount, acquireCSOnRecipient](
+        [&opCtx, &migrationRecoveryCount, acquireCSOnRecipient, &cancellationToken](
             const MigrationCoordinatorDocument& doc) {
             LOGV2_DEBUG(4798502,
                         2,
@@ -1002,7 +993,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss)
                           "simulate an error response for forceShardFilteringMetadataRefresh");
             }
 
-            auto setFilteringMetadata = [&opCtx, &currentMetadata, &doc]() {
+            auto setFilteringMetadata = [&opCtx, &currentMetadata, &doc, &cancellationToken]() {
                 AutoGetDb autoDb(opCtx, doc.getNss().db(), MODE_IX);
                 Lock::CollectionLock collLock(opCtx, doc.getNss(), MODE_IX);
                 auto* const csr = CollectionShardingRuntime::get(opCtx, doc.getNss());
@@ -1010,7 +1001,10 @@ void recoverMigrationCoordinations(OperationContext* opCtx, NamespaceString nss)
                 auto optMetadata = csr->getCurrentMetadataIfKnown();
                 invariant(!optMetadata);
 
-                csr->setFilteringMetadata(opCtx, std::move(currentMetadata));
+                auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(opCtx, csr);
+                if (!cancellationToken.isCanceled()) {
+                    csr->setFilteringMetadata_withLock(opCtx, std::move(currentMetadata), csrLock);
+                }
             };
 
             if (!currentMetadata.isSharded() ||
@@ -1109,7 +1103,8 @@ void persistMigrationRecipientRecoveryDocument(
     PersistentTaskStore<MigrationRecipientRecoveryDocument> store(
         NamespaceString::kMigrationRecipientsNamespace);
     try {
-        store.add(opCtx, migrationRecipientDoc, WriteConcerns::kMajorityWriteConcern);
+        store.add(
+            opCtx, migrationRecipientDoc, WriteConcerns::kMajorityWriteConcernShardingTimeout);
     } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
         // Convert a DuplicateKey error to an anonymous error.
         uasserted(6064502,
@@ -1174,6 +1169,24 @@ void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx) {
                 2,
                 "Finished migration recipient step-up recovery",
                 "ongoingRecipientCritSecCount"_attr = ongoingMigrationRecipientsCount);
+}
+
+void drainMigrationsPendingRecovery(OperationContext* opCtx) {
+    PersistentTaskStore<MigrationCoordinatorDocument> store(
+        NamespaceString::kMigrationCoordinatorsNamespace);
+
+    while (store.count(opCtx)) {
+        store.forEach(opCtx, BSONObj(), [opCtx](const MigrationCoordinatorDocument& doc) {
+            try {
+                onShardVersionMismatch(opCtx, doc.getNss(), boost::none);
+            } catch (DBException& ex) {
+                ex.addContext(str::stream() << "Failed to recover pending migration for document "
+                                            << doc.toBSON());
+                throw;
+            }
+            return true;
+        });
+    }
 }
 
 }  // namespace migrationutil

@@ -34,6 +34,7 @@
 #include "mongo/db/repl/repl_set_config.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 #include <functional>
 
 #include "mongo/bson/util/bson_check.h"
@@ -52,7 +53,6 @@ namespace repl {
 // Allow the heartbeat interval to be forcibly overridden on this node.
 MONGO_FAIL_POINT_DEFINE(forceHeartbeatIntervalMS);
 
-const size_t ReplSetConfig::kMaxVotingMembers;
 const Milliseconds ReplSetConfig::kInfiniteCatchUpTimeout(-1);
 const Milliseconds ReplSetConfig::kCatchUpDisabled(0);
 const Milliseconds ReplSetConfig::kCatchUpTakeoverDisabled(-1);
@@ -97,6 +97,17 @@ ReplSetConfig ReplSetConfig::parseForInitiate(const BSONObj& cfg, OID newReplica
     return result;
 }
 
+BSONObj ReplSetConfig::toBSON() const {
+    BSONObjBuilder builder;
+    serialize(&builder);
+
+    if (_recipientConfig) {
+        builder.append(kRecipientConfigFieldName, _recipientConfig->toBSON());
+    }
+
+    return builder.obj();
+}
+
 void ReplSetConfig::_setRequiredFields() {
     // The three required fields need to be set to something valid to avoid a potential
     // invariant if the uninitialized object is ever used with toBSON().
@@ -123,6 +134,12 @@ ReplSetConfig::ReplSetConfig(const BSONObj& cfg,
     setSettings(ReplSetConfigSettings());
     ReplSetConfigBase::parseProtected(IDLParserErrorContext("ReplSetConfig"), cfg);
     uassertStatusOK(_initialize(forInitiate, forceTerm, defaultReplicaSetId));
+
+    if (cfg.hasField(kRecipientConfigFieldName)) {
+        auto splitConfig = cfg[kRecipientConfigFieldName].Obj();
+        _recipientConfig.reset(new ReplSetConfig(
+            splitConfig, false /* forInitiate */, forceTerm, defaultReplicaSetId));
+    }
 }
 
 Status ReplSetConfig::_initialize(bool forInitiate,
@@ -528,6 +545,29 @@ StatusWith<ReplSetTagPattern> ReplSetConfig::findCustomWriteMode(StringData patt
     return StatusWith<ReplSetTagPattern>(iter->second);
 }
 
+StatusWith<ReplSetTagPattern> ReplSetConfig::makeCustomWriteMode(const BSONObj& wTags) const {
+    ReplSetTagPattern pattern = _tagConfig.makePattern();
+    for (auto e : wTags) {
+        const auto tagName = e.fieldNameStringData();
+        if (!e.isNumber()) {
+            return {
+                ErrorCodes::BadValue,
+                fmt::format(
+                    "Custom write mode only supports integer values, found: \"{}\" for tag: \"{}\"",
+                    e.toString(),
+                    tagName)};
+        }
+
+        const auto minNodesWithTag = e.safeNumberInt();
+        auto status = _tagConfig.addTagCountConstraintToPattern(&pattern, tagName, minNodesWithTag);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    return pattern;
+}
+
 void ReplSetConfig::_calculateMajorities() {
     const int voters = std::count_if(
         begin(getMembers()), end(getMembers()), [](const auto& x) { return x.isVoter(); });
@@ -696,6 +736,14 @@ bool ReplSetConfig::containsCustomizedGetLastErrorDefaults() const {
     const auto& getLastErrorDefaults = getDefaultWriteConcern();
     return !(getLastErrorDefaults.wNumNodes == 1 && getLastErrorDefaults.wTimeout == 0 &&
              getLastErrorDefaults.syncMode == WriteConcernOptions::SyncMode::UNSET);
+}
+
+bool ReplSetConfig::isSplitConfig() const {
+    return !!_recipientConfig;
+}
+
+ReplSetConfigPtr ReplSetConfig::getRecipientConfig() const {
+    return _recipientConfig;
 }
 
 MemberConfig* MutableReplSetConfig::_findMemberByID(MemberId id) {

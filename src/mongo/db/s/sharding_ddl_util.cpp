@@ -146,6 +146,35 @@ write_ops::UpdateCommandRequest buildNoopWriteRequestCommand() {
     return updateOp;
 }
 
+void setAllowMigrations(OperationContext* opCtx,
+                        const NamespaceString& nss,
+                        const boost::optional<UUID>& expectedCollectionUUID,
+                        bool allowMigrations) {
+    ConfigsvrSetAllowMigrations configsvrSetAllowMigrationsCmd(nss, allowMigrations);
+    configsvrSetAllowMigrationsCmd.setCollectionUUID(expectedCollectionUUID);
+
+    const auto swSetAllowMigrationsResult =
+        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
+            opCtx,
+            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+            NamespaceString::kAdminDb.toString(),
+            CommandHelpers::appendMajorityWriteConcern(configsvrSetAllowMigrationsCmd.toBSON({})),
+            Shard::RetryPolicy::kIdempotent  // Although ConfigsvrSetAllowMigrations is not really
+                                             // idempotent (because it will cause the collection
+                                             // version to be bumped), it is safe to be retried.
+        );
+    try {
+        uassertStatusOKWithContext(
+            Shard::CommandResponse::getEffectiveStatus(std::move(swSetAllowMigrationsResult)),
+            str::stream() << "Error setting allowMigrations to " << allowMigrations
+                          << " for collection " << nss.toString());
+    } catch (const ExceptionFor<ErrorCodes::NamespaceNotSharded>&) {
+        // Collection no longer exists
+    } catch (const ExceptionFor<ErrorCodes::ConflictingOperationInProgress>&) {
+        // Collection metadata was concurrently dropped
+    }
+}
+
 }  // namespace
 
 void linearizeCSRSReads(OperationContext* opCtx) {
@@ -160,11 +189,12 @@ void linearizeCSRSReads(OperationContext* opCtx) {
         ShardingCatalogClient::kMajorityWriteConcern));
 }
 
-void sendAuthenticatedCommandToShards(OperationContext* opCtx,
-                                      StringData dbName,
-                                      const BSONObj& command,
-                                      const std::vector<ShardId>& shardIds,
-                                      const std::shared_ptr<executor::TaskExecutor>& executor) {
+std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandToShards(
+    OperationContext* opCtx,
+    StringData dbName,
+    const BSONObj& command,
+    const std::vector<ShardId>& shardIds,
+    const std::shared_ptr<executor::TaskExecutor>& executor) {
     // TODO SERVER-57519: remove the following scope
     {
         // Ensure ShardRegistry is initialized before using the AsyncRequestsSender that relies on
@@ -180,7 +210,8 @@ void sendAuthenticatedCommandToShards(OperationContext* opCtx,
     BSONObjBuilder bob(command);
     rpc::writeAuthDataToImpersonatedUserMetadata(opCtx, &bob);
     auto authenticatedCommand = bob.obj();
-    sharding_util::sendCommandToShards(opCtx, dbName, authenticatedCommand, shardIds, executor);
+    return sharding_util::sendCommandToShards(
+        opCtx, dbName, authenticatedCommand, shardIds, executor);
 }
 
 void removeTagsMetadataFromConfig(OperationContext* opCtx,
@@ -402,34 +433,23 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadySharded(
 void stopMigrations(OperationContext* opCtx,
                     const NamespaceString& nss,
                     const boost::optional<UUID>& expectedCollectionUUID) {
-    ConfigsvrSetAllowMigrations configsvrSetAllowMigrationsCmd(nss, false /* allowMigrations */);
-    configsvrSetAllowMigrationsCmd.setCollectionUUID(expectedCollectionUUID);
-
-    const auto swSetAllowMigrationsResult =
-        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
-            opCtx,
-            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            NamespaceString::kAdminDb.toString(),
-            CommandHelpers::appendMajorityWriteConcern(configsvrSetAllowMigrationsCmd.toBSON({})),
-            Shard::RetryPolicy::kIdempotent  // Although ConfigsvrSetAllowMigrations is not really
-                                             // idempotent (because it will cause the collection
-                                             // version to be bumped), it is safe to be retried.
-        );
-
-    try {
-        uassertStatusOKWithContext(
-            Shard::CommandResponse::getEffectiveStatus(std::move(swSetAllowMigrationsResult)),
-            str::stream() << "Error setting allowMigrations to false for collection "
-                          << nss.toString());
-    } catch (const ExceptionFor<ErrorCodes::NamespaceNotSharded>&) {
-        // Collection no longer exists
-    } catch (const ExceptionFor<ErrorCodes::ConflictingOperationInProgress>&) {
-        // Collection metadata was concurrently dropped
-    }
+    setAllowMigrations(opCtx, nss, expectedCollectionUUID, false);
 }
 
-boost::optional<UUID> getCollectionUUID(OperationContext* opCtx, const NamespaceString& nss) {
-    AutoGetCollection autoColl(opCtx, nss, MODE_IS, AutoGetCollectionViewMode::kViewsForbidden);
+void resumeMigrations(OperationContext* opCtx,
+                      const NamespaceString& nss,
+                      const boost::optional<UUID>& expectedCollectionUUID) {
+    setAllowMigrations(opCtx, nss, expectedCollectionUUID, true);
+}
+
+boost::optional<UUID> getCollectionUUID(OperationContext* opCtx,
+                                        const NamespaceString& nss,
+                                        bool allowViews) {
+    AutoGetCollection autoColl(opCtx,
+                               nss,
+                               MODE_IS,
+                               allowViews ? AutoGetCollectionViewMode::kViewsPermitted
+                                          : AutoGetCollectionViewMode::kViewsForbidden);
     return autoColl ? boost::make_optional(autoColl->uuid()) : boost::none;
 }
 

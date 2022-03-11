@@ -37,6 +37,8 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/import_options.h"
+#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/engine_extension.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
@@ -111,7 +113,8 @@ public:
      */
     virtual Status importRecordStore(OperationContext* opCtx,
                                      StringData ident,
-                                     const BSONObj& storageMetadata) {
+                                     const BSONObj& storageMetadata,
+                                     const ImportOptions& importOptions) {
         MONGO_UNREACHABLE;
     }
 
@@ -126,7 +129,8 @@ public:
      */
     virtual Status importSortedDataInterface(OperationContext* opCtx,
                                              StringData ident,
-                                             const BSONObj& storageMetadata) {
+                                             const BSONObj& storageMetadata,
+                                             const ImportOptions& importOptions) {
         MONGO_UNREACHABLE;
     }
 
@@ -403,6 +407,15 @@ public:
      * See `StorageEngine::dump`
      */
     virtual void dump() const = 0;
+
+    /**
+     * Instructs the KVEngine to (re-)configure any internal logging
+     * capabilities. Returns Status::OK() if the logging subsystem was successfully
+     * configured (or if defaulting to the virtual implementation).
+     */
+    virtual Status reconfigureLogging() {
+        return Status::OK();
+    }
 
     /**
      * The destructor will never be called from mongod, but may be called from tests.

@@ -79,13 +79,20 @@ server_parameters:
         validator:
             gte: 1
 
+    indexMaxNumGeneratedKeysPerDocument:
+        description: 'Maximum number of index keys a single document is allowed to generate'
+        set_at: [ startup ]
+        cpp_vartype: int32_t
+        cpp_varname: gIndexMaxNumGeneratedKeysPerDocument
+        default: 100000
+        validator:
+            gte: 200
+
     storageGlobalParams.directoryperdb:
         description: 'Read-only view of directory per db config parameter'
-        # Actually, never.  TODO(SERVER-59813): Use correct IDL for this once support is added.
-        set_at: startup
+        set_at: 'readonly'
         cpp_class:
             name: StorageDirectoryPerDbParameter
-            override_ctor: true
 
     timeseriesValidateCompressedBuckets:
         description: 'Validate that there is no data loss before committing compressed timeseries buckets'
@@ -123,8 +130,17 @@ feature_flags:
     featureFlagYieldingSupportForSBE:
         description: "Enable retaining valid cursor across query yield"
         cpp_varname: feature_flags::gYieldingSupportForSBE
-        default: false
+        default: true
+        version: 5.3
     featureFlagCollModIndexUnique:
         description: "When enabled, collMod supports making an index unique"
         cpp_varname: feature_flags::gCollModIndexUnique
+        default: false
+    featureFlagCommandsAcceptCollectionUUID:
+        description: "When enabled, support specifying collection UUID for commands"
+        cpp_varname: feature_flags::gCommandsAcceptCollectionUUID
+        default: false
+    featureFlagSelectiveBackup:
+        description: "When enabled, support selective backups and restores on collections"
+        cpp_varname: feature_flags::gSelectiveBackup
         default: false

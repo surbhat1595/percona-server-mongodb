@@ -55,7 +55,6 @@ __wt_row_modify(WT_CURSOR_BTREE *cbt, const WT_ITEM *key, const WT_ITEM *value, 
     WT_PAGE *page;
     WT_PAGE_MODIFY *mod;
     WT_SESSION_IMPL *session;
-    WT_TXN *txn;
     WT_UPDATE *last_upd, *old_upd, *upd, **upd_entry;
     wt_timestamp_t prev_upd_ts;
     size_t ins_size, upd_size;
@@ -66,7 +65,6 @@ __wt_row_modify(WT_CURSOR_BTREE *cbt, const WT_ITEM *key, const WT_ITEM *value, 
     ins = NULL;
     page = cbt->ref->page;
     session = CUR2S(cbt);
-    txn = session->txn;
     last_upd = NULL;
     upd = upd_arg;
     prev_upd_ts = WT_TS_NONE;
@@ -264,16 +262,6 @@ __wt_row_modify(WT_CURSOR_BTREE *cbt, const WT_ITEM *key, const WT_ITEM *value, 
         WT_ERR(__wt_txn_op_set_key(session, key));
     }
 
-    /*
-     * This is temporary till we support more cases for resolving uncommitted updates: If we see a
-     * reserve update, we don't want to continue with resolving uncommitted updates. We also have to
-     * clear the weak hazard pointers we have already saved.
-     */
-    if (txn->resolve_weak_hazard_updates && modify_type == WT_UPDATE_RESERVE) {
-        txn->resolve_weak_hazard_updates = false;
-        WT_ERR(__wt_txn_op_list_clear_weak_hazard(session));
-    }
-
     if (0) {
 err:
         /* Remove the update from the current transaction, don't try to modify it on rollback. */
@@ -378,8 +366,6 @@ __wt_update_obsolete_check(
                 ++upd_unstable;
         }
     }
-
-    __wt_cache_update_hs_score(session, upd_seen, upd_unstable);
 
     /*
      * We cannot discard this WT_UPDATE structure, we can only discard WT_UPDATE structures

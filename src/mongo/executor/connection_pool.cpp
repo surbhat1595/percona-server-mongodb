@@ -61,6 +61,8 @@ namespace mongo {
 
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(refreshConnectionAfterEveryCommand);
+
 auto makeSeveritySuppressor() {
     return std::make_unique<logv2::KeyedSeveritySuppressor<HostAndPort>>(
         Seconds{1}, logv2::LogSeverity::Log(), logv2::LogSeverity::Debug(2));
@@ -306,6 +308,11 @@ public:
     size_t refreshingConnections() const;
 
     /**
+     * Returns the number of all refreshed connections in the pool.
+     */
+    size_t refreshedConnections() const;
+
+    /**
      * Returns the total number of connections ever created in this pool.
      */
     size_t createdConnections() const;
@@ -427,6 +434,8 @@ private:
     bool _updateScheduled = false;
 
     size_t _created = 0;
+
+    size_t _refreshed = 0;
 
     transport::Session::TagMask _tags = transport::Session::kPending;
 
@@ -582,7 +591,8 @@ void ConnectionPool::appendConnectionStats(ConnectionPoolStats* stats) const {
         ConnectionStatsPer hostStats{pool->inUseConnections(),
                                      pool->availableConnections(),
                                      pool->createdConnections(),
-                                     pool->refreshingConnections()};
+                                     pool->refreshingConnections(),
+                                     pool->refreshedConnections()};
         stats->updateStatsForHost(_name, host, hostStats);
     }
 }
@@ -628,6 +638,10 @@ size_t ConnectionPool::SpecificPool::availableConnections() const {
 
 size_t ConnectionPool::SpecificPool::refreshingConnections() const {
     return _processingPool.size();
+}
+
+size_t ConnectionPool::SpecificPool::refreshedConnections() const {
+    return _refreshed;
 }
 
 size_t ConnectionPool::SpecificPool::createdConnections() const {
@@ -730,6 +744,10 @@ ConnectionPool::ConnectionHandle ConnectionPool::SpecificPool::tryGetConnection(
 void ConnectionPool::SpecificPool::finishRefresh(ConnectionInterface* connPtr, Status status) {
     auto conn = takeFromProcessingPool(connPtr);
 
+    // We increment the total number of refreshed connections right upfront to track all completed
+    // refreshes.
+    _refreshed++;
+
     // If we're in shutdown, we don't need refreshed connections
     if (_health.isShutdown) {
         return;
@@ -814,10 +832,15 @@ void ConnectionPool::SpecificPool::returnConnection(ConnectionInterface* connPtr
         return;
     }
 
-    auto now = _parent->_factory->now();
-    if (needsRefreshTP <= now) {
-        // If we need to refresh this connection
+    // If we need to refresh this connection
+    bool shouldRefreshConnection = needsRefreshTP <= _parent->_factory->now();
 
+    if (MONGO_unlikely(refreshConnectionAfterEveryCommand.shouldFail())) {
+        LOGV2(5505501, "refresh connection after every command is on");
+        shouldRefreshConnection = true;
+    }
+
+    if (shouldRefreshConnection) {
         auto controls = _parent->_controller->getControls(_id);
         if (_readyPool.size() + _processingPool.size() + _checkedOutPool.size() >=
             controls.targetConnections) {
@@ -1121,6 +1144,14 @@ void ConnectionPool::SpecificPool::updateEventTimer() {
         nextEventTime = _requests.front().first;
     }
 
+    // Clamp next event time to be either now or in the future. Next event time
+    // can be in the past anytime we wait a long time between invocations of
+    // updateState; in these cases, we want to set our event timer to expire
+    // immediately.
+    if (nextEventTime < now) {
+        nextEventTime = now;
+    }
+
     // If our timer is already set to the next event, then we're done
     if (nextEventTime == _eventTimerExpiration) {
         return;
@@ -1133,7 +1164,7 @@ void ConnectionPool::SpecificPool::updateEventTimer() {
     _eventTimer->cancelTimeout();
 
     // Set our event timer to timeout requests, refresh the state, and potentially expire this pool
-    auto deferredStateUpdateFunc = guardCallback([this, timeout]() {
+    auto deferredStateUpdateFunc = guardCallback([this]() {
         auto now = _parent->_factory->now();
 
         _health.isFailed = false;

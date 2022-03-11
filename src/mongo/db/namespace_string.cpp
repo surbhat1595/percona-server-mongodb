@@ -34,6 +34,7 @@
 #include <ostream>
 
 #include "mongo/base/parse_number.h"
+#include "mongo/base/status.h"
 #include "mongo/db/server_options.h"
 #include "mongo/util/str.h"
 
@@ -342,6 +343,14 @@ bool NamespaceString::isChangeStreamPreImagesCollection() const {
     return ns() == kChangeStreamPreImagesNamespace.ns();
 }
 
+bool NamespaceString::isConfigImagesCollection() const {
+    return ns() == kConfigImagesNamespace.ns();
+}
+
+bool NamespaceString::isConfigTransactionsCollection() const {
+    return ns() == kSessionTransactionsTableNamespace.ns();
+}
+
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {
     return {db(), kTimeseriesBucketsCollectionPrefix.toString() + coll()};
 }
@@ -349,6 +358,17 @@ NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {
 NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
     invariant(isTimeseriesBucketsCollection(), ns());
     return {db(), coll().substr(kTimeseriesBucketsCollectionPrefix.size())};
+}
+
+bool NamespaceString::isImplicitlyReplicated() const {
+    if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() || isChangeCollection()) {
+        // Implicitly replicated namespaces are replicated, although they only replicate a subset of
+        // writes.
+        invariant(isReplicated());
+        return true;
+    }
+
+    return false;
 }
 
 bool NamespaceString::isReplicated() const {
@@ -368,6 +388,16 @@ bool NamespaceString::isReplicated() const {
 
     // E.g: `system.version` is replicated.
     return true;
+}
+
+Status NamespaceStringOrUUID::isNssValid() const {
+    if (!_nss || _nss->isValid()) {
+        return Status::OK();
+    }
+
+    // _nss is set and not valid.
+    return {ErrorCodes::InvalidNamespace,
+            str::stream() << "Namespace " << _nss << " is not a valid collection name"};
 }
 
 std::string NamespaceStringOrUUID::toString() const {

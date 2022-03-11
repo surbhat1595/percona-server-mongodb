@@ -948,8 +948,31 @@ findAndModify.
 For retry images saved in the image collection, the source will "downconvert" oplog entries with
 `needsRetryImage: true` into two oplog entries, simulating the old format. As chunk migrations use
 internal commands, [this downconverting procedure](https://github.com/mongodb/mongo/blob/0beb0cacfcaf7b24259207862e1d0d489e1c16f1/src/mongo/db/s/session_catalog_migration_source.cpp#L58-L97)
-is installed under the hood. For resharding and tenant migrations, a new aggregation stage will be
-introduced that performs the identical substituion.
+is installed under the hood. For resharding and tenant migrations, a new aggregation stage,
+[_internalFindAndModifyImageLookup](https://github.com/10gen/mongo/blob/e27dfa10b994f6deff7c59a122b87771cdfa8aba/src/mongo/db/pipeline/document_source_find_and_modify_image_lookup.cpp#L61),
+was introduced to perform the identical substitution. In order for this stage to have a valid timestamp
+to assign to the forged no-op oplog entry as result of the "downconvert", we must always assign an
+extra oplog slot when writing the original retryable findAndModify oplog entry with
+`needsRetryImage: true`.
+
+The server also supports [collection-level pre-images](https://docs.mongodb.com/realm/mongodb/trigger-preimages/#overview), a feature used by MongoDB Realm. This feature continues to store document pre-images in
+the oplog, and is expected to work with the new retryable findAndModify behavior described above.
+With this, it's possible that for a particular update operation, we must store a pre-image
+(for collection-level pre-images) in the oplog while storing the post-image
+(for retryable findAndModify) in `config.image_collection`. In order to avoid certain WiredTiger
+constraints surrounding setting multiple timestamps in a single storage transaction, we must reserve
+oplog slots before entering the OpObserver, which is where we would normally create an oplog entry
+and assign it the next available timestamp. Here, we have a table that describes the different
+scenarios, along with the timestamps that are reserved and the oplog entries assigned to each of
+those timestamps:
+| Parameters | NumSlotsReserved | TS - 2 | TS - 1 | TS | Oplog fields for entry with timestamp: TS |
+| --- | --- | --- | --- | --- | --- |
+| Update, NeedsRetryImage=postImage, preImageRecordingEnabled = True | 3 | No-op oplog entry storing the pre-image|Reserved for forged no-op entry eventually used by tenant migrations/resharding | Update oplog entry | NeedsRetryImage: postImage, preImageOpTime: \{TS - 2} |
+| Update, NeedsRetryImage=preImage, preImageRecordingEnabled=True | 3 |No-op oplog entry storing the pre-image | Reserved but will not be used|Update Oplog entry | preImageOpTime: \{TS - 2} |
+| Update, NeedsRetryImage=preImage, preImageRecordingEnabled=False | 2 | N/A | Reserved for forged no-op entry eventually used by tenant migrations/resharding|Update oplog entry|NeedsRetryImage: preImage |
+| Update, NeedsRetryImage=postImage, preImageRecordingEnabled=False | 2 | N/A | Reserved for forged no-op entry eventually used by tenant migrations/resharding|Update oplog entry | NeedsRetryImage: postImage |
+| Delete, NeedsRetryImage=preImage, preImageRecordingEnabled = True | 0. Note that the OpObserver will still create a no-op entry along with the delete oplog entry, assigning them the next two available timestamps (TS - 1 and TS respectively). | N/A | No-op oplog entry storing the pre-image|Delete oplog entry | preImageOpTime: \{TS - 1} |
+|Delete, NeedsRetryImage=preImage, preImageRecordingEnabled = False|2|N/A|Reserved for forged no-op entry eventually used by tenant migrations/resharding|Delete oplog entry|NeedsRetryImage: preImage|
 
 #### Code references
 * [**TransactionParticipant class**](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/transaction_participant.h)
@@ -1069,7 +1092,7 @@ information for all chunks in the collection. That information is stored in an o
 key of each chunk to an entry that contains routing information for the chunk, such as chunk range,
 chunk version and chunk history. The chunk history contains the shard id for the shard that currently
 owns the chunk, and the shard id for any other shards that used to own the chunk in the past
-`minSnapshotHistoryWindowInSeconds` (defaults to 10 seconds). It corresponds to the chunk history in
+`minSnapshotHistoryWindowInSeconds` (defaults to 300 seconds). It corresponds to the chunk history in
 the `config.chunks` document for the chunk which gets updated whenever the chunk goes through an
 operation, such as merge or migration. The `ChunkManager` uses this information to determine the
 shards to target for a query. If the clusterTime is not provided, it will return the shards that
@@ -1158,3 +1181,70 @@ drivers will not specify this flag at all, so the behavior remains the same.
 #### Code references
 * [isMaster command](https://github.com/mongodb/mongo/blob/r4.8.0-alpha/src/mongo/s/commands/cluster_is_master_cmd.cpp#L248) for mongos.
 * [hello command](https://github.com/mongodb/mongo/blob/r4.8.0-alpha/src/mongo/s/commands/cluster_is_master_cmd.cpp#L64) for mongos.
+
+# Cluster DDL operations
+
+[Data Definition Language](https://en.wikipedia.org/wiki/Data_definition_language) (DDL) operations are operations that change the metadata;
+some examples of DDLs are create/drop database or create/rename/drop collection.
+
+Metadata are tracked in the two main MongoDB catalogs:
+- *[Local catalog](https://github.com/mongodb/mongo/blob/master/src/mongo/db/catalog/README.md#the-catalog)*: present on each shard, keeping
+track of databases/collections/indexes the shard owns or has knowledge of.
+- *Sharded Catalog*: residing on the config server, keeping track of the metadata of databases and sharded collections for which it serves
+as the authoritative source of information.
+
+## Sharding DDL Coordinator
+The [ShardingDDLCoordinator](https://github.com/mongodb/mongo/blob/106b96548c5214a8e246a1cf6ac005a3985c16d4/src/mongo/db/s/sharding_ddl_coordinator.h#L47-L191)
+is the main component of the DDL infrastructure for sharded clusters: it is an abstract class whose concrete implementations have the
+responsibility of coordinating the different DDL operations between shards and the config server in order to keep the two catalogs
+consistent. When a DDL request is received by a router, it gets forwarded to the [primary shard](https://docs.mongodb.com/manual/core/sharded-cluster-shards/#primary-shard)
+of the targeted database. For the sake of clarity, createDatabase is the only DDL operation that cannot possibly get forwarded to the
+database primary but is instead routed to the config server, as the database may not exist yet.
+
+##### Serialization and joinability of DDL operations 
+When a primary shard receives a DDL request, it tries to construct a DDL coordinator performing the following steps:
+- Acquire the [distributed lock for the database](https://github.com/mongodb/mongo/blob/908e394d39b223ce498fde0d40e18c9200c188e2/src/mongo/db/s/sharding_ddl_coordinator.cpp#L155). This ensures that at most one DDL operation at a time will run for namespaces belonging to the same database on that particular primary node.
+- Acquire the distributed lock for the [collection](https://github.com/mongodb/mongo/blob/908e394d39b223ce498fde0d40e18c9200c188e2/src/mongo/db/s/sharding_ddl_coordinator.cpp#L171) (or [collections](https://github.com/mongodb/mongo/blob/908e394d39b223ce498fde0d40e18c9200c188e2/src/mongo/db/s/sharding_ddl_coordinator.cpp#L181)) involved in the operation.
+
+In case a new DDL petition on the same namespace gets forwarded by a router while a DDL coordinator is instantiated, a [check is performed](https://github.com/mongodb/mongo/blob/b7a055f55a202ba870730fb865579acf5d9fb90f/src/mongo/db/s/sharding_ddl_coordinator.h#L54-L61)
+on the shard in order to join the ongoing operation if the options match (same operation with same parameters) or fail if they don't
+(different operation or same operation with different parameters).
+
+##### Execution of DDL coordinators
+Once the distributed locks have been acquired, it is guaranteed that no other concurrent DDLs are happening for the same database,
+hence a DDL coordinator can safely start [executing the operation](https://github.com/mongodb/mongo/blob/master/src/mongo/db/s/sharding_ddl_coordinator.cpp#L207).
+
+As first step, each coordinator is required to [majority commit a document](https://github.com/mongodb/mongo/blob/2ae2bcedfb7d48e64843dd56b9e4f107c56944b6/src/mongo/db/s/sharding_ddl_coordinator.h#L105-L116) - 
+that we will refer to as state document - containing all information regarding the running operation such as name of the DDL, namespaces
+involved and other metadata identifying the original request. At this point, the coordinator is entitled to start making both local and
+remote catalog modifications, eventually after blocking CRUD operations on the changing namespaces; when the execution reaches relevant
+points, the state can be checkpointed by [updating the state document](https://github.com/mongodb/mongo/blob/b7a055f55a202ba870730fb865579acf5d9fb90f/src/mongo/db/s/sharding_ddl_coordinator.h#L118-L127).
+
+The completion of a DDL operation is marked by the [state document removal](https://github.com/mongodb/mongo/blob/b7a055f55a202ba870730fb865579acf5d9fb90f/src/mongo/db/s/sharding_ddl_coordinator.cpp#L258)
+followed by the [release of the distributed locks](https://github.com/mongodb/mongo/blob/b7a055f55a202ba870730fb865579acf5d9fb90f/src/mongo/db/s/sharding_ddl_coordinator.cpp#L291-L298)
+in inverse order of acquisition.
+
+Some DDL operations are required to block migrations before actually executing so that the coordinator has a consistent view of which
+shards contain data for the collection. The [setAllowMigration command](https://github.com/mongodb/mongo/blob/c5fd926e176fcaf613d9fb785f5bdc70e1aa14be/src/mongo/db/s/config/configsvr_set_allow_migrations_command.cpp#L42)
+serves the purpose of blocking ongoing migrations and avoiding new ones to start.
+
+##### Resiliency to elections, crashes and errors
+
+DDL coordinators are resilient to elections and sudden crashes because they're instances of a [primary only service](https://github.com/mongodb/mongo/blob/master/docs/primary_only_service.md)
+that - by definition - gets automatically resumed when the node of a shard steps up.
+
+The coordinator state document has a double aim:
+- It serves the purpose of primary only service state document.
+- It tracks the progress of a DDL operation.
+
+Steps executed by coordinators are implemented in idempotent phases. When entering a phase, the state is checkpointed as majority committed
+on the state document before actually executing the phase. If a node fails or steps down, it is then safe to resume the DDL operation as
+follows: skip previous phases and re-execute starting from the checkpointed phase.
+
+When a new primary node is elected, the DDL primary only service is [rebuilt](https://github.com/mongodb/mongo/blob/20549d58943b586749d1570eee834c71bdef1b37/src/mongo/db/s/sharding_ddl_coordinator_service.cpp#L158-L185)
+resuming outstanding coordinators, if present; during this recovery phase, incoming DDL operations are [temporarily put on hold](https://github.com/mongodb/mongo/blob/20549d58943b586749d1570eee834c71bdef1b37/src/mongo/db/s/sharding_ddl_coordinator_service.cpp#L152-L156)
+waiting for pre-existing DDL coordinators to be re-instantiated in order to avoid conflicts in the acquisition of the distributed locks.
+
+If a [recoverable error](https://github.com/mongodb/mongo/blob/a1752a0f5300b3a4df10c0a704c07e597c3cd291/src/mongo/db/s/sharding_ddl_coordinator.cpp#L216-L226)
+is caught at execution-time, it will be retried indefinitely; all other errors errors have the effect of stopping and destructing the DDL coordinator and -
+because of that - are never expected to happen after a coordinator performs destructive operations.

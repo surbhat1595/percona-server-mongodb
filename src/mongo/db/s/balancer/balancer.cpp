@@ -46,12 +46,12 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/s/balancer/balancer_chunk_merger_impl.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy_impl.h"
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
 #include "mongo/db/s/balancer/balancer_defragmentation_policy_impl.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/logv2/log.h"
@@ -60,7 +60,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/balancer_collection_status_gen.h"
-#include "mongo/s/request_types/configure_collection_auto_split_gen.h"
+#include "mongo/s/request_types/configure_collection_balancing_gen.h"
 #include "mongo/s/shard_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
@@ -374,6 +374,14 @@ void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
 
 void Balancer::_consumeActionStreamLoop() {
     Client::initThread("BalancerSecondary");
+    auto applyThrottling = [lastActionTime = Date_t::fromMillisSinceEpoch(0)]() mutable {
+        const Milliseconds throttle{chunkDefragmentationThrottlingMS.load()};
+        auto timeSinceLastAction = Date_t::now() - lastActionTime;
+        if (throttle > timeSinceLastAction) {
+            sleepFor(throttle - timeSinceLastAction);
+        }
+        lastActionTime = Date_t::now();
+    };
     auto opCtx = cc().makeOperationContext();
     executor::ScopedTaskExecutor executor(
         Grid::get(opCtx.get())->getExecutorPool()->getFixedExecutor());
@@ -385,6 +393,7 @@ void Balancer::_consumeActionStreamLoop() {
         stdx::visit(
             visit_helper::Overloaded{
                 [&](MergeInfo mergeAction) {
+                    applyThrottling();
                     auto result =
                         _commandScheduler
                             ->requestMergeChunks(opCtx.get(),
@@ -394,7 +403,6 @@ void Balancer::_consumeActionStreamLoop() {
                                                  mergeAction.collectionVersion)
                             .thenRunOn(*executor)
                             .onCompletion([this, mergeAction](const Status& status) {
-                                // TODO (SERVER-61880) Remove this ThreadClient
                                 ThreadClient tc(
                                     "BalancerDefragmentationPolicy::acknowledgeMergeResult",
                                     getGlobalServiceContext());
@@ -416,7 +424,6 @@ void Balancer::_consumeActionStreamLoop() {
                             .thenRunOn(*executor)
                             .onCompletion([this, dataSizeAction](
                                               const StatusWith<DataSizeResponse>& swDataSize) {
-                                // TODO (SERVER-61880) Remove this ThreadClient
                                 ThreadClient tc(
                                     "BalancerDefragmentationPolicy::acknowledgeDataSizeResult",
                                     getGlobalServiceContext());
@@ -436,30 +443,38 @@ void Balancer::_consumeActionStreamLoop() {
                                                      splitVectorAction.maxKey,
                                                      splitVectorAction.maxChunkSizeBytes)
                             .thenRunOn(*executor)
-                            .onCompletion(
-                                [this, splitVectorAction](
-                                    const StatusWith<std::vector<BSONObj>>& swSplitPoints) {
-                                    auto opCtx = cc().makeOperationContext();
-                                    _defragmentationPolicy->acknowledgeAutoSplitVectorResult(
-                                        opCtx.get(), splitVectorAction, swSplitPoints);
-                                });
+                            .onCompletion([this, splitVectorAction](
+                                              const StatusWith<std::vector<BSONObj>>&
+                                                  swSplitPoints) {
+                                ThreadClient tc(
+                                    "BalancerDefragmentationPolicy::acknowledgeSplitVectorResult",
+                                    getGlobalServiceContext());
+                                auto opCtx = tc->makeOperationContext();
+                                _defragmentationPolicy->acknowledgeAutoSplitVectorResult(
+                                    opCtx.get(), splitVectorAction, swSplitPoints);
+                            });
                 },
                 [&](SplitInfoWithKeyPattern splitAction) {
-                    auto result = _commandScheduler
-                                      ->requestSplitChunk(opCtx.get(),
-                                                          splitAction.info.nss,
-                                                          splitAction.info.shardId,
-                                                          splitAction.info.collectionVersion,
-                                                          splitAction.keyPattern,
-                                                          splitAction.info.minKey,
-                                                          splitAction.info.maxKey,
-                                                          splitAction.info.splitKeys)
-                                      .thenRunOn(*executor)
-                                      .onCompletion([this, splitAction](const Status& status) {
-                                          auto opCtx = cc().makeOperationContext();
-                                          _defragmentationPolicy->acknowledgeSplitResult(
-                                              opCtx.get(), splitAction, status);
-                                      });
+                    applyThrottling();
+                    auto result =
+                        _commandScheduler
+                            ->requestSplitChunk(opCtx.get(),
+                                                splitAction.info.nss,
+                                                splitAction.info.shardId,
+                                                splitAction.info.collectionVersion,
+                                                splitAction.keyPattern,
+                                                splitAction.info.minKey,
+                                                splitAction.info.maxKey,
+                                                splitAction.info.splitKeys)
+                            .thenRunOn(*executor)
+                            .onCompletion([this, splitAction](const Status& status) {
+                                ThreadClient tc(
+                                    "BalancerDefragmentationPolicy::acknowledgeSplitResult",
+                                    getGlobalServiceContext());
+                                auto opCtx = tc->makeOperationContext();
+                                _defragmentationPolicy->acknowledgeSplitResult(
+                                    opCtx.get(), splitAction, status);
+                            });
                 },
                 [](EndOfActionStream eoa) {}},
             action);
@@ -539,7 +554,6 @@ void Balancer::_mainThread() {
                 _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
                 continue;
             }
-
             if (!balancerConfig->shouldBalance() || _stopOrPauseRequested()) {
                 LOGV2_DEBUG(21859, 1, "Skipping balancing round because balancing is disabled");
                 _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
@@ -896,7 +910,7 @@ Balancer::BalancerStatus Balancer::getBalancerStatusForNs(OperationContext* opCt
     // TODO (SERVER-61727) update this with phase 2
     try {
         auto coll = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, ns, {});
-        bool isMerging = _defragmentationPolicy->isDefragmentingCollection(coll.getUuid());
+        bool isMerging = coll.getBalancerShouldMergeChunks();
         if (isMerging) {
             return {false, kBalancerPolicyStatusChunksMerging.toString()};
         }

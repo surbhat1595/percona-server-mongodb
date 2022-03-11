@@ -36,6 +36,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
@@ -315,6 +316,12 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
             !db || !ViewCatalog::get(db)->lookup(opCtx, ns));
 
     if (createCollImplicitly) {
+        for (const auto& spec : specs) {
+            uassert(6100900,
+                    "Cannot implicitly create a new collection with createIndex 'clustered' option",
+                    !spec["clustered"]);
+        }
+
         // We need to create the collection.
         BSONObjBuilder builder;
         builder.append("create", ns.coll());

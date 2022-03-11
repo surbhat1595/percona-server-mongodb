@@ -45,11 +45,16 @@ using namespace fmt::literals;
 
 namespace WriteConcerns {
 
-const WriteConcernOptions kMajorityWriteConcern{WriteConcernOptions::kMajority,
-                                                WriteConcernOptions::SyncMode::UNSET,
-                                                WriteConcernOptions::kWriteConcernTimeoutSharding};
+const WriteConcernOptions kMajorityWriteConcernShardingTimeout{
+    WriteConcernOptions::kMajority,
+    WriteConcernOptions::SyncMode::UNSET,
+    WriteConcernOptions::kWriteConcernTimeoutSharding};
 
-}
+const WriteConcernOptions kMajorityWriteConcernNoTimeout{WriteConcernOptions::kMajority,
+                                                         WriteConcernOptions::SyncMode::UNSET,
+                                                         WriteConcernOptions::kNoTimeout};
+
+}  // namespace WriteConcerns
 
 template <typename T>
 class PersistentTaskStore {
@@ -61,7 +66,8 @@ public:
      */
     void add(OperationContext* opCtx,
              const T& task,
-             const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern) {
+             const WriteConcernOptions& writeConcern =
+                 WriteConcerns::kMajorityWriteConcernShardingTimeout) {
         DBDirectClient dbClient(opCtx);
 
         const auto commandResponse = dbClient.runCommand([&] {
@@ -85,7 +91,8 @@ public:
     void update(OperationContext* opCtx,
                 const BSONObj& filter,
                 const BSONObj& update,
-                const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern) {
+                const WriteConcernOptions& writeConcern =
+                    WriteConcerns::kMajorityWriteConcernShardingTimeout) {
         _update(opCtx, filter, update, /* upsert */ false, writeConcern);
     }
 
@@ -96,7 +103,8 @@ public:
     void upsert(OperationContext* opCtx,
                 const BSONObj& filter,
                 const BSONObj& update,
-                const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern) {
+                const WriteConcernOptions& writeConcern =
+                    WriteConcerns::kMajorityWriteConcernShardingTimeout) {
         _update(opCtx, filter, update, /* upsert */ true, writeConcern);
     }
 
@@ -105,7 +113,8 @@ public:
      */
     void remove(OperationContext* opCtx,
                 const BSONObj& filter,
-                const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern) {
+                const WriteConcernOptions& writeConcern =
+                    WriteConcerns::kMajorityWriteConcernShardingTimeout) {
         DBDirectClient dbClient(opCtx);
 
         auto commandResponse = dbClient.runCommand([&] {
@@ -141,7 +150,9 @@ public:
                  std::function<bool(const T&)> handler) {
         DBDirectClient dbClient(opCtx);
 
-        auto cursor = dbClient.query(_storageNss, filter);
+        FindCommandRequest findRequest{_storageNss};
+        findRequest.setFilter(filter);
+        auto cursor = dbClient.find(std::move(findRequest));
 
         while (cursor->more()) {
             auto bson = cursor->next();
@@ -159,8 +170,10 @@ public:
     size_t count(OperationContext* opCtx, const BSONObj& filter = BSONObj{}) {
         DBDirectClient client(opCtx);
 
-        auto projection = BSON("_id" << 1);
-        auto cursor = client.query(_storageNss, filter, Query(), 0, 0, &projection);
+        FindCommandRequest findRequest{_storageNss};
+        findRequest.setFilter(filter);
+        findRequest.setProjection(BSON("_id" << 1));
+        auto cursor = client.find(std::move(findRequest));
 
         return cursor->itcount();
     }
@@ -170,7 +183,8 @@ private:
                  const BSONObj& filter,
                  const BSONObj& update,
                  bool upsert,
-                 const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcern) {
+                 const WriteConcernOptions& writeConcern =
+                     WriteConcerns::kMajorityWriteConcernShardingTimeout) {
         DBDirectClient dbClient(opCtx);
 
         auto commandResponse = dbClient.update([&] {

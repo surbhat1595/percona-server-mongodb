@@ -72,6 +72,12 @@ PlanStage::StageState UpsertStage::doWork(WorkingSetID* out) {
         return StageState::IS_EOF;
     }
 
+    boost::optional<repl::UnreplicatedWritesBlock> unReplBlock;
+    if (collection()->ns().isImplicitlyReplicated()) {
+        // Implictly replicated collections do not replicate updates.
+        unReplBlock.emplace(opCtx());
+    }
+
     // First, attempt to perform the update on a matching document.
     auto updateState = UpdateStage::doWork(out);
 
@@ -125,7 +131,7 @@ void UpsertStage::_performInsert(BSONObj newDocument) {
         if (css->getCollectionDescription(opCtx()).isSharded()) {
             const auto collFilter = css->getOwnershipFilter(
                 opCtx(), CollectionShardingState::OrphanCleanupPolicy::kAllowOrphanCleanup);
-            const ShardKeyPattern shardKeyPattern(collFilter.getKeyPattern());
+            const ShardKeyPattern& shardKeyPattern = collFilter.getShardKeyPattern();
             auto newShardKey = shardKeyPattern.extractShardKeyFromDoc(newDocument);
 
             if (!collFilter.keyBelongsToMe(newShardKey)) {

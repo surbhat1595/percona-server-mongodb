@@ -82,7 +82,7 @@ std::string getThreadNameByAppName(DBClientBase* conn, StringData appName) {
     const auto cursorResponse = CursorResponse::parseFromBSON(curOpReply->getCommandReply());
     ASSERT_OK(cursorResponse.getStatus());
     const auto batch = cursorResponse.getValue().getBatch();
-    return batch.empty() ? "" : batch[0].getStringField("desc");
+    return batch.empty() ? "" : batch[0].getStringField("desc").toString();
 }
 
 TEST(OpMsg, UnknownRequiredFlagClosesConnection) {
@@ -1165,8 +1165,14 @@ TEST(OpMsg, ExhaustWithDBClientCursorBehavesCorrectly) {
 
     // Open an exhaust cursor.
     int batchSize = 2;
-    auto cursor = conn->query(
-        nss, BSONObj{}, Query().sort("_id", 1), 0, 0, nullptr, QueryOption_Exhaust, batchSize);
+    auto cursor = conn->query_DEPRECATED(nss,
+                                         BSONObj{},
+                                         Query().sort(BSON("_id" << 1)),
+                                         0,
+                                         0,
+                                         nullptr,
+                                         QueryOption_Exhaust,
+                                         batchSize);
 
     // Verify that the documents are returned properly. Exhaust cursors should still receive results
     // in batches, so we check that these batches correspond to the given specified batch size.

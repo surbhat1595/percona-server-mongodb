@@ -372,6 +372,14 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
         return PlanStage::IS_EOF;
     }
 
+    boost::optional<repl::UnreplicatedWritesBlock> unReplBlock;
+    if (collection()->ns().isImplicitlyReplicated() && !_isUserInitiatedWrite) {
+        // Implictly replicated collections do not replicate updates.
+        // However, user-initiated writes and some background maintenance tasks are allowed
+        // to replicate as they cannot be derived from the oplog.
+        unReplBlock.emplace(opCtx());
+    }
+
     // It is possible that after an update was applied, a WriteConflictException
     // occurred and prevented us from returning ADVANCED with the requested version
     // of the document.
@@ -440,6 +448,23 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
                 throw WriteConflictException();
             }
             return PlanStage::NEED_TIME;
+        }
+
+        {
+            BSONObj unownedOldDoc = member->doc.value().toBson();
+
+            if (!_params.request->explain() && _isUserInitiatedWrite &&
+                write_stage_common::skipWriteToOrphanDocument(
+                    opCtx(), collection()->ns(), unownedOldDoc)) {
+                LOGV2_DEBUG(5983200,
+                            1,
+                            "Abort update operation to orphan document to prevent a wrong change "
+                            "stream event",
+                            "namespace"_attr = collection()->ns(),
+                            "record"_attr = redact(unownedOldDoc));
+
+                return PlanStage::NEED_TIME;
+            }
         }
 
         // Ensure that the BSONObj underlying the WorkingSetMember is owned because saveState()
@@ -677,7 +702,7 @@ bool UpdateStage::wasExistingShardKeyUpdated(const ShardingWriteRouter& sharding
                                              const Snapshotted<BSONObj>& oldObj) {
     const auto css = shardingWriteRouter.getCollectionShardingState();
 
-    const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
+    const ShardKeyPattern& shardKeyPattern = collDesc.getShardKeyPattern();
     auto oldShardKey = shardKeyPattern.extractShardKeyFromDoc(oldObj.value());
     auto newShardKey = shardKeyPattern.extractShardKeyFromDoc(newObj);
 

@@ -112,7 +112,7 @@ StatusWith<OpMsgRequest> createX509AuthCmd(const BSONObj& params, StringData cli
     if (username != clientName.toString()) {
         StringBuilder message;
         message << "Username \"";
-        message << params[saslCommandUserFieldName].valuestr();
+        message << params[saslCommandUserFieldName].valueStringData();
         message << "\" does not match the provided client certificate user \"";
         message << clientName.toString() << "\"";
         return {ErrorCodes::AuthenticationFailed, message.str()};
@@ -277,14 +277,11 @@ Future<void> authenticateInternalClient(
         });
 }
 
-BSONObj buildAuthParams(StringData dbname,
-                        StringData username,
-                        StringData passwordText,
-                        bool digestPassword) {
-    return BSON(saslCommandMechanismFieldName
-                << "SCRAM-SHA-1" << saslCommandUserDBFieldName << dbname << saslCommandUserFieldName
-                << username << saslCommandPasswordFieldName << passwordText
-                << saslCommandDigestPasswordFieldName << digestPassword);
+BSONObj buildAuthParams(StringData dbname, StringData username, StringData passwordText) {
+
+    return BSON(saslCommandMechanismFieldName << "SCRAM-SHA-256" << saslCommandUserDBFieldName
+                                              << dbname << saslCommandUserFieldName << username
+                                              << saslCommandPasswordFieldName << passwordText);
 }
 
 StringData getSaslCommandUserDBFieldName() {

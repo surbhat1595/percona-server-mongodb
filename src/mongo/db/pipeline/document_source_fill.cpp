@@ -44,8 +44,8 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(fill,
                                        document_source_fill::createFromBson,
                                        AllowedWithApiStrict::kNeverInVersion1,
                                        AllowedWithClientType::kAny,
-                                       multiversion::FeatureCompatibilityVersion::kVersion_5_2,
-                                       feature_flags::gFlagFill.isEnabledAndIgnoreFCV());
+                                       feature_flags::gFeatureFlagFill.getVersion(),
+                                       feature_flags::gFeatureFlagFill.isEnabledAndIgnoreFCV());
 namespace document_source_fill {
 
 std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
@@ -89,13 +89,17 @@ std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
                     str::stream() << "Method must be either " << kLocfMethod << " or "
                                   << kLinearInterpolateMethod,
                     methodStr == kLocfMethod || methodStr == kLinearInterpolateMethod);
-            setWindowFieldsOutputSpec.append(fieldName, BSON("$" + methodStr << "$" + fieldName));
+            auto&& fullMethodStr =
+                methodStr == kLinearInterpolateMethod ? "$" + methodStr + "Fill" : "$" + methodStr;
+            setWindowFieldsOutputSpec.append(fieldName, BSON(fullMethodStr << "$" + fieldName));
             needSetWindowFields = true;
         }
         if (auto&& unparsedValueExpr = parsedSpec.getValue()) {
             // Value fields are BSONAnyType.
-            auto valueObj = unparsedValueExpr.value().getElement().wrap(fieldName);
-            addFieldsSpec.appendElements(valueObj);
+            auto valueElem = unparsedValueExpr.value().getElement();
+            BSONObj fullFieldSpec =
+                BSON(fieldName << BSON("$ifNull" << BSON_ARRAY("$" + fieldName << valueElem)));
+            addFieldsSpec.appendElements(fullFieldSpec);
         }
     }
     setWindowFieldsOutputSpec.done();

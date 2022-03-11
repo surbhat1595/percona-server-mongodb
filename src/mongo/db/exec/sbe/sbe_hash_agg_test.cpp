@@ -64,9 +64,9 @@ void HashAggStageTest::performHashAggWithSpillChecking(
     value::ValueGuard expectedGuard{expectedTag, expectedVal};
 
     auto collatorSlot = generateSlotId();
-    auto shouldUseCollator = optionalCollator.get() != nullptr;
+    auto shouldUseCollator = optionalCollator != nullptr;
 
-    auto makeStageFn = [this, collatorSlot, shouldUseCollator](
+    auto makeStageFn = [this, collatorSlot, shouldUseCollator, shouldSpill](
                            value::SlotId scanSlot, std::unique_ptr<PlanStage> scanStage) {
         auto countsSlot = generateSlotId();
 
@@ -80,6 +80,7 @@ void HashAggStageTest::performHashAggWithSpillChecking(
             makeSV(),
             true,
             boost::optional<value::SlotId>{shouldUseCollator, collatorSlot},
+            shouldSpill,
             kEmptyPlanNodeId);
 
         return std::make_pair(countsSlot, std::move(hashAggStage));
@@ -91,23 +92,12 @@ void HashAggStageTest::performHashAggWithSpillChecking(
     if (shouldUseCollator) {
         ctx->pushCorrelated(collatorSlot, &collatorAccessor);
         collatorAccessor.reset(value::TypeTags::collator,
-                               value::bitcastFrom<CollatorInterface*>(optionalCollator.get()));
+                               value::bitcastFrom<CollatorInterface*>(optionalCollator.release()));
     }
 
     // Generate a mock scan from 'input' with a single output slot.
     inputGuard.reset();
     auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
-
-    // Prepare the tree and get the 'SlotAccessor' for the output slot.
-    if (shouldSpill) {
-        auto hashAggStage = makeStageFn(scanSlot, std::move(scanStage));
-        // 'prepareTree()' also opens the tree after preparing it thus the spilling error should
-        // occur in 'prepareTree()'.
-        ASSERT_THROWS_CODE(prepareTree(ctx.get(), hashAggStage.second.get(), hashAggStage.first),
-                           DBException,
-                           5859000);
-        return;
-    }
 
     auto [outputSlot, stage] = makeStageFn(scanSlot, std::move(scanStage));
     auto resultAccessor = prepareTree(ctx.get(), stage.get(), outputSlot);
@@ -165,8 +155,8 @@ TEST_F(HashAggStageTest, HashAggMinMaxTest) {
 
     auto makeStageFn = [this, &collator](value::SlotId scanSlot,
                                          std::unique_ptr<PlanStage> scanStage) {
-        auto collExpr = makeE<EConstant>(value::TypeTags::collator,
-                                         value::bitcastFrom<CollatorInterface*>(collator.get()));
+        auto collExpr = makeE<EConstant>(
+            value::TypeTags::collator, value::bitcastFrom<CollatorInterface*>(collator.release()));
 
         // Build a HashAggStage that exercises the collMin() and collMax() aggregate functions.
         auto minSlot = generateSlotId();
@@ -189,6 +179,7 @@ TEST_F(HashAggStageTest, HashAggMinMaxTest) {
             makeSV(),
             true,
             boost::none,
+            false /* allowDiskUse */,
             kEmptyPlanNodeId);
 
         auto outSlot = generateSlotId();
@@ -231,8 +222,8 @@ TEST_F(HashAggStageTest, HashAggAddToSetTest) {
 
     auto makeStageFn = [this, &collator](value::SlotId scanSlot,
                                          std::unique_ptr<PlanStage> scanStage) {
-        auto collExpr = makeE<EConstant>(value::TypeTags::collator,
-                                         value::bitcastFrom<CollatorInterface*>(collator.get()));
+        auto collExpr = makeE<EConstant>(
+            value::TypeTags::collator, value::bitcastFrom<CollatorInterface*>(collator.release()));
 
         // Build a HashAggStage that exercises the collAddToSet() aggregate function.
         auto hashAggSlot = generateSlotId();
@@ -245,6 +236,7 @@ TEST_F(HashAggStageTest, HashAggAddToSetTest) {
             makeSV(),
             true,
             boost::none,
+            false /* allowDiskUse */,
             kEmptyPlanNodeId);
 
         return std::make_pair(hashAggSlot, std::move(hashAggStage));
@@ -342,6 +334,7 @@ TEST_F(HashAggStageTest, HashAggSeekKeysTest) {
             makeSV(seekSlot),
             true,
             boost::none,
+            false /* allowDiskUse */,
             kEmptyPlanNodeId);
 
         return std::make_pair(countsSlot, std::move(hashAggStage));
@@ -376,6 +369,277 @@ TEST_F(HashAggStageTest, HashAggSeekKeysTest) {
     auto [res3Tag, res3Val] = resultAccessor->getViewOfValue();
     // There are '4' occurences of '7' in the input.
     assertValuesEqual(res3Tag, res3Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(4));
+    ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
+
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggBasicCountSpill) {
+    // Changing the query knobs to always re-estimate the hash table size in HashAgg and spill when
+    // estimated size is >= 4 * 8.
+    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
+    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(4 * 8);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
+            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
+    });
+    auto defaultInternalQuerySBEAggMemoryUseSampleRate =
+        internalQuerySBEAggMemoryUseSampleRate.load();
+    internalQuerySBEAggMemoryUseSampleRate.store(1.0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggMemoryUseSampleRate.store(defaultInternalQuerySBEAggMemoryUseSampleRate);
+    });
+
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] =
+        stage_builder::makeValue(BSON_ARRAY(5 << 6 << 7 << 5 << 6 << 7 << 6 << 7 << 7));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto stage = makeS<HashAggStage>(
+        std::move(scanStage),
+        makeSV(scanSlot),
+        makeEM(countsSlot,
+               stage_builder::makeFunction(
+                   "sum",
+                   makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1)))),
+        makeSV(),  // Seek slot
+        true,
+        boost::none,
+        true /* allowDiskUse */,
+        kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res1Tag, res1Val] = resultAccessor->getViewOfValue();
+    // There are '2' occurences of '5' in the input.
+    assertValuesEqual(res1Tag, res1Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res2Tag, res2Val] = resultAccessor->getViewOfValue();
+    // There are '3' occurences of '6' in the input.
+    assertValuesEqual(res2Tag, res2Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(3));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res3Tag, res3Val] = resultAccessor->getViewOfValue();
+    // There are '4' occurences of '7' in the input.
+    assertValuesEqual(res3Tag, res3Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(4));
+    ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
+
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggBasicCountSpillDouble) {
+    // Changing the query knobs to always re-estimate the hash table size in HashAgg and spill when
+    // estimated size is >= 4 * 8.
+    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
+    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(4 * 8);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
+            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
+    });
+    auto defaultInternalQuerySBEAggMemoryUseSampleRate =
+        internalQuerySBEAggMemoryUseSampleRate.load();
+    internalQuerySBEAggMemoryUseSampleRate.store(1.0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggMemoryUseSampleRate.store(defaultInternalQuerySBEAggMemoryUseSampleRate);
+    });
+
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] = stage_builder::makeValue(
+        BSON_ARRAY(5.0 << 6.0 << 7.0 << 5.0 << 6.0 << 7.0 << 6.0 << 7.0 << 7.0));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto stage = makeS<HashAggStage>(
+        std::move(scanStage),
+        makeSV(scanSlot),
+        makeEM(countsSlot,
+               stage_builder::makeFunction(
+                   "sum",
+                   makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1)))),
+        makeSV(),  // Seek slot
+        true,
+        boost::none,
+        true /* allowDiskUse */,
+        kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res1Tag, res1Val] = resultAccessor->getViewOfValue();
+    // There are '2' occurences of '5' in the input.
+    assertValuesEqual(res1Tag, res1Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res2Tag, res2Val] = resultAccessor->getViewOfValue();
+    // There are '3' occurences of '6' in the input.
+    assertValuesEqual(res2Tag, res2Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(3));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res3Tag, res3Val] = resultAccessor->getViewOfValue();
+    // There are '4' occurences of '7' in the input.
+    assertValuesEqual(res3Tag, res3Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(4));
+    ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
+
+    stage->close();
+}
+
+
+TEST_F(HashAggStageTest, HashAggMultipleAccSpill) {
+    // Changing the query knobs to always re-estimate the hash table size in HashAgg and spill when
+    // estimated size is >= 2 * 8.
+    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
+    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(2 * 8);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
+            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
+    });
+    auto defaultInternalQuerySBEAggMemoryUseSampleRate =
+        internalQuerySBEAggMemoryUseSampleRate.load();
+    internalQuerySBEAggMemoryUseSampleRate.store(1.0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggMemoryUseSampleRate.store(defaultInternalQuerySBEAggMemoryUseSampleRate);
+    });
+
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] =
+        stage_builder::makeValue(BSON_ARRAY(5 << 6 << 7 << 5 << 6 << 7 << 6 << 7 << 7));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto sumsSlot = generateSlotId();
+    auto stage = makeS<HashAggStage>(
+        std::move(scanStage),
+        makeSV(scanSlot),
+        makeEM(countsSlot,
+               stage_builder::makeFunction(
+                   "sum",
+                   makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1))),
+               sumsSlot,
+               stage_builder::makeFunction("sum", makeE<EVariable>(scanSlot))),
+        makeSV(),  // Seek slot
+        true,
+        boost::none,
+        true /* allowDiskUse */,
+        kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(countsSlot, sumsSlot));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res1Tag, res1Val] = resultAccessors[0]->getViewOfValue();
+    auto [res1TagSum, res1ValSum] = resultAccessors[1]->getViewOfValue();
+
+    // There are '2' occurences of '5' in the input.
+    assertValuesEqual(res1Tag, res1Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
+    assertValuesEqual(
+        res1TagSum, res1ValSum, value::TypeTags::NumberInt32, value::bitcastFrom<int>(10));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res2Tag, res2Val] = resultAccessors[0]->getViewOfValue();
+    auto [res2TagSum, res2ValSum] = resultAccessors[1]->getViewOfValue();
+    // There are '3' occurences of '6' in the input.
+    assertValuesEqual(res2Tag, res2Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(3));
+    assertValuesEqual(
+        res2TagSum, res2ValSum, value::TypeTags::NumberInt32, value::bitcastFrom<int>(18));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res3Tag, res3Val] = resultAccessors[0]->getViewOfValue();
+    auto [res3TagSum, res3ValSum] = resultAccessors[1]->getViewOfValue();
+    // There are '4' occurences of '7' in the input.
+    assertValuesEqual(res3Tag, res3Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(4));
+    assertValuesEqual(
+        res3TagSum, res3ValSum, value::TypeTags::NumberInt32, value::bitcastFrom<int>(28));
+    ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
+
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggMultipleAccSpillAllToDisk) {
+    // Changing the query knobs to always re-estimate the hash table size in HashAgg and spill when
+    // estimated size is >= 0. This sill spill everything to the RecordStore.
+    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
+    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
+            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
+    });
+    auto defaultInternalQuerySBEAggMemoryUseSampleRate =
+        internalQuerySBEAggMemoryUseSampleRate.load();
+    internalQuerySBEAggMemoryUseSampleRate.store(1.0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggMemoryUseSampleRate.store(defaultInternalQuerySBEAggMemoryUseSampleRate);
+    });
+
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] =
+        stage_builder::makeValue(BSON_ARRAY(5 << 6 << 7 << 5 << 6 << 7 << 6 << 7 << 7));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto sumsSlot = generateSlotId();
+    auto stage = makeS<HashAggStage>(
+        std::move(scanStage),
+        makeSV(scanSlot),
+        makeEM(countsSlot,
+               stage_builder::makeFunction(
+                   "sum",
+                   makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1))),
+               sumsSlot,
+               stage_builder::makeFunction("sum", makeE<EVariable>(scanSlot))),
+        makeSV(),  // Seek slot
+        true,
+        boost::none,
+        true,  // allowDiskUse=true
+        kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(countsSlot, sumsSlot));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res1Tag, res1Val] = resultAccessors[0]->getViewOfValue();
+    auto [res1TagSum, res1ValSum] = resultAccessors[1]->getViewOfValue();
+
+    // There are '2' occurences of '5' in the input.
+    assertValuesEqual(res1Tag, res1Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
+    assertValuesEqual(
+        res1TagSum, res1ValSum, value::TypeTags::NumberInt32, value::bitcastFrom<int>(10));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res2Tag, res2Val] = resultAccessors[0]->getViewOfValue();
+    auto [res2TagSum, res2ValSum] = resultAccessors[1]->getViewOfValue();
+    // There are '3' occurences of '6' in the input.
+    assertValuesEqual(res2Tag, res2Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(3));
+    assertValuesEqual(
+        res2TagSum, res2ValSum, value::TypeTags::NumberInt32, value::bitcastFrom<int>(18));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res3Tag, res3Val] = resultAccessors[0]->getViewOfValue();
+    auto [res3TagSum, res3ValSum] = resultAccessors[1]->getViewOfValue();
+    // There are '4' occurences of '7' in the input.
+    assertValuesEqual(res3Tag, res3Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(4));
+    assertValuesEqual(
+        res3TagSum, res3ValSum, value::TypeTags::NumberInt32, value::bitcastFrom<int>(28));
     ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
 
     stage->close();
@@ -420,4 +684,194 @@ TEST_F(HashAggStageTest, HashAggMemUsageTest) {
     performHashAggWithSpillChecking(spillInputArr, expectedOutputArr, true);
 }
 
+TEST_F(HashAggStageTest, HashAggSum10Groups) {
+    // Changing the query knobs to always re-estimate the hash table size in HashAgg and spill when
+    // estimated size is >= 128. This should spilt the number of ints between the hash table and
+    // the record store somewhat evenly.
+    const auto memLimit = 128;
+    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
+    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(memLimit);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
+            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
+    });
+    auto defaultInternalQuerySBEAggMemoryUseSampleRate =
+        internalQuerySBEAggMemoryUseSampleRate.load();
+    internalQuerySBEAggMemoryUseSampleRate.store(1.0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggMemoryUseSampleRate.store(defaultInternalQuerySBEAggMemoryUseSampleRate);
+    });
+
+    auto ctx = makeCompileCtx();
+
+    // Build an array with sums over 100 congruence groups.
+    BSONArrayBuilder builder;
+    stdx::unordered_map<int, int> sums;
+    for (int i = 0; i < 10 * memLimit; ++i) {
+        auto val = i % 10;
+        auto [it, inserted] = sums.try_emplace(val, val);
+        if (!inserted) {
+            it->second += val;
+        }
+        builder.append(val);
+    }
+
+    auto [inputTag, inputVal] = stage_builder::makeValue(BSONArray(builder.done()));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a sum for each group.
+    auto sumsSlot = generateSlotId();
+    auto stage = makeS<HashAggStage>(
+        std::move(scanStage),
+        makeSV(scanSlot),
+        makeEM(sumsSlot, stage_builder::makeFunction("sum", makeE<EVariable>(scanSlot))),
+        makeSV(),  // Seek slot
+        true,
+        boost::none,
+        true,  // allowDiskUse=true
+        kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(scanSlot, sumsSlot));
+
+    while (stage->getNext() == PlanState::ADVANCED) {
+        auto [resGroupByTag, resGroupByVal] = resultAccessors[0]->getViewOfValue();
+        auto [resSumTag, resSumVal] = resultAccessors[1]->getViewOfValue();
+        auto it = sums.find(value::bitcastTo<int>(resGroupByVal));
+        ASSERT_TRUE(it != sums.end());
+        assertValuesEqual(resSumTag,
+                          resSumVal,
+                          value::TypeTags::NumberInt32,
+                          value::bitcastFrom<int>(it->second));
+    }
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggBasicCountWithRecordIds) {
+    // Changing the query knobs to always re-estimate the hash table size in HashAgg and spill when
+    // estimated size is >= 4 * 8.
+    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
+    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(4 * 8);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
+            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
+    });
+    auto defaultInternalQuerySBEAggMemoryUseSampleRate =
+        internalQuerySBEAggMemoryUseSampleRate.load();
+    internalQuerySBEAggMemoryUseSampleRate.store(1.0);
+    ON_BLOCK_EXIT([&] {
+        internalQuerySBEAggMemoryUseSampleRate.store(defaultInternalQuerySBEAggMemoryUseSampleRate);
+    });
+
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of record ids [1,10,999,10,1,999,8589869056,999,10,8589869056] input array.
+    auto [inputTag, inputVal] = sbe::value::makeNewArray();
+    auto testData = sbe::value::getArrayView(inputVal);
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(1);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(10);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(999);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(10);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(999);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(1);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(999);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(8589869056);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(999);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(10);
+        testData->push_back(ridTag, ridVal);
+    }
+    {
+        auto [ridTag, ridVal] = sbe::value::makeNewRecordId(8589869056);
+        testData->push_back(ridTag, ridVal);
+    }
+
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto stage = makeS<HashAggStage>(
+        std::move(scanStage),
+        makeSV(scanSlot),
+        makeEM(countsSlot,
+               stage_builder::makeFunction(
+                   "sum",
+                   makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1)))),
+        makeSV(),  // Seek slot
+        true,
+        boost::none,
+        true,  // allowDiskUse=true
+        kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(scanSlot, countsSlot));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res1ScanTag, res1ScanVal] = resultAccessors[0]->getViewOfValue();
+    auto [res1Tag, res1Val] = resultAccessors[1]->getViewOfValue();
+    // There are '2' occurences of '1' in the input.
+    ASSERT_TRUE(res1ScanTag == value::TypeTags::RecordId);
+    ASSERT_TRUE(sbe::value::getRecordIdView(res1ScanVal)->getLong() == 1);
+    assertValuesEqual(
+        res1Tag, res1Val, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(2));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res2ScanTag, res2ScanVal] = resultAccessors[0]->getViewOfValue();
+    auto [res2Tag, res2Val] = resultAccessors[1]->getViewOfValue();
+    // There are '2' occurences of '8589869056' in the input.
+    ASSERT_TRUE(res2ScanTag == value::TypeTags::RecordId);
+    ASSERT_TRUE(sbe::value::getRecordIdView(res2ScanVal)->getLong() == 8589869056);
+    assertValuesEqual(
+        res2Tag, res2Val, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(2));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res3ScanTag, res3ScanVal] = resultAccessors[0]->getViewOfValue();
+    auto [res3Tag, res3Val] = resultAccessors[1]->getViewOfValue();
+    // There are '3' occurences of '10' in the input.
+    ASSERT_TRUE(res3ScanTag == value::TypeTags::RecordId);
+    ASSERT_TRUE(sbe::value::getRecordIdView(res3ScanVal)->getLong() == 10);
+    assertValuesEqual(
+        res3Tag, res3Val, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(3));
+
+    ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
+    auto [res4ScanTag, res4ScanVal] = resultAccessors[0]->getViewOfValue();
+    auto [res4Tag, res4Val] = resultAccessors[1]->getViewOfValue();
+    // There are '4' occurences of '999' in the input.
+    ASSERT_TRUE(res4ScanTag == value::TypeTags::RecordId);
+    ASSERT_TRUE(sbe::value::getRecordIdView(res4ScanVal)->getLong() == 999);
+    assertValuesEqual(
+        res4Tag, res4Val, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(4));
+    ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
+
+    stage->close();
+}
 }  // namespace mongo::sbe

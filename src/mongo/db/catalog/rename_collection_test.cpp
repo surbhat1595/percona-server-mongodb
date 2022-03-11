@@ -379,7 +379,7 @@ void _createCollection(OperationContext* opCtx,
                        const CollectionOptions options = {}) {
     writeConflictRetry(opCtx, "_createCollection", nss.ns(), [=] {
         AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
-        auto db = autoDb.ensureDbExists();
+        auto db = autoDb.ensureDbExists(opCtx);
         ASSERT_TRUE(db) << "Cannot create collection " << nss << " because database " << nss.db()
                         << " does not exist.";
 
@@ -471,10 +471,10 @@ void _createIndexOnEmptyCollection(OperationContext* opCtx,
                                      << BSON("a" << 1) << "name" << indexName);
 
         WriteUnitOfWork wuow(opCtx);
-        auto indexCatalog = collection.getWritableCollection()->getIndexCatalog();
+        auto indexCatalog = collection.getWritableCollection(opCtx)->getIndexCatalog();
         ASSERT_OK(indexCatalog
                       ->createIndexOnEmptyCollection(
-                          opCtx, collection.getWritableCollection(), indexInfoObj)
+                          opCtx, collection.getWritableCollection(opCtx), indexInfoObj)
                       .getStatus());
         wuow.commit();
     });

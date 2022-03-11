@@ -299,7 +299,7 @@ let testCases = {
     commitReshardCollection: {skip: "always targets the config server"},
     commitTransaction: {skip: "unversioned and uses special targetting rules"},
     compact: {skip: "not allowed through mongos"},
-    configureCollectionAutoSplitter: {skip: "always targets the config server"},
+    configureCollectionBalancing: {skip: "always targets the config server"},
     configureFailPoint: {skip: "executes locally on mongos (not sent to any remote node)"},
     connPoolStats: {skip: "executes locally on mongos (not sent to any remote node)"},
     connPoolSync: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -454,6 +454,8 @@ let testCases = {
     flushRouterConfig: {skip: "executes locally on mongos (not sent to any remote node)"},
     fsync: {skip: "broadcast to all shards"},
     getAuditConfig: {skip: "not on a user database", conditional: true},
+    getChangeStreamOptions:
+        {skip: "executes locally on mongos (not sent to any remote node)", conditional: true},
     getCmdLineOpts: {skip: "executes locally on mongos (not sent to any remote node)"},
     getDefaultRWConcern: {skip: "executes locally on mongos (not sent to any remote node)"},
     getDiagnosticData: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -607,6 +609,7 @@ let testCases = {
             }
         }
     },
+    repairShardedCollectionChunksHistory: {skip: "always targets the config server"},
     replSetGetStatus: {skip: "not supported in mongos"},
     reshardCollection: {skip: "does not forward command to primary shard"},
     revokePrivilegesFromRole: {skip: "always targets the config server"},
@@ -619,6 +622,7 @@ let testCases = {
     serverStatus: {skip: "executes locally on mongos (not sent to any remote node)"},
     setAllowMigrations: {skip: "not on a user database"},
     setAuditConfig: {skip: "not on a user database", conditional: true},
+    setChangeStreamOptions: {skip: "always targets the config server", conditional: true},
     setDefaultRWConcern: {skip: "always targets the config server"},
     setIndexCommitQuorum: {
         run: {

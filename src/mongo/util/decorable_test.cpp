@@ -29,17 +29,14 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
-#include "mongo/platform/basic.h"
-
-#include <boost/utility.hpp>
+#include <type_traits>
 
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/decoration_container.h"
-#include "mongo/util/decoration_registry.h"
 
 namespace mongo {
+
 namespace {
 
 static int numConstructedAs;
@@ -75,15 +72,21 @@ public:
     int value;
 };
 
-class MyDecorable : public Decorable<MyDecorable> {};
-class MyCopyableDecorable : public DecorableCopyable<MyCopyableDecorable> {};
+struct NonCopyableA {
+    A a;
+    NonCopyableA() = default;
+    NonCopyableA(const NonCopyableA&) = delete;
+    NonCopyableA& operator=(const NonCopyableA&) = delete;
+};
 
-TEST(DecorableTest, DecorableType) {
-    const auto dd1 = MyDecorable::declareDecoration<A>();
-    const auto dd2 = MyDecorable::declareDecoration<A>();
-    const auto dd3 = MyDecorable::declareDecoration<int>();
+TEST(DecorableTest, SimpleDecoration) {
+    struct MyDecorable : Decorable<MyDecorable> {};
     numConstructedAs = 0;
     numDestructedAs = 0;
+    static const auto dd1 = MyDecorable::template declareDecoration<A>();
+    static const auto dd2 = MyDecorable::template declareDecoration<A>();
+    static const auto dd3 = MyDecorable::template declareDecoration<int>();
+
     {
         MyDecorable decorable1;
         ASSERT_EQ(2, numConstructedAs);
@@ -111,102 +114,34 @@ TEST(DecorableTest, DecorableType) {
     ASSERT_EQ(4, numDestructedAs);
 }
 
-TEST(DecorableTest, SimpleDecoration) {
-    auto test = [](auto decorable) {
-        using decorable_t = decltype(decorable);
-
-        numConstructedAs = 0;
-        numDestructedAs = 0;
-        DecorationRegistry<decorable_t> registry;
-        const auto dd1 = registry.template declareDecoration<A>();
-        const auto dd2 = registry.template declareDecoration<A>();
-        const auto dd3 = registry.template declareDecoration<int>();
-
-        {
-            decorable_t* decorablePtr = nullptr;
-            DecorationContainer<decorable_t> decorable1(decorablePtr, &registry);
-            ASSERT_EQ(2, numConstructedAs);
-            ASSERT_EQ(0, numDestructedAs);
-            DecorationContainer<decorable_t> decorable2(decorablePtr, &registry);
-            ASSERT_EQ(4, numConstructedAs);
-            ASSERT_EQ(0, numDestructedAs);
-
-            ASSERT_EQ(0, decorable1.getDecoration(dd1).value);
-            ASSERT_EQ(0, decorable1.getDecoration(dd2).value);
-            ASSERT_EQ(0, decorable2.getDecoration(dd1).value);
-            ASSERT_EQ(0, decorable2.getDecoration(dd2).value);
-            ASSERT_EQ(0, decorable2.getDecoration(dd3));
-            decorable1.getDecoration(dd1).value = 1;
-            decorable1.getDecoration(dd2).value = 2;
-            decorable2.getDecoration(dd1).value = 3;
-            decorable2.getDecoration(dd2).value = 4;
-            decorable2.getDecoration(dd3) = 5;
-            ASSERT_EQ(1, decorable1.getDecoration(dd1).value);
-            ASSERT_EQ(2, decorable1.getDecoration(dd2).value);
-            ASSERT_EQ(3, decorable2.getDecoration(dd1).value);
-            ASSERT_EQ(4, decorable2.getDecoration(dd2).value);
-            ASSERT_EQ(5, decorable2.getDecoration(dd3));
-        }
-        ASSERT_EQ(4, numDestructedAs);
-    };
-
-    test(MyDecorable());
-    test(MyCopyableDecorable());
-}
-
 TEST(DecorableTest, ThrowingConstructor) {
-    auto test = [](auto decorable) {
-        using decorable_t = decltype(decorable);
+    struct MyDecorable : Decorable<MyDecorable> {};
+    numConstructedAs = 0;
+    numDestructedAs = 0;
+    static const auto dd1 [[maybe_unused]] = MyDecorable::template declareDecoration<A>();
+    static const auto dd2 [[maybe_unused]] = MyDecorable::template declareDecoration<ThrowA>();
+    static const auto dd3 [[maybe_unused]] = MyDecorable::template declareDecoration<A>();
 
-        numConstructedAs = 0;
-        numDestructedAs = 0;
-
-        DecorationRegistry<decorable_t> registry;
-        registry.template declareDecoration<A>();
-        registry.template declareDecoration<ThrowA>();
-        registry.template declareDecoration<A>();
-
-        try {
-            decorable_t* decorablePtr = nullptr;
-            DecorationContainer<decorable_t> d(decorablePtr, &registry);
-        } catch (const AssertionException& ex) {
-            ASSERT_EQ(ErrorCodes::Unauthorized, ex.code());
-        }
-        ASSERT_EQ(1, numConstructedAs);
-        ASSERT_EQ(1, numDestructedAs);
-    };
-
-    test(MyDecorable());
-    test(MyCopyableDecorable());
+    try {
+        MyDecorable decorable;
+        FAIL("didn't throw");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ErrorCodes::Unauthorized, ex.code());
+    }
+    ASSERT_EQ(1, numConstructedAs);
+    ASSERT_EQ(1, numDestructedAs);
 }
 
 TEST(DecorableTest, Alignment) {
-    auto test = [](auto decorable) {
-        using decorable_t = decltype(decorable);
+    struct MyDecorable : Decorable<MyDecorable> {};
+    static const auto firstChar [[maybe_unused]] = MyDecorable::template declareDecoration<char>();
+    static const auto firstInt = MyDecorable::template declareDecoration<int>();
+    static const auto secondChar [[maybe_unused]] = MyDecorable::template declareDecoration<char>();
+    static const auto secondInt = MyDecorable::template declareDecoration<int>();
 
-        DecorationRegistry<decorable_t> registry;
-        const auto firstChar = registry.template declareDecoration<char>();
-        const auto firstInt = registry.template declareDecoration<int>();
-        const auto secondChar = registry.template declareDecoration<int>();
-        const auto secondInt = registry.template declareDecoration<int>();
-        decorable_t* decorablePtr = nullptr;
-        DecorationContainer<decorable_t> d(decorablePtr, &registry);
-        ASSERT_EQ(0U,
-                  reinterpret_cast<uintptr_t>(&d.getDecoration(firstChar)) %
-                      std::alignment_of<char>::value);
-        ASSERT_EQ(0U,
-                  reinterpret_cast<uintptr_t>(&d.getDecoration(secondChar)) %
-                      std::alignment_of<char>::value);
-        ASSERT_EQ(0U,
-                  reinterpret_cast<uintptr_t>(&d.getDecoration(firstInt)) %
-                      std::alignment_of<int>::value);
-        ASSERT_EQ(0U,
-                  reinterpret_cast<uintptr_t>(&d.getDecoration(secondInt)) %
-                      std::alignment_of<int>::value);
-    };
-
-    test(MyDecorable());
-    test(MyCopyableDecorable());
+    MyDecorable d;
+    ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(&firstInt(d)) % alignof(int));
+    ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(&secondInt(d)) % alignof(int));
 }
 
 struct DecoratedOwnerChecker : public Decorable<DecoratedOwnerChecker> {
@@ -274,11 +209,27 @@ TEST(DecorableTest, DecorationWithOwner) {
     ASSERT_EQ(&owner, &DecorationWithOwner::get.owner(decoration));
 }
 
-TEST(DecorableTest, DecorableCopyableType) {
+TEST(DecorableTest, NonCopyableDecorable) {
+    struct MyDecorable : Decorable<MyDecorable> {
+        MyDecorable() = default;
+        MyDecorable(const MyDecorable&) = delete;
+        MyDecorable& operator=(const MyDecorable&) = delete;
+    };
+
     numCopyConstructedAs = 0;
     numCopyAssignedAs = 0;
-    const auto dd1 = MyCopyableDecorable::declareDecoration<A>();
-    const auto dd2 = MyCopyableDecorable::declareDecoration<int>();
+    static const auto dd1 = MyDecorable::declareDecoration<NonCopyableA>();
+    MyDecorable decorable;
+    dd1(decorable).a.value = 1;
+}
+
+TEST(DecorableTest, CopyableDecorable) {
+    struct MyCopyableDecorable : Decorable<MyCopyableDecorable> {};
+    numCopyConstructedAs = 0;
+    numCopyAssignedAs = 0;
+    static const auto dd1 = MyCopyableDecorable::declareDecoration<A>();
+    static const auto dd2 = MyCopyableDecorable::declareDecoration<int>();
+
     {
         MyCopyableDecorable decorable1;
         dd1(decorable1).value = 1;

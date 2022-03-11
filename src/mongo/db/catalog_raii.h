@@ -56,10 +56,16 @@ class AutoGetDb {
     AutoGetDb& operator=(const AutoGetDb&) = delete;
 
 public:
+    /**
+     * Database locks are also acquired for any 'secondaryDbNames' database names provided. Only
+     * MODE_IS is supported when 'secondaryDbNames' are provided. It is safe to repeat 'dbName' in
+     * 'secondaryDbNames'.
+     */
     AutoGetDb(OperationContext* opCtx,
               StringData dbName,
               LockMode mode,
-              Date_t deadline = Date_t::max());
+              Date_t deadline = Date_t::max(),
+              const std::set<StringData>& secondaryDbNames = {});
 
     AutoGetDb(AutoGetDb&&) = default;
 
@@ -73,14 +79,21 @@ public:
     /**
      * Returns the database, creating it if it does not exist.
      */
-    Database* ensureDbExists();
+    Database* ensureDbExists(OperationContext* opCtx);
 
 private:
-    OperationContext* _opCtx;
     std::string _dbName;
 
+    // Special note! The primary DBLock must destruct last (be declared first) so that the global
+    // and RSTL locks are not released until all the secondary DBLocks (without global and RSTL)
+    // have destructed.
     Lock::DBLock _dbLock;
+
     Database* _db;
+
+    // The secondary DBLocks will be acquired without the global or RSTL locks taken, re: the
+    // skipGlobalAndRSTLLocks flag in the DBLock constructor.
+    std::vector<Lock::DBLock> _secondaryDbLocks;
 };
 
 enum class AutoGetCollectionViewMode { kViewsPermitted, kViewsForbidden };
@@ -106,12 +119,23 @@ class AutoGetCollection {
     AutoGetCollection& operator=(const AutoGetCollection&) = delete;
 
 public:
+    /**
+     * Collection locks are also acquired for any 'secondaryNssOrUUIDs' namespaces provided.
+     * Collection locks are acquired in ascending ResourceId(RESOURCE_COLLECTION, nss) order to
+     * avoid deadlocks, consistent with other locations in the code wherein we take multiple
+     * collection locks.
+     *
+     * Invariants if any 'secondaryNssOrUUIDs' represent a view namespace. Only MODE_IS is supported
+     * when 'secondaryNssOrUUIDs' namespaces are provided. It is safe for 'nsOrUUID' to be
+     * duplicated in 'secondaryNssOrUUIDs', or 'secondaryNssOrUUIDs' to contain duplicates.
+     */
     AutoGetCollection(
         OperationContext* opCtx,
         const NamespaceStringOrUUID& nsOrUUID,
         LockMode modeColl,
         AutoGetCollectionViewMode viewMode = AutoGetCollectionViewMode::kViewsForbidden,
-        Date_t deadline = Date_t::max());
+        Date_t deadline = Date_t::max(),
+        const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs = {});
 
     explicit operator bool() const {
         return static_cast<bool>(getCollection());
@@ -132,14 +156,14 @@ public:
      * Returns the database, or nullptr if it didn't exist.
      */
     Database* getDb() const {
-        return _autoDb.getDb();
+        return _autoDb->getDb();
     }
 
     /**
      * Returns the database, creating it if it does not exist.
      */
-    Database* ensureDbExists() {
-        return _autoDb.ensureDbExists();
+    Database* ensureDbExists(OperationContext* opCtx) {
+        return _autoDb->ensureDbExists(opCtx);
     }
 
     /**
@@ -166,6 +190,13 @@ public:
     }
 
     /**
+     * Indicates whether any of the 'secondaryNssOrUUIDs' namespaces are views.
+     */
+    bool isAnySecondaryNamespaceAView() const {
+        return _secondaryNssIsView;
+    }
+
+    /**
      * Returns a writable Collection copy that will be returned by current and future calls to this
      * function as well as getCollection(). Any previous Collection pointers that were returned may
      * be invalidated.
@@ -175,12 +206,9 @@ public:
      * the original Collection pointer.
      */
     Collection* getWritableCollection(
+        OperationContext* opCtx,
         CollectionCatalog::LifetimeMode mode =
             CollectionCatalog::LifetimeMode::kManagedInWriteUnitOfWork);
-
-    OperationContext* getOperationContext() const {
-        return _opCtx;
-    }
 
 protected:
     template <typename AutoGetCollectionType, typename EmplaceAutoGetCollectionFunc>
@@ -193,11 +221,16 @@ protected:
         return _coll;
     }
 
-    OperationContext* _opCtx = nullptr;
-    AutoGetDb _autoDb;
-    boost::optional<Lock::CollectionLock> _collLock;
+    // Ordering matters, the _collLocks should destruct before the _autoGetDb releases the
+    // rstl/global/database locks.
+    boost::optional<AutoGetDb> _autoDb;
+    std::vector<Lock::CollectionLock> _collLocks;
+
     CollectionPtr _coll = nullptr;
     std::shared_ptr<const ViewDefinition> _view;
+
+    // Tracks whether any secondary collection namespaces is a view.
+    bool _secondaryNssIsView = false;
 
     // If the object was instantiated with a UUID, contains the resolved namespace, otherwise it is
     // the same as the input namespace string
@@ -362,7 +395,8 @@ public:
                      CollectionCatalog::LifetimeMode mode =
                          CollectionCatalog::LifetimeMode::kManagedInWriteUnitOfWork);
     // Acts as an adaptor for AutoGetCollection
-    CollectionWriter(AutoGetCollection& autoCollection,
+    CollectionWriter(OperationContext* opCtx,
+                     AutoGetCollection& autoCollection,
                      CollectionCatalog::LifetimeMode mode =
                          CollectionCatalog::LifetimeMode::kManagedInWriteUnitOfWork);
     // Acts as an adaptor for a writable Collection that has been retrieved elsewhere

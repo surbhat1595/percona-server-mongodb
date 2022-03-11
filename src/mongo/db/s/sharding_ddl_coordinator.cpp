@@ -39,6 +39,7 @@
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
+#include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
@@ -71,6 +72,26 @@ ShardingDDLCoordinator::ShardingDDLCoordinator(ShardingDDLCoordinatorService* se
 ShardingDDLCoordinator::~ShardingDDLCoordinator() {
     invariant(_constructionCompletionPromise.getFuture().isReady());
     invariant(_completionPromise.getFuture().isReady());
+}
+
+ExecutorFuture<bool> ShardingDDLCoordinator::_removeDocumentUntillSuccessOrStepdown(
+    std::shared_ptr<executor::TaskExecutor> executor) {
+    return AsyncTry([this, anchor = shared_from_this()] {
+               auto opCtxHolder = cc().makeOperationContext();
+               auto* opCtx = opCtxHolder.get();
+
+               return StatusWith(_removeDocument(opCtx));
+           })
+        .until([this](const StatusWith<bool>& sw) {
+            // We can't rely on the instance token because after removing the document the
+            // CancellationSource object of the instance is lost, so the reference to the parent POS
+            // token is also lost, making any subsequent cancel during a stepdown unnoticeable by
+            // the token.
+            return sw.isOK() || sw.getStatus().isA<ErrorCategory::NotPrimaryError>() ||
+                sw.getStatus().isA<ErrorCategory::ShutdownError>();
+        })
+        .withBackoffBetweenIterations(kExponentialBackoff)
+        .on(executor, CancellationToken::uncancelable());
 }
 
 bool ShardingDDLCoordinator::_removeDocument(OperationContext* opCtx) {
@@ -153,7 +174,6 @@ void ShardingDDLCoordinator::interrupt(Status status) {
 
 SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                              const CancellationToken& token) noexcept {
-
     return ExecutorFuture<void>(**executor)
         .then([this, executor, token, anchor = shared_from_this()] {
             return _acquireLockAsync(executor, token, nss().db());
@@ -241,7 +261,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                 .withBackoffBetweenIterations(kExponentialBackoff)
                 .on(**executor, CancellationToken::uncancelable());
         })
-        .onCompletion([this, anchor = shared_from_this()](const Status& status) {
+        .onCompletion([this, executor, token, anchor = shared_from_this()](const Status& status) {
             auto opCtxHolder = cc().makeOperationContext();
             auto* opCtx = opCtxHolder.get();
 
@@ -253,16 +273,20 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             // Release the coordinator only in case the node is not stepping down or in case of
             // acceptable error
             if (!isSteppingDown || (!status.isOK() && _completeOnError)) {
-                try {
-                    LOGV2(5565601,
-                          "Releasing sharding DDL coordinator",
-                          "coordinatorId"_attr = _coordId);
+                LOGV2(
+                    5565601, "Releasing sharding DDL coordinator", "coordinatorId"_attr = _coordId);
 
-                    auto session = metadata().getSession();
-                    const auto docWasRemoved = _removeDocument(opCtx);
+                auto session = metadata().getSession();
+
+                try {
+                    // We need to execute this in another executor to ensure the remove work is
+                    // done.
+                    const auto docWasRemoved = _removeDocumentUntillSuccessOrStepdown(
+                                                   _service->getInstanceCleanupExecutor())
+                                                   .get();
 
                     if (!docWasRemoved) {
-                        // Release the instance without interrupting it
+                        // Release the instance without interrupting it.
                         _service->releaseInstance(
                             BSON(ShardingDDLCoordinatorMetadata::kIdFieldName << _coordId.toBSON()),
                             Status::OK());
@@ -274,13 +298,12 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                         InternalSessionPool::get(opCtx)->release(
                             {session->getLsid(), session->getTxnNumber()});
                     }
-                } catch (DBException& ex) {
-                    static constexpr auto errMsg = "Failed to release sharding DDL coordinator";
-                    LOGV2_WARNING(5565605,
-                                  errMsg,
-                                  "coordinatorId"_attr = _coordId,
-                                  "error"_attr = redact(ex));
-                    completionStatus = ex.toStatus(errMsg);
+                } catch (const DBException& ex) {
+                    completionStatus = ex.toStatus();
+                    isSteppingDown = completionStatus.isA<ErrorCategory::NotPrimaryError>() ||
+                        completionStatus.isA<ErrorCategory::ShutdownError>() ||
+                        completionStatus.isA<ErrorCategory::CancellationError>();
+                    dassert(isSteppingDown);
                 }
             }
 
@@ -311,22 +334,18 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
         .semi();
 }
 
-ShardingDDLCoordinator_NORESILIENT::ShardingDDLCoordinator_NORESILIENT(OperationContext* opCtx,
-                                                                       const NamespaceString& ns)
-    : _nss(ns), _forwardableOpMetadata(opCtx) {}
+void ShardingDDLCoordinator::_performNoopRetryableWriteOnAllShardsAndConfigsvr(
+    OperationContext* opCtx,
+    const OperationSessionInfo& osi,
+    const std::shared_ptr<executor::TaskExecutor>& executor) {
+    const auto shardsAndConfigsvr = [&] {
+        const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+        auto participants = shardRegistry->getAllShardIds(opCtx);
+        participants.emplace_back(shardRegistry->getConfigShard()->getId());
+        return participants;
+    }();
 
-SemiFuture<void> ShardingDDLCoordinator_NORESILIENT::run(OperationContext* opCtx) {
-    if (!_nss.isConfigDB()) {
-        // Check that the operation context has a database version for this namespace
-        const auto clientDbVersion = OperationShardingState::get(opCtx).getDbVersion(_nss.db());
-        uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Request sent without attaching database version",
-                clientDbVersion);
-
-        // Checks that this is the primary shard for the namespace's db
-        DatabaseShardingState::checkIsPrimaryShardForDb(opCtx, _nss.db());
-    }
-    return runImpl(Grid::get(opCtx)->getExecutorPool()->getFixedExecutor());
+    sharding_ddl_util::performNoopRetryableWriteOnShards(opCtx, shardsAndConfigsvr, osi, executor);
 }
 
 }  // namespace mongo

@@ -42,6 +42,7 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
 
 #define MONGO_SERVER_PARAMETER_REGISTER(name) \
     MONGO_INITIALIZER_GENERAL(                \
@@ -50,28 +51,40 @@
 namespace mongo {
 
 /**
- * Server Parameters can be set startup up and/or runtime.
- *
- * At startup, --setParameter ... or config file is used.
- * At runtime, { setParameter : 1, ...} is used.
+ * How and when a given Server Parameter may be set/modified.
  */
 enum class ServerParameterType {
+    /**
+     * May not be set at any time.
+     * Used as a means to read out current state, similar to ServerStatus.
+     */
+    kReadOnly,
 
     /**
-     * Parameter can only be set via runCommand.
+     * Parameter can only be set via `{setParameter: 1, name: value}`
      */
     kRuntimeOnly,
 
     /**
-     * Parameter can only be set via --setParameter, and is only read at startup after command-line
+     * Parameter can only be set via `--setParameter 'name=value'`,
+     * and is only read at startup after command-line
      * parameters, and the config file are processed.
      */
     kStartupOnly,
 
     /**
      * Parameter can be set at both startup and runtime.
+     * This is essentially a union of kRuntimeOnly and kStartupOnly.
      */
     kStartupAndRuntime,
+
+    /**
+     * Cluster-wide configuration setting.
+     * These are by-definition runtime settable only, however unlike other modes (including
+     * kRuntimeOnly), these are set via the {setClusterParameter:...} command and stored in a
+     * separate map. ClusterWide settings are propagated to other nodes in the cluster.
+     */
+    kClusterWide,
 };
 
 class ServerParameterSet;
@@ -82,11 +95,6 @@ public:
     using Map = std::map<std::string, ServerParameter*>;
 
     ServerParameter(StringData name, ServerParameterType spt);
-    ServerParameter(ServerParameterSet* sps,
-                    StringData name,
-                    bool allowedToChangeAtStartup,
-                    bool allowedToChangeAtRuntime);
-    ServerParameter(ServerParameterSet* sps, StringData name);
     virtual ~ServerParameter() = default;
 
     std::string name() const {
@@ -97,16 +105,36 @@ public:
      * @return if you can set on command line or config file
      */
     bool allowedToChangeAtStartup() const {
-        return _allowedToChangeAtStartup;
+        return (_type == ServerParameterType::kStartupOnly) ||
+            (_type == ServerParameterType::kStartupAndRuntime);
     }
 
     /**
      * @param if you can use (get|set)Parameter
      */
     bool allowedToChangeAtRuntime() const {
-        return _allowedToChangeAtRuntime;
+        return (_type == ServerParameterType::kRuntimeOnly) ||
+            (_type == ServerParameterType::kStartupAndRuntime) ||
+            (_type == ServerParameterType::kClusterWide);
     }
 
+    ServerParameterType getServerParameterType() const {
+        return _type;
+    }
+
+    bool isClusterWide() const {
+        return (_type == ServerParameterType::kClusterWide);
+    }
+
+    bool isNodeLocal() const {
+        return (_type != ServerParameterType::kClusterWide);
+    }
+
+    OID getGeneration() const {
+        return _generation;
+    }
+
+    void setGeneration(const OID& generation);
 
     virtual void append(OperationContext* opCtx, BSONObjBuilder& b, const std::string& name) = 0;
 
@@ -114,6 +142,10 @@ public:
                                            BSONObjBuilder& b,
                                            const std::string& name) {
         append(opCtx, b, name);
+    }
+
+    virtual Status validate(const BSONElement& newValueElement) const {
+        return Status::OK();
     }
 
     virtual Status set(const BSONElement& newValueElement) = 0;
@@ -132,10 +164,14 @@ protected:
     // Helper for translating setParameter values from BSON to string.
     StatusWith<std::string> coerceToString(const BSONElement&, bool redact);
 
+    // Used by DisabledTestParameter to avoid re-registering the server parameter.
+    struct NoRegistrationTag {};
+    ServerParameter(StringData name, ServerParameterType spt, NoRegistrationTag);
+
 private:
     std::string _name;
-    bool _allowedToChangeAtStartup;
-    bool _allowedToChangeAtRuntime;
+    OID _generation;
+    ServerParameterType _type;
     bool _testOnly = false;
 };
 
@@ -143,27 +179,45 @@ class ServerParameterSet {
 public:
     using Map = ServerParameter::Map;
 
-    void add(ServerParameter* sp);
+    virtual ~ServerParameterSet() = default;
+
+    virtual void add(ServerParameter* sp) = 0;
     void remove(const std::string& name);
 
     const Map& getMap() const {
         return _map;
     }
 
-    static ServerParameterSet* getGlobal();
-
+    // Singleton instances of ServerParameterSet
+    // used for retreiving the local or cluster-wide maps.
+    static ServerParameterSet* getNodeParameterSet();
+    static ServerParameterSet* getClusterParameterSet();
+    static ServerParameterSet* getParameterSet(ServerParameterType spt) {
+        if (spt == ServerParameterType::kClusterWide) {
+            return getClusterParameterSet();
+        } else {
+            return getNodeParameterSet();
+        }
+    }
     void disableTestParameters();
 
     template <typename T = ServerParameter>
-    T* get(StringData name) {
+    T* getIfExists(StringData name) {
         const auto& it = _map.find(name.toString());
-        uassert(ErrorCodes::NoSuchKey,
-                str::stream() << "Unknown server parameter: " << name,
-                it != _map.end());
+        if (it == _map.end()) {
+            return nullptr;
+        }
         return checked_cast<T*>(it->second);
     }
 
-private:
+    template <typename T = ServerParameter>
+    T* get(StringData name) {
+        T* ret = getIfExists<T>(name);
+        uassert(ErrorCodes::NoSuchKey, str::stream() << "Unknown server parameter: " << name, ret);
+        return ret;
+    }
+
+protected:
     Map _map;
 };
 

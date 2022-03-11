@@ -51,37 +51,50 @@ assert.commandFailedWithCode(buildAndRunCommand({
                              }),
                              6050204);
 
-// TODO SERVER-60500 Add a test that "linearFill" fails without a sortBy field.
+// Fail if linearFill does not receive a sortBy field.
+assert.commandFailedWithCode(
+    buildAndRunCommand({
+        $fill:
+            {output: {test: {method: "linear"}}, partitionBy: {part: "$part", partTwo: "$partTwo"}}
+    }),
+    605001);
 
 // Test that we desugar correctly.
 // Format is [[$fill spec], [Desugared pipeline], [field list that contains UUIDs]]
 // Not all test cases have a spec that generates UUIDs, the third array will be empty for those
 // tests.
-// TODO SERVER-60500 Enable tests that reference 'linear'
 let testCases = [
     [
         {$fill: {output: {val: {method: "locf"}}}},
         [{"$_internalSetWindowFields": {"output": {"val": {"$locf": "$val"}}}}],
         []
     ],  // 0
-    // TODO SERVER-60500: Enable
-    // [{$fill: {output: {val: {method: "linear"}}}}, [{
-    //  		"$_internalSetWindowFields" : {
-    //  			"output" : {
-    //  				"val" : {
-    //  					"$linear" : "$val"
-    //  				}
-    //  			}
-    //  		}
-    //  	}], []
-    // ], // 1
-    [{$fill: {output: {val: {value: 5}}}}, [{"$addFields": {"val": {"$const": 5}}}], []],  // 2
-    [{$fill: {output: {val: {value: "$test"}}}}, [{"$addFields": {"val": "$test"}}], []],  // 3
+    [
+        {$fill: {sortBy: {key: 1}, output: {val: {method: "linear"}}}},
+        [
+            {"$sort": {"sortKey": {"key": 1}}},
+            {
+                "$_internalSetWindowFields":
+                    {"sortBy": {"key": 1}, "output": {"val": {"$linearFill": "$val"}}}
+            }
+        ],
+        []
+    ],  // 1
+    [
+        {$fill: {output: {val: {value: 5}}}},
+        [{"$addFields": {"val": {$ifNull: ["$val", {"$const": 5}]}}}],
+        []
+    ],  // 2
+    [
+        {$fill: {output: {val: {value: "$test"}}}},
+        [{"$addFields": {"val": {$ifNull: ["$val", "$test"]}}}],
+        []
+    ],  // 3
     [
         {$fill: {output: {val: {value: "$test"}, second: {method: "locf"}}}},
         [
             {"$_internalSetWindowFields": {"output": {"second": {"$locf": "$second"}}}},
-            {"$addFields": {"val": "$test"}}
+            {"$addFields": {"val": {$ifNull: ["$val", "$test"]}}}
         ],
         []
     ],  // 4
@@ -101,7 +114,12 @@ let testCases = [
                 "$_internalSetWindowFields":
                     {"output": {"second": {"$locf": "$second"}, "fourth": {"$locf": "$fourth"}}}
             },
-            {"$addFields": {"val": "$test", "third": {"$add": ["$val", "$second"]}}}
+            {
+                "$addFields": {
+                    "val": {$ifNull: ["$val", "$test"]},
+                    "third": {$ifNull: ["$third", {"$add": ["$val", "$second"]}]}
+                }
+            }
         ],
         []
     ],  // 5
@@ -190,7 +208,7 @@ let testCases = [
                 }
             },
             {"$project": {"UUIDPLACEHOLDER": false, "_id": true}},
-            {"$addFields": {"second": {"$const": 7}}}
+            {"$addFields": {"second": {$ifNull: ["$second", {"$const": 7}]}}}
         ],
         [
             [0, "$addFields", true],
@@ -230,8 +248,8 @@ function modifyObjectAtPath(orig, path) {
 
 for (let i = 0; i < testCases.length; i++) {
     let result = desugarSingleStageAggregation(db, coll, testCases[i][0]);
-    // $setWindowFields generates random fieldnames. Use the paths in the test case to replace the
-    // UUID with "UUIDPLACEHOLDER".
+    // $setWindowFields generates random fieldnames. Use the paths in the test case to
+    // replace the UUID with "UUIDPLACEHOLDER".
     if (testCases[i][2].length != 0) {
         for (let pathNum = 0; pathNum < testCases[i][2].length; pathNum++) {
             result = modifyObjectAtPath(result, testCases[i][2][pathNum]);

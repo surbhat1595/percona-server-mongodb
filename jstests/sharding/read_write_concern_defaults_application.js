@@ -93,7 +93,10 @@ let testCases = {
     _configsvrCommitChunkSplit: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: "internal command"},
-    _configsvrConfigureAutoSplit: {skip: "internal command"},
+    _configsvrConfigureAutoSplit: {
+        skip: "internal command"
+    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
+    _configsvrConfigureCollectionBalancing: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
     _configsvrDropCollection:
         {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
@@ -111,6 +114,7 @@ let testCases = {
     _configsvrRemoveTags: {skip: "internal command"},
     _configsvrRenameCollection: {skip: "internal command"},
     _configsvrRenameCollectionMetadata: {skip: "internal command"},
+    _configsvrRepairShardedCollectionChunksHistory: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
     _configsvrSetAllowMigrations: {skip: "internal command"},
     _configsvrShardCollection:
@@ -153,6 +157,8 @@ let testCases = {
     _shardsvrReshardCollection: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
     _shardsvrSetAllowMigrations: {skip: "internal command"},
+    _shardsvrCollMod: {skip: "internal command"},
+    _shardsvrCollModParticipant: {skip: "internal command"},
     _shardsvrShardCollection:
         {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _transferMods: {skip: "internal command"},
@@ -264,7 +270,10 @@ let testCases = {
         useLogs: true,
     },
     compact: {skip: "does not accept read or write concern"},
-    configureCollectionAutoSplitter: {skip: "does not accept read or write concern"},
+    configureCollectionAutoSplitter: {
+        skip: "does not accept read or write concern"
+    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
+    configureCollectionBalancing: {skip: "does not accept read or write concern"},
     configureFailPoint: {skip: "does not accept read or write concern"},
     connPoolStats: {skip: "does not accept read or write concern"},
     connPoolSync: {skip: "internal command"},
@@ -445,6 +454,7 @@ let testCases = {
     fsync: {skip: "does not accept read or write concern"},
     fsyncUnlock: {skip: "does not accept read or write concern"},
     getAuditConfig: {skip: "does not accept read or write concern"},
+    getChangeStreamOptions: {skip: "TODO PM-2502"},
     getCmdLineOpts: {skip: "does not accept read or write concern"},
     getDatabaseVersion: {skip: "does not accept read or write concern"},
     getDefaultRWConcern: {skip: "does not accept read or write concern"},
@@ -570,6 +580,7 @@ let testCases = {
         checkWriteConcern: true,
     },
     repairDatabase: {skip: "does not accept read or write concern"},
+    repairShardedCollectionChunksHistory: {skip: "does not accept read or write concern"},
     replSetAbortPrimaryCatchUp: {skip: "does not accept read or write concern"},
     replSetFreeze: {skip: "does not accept read or write concern"},
     replSetGetConfig: {skip: "does not accept read or write concern"},
@@ -649,6 +660,7 @@ let testCases = {
     serverStatus: {skip: "does not accept read or write concern"},
     setAllowMigrations: {skip: "does not accept read or write concern"},
     setAuditConfig: {skip: "does not accept read or write concern"},
+    setChangeStreamOptions: {skip: "TODO PM-2502"},
     setCommittedSnapshot: {skip: "internal command"},
     setDefaultRWConcern: {skip: "special case (must run after all other commands)"},
     setFeatureCompatibilityVersion: {skip: "does not accept read or write concern"},

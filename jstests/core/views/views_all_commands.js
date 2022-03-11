@@ -90,7 +90,10 @@ let viewsCommandTests = {
     _configsvrCommitMovePrimary:
         {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
-    _configsvrConfigureAutoSplit: {skip: isAnInternalCommand},
+    _configsvrConfigureAutoSplit: {
+        skip: isAnInternalCommand
+    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
+    _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrDropCollection:
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
@@ -108,6 +111,7 @@ let viewsCommandTests = {
     _configsvrRemoveShard: {skip: isAnInternalCommand},
     _configsvrRemoveShardFromZone: {skip: isAnInternalCommand},
     _configsvrRemoveTags: {skip: isAnInternalCommand},
+    _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrShardCollection:
@@ -153,6 +157,8 @@ let viewsCommandTests = {
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrShardCollection:
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _shardsvrCollMod: {skip: isAnInternalCommand},
+    _shardsvrCollModParticipant: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {skip: isUnrelated},
@@ -217,7 +223,10 @@ let viewsCommandTests = {
     commitTransaction: {skip: isUnrelated},
     compact: {command: {compact: "view", force: true}, expectFailure: true, skipSharded: true},
     configureFailPoint: {skip: isUnrelated},
-    configureCollectionAutoSplitter: {skip: isUnrelated},
+    configureCollectionAutoSplitter: {
+        skip: isUnrelated
+    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
+    configureCollectionBalancing: {skip: isUnrelated},
     connPoolStats: {skip: isUnrelated},
     connPoolSync: {skip: isUnrelated},
     connectionStatus: {skip: isUnrelated},
@@ -324,6 +333,7 @@ let viewsCommandTests = {
     fsyncUnlock: {skip: isUnrelated},
     getAuditConfig: {skip: isUnrelated},
     getDatabaseVersion: {skip: isUnrelated},
+    getChangeStreamOptions: {skip: isUnrelated},
     getCmdLineOpts: {skip: isUnrelated},
     getDefaultRWConcern: {skip: isUnrelated},
     getDiagnosticData: {skip: isUnrelated},
@@ -496,6 +506,13 @@ let viewsCommandTests = {
         }
     ],
     repairDatabase: {skip: isUnrelated},
+    repairShardedCollectionChunksHistory: {
+        command: {repairShardedCollectionChunksHistory: "test.view"},
+        skipStandalone: true,
+        isAdminCommand: true,
+        expectFailure: true,
+        expectedErrorCode: ErrorCodes.NamespaceNotFound,
+    },
     replSetAbortPrimaryCatchUp: {skip: isUnrelated},
     replSetFreeze: {skip: isUnrelated},
     replSetGetConfig: {skip: isUnrelated},
@@ -554,6 +571,7 @@ let viewsCommandTests = {
     saslStart: {skip: isUnrelated},
     sbe: {skip: isAnInternalCommand},
     serverStatus: {command: {serverStatus: 1}, skip: isUnrelated},
+    setChangeStreamOptions: {skip: isUnrelated},
     setIndexCommitQuorum: {skip: isUnrelated},
     setAuditConfig: {skip: isUnrelated},
     setCommittedSnapshot: {skip: isAnInternalCommand},

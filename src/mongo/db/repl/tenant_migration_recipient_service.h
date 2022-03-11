@@ -32,6 +32,7 @@
 #include <boost/optional.hpp>
 #include <memory>
 
+#include "mongo/client/fetcher.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/repl/oplog_fetcher.h"
 #include "mongo/db/repl/primary_only_service.h"
@@ -368,6 +369,16 @@ public:
         void _fetchAndStoreDonorClusterTimeKeyDocs(const CancellationToken& token);
 
         /**
+         * Creates a backup cursor wrapped in a Fetcher.
+         */
+        ExecutorFuture<void> _getDonorFilenames(const CancellationToken& token);
+
+        /**
+         * Kills the Donor backup cursor
+         */
+        void _killBackupCursor(WithLock lk);
+
+        /**
          * Retrieves the start optimes from the donor and updates the in-memory state accordingly.
          */
         void _getStartOpTimesFromDonor(WithLock lk);
@@ -465,9 +476,9 @@ public:
         SemiFuture<void> _onCloneSuccess();
 
         /*
-         * For protocol "shard merge", revert copied files to a consistent snapshot.
+         * For protocol "shard merge", import donor data files.
          */
-        SemiFuture<void> _rollbackToStable();
+        SemiFuture<void> _importCopiedFiles();
 
         /*
          * Returns a future that will be fulfilled when the tenant migration reaches consistent
@@ -566,6 +577,10 @@ public:
         // Follow DBClientCursor synchonization rules.
         std::unique_ptr<DBClientConnection> _client;              // (S)
         std::unique_ptr<DBClientConnection> _oplogFetcherClient;  // (S)
+
+        CursorId _donorFilenameBackupCursorId = 0;                       // (M)
+        NamespaceString _donorFilenameBackupCursorNamespaceString;       // (M)
+        std::unique_ptr<Fetcher> _donorFilenameBackupCursorFileFetcher;  // (M)
 
         std::unique_ptr<OplogFetcherFactory> _createOplogFetcherFn =
             std::make_unique<CreateOplogFetcherFn>();                               // (M)

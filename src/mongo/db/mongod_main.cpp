@@ -64,6 +64,7 @@
 #include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/clientcursor.h"
@@ -271,7 +272,7 @@ void logStartup(OperationContext* opCtx) {
 
     Lock::GlobalWrite lk(opCtx);
     AutoGetDb autoDb(opCtx, startupLogCollectionName.db(), mongo::MODE_X);
-    auto db = autoDb.ensureDbExists();
+    auto db = autoDb.ensureDbExists(opCtx);
     CollectionPtr collection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, startupLogCollectionName);
     WriteUnitOfWork wunit(opCtx);
@@ -1363,23 +1364,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         // Depends on setKillAllOperations() above to interrupt the index build operations.
         LOGV2_OPTIONS(4784915, {LogComponent::kIndex}, "Shutting down the IndexBuildsCoordinator");
         IndexBuildsCoordinator::get(serviceContext)->shutdown(opCtx);
-
-        // No new readers can come in after the releasing the RSTL, as previously before releasing
-        // the RSTL, we made sure that all new operations will be immediately interrupted by setting
-        // ServiceContext::_globalKill to true. Reacquires RSTL in mode X.
-        LOGV2_OPTIONS(4784916,
-                      {LogComponent::kReplication},
-                      "Reacquiring the ReplicationStateTransitionLock for shutdown");
-        rstl.reacquire();
-
-        // We are expected to have no active readers while performing
-        // markAsCleanShutdownIfPossible() step. We guarantee that there are no active readers at
-        // this point due to:
-        // 1) Acquiring RSTL in mode X as all readers (except single phase hybrid index builds on
-        //    secondaries) are expected to hold RSTL in mode IX.
-        // 2) By waiting for all index build to finish.
-        LOGV2_OPTIONS(4784917, {LogComponent::kReplication}, "Attempting to mark clean shutdown");
-        repl::ReplicationCoordinator::get(serviceContext)->markAsCleanShutdownIfPossible(opCtx);
     }
 
     LOGV2_OPTIONS(4784918, {LogComponent::kNetwork}, "Shutting down the ReplicaSetMonitor");
@@ -1530,7 +1514,18 @@ int mongod_main(int argc, char* argv[]) {
         }
     }
 
-    audit::rotateAuditLog();
+    // Attempt to rotate the audit log pre-emptively on startup to avoid any potential conflicts
+    // with existing log state. If this rotation fails, then exit nicely with failure
+    try {
+        audit::rotateAuditLog();
+    } catch (...) {
+
+        Status err = mongo::exceptionToStatus();
+        LOGV2(6169900, "Error rotating audit log", "error"_attr = err);
+
+        quickExit(ExitCode::EXIT_AUDIT_ROTATE_ERROR);
+    }
+
     setUpCollectionShardingState(service);
     setUpCatalog(service);
     setUpReplication(service);
@@ -1554,6 +1549,7 @@ int mongod_main(int argc, char* argv[]) {
     startSignalProcessingThread();
 
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
+    ChangeStreamOptionsManager::create(service);
 
 #if defined(_WIN32)
     if (ntservice::shouldStartService()) {

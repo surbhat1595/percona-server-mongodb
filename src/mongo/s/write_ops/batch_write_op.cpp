@@ -131,14 +131,12 @@ bool wouldMakeBatchesTooBig(const std::vector<std::unique_ptr<TargetedWrite>>& w
             continue;
         }
 
-        const auto& batch = it->second;
-
-        if (batch->getNumOps() >= write_ops::kMaxWriteBatchSize) {
+        if (it->second->getNumOps() >= write_ops::kMaxWriteBatchSize) {
             // Too many items in batch
             return true;
         }
 
-        if (batch->getEstimatedSizeBytes() + writeSizeBytes > BSONObjMaxUserSize) {
+        if (it->second->getEstimatedSizeBytes() + writeSizeBytes > BSONObjMaxUserSize) {
             // Batch would be too big
             return true;
         }
@@ -267,9 +265,10 @@ BatchWriteOp::BatchWriteOp(OperationContext* opCtx, const BatchedCommandRequest&
     }
 }
 
-Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
-                                 bool recordTargetErrors,
-                                 std::map<ShardId, TargetedWriteBatch*>* targetedBatches) {
+Status BatchWriteOp::targetBatch(
+    const NSTargeter& targeter,
+    bool recordTargetErrors,
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>* targetedBatches) {
     //
     // Targeting of unordered batches is fairly simple - each remaining write op is targeted,
     // and each of those targeted writes are grouped into a batch for a particular shard
@@ -392,7 +391,7 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
         // StaleShardVersion and has to return number of errors equivalent to the number of writes
         // in the batch, the response size will not exceed the max BSON size.
         //
-        // The constant of 272 is chosen as an approximation of the size of the BSON representataion
+        // The constant of 272 is chosen as an approximation of the size of the BSON representation
         // of the StaleConfigInfo (which contains the shard id) and the adjacent error message.
         const int errorResponsePotentialSizeBytes =
             ordered ? 0 : write_ops::kWriteCommandBSONArrayPerElementOverheadBytes + 272;
@@ -417,14 +416,14 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
         for (auto&& write : writes) {
             TargetedBatchMap::iterator batchIt = batchMap.find(&write->endpoint);
             if (batchIt == batchMap.end()) {
-                TargetedWriteBatch* newBatch = new TargetedWriteBatch(write->endpoint);
-                batchIt = batchMap.emplace(&newBatch->getEndpoint(), newBatch).first;
-                targetedShards.insert((&newBatch->getEndpoint())->shardName);
+                auto newBatch = std::make_unique<TargetedWriteBatch>(write->endpoint);
+                auto endpoint = &newBatch->getEndpoint();
+                batchIt = batchMap.emplace(endpoint, std::move(newBatch)).first;
+                targetedShards.insert(endpoint->shardName);
             }
 
-            TargetedWriteBatch* batch = batchIt->second;
-            batch->addWrite(std::move(write),
-                            std::max(writeSizeBytes, errorResponsePotentialSizeBytes));
+            batchIt->second->addWrite(std::move(write),
+                                      std::max(writeSizeBytes, errorResponsePotentialSizeBytes));
         }
 
         // Relinquish ownership of TargetedWrites, now the TargetedBatches own them
@@ -444,16 +443,16 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
     //
 
     for (TargetedBatchMap::iterator it = batchMap.begin(); it != batchMap.end(); ++it) {
-        TargetedWriteBatch* batch = it->second;
+        auto batch = std::move(it->second);
         if (batch->getWrites().empty())
             continue;
 
         // Remember targeted batch for reporting
-        _targeted.insert(batch);
+        _targeted.insert(batch.get());
 
         // Send the handle back to caller
         invariant(targetedBatches->find(batch->getEndpoint().shardName) == targetedBatches->end());
-        targetedBatches->emplace(batch->getEndpoint().shardName, batch);
+        targetedBatches->emplace(batch->getEndpoint().shardName, std::move(batch));
     }
 
     _nShardsOwningChunks = targeter.getNShardsOwningChunks();
@@ -474,7 +473,7 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& 
     boost::optional<std::vector<write_ops::UpdateOpEntry>> updates;
     boost::optional<std::vector<write_ops::DeleteOpEntry>> deletes;
 
-    for (const auto& targetedWrite : targetedBatch.getWrites()) {
+    for (auto&& targetedWrite : targetedBatch.getWrites()) {
         const WriteOpRef& writeOpRef = targetedWrite->writeOpRef;
 
         switch (batchType) {
@@ -544,6 +543,7 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& 
         wcb.setBypassDocumentValidation(
             _clientRequest.getWriteCommandRequestBase().getBypassDocumentValidation());
         wcb.setOrdered(_clientRequest.getWriteCommandRequestBase().getOrdered());
+        wcb.setCollectionUUID(_clientRequest.getWriteCommandRequestBase().getCollectionUUID());
 
         if (targeter.isShardedTimeSeriesBucketsNamespace() &&
             !_clientRequest.getNS().isTimeseriesBucketsCollection()) {
@@ -625,7 +625,7 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
     }
 
     //
-    // Go through all pending responses of the op and sorted remote reponses, populate errors
+    // Go through all pending responses of the op and sorted remote responses, populate errors
     // This will either set all errors to the batch error or apply per-item errors as-needed
     //
     // If the batch is ordered, cancel all writes after the first error for retargeting.
@@ -757,7 +757,7 @@ bool BatchWriteOp::isFinished() {
 }
 
 void BatchWriteOp::buildClientResponse(BatchedCommandResponse* batchResp) {
-    // Note: we aggresively abandon the batch when encountering errors during transactions, so
+    // Note: we aggressively abandon the batch when encountering errors during transactions, so
     // it can be in a state that is not "finished" even for unordered batches.
     dassert(_inTransaction || isFinished());
 
@@ -887,28 +887,16 @@ void BatchWriteOp::_incBatchStats(const BatchedCommandResponse& response) {
 
 void BatchWriteOp::_cancelBatches(const WriteErrorDetail& why,
                                   TargetedBatchMap&& batchMapToCancel) {
-    TargetedBatchMap batchMap(batchMapToCancel);
-
     // Collect all the writeOps that are currently targeted
-    for (TargetedBatchMap::iterator it = batchMap.begin(); it != batchMap.end();) {
-        TargetedWriteBatch* batch = it->second;
-        const std::vector<TargetedWrite*>& writes = batch->getWrites();
-
-        for (std::vector<TargetedWrite*>::const_iterator writeIt = writes.begin();
-             writeIt != writes.end();
-             ++writeIt) {
-            TargetedWrite* write = *writeIt;
-
+    for (TargetedBatchMap::iterator it = batchMapToCancel.begin(); it != batchMapToCancel.end();) {
+        for (auto&& write : it->second->getWrites()) {
             // NOTE: We may repeatedly cancel a write op here, but that's fast and we want to cancel
             // before erasing the TargetedWrite* (which owns the cancelled targeting info) for
             // reporting reasons.
             _writeOps[write->writeOpRef.first].cancelWrites(&why);
         }
 
-        // Note that we need to *erase* first, *then* delete, since the map keys are ptrs from
-        // the values
-        batchMap.erase(it++);
-        delete batch;
+        it = batchMapToCancel.erase(it);
     }
 }
 
@@ -971,13 +959,6 @@ void TrackedErrors::addError(ShardError error) {
 const std::vector<ShardError>& TrackedErrors::getErrors(int errCode) const {
     dassert(isTracking(errCode));
     return _errorMap.find(errCode)->second;
-}
-
-std::vector<TargetedWrite*> TargetedWriteBatch::getWrites() const {
-    std::vector<TargetedWrite*> rv;
-    std::transform(
-        _writes.begin(), _writes.end(), std::back_inserter(rv), [](auto&& w) { return w.get(); });
-    return rv;
 }
 
 void TargetedWriteBatch::addWrite(std::unique_ptr<TargetedWrite> targetedWrite, int estWriteSize) {

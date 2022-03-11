@@ -367,7 +367,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
                 //        }
                 //     ...
                 // }
-                NamespaceString collectionNamespace(nss.getSisterNS(first.valuestr()));
+                NamespaceString collectionNamespace(nss.getSisterNS(first.valueStringDataSafe()));
 
                 // Registers the collection to be removed from the drop pending collection
                 // reaper and to be renamed from its drop pending namespace to original namespace.
@@ -388,7 +388,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
                 //            ns: "foo.x"
                 //        }
 
-                string ns = nss.db().toString() + '.' + first.valuestr();
+                string ns = nss.db().toString() + '.' + first.str();
 
                 string indexName;
                 auto status = bsonExtractStringField(obj, "index", &indexName);
@@ -607,7 +607,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
 
                 BSONObj cmd = obj;
 
-                std::string ns = first.valuestrsafe();
+                std::string ns = first.str();
                 if (ns.empty()) {
                     static constexpr char message[] = "Collection name missing from oplog entry";
                     LOGV2(21667, message, "oplogEntry"_attr = redact(obj));
@@ -833,7 +833,7 @@ void checkRbidAndUpdateMinValid(OperationContext* opCtx,
     // This method is only used with storage engines that do not support recover to stable
     // timestamp. As a result, the timestamp on the 'appliedThrough' update does not matter.
     invariant(!opCtx->getServiceContext()->getStorageEngine()->supportsRecoverToStableTimestamp());
-    replicationProcess->getConsistencyMarkers()->clearAppliedThrough(opCtx, {});
+    replicationProcess->getConsistencyMarkers()->clearAppliedThrough(opCtx);
     replicationProcess->getConsistencyMarkers()->setMinValid(opCtx, minValid);
 
     if (MONGO_unlikely(rollbackHangThenFailAfterWritingMinValid.shouldFail())) {
@@ -1978,9 +1978,8 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
               "Setting appliedThrough to the common point: {commonPoint}",
               "Setting appliedThrough to the common point",
               "commonPoint"_attr = fixUpInfo.commonPoint);
-        const bool setTimestamp = false;
-        replicationProcess->getConsistencyMarkers()->setAppliedThrough(
-            opCtx, fixUpInfo.commonPoint, setTimestamp);
+        replicationProcess->getConsistencyMarkers()->setAppliedThrough(opCtx,
+                                                                       fixUpInfo.commonPoint);
 
         // Take an unstable checkpoint to ensure the appliedThrough write is persisted to disk.
         LOGV2(21720, "Waiting for an unstable checkpoint");
@@ -1989,7 +1988,7 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
 
         // Ensure that appliedThrough is unset in the next stable checkpoint.
         LOGV2(21721, "Clearing appliedThrough");
-        replicationProcess->getConsistencyMarkers()->clearAppliedThrough(opCtx, Timestamp());
+        replicationProcess->getConsistencyMarkers()->clearAppliedThrough(opCtx);
     }
 
     Status status = AuthorizationManager::get(opCtx->getServiceContext())->initialize(opCtx);

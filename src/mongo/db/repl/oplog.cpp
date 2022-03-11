@@ -73,6 +73,7 @@
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer_util.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/ops/update.h"
@@ -296,7 +297,6 @@ void writeToImageCollection(OperationContext* opCtx,
     request.setFromOplogApplication(true);
     try {
         // This code path can also be hit by things such as `applyOps` and tenant migrations.
-        repl::UnreplicatedWritesBlock dontReplicate(opCtx);
         ::mongo::update(opCtx, autoColl.getDb(), request);
     } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
         // We can get a duplicate key when two upserts race on inserting a document.
@@ -521,7 +521,9 @@ std::vector<OpTime> logInsertOps(
         if (insertStatementOplogSlot.isNull()) {
             insertStatementOplogSlot = oplogInfo->getNextOpTimes(opCtx, 1U)[0];
         }
+        const auto docKey = getDocumentKey(opCtx, nss, begin[i].doc).getShardKeyAndId();
         oplogEntry.setObject(begin[i].doc);
+        oplogEntry.setObject2(docKey);
         oplogEntry.setOpTime(insertStatementOplogSlot);
         oplogEntry.setDestinedRecipient(getDestinedRecipientFn(begin[i].doc));
         addDestinedRecipient.execute([&](const BSONObj& data) {
@@ -1927,14 +1929,51 @@ Status applyCommand_inlock(OperationContext* opCtx,
 
                 auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db(), o))->ns();
 
-                invariant(mode == OplogApplication::Mode::kInitialSync);
-                abortIndexBuilds(
-                    opCtx, entry.getCommandType(), ns, "Aborting index builds during initial sync");
-                LOGV2_DEBUG(4665901,
-                            1,
-                            "Conflicting DDL operation encountered during initial sync; "
-                            "aborting index build and retrying",
-                            "namespace"_attr = ns);
+                // TODO (SERVER-61481): Once kLastLTS is 6.0, this error will only be possible in
+                // mode kInitialSync.
+                if (mode == OplogApplication::Mode::kInitialSync) {
+                    abortIndexBuilds(opCtx,
+                                     entry.getCommandType(),
+                                     ns,
+                                     "Aborting index builds during initial sync");
+                    LOGV2_DEBUG(4665901,
+                                1,
+                                "Conflicting DDL operation encountered during initial sync; "
+                                "aborting index build and retrying",
+                                logAttrs(ns));
+                } else {
+                    auto lockState = opCtx->lockState();
+                    Locker::LockSnapshot lockSnapshot;
+                    auto locksReleased = lockState->saveLockStateAndUnlock(&lockSnapshot);
+
+                    ScopeGuard guard{[&] {
+                        if (locksReleased) {
+                            invariant(!lockState->isLocked());
+                            lockState->restoreLockState(lockSnapshot);
+                        }
+                    }};
+
+                    auto swUUID = entry.getUuid();
+                    if (!swUUID) {
+                        LOGV2_ERROR(21261,
+                                    "Failed command during oplog application. Expected a UUID",
+                                    "command"_attr = redact(o),
+                                    logAttrs(ns));
+                    }
+                    IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
+                        opCtx, swUUID.get());
+
+                    opCtx->recoveryUnit()->abandonSnapshot();
+                    opCtx->checkForInterrupt();
+
+                    LOGV2_DEBUG(
+                        51775,
+                        1,
+                        "Acceptable error during oplog application: background operation in "
+                        "progress for namespace",
+                        logAttrs(ns),
+                        "oplogEntry"_attr = redact(entry.toBSONForLogging()));
+                }
 
                 break;
             }

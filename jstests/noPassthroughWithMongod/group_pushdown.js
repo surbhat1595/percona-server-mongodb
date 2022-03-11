@@ -23,8 +23,9 @@ assert.commandWorked(coll.insert([
     {"_id": 5, "item": "c", "price": 5, "quantity": 10, "date": ISODate("2014-02-15T09:05:00Z")},
 ]));
 
-let assertGroupPushdown = function(coll, pipeline, expectedResults, expectedGroupCountInExplain) {
-    const explain = coll.explain().aggregate(pipeline);
+let assertGroupPushdown = function(
+    coll, pipeline, expectedResults, expectedGroupCountInExplain, options = {}) {
+    const explain = coll.explain().aggregate(pipeline, options);
     // When $group is pushed down it will never be present as a stage in the 'winningPlan' of
     // $cursor.
     if (expectedGroupCountInExplain > 1) {
@@ -33,7 +34,7 @@ let assertGroupPushdown = function(coll, pipeline, expectedResults, expectedGrou
         assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
     }
 
-    let results = coll.aggregate(pipeline).toArray();
+    let results = coll.aggregate(pipeline, options).toArray();
     assert.sameMembers(results, expectedResults);
 };
 
@@ -253,11 +254,12 @@ assertNoGroupPushdown(coll,
                       [{$group: {_id: {"i": "$item"}, s: {$sum: "$price"}}}],
                       [{_id: {i: "a"}, s: 15}, {_id: {i: "b"}, s: 30}, {_id: {i: "c"}, s: 5}]);
 
-// Spilling isn't supported yet so $group with 'allowDiskUse' true won't get pushed down.
-assertNoGroupPushdown(coll,
-                      [{$group: {_id: "$item", s: {$sum: "$price"}}}],
-                      [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
-                      {allowDiskUse: true, cursor: {batchSize: 1}});
+// Run a group with spilling on and check that $group is pushed down.
+assertGroupPushdown(coll,
+                    [{$group: {_id: "$item", s: {$sum: "$price"}}}],
+                    [{"_id": "b", "s": 30}, {"_id": "a", "s": 15}, {"_id": "c", "s": 5}],
+                    1,
+                    {allowDiskUse: true, cursor: {batchSize: 1}});
 
 // Run a pipeline with match, sort, group to check if the whole pipeline gets pushed down.
 assertGroupPushdown(coll,
@@ -358,9 +360,11 @@ assertNoGroupPushdown(coll,
                       [matchWithTrivialAndOr, groupPossiblyPushedDown],
                       [{_id: "a", quantity: 7}, {_id: "b", quantity: 10}]);
 
-// $bucketAuto/$bucket/$sortByCount are sugared $group stages which are not compatible with SBE.
-// TODO SERVER-60300: When we support pushdown of these stages, change these assertions to check
-// that they are pushed down.
+// $bucketAuto is a group-like stage that is not compatible with SBE HashAggStage.
+// TODO SERVER-62401: Supporting a $bucketAuto will require a range-based group-aggregate
+// implementation that will chose _ids based on the collection of values rather than a hash-based
+// group-aggregate that requires _id to be computable by looking just at the current document.
+
 assertNoGroupPushdown(
     coll,
     [{$bucketAuto: {groupBy: "$price", buckets: 5, output: {quantity: {$sum: "$quantity"}}}}],
@@ -369,14 +373,29 @@ assertNoGroupPushdown(
         {"_id": {"min": 10, "max": 20}, "quantity": 12},
         {"_id": {"min": 20, "max": 20}, "quantity": 1}
     ]);
-assertNoGroupPushdown(
+
+// Verify that $bucket is pushed down to SBE and returns correct results.
+assertResultsMatchWithAndWithoutPushdown(
     coll,
     [{
         $bucket:
             {groupBy: "$price", boundaries: [1, 10, 50], output: {quantity: {$sum: "$quantity"}}}
     }],
     [{"_id": 1, "quantity": 15}, {"_id": 10, "quantity": 13}]);
-assertNoGroupPushdown(
+
+assertResultsMatchWithAndWithoutPushdown(
+    coll,
+    [{
+        $bucket: {
+            groupBy: "$price",
+            boundaries: [1, 50],
+            output: {count: {$count: {}}, quantity: {$sum: "$quantity"}}
+        }
+    }],
+    [{"_id": 1, "count": 5, "quantity": 28}]);
+
+// Verify that $sortByCount is pushed down to SBE and returns correct results.
+assertResultsMatchWithAndWithoutPushdown(
     coll,
     [{$sortByCount: "$item"}],
     [{"_id": "a", "count": 2}, {"_id": "b", "count": 2}, {"_id": "c", "count": 1}]);

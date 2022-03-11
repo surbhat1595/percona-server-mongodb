@@ -33,6 +33,7 @@
 
 #include "mongo/db/index_builds_coordinator.h"
 
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/catalog/database_holder.h"
@@ -495,7 +496,7 @@ std::vector<std::string> IndexBuildsCoordinator::extractIndexNames(
     const std::vector<BSONObj>& specs) {
     std::vector<std::string> indexNames;
     for (const auto& spec : specs) {
-        std::string name = spec.getStringField(IndexDescriptor::kIndexNameFieldName);
+        std::string name = spec.getStringField(IndexDescriptor::kIndexNameFieldName).toString();
         invariant(!name.empty(),
                   str::stream() << "Bad spec passed into ReplIndexBuildState constructor, missing '"
                                 << IndexDescriptor::kIndexNameFieldName << "' field: " << spec);
@@ -532,7 +533,7 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
 
     std::vector<std::string> indexNames;
     for (auto& spec : specs) {
-        std::string name = spec.getStringField(IndexDescriptor::kIndexNameFieldName);
+        std::string name = spec.getStringField(IndexDescriptor::kIndexNameFieldName).toString();
         if (name.empty()) {
             return Status(ErrorCodes::CannotCreateIndex,
                           str::stream()
@@ -660,7 +661,8 @@ Status IndexBuildsCoordinator::_setUpResumeIndexBuild(OperationContext* opCtx,
     auto durableCatalog = DurableCatalog::get(opCtx);
 
     for (auto spec : specs) {
-        std::string indexName = spec.getStringField(IndexDescriptor::kIndexNameFieldName);
+        std::string indexName =
+            spec.getStringField(IndexDescriptor::kIndexNameFieldName).toString();
         if (indexName.empty()) {
             return Status(ErrorCodes::CannotCreateIndex,
                           str::stream()
@@ -854,18 +856,19 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
             invariant(coll,
                       str::stream() << "Collection with UUID " << collUUID << " was dropped.");
 
-            IndexCatalog* indexCatalog = coll.getWritableCollection()->getIndexCatalog();
+            IndexCatalog* indexCatalog = coll.getWritableCollection(opCtx)->getIndexCatalog();
 
             const bool includeUnfinished = false;
             for (const auto& spec : oplogEntry.indexSpecs) {
-                std::string name = spec.getStringField(IndexDescriptor::kIndexNameFieldName);
+                std::string name =
+                    spec.getStringField(IndexDescriptor::kIndexNameFieldName).toString();
                 uassert(ErrorCodes::BadValue,
                         str::stream() << "Index spec is missing the 'name' field " << spec,
                         !name.empty());
 
                 if (auto desc = indexCatalog->findIndexByName(opCtx, name, includeUnfinished)) {
                     uassertStatusOK(
-                        indexCatalog->dropIndex(opCtx, coll.getWritableCollection(), desc));
+                        indexCatalog->dropIndex(opCtx, coll.getWritableCollection(opCtx), desc));
                 }
             }
 
@@ -1638,6 +1641,11 @@ void IndexBuildsCoordinator::createIndexesOnEmptyCollection(OperationContext* op
     // Always run single phase index build for empty collection. And, will be coordinated using
     // createIndexes oplog entry.
     for (const auto& spec : specs) {
+        if (spec.hasField("clustered") && spec.getBoolField("clustered")) {
+            // The index is already built implicitly.
+            continue;
+        }
+
         // Each index will be added to the mdb catalog using the preceding createIndexes
         // timestamp.
         opObserver->onCreateIndex(opCtx, nss, collectionUUID, spec, fromMigrate);
@@ -1715,7 +1723,7 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
     // AutoGetCollection throws an exception if it is unable to look up the collection by UUID.
     NamespaceStringOrUUID nssOrUuid{dbName.toString(), collectionUUID};
     AutoGetCollection autoColl(opCtx, nssOrUuid, MODE_X);
-    CollectionWriter collection(autoColl);
+    CollectionWriter collection(opCtx, autoColl);
 
     const auto& ns = collection.get()->ns();
     auto css = CollectionShardingState::get(opCtx, ns);
@@ -1800,7 +1808,7 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
     const NamespaceStringOrUUID nssOrUuid{replState->dbName, replState->collectionUUID};
 
     AutoGetCollection coll(opCtx, nssOrUuid, MODE_X);
-    CollectionWriter collection(coll);
+    CollectionWriter collection(opCtx, coll);
     CollectionShardingState::get(opCtx, collection->ns())->checkShardVersionOrThrow(opCtx);
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);

@@ -33,10 +33,12 @@ const kCollName = "testColl";
 const kConfigSessionsNs = "config.system.sessions";
 const kConfigTxnsNs = "config.transactions";
 const kImageCollNs = "config.image_collection";
+const kOplogCollNs = "local.oplog.rs";
 
 let sessionsCollOnPrimary = shard0Primary.getCollection(kConfigSessionsNs);
 let transactionsCollOnPrimary = shard0Primary.getCollection(kConfigTxnsNs);
 let imageCollOnPrimary = shard0Primary.getCollection(kImageCollNs);
+let oplogCollOnPrimary = shard0Primary.getCollection(kOplogCollNs);
 let testDB = shard0Primary.getDB(kDbName);
 
 assert.commandWorked(testDB.createCollection(kCollName));
@@ -59,7 +61,6 @@ const childLsid0 = {
     id: sessionUUID,
     txnUUID: UUID()
 };
-
 assert.commandWorked(testDB.runCommand({
     update: kCollName,
     updates: [{q: {_id: 0}, u: {$set: {a: 0}}}],
@@ -78,11 +79,13 @@ jsTest.log("Verify that the config.transactions entry for the internal transacti
 assert.eq(numTransactionsCollEntries, transactionsCollOnPrimary.find().itcount());
 
 const parentTxnNumber1 = NumberLong(1);
+
 assert.commandWorked(testDB.runCommand({
     update: kCollName,
     updates: [{q: {_id: 0}, u: {$set: {b: 0}}}],
     lsid: parentLsid,
     txnNumber: parentTxnNumber1,
+    stmtId: NumberInt(0)
 }));
 numTransactionsCollEntries++;
 
@@ -91,12 +94,12 @@ const childLsid1 = {
     txnNumber: parentTxnNumber1,
     txnUUID: UUID()
 };
-
 assert.commandWorked(testDB.runCommand({
     update: kCollName,
     updates: [{q: {_id: 0}, u: {$set: {c: 0}}}],
     lsid: childLsid1,
     txnNumber: kInternalTxnNumber,
+    stmtId: NumberInt(1),
     startTransaction: true,
     autocommit: false
 }));
@@ -105,12 +108,14 @@ assert.commandWorked(testDB.adminCommand(
 numTransactionsCollEntries++;
 
 const parentTxnNumber2 = NumberLong(2);
+
 assert.commandWorked(testDB.runCommand({
     findAndModify: kCollName,
     query: {_id: 0},
     update: {$set: {d: 0}},
     lsid: parentLsid,
-    txnNumber: parentTxnNumber2
+    txnNumber: parentTxnNumber2,
+    stmtId: NumberInt(0)
 }));
 numImageCollEntries++;
 
@@ -123,13 +128,13 @@ const childLsid2 = {
     txnNumber: parentTxnNumber2,
     txnUUID: UUID()
 };
-
 assert.commandWorked(testDB.runCommand({
     findAndModify: kCollName,
     query: {_id: 0},
     update: {$set: {e: 0}},
     lsid: childLsid2,
     txnNumber: kInternalTxnNumber,
+    stmtId: NumberInt(1),
     startTransaction: true,
     autocommit: false
 }));
@@ -139,8 +144,14 @@ numTransactionsCollEntries++;
 numImageCollEntries++;
 
 const parentTxnNumber3 = NumberLong(3);
-assert.commandWorked(testDB.runCommand(
-    {insert: kCollName, documents: [{_id: 1}], lsid: parentLsid, txnNumber: parentTxnNumber3}));
+
+assert.commandWorked(testDB.runCommand({
+    insert: kCollName,
+    documents: [{_id: 1}],
+    lsid: parentLsid,
+    txnNumber: parentTxnNumber3,
+    stmtId: NumberInt(0)
+}));
 
 jsTest.log("Verify that the config.transactions entry for the retryable internal transaction for " +
            "the findAndModify did not get reaped although there is already a new retryable write");
@@ -180,6 +191,12 @@ assert.eq(0,
           transactionsCollOnPrimary.find().itcount(),
           tojson(transactionsCollOnPrimary.find().toArray()));
 assert.eq(0, imageCollOnPrimary.find().itcount());
+
+// Validate that writes to config.transactions do not generate oplog entries, with the exception of
+// deletions.
+assert.eq(numTransactionsCollEntries,
+          oplogCollOnPrimary.find({op: 'd', ns: kConfigTxnsNs}).itcount());
+assert.eq(0, oplogCollOnPrimary.find({op: {'$ne': 'd'}, ns: kConfigTxnsNs}).itcount());
 
 st.stop();
 })();

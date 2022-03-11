@@ -112,8 +112,12 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
         candidates.plans.erase(candidates.plans.begin() + candidates.winnerIdx);
     }
 
-    _planExplainer = plan_explainer_factory::make(
-        _root.get(), &_rootData, _solution.get(), std::move(candidates.plans), isMultiPlan);
+    _planExplainer = plan_explainer_factory::make(_root.get(),
+                                                  &_rootData,
+                                                  _solution.get(),
+                                                  std::move(candidates.plans),
+                                                  isMultiPlan,
+                                                  std::move(_rootData.debugInfo));
 }
 
 void PlanExecutorSBE::saveState() {
@@ -329,7 +333,9 @@ BSONObj PlanExecutorSBE::getPostBatchResumeToken() const {
                                      "but found a result without a valid RecordId: "
                                   << msgTag,
                     tag == sbe::value::TypeTags::RecordId);
-            return BSON("$recordId" << sbe::value::bitcastTo<int64_t>(val));
+            BSONObjBuilder builder;
+            sbe::value::getRecordIdView(val)->serializeToken("$recordId", &builder);
+            return builder.obj();
         }
     }
 
@@ -383,7 +389,7 @@ sbe::PlanState fetchNext(sbe::PlanStage* root,
         invariant(recordIdSlot);
         auto [tag, val] = recordIdSlot->getViewOfValue();
         if (tag == sbe::value::TypeTags::RecordId) {
-            *dlOut = RecordId{sbe::value::bitcastTo<int64_t>(val)};
+            *dlOut = *sbe::value::getRecordIdView(val);
         }
     }
     return state;

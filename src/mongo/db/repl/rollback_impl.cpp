@@ -76,6 +76,7 @@ using namespace fmt::literals;
 
 MONGO_FAIL_POINT_DEFINE(rollbackHangAfterTransitionToRollback);
 MONGO_FAIL_POINT_DEFINE(rollbackToTimestampHangCommonPointBeforeReplCommitPoint);
+MONGO_FAIL_POINT_DEFINE(rollbackHangBeforeTransitioningToRollback);
 
 namespace {
 
@@ -316,6 +317,7 @@ Status RollbackImpl::_transitionToRollback(OperationContext* opCtx) {
 
     LOGV2(21593, "Transition to ROLLBACK");
     {
+        rollbackHangBeforeTransitioningToRollback.pauseWhileSet(opCtx);
         ReplicationStateTransitionLockGuard rstlLock(
             opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
 
@@ -410,7 +412,7 @@ StatusWith<std::set<NamespaceString>> RollbackImpl::_namespacesForOp(const Oplog
         switch (oplogEntry.getCommandType()) {
             case OplogEntry::CommandType::kRenameCollection: {
                 // Add both the 'from' and 'to' namespaces.
-                namespaces.insert(NamespaceString(firstElem.valuestrsafe()));
+                namespaces.insert(NamespaceString(firstElem.valueStringDataSafe()));
                 namespaces.insert(NamespaceString(obj.getStringField("to")));
                 break;
             }
@@ -475,12 +477,13 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
     const auto filterFromMigration = BSON("op"
                                           << "n"
                                           << "fromMigrate" << true);
-    auto cursor = client->query(
-        NamespaceString::kRsOplogNamespace,
-        BSON("ts" << BSON("$gt" << stableTimestamp) << "txnNumber" << BSON("$exists" << true)
-                  << "stmtId" << BSON("$exists" << true) << "prevOpTime.ts"
-                  << BSON("$gte" << Timestamp(1, 0) << "$lte" << stableTimestamp) << "$or"
-                  << BSON_ARRAY(filter << filterFromMigration)));
+    FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
+    findRequest.setFilter(BSON("ts" << BSON("$gt" << stableTimestamp) << "txnNumber"
+                                    << BSON("$exists" << true) << "stmtId"
+                                    << BSON("$exists" << true) << "prevOpTime.ts"
+                                    << BSON("$gte" << Timestamp(1, 0) << "$lte" << stableTimestamp)
+                                    << "$or" << BSON_ARRAY(filter << filterFromMigration)));
+    auto cursor = client->find(std::move(findRequest));
     while (cursor->more()) {
         auto doc = cursor->next();
         auto swEntry = OplogEntry::parse(doc);

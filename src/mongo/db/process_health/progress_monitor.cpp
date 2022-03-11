@@ -91,9 +91,22 @@ void ProgressMonitor::progressMonitorCheck(std::function<void(std::string cause)
     if (secondPass.empty()) {
         return;
     }
+
+    auto longestIntervalHealthObserver = *std::max_element(
+        secondPass.begin(), secondPass.end(), [&](const auto& lhs, const auto& rhs) {
+            auto lhs_interval =
+                _faultManager->getConfig().getPeriodicHealthCheckInterval(lhs->getType());
+            auto rhs_interval =
+                _faultManager->getConfig().getPeriodicHealthCheckInterval(rhs->getType());
+            return lhs_interval < rhs_interval;
+        });
+
+    auto longestInterval = _faultManager->getConfig().getPeriodicHealthCheckInterval(
+        longestIntervalHealthObserver->getType());
+
+    sleepFor(longestInterval * 2);
     // The observer is enabled but did not run for a while. Sleep two cycles
     // and check again. Note: this should be rare.
-    sleepFor(_faultManager->getConfig().getPeriodicHealthCheckInterval() * 2);
     for (auto observer : secondPass) {
         const auto stats = observer->getStats();
         if (!_faultManager->getConfig().isHealthObserverEnabled(observer->getType()) &&
@@ -110,12 +123,18 @@ void ProgressMonitor::progressMonitorCheck(std::function<void(std::string cause)
 }
 
 void ProgressMonitor::_progressMonitorLoop() {
-    Client::initThread("Health checks progress monitor"_sd, _svcCtx, nullptr);
+    Client::initThread("FaultManagerProgressMonitor"_sd, _svcCtx, nullptr);
+    static const int kSleepsPerInterval = 10;
 
     while (!_terminate.load()) {
         progressMonitorCheck(_crashCb);
 
-        sleepFor(_faultManager->getConfig().getPeriodicLivenessCheckInterval());
+        const auto interval =
+            Microseconds(_faultManager->getConfig().getPeriodicLivenessCheckInterval());
+        // Breaking up the sleeping interval to check for `_terminate` more often.
+        for (int i = 0; i < kSleepsPerInterval && !_terminate.load(); ++i) {
+            sleepFor(interval / kSleepsPerInterval);
+        }
     }
 }
 

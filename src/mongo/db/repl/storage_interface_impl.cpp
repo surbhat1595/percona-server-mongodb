@@ -57,7 +57,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/exec/delete.h"
+#include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/index_builds_coordinator.h"
@@ -245,7 +245,7 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
         {
             // Create the collection.
             WriteUnitOfWork wunit(opCtx.get());
-            auto db = autoDb.ensureDbExists();
+            auto db = autoDb.ensureDbExists(opCtx.get());
             fassert(40332, db->createCollection(opCtx.get(), nss, options, false));
             wunit.commit();
         }
@@ -259,19 +259,21 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
         if (options.capped) {
             WriteUnitOfWork wunit(opCtx.get());
             if (!idIndexSpec.isEmpty()) {
-                auto status = autoColl->getWritableCollection()
-                                  ->getIndexCatalog()
-                                  ->createIndexOnEmptyCollection(
-                                      opCtx.get(), autoColl->getWritableCollection(), idIndexSpec);
+                auto status =
+                    autoColl->getWritableCollection(opCtx.get())
+                        ->getIndexCatalog()
+                        ->createIndexOnEmptyCollection(
+                            opCtx.get(), autoColl->getWritableCollection(opCtx.get()), idIndexSpec);
                 if (!status.getStatus().isOK()) {
                     return status.getStatus();
                 }
             }
             for (auto&& spec : secondaryIndexSpecs) {
-                auto status = autoColl->getWritableCollection()
-                                  ->getIndexCatalog()
-                                  ->createIndexOnEmptyCollection(
-                                      opCtx.get(), autoColl->getWritableCollection(), spec);
+                auto status =
+                    autoColl->getWritableCollection(opCtx.get())
+                        ->getIndexCatalog()
+                        ->createIndexOnEmptyCollection(
+                            opCtx.get(), autoColl->getWritableCollection(opCtx.get()), spec);
                 if (!status.getStatus().isOK()) {
                     return status.getStatus();
                 }
@@ -475,7 +477,7 @@ Status StorageInterfaceImpl::createCollection(OperationContext* opCtx,
                                               const BSONObj& idIndexSpec) {
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::createCollection", nss.ns(), [&] {
         AutoGetDb databaseWriteGuard(opCtx, nss.db(), MODE_IX);
-        auto db = databaseWriteGuard.ensureDbExists();
+        auto db = databaseWriteGuard.ensureDbExists(opCtx);
         invariant(db);
         if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)) {
             return Status(ErrorCodes::NamespaceExists,
@@ -553,7 +555,7 @@ Status StorageInterfaceImpl::truncateCollection(OperationContext* opCtx,
         }
 
         WriteUnitOfWork wunit(opCtx);
-        const auto status = autoColl.getWritableCollection()->truncate(opCtx);
+        const auto status = autoColl.getWritableCollection(opCtx)->truncate(opCtx);
         if (!status.isOK()) {
             return status;
         }

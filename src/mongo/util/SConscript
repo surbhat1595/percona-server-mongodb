@@ -291,6 +291,28 @@ env.Library(
     ]
 )
 
+env.Library(
+    target='tracing_support',
+    source=[
+        'tracing_support.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ]
+)
+
+env.CppUnitTest(
+    target='tracing_support_test',
+    source=[
+        'tracing_support_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/util/clock_source_mock',
+        '$BUILD_DIR/mongo/util/tracing_support',
+    ],
+)
+
+
 env.CppUnitTest(
     target='thread_safety_context_test',
     source=[
@@ -686,6 +708,7 @@ icuEnv.CppUnitTest(
         'md5_test.cpp',
         'md5main.cpp',
         'out_of_line_executor_test.cpp',
+        'packaged_task_test.cpp',
         'periodic_runner_impl_test.cpp',
         'processinfo_test.cpp',
         'procparser_test.cpp' if env.TargetOSIs('linux') else [],

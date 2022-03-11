@@ -43,6 +43,7 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/s/migration_session_id.h"
+#include "mongo/db/s/session_catalog_migration.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/write_concern.h"
@@ -272,8 +273,7 @@ ProcessOplogResult processSessionOplog(const BSONObj& oplogBSON,
     }
 
     if (!result.isPrePostImage)
-        oplogEntry.setObject(
-            BSON(SessionCatalogMigrationDestination::kSessionMigrateOplogTag << 1));
+        oplogEntry.setObject(SessionCatalogMigration::kSessionOplogTag);
     setPrePostImageTs(lastResult, &oplogEntry);
     oplogEntry.setPrevWriteOpTimeInTransaction(txnParticipant.getLastWriteOpTime());
 
@@ -326,8 +326,6 @@ ProcessOplogResult processSessionOplog(const BSONObj& oplogBSON,
 }
 
 }  // namespace
-
-const char SessionCatalogMigrationDestination::kSessionMigrateOplogTag[] = "$sessionMigrateInfo";
 
 SessionCatalogMigrationDestination::SessionCatalogMigrationDestination(
     NamespaceString nss, ShardId fromShard, MigrationSessionId migrationSessionId)
@@ -449,19 +447,18 @@ void SessionCatalogMigrationDestination::_retrieveSessionStateFromSource(Service
                 uassertStatusOK(
                     waitForWriteConcern(opCtx, lastResult.oplogTime, kMajorityWC, &unusedWCResult));
 
-                // We depleted the buffer at least once, transition to ready for commit.
-                LOGV2(
-                    5087101,
-                    "Recipient finished draining oplog entries for retryable writes and "
-                    "transactions from donor for the first time, before receiving _recvChunkCommit",
-                    "namespace"_attr = _nss,
-                    "migrationSessionId"_attr = _migrationSessionId,
-                    "fromShard"_attr = _fromShard);
-
                 {
                     stdx::lock_guard<Latch> lk(_mutex);
                     // Note: only transition to "ready to commit" if state is not error/force stop.
                     if (_state == State::Migrating) {
+                        // We depleted the buffer at least once, transition to ready for commit.
+                        LOGV2(5087101,
+                              "Recipient finished draining oplog entries for retryable writes and "
+                              "transactions from donor for the first time, before receiving "
+                              "_recvChunkCommit",
+                              "namespace"_attr = _nss,
+                              "migrationSessionId"_attr = _migrationSessionId,
+                              "fromShard"_attr = _fromShard);
                         _state = State::ReadyToCommit;
                     }
                 }

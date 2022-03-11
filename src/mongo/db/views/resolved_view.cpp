@@ -37,6 +37,7 @@
 #include "mongo/db/pipeline/document_source_internal_convert_bucket_index_stats.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 
 namespace mongo {
@@ -72,15 +73,42 @@ ResolvedView ResolvedView::fromBSON(const BSONObj& commandResponseObj) {
         collationSpec = collationElt.embeddedObject().getOwned();
     }
 
+    boost::optional<TimeseriesOptions> timeseriesOptions = boost::none;
+    if (auto tsOptionsElt = viewDef[kTimeseriesOptions]) {
+        if (tsOptionsElt.isABSONObj()) {
+            timeseriesOptions =
+                TimeseriesOptions::parse({"ResolvedView::fromBSON"}, tsOptionsElt.Obj());
+        }
+    }
+
+    boost::optional<bool> mixedSchema = boost::none;
+    if (auto mixedSchemaElem = viewDef[kTimeseriesMayContainMixedData]) {
+        uassert(6067204,
+                str::stream() << "view definition must have " << kTimeseriesMayContainMixedData
+                              << " of type bool or no such field",
+                mixedSchemaElem.type() == BSONType::Bool);
+
+        mixedSchema = boost::optional<bool>(mixedSchemaElem.boolean());
+    }
+
     return {NamespaceString(viewDef["ns"].valueStringData()),
             std::move(pipeline),
-            std::move(collationSpec)};
+            std::move(collationSpec),
+            std::move(timeseriesOptions),
+            std::move(mixedSchema)};
 }
 
 void ResolvedView::serialize(BSONObjBuilder* builder) const {
     BSONObjBuilder subObj(builder->subobjStart("resolvedView"));
     subObj.append("ns", _namespace.ns());
     subObj.append("pipeline", _pipeline);
+    if (_timeseriesOptions) {
+        BSONObjBuilder tsObj(builder->subobjStart(kTimeseriesOptions));
+        _timeseriesOptions->serialize(&tsObj);
+    }
+    // Only serialize if it doesn't contain mixed data.
+    if ((_timeseriesMayContainMixedData && !(*_timeseriesMayContainMixedData)))
+        subObj.append(kTimeseriesMayContainMixedData, *_timeseriesMayContainMixedData);
     if (!_defaultCollation.isEmpty()) {
         subObj.append("collation", _defaultCollation);
     }
@@ -125,6 +153,21 @@ AggregateCommandRequest ResolvedView::asExpandedViewAggregation(
         }
         resolvedPipeline[1] =
             BSON(DocumentSourceInternalConvertBucketIndexStats::kStageName << builder.obj());
+    } else if (resolvedPipeline.size() >= 1 &&
+               resolvedPipeline[0][DocumentSourceInternalUnpackBucket::kStageNameInternal] &&
+               serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
+                   multiversion::FeatureCompatibilityVersion::kVersion_5_2)) {
+        auto unpackStage = resolvedPipeline[0];
+
+        BSONObjBuilder builder;
+        for (const auto& elem :
+             unpackStage[DocumentSourceInternalUnpackBucket::kStageNameInternal].Obj()) {
+            builder.append(elem);
+        }
+        builder.append(DocumentSourceInternalUnpackBucket::kAssumeNoMixedSchemaData,
+                       ((_timeseriesMayContainMixedData && !(*_timeseriesMayContainMixedData))));
+        resolvedPipeline[0] =
+            BSON(DocumentSourceInternalUnpackBucket::kStageNameInternal << builder.obj());
     }
 
     AggregateCommandRequest expandedRequest{_namespace, resolvedPipeline};
@@ -135,7 +178,25 @@ AggregateCommandRequest ResolvedView::asExpandedViewAggregation(
         expandedRequest.setCursor(request.getCursor());
     }
 
-    expandedRequest.setHint(request.getHint());
+    // If we have an index hint on a time-series view, we may need to rewrite the index spec to
+    // match the index on the underlying buckets collection.
+    if (request.getHint() && _timeseriesOptions) {
+        BSONObj original = *request.getHint();
+        BSONObj rewritten = original;
+        // Only convert if we are given an index spec, not an index name. An index name is provided
+        // in the form of {"$hint": <name>}.
+        if (!original.isEmpty() && original.firstElementFieldNameStringData() != "$hint"_sd) {
+            auto converted = timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+                *_timeseriesOptions, original);
+            if (converted.isOK()) {
+                rewritten = converted.getValue();
+            }
+        }
+        expandedRequest.setHint(rewritten);
+    } else {
+        expandedRequest.setHint(request.getHint());
+    }
+
     expandedRequest.setMaxTimeMS(request.getMaxTimeMS());
     expandedRequest.setReadConcern(request.getReadConcern());
     expandedRequest.setUnwrappedReadPref(request.getUnwrappedReadPref());

@@ -87,6 +87,11 @@ static bool inmem;
 
 static void handler(int) WT_GCC_FUNC_DECL_ATTRIBUTE((noreturn));
 static void usage(void) WT_GCC_FUNC_DECL_ATTRIBUTE((noreturn));
+
+/*
+ * usage --
+ *     TODO: Add a comment describing this function.
+ */
 static void
 usage(void)
 {
@@ -100,6 +105,10 @@ typedef struct {
     uint32_t id;
 } WT_THREAD_DATA;
 
+/*
+ * thread_run --
+ *     TODO: Add a comment describing this function.
+ */
 static WT_THREAD_RET
 thread_run(void *arg)
 {
@@ -181,8 +190,7 @@ thread_run(void *arg)
         if (i == 0)
             i++;
 
-        /* FIXME-WT-6035: temporarily turn off tests for lower isolation levels. */
-        testutil_check(session->begin_transaction(session, "isolation=snapshot"));
+        testutil_check(session->begin_transaction(session, NULL));
 
         /*
          * The value is the insert- with key appended.
@@ -209,7 +217,6 @@ thread_run(void *arg)
         cursor->set_value(cursor, &data);
         testutil_check(cursor->insert(cursor));
 
-        /* FIXME-WT-6035: temporarily turn off tests for lower isolation levels. */
         testutil_check(session->commit_transaction(session, NULL));
 
         /*
@@ -233,8 +240,7 @@ thread_run(void *arg)
          * Decide what kind of operation can be performed on the already inserted data.
          */
         if (i % MAX_NUM_OPS == OP_TYPE_DELETE) {
-            /* FIXME-WT-6035: temporarily turn off tests for lower isolation levels. */
-            testutil_check(session->begin_transaction(session, "isolation=snapshot"));
+            testutil_check(session->begin_transaction(session, NULL));
 
             if (columnar_table)
                 cursor->set_key(cursor, i);
@@ -243,7 +249,6 @@ thread_run(void *arg)
 
             testutil_check(cursor->remove(cursor));
 
-            /* FIXME-WT-6035: temporarily turn off tests for lower isolation levels. */
             testutil_check(session->commit_transaction(session, NULL));
 
             /* Save the key separately for checking later.*/
@@ -261,7 +266,7 @@ thread_run(void *arg)
              * Make sure the modify operation is carried out in an snapshot isolation level with
              * explicit transaction.
              */
-            testutil_check(session->begin_transaction(session, "isolation=snapshot"));
+            testutil_check(session->begin_transaction(session, NULL));
 
             ret = wiredtiger_calc_modify(session, &data, &newv, maxdiff, entries, &nentries);
 
@@ -295,11 +300,13 @@ thread_run(void *arg)
     /* NOTREACHED */
 }
 
-/*
- * Child process creates the database and table, and then creates worker threads to add data until
- * it is killed by the parent.
- */
 static void fill_db(uint32_t) WT_GCC_FUNC_DECL_ATTRIBUTE((noreturn));
+
+/*
+ * fill_db --
+ *     Child process creates the database and table, and then creates worker threads to add data
+ *     until it is killed by the parent.
+ */
 static void
 fill_db(uint32_t nth)
 {
@@ -352,6 +359,10 @@ fill_db(uint32_t nth)
 extern int __wt_optind;
 extern char *__wt_optarg;
 
+/*
+ * handler --
+ *     TODO: Add a comment describing this function.
+ */
 static void
 handler(int sig)
 {
@@ -365,6 +376,10 @@ handler(int sig)
     testutil_die(EINVAL, "Child process %" PRIu64 " abnormally exited", (uint64_t)pid);
 }
 
+/*
+ * recover_and_verify --
+ *     TODO: Add a comment describing this function.
+ */
 static int
 recover_and_verify(uint32_t nthreads)
 {
@@ -604,6 +619,10 @@ recover_and_verify(uint32_t nthreads)
     return (EXIT_SUCCESS);
 }
 
+/*
+ * main --
+ *     TODO: Add a comment describing this function.
+ */
 int
 main(int argc, char *argv[])
 {
@@ -612,21 +631,22 @@ main(int argc, char *argv[])
     WT_RAND_STATE rnd;
     pid_t pid;
     uint32_t i, j, nth, timeout;
-    int ch, status;
+    int ch, status, ret;
     char buf[1024], fname[MAX_RECORD_FILES][64];
     const char *working_dir;
-    bool rand_th, rand_time, verify_only;
+    bool preserve, rand_th, rand_time, verify_only;
 
     (void)testutil_set_progname(argv);
 
     compaction = compat = inmem = false;
     nth = MIN_TH;
+    preserve = false;
     rand_th = rand_time = true;
     timeout = MIN_TIME;
     verify_only = false;
     working_dir = "WT_TEST.random-abort";
 
-    while ((ch = __wt_getopt(progname, argc, argv, "Cch:mT:t:v")) != EOF)
+    while ((ch = __wt_getopt(progname, argc, argv, "Cch:mpT:t:v")) != EOF)
         switch (ch) {
         case 'C':
             compat = true;
@@ -639,6 +659,9 @@ main(int argc, char *argv[])
             break;
         case 'm':
             inmem = true;
+            break;
+        case 'p':
+            preserve = true;
             break;
         case 'T':
             rand_th = false;
@@ -754,5 +777,13 @@ main(int argc, char *argv[])
     /*
      * Recover the database and verify whether all the records from all threads are present or not?
      */
-    return recover_and_verify(nth);
+    ret = recover_and_verify(nth);
+    if (ret == EXIT_SUCCESS && !preserve) {
+        testutil_clean_test_artifacts(home);
+        /* At this point $PATH is inside `home`, which we intend to delete. cd to the parent dir. */
+        if (chdir("../") != 0)
+            testutil_die(errno, "root chdir: %s", home);
+        testutil_clean_work_dir(home);
+    }
+    return ret;
 }

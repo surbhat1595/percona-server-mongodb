@@ -58,10 +58,6 @@
 namespace mongo {
 namespace {
 
-std::string formatVersionString(StringData versioned, const VersionInfoInterface& provider) {
-    return format(FMT_STRING("{} version v{}"), versioned, provider.version());
-}
-
 class FallbackVersionInfo : public VersionInfoInterface {
 public:
     int majorVersion() const noexcept final {
@@ -247,6 +243,10 @@ void VersionInfoInterface::logBuildInfo(std::ostream* os) const {
     } else {
         LOGV2(23403, "Build Info", "buildInfo"_attr = obj);
     }
+}
+
+std::string formatVersionString(StringData versioned, const VersionInfoInterface& provider) {
+    return format(FMT_STRING("{} version v{}"), versioned, provider.version());
 }
 
 std::string mongoShellVersion(const VersionInfoInterface& provider) {

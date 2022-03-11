@@ -41,6 +41,8 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/factory.h"
@@ -51,48 +53,117 @@
 
 namespace mongo::txn_api {
 
-void TransactionWithRetries::runSync(OperationContext* opCtx, TxnCallback func) {
+namespace details {
+
+std::string execContextToString(Transaction::ExecutionContext execContext) {
+    switch (execContext) {
+        case Transaction::ExecutionContext::kOwnSession:
+            return "own session";
+        case Transaction::ExecutionContext::kClientSession:
+            return "client session";
+        case Transaction::ExecutionContext::kClientRetryableWrite:
+            return "client retryable write";
+        case Transaction::ExecutionContext::kClientTransaction:
+            return "client transaction";
+    }
+    MONGO_UNREACHABLE;
+}
+
+std::string errorHandlingStepToString(Transaction::ErrorHandlingStep nextStep) {
+    switch (nextStep) {
+        case Transaction::ErrorHandlingStep::kDoNotRetry:
+            return "do not retry";
+        case Transaction::ErrorHandlingStep::kRetryTransaction:
+            return "retry transaction";
+        case Transaction::ErrorHandlingStep::kRetryCommit:
+            return "retry commit";
+    }
+    MONGO_UNREACHABLE;
+}
+
+std::string transactionStateToString(Transaction::TransactionState txnState) {
+    switch (txnState) {
+        case Transaction::TransactionState::kInit:
+            return "init";
+        case Transaction::TransactionState::kStarted:
+            return "started";
+        case Transaction::TransactionState::kStartedCommit:
+            return "started commit";
+        case Transaction::TransactionState::kStartedAbort:
+            return "started abort";
+        case Transaction::TransactionState::kDone:
+            return "done";
+    }
+    MONGO_UNREACHABLE;
+}
+
+void logNextStep(Transaction::ErrorHandlingStep nextStep, const BSONObj& txnInfo) {
+    LOGV2(5918600,
+          "Chose internal transaction error handling step",
+          "nextStep"_attr = errorHandlingStepToString(nextStep),
+          "txnInfo"_attr = txnInfo);
+}
+
+}  // namespace details
+
+StatusWith<CommitResult> TransactionWithRetries::runSyncNoThrow(OperationContext* opCtx,
+                                                                TxnCallback func) noexcept {
     // TODO SERVER-59566 Add a retry policy.
     while (true) {
-        try {
-            ExecutorFuture<void>(_executor)
-                .then([this, anchor = shared_from_this(), &func] {
-                    return func(_internalTxn->getClient(), _executor);
-                })
-                .get(opCtx);
-        } catch (const DBException& e) {
-            auto nextStep = _internalTxn->handleError(e.toStatus());
-            switch (nextStep) {
-                case details::Transaction::ErrorHandlingStep::kDoNotRetry:
+        {
+            auto bodyStatus = ExecutorFuture<void>(_executor)
+                                  .then([this, anchor = shared_from_this(), &func] {
+                                      return func(_internalTxn->getClient(), _executor);
+                                  })
+                                  .getNoThrow(opCtx);
+
+            if (!bodyStatus.isOK()) {
+                auto nextStep = _internalTxn->handleError(bodyStatus);
+                logNextStep(nextStep, _internalTxn->reportStateForLog());
+
+                if (nextStep == details::Transaction::ErrorHandlingStep::kDoNotRetry) {
                     _bestEffortAbort(opCtx);
-                    throw;
-                case details::Transaction::ErrorHandlingStep::kRetryTransaction:
+                    return bodyStatus;
+                } else if (nextStep == details::Transaction::ErrorHandlingStep::kRetryTransaction) {
+                    _bestEffortAbort(opCtx);
+                    _internalTxn->primeForTransactionRetry();
                     continue;
-                case details::Transaction::ErrorHandlingStep::kRetryCommit:
+                } else {
                     MONGO_UNREACHABLE;
+                }
             }
         }
 
         while (true) {
-            try {
+            auto swResult =
                 ExecutorFuture<void>(_executor)
                     .then([this, anchor = shared_from_this()] { return _internalTxn->commit(); })
-                    .get(opCtx);
-                return;
-            } catch (const DBException& e) {
-                auto nextStep = _internalTxn->handleError(e.toStatus());
-                switch (nextStep) {
-                    case details::Transaction::ErrorHandlingStep::kDoNotRetry:
-                        _bestEffortAbort(opCtx);
-                        throw;
-                    case details::Transaction::ErrorHandlingStep::kRetryTransaction:
-                        break;
-                    case details::Transaction::ErrorHandlingStep::kRetryCommit:
-                        continue;
-                }
+                    .getNoThrow(opCtx);
+
+            if (swResult.isOK() && swResult.getValue().getEffectiveStatus().isOK()) {
+                // Commit succeeded so return to the caller.
+                return swResult;
+            }
+
+            auto nextStep = _internalTxn->handleError(swResult);
+            logNextStep(nextStep, _internalTxn->reportStateForLog());
+
+            if (nextStep == details::Transaction::ErrorHandlingStep::kDoNotRetry) {
+                _bestEffortAbort(opCtx);
+                return swResult;
+            } else if (nextStep == details::Transaction::ErrorHandlingStep::kRetryTransaction) {
+                _bestEffortAbort(opCtx);
+                _internalTxn->primeForTransactionRetry();
+                break;
+            } else if (nextStep == details::Transaction::ErrorHandlingStep::kRetryCommit) {
+                _internalTxn->primeForCommitRetry();
+                continue;
+            } else {
+                MONGO_UNREACHABLE;
             }
         }
     }
+    MONGO_UNREACHABLE;
 }
 
 void TransactionWithRetries::_bestEffortAbort(OperationContext* opCtx) {
@@ -135,7 +206,7 @@ SemiFuture<BSONObj> SEPTransactionClient::runCommand(StringData dbName, BSONObj 
     auto opMsgRequest = OpMsgRequest::fromDBAndBody(dbName, cmdBuilder.obj());
     auto requestMessage = opMsgRequest.serialize();
     return sep->handleRequest(cancellableOpCtx.get(), requestMessage)
-        .then([this](DbResponse dbResponse) {
+        .then([this, anchor = shared_from_this()](DbResponse dbResponse) {
             auto reply = rpc::makeReply(&dbResponse.response)->getCommandReply().getOwned();
             _hooks->runReplyHook(reply);
             return reply;
@@ -147,7 +218,7 @@ SemiFuture<BatchedCommandResponse> SEPTransactionClient::runCRUDOp(
     const BatchedCommandRequest& cmd, std::vector<StmtId> stmtIds) const {
     return runCommand(cmd.getNS().db(), cmd.toBSON())
         .thenRunOn(_executor)
-        .then([this](BSONObj reply) {
+        .then([this, anchor = shared_from_this()](BSONObj reply) {
             uassertStatusOK(getStatusFromCommandResult(reply));
 
             BatchedCommandResponse response;
@@ -168,7 +239,7 @@ SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
             cmd.getSingleBatch());
     return runCommand(cmd.getDbName(), cmd.toBSON({}))
         .thenRunOn(_executor)
-        .then([this](BSONObj reply) {
+        .then([this, anchor = shared_from_this()](BSONObj reply) {
             // Will throw if the response has a non OK top level status.
             auto cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(reply));
             return cursorResponse.releaseBatch();
@@ -176,25 +247,38 @@ SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
         .semi();
 }
 
-SemiFuture<void> Transaction::commit() {
-    return _commitOrAbort(NamespaceString::kAdminDb, CommitTransaction::kCommandName);
+SemiFuture<CommitResult> Transaction::commit() {
+    return _commitOrAbort(NamespaceString::kAdminDb, CommitTransaction::kCommandName)
+        .thenRunOn(_executor)
+        .then([](BSONObj res) {
+            auto wcErrorHolder = getWriteConcernErrorDetailFromBSONObj(res);
+            WriteConcernErrorDetail wcError;
+            if (wcErrorHolder) {
+                wcErrorHolder->cloneTo(&wcError);
+            }
+            return CommitResult{getStatusFromCommandResult(res), wcError};
+        })
+        .semi();
 }
 
 SemiFuture<void> Transaction::abort() {
-    return _commitOrAbort(NamespaceString::kAdminDb, AbortTransaction::kCommandName);
+    return _commitOrAbort(NamespaceString::kAdminDb, AbortTransaction::kCommandName)
+        .thenRunOn(_executor)
+        .then([](BSONObj res) {
+            uassertStatusOK(getStatusFromCommandResult(res));
+            uassertStatusOK(getWriteConcernStatusFromCommandResult(res));
+        })
+        .semi();
 }
 
-SemiFuture<void> Transaction::_commitOrAbort(StringData dbName, StringData cmdName) {
-    uassert(5875904, "Internal transaction already completed", _state != TransactionState::kDone);
-
+SemiFuture<BSONObj> Transaction::_commitOrAbort(StringData dbName, StringData cmdName) {
     if (_state == TransactionState::kInit) {
         LOGV2_DEBUG(5875903,
                     0,  // TODO SERVER-61781: Raise verbosity.
                     "Internal transaction skipping commit or abort because no commands were run",
                     "cmdName"_attr = cmdName,
-                    "sessionInfo"_attr = _sessionInfo,
-                    "execContext"_attr = _execContextToString(_execContext));
-        return SemiFuture<void>::makeReady();
+                    "txnInfo"_attr = reportStateForLog());
+        return BSON("ok" << 1);
     }
     uassert(5875902,
             "Internal transaction not in progress",
@@ -213,26 +297,21 @@ SemiFuture<void> Transaction::_commitOrAbort(StringData dbName, StringData cmdNa
 
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(cmdName, 1);
-    cmdBuilder.append(WriteConcernOptions::kWriteConcernField, WriteConcernOptions::Majority);
+    cmdBuilder.append(WriteConcernOptions::kWriteConcernField, _writeConcern.toBSON());
     auto cmdObj = cmdBuilder.obj();
 
-    return _txnClient->runCommand(dbName, cmdObj)
-        .thenRunOn(_executor)
-        .then([this](BSONObj res) {
-            uassertStatusOK(getStatusFromCommandResult(res));
-            uassertStatusOK(getWriteConcernStatusFromCommandResult(res));
-            _state = TransactionState::kDone;
-        })
-        .semi();
+    return _txnClient->runCommand(dbName, cmdObj).semi();
 }
 
-Transaction::ErrorHandlingStep Transaction::handleError(Status clientStatus) {
+Transaction::ErrorHandlingStep Transaction::handleError(
+    const StatusWith<CommitResult>& swResult) const {
     LOGV2_DEBUG(5875905,
                 0,  // TODO SERVER-61781: Raise verbosity.
                 "Internal transaction handling error",
-                "clientStatus"_attr = clientStatus,
-                "latestResponseStatus"_attr = _latestResponseStatus,
-                "latestResponseWCStatus"_attr = _latestResponseWCStatus,
+                "error"_attr = swResult.isOK() ? swResult.getValue().getEffectiveStatus()
+                                               : swResult.getStatus(),
+                "hasTransientTransactionErrorLabel"_attr =
+                    _latestResponseHasTransientTransactionErrorLabel,
                 "txnInfo"_attr = reportStateForLog());
 
     if (_execContext == ExecutionContext::kClientTransaction) {
@@ -240,23 +319,39 @@ Transaction::ErrorHandlingStep Transaction::handleError(Status clientStatus) {
         return ErrorHandlingStep::kDoNotRetry;
     }
 
-    auto hasStartedCommit = _state == TransactionState::kStartedCommit;
-    auto clientReceivedNetworkError = ErrorCodes::isNetworkError(clientStatus);
-    if (_latestResponseHasTransientTransactionErrorLabel ||
-        // A network error before commit is a transient transaction error.
-        (!hasStartedCommit && clientReceivedNetworkError)) {
-        _primeForTransactionRetry();
+    // The transient transaction error label is always returned in command responses, even for
+    // internal clients, so we use it to decide when to retry the transaction instead of inspecting
+    // error codes. The only exception is when a network error was received before commit, handled
+    // below.
+    if (_latestResponseHasTransientTransactionErrorLabel) {
         return ErrorHandlingStep::kRetryTransaction;
     }
 
-    bool latestResponseErrorWasRetryable = ErrorCodes::isRetriableError(_latestResponseStatus) ||
-        ErrorCodes::isRetriableError(_latestResponseWCStatus);
-    if (hasStartedCommit && latestResponseErrorWasRetryable) {
-        // TODO SERVER-59566: Handle timeouts and max retry attempts. Note commit might be retried
-        // within the command itself, e.g. ClusterCommitTransaction uses an idempotent retry policy,
-        // so we may want a timeout policy instead of number of retries.
-        _primeForCommitRetry();
-        return ErrorHandlingStep::kRetryCommit;
+    auto hasStartedCommit = _state == TransactionState::kStartedCommit;
+
+    const auto& clientStatus = swResult.getStatus();
+    if (!clientStatus.isOK()) {
+        // A network error before commit is a transient transaction error.
+        if (!hasStartedCommit && ErrorCodes::isNetworkError(clientStatus)) {
+            return ErrorHandlingStep::kRetryTransaction;
+        }
+        return ErrorHandlingStep::kDoNotRetry;
+    }
+
+    if (hasStartedCommit) {
+        const auto& commitStatus = swResult.getValue().cmdStatus;
+        const auto& commitWCStatus = swResult.getValue().wcError.toStatus();
+
+        // The retryable write error label is not returned to internal clients, so we cannot rely on
+        // it and instead use error categories to decide when to retry commit, which is treated as a
+        // retryable write, per the drivers specification.
+        if (ErrorCodes::isRetriableError(commitStatus) ||
+            ErrorCodes::isRetriableError(commitWCStatus)) {
+            // TODO SERVER-59566: Handle timeouts and max retry attempts. Note commit might be
+            // retried within the command itself, e.g. ClusterCommitTransaction uses an idempotent
+            // retry policy, so we may want a timeout policy instead of number of retries.
+            return ErrorHandlingStep::kRetryCommit;
+        }
     }
 
     return ErrorHandlingStep::kDoNotRetry;
@@ -270,17 +365,13 @@ void Transaction::prepareRequest(BSONObjBuilder* cmdBuilder) {
     if (_state == TransactionState::kInit) {
         _state = TransactionState::kStarted;
         _sessionInfo.setStartTransaction(boost::none);
+        cmdBuilder->append(_readConcern.toBSON().firstElement());
     }
 
-    _latestResponseStatus = Status::OK();
-    _latestResponseWCStatus = Status::OK();
     _latestResponseHasTransientTransactionErrorLabel = false;
 }
 
 void Transaction::processResponse(const BSONObj& reply) {
-    _latestResponseStatus = getStatusFromCommandResult(reply);
-    _latestResponseWCStatus = getWriteConcernStatusFromCommandResult(reply);
-
     if (auto errorLabels = reply[kErrorLabelsFieldName]) {
         for (const auto& label : errorLabels.Array()) {
             if (label.String() == ErrorLabel::kTransientTransaction) {
@@ -298,7 +389,8 @@ void Transaction::_setSessionInfo(LogicalSessionId lsid,
     _sessionInfo.setTxnRetryCounter(txnRetryCounter ? *txnRetryCounter : 0);
 }
 
-void Transaction::_primeForTransactionRetry() {
+void Transaction::primeForTransactionRetry() {
+    _latestResponseHasTransientTransactionErrorLabel = false;
     switch (_execContext) {
         case ExecutionContext::kOwnSession:
             // Advance txnNumber.
@@ -324,23 +416,16 @@ void Transaction::_primeForTransactionRetry() {
     }
 }
 
-void Transaction::_primeForCommitRetry() {
+void Transaction::primeForCommitRetry() {
     invariant(_state == TransactionState::kStartedCommit);
+    _latestResponseHasTransientTransactionErrorLabel = false;
     _state = TransactionState::kStarted;
 }
 
-std::string Transaction::_execContextToString(ExecutionContext execContext) {
-    switch (execContext) {
-        case ExecutionContext::kOwnSession:
-            return "own session";
-        case ExecutionContext::kClientSession:
-            return "client session";
-        case ExecutionContext::kClientRetryableWrite:
-            return "client retryable write";
-        case ExecutionContext::kClientTransaction:
-            return "client transaction";
-    }
-    MONGO_UNREACHABLE;
+BSONObj Transaction::reportStateForLog() const {
+    return BSON("execContext" << execContextToString(_execContext) << "sessionInfo"
+                              << _sessionInfo.toBSON() << "state"
+                              << transactionStateToString(_state));
 }
 
 void Transaction::_primeTransaction(OperationContext* opCtx) {
@@ -377,11 +462,17 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
     _sessionInfo.setStartTransaction(true);
     _sessionInfo.setAutocommit(false);
 
+    // Extract non-session options.
+    _readConcern = repl::ReadConcernArgs::get(opCtx);
+    _writeConcern = opCtx->getWriteConcern();
+
     LOGV2_DEBUG(5875901,
                 0,  // TODO SERVER-61781: Raise verbosity.
                 "Started internal transaction",
                 "sessionInfo"_attr = _sessionInfo,
-                "execContext"_attr = _execContextToString(_execContext));
+                "readConcern"_attr = _readConcern,
+                "writeConcern"_attr = _writeConcern,
+                "execContext"_attr = execContextToString(_execContext));
 }
 
 }  // namespace details

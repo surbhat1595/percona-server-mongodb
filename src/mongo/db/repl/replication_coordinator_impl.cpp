@@ -923,6 +923,7 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
 
     _replExecutor->startup();
 
+    LOGV2(6005300, "Starting up replica set aware services");
     ReplicaSetAwareServiceRegistry::get(_service).onStartup(opCtx);
 
     bool doneLoadingConfig = _startLoadLocalConfig(opCtx, lastShutdownState);
@@ -1046,10 +1047,6 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
     _externalState->shutdown(opCtx);
     _replExecutor->shutdown();
     _replExecutor->join();
-}
-
-void ReplicationCoordinatorImpl::markAsCleanShutdownIfPossible(OperationContext* opCtx) {
-    _externalState->clearAppliedThroughIfCleanShutdown(opCtx);
 }
 
 const ReplSettings& ReplicationCoordinatorImpl::getSettings() const {
@@ -1899,6 +1896,11 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
 
     const bool useDurableOpTime = writeConcern.syncMode == WriteConcernOptions::SyncMode::JOURNAL;
     if (writeConcern.wMode.empty()) {
+        if (writeConcern.wTags()) {
+            auto tagPattern = uassertStatusOK(_rsConfig.makeCustomWriteMode(*writeConcern.wTags()));
+            return _topCoord->haveTaggedNodesReachedOpTime(opTime, tagPattern, useDurableOpTime);
+        }
+
         return _topCoord->haveNumNodesReachedOpTime(
             opTime, writeConcern.wNumNodes, useDurableOpTime);
     }

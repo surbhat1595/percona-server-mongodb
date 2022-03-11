@@ -459,7 +459,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
             // Iterate through all the aborted indexes and drop any indexes that are ready in
             // the index catalog. This would indicate that while we yielded our locks during the
             // abort phase, a new identical index was created.
-            auto indexCatalog = collection->getWritableCollection()->getIndexCatalog();
+            auto indexCatalog = collection->getWritableCollection(opCtx)->getIndexCatalog();
             const bool includeUnfinished = false;
             for (const auto& indexName : indexNames) {
                 auto desc = indexCatalog->findIndexByName(opCtx, indexName, includeUnfinished);
@@ -469,7 +469,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
                 }
 
                 uassertStatusOK(dropIndexByDescriptor(
-                    opCtx, collection->getWritableCollection(), indexCatalog, desc));
+                    opCtx, collection->getWritableCollection(opCtx), indexCatalog, desc));
             }
 
             wuow.commit();
@@ -487,8 +487,10 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         invariant((*collection)->getIndexCatalog()->numIndexesInProgress(opCtx) == 0);
     }
 
-    // TODO(SERVER-61481): (Generic FCV reference): Remove this block once kLastLTS is 6.0.
-    if (serverGlobalParams.featureCompatibility.isLessThan(multiversion::GenericFCV::kLatest)) {
+    // TODO(SERVER-61481): Remove this block once kLastLTS is 6.0. As of 5.2, dropping an index
+    // while having a separate index build on the same collection is permitted.
+    if (serverGlobalParams.featureCompatibility.isLessThan(
+            multiversion::FeatureCompatibilityVersion::kVersion_5_2)) {
         // The index catalog requires that no active index builders are running when dropping ready
         // indexes.
         IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(collectionUUID);
@@ -500,7 +502,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
 
             // This is necessary to check shard version.
             OldClientContext ctx(opCtx, (*collection)->ns().ns());
-            dropReadyIndexes(opCtx, collection->getWritableCollection(), indexNames, &reply);
+            dropReadyIndexes(opCtx, collection->getWritableCollection(opCtx), indexNames, &reply);
             wunit.commit();
         });
 
@@ -532,8 +534,10 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
                   "indexes"_attr = cmdObj[kIndexFieldName].toString(false));
         }
 
-        // TODO(SERVER-61481): (Generic FCV reference): Remove this block once kLastLTS is 6.0.
-        if (serverGlobalParams.featureCompatibility.isLessThan(multiversion::GenericFCV::kLatest)) {
+        // TODO(SERVER-61481): Remove this block once kLastLTS is 6.0. As of 5.2, dropping an index
+        // while having a separate index build on the same collection is permitted.
+        if (serverGlobalParams.featureCompatibility.isLessThan(
+                multiversion::FeatureCompatibilityVersion::kVersion_5_2)) {
             IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
                 collection->uuid());
         }
@@ -550,7 +554,7 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
 
         DropIndexesReply ignoredReply;
         dropReadyIndexes(
-            opCtx, collection.getWritableCollection(), swIndexNames.getValue(), &ignoredReply);
+            opCtx, collection.getWritableCollection(opCtx), swIndexNames.getValue(), &ignoredReply);
 
         wunit.commit();
         return Status::OK();

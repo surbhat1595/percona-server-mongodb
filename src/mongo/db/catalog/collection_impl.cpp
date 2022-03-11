@@ -35,7 +35,6 @@
 
 #include "mongo/base/counter.h"
 #include "mongo/base/init.h"
-#include "mongo/base/owned_pointer_map.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
@@ -370,7 +369,10 @@ CollectionImpl::SharedState::SharedState(CollectionImpl* collection,
       _recordStore(std::move(recordStore)),
       _cappedNotifier(_recordStore && options.capped ? std::make_shared<CappedInsertNotifier>()
                                                      : nullptr),
-      _needCappedLock(options.capped && collection->ns().isReplicated()),
+      // Capped collections must preserve insertion order, so we serialize writes. One exception are
+      // clustered capped collections because they only guarantee insertion order when cluster keys
+      // are inserted in monotonically-increasing order.
+      _needCappedLock(options.capped && collection->ns().isReplicated() && !options.clusteredIndex),
       _isCapped(options.capped),
       _cappedMaxDocs(options.cappedMaxDocs) {
     if (_cappedNotifier) {
@@ -883,10 +885,14 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
     }
 
     if (_shared->_needCappedLock) {
-        // X-lock the metadata resource for this capped collection until the end of the WUOW. This
-        // prevents the primary from executing with more concurrency than secondaries and protects
-        // '_cappedFirstRecord'.
-        // See SERVER-21646.
+        // X-lock the metadata resource for this replicated, non-clustered capped collection until
+        // the end of the WUOW. Non-clustered capped collections require writes to be serialized on
+        // the secondary in order to guarantee insertion order (SERVER-21483); this exclusive access
+        // to the metadata resource prevents the primary from executing with more concurrency than
+        // secondaries - thus helping secondaries keep up - and protects '_cappedFirstRecord'. See
+        // SERVER-21646. On the other hand, capped clustered collections with a monotonically
+        // increasing cluster key natively guarantee preservation of the insertion order, and don't
+        // need serialisation. We allow concurrent inserts for clustered capped collections.
         Lock::ResourceLock heldUntilEndOfWUOW{
             opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
     }
@@ -1268,6 +1274,8 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     if (!oldId.eoo() && SimpleBSONElementComparator::kInstance.evaluate(oldId != newDoc["_id"]))
         uasserted(13596, "in Collection::updateDocument _id mismatch");
 
+    // TODO(SERVER-62496): Remove this block once kLastLTS is 6.0. As of 5.3, changing the size of
+    // a document in a capped collection is permitted.
     // The MMAPv1 storage engine implements capped collections in a way that does not allow records
     // to grow beyond their original size. If MMAPv1 part of a replicaset with storage engines that
     // do not have this limitation, replication could result in errors, so it is necessary to set a
@@ -1276,10 +1284,14 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     // MMAPv1 behavior would require padding shrunk documents on all storage engines. Instead forbid
     // all size changes.
     const auto oldSize = oldDoc.value().objsize();
-    if (_shared->_isCapped && oldSize != newDoc.objsize())
+    if (_shared->_isCapped && oldSize != newDoc.objsize() &&
+        (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
+         serverGlobalParams.featureCompatibility.isLessThan(
+             multiversion::FeatureCompatibilityVersion::kVersion_5_3))) {
         uasserted(ErrorCodes::CannotGrowDocumentInCappedNamespace,
                   str::stream() << "Cannot change the size of a document in a capped collection: "
                                 << oldSize << " != " << newDoc.objsize());
+    }
 
     // The preImageDoc may not be boost::none if this update was a retryable findAndModify or if
     // the update may have changed the shard key. For non-in-place updates we always set the

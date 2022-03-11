@@ -171,13 +171,13 @@ public:
         Lock::CollectionLock collLock(operationContext(), nss, MODE_X);
 
         WriteUnitOfWork wuow(operationContext());
-        auto res = getCatalog()
-                       ->importCollection(operationContext(),
-                                          nss,
-                                          metadata,
-                                          BSON("storage"
-                                               << "metadata"),
-                                          DurableCatalog::ImportCollectionUUIDOption::kGenerateNew);
+        auto res = getCatalog()->importCollection(
+            operationContext(),
+            nss,
+            metadata,
+            BSON("storage"
+                 << "metadata"),
+            ImportOptions(ImportOptions::ImportCollectionUUIDOption::kGenerateNew));
         if (res.isOK()) {
             wuow.commit();
         }
@@ -673,38 +673,6 @@ TEST_F(DurableCatalogTest, CheckTimeseriesBucketsMayHaveMixedSchemaDataFlagFCVLa
         ASSERT_FALSE(*getCatalog()
                           ->getMetaData(operationContext(), catalogId)
                           ->timeseriesBucketsMayHaveMixedSchemaData);
-    }
-}
-
-TEST_F(DurableCatalogTest, CheckTimeseriesBucketsMayHaveMixedSchemaDataFlagFCVLastContinuous) {
-    // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(
-        multiversion::GenericFCV::kLastContinuous);
-
-    {
-        const NamespaceString regularNss = NamespaceString("test.regular");
-        createCollection(regularNss, CollectionOptions());
-
-        auto collection = CollectionCatalog::get(operationContext())
-                              ->lookupCollectionByNamespace(operationContext(), regularNss);
-        RecordId catalogId = collection->getCatalogId();
-        ASSERT(!getCatalog()
-                    ->getMetaData(operationContext(), catalogId)
-                    ->timeseriesBucketsMayHaveMixedSchemaData);
-    }
-
-    {
-        const NamespaceString bucketsNss = NamespaceString("system.buckets.ts");
-        CollectionOptions options;
-        options.timeseries = TimeseriesOptions(/*timeField=*/"t");
-        createCollection(bucketsNss, options);
-
-        auto collection = CollectionCatalog::get(operationContext())
-                              ->lookupCollectionByNamespace(operationContext(), bucketsNss);
-        RecordId catalogId = collection->getCatalogId();
-        ASSERT(!getCatalog()
-                    ->getMetaData(operationContext(), catalogId)
-                    ->timeseriesBucketsMayHaveMixedSchemaData);
     }
 }
 

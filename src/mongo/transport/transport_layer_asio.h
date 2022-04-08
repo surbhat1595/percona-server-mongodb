@@ -69,12 +69,13 @@ class ServiceEntryPoint;
 
 namespace transport {
 
-// This fail point simulates reads and writes that always return 1 byte and fail with EAGAIN
+// Simulates reads and writes that always return 1 byte and fail with EAGAIN
 extern FailPoint transportLayerASIOshortOpportunisticReadWrite;
 
-// This fail point will cause an asyncConnect to timeout after it's successfully connected
-// to the remote peer
+// Cause an asyncConnect to timeout after it's successfully connected to the remote peer
 extern FailPoint transportLayerASIOasyncConnectTimesOut;
+
+extern FailPoint transportLayerASIOhangBeforeAccept;
 
 /**
  * A TransportLayer implementation based on ASIO networking primitives.
@@ -90,7 +91,8 @@ public:
         constexpr static auto kIngress = 0x1;
         constexpr static auto kEgress = 0x10;
 
-        explicit Options(const ServerGlobalParams* params);
+        explicit Options(const ServerGlobalParams* params) : Options(params, {}) {}
+        Options(const ServerGlobalParams* params, boost::optional<int> loadBalancerPort);
         Options() = default;
 
         int mode = kIngress | kEgress;
@@ -104,6 +106,7 @@ public:
         }
 
         int port = ServerGlobalParams::DefaultDBPort;  // port to bind to
+        boost::optional<int> loadBalancerPort;         // accepts load balancer connections
         std::vector<std::string> ipList;               // addresses to bind to
 #ifndef _WIN32
         bool useUnixSockets = true;  // whether to allow UNIX sockets in ipList
@@ -118,7 +121,7 @@ public:
                        ServiceEntryPoint* sep,
                        const WireSpec& wireSpec = WireSpec::instance());
 
-    virtual ~TransportLayerASIO();
+    ~TransportLayerASIO() override;
 
     StatusWith<SessionHandle> connect(HostAndPort peer,
                                       ConnectSSLMode sslMode,
@@ -142,6 +145,10 @@ public:
 
     int listenerPort() const {
         return _listenerPort;
+    }
+
+    boost::optional<int> loadBalancerPort() const {
+        return _listenerOptions.loadBalancerPort;
     }
 
 #ifdef __linux__

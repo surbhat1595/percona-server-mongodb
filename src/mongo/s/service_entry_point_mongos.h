@@ -46,6 +46,14 @@ public:
     using ServiceEntryPointImpl::ServiceEntryPointImpl;
     Future<DbResponse> handleRequest(OperationContext* opCtx,
                                      const Message& request) noexcept override;
+
+    void appendStats(BSONObjBuilder* bob) const override;
+
+    void onClientConnect(Client* client) override;
+    void onClientDisconnect(Client* client) override;
+
+private:
+    Counter64 _loadBalancedConnections;
 };
 
 }  // namespace mongo

@@ -81,7 +81,7 @@ private:
     SharedSemiFuture<void> waitForDurableConfigTime() override;
     SharedSemiFuture<void> waitForDurableTopologyTime() override;
     SharedSemiFuture<void> waitForDurable() override;
-    SharedSemiFuture<void> recover() override;
+    VectorClock::VectorTime recoverDirect(OperationContext* opCtx) override;
 
     LogicalTime _tick(Component component, uint64_t nTicks) override;
     void _tickTo(Component component, LogicalTime newTime) override;
@@ -89,6 +89,8 @@ private:
     // ReplicaSetAwareService methods implementation
 
     void onStartup(OperationContext* opCtx) override {}
+    void onStartupRecoveryComplete(OperationContext* opCtx) override {}
+    void onInitialSyncComplete(OperationContext* opCtx) override {}
     void onShutdown() override {}
     void onStepUpBegin(OperationContext* opCtx, long long term) override;
     void onStepUpComplete(OperationContext* opCtx, long long term) override {}
@@ -181,6 +183,27 @@ VectorClockMongoD::~VectorClockMongoD() = default;
 void VectorClockMongoD::onStepUpBegin(OperationContext* opCtx, long long term) {
     stdx::lock_guard lg(_mutex);
     _durableTime.reset();
+
+    // Initialize the config server's topology time to the maximum topology time from
+    // `config.shards` collection instead of using `Timestamp(0 ,0)`.
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        const auto maxTopologyTime{[&opCtx]() -> boost::optional<Timestamp> {
+            DBDirectClient client{opCtx};
+            const auto query{Query().sort(BSON(ShardType::topologyTime << -1))};
+            const auto collEntry{client.findOne(ShardType::ConfigNS.ns(), query)};
+            if (collEntry.isEmpty()) {
+                // No shards are available yet.
+                return boost::none;
+            }
+
+            const auto shardEntry{uassertStatusOK(ShardType::fromBSON(collEntry))};
+            return shardEntry.getTopologyTime();
+        }()};
+
+        if (maxTopologyTime) {
+            _advanceComponentTimeTo(Component::TopologyTime, LogicalTime(*maxTopologyTime));
+        }
+    }
 }
 
 void VectorClockMongoD::onStepDown() {
@@ -228,12 +251,27 @@ SharedSemiFuture<void> VectorClockMongoD::waitForDurable() {
     return _enqueueWaiterAndScheduleLoopIfNeeded(std::move(ul), std::move(time));
 }
 
-SharedSemiFuture<void> VectorClockMongoD::recover() {
-    stdx::unique_lock ul(_mutex);
-    if (_durableTime)
-        return SharedSemiFuture<void>();
+VectorClock::VectorTime VectorClockMongoD::recoverDirect(OperationContext* opCtx) {
+    VectorClockDocument durableVectorClock;
 
-    return _enqueueWaiterAndScheduleLoopIfNeeded(std::move(ul), VectorTime());
+    PersistentTaskStore<VectorClockDocument> store(NamespaceString::kVectorClockNamespace);
+    store.forEach(opCtx,
+                  BSON(VectorClockDocument::k_idFieldName << durableVectorClock.get_id()),
+                  [&, numDocsFound = 0](const auto& doc) mutable {
+                      invariant(++numDocsFound == 1);
+                      durableVectorClock = doc;
+                      return true;
+                  });
+
+    const auto newDurableTime = VectorTime({VectorClock::kInitialComponentTime,
+                                            LogicalTime(durableVectorClock.getConfigTime()),
+                                            LogicalTime(durableVectorClock.getTopologyTime())});
+
+    // Make sure the VectorClock advances at least up to the just recovered durable time
+    _advanceTime(
+        {newDurableTime.clusterTime(), newDurableTime.configTime(), newDurableTime.topologyTime()});
+
+    return newDurableTime;
 }
 
 SharedSemiFuture<void> VectorClockMongoD::_enqueueWaiterAndScheduleLoopIfNeeded(
@@ -272,12 +310,6 @@ Future<void> VectorClockMongoD::_doWhileQueueNotEmptyOrError(ServiceContext* ser
                               it = _queue.erase(it);
                           }
                           ul.unlock();
-
-                          // Make sure the VectorClock advances at least up to the just recovered
-                          // durable time
-                          _advanceTime({newDurableTime.clusterTime(),
-                                        newDurableTime.configTime(),
-                                        newDurableTime.topologyTime()});
 
                           for (auto& p : promises)
                               p->emplaceValue();
@@ -324,33 +356,21 @@ Future<void> VectorClockMongoD::_doWhileQueueNotEmptyOrError(ServiceContext* ser
             auto* const opCtx = opCtxHolder.get();
 
             if (mustRecoverDurableTime) {
-                VectorClockDocument durableVectorClock;
-
-                PersistentTaskStore<VectorClockDocument> store(
-                    NamespaceString::kVectorClockNamespace);
-                store.forEach(
-                    opCtx,
-                    QUERY(VectorClockDocument::k_idFieldName << durableVectorClock.get_id()),
-                    [&, numDocsFound = 0](const auto& doc) mutable {
-                        invariant(++numDocsFound == 1);
-                        durableVectorClock = doc;
-                        return true;
-                    });
-
-                return VectorTime({LogicalTime(Timestamp(0)),
-                                   LogicalTime(durableVectorClock.getConfigTime()),
-                                   LogicalTime(durableVectorClock.getTopologyTime())});
+                return recoverDirect(opCtx);
             }
 
             auto vectorTime = getTime();
-            const VectorClockDocument vcd(vectorTime.configTime().asTimestamp(),
-                                          vectorTime.topologyTime().asTimestamp());
+
+            VectorClockDocument vcd;
+            vcd.setConfigTime(vectorTime.configTime().asTimestamp());
+            vcd.setTopologyTime(vectorTime.topologyTime().asTimestamp());
 
             PersistentTaskStore<VectorClockDocument> store(NamespaceString::kVectorClockNamespace);
             store.upsert(opCtx,
                          QUERY(VectorClockDocument::k_idFieldName << vcd.get_id()),
                          vcd.toBSON(),
                          WriteConcerns::kMajorityWriteConcernNoTimeout);
+
             return vectorTime;
         })
         .getAsync([this, promise = std::move(p)](StatusWith<VectorTime> swResult) mutable {

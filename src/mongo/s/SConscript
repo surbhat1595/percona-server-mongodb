@@ -131,6 +131,31 @@ env.Library(
 )
 
 env.Library(
+    target="load_balancer_feature_flag",
+    source=[
+        'load_balancer_feature_flag.idl'
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/feature_flag',
+    ]
+)
+
+env.Library(
+    target="load_balancer_support",
+    source=[
+        'load_balancer_support.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/idl/feature_flag',
+        'load_balancer_feature_flag',
+        'mongos_server_parameters',
+    ],
+)
+
+# Sharding code needed by both mongos and mongod.
+env.Library(
     target='common_s',
     source=[
         'cannot_implicitly_create_collection_info.cpp',
@@ -207,6 +232,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/idl/idl_parser',
+        "load_balancer_feature_flag",
     ]
 )
 
@@ -447,6 +473,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/logical_session_cache_impl',
         '$BUILD_DIR/mongo/db/logical_time_metadata_hook',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongos_process_interface_factory',
+        '$BUILD_DIR/mongo/db/process_health/fault_manager',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/server_options',
         '$BUILD_DIR/mongo/db/server_options_base',
@@ -512,6 +539,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ftdc/ftdc_mongos',
         '$BUILD_DIR/mongo/db/lasterror',
         '$BUILD_DIR/mongo/db/log_process_details',
+        '$BUILD_DIR/mongo/db/process_health/fault_manager',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/serverinit',
         '$BUILD_DIR/mongo/db/service_liaison_mongos',
@@ -527,6 +555,7 @@ env.Library(
         'cluster_last_error_info',
         'commands/cluster_commands',
         'committed_optime_metadata_hook',
+        'load_balancer_support',
         'mongos_initializers',
         'mongos_topology_coordinator',
         'query/cluster_cursor_cleanup_job',
@@ -611,6 +640,7 @@ env.CppUnitTest(
         'comparable_chunk_version_test.cpp',
         'comparable_database_version_test.cpp',
         'hedge_options_util_test.cpp',
+        'load_balancer_support_test.cpp',
         'mock_ns_targeter.cpp',
         'mongos_topology_coordinator_test.cpp',
         'request_types/add_shard_request_test.cpp',
@@ -650,6 +680,7 @@ env.CppUnitTest(
         'chunk_writes_tracker',
         'cluster_last_error_info',
         'coreshard',
+        'load_balancer_support',
         'mongos_topology_coordinator',
         'sessions_collection_sharded',
         'sharding_api',

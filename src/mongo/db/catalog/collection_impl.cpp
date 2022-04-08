@@ -878,6 +878,12 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
 
     if (opDebug) {
         opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
+        // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+        if (!opCtx->inMultiDocumentTransaction()) {
+            opCtx->recoveryUnit()->onRollback([opDebug, keysInserted]() {
+                opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+            });
+        }
     }
 
     opCtx->getServiceContext()->getOpObserver()->onInserts(
@@ -1132,11 +1138,23 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
                                     bool fromMigrate,
                                     bool noWarn,
                                     Collection::StoreDeletedDoc storeDeletedDoc) const {
-    if (isCapped() && opCtx->isEnforcingConstraints()) {
-        // System operations such as tenant migration or secondary batch application can delete from
-        // capped collections.
-        LOGV2(20291, "failing remove on a capped ns", "namespace"_attr = _ns);
-        uasserted(10089, "cannot remove from a capped collection");
+    if (isCapped()) {
+        const auto isFCV50 = serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            serverGlobalParams.featureCompatibility.getVersion() ==
+                ServerGlobalParams::FeatureCompatibility::Version::kVersion50;
+
+        if (isFCV50) {
+            if (opCtx->inMultiDocumentTransaction()) {
+                // User deletes outside of multi-document transacations can only happen in FCV 5.0.
+                uasserted(ErrorCodes::IllegalOperation,
+                          "Cannot remove from a capped collection in a multi-document transaction");
+            }
+        } else if (opCtx->isEnforcingConstraints()) {
+            // System operations such as tenant migration or secondary batch application can delete
+            // from capped collections.
+            LOGV2(20291, "failing remove on a capped ns", "namespace"_attr = _ns);
+            uasserted(10089, "cannot remove from a capped collection");
+        }
     }
 
     std::vector<OplogSlot> oplogSlots;
@@ -1168,6 +1186,12 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
 
     if (opDebug) {
         opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
+        // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+        if (!opCtx->inMultiDocumentTransaction()) {
+            opCtx->recoveryUnit()->onRollback([opDebug, keysDeleted]() {
+                opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+            });
+        }
     }
 }
 
@@ -1280,6 +1304,13 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         if (opDebug) {
             opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
             opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
+            // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+            if (!opCtx->inMultiDocumentTransaction()) {
+                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
+                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+                });
+            }
         }
     }
 
@@ -1963,13 +1994,19 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
         uncommittedMultikeys = std::make_shared<UncommittedMultikey::MultikeyMap>();
     }
     BSONCollectionCatalogEntry::MetaData* metadata = nullptr;
+    bool hasSetMultikey = false;
     if (auto it = uncommittedMultikeys->find(this); it != uncommittedMultikeys->end()) {
         metadata = &it->second;
+        hasSetMultikey = setMultikey(*metadata);
     } else {
-        metadata = &uncommittedMultikeys->emplace(this, *_metadata).first->second;
+        BSONCollectionCatalogEntry::MetaData metadataLocal(*_metadata);
+        hasSetMultikey = setMultikey(metadataLocal);
+        if (hasSetMultikey) {
+            metadata = &uncommittedMultikeys->emplace(this, std::move(metadataLocal)).first->second;
+        }
     }
 
-    if (!setMultikey(*metadata))
+    if (!hasSetMultikey)
         return false;
 
     opCtx->recoveryUnit()->onRollback(

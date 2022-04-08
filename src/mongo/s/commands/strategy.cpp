@@ -80,6 +80,7 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/load_balancer_support.h"
 #include "mongo/s/mongos_topology_coordinator.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/query/cluster_find.h"
@@ -152,14 +153,14 @@ void appendRequiredFieldsToResponse(OperationContext* opCtx, BSONObjBuilder* res
     // Ensure that either both operationTime and $clusterTime are output, or neither.
     if (clusterTimeWasOutput) {
         auto operationTime = OperationTimeTracker::get(opCtx)->getMaxOperationTime();
-        if (operationTime != LogicalTime::kUninitialized) {
+        if (VectorClock::isValidComponentTime(operationTime)) {
             LOGV2_DEBUG(22764,
                         5,
                         "Appending operationTime: {operationTime}",
                         "Appending operationTime",
                         "operationTime"_attr = operationTime.asTimestamp());
             operationTime.appendAsOperationTime(responseBuilder);
-        } else if (clusterTime != LogicalTime::kUninitialized) {
+        } else if (VectorClock::isValidComponentTime(clusterTime)) {
             // If we don't know the actual operation time, use the cluster time instead. This is
             // safe but not optimal because we can always return a later operation time than
             // actual.
@@ -618,6 +619,8 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     bool startTransaction = false;
     if (_parc->_osi->getAutocommit()) {
         _routerSession.emplace(opCtx);
+
+        load_balancer_support::setMruSession(opCtx->getClient(), *opCtx->getLogicalSessionId());
 
         auto txnRouter = TransactionRouter::get(opCtx);
         invariant(txnRouter);

@@ -101,6 +101,7 @@ boost::optional<Status> maybeTcpFastOpenStatus;
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(transportLayerASIOasyncConnectTimesOut);
+MONGO_FAIL_POINT_DEFINE(transportLayerASIOhangBeforeAccept);
 
 #ifdef MONGO_CONFIG_SSL
 SSLConnectionContext::~SSLConnectionContext() = default;
@@ -281,8 +282,10 @@ private:
 thread_local TransportLayerASIO::ASIOReactor* TransportLayerASIO::ASIOReactor::_reactorForThread =
     nullptr;
 
-TransportLayerASIO::Options::Options(const ServerGlobalParams* params)
+TransportLayerASIO::Options::Options(const ServerGlobalParams* params,
+                                     boost::optional<int> loadBalancerPort)
     : port(params->port),
+      loadBalancerPort(loadBalancerPort),
       ipList(params->bind_ips),
 #ifndef _WIN32
       useUnixSockets(!params->noUnixSocket),
@@ -497,7 +500,7 @@ StatusWith<SessionHandle> TransportLayerASIO::connect(
     }
 
     std::error_code ec;
-    GenericSocket sock(*_egressReactor);
+    ASIOSession::GenericSocket sock(*_egressReactor);
     WrappedResolver resolver(*_egressReactor);
 
     Date_t timeBefore = Date_t::now();
@@ -558,7 +561,7 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
     const HostAndPort& peer,
     const Milliseconds& timeout,
     boost::optional<TransientSSLParams> transientSSLParams) {
-    GenericSocket sock(*_egressReactor);
+    ASIOSession::GenericSocket sock(*_egressReactor);
     std::error_code ec;
 
     const auto protocol = endpoint->protocol();
@@ -567,7 +570,11 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
 #ifdef TCP_FASTOPEN_CONNECT
     const auto family = protocol.family();
     if ((family == AF_INET) || (family == AF_INET6)) {
-        sock.set_option(TCPFastOpenConnect(gTCPFastOpenClient), ec);
+        setSocketOption(sock,
+                        TCPFastOpenConnect(gTCPFastOpenClient),
+                        "connect (sync) TCP fast open",
+                        logv2::LogSeverity::Info(),
+                        ec);
         if (tcpFastOpenIsConfigured) {
             return errorCodeToStatus(ec);
         }
@@ -615,6 +622,8 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
 #endif
         return std::make_shared<ASIOSession>(
             this, std::move(sock), false, *endpoint, transientSSLContext);
+    } catch (const asio::system_error& e) {
+        return errorCodeToStatus(e.code());
     } catch (const DBException& e) {
         return e.toStatus();
     }
@@ -650,7 +659,7 @@ Future<SessionHandle> TransportLayerASIO::asyncConnect(
         Promise<SessionHandle> promise;
 
         Mutex mutex = MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "AsyncConnectState::mutex");
-        GenericSocket socket;
+        ASIOSession::GenericSocket socket;
         ASIOReactorTimer timeoutTimer;
         WrappedResolver resolver;
         WrappedEndpoint resolvedEndpoint;
@@ -718,7 +727,11 @@ Future<SessionHandle> TransportLayerASIO::asyncConnect(
 
 #ifdef TCP_FASTOPEN_CONNECT
             std::error_code ec;
-            connector->socket.set_option(TCPFastOpenConnect(gTCPFastOpenClient), ec);
+            setSocketOption(connector->socket,
+                            TCPFastOpenConnect(gTCPFastOpenClient),
+                            "connect (async) TCP fast open",
+                            logv2::LogSeverity::Info(),
+                            ec);
             if (tcpFastOpenIsConfigured) {
                 return futurize(ec);
             }
@@ -727,11 +740,17 @@ Future<SessionHandle> TransportLayerASIO::asyncConnect(
         })
         .then([this, connector, sslMode, transientSSLContext]() -> Future<void> {
             stdx::unique_lock<Latch> lk(connector->mutex);
-            connector->session = std::make_shared<ASIOSession>(this,
-                                                               std::move(connector->socket),
-                                                               false,
-                                                               *connector->resolvedEndpoint,
-                                                               transientSSLContext);
+            connector->session = [&] {
+                try {
+                    return std::make_shared<ASIOSession>(this,
+                                                         std::move(connector->socket),
+                                                         false,
+                                                         *connector->resolvedEndpoint,
+                                                         transientSSLContext);
+                } catch (const asio::system_error& e) {
+                    iasserted(errorCodeToStatus(e.code()));
+                }
+            }();
             connector->session->ensureAsync();
 
 #ifndef MONGO_CONFIG_SSL
@@ -940,7 +959,11 @@ Status TransportLayerASIO::setup() {
 
 #ifndef _WIN32
     if (_listenerOptions.useUnixSockets && _listenerOptions.isIngress()) {
-        listenAddrs.emplace_back(makeUnixSockPath(_listenerOptions.port));
+        listenAddrs.push_back(makeUnixSockPath(_listenerOptions.port));
+
+        if (_listenerOptions.loadBalancerPort) {
+            listenAddrs.push_back(makeUnixSockPath(*_listenerOptions.loadBalancerPort));
+        }
     }
 #endif
 
@@ -956,28 +979,35 @@ Status TransportLayerASIO::setup() {
     _listenerPort = _listenerOptions.port;
     WrappedResolver resolver(*_acceptorReactor);
 
-    // Self-deduplicating list of unique endpoint addresses.
-    std::set<WrappedEndpoint> endpoints;
-    for (auto& ip : listenAddrs) {
-        if (ip.empty()) {
-            LOGV2_WARNING(23020, "Skipping empty bind address");
-            continue;
-        }
-
-        auto swAddrs =
-            resolver.resolve(HostAndPort(ip, _listenerPort), _listenerOptions.enableIPv6);
-        if (!swAddrs.isOK()) {
-            LOGV2_WARNING(23021,
-                          "Found no addresses for {peer}",
-                          "Found no addresses for peer",
-                          "peer"_attr = swAddrs.getStatus());
-            continue;
-        }
-        auto& addrs = swAddrs.getValue();
-        endpoints.insert(addrs.begin(), addrs.end());
+    std::vector<int> ports = {_listenerPort};
+    if (_listenerOptions.loadBalancerPort) {
+        ports.push_back(*_listenerOptions.loadBalancerPort);
     }
 
-    for (auto& addr : endpoints) {
+    // Self-deduplicating list of unique endpoint addresses.
+    std::set<WrappedEndpoint> endpoints;
+    for (const auto& port : ports) {
+        for (const auto& listenAddr : listenAddrs) {
+            if (listenAddr.empty()) {
+                LOGV2_WARNING(23020, "Skipping empty bind address");
+                continue;
+            }
+
+            const auto& swAddrs =
+                resolver.resolve(HostAndPort(listenAddr, port), _listenerOptions.enableIPv6);
+            if (!swAddrs.isOK()) {
+                LOGV2_WARNING(23021,
+                              "Found no addresses for {peer}",
+                              "Found no addresses for peer",
+                              "peer"_attr = swAddrs.getStatus());
+                continue;
+            }
+            const auto& addrs = swAddrs.getValue();
+            endpoints.insert(addrs.begin(), addrs.end());
+        }
+    }
+
+    for (const auto& addr : endpoints) {
 #ifndef _WIN32
         if (addr.family() == AF_UNIX) {
             if (::unlink(addr.toString().c_str()) == -1 && errno != ENOENT) {
@@ -1001,9 +1031,15 @@ Status TransportLayerASIO::setup() {
         } catch (std::exception&) {
             // Allow the server to start when "ipv6: true" and "bindIpAll: true", but the platform
             // does not support ipv6 (e.g., ipv6 kernel module is not loaded in Linux).
-            const auto bindAllIPv6Addr = ":::"_sd + std::to_string(_listenerPort);
+            auto bindAllFmt = [](auto p) { return fmt::format(":::{}", p); };
+            bool addrIsBindAll = addr.toString() == bindAllFmt(_listenerPort);
+
+            if (!addrIsBindAll && _listenerOptions.loadBalancerPort) {
+                addrIsBindAll = (addr.toString() == bindAllFmt(*_listenerOptions.loadBalancerPort));
+            }
+
             if (errno == EAFNOSUPPORT && _listenerOptions.enableIPv6 && addr.family() == AF_INET6 &&
-                addr.toString() == bindAllIPv6Addr) {
+                addrIsBindAll) {
                 LOGV2_WARNING(4206501,
                               "Failed to bind to address as the platform does not support ipv6",
                               "Failed to bind to {address} as the platform does not support ipv6",
@@ -1013,12 +1049,19 @@ Status TransportLayerASIO::setup() {
 
             throw;
         }
-        acceptor.set_option(GenericAcceptor::reuse_address(true));
+        setSocketOption(acceptor,
+                        GenericAcceptor::reuse_address(true),
+                        "acceptor reuse address",
+                        logv2::LogSeverity::Info());
 
         std::error_code ec;
 #ifdef TCP_FASTOPEN
         if (gTCPFastOpenServer && ((addr.family() == AF_INET) || (addr.family() == AF_INET6))) {
-            acceptor.set_option(TCPFastOpen(gTCPFastOpenQueueSize), ec);
+            setSocketOption(acceptor,
+                            TCPFastOpen(gTCPFastOpenQueueSize),
+                            "acceptor TCP fast open",
+                            logv2::LogSeverity::Info(),
+                            ec);
             if (tcpFastOpenIsConfigured) {
                 return errorCodeToStatus(ec);
             }
@@ -1026,7 +1069,8 @@ Status TransportLayerASIO::setup() {
         }
 #endif
         if (addr.family() == AF_INET6) {
-            acceptor.set_option(asio::ip::v6_only(true));
+            setSocketOption(
+                acceptor, asio::ip::v6_only(true), "acceptor v6 only", logv2::LogSeverity::Info());
         }
 
         acceptor.non_blocking(true, ec);
@@ -1209,7 +1253,10 @@ ReactorHandle TransportLayerASIO::getReactor(WhichReactor which) {
 }
 
 void TransportLayerASIO::_acceptConnection(GenericAcceptor& acceptor) {
-    auto acceptCb = [this, &acceptor](const std::error_code& ec, GenericSocket peerSocket) mutable {
+    auto acceptCb = [this, &acceptor](const std::error_code& ec,
+                                      ASIOSession::GenericSocket peerSocket) mutable {
+        transportLayerASIOhangBeforeAccept.pauseWhileSet();
+
         if (auto lk = stdx::lock_guard(_mutex); _isShutdown) {
             return;
         }
@@ -1236,7 +1283,26 @@ void TransportLayerASIO::_acceptConnection(GenericAcceptor& acceptor) {
         try {
             std::shared_ptr<ASIOSession> session(
                 new ASIOSession(this, std::move(peerSocket), true));
-            _sep->startSession(std::move(session));
+            if (session->isFromLoadBalancer()) {
+                session->parseProxyProtocolHeader(_acceptorReactor)
+                    .getAsync([this, session = std::move(session)](Status s) {
+                        if (s.isOK()) {
+                            _sep->startSession(std::move(session));
+                        }
+                    });
+            } else {
+                _sep->startSession(std::move(session));
+            }
+        } catch (const asio::system_error& e) {
+            // Swallow connection reset errors. Connection reset errors classically present as
+            // asio::error::eof, but can bubble up as asio::error::invalid_argument when calling
+            // into socket.set_option().
+            if (e.code() != asio::error::eof && e.code() != asio::error::invalid_argument) {
+                LOGV2_WARNING(5746600,
+                              "Error accepting new connection: {error}",
+                              "Error accepting new connection",
+                              "error"_attr = e.code().message());
+            }
         } catch (const DBException& e) {
             LOGV2_WARNING(23023,
                           "Error accepting new connection: {error}",

@@ -1571,8 +1571,13 @@ void ShardingCatalogManager::clearJumboFlag(OperationContext* opCtx,
     BSONObjBuilder updateBuilder;
     updateBuilder.append("$unset", BSON(ChunkType::jumbo() << ""));
 
+    // Update the newest chunk to have the new (bumped) version
     BSONObjBuilder updateVersionClause(updateBuilder.subobjStart("$set"));
-    newVersion.appendLegacyWithField(&updateVersionClause, ChunkType::lastmod());
+    if (coll.getTimestamp()) {
+        updateVersionClause.appendTimestamp(ChunkType::lastmod(), newVersion.toLong());
+    } else {
+        newVersion.appendLegacyWithField(&updateVersionClause, ChunkType::lastmod());
+    }
     updateVersionClause.doneFast();
 
     auto chunkUpdate = updateBuilder.obj();
@@ -1769,15 +1774,35 @@ void ShardingCatalogManager::bumpCollectionVersionAndChangeMetadataInTxn(
     OperationContext* opCtx,
     const NamespaceString& nss,
     unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc) {
+    bumpCollectionVersionAndChangeMetadataInTxn(
+        opCtx, nss, std::move(changeMetadataFunc), ShardingCatalogClient::kMajorityWriteConcern);
+}
 
+void ShardingCatalogManager::bumpCollectionVersionAndChangeMetadataInTxn(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc,
+    const WriteConcernOptions& writeConcern) {
     bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
-        opCtx, {nss}, std::move(changeMetadataFunc));
+        opCtx, {nss}, std::move(changeMetadataFunc), writeConcern);
 }
 
 void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
     OperationContext* opCtx,
     const std::vector<NamespaceString>& collNames,
     unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc) {
+    bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
+        opCtx,
+        collNames,
+        std::move(changeMetadataFunc),
+        ShardingCatalogClient::kMajorityWriteConcern);
+}
+
+void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
+    OperationContext* opCtx,
+    const std::vector<NamespaceString>& collNames,
+    unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc,
+    const WriteConcernOptions& writeConcern) {
 
     // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
     // migrations
@@ -1798,7 +1823,8 @@ void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTx
                                 opCtx, nssAndShardId.first, txnNumber, nssAndShardId.second);
                         }
                         changeMetadataFunc(opCtx, txnNumber);
-                    });
+                    },
+                    writeConcern);
 }
 
 void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,

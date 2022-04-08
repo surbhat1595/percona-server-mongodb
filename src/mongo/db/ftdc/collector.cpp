@@ -75,6 +75,11 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
               opCtx->recoveryUnit()->getTimestampReadSource());
 
     for (auto& collector : _collectors) {
+        // Skip collection if this collector has no data to return
+        if (!collector->hasData()) {
+            continue;
+        }
+
         BSONObjBuilder subObjBuilder(builder.subobjStart(collector->name()));
 
         // Add a Date_t before and after each BSON is collected so that we can track timing of the
@@ -93,6 +98,10 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
 
         end = client->getServiceContext()->getPreciseClockSource()->now();
         subObjBuilder.appendDate(kFTDCCollectEndField, end);
+
+        // Ensure the collector did not set a read timestamp.
+        dassert(opCtx->recoveryUnit()->getTimestampReadSource() ==
+                RecoveryUnit::ReadSource::kNoTimestamp);
     }
 
     builder.appendDate(kFTDCCollectEndField, end);

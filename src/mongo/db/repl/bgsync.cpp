@@ -114,7 +114,10 @@ public:
                                               const rpc::ReplSetMetadata& replMetadata,
                                               const rpc::OplogQueryMetadata& oqMetadata,
                                               const OpTime& previousOpTimeFetched,
-                                              const OpTime& lastOpTimeFetched) override;
+                                              const OpTime& lastOpTimeFetched) const final;
+
+    ChangeSyncSourceAction shouldStopFetchingOnError(const HostAndPort& source,
+                                                     const OpTime& lastOpTimeFetched) const final;
 
 private:
     BackgroundSync* _bgsync;
@@ -132,13 +135,22 @@ ChangeSyncSourceAction DataReplicatorExternalStateBackgroundSync::shouldStopFetc
     const rpc::ReplSetMetadata& replMetadata,
     const rpc::OplogQueryMetadata& oqMetadata,
     const OpTime& previousOpTimeFetched,
-    const OpTime& lastOpTimeFetched) {
+    const OpTime& lastOpTimeFetched) const {
     if (_bgsync->shouldStopFetching()) {
         return ChangeSyncSourceAction::kStopSyncingAndEnqueueLastBatch;
     }
 
     return DataReplicatorExternalStateImpl::shouldStopFetching(
         source, replMetadata, oqMetadata, previousOpTimeFetched, lastOpTimeFetched);
+}
+
+ChangeSyncSourceAction DataReplicatorExternalStateBackgroundSync::shouldStopFetchingOnError(
+    const HostAndPort& source, const OpTime& lastOpTimeFetched) const {
+    if (_bgsync->shouldStopFetching()) {
+        return ChangeSyncSourceAction::kStopSyncingAndDropLastBatchIfPresent;
+    }
+
+    return DataReplicatorExternalStateImpl::shouldStopFetchingOnError(source, lastOpTimeFetched);
 }
 
 size_t getSize(const BSONObj& o) {
@@ -482,6 +494,10 @@ void BackgroundSync::_produce() {
     {
         auto opCtx = cc().makeOperationContext();
 
+        // Calling getMyLastAppliedOpTime has to be outside bgsync mutex, to preserve proper lock
+        // ordering because it acquires replication coordinator's mutex .
+        auto lastAppliedOpTime = _replCoord->getMyLastAppliedOpTime();
+
         // Check if the producer has been stopped so that we can prevent setting the applied point
         // after step up has already cleared it. We need to acquire the collection lock before the
         // mutex to preserve proper lock ordering.
@@ -499,7 +515,7 @@ void BackgroundSync::_produce() {
             // TODO SERVER-53642: With Lock Free Reads we may have readers on lastAppliedOpTime so
             // we cannot use this timestamp in a write.
             _replicationProcess->getConsistencyMarkers()->setAppliedThrough(
-                opCtx.get(), _replCoord->getMyLastAppliedOpTime(), false);
+                opCtx.get(), lastAppliedOpTime, false);
         }
     }
 
@@ -787,9 +803,17 @@ void BackgroundSync::_runRollback(OperationContext* opCtx,
         _fallBackOnRollbackViaRefetch(opCtx, source, requiredRBID, &localOplog, getConnection);
     }
 
-    // Reset the producer to clear the sync source and the last optime fetched.
-    stop(true);
-    startProducerIfStopped();
+    {
+        // Reset the producer to clear the sync source and the last optime fetched.
+        stdx::lock_guard<Latch> lock(_mutex);
+        auto oldProducerState = _state;
+        _stop(lock, true);
+        // Start the producer only if it was already running, because a concurrent stepUp could have
+        // caused rollback to fail, so we avoid restarting the producer if we have become primary.
+        if (oldProducerState != ProducerState::Stopped) {
+            setState(lock, ProducerState::Starting);
+        }
+    }
 }
 
 void BackgroundSync::_runRollbackViaRecoverToCheckpoint(
@@ -864,9 +888,7 @@ void BackgroundSync::clearSyncTarget() {
     _syncSourceHost = HostAndPort();
 }
 
-void BackgroundSync::stop(bool resetLastFetchedOptime) {
-    stdx::lock_guard<Latch> lock(_mutex);
-
+void BackgroundSync::_stop(WithLock lock, bool resetLastFetchedOptime) {
     setState(lock, ProducerState::Stopped);
     LOGV2(21107, "Stopping replication producer");
 
@@ -884,6 +906,11 @@ void BackgroundSync::stop(bool resetLastFetchedOptime) {
     if (_oplogFetcher) {
         _oplogFetcher->shutdown();
     }
+}
+
+void BackgroundSync::stop(bool resetLastFetchedOptime) {
+    stdx::lock_guard<Latch> lock(_mutex);
+    _stop(lock, resetLastFetchedOptime);
 }
 
 void BackgroundSync::start(OperationContext* opCtx) {

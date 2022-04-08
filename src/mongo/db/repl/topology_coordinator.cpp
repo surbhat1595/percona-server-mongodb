@@ -336,7 +336,8 @@ HostAndPort TopologyCoordinator::_chooseNearbySyncSource(Date_t now,
                                        now,
                                        lastOpTimeFetched,
                                        readPreference,
-                                       attempts == 0 /* firstAttempt */)) {
+                                       attempts == 0 /* firstAttempt */,
+                                       true /* shouldCheckStaleness */)) {
                 // Node is not a viable sync source candidate.
                 continue;
             }
@@ -413,7 +414,8 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
                                                 Date_t now,
                                                 const OpTime& lastOpTimeFetched,
                                                 ReadPreference readPreference,
-                                                const bool firstAttempt) const {
+                                                const bool firstAttempt,
+                                                const bool shouldCheckStaleness) const {
     // Don't consider ourselves.
     if (candidateIndex == _selfIndex) {
         return false;
@@ -471,16 +473,19 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
                         "syncSourceCandidate"_attr = syncSourceCandidate);
             return false;
         }
-        // Candidates cannot be excessively behind.
-        const auto oldestSyncOpTime = _getOldestSyncOpTime();
-        if (memberData.getHeartbeatAppliedOpTime() < oldestSyncOpTime) {
-            LOGV2_DEBUG(3873110,
-                        2,
-                        "Cannot select sync source because it is too far behind",
-                        "syncSourceCandidate"_attr = syncSourceCandidate,
-                        "syncSourceCandidateOpTime"_attr = memberData.getHeartbeatAppliedOpTime(),
-                        "oldestAcceptableOpTime"_attr = oldestSyncOpTime);
-            return false;
+        // Candidates cannot be excessively behind, if we are checking for staleness.
+        if (shouldCheckStaleness) {
+            const auto oldestSyncOpTime = _getOldestSyncOpTime();
+            if (memberData.getHeartbeatAppliedOpTime() < oldestSyncOpTime) {
+                LOGV2_DEBUG(3873110,
+                            2,
+                            "Cannot select sync source because it is too far behind",
+                            "syncSourceCandidate"_attr = syncSourceCandidate,
+                            "syncSourceCandidateOpTime"_attr =
+                                memberData.getHeartbeatAppliedOpTime(),
+                            "oldestAcceptableOpTime"_attr = oldestSyncOpTime);
+                return false;
+            }
         }
         // Candidate must not have a configured delay larger than ours.
         if (_selfConfig().getSecondaryDelay() < memberConfig.getSecondaryDelay()) {
@@ -504,8 +509,8 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
             return false;
         }
     }
-    // Only select a candidate that is ahead of me.
-    if (memberData.getHeartbeatAppliedOpTime() <= lastOpTimeFetched) {
+    // Only select a candidate that is ahead of me, if we are checking for staleness.
+    if (shouldCheckStaleness && memberData.getHeartbeatAppliedOpTime() <= lastOpTimeFetched) {
         LOGV2_DEBUG(3873113,
                     1,
                     "Cannot select sync source which is not ahead of me",
@@ -3016,33 +3021,16 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
     // If the currentSource has the same replication progress as we do and has no source for further
     // progress, return true.
 
-    if (_selfIndex == -1) {
-        LOGV2(21828, "Not choosing new sync source because we are not in the config");
-        return false;
+    auto [initialDecision, currentSourceIndex] =
+        _shouldChangeSyncSourceInitialChecks(currentSource);
+    if (initialDecision != ChangeSyncSourceDecision::kMaybe) {
+        return initialDecision == ChangeSyncSourceDecision::kYes;
     }
 
-    // If the user requested a sync source change, return true.
-    if (_forceSyncSourceIndex != -1) {
-        LOGV2(21829,
-              "Choosing new sync source because the user has requested to use "
-              "{syncSource} as a sync source",
-              "Choosing new sync source because the user has requested a sync source",
-              "syncSource"_attr = _rsConfig.getMemberAt(_forceSyncSourceIndex).getHostAndPort());
+    if (!replMetadata.getIsPrimary() &&
+        _shouldChangeSyncSourceDueToNewPrimary(currentSource, currentSourceIndex)) {
         return true;
     }
-
-    // While we can allow data replication across config versions, we still do not allow syncing
-    // from a node that is not in our config.
-    const int currentSourceIndex = _rsConfig.findMemberIndexByHostAndPort(currentSource);
-    if (currentSourceIndex == -1) {
-        LOGV2(21831,
-              "Choosing new sync source because {currentSyncSource} is not in our config",
-              "Choosing new sync source because current sync source is not in our config",
-              "currentSyncSource"_attr = currentSource.toString());
-        return true;
-    }
-
-    invariant(currentSourceIndex != _selfIndex);
 
     OpTime currentSourceOpTime =
         std::max(oqMetadata.getLastOpApplied(),
@@ -3053,13 +3041,96 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
     int syncSourceIndex = oqMetadata.getSyncSourceIndex();
     std::string syncSourceHost = oqMetadata.getSyncSourceHost();
 
+    // Change sync source if they are not ahead of us, and don't have a sync source,
+    // unless they are primary.
+    if (_shouldChangeSyncSourceDueToSourceNotAhead(currentSource,
+                                                   syncSourceIndex,
+                                                   replMetadata.getIsPrimary(),
+                                                   currentSourceOpTime,
+                                                   lastOpTimeFetched))
+        return true;
+
+    if (_shouldChangeSyncSourceToBreakCycle(
+            currentSource, syncSourceHost, syncSourceIndex, currentSourceOpTime, lastOpTimeFetched))
+        return true;
+
+    if (_shouldChangeSyncSourceDueToLag(currentSource, currentSourceOpTime, lastOpTimeFetched, now))
+        return true;
+
+    if (_shouldChangeSyncSourceDueToBetterEligibleSource(
+            currentSource, currentSourceIndex, lastOpTimeFetched, now))
+        return true;
+
+    return false;
+}
+
+bool TopologyCoordinator::shouldChangeSyncSourceOnError(const HostAndPort& currentSource,
+                                                        const OpTime& lastOpTimeFetched,
+                                                        Date_t now) const {
+    // We change sync source on error if
+    // 1) A forced sync source change has been requested.
+    // 2) Chaining is disabled and a new primary has been detected.
+    // 3) A more eligible node exists. Note this covers the case where our current sync source is
+    //    down.
+
+    auto [initialDecision, currentSourceIndex] =
+        _shouldChangeSyncSourceInitialChecks(currentSource);
+    if (initialDecision != ChangeSyncSourceDecision::kMaybe) {
+        return initialDecision == ChangeSyncSourceDecision::kYes;
+    }
+
+    if (_shouldChangeSyncSourceDueToNewPrimary(currentSource, currentSourceIndex)) {
+        return true;
+    }
+
+    if (_shouldChangeSyncSourceDueToBetterEligibleSource(
+            currentSource, currentSourceIndex, lastOpTimeFetched, now))
+        return true;
+
+    return false;
+}
+
+std::pair<TopologyCoordinator::ChangeSyncSourceDecision, int>
+TopologyCoordinator::_shouldChangeSyncSourceInitialChecks(const HostAndPort& currentSource) const {
+    if (_selfIndex == -1) {
+        LOGV2(21828, "Not choosing new sync source because we are not in the config");
+        return {ChangeSyncSourceDecision::kNo, -1};
+    }
+
+    // If the user requested a sync source change, return kYes.
+    if (_forceSyncSourceIndex != -1) {
+        LOGV2(21829,
+              "Choosing new sync source because the user has requested to use "
+              "{syncSource} as a sync source",
+              "Choosing new sync source because the user has requested a sync source",
+              "syncSource"_attr = _rsConfig.getMemberAt(_forceSyncSourceIndex).getHostAndPort());
+        return {ChangeSyncSourceDecision::kYes, -1};
+    }
+
+    // While we can allow data replication across config versions, we still do not allow syncing
+    // from a node that is not in our config.
+    const int currentSourceIndex = _rsConfig.findMemberIndexByHostAndPort(currentSource);
+    if (currentSourceIndex == -1) {
+        LOGV2(21831,
+              "Choosing new sync source because {currentSyncSource} is not in our config",
+              "Choosing new sync source because current sync source is not in our config",
+              "currentSyncSource"_attr = currentSource.toString());
+        return {ChangeSyncSourceDecision::kYes, -1};
+    }
+
+    invariant(currentSourceIndex != _selfIndex);
+    return {ChangeSyncSourceDecision::kMaybe, currentSourceIndex};
+}
+
+bool TopologyCoordinator::_shouldChangeSyncSourceDueToNewPrimary(const HostAndPort& currentSource,
+                                                                 int currentSourceIndex) const {
     // Change sync source if chaining is disabled (without overrides), we are not syncing from the
     // primary, and we know who the new primary is. We do not consider chaining disabled if we are
     // the primary, since we are in catchup mode.
     auto chainingDisabled = !_rsConfig.isChainingAllowed() &&
         !enableOverrideClusterChainingSetting.load() && _currentPrimaryIndex != _selfIndex;
     auto foundNewPrimary = _currentPrimaryIndex != -1 && _currentPrimaryIndex != currentSourceIndex;
-    if (!replMetadata.getIsPrimary() && chainingDisabled && foundNewPrimary) {
+    if (chainingDisabled && foundNewPrimary) {
         auto newPrimary = _rsConfig.getMemberAt(_currentPrimaryIndex).getHostAndPort();
         LOGV2(3962100,
               "Choosing new sync source because chaining is disabled and we are aware of a new "
@@ -3068,21 +3139,34 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
               "newPrimary"_attr = newPrimary);
         return true;
     }
+    return false;
+}
 
-    // Change sync source if they are not ahead of us, and don't have a sync source,
-    // unless they are primary.
-    if (syncSourceIndex == -1 && currentSourceOpTime <= lastOpTimeFetched &&
-        !replMetadata.getIsPrimary()) {
+bool TopologyCoordinator::_shouldChangeSyncSourceDueToSourceNotAhead(
+    const HostAndPort& currentSource,
+    int syncSourceIndex,
+    bool syncSourceIsPrimary,
+    const OpTime& currentSourceOpTime,
+    const OpTime& lastOpTimeFetched) const {
+    if (syncSourceIndex == -1 && currentSourceOpTime <= lastOpTimeFetched && !syncSourceIsPrimary) {
         LOGV2(21832,
               "Choosing new sync source. Our current sync source is not primary and does "
               "not have a sync source, so we require that it is ahead of us",
               "syncSource"_attr = currentSource,
               "lastOpTimeFetched"_attr = lastOpTimeFetched,
               "syncSourceLatestOplogOpTime"_attr = currentSourceOpTime,
-              "isPrimary"_attr = replMetadata.getIsPrimary());
+              "isPrimary"_attr = syncSourceIsPrimary);
         return true;
     }
+    return false;
+}
 
+bool TopologyCoordinator::_shouldChangeSyncSourceToBreakCycle(
+    const HostAndPort& currentSource,
+    const std::string& syncSourceHost,
+    int syncSourceIndex,
+    const OpTime& currentSourceOpTime,
+    const OpTime& lastOpTimeFetched) const {
     // Change sync source if our sync source is also syncing from us when we are in primary
     // catchup mode, forming a sync source selection cycle, and the sync source is not ahead
     // of us. This is to prevent a deadlock situation. See SERVER-58988 for details.
@@ -3091,7 +3175,7 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
     // node that we think of because it was inferred from the sender node, which could have
     // a different config. This is acceptable since we are just choosing a different sync
     // source if that happens and reconfigs are rare.
-    bool isSyncingFromMe = !syncSourceHost.empty()
+    const bool isSyncingFromMe = !syncSourceHost.empty()
         ? syncSourceHost == _selfMemberData().getHostAndPort().toString()
         : syncSourceIndex == _selfIndex;
 
@@ -3105,44 +3189,91 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
               "syncSourceLatestOplogOpTime"_attr = currentSourceOpTime);
         return true;
     }
+    return false;
+}
 
+bool TopologyCoordinator::_shouldChangeSyncSourceDueToLag(const HostAndPort& currentSource,
+                                                          const OpTime& currentSourceOpTime,
+                                                          const OpTime& lastOpTimeFetched,
+                                                          Date_t now) const {
     if (MONGO_unlikely(disableMaxSyncSourceLagSecs.shouldFail())) {
         LOGV2(
             21833,
-            "disableMaxSyncSourceLagSecs fail point enabled - not checking the most recent "
-            "OpTime, {currentSyncSourceOpTime}, of our current sync source, {syncSource}, against "
-            "the OpTimes of the other nodes in this replica set.",
             "disableMaxSyncSourceLagSecs fail point enabled - not checking the most recent OpTime "
             "of our current sync source against the OpTimes of the other nodes in this replica set",
             "currentSyncSourceOpTime"_attr = currentSourceOpTime.toString(),
             "syncSource"_attr = currentSource);
     } else {
-        unsigned int currentSecs = currentSourceOpTime.getSecs();
-        unsigned int goalSecs = currentSecs + durationCount<Seconds>(_options.maxSyncSourceLagSecs);
+        unsigned int currentSourceOpTimeSecs = currentSourceOpTime.getSecs();
+        unsigned int currentSourceLagThresholdSecs =
+            currentSourceOpTimeSecs + durationCount<Seconds>(_options.maxSyncSourceLagSecs);
 
-        for (std::vector<MemberData>::const_iterator it = _memberData.begin();
-             it != _memberData.end();
-             ++it) {
-            const int itIndex = indexOfIterator(_memberData, it);
-            const MemberConfig& candidateConfig = _rsConfig.getMemberAt(itIndex);
-            if (it->up() && (candidateConfig.isVoter() || !_selfConfig().isVoter()) &&
-                (candidateConfig.shouldBuildIndexes() || !_selfConfig().shouldBuildIndexes()) &&
-                it->getState().readable() && !_memberIsDenylisted(candidateConfig, now) &&
-                goalSecs < it->getHeartbeatAppliedOpTime().getSecs()) {
+        for (size_t i = 0; i < _memberData.size(); i++) {
+            const auto& member = _memberData[i];
+            if (currentSourceLagThresholdSecs < member.getHeartbeatAppliedOpTime().getSecs() &&
+                _isEligibleSyncSource(i,
+                                      now,
+                                      lastOpTimeFetched,
+                                      ReadPreference::Nearest,
+                                      true /* firstAttempt */,
+                                      true /* shouldCheckStaleness */)) {
+                invariant(i != (size_t)_selfIndex,
+                          str::stream()
+                              << "Node " << i << " was eligible as a sync source for itself");
                 LOGV2(21834,
-                      "Choosing new sync source because the most recent OpTime of our sync "
-                      "source, {syncSource}, is {syncSourceOpTime} which is more than "
-                      "{maxSyncSourceLagSecs} behind member {otherMember} "
-                      "whose most recent OpTime is {otherMemberHearbeatAppliedOpTime}",
                       "Choosing new sync source because the most recent OpTime of our sync source "
                       "is more than maxSyncSourceLagSecs behind another member",
                       "syncSource"_attr = currentSource,
                       "syncSourceOpTime"_attr = currentSourceOpTime.toString(),
                       "maxSyncSourceLagSecs"_attr = _options.maxSyncSourceLagSecs,
-                      "otherMember"_attr = candidateConfig.getHostAndPort().toString(),
+                      "otherMember"_attr = member.getHostAndPort().toString(),
                       "otherMemberHearbeatAppliedOpTime"_attr =
-                          it->getHeartbeatAppliedOpTime().toString());
-                invariant(itIndex != _selfIndex);
+                          member.getHeartbeatAppliedOpTime().toString());
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool TopologyCoordinator::_shouldChangeSyncSourceDueToBetterEligibleSource(
+    const HostAndPort& currentSource,
+    const int currentSourceIndex,
+    const OpTime& lastOpTimeFetched,
+    Date_t now) const {
+    // Change sync source if our current sync source is not a preferred sync source node choice due
+    // to non-staleness issues, such as being a non-voter when we are a voter, or being hidden, or
+    // any of the other conditions checked in _isEligibleSyncSource with firstAttempt=true, and
+    // another eligible node exists which does meet these criteria. Note that while we bypass
+    // staleness checks for our current node, we should not do this for a potential new node,
+    // because we could end up with a situation where shouldChangeSyncSource returns true, causing
+    // the sync source to be cleared, but then being reset to our previous sync source repeatedly
+    // because the new source is not actually valid. Note that _isEligibleSyncSource only checks for
+    // ReadPreference::Secondary*, so any choice besides those for the read preference is fine.
+    if (!_isEligibleSyncSource(currentSourceIndex,
+                               now,
+                               lastOpTimeFetched,
+                               ReadPreference::Nearest,
+                               true /* firstAttempt */,
+                               false /* shouldCheckStaleness */)) {
+
+        for (size_t i = 0; i < _memberData.size(); i++) {
+            if (_isEligibleSyncSource(i,
+                                      now,
+                                      lastOpTimeFetched,
+                                      ReadPreference::Nearest,
+                                      true /* firstAttempt */,
+                                      true /* shouldCheckStaleness */)) {
+                invariant(i != (size_t)_selfIndex,
+                          str::stream()
+                              << "Node " << i << " was eligible as a sync source for itself");
+                LOGV2(5929000,
+                      "Choosing new sync source because our current sync source does not satisfy "
+                      "our strict criteria for candidates, but there is another member which does "
+                      "satisfy these criteria",
+                      "currentSyncSource"_attr = currentSource,
+                      "eligibleCandidateSyncSource"_attr =
+                          _rsConfig.getMemberAt(i).getHostAndPort().toString());
                 return true;
             }
         }
@@ -3234,7 +3365,8 @@ bool TopologyCoordinator::shouldChangeSyncSourceDueToPingTime(const HostAndPort&
                                   now,
                                   previousOpTimeFetched,
                                   readPreference,
-                                  true /* firstAttempt */)) {
+                                  true /* firstAttempt */,
+                                  true /* shouldCheckStaleness */)) {
             LOGV2(4744901,
                   "Choosing new sync source because we have found another potential sync "
                   "source that is significantly closer than our current sync source",

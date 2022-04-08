@@ -4844,64 +4844,6 @@ tasks:
       resmoke_args: --storageEngine=wiredTiger
 
 - <<: *gen_task_template
-  name: tenant_migration_jscore_passthrough_gen
-  tags: ["tenant_migration"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-      resmoke_args: --storageEngine=wiredTiger
-
-- <<: *gen_task_template
-  name: tenant_migration_causally_consistent_jscore_passthrough_gen
-  tags: ["tenant_migration"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-      resmoke_args: --storageEngine=wiredTiger
-
-- <<: *gen_task_template
-  name: tenant_migration_multi_stmt_txn_jscore_passthrough_gen
-  tags: ["tenant_migration", "txn"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-      resmoke_args: --storageEngine=wiredTiger
-
-- <<: *gen_task_template
-  name: tenant_migration_stepdown_jscore_passthrough_gen
-  tags: ["tenant_migration"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-      resmoke_args: --storageEngine=wiredTiger
-
-- <<: *gen_task_template
-  name: tenant_migration_terminate_primary_jscore_passthrough_gen
-  tags: ["tenant_migration"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      depends_on: jsCore
-      use_large_distro: "true"
-      resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
-
-- <<: *gen_task_template
-  name: tenant_migration_kill_primary_jscore_passthrough_gen
-  tags: ["tenant_migration"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      depends_on: jsCore
-      use_large_distro: "true"
-      resmoke_args: --storageEngine=wiredTiger
-      fallback_num_sub_suites: 10
-
-- <<: *gen_task_template
   name: parallel_gen
   tags: ["misc_js", "parallel"]
   commands:
@@ -6352,15 +6294,16 @@ tasks:
         build_variants: [rhel70, windows]
 
     # Put the debug symbols
+    # push directly to repo due to limitations in file size SERVER-63432
     - command: s3.put
       params:
         aws_secret: ${aws_secret}
         aws_key: ${aws_key}
         permissions: public-read
         local_file: src/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}
-        bucket: build-push-testing
+        bucket: ${push_bucket}
         content_type: ${content_type|application/gzip}
-        remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}-${task_id}.${ext|tgz}
+        remote_file: ${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}
         optional: true
 
     # Put the binaries tarball signature
@@ -6770,10 +6713,7 @@ tasks:
         aws_secret: ${aws_secret}
         optional: true
         s3_copy_files:
-            #Debug Symbols
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}-${task_id}.${ext|tgz}', 'bucket': 'build-push-testing'},
-               'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'}}
-
+            #Debug Symbols  temporarily removed - see SERVER-63432 - need to s3.push debugsymbols due to size limit
             #Debug Symbols Signature
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}-${task_id}.${ext|tgz}.sig', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}.sig', 'bucket': '${push_bucket}'}}
@@ -8874,9 +8814,6 @@ buildvariants:
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
-  - name: .tenant_migration
-    distros:
-      - rhel80-xlarge
   - name: server_selection_json_test_TG
     distros:
       - rhel80-xlarge
@@ -8894,6 +8831,7 @@ buildvariants:
     test_flags: >-
       --additionalFeatureFlags=featureFlagTimeseriesUpdatesAndDeletes
       --additionalFeatureFlags=featureFlagShardedTimeSeries
+      --additionalFeatureFlags=featureFlagLoadBalancer
   tasks:
     - name: compile_test_and_package_parallel_core_stream_TG
       distros:
@@ -8966,9 +8904,6 @@ buildvariants:
     - name: .stitch
     - name: .updatefuzzer
     - name: secondary_reads_passthrough_gen
-    - name: .tenant_migration
-      distros:
-        - rhel80-xlarge
 
 - name: enterprise-rhel-80-64-bit-large-txns-format
   display_name: "Enterprise RHEL 8.0 (large transactions format)"
@@ -10608,7 +10543,6 @@ buildvariants:
   - name: snmp
   - name: .watchdog
   - name: .stitch
-  - name: .tenant_migration
   - name: unittest_shell_hang_analyzer_gen
   - name: .updatefuzzer
   - name: server_discovery_and_monitoring_json_test_TG
@@ -10700,7 +10634,6 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .updatefuzzer
-  - name: .tenant_migration
   - name: watchdog_wiredtiger
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG

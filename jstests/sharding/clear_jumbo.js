@@ -86,6 +86,17 @@ assert(!jumboChunk.jumbo, tojson(jumboChunk));
 assert.lt(jumboMajorVersionBefore, jumboChunk.lastmod.getTime());
 
 ////////////////////////////////////////////////////////////////////////////
+// Ensure clear jumbo flag stores the correct chunk version
+
+let version = st.configRS.getPrimary()
+                  .adminCommand({getParameter: 1, featureCompatibilityVersion: 1})
+                  .featureCompatibilityVersion.version;
+if (version === '5.0') {
+    assert.eq(undefined, jumboChunk.lastmodEpoch);
+    assert.eq(undefined, jumboChunk.lastmodTimestamp);
+}
+
+////////////////////////////////////////////////////////////////////////////
 // Balancer with jumbo chunks behavior
 // Forces a jumbo chunk to be on a wrong zone but balancer shouldn't be able to move it until
 // jumbo flag is cleared.

@@ -32,6 +32,8 @@
 #include <string>
 #include <vector>
 
+#include "mongo/base/status_with.h"
+
 namespace mongo {
 
 /**
@@ -53,6 +55,7 @@ enum class HostnameCanonicalizationMode {
  *  May return an empty vector if no FQDNs can be determined, or if the underlying
  *  implementation returns an error. The returned information is advisory only.
  */
-std::vector<std::string> getHostFQDNs(std::string hostName, HostnameCanonicalizationMode mode);
+StatusWith<std::vector<std::string>> getHostFQDNs(std::string hostName,
+                                                  HostnameCanonicalizationMode mode);
 
 }  // namespace mongo

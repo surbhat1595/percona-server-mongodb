@@ -89,12 +89,12 @@ public:
     // _srng use protected by _lock_key
     void generate_secure_key(unsigned char* key);
 
-    StatusWith<std::vector<StorageEngine::BackupBlock>> beginNonBlockingBackup(
+    StatusWith<std::deque<StorageEngine::BackupBlock>> beginNonBlockingBackup(
         const StorageEngine::BackupOptions& options);
 
     Status endNonBlockingBackup();
 
-    StatusWith<std::vector<std::string>> extendBackupCursor();
+    StatusWith<std::deque<std::string>> extendBackupCursor();
 
 private:
     typedef boost::multiprecision::uint128_t _gcm_iv_type;
@@ -103,7 +103,7 @@ private:
 
     int _openWiredTiger(const std::string& path, const std::string& wtOpenConfig);
 
-    StatusWith<std::vector<StorageEngine::BackupBlock>> _disableIncrementalBackup();
+    StatusWith<std::deque<StorageEngine::BackupBlock>> _disableIncrementalBackup();
 
     void close_handles();
     int store_gcm_iv_reserved();

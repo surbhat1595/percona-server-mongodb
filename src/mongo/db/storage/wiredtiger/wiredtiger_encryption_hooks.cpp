@@ -108,7 +108,7 @@ bool WiredTigerEncryptionHooks::restartRequired() {
     return false;
 }
 
-StatusWith<std::vector<StorageEngine::BackupBlock>>
+StatusWith<std::deque<StorageEngine::BackupBlock>>
 WiredTigerEncryptionHooks::beginNonBlockingBackup(const StorageEngine::BackupOptions& options) {
     return _encryptionKeyDB->beginNonBlockingBackup(options);
 }
@@ -117,7 +117,7 @@ Status WiredTigerEncryptionHooks::endNonBlockingBackup() {
     return _encryptionKeyDB->endNonBlockingBackup();
 }
 
-StatusWith<std::vector<std::string>> WiredTigerEncryptionHooks::extendBackupCursor() {
+StatusWith<std::deque<std::string>> WiredTigerEncryptionHooks::extendBackupCursor() {
     return _encryptionKeyDB->extendBackupCursor();
 }
 

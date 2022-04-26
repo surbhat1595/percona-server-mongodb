@@ -107,9 +107,9 @@ private:
     const Timestamp _extendTo;
     BackupCursorExtendState _backupCursorExtendState;
     // Convenience reference to _backupCursorExtendState.filenames
-    const std::vector<std::string>& _filenames;
+    const std::deque<std::string>& _filenames;
     // Document iterator
-    std::vector<std::string>::const_iterator _fileIt;
+    std::deque<std::string>::const_iterator _fileIt;
 };
 
 }  // namespace mongo

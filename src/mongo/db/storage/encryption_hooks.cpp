@@ -95,16 +95,16 @@ Status EncryptionHooks::unprotectTmpData(const uint8_t* in,
                   "Encryption hooks must be enabled to use postprocessTmpData.");
 }
 
-StatusWith<std::vector<StorageEngine::BackupBlock>> EncryptionHooks::beginNonBlockingBackup(
+StatusWith<std::deque<StorageEngine::BackupBlock>> EncryptionHooks::beginNonBlockingBackup(
     const StorageEngine::BackupOptions&) {
-    return std::vector<StorageEngine::BackupBlock>();
+    return std::deque<StorageEngine::BackupBlock>();
 }
 
 Status EncryptionHooks::endNonBlockingBackup() {
     return Status::OK();
 }
 
-StatusWith<std::vector<std::string>> EncryptionHooks::extendBackupCursor() {
-    return {std::vector<std::string>()};
+StatusWith<std::deque<std::string>> EncryptionHooks::extendBackupCursor() {
+    return {std::deque<std::string>()};
 }
 }  // namespace mongo

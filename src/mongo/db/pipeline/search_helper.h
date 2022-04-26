@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -29,26 +29,30 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <deque>
-#include <string>
-
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/pipeline/pipeline.h"
 
 namespace mongo {
 
-struct BackupCursorState {
-    UUID backupId;
-    boost::optional<Document> preamble;
-    std::unique_ptr<StorageEngine::StreamingCursor> streamingCursor;
-    // 'otherBackupBlocks' includes the backup blocks for the encrypted storage engine in the
-    // enterprise module.
-    std::deque<StorageEngine::BackupBlock> otherBackupBlocks;
+/**
+ * A class that contains any functions needed to run $seach queries when the enterprise module
+ * is compiled in. The enterprise module will override these functions, these are just stubs.
+ */
+class SearchDefaultHelperFunctions {
+public:
+    virtual ~SearchDefaultHelperFunctions() {}
+    /**
+     * Check if the passed in pipeline is valid in a sharded collection. If it is not, return the
+     * error message, otherwise return boost::none.
+     */
+    virtual boost::optional<std::string> validatePipelineForShardedCollection(
+        const Pipeline& pipeline) {
+        return boost::none;
+    }
 };
 
-struct BackupCursorExtendState {
-    std::deque<std::string> filenames;
-};
+/**
+ * A 'ServiceContext' decorator that allows enterprise to set its own version of the above class.
+ */
+extern ServiceContext::Decoration<std::unique_ptr<SearchDefaultHelperFunctions>> getSearchHelpers;
 
 }  // namespace mongo

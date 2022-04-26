@@ -326,6 +326,7 @@ variables:
   - enterprise-amazon2-arm64
   - enterprise-debian92-64
   - enterprise-debian10-64
+  - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
   - enterprise-rhel-70-64-bit
@@ -340,6 +341,7 @@ variables:
   - enterprise-rhel-80-64-bit-multiversion
   - enterprise-rhel-80-64-bit-suggested
   - enterprise-rhel-82-arm64
+  - enterprise-rhel-83-s390x
   - enterprise-suse12-64
   - enterprise-suse15-64
   - enterprise-ubuntu1804-64
@@ -366,6 +368,7 @@ variables:
   - enterprise-rhel-80-64-bit-dynamic-required
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-82-arm64
+  - enterprise-rhel-83-s390x
   - enterprise-amazon2-arm64
   - enterprise-ubuntu1804-64
   - enterprise-windows
@@ -380,7 +383,9 @@ variables:
   - enterprise-amazon2
   - enterprise-amazon2-arm64
   - debian10
+  - debian11
   - enterprise-debian10-64
+  - enterprise-debian11-64
   - debian92
   - enterprise-debian92-64
   - rhel70
@@ -388,6 +393,7 @@ variables:
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
+  - enterprise-rhel-83-s390x
   - ubi8
   - rhel80
   - rhel-82-arm64
@@ -4872,24 +4878,22 @@ tasks:
       resmoke_args: --suites=concurrency --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_metrics
+- <<: *gen_task_template
+  name: concurrency_metrics_gen
   tags: ["concurrency"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=concurrency_metrics --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_replication_metrics
+- <<: *gen_task_template
+  name: concurrency_replication_metrics_gen
   tags: ["concurrency", "repl"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=concurrency_replication_metrics --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
@@ -5994,12 +5998,7 @@ tasks:
   depends_on:
     - name: compile_dist_test
   commands:
-    - command: manifest.load
-    - *git_get_project
     - *f_expansions_write
-    - *kill_processes
-    - *cleanup_environment
-    - *set_up_venv
     - func: "scons compile"
       vars:
         targets: >-
@@ -9880,6 +9879,59 @@ buildvariants:
     - rhel70-small
   - name: generate_buildid_to_debug_symbols_mapping
 
+- name: enterprise-rhel-83-s390x
+  display_name: Enterprise RHEL 8.3 s390x
+  modules:
+  - enterprise
+  run_on:
+  - rhel83-zseries-small
+  batchtime: 525600 # 365 days
+  stepback: false
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    release_buid: true
+    compile_flags: --ssl MONGO_DISTMOD=rhel83 -j3 --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    resmoke_jobs_max: 2
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: s390x
+    packager_distro: rhel83
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: s390x-enterprise-rhel83
+    repo_edition: enterprise
+    multiversion_platform: rhel83
+    multiversion_architecture: s390x
+    multiversion_edition: enterprise
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - rhel83-zseries-large
+  - name: build_variant_gen
+  - name: .aggregation .common
+  - name: audit
+  - name: .auth !.multiversion !.jscore
+  - name: .misc_js
+  - name: .encrypt
+  - name: .integration !.audit
+    distros:
+    - rhel83-zseries-large
+  - name: .jscore .common !.auth
+  - name: jsCore_op_query
+  - name: .read_write_concern
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: sasl
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.multiversion
+  - name: snmp
+  - name: .stitch
+  - name: .publish
+    distros:
+    - rhel80-small
+  - name: generate_buildid_to_debug_symbols_mapping
+
 ###########################################
 #          Ubuntu buildvariants           #
 ###########################################
@@ -9915,7 +9967,7 @@ buildvariants:
   modules:
   - enterprise
   run_on:
-  - suse12-test
+  - suse12-sp5-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     push_path: linux
@@ -9934,7 +9986,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - suse12-build
+    - suse12-sp5-large
   - name: build_variant_gen
   - name: .aggfuzzer .common
   - name: audit
@@ -9960,7 +10012,7 @@ buildvariants:
 - name: suse12
   display_name: SUSE 12
   run_on:
-  - suse12-test
+  - suse12-sp5-small
   expansions:
     push_path: linux
     push_bucket: downloads.mongodb.org
@@ -9975,11 +10027,11 @@ buildvariants:
     packager_distro: suse12
     repo_edition: org
     scons_cache_scope: shared
-    large_distro_name: suse12-build
+    large_distro_name: suse12-sp5-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - suse12-build
+    - suse12-sp5-large
   - name: build_variant_gen
   - name: .aggfuzzer .common
   - name: aggregation
@@ -9989,7 +10041,7 @@ buildvariants:
   - name: .concurrency .common !.large
   - name: .concurrency .common .large
     distros:
-      - suse12-build
+      - suse12-sp5-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
   - name: free_monitoring
@@ -10304,6 +10356,104 @@ buildvariants:
     - debian10-small
   - name: generate_buildid_to_debug_symbols_mapping
 
+- name: enterprise-debian11-64
+  display_name: Enterprise Debian 11
+  modules:
+  - enterprise
+  run_on:
+  - debian11-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-debian11
+    compile_flags: --ssl MONGO_DISTMOD=debian11 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    multiversion_platform: debian11
+    multiversion_edition: enterprise
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: debian11
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    large_distro_name: debian11-large
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - debian11-large
+  - name: build_variant_gen
+  - name: .aggfuzzer .common !.multiversion
+  - name: audit
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
+  - name: .jscore .common !.decimal !.compat !.sharding
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough
+  - name: sasl
+  - name: sharding_auth_gen
+  - name: snmp
+  - name: .stitch
+  - name: test_packages
+    distros:
+    - ubuntu2004-package
+  - name: .publish
+    distros:
+    - debian11-small
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: debian11
+  display_name: Debian 11
+  run_on:
+  - debian11-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.mongodb.org
+    push_name: linux
+    push_arch: x86_64-debian11
+    compile_flags: --ssl MONGO_DISTMOD=debian11 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    multiversion_platform: debian11
+    multiversion_edition: targeted
+    has_packages: true
+    packager_script: packager.py
+    packager_arch: x86_64
+    packager_distro: debian11
+    repo_edition: org
+    scons_cache_scope: shared
+    large_distro_name: debian11-large
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - debian11-large
+  - name: build_variant_gen
+  - name: .aggfuzzer .common !.multiversion
+  - name: aggregation
+  - name: aggregation_auth
+  - name: .auth !.audit !.multiversion
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .misc_js
+  - name: .concurrency .common
+  - name: concurrency_replication_causal_consistency_gen
+  - name: disk_wiredtiger
+  - name: free_monitoring
+  - name: .jscore .common !.decimal
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.op_query !.csrs
+  - name: .ssl
+  - name: .stitch
+  - name: test_packages
+    distros:
+    - ubuntu2004-package
+  - name: .publish
+    distros:
+    - debian11-small
+  - name: generate_buildid_to_debug_symbols_mapping
 ################################
 # storage engine buildvariants #
 ################################

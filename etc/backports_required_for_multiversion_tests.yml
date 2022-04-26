@@ -58,10 +58,14 @@ last-continuous:
       test_file: jstests/sharding/coordinate_txn_commit_with_tickets_exhausted.js
     - ticket: SERVER-60685
       test_file: jstests/sharding/cancel_coordinate_txn_commit_with_tickets_exhausted.js
+    - ticket: SERVER-58506
+      test_file: jstests/noPassthrough/getParameterWithDetails.js
     - ticket: SERVER-61757
       test_file: jstests/replsets/dbcheck.js
     - ticket: SERVER-61955
       test_file: jstests/auth/dbcheck.js
+    - ticket: SERVER-64184
+      test_file: jstests/noPassthrough/aggregate_metrics.js
     - ticket: SERVER-56127
       test_file: jstests/sharding/retryable_writes_nested_shard_key.js
     - ticket: SERVER-62296
@@ -138,6 +142,8 @@ last-lts:
       test_file: jstests/sharding/safe_secondary_reads_single_migration_suspend_range_deletion.js
     - ticket: SERVER-50640
       test_file: jstests/sharding/safe_secondary_reads_single_migration_waitForDelete.js
+    - ticket: SERVER-64184
+      test_file: jstests/noPassthrough/aggregate_metrics.js
     - ticket: SERVER-49991
       test_file: jstests/replsets/get_replication_info_helper.js
     - ticket: SERVER-47469
@@ -290,6 +296,8 @@ last-lts:
       test_file: jstests/sharding/cancel_coordinate_txn_commit_with_tickets_exhausted.js
     - ticket: SERVER-57772
       test_file: jstests/sharding/rewrite_state_change_errors.js
+    - ticket: SERVER-58506
+      test_file: jstests/noPassthrough/getParameterWithDetails.js
     - ticket: SERVER-61757
       test_file: jstests/replsets/dbcheck.js
     - ticket: SERVER-61955
@@ -312,6 +320,8 @@ last-lts:
       test_file: jstests/aggregation/lookup_let_optimization.js
     - ticket: SERVER-59290
       test_file: jstests/replsets/sync_source_changes.js
+    - ticket: SERVER-64485
+      test_file: jstests/sharding/update_with_dollar_fields.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

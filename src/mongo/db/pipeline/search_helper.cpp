@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,28 +27,15 @@
  *    it in the license file.
  */
 
-#pragma once
-
-#include <boost/optional.hpp>
-#include <deque>
-#include <string>
-
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/pipeline/search_helper.h"
 
 namespace mongo {
+ServiceContext::Decoration<std::unique_ptr<SearchDefaultHelperFunctions>> getSearchHelpers =
+    ServiceContext::declareDecoration<std::unique_ptr<SearchDefaultHelperFunctions>>();
 
-struct BackupCursorState {
-    UUID backupId;
-    boost::optional<Document> preamble;
-    std::unique_ptr<StorageEngine::StreamingCursor> streamingCursor;
-    // 'otherBackupBlocks' includes the backup blocks for the encrypted storage engine in the
-    // enterprise module.
-    std::deque<StorageEngine::BackupBlock> otherBackupBlocks;
-};
-
-struct BackupCursorExtendState {
-    std::deque<std::string> filenames;
-};
-
+ServiceContext::ConstructorActionRegisterer searchQueryHelperRegisterer{
+    "searchQueryHelperRegisterer", [](ServiceContext* context) {
+        invariant(context);
+        getSearchHelpers(context) = std::make_unique<SearchDefaultHelperFunctions>();
+    }};
 }  // namespace mongo

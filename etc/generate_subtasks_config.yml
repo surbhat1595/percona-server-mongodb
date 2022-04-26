@@ -2,10 +2,12 @@ build_variant_large_distro_exceptions:
   - amazon
   - amazon2
   - debian10
+  - debian11
   - debian92
   - enterprise-amazon2
   - enterprise-amazon2-arm64
   - enterprise-debian10-64
+  - enterprise-debian11-64
   - enterprise-debian92-64
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
@@ -21,6 +23,7 @@ build_variant_large_distro_exceptions:
   - enterprise-rhel-80-64-bit-coverage
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-82-arm64
+  - enterprise-rhel-83-s390x
   - enterprise-suse12-64
   - enterprise-suse12-s390x
   - enterprise-suse15-64

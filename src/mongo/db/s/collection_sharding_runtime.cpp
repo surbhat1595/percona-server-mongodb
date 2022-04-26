@@ -185,10 +185,16 @@ boost::optional<SharedSemiFuture<void>> CollectionShardingRuntime::getCriticalSe
 
 void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
                                                      CollectionMetadata newMetadata) {
+    const auto csrLock = CSRLock::lockExclusive(opCtx, this);
+    setFilteringMetadata_withLock(opCtx, newMetadata, csrLock);
+}
+
+void CollectionShardingRuntime::setFilteringMetadata_withLock(OperationContext* opCtx,
+                                                              CollectionMetadata newMetadata,
+                                                              const CSRLock& csrExclusiveLock) {
     invariant(!newMetadata.isSharded() || !_nss.isNamespaceAlwaysUnsharded(),
               str::stream() << "Namespace " << _nss.ns() << " must never be sharded.");
 
-    auto csrLock = CSRLock::lockExclusive(opCtx, this);
     stdx::lock_guard lk(_metadataManagerLock);
 
     if (!newMetadata.isSharded()) {
@@ -212,6 +218,10 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
 
 void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) {
     const auto csrLock = CSRLock::lockExclusive(opCtx, this);
+    if (_shardVersionInRecoverOrRefresh) {
+        _shardVersionInRecoverOrRefresh->cancellationSource.cancel();
+    }
+
     stdx::lock_guard lk(_metadataManagerLock);
     if (!_nss.isNamespaceAlwaysUnsharded()) {
         LOGV2_DEBUG(4798530,
@@ -318,9 +328,9 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 
     const auto& receivedShardVersion = *optReceivedShardVersion;
 
-    // An operation with read concern 'available' should never have shardVersion set.
-    invariant(repl::ReadConcernArgs::get(opCtx).getLevel() !=
-              repl::ReadConcernLevel::kAvailableReadConcern);
+    if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
+        repl::ReadConcernLevel::kAvailableReadConcern)
+        return kUnshardedCollection;
 
     auto csrLock = CSRLock::lockShared(opCtx, this);
 
@@ -339,13 +349,14 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         auto criticalSectionSignal = _critSec.getSignal(
             opCtx->lockState()->isWriteLocked() ? ShardingMigrationCriticalSection::kWrite
                                                 : ShardingMigrationCriticalSection::kRead);
-
+        std::string reason = _critSec.getReason() ? _critSec.getReason()->toString() : "unknown";
         uassert(StaleConfigInfo(_nss,
                                 receivedShardVersion,
                                 wantedShardVersion,
                                 ShardingState::get(opCtx)->shardId(),
                                 std::move(criticalSectionSignal)),
-                str::stream() << "migration commit in progress for " << _nss.ns(),
+                str::stream() << "The critical section for " << _nss.ns()
+                              << " is acquired with reason: " << reason,
                 !criticalSectionSignal);
     }
 
@@ -398,16 +409,18 @@ size_t CollectionShardingRuntime::numberOfRangesScheduledForDeletion() const {
 }
 
 
-void CollectionShardingRuntime::setShardVersionRecoverRefreshFuture(SharedSemiFuture<void> future,
-                                                                    const CSRLock&) {
+void CollectionShardingRuntime::setShardVersionRecoverRefreshFuture(
+    SharedSemiFuture<void> future, CancellationSource cancellationSource, const CSRLock&) {
     invariant(!_shardVersionInRecoverOrRefresh);
-    _shardVersionInRecoverOrRefresh.emplace(std::move(future));
+    _shardVersionInRecoverOrRefresh.emplace(std::move(future), std::move(cancellationSource));
 }
 
 boost::optional<SharedSemiFuture<void>>
 CollectionShardingRuntime::getShardVersionRecoverRefreshFuture(OperationContext* opCtx) {
     auto csrLock = CSRLock::lockShared(opCtx, this);
-    return _shardVersionInRecoverOrRefresh;
+    return _shardVersionInRecoverOrRefresh
+        ? boost::optional<SharedSemiFuture<void>>(_shardVersionInRecoverOrRefresh->future)
+        : boost::none;
 }
 
 void CollectionShardingRuntime::resetShardVersionRecoverRefreshFuture(const CSRLock&) {

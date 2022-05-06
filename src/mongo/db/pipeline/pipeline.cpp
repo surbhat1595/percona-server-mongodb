@@ -235,10 +235,11 @@ void Pipeline::validateCommon() const {
                 str::stream() << stage->getSourceName() << " can only be run on mongoS",
                 !(constraints.hostRequirement == HostTypeRequirement::kMongoS && !pCtx->inMongos));
 
-        uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Stage not supported inside of a multi-document transaction: "
-                              << stage->getSourceName(),
-                !(pCtx->inMultiDocumentTransaction && !constraints.isAllowedInTransaction()));
+        uassert(
+            ErrorCodes::OperationNotSupportedInTransaction,
+            str::stream() << "Stage not supported inside of a multi-document transaction: "
+                          << stage->getSourceName(),
+            !(pCtx->opCtx->inMultiDocumentTransaction() && !constraints.isAllowedInTransaction()));
     }
 }
 
@@ -447,6 +448,23 @@ void Pipeline::stitch() {
     DocumentSource* prevSource = _sources.front().get();
     prevSource->setSource(nullptr);
     for (SourceContainer::iterator iter(++_sources.begin()), listEnd(_sources.end());
+         iter != listEnd;
+         ++iter) {
+        intrusive_ptr<DocumentSource> pTemp(*iter);
+        pTemp->setSource(prevSource);
+        prevSource = pTemp.get();
+    }
+}
+
+void Pipeline::stitch(SourceContainer* container) {
+    if (container->empty()) {
+        return;
+    }
+
+    // Chain together all the stages.
+    DocumentSource* prevSource = container->front().get();
+    prevSource->setSource(nullptr);
+    for (Pipeline::SourceContainer::iterator iter(++container->begin()), listEnd(container->end());
          iter != listEnd;
          ++iter) {
         intrusive_ptr<DocumentSource> pTemp(*iter);

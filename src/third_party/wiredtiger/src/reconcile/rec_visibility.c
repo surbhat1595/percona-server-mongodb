@@ -402,6 +402,7 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, W
      */
     upd_select->upd = NULL;
     upd_select->upd_saved = false;
+    upd_select->ooo_tombstone = false;
     select_tw = &upd_select->tw;
     WT_TIME_WINDOW_INIT(select_tw);
 
@@ -699,6 +700,32 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, W
     WT_ERR(__rec_validate_upd_chain(session, r, onpage_upd, select_tw, vpack));
 
     /*
+     * Set the flag if the selected tombstone is an out-of-order or mixed mode to an update. Based
+     * on this flag, the caller functions perform the history store truncation for this key.
+     */
+    if (!is_hs_page && tombstone != NULL &&
+      !F_ISSET(tombstone, WT_UPDATE_RESTORED_FROM_DS | WT_UPDATE_RESTORED_FROM_HS)) {
+        upd = upd_select->upd;
+
+        /*
+         * The selected update can be the tombstone itself when the tombstone is globally visible.
+         * Compare the tombstone's timestamp with either the next update in the update list or the
+         * on-disk cell timestamp to determine if the tombstone is an out-of-order or mixed mode.
+         */
+        if (tombstone == upd) {
+            upd = upd->next;
+
+            /* Loop until a valid update is found. */
+            while (upd != NULL && upd->txnid == WT_TXN_ABORTED)
+                upd = upd->next;
+        }
+
+        if ((upd != NULL && upd->start_ts > tombstone->start_ts) ||
+          (vpack != NULL && vpack->tw.start_ts > tombstone->start_ts))
+            upd_select->ooo_tombstone = true;
+    }
+
+    /*
      * Fixup any out of order timestamps, assert that checkpoint wasn't running when this round of
      * reconciliation started.
      *
@@ -778,8 +805,7 @@ __wt_rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_INSERT *ins, W
       !vpack->tw.prepare && (upd_saved || F_ISSET(vpack, WT_CELL_UNPACK_OVERFLOW)))
         WT_ERR(__rec_append_orig_value(session, page, upd_select->upd, vpack));
 
-    __wt_time_window_clear_obsolete(
-      session, &upd_select->tw, r->rec_start_oldest_id, r->rec_start_pinned_ts);
+    __wt_rec_time_window_clear_obsolete(session, upd_select, NULL, r);
 err:
     __wt_scr_free(session, &tmp);
     return (ret);

@@ -58,7 +58,7 @@ def icecc_create_env(env, target, source, for_signature):
     # store it in a known location. Add any files requested from the user environment.
     create_env = "ICECC_VERSION_TMP=$$(${SOURCES[0]} --$ICECC_COMPILER_TYPE ${SOURCES[1]} ${SOURCES[2]}"
 
-    # TODO: It would be a little more elegant if things in
+    # TODO: SERVER-57393 It would be a little more elegant if things in
     # ICECC_CREATE_ENV_ADDFILES were handled as sources, because we
     # would get automatic dependency tracking. However, there are some
     # wrinkles around the mapped case so we have opted to leave it as
@@ -135,7 +135,7 @@ def generate(env):
         env.get('ICECREAM_TARGET_DIR', '#./.icecream')
     )
     verbose = env.get('ICECREAM_VERBOSE', False)
-    env['ICECREAM_DEBUG'] = env.get('ICECREAM_DEBUG', False)
+    env['ICECC_DEBUG'] = env.get('ICECC_DEBUG', False)
 
     # We have a lot of things to build and run that the final user
     # environment doesn't need to see or know about. Make a custom env
@@ -328,7 +328,7 @@ def generate(env):
     # of such a node easily. Creating a Substfile means that SCons
     # will take care of generating a file that Ninja can use.
     run_icecc = setupEnv.Textfile(
-        target="$ICECREAM_TARGET_DIR/run-icecc.sh",
+        target="$ICECREAM_TARGET_DIR/$ICECREAM_RUN_SCRIPT_SUBPATH/run-icecc.sh",
         source=[
             '#!/bin/sh',
             'ICECC_VERSION=@icecc_version_arch@@icecc_version@ exec @icecc@ "$@"',
@@ -505,7 +505,7 @@ def generate(env):
             env[command] = " ".join(["$( $ICERUN $)", env[command]])
 
     # Uncomment these to debug your icecc integration
-    if env['ICECREAM_DEBUG']:
+    if env['ICECC_DEBUG']:
         env['ENV']['ICECC_DEBUG'] = 'debug'
         env['ENV']['ICECC_LOGFILE'] = 'icecc.log'
 

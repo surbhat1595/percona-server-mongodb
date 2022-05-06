@@ -2872,6 +2872,140 @@ TEST_F(PipelineMustRunOnMongoSTest, SplittablePipelineRunsUnsplitOnMongoSIfSplit
 }
 
 }  // namespace mustRunOnMongoS
+
+namespace DeferredSort {
+
+// Like a DocumentSourceMock, but has a deferrable merge sort.
+class DocumentSourceDeferredMergeSort : public DocumentSourceMock {
+public:
+    DocumentSourceDeferredMergeSort(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : DocumentSourceMock({}, expCtx) {}
+
+    static boost::intrusive_ptr<DocumentSourceDeferredMergeSort> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+        return new DocumentSourceDeferredMergeSort(expCtx);
+    }
+
+    boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
+        DistributedPlanLogic logic;
+
+        logic.mergingStage = nullptr;
+        logic.shardsStage = nullptr;
+        logic.mergeSortPattern = BSON("a" << 1);
+        logic.needsSplit = false;
+
+        return logic;
+    }
+};
+
+class DocumentSourceCanSwapWithSort : public DocumentSourceMock {
+public:
+    DocumentSourceCanSwapWithSort(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : DocumentSourceMock({}, expCtx) {}
+
+    static boost::intrusive_ptr<DocumentSourceCanSwapWithSort> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+        return new DocumentSourceCanSwapWithSort(expCtx);
+    }
+
+    boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
+        return boost::none;
+    }
+
+    // This is just to test splitting logic, doGetNext should not be called.
+    GetNextResult doGetNext() override {
+        MONGO_UNREACHABLE;
+    }
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kNone,
+                                     HostTypeRequirement::kNone,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kNotAllowed,
+                                     LookupRequirement::kAllowed,
+                                     UnionRequirement::kAllowed,
+                                     ChangeStreamRequirement::kBlacklist);
+        constraints.preservesOrderAndMetadata = true;
+
+        return constraints;
+    }
+};
+
+using PipelineDeferredMergeSortTest = AggregationContextFixture;
+using HostTypeRequirement = StageConstraints::HostTypeRequirement;
+
+TEST_F(PipelineDeferredMergeSortTest, StageWithDeferredSortDoesNotSplit) {
+    auto expCtx = getExpCtx();
+
+    expCtx->inMongos = true;
+
+    auto mock = DocumentSourceDeferredMergeSort::create(expCtx);
+    auto swappable = DocumentSourceCanSwapWithSort::create(expCtx);
+    auto split = DocumentSourceInternalSplitPipeline::create(expCtx, HostTypeRequirement::kNone);
+    auto runOnMongoS = DocumentSourceMatch::create(fromjson("{b: 5}"), expCtx);
+
+    auto pipeline = Pipeline::create({mock, swappable, split, runOnMongoS}, expCtx);
+
+    auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(pipeline));
+
+    // Verify that we've split the pipeline at the SplitPipeline stage, not on the deferred sort.
+    ASSERT_EQ(splitPipeline.shardsPipeline->getSources().size(), 2);
+    ASSERT_EQ(splitPipeline.mergePipeline->getSources().size(), 2);
+
+    // Verify the sort is correct.
+    ASSERT(splitPipeline.shardCursorsSortSpec);
+    ASSERT_BSONOBJ_EQ(splitPipeline.shardCursorsSortSpec.get(), BSON("a" << 1));
+}
+
+TEST_F(PipelineDeferredMergeSortTest, EarliestSortIsSelectedIfDeferred) {
+    auto expCtx = getExpCtx();
+
+    expCtx->inMongos = true;
+
+    auto mock = DocumentSourceDeferredMergeSort::create(expCtx);
+    auto swappable = DocumentSourceCanSwapWithSort::create(expCtx);
+    auto sort = DocumentSourceSort::create(expCtx, fromjson("{NO: 1}"));
+    auto split = DocumentSourceInternalSplitPipeline::create(expCtx, HostTypeRequirement::kNone);
+    auto runOnMongoS = DocumentSourceMatch::create(fromjson("{b: 5}"), expCtx);
+
+    auto pipeline = Pipeline::create({mock, swappable, sort, split, runOnMongoS}, expCtx);
+
+    auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(pipeline));
+
+    // Verify that we've split the pipeline at the non-deferred sort.
+    ASSERT_EQ(splitPipeline.shardsPipeline->getSources().size(), 2);
+    ASSERT_EQ(splitPipeline.mergePipeline->getSources().size(), 3);
+
+    // Verify the sort is correct.
+    ASSERT(splitPipeline.shardCursorsSortSpec);
+    ASSERT_BSONOBJ_EQ(splitPipeline.shardCursorsSortSpec.get(), BSON("a" << 1));
+}
+
+TEST_F(PipelineDeferredMergeSortTest, StageThatCantSwapGoesToMergingHalf) {
+    auto expCtx = getExpCtx();
+
+    expCtx->inMongos = true;
+
+    auto mock = DocumentSourceDeferredMergeSort::create(expCtx);
+    auto match = DocumentSourceMatch::create(fromjson("{a: 5}"), expCtx);
+    auto split = DocumentSourceInternalSplitPipeline::create(expCtx, HostTypeRequirement::kNone);
+    auto runOnMongoS = DocumentSourceMatch::create(fromjson("{b: 5}"), expCtx);
+
+    auto pipeline = Pipeline::create({mock, match, split, runOnMongoS}, expCtx);
+
+    auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(pipeline));
+
+    // Verify that we've split the pipeline at the stage that can't be swapped.
+    ASSERT_EQ(splitPipeline.shardsPipeline->getSources().size(), 1);
+    ASSERT_EQ(splitPipeline.mergePipeline->getSources().size(), 3);
+
+    // Verify the sort is correct.
+    ASSERT(splitPipeline.shardCursorsSortSpec);
+    ASSERT_BSONOBJ_EQ(splitPipeline.shardCursorsSortSpec.get(), BSON("a" << 1));
+}
+}  // namespace DeferredSort
 }  // namespace Sharded
 }  // namespace Optimizations
 
@@ -3023,7 +3157,7 @@ public:
 
 TEST_F(PipelineValidateTest, TopLevelPipelineValidatedForStagesIllegalInTransactions) {
     auto ctx = getExpCtx();
-    ctx->inMultiDocumentTransaction = true;
+    ctx->opCtx->setInMultiDocumentTransaction();
 
     // Make a pipeline with a legal $match, and then an illegal mock stage, and verify that pipeline
     // creation fails with the expected error code.
@@ -3036,7 +3170,7 @@ TEST_F(PipelineValidateTest, TopLevelPipelineValidatedForStagesIllegalInTransact
 
 TEST_F(PipelineValidateTest, FacetPipelineValidatedForStagesIllegalInTransactions) {
     auto ctx = getExpCtx();
-    ctx->inMultiDocumentTransaction = true;
+    ctx->opCtx->setInMultiDocumentTransaction();
 
     const std::vector<BSONObj> rawPipeline = {
         fromjson("{$facet: {subPipe: [{$match: {}}, {$out: 'outColl'}]}}")};

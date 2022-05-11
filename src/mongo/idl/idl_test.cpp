@@ -476,6 +476,8 @@ void TestLoopbackVariant(TestT test_value) {
                 arrayBuilder.append(item);
             }
         }
+    } else if constexpr (std::is_same_v<TestT, UUID>) {
+        test_value.appendToBuilder(&bob, "value");
     } else {
         bob.append("value", test_value);
     }
@@ -511,6 +513,9 @@ void TestLoopbackVariant(TestT test_value) {
 TEST(IDLVariantTests, TestVariantRoundtrip) {
     TestLoopbackVariant<One_variant, int, NumberInt>(1);
     TestLoopbackVariant<One_variant, std::string, String>("test_value");
+
+    TestLoopbackVariant<One_variant_uuid, int, NumberInt>(1);
+    TestLoopbackVariant<One_variant_uuid, UUID, BinData>(UUID::gen());
 
     TestLoopbackVariant<One_variant_compound, std::string, String>("test_value");
     TestLoopbackVariant<One_variant_compound, BSONObj, Object>(BSON("x" << 1));
@@ -1185,6 +1190,20 @@ TEST(IDLFieldTests, TestStrictDuplicateIgnoredFields) {
         ASSERT_EQUALS(testStruct.get##field_name(), new_value);     \
     }
 
+#define TEST_DEFAULT_VALUES_VARIANT(field_name, default_type, default_value, new_type, new_value) \
+    {                                                                                             \
+        auto testDoc = BSONObj();                                                                 \
+        auto testStruct = Default_values::parse(ctxt, testDoc);                                   \
+        ASSERT_TRUE(stdx::holds_alternative<default_type>(testStruct.get##field_name()));         \
+        ASSERT_EQUALS(stdx::get<default_type>(testStruct.get##field_name()), default_value);      \
+    }                                                                                             \
+    {                                                                                             \
+        auto testDoc = BSON(#field_name << new_value);                                            \
+        auto testStruct = Default_values::parse(ctxt, testDoc);                                   \
+        ASSERT_TRUE(stdx::holds_alternative<new_type>(testStruct.get##field_name()));             \
+        ASSERT_EQUALS(stdx::get<new_type>(testStruct.get##field_name()), new_value);              \
+    }
+
 // Mixed: struct strict, and ignored field works
 TEST(IDLFieldTests, TestDefaultFields) {
     IDLParserErrorContext ctxt("root");
@@ -1194,6 +1213,8 @@ TEST(IDLFieldTests, TestDefaultFields) {
     TEST_DEFAULT_VALUES(V_long, 423, 4LL);
     TEST_DEFAULT_VALUES(V_double, 3.14159, 2.8);
     TEST_DEFAULT_VALUES(V_bool, true, false);
+    TEST_DEFAULT_VALUES_VARIANT(V_variant_string, std::string, "a default", int, 42);
+    TEST_DEFAULT_VALUES_VARIANT(V_variant_int, int, 42, std::string, "a default");
 }
 
 // Positive: struct strict, and optional field works
@@ -2561,6 +2582,8 @@ void TestLoopbackCommandTypeVariant(TestT test_value) {
         // TestT might be an IDL struct type like One_string.
         BSONObjBuilder subObj(bob.subobjStart(CommandT::kCommandParameterFieldName));
         test_value.serialize(&subObj);
+    } else if constexpr (std::is_same_v<TestT, UUID>) {
+        test_value.appendToBuilder(&bob, CommandT::kCommandParameterFieldName);
     } else {
         bob.append(CommandT::kCommandParameterFieldName, test_value);
     }
@@ -2595,6 +2618,9 @@ TEST(IDLCommand, TestCommandTypeVariant) {
     TestLoopbackCommandTypeVariant<CommandTypeVariantCommand, std::string, String>("test_value");
     TestLoopbackCommandTypeVariant<CommandTypeVariantCommand, std::vector<std::string>, Array>(
         {"x", "y"});
+
+    TestLoopbackCommandTypeVariant<CommandTypeVariantUUIDCommand, int, NumberInt>(1);
+    TestLoopbackCommandTypeVariant<CommandTypeVariantUUIDCommand, UUID, BinData>(UUID::gen());
 
     TestLoopbackCommandTypeVariant<CommandTypeVariantStructCommand, bool, Bool>(true);
     TestLoopbackCommandTypeVariant<CommandTypeVariantStructCommand, One_string, Object>(

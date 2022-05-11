@@ -75,6 +75,7 @@ env.Library(
     source=[
         'chunk.cpp',
         'chunk_manager.cpp',
+        'chunk_writes_tracker.cpp',
         'shard_key_pattern.cpp',
     ],
     LIBDEPS=[
@@ -83,7 +84,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/update/update_common',
         '$BUILD_DIR/mongo/util/concurrency/ticketholder',
-        'chunk_writes_tracker',
         'common_s',
     ],
 )
@@ -176,9 +176,9 @@ env.Library(
         'chunk_version.idl',
         'database_version.cpp',
         'database_version.idl',
-        'long_collection_names.idl',
         'mongod_and_mongos_server_parameters.idl',
         'pm2423_feature_flags.idl',
+        'refine_collection_shard_key_coordinator_feature_flags.idl',
         'request_types/abort_reshard_collection.idl',
         'request_types/add_shard_request_type.cpp',
         'request_types/add_shard_to_zone_request_type.cpp',
@@ -220,6 +220,7 @@ env.Library(
         'shard_cannot_refresh_due_to_locks_held_exception.cpp',
         'shard_id.cpp',
         'shard_invalidated_for_targeting_exception.cpp',
+        'sharding_feature_flags.idl',
         'stale_exception.cpp',
         'type_collection_common_types.idl',
         'would_change_owning_shard_exception.cpp',
@@ -337,16 +338,6 @@ env.Benchmark(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         'sharding_routing_table',
-    ],
-)
-
-env.Library(
-    target='chunk_writes_tracker',
-    source=[
-        'chunk_writes_tracker.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
     ],
 )
 
@@ -668,7 +659,6 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/s/write_ops/batch_write_types',
         '$BUILD_DIR/mongo/s/write_ops/cluster_write_ops',
         '$BUILD_DIR/mongo/util/net/network',
-        'chunk_writes_tracker',
         'coreshard',
         'load_balancer_support',
         'mongos_topology_coordinator',

@@ -174,7 +174,7 @@ BaseCloner::AfterStageBehavior CollectionCloner::countStage() {
                                     QueryOption_SecondaryOk,
                                     0 /* limit */,
                                     0 /* skip */,
-                                    ReadConcernArgs::kImplicitDefault);
+                                    ReadConcernArgs::kLocal);
 
     // The count command may return a negative value after an unclean shutdown,
     // so we set it to zero here to avoid aborting the collection clone.
@@ -212,7 +212,7 @@ BaseCloner::AfterStageBehavior CollectionCloner::listIndexesStage() {
             invariant(_collectionOptions.clusteredIndex);
             invariant(spec.getBoolField("clustered") == true);
             invariant(clustered_util::formatClusterKeyForListIndexes(
-                          _collectionOptions.clusteredIndex.get())
+                          _collectionOptions.clusteredIndex.get(), _collectionOptions.collation)
                           .woCompare(spec) == 0);
             // Skip if the spec is for the collection's clusteredIndex.
         } else if (spec.hasField("buildUUID")) {
@@ -343,7 +343,7 @@ void CollectionCloner::runQuery() {
         QueryOption_NoCursorTimeout | QueryOption_SecondaryOk |
             (collectionClonerUsesExhaust ? QueryOption_Exhaust : 0),
         _collectionClonerBatchSize,
-        ReadConcernArgs::kImplicitDefault);
+        ReadConcernArgs::kLocal);
 }
 
 void CollectionCloner::handleNextBatch(DBClientCursorBatchIterator& iter) {

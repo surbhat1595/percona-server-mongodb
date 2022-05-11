@@ -48,6 +48,7 @@
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/tenant_namespace.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/stdx/thread.h"
@@ -169,7 +170,7 @@ protected:
         ASSERT_OK(_storageInterface->createCollection(opCtx, nss, options));
 
         // Initialize a mock collection.
-        return std::make_unique<CollectionMock>(nss);
+        return std::make_unique<CollectionMock>(TenantNamespace(boost::none, nss));
     }
 
     /**
@@ -1491,6 +1492,7 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
     DurableOplogEntry partialApplyOpsOplogEntry(partialApplyOpsOpTime,      // opTime
                                                 1LL,                        // hash
                                                 OpTypeEnum::kCommand,       // opType
+                                                boost::none,                // tenant id
                                                 adminCmdNss,                // nss
                                                 boost::none,                // uuid
                                                 boost::none,                // fromMigrate
@@ -1526,6 +1528,7 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
         commitApplyOpsOpTime,       // opTime
         1LL,                        // hash
         OpTypeEnum::kCommand,       // opType
+        boost::none,                // tenant id
         adminCmdNss,                // nss
         boost::none,                // uuid
         boost::none,                // fromMigrate

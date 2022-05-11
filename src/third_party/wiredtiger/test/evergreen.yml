@@ -480,6 +480,7 @@ functions:
         aws_key: ${aws_key}
         local_file: wt-hang-analyzer.tgz
         bucket: build_external
+        optional: true
         permissions: public-read
         content_type: application/tar
         display_name: WT Hang Analyzer Output - Execution ${execution}
@@ -575,6 +576,11 @@ functions:
         set -o verbose
         ${test_env_vars|} test/csuite/${test_binary}/smoke.sh ${test_args|} 2>&1
 
+  "upload cpp test stats":
+    - command: perf.send
+      params:
+        file: ./wiredtiger/cmake_build/test/cppsuite/${test_name}.json
+
   "upload-perf-test-stats":
     - command: shell.exec
       params:
@@ -665,10 +671,7 @@ variables:
       - func: "get project"
       - func: "compile wiredtiger"
         vars:
-          configure_env_vars:
-            CC="/opt/mongodbtoolchain/v3/bin/clang -fsanitize=address"
-            PATH=/opt/mongodbtoolchain/v3/bin:$PATH CFLAGS="-ggdb -fPIC -fno-omit-frame-pointer" CXXFLAGS="-fsanitize=address -fno-omit-frame-pointer -ggdb -fPIC"
-          posix_configure_flags: --enable-strict --enable-diagnostic --with-builtins=lz4,snappy,zlib,zstd
+          posix_configure_flags: -DENABLE_STRICT=1 -DHAVE_DIAGNOSTIC=1 -DHAVE_BUILTIN_EXTENSION_LZ4=1 -DHAVE_BUILTIN_EXTENSION_SNAPPY=1 -DHAVE_BUILTIN_EXTENSION_ZLIB=1 -DHAVE_BUILTIN_EXTENSION_ZSTD=1
       - func: "format test script"
         vars:
           format_test_script_args: -R -t 360
@@ -951,6 +954,9 @@ tasks:
           test_config: debug_mode=(cursor_copy=true)
           test_config_filename: configs/base_test_default.txt
           test_name: base_test
+      - func: "upload cpp test stats"
+        vars:
+          test_name: base_test
 
   - name: cppsuite-hs-cleanup-default
     tags: ["pull_request"]
@@ -963,6 +969,9 @@ tasks:
           test_config: debug_mode=(cursor_copy=true)
           test_config_filename: configs/hs_cleanup_default.txt
           test_name: hs_cleanup
+      - func: "upload cpp test stats"
+        vars:
+          test_name: hs_cleanup
 
   - name: cppsuite-search-near-01-default
     tags: ["pull_request"]
@@ -973,6 +982,9 @@ tasks:
       - func: "cppsuite test"
         vars:
           test_config_filename: configs/search_near_01_default.txt
+          test_name: search_near_01
+      - func: "upload cpp test stats"
+        vars:
           test_name: search_near_01
 
   - name: cppsuite-search-near-02-default
@@ -985,6 +997,9 @@ tasks:
         vars:
           test_config_filename: configs/search_near_02_default.txt
           test_name: search_near_02
+      - func: "upload cpp test stats"
+        vars:
+          test_name: search_near_02
 
   - name: cppsuite-search-near-03-default
     tags: ["pull_request"]
@@ -996,6 +1011,9 @@ tasks:
         vars:
           test_config_filename: configs/search_near_03_default.txt
           test_name: search_near_03
+      - func: "upload cpp test stats"
+        vars:
+          test_name: search_near_03
 
   - name: cppsuite-base-test-stress
     depends_on:
@@ -1005,6 +1023,9 @@ tasks:
       - func: "cppsuite test"
         vars:
           test_config_filename: configs/base_test_stress.txt
+          test_name: base_test
+      - func: "upload cpp test stats"
+        vars:
           test_name: base_test
 
   - name: cppsuite-hs-cleanup-stress
@@ -1016,7 +1037,10 @@ tasks:
         vars:
           test_config_filename: configs/hs_cleanup_stress.txt
           test_name: hs_cleanup
-  
+      - func: "upload cpp test stats"
+        vars:
+          test_name: hs_cleanup
+
   - name: cppsuite-search-near-01-stress
     depends_on:
       - name: compile
@@ -1025,6 +1049,9 @@ tasks:
       - func: "cppsuite test"
         vars:
           test_config_filename: configs/search_near_01_stress.txt
+          test_name: search_near_01
+      - func: "upload cpp test stats"
+        vars:
           test_name: search_near_01
 
   - name: cppsuite-search-near-02-stress
@@ -1036,6 +1063,9 @@ tasks:
         vars:
           test_config_filename: configs/search_near_02_stress.txt
           test_name: search_near_02
+      - func: "upload cpp test stats"
+        vars:
+          test_name: search_near_02
 
   - name: cppsuite-search-near-03-stress
     depends_on:
@@ -1045,6 +1075,9 @@ tasks:
       - func: "cppsuite test"
         vars:
           test_config_filename: configs/search_near_03_stress.txt
+          test_name: search_near_03
+      - func: "upload cpp test stats"
+        vars:
           test_name: search_near_03
 
   # End of cppsuite test tasks.
@@ -1480,13 +1513,6 @@ tasks:
       - func: "fetch artifacts"
       - func: "unit test"
 
-  - name: unit-test-with-compile
-    tags: ["python"]
-    commands:
-      - func: "get project"
-      - func: "compile wiredtiger"
-      - func: "unit test"
-
   - name: unit-test-zstd
     tags: ["python"]
     depends_on:
@@ -1870,18 +1896,6 @@ tasks:
         vars:
           format_test_script_args: -t 110 -j 4 direct_io=1
 
-  # - name: linux-directio
-  #   depends_on:
-  #   - name: compile
-  #   commands:
-  #     - func: "fetch artifacts"
-  #     - func: "compile wiredtiger"
-  #     - func: "format test"
-  #       vars:
-  #         times: 3
-  #         config: ../../../test/format/CONFIG.stress
-  #         extra_args: -C "direct_io=[data]"
-
   - name: format-linux-no-ftruncate
     commands:
       - func: "get project"
@@ -1955,7 +1969,6 @@ tasks:
       - func: "get project"
       - func: "compile wiredtiger"
         vars:
-          configure_env_vars: PATH=/opt/mongodbtoolchain/v3/bin:$PATH
           posix_configure_flags: -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/mongodbtoolchain_v3_gcc.cmake -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_FLAGS="-ggdb" -DWITH_PIC=1 -DHAVE_DIAGNOSTIC=1 -DENABLE_STRICT=1 -DENABLE_PYTHON=1 -DHAVE_BUILTIN_EXTENSION_LZ4=1 -DHAVE_BUILTIN_EXTENSION_ZSTD=1 -DHAVE_BUILTIN_EXTENSION_SNAPPY=1 -DHAVE_BUILTIN_EXTENSION_ZLIB=1
       - func: "make check all"
       - func: "unit test"
@@ -3606,7 +3619,6 @@ buildvariants:
       WT_TOPDIR=$(git rev-parse --show-toplevel)
       WT_BUILDDIR=$WT_TOPDIR/cmake_build
       LD_LIBRARY_PATH=$WT_BUILDDIR
-      TESTUTIL_SLOW_MACHINE=1
     # We don't run C++ memory sanitized testing as it creates false positives.
     check_args: -LE cppsuite
   tasks:
@@ -3713,6 +3725,7 @@ buildvariants:
 
 - name: ubuntu2004-perf-tests
   display_name: Ubuntu 20.04 Performance tests
+  batchtime: 1440 # 1 day
   run_on:
     - ubuntu2004-medium
   expansions:
@@ -3838,7 +3851,6 @@ buildvariants:
   run_on:
   - ubuntu2004-test
   expansions:
-    configure_env_vars: PATH=/opt/mongodbtoolchain/v3/bin:$PATH
     doc_update_branches: develop,mongodb-5.0,mongodb-4.4,mongodb-4.2,mongodb-4.0
   tasks:
     - name: doc-update
@@ -3949,7 +3961,7 @@ buildvariants:
   run_on:
   - windows-64-vs2017-test
   expansions:
-    python_binary: 'python'
+    python_binary: '/cygdrive/c/Python39/python'
     test_env_vars:
       WT_TOPDIR=$(git rev-parse --show-toplevel)
       WT_BUILDDIR=$WT_TOPDIR/cmake_build
@@ -4052,7 +4064,8 @@ buildvariants:
       -DENABLE_STRICT=1
       -DCMAKE_INSTALL_PREFIX=$(pwd)/LOCAL_INSTALL
     python_binary: '/opt/mongodbtoolchain/v3/bin/python3'
-    smp_command: -j $(grep -c ^processor /proc/cpuinfo)
+    # Use half number of vCPU to avoid OOM kill failure
+    smp_command: -j $(echo $(grep -c ^processor /proc/cpuinfo) / 2 | bc)
     cmake_generator: Ninja
     make_command: ninja
   tasks:
@@ -4082,7 +4095,8 @@ buildvariants:
       -DENABLE_STRICT=1
       -DCMAKE_INSTALL_PREFIX=$(pwd)/LOCAL_INSTALL
     python_binary: '/opt/mongodbtoolchain/v3/bin/python3'
-    smp_command: -j $(grep -c ^processor /proc/cpuinfo)
+    # Use half number of vCPU to avoid OOM kill failure
+    smp_command: -j $(echo $(grep -c ^processor /proc/cpuinfo) / 2 | bc)
     cmake_generator: Ninja
     make_command: ninja
   tasks:
@@ -4092,3 +4106,30 @@ buildvariants:
     - name: ".stress-test-zseries-1"
     - name: ".stress-test-zseries-2"
     - name: ".stress-test-zseries-3"
+
+- name: ubuntu2004-tmp-s3-cmake
+  display_name: "* (Temporary) Ubuntu 20.04 S3 Extension CMake"
+  run_on:
+  - ubuntu2004-test
+  expansions:
+    test_env_vars:
+      WT_TOPDIR=$(git rev-parse --show-toplevel)
+      WT_BUILDDIR=$WT_TOPDIR/cmake_build
+      LD_LIBRARY_PATH=$WT_BUILDDIR:$WT_TOPDIR/TCMALLOC_LIB/lib
+    posix_configure_flags:
+      -DCMAKE_C_FLAGS="-ggdb"
+      -DHAVE_DIAGNOSTIC=1
+      -DENABLE_PYTHON=1
+      -DENABLE_ZLIB=1
+      -DENABLE_SNAPPY=1
+      -DENABLE_STRICT=0
+      -DENABLE_TCMALLOC=1
+      -DENABLE_S3=1
+      -DCMAKE_PREFIX_PATH="$(pwd)/../TCMALLOC_LIB"
+      -DCMAKE_INSTALL_PREFIX=$(pwd)/LOCAL_INSTALL
+    python_binary: '/opt/mongodbtoolchain/v3/bin/python3'
+    smp_command: -j $(echo "`grep -c ^processor /proc/cpuinfo` * 2" | bc)
+    cmake_generator: Ninja
+    make_command: ninja
+  tasks:
+    - name: compile

@@ -32,11 +32,12 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/requires_collection_stage.h"
+#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/ops/parsed_update.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/ops/update_result.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/update/update_driver.h"
 
 namespace mongo {
@@ -124,7 +125,9 @@ protected:
                 WorkingSet* ws,
                 const CollectionPtr& collection);
 
-    void doSaveStateRequiresCollection() final {}
+    void doSaveStateRequiresCollection() final {
+        _preWriteFilter.saveState();
+    }
 
     void doRestoreStateRequiresCollection() final;
 
@@ -157,7 +160,9 @@ private:
      * memory, then commits these changes to the database. Returns a possibly unowned copy
      * of the newly-updated version of the document.
      */
-    BSONObj transformAndUpdate(const Snapshotted<BSONObj>& oldObj, RecordId& recordId);
+    BSONObj transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
+                               RecordId& recordId,
+                               bool writeOnOrphan);
 
     /**
      * Stores 'idToRetry' in '_idRetrying' so the update can be retried during the next call to
@@ -217,6 +222,16 @@ private:
     // So, no matter what, we keep track of where the doc wound up.
     typedef stdx::unordered_set<RecordId, RecordId::Hasher> RecordIdSet;
     const std::unique_ptr<RecordIdSet> _updatedRecordIds;
+
+    /**
+     * This member is used to check whether the write should be performed, and if so, any other
+     * behavior that should be done as part of the write (e.g. skipping it because it affects an
+     * orphan document). A yield cannot happen between the check and the write, so the checks are
+     * embedded in the stage.
+     *
+     * It's refreshed after yielding and reacquiring the locks.
+     */
+    write_stage_common::PreWriteFilter _preWriteFilter;
 };
 
 }  // namespace mongo

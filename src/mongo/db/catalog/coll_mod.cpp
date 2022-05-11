@@ -40,6 +40,7 @@
 #include "mongo/db/catalog/coll_mod_index.h"
 #include "mongo/db/catalog/coll_mod_write_ops_tracker.h"
 #include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
@@ -74,7 +75,6 @@ MONGO_FAIL_POINT_DEFINE(hangAfterDatabaseLock);
 MONGO_FAIL_POINT_DEFINE(hangAfterCollModIndexUniqueSideWriteTracker);
 
 void assertMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
-    Lock::DBLock dblock(opCtx, nss.db(), MODE_IS);
     auto dss = DatabaseShardingState::get(opCtx, nss.db().toString());
     if (!dss) {
         return;
@@ -126,6 +126,13 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
 
     ParsedCollModRequest cmr;
 
+    try {
+        checkCollectionUUIDMismatch(opCtx, coll, cmd.getCollModRequest().getCollectionUUID());
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+
+    // TODO (SERVER-62732): Check options directly rather than using a loop.
     auto cmdObj = cmd.toBSON(BSONObj());
     for (const auto& e : cmdObj) {
         const auto fieldName = e.fieldNameStringData();
@@ -157,15 +164,16 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             if (!cmdIndex.getExpireAfterSeconds() && !cmdIndex.getHidden() &&
-                !cmdIndex.getUnique()) {
-                return Status(ErrorCodes::InvalidOptions,
-                              "no expireAfterSeconds, hidden, or unique field");
+                !cmdIndex.getUnique() && !cmdIndex.getDisallowNewDuplicateKeys()) {
+                return Status(
+                    ErrorCodes::InvalidOptions,
+                    "no expireAfterSeconds, hidden, unique, or disallowNewDuplicateKeys field");
             }
 
             auto cmrIndex = &cmr.indexRequest;
             auto indexObj = e.Obj();
 
-            if (cmdIndex.getUnique()) {
+            if (cmdIndex.getUnique() || cmdIndex.getDisallowNewDuplicateKeys()) {
                 uassert(ErrorCodes::InvalidOptions,
                         "collMod does not support converting an index to unique",
                         feature_flags::gCollModIndexUnique.isEnabled(
@@ -302,6 +310,15 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 }
             }
 
+            // The 'disallowNewDuplicateKeys' option is an ephemeral setting. It is replicated but
+            // still susceptible to process restarts. We do not compare the requested change with
+            // the existing state, so there is no need for the no-op conversion logic that we have
+            // for 'hidden' or 'unique'.
+            if (cmdIndex.getDisallowNewDuplicateKeys()) {
+                cmr.numModifications++;
+                cmrIndex->indexDisallowNewDuplicateKeys = cmdIndex.getDisallowNewDuplicateKeys();
+            }
+
             // The index options doc must contain either the name or key pattern, but not both.
             // If we have just one field, the index modifications requested matches the current
             // state in catalog and there is nothing further to do.
@@ -423,6 +440,7 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             cmr.dryRun = e.trueValue();
             // The dry run option should never be included in a collMod oplog entry.
             continue;
+        } else if (fieldName == CollMod::kCollectionUUIDFieldName) {
         } else {
             if (isTimeseries) {
                 return Status(ErrorCodes::InvalidOptions,
@@ -440,6 +458,12 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
         }
 
         oplogEntryBuilder->append(e);
+    }
+
+    // Currently disallows the use of 'indexDisallowNewDuplicateKeys' with other collMod options.
+    if (cmr.indexRequest.indexDisallowNewDuplicateKeys && cmr.numModifications > 1) {
+        return {ErrorCodes::InvalidOptions,
+                "disallowNewDuplicateKeys cannot be combined with any other modification."};
     }
 
     return {std::move(cmr)};
@@ -530,8 +554,8 @@ Status _processCollModDryRunMode(OperationContext* opCtx,
     // Throws exception if index contains duplicates.
     auto violatingRecordsList = scanIndexForDuplicates(opCtx, collection, cmr.indexRequest.idx);
     if (!violatingRecordsList.empty()) {
-        uassertStatusOK(buildEnableConstraintErrorStatus(
-            "unique", buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
+        uassertStatusOK(buildConvertUniqueErrorStatus(
+            buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
     }
 
     return Status::OK();
@@ -539,7 +563,10 @@ Status _processCollModDryRunMode(OperationContext* opCtx,
 
 StatusWith<std::unique_ptr<CollModWriteOpsTracker::Token>> _setUpCollModIndexUnique(
     OperationContext* opCtx, const NamespaceStringOrUUID& nsOrUUID, const CollMod& cmd) {
-    AutoGetCollection coll(opCtx, nsOrUUID, MODE_IS);
+    // Acquires the MODE_IX lock with the intent to write to the collection later in the collMod
+    // operation while still allowing concurrent writes. This also makes sure the operation is
+    // killed during a stepdown.
+    AutoGetCollection coll(opCtx, nsOrUUID, MODE_IX);
     auto nss = coll.getNss();
 
     const auto& collection = coll.getCollection();
@@ -561,16 +588,17 @@ StatusWith<std::unique_ptr<CollModWriteOpsTracker::Token>> _setUpCollModIndexUni
     const auto& cmr = statusW.getValue();
     auto idx = cmr.indexRequest.idx;
     auto violatingRecordsList = scanIndexForDuplicates(opCtx, collection, idx);
-    if (!violatingRecordsList.empty()) {
-        uassertStatusOK(buildEnableConstraintErrorStatus(
-            "unique", buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
-    }
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(&hangAfterCollModIndexUniqueSideWriteTracker,
                                                      opCtx,
                                                      "hangAfterCollModIndexUniqueSideWriteTracker",
                                                      []() {},
                                                      nss);
+
+    if (!violatingRecordsList.empty()) {
+        uassertStatusOK(buildConvertUniqueErrorStatus(
+            buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
+    }
 
     return std::move(writeOpsToken);
 }
@@ -610,8 +638,8 @@ Status _collModInternal(OperationContext* opCtx,
 
     // May also modify a view instead of a collection.
     boost::optional<ViewDefinition> view;
-    if (db && !coll) {
-        const auto sharedView = ViewCatalog::get(db)->lookup(opCtx, nss);
+    if (!coll) {
+        const auto sharedView = ViewCatalog::get(opCtx)->lookup(opCtx, nss);
         if (sharedView) {
             // We copy the ViewDefinition as it is modified below to represent the requested state.
             view = {*sharedView};
@@ -695,7 +723,7 @@ Status _collModInternal(OperationContext* opCtx,
                 pipeline.append(item);
             }
             auto errorStatus =
-                ViewCatalog::modifyView(opCtx, db, nss, view->viewOn(), BSONArray(pipeline.obj()));
+                ViewCatalog::modifyView(opCtx, nss, view->viewOn(), BSONArray(pipeline.obj()));
             if (!errorStatus.isOK()) {
                 return errorStatus;
             }
@@ -712,7 +740,8 @@ Status _collModInternal(OperationContext* opCtx,
         const CollectionOptions& oldCollOptions = coll->getCollectionOptions();
 
         // TODO SERVER-58584: remove the feature flag.
-        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledAndIgnoreFCV()) {
+        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
             // If 'changeStreamPreAndPostImagesOptions' are enabled, 'recordPreImages' must be set
             // to false. If 'recordPreImages' is set to true, 'changeStreamPreAndPostImagesOptions'
             // must be disabled.
@@ -724,6 +753,13 @@ Status _collModInternal(OperationContext* opCtx,
             if (cmrNew.recordPreImages) {
                 cmrNew.changeStreamPreAndPostImagesOptions =
                     ChangeStreamPreAndPostImagesOptions(false);
+            }
+        } else {
+            // If the FCV has changed while executing the command to the version, where the feature
+            // flag is disabled, specifying changeStreamPreAndPostImagesOptions is not allowed.
+            if (cmrNew.changeStreamPreAndPostImagesOptions) {
+                return Status(ErrorCodes::InvalidOptions,
+                              "The 'changeStreamPreAndPostImages' is an unknown field.");
             }
         }
 
@@ -763,9 +799,7 @@ Status _collModInternal(OperationContext* opCtx,
             coll.getWritableCollection(opCtx)->setRecordPreImages(opCtx, cmrNew.recordPreImages);
         }
 
-        // TODO SERVER-58584: remove the feature flag.
-        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledAndIgnoreFCV() &&
-            cmrNew.changeStreamPreAndPostImagesOptions.has_value() &&
+        if (cmrNew.changeStreamPreAndPostImagesOptions.has_value() &&
             *cmrNew.changeStreamPreAndPostImagesOptions !=
                 oldCollOptions.changeStreamPreAndPostImagesOptions) {
             coll.getWritableCollection(opCtx)->setChangeStreamPreAndPostImages(

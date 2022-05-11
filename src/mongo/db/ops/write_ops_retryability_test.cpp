@@ -70,6 +70,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         repl::DurableOplogEntry(opTime,                           // optime
                                 boost::none,                      // hash
                                 opType,                           // opType
+                                boost::none,                      // tenant id
                                 nss,                              // namespace
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
@@ -100,7 +101,7 @@ void setUpTxnParticipant(OperationContext* opCtx, std::vector<int> executedStmtI
     auto txnPart = TransactionParticipant::get(opCtx);
     txnPart.refreshFromStorageIfNeeded(opCtx);
     txnPart.beginOrContinue(opCtx, {txnNumber}, boost::none, boost::none);
-    txnPart.setCommittedStmtIdsForTest(opCtx, std::move(executedStmtIds));
+    txnPart.addCommittedStmtIds(opCtx, std::move(executedStmtIds), repl::OpTime());
 }
 
 write_ops::FindAndModifyCommandRequest makeFindAndModifyRequest(

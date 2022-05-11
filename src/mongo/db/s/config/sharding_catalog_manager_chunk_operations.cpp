@@ -510,7 +510,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
     uassert(ErrorCodes::ConflictingOperationInProgress,
             str::stream() << "Can't commit auto-split while `" << nss.ns()
                           << "` is undergoing a defragmentation.",
-            !(coll.getBalancerShouldMergeChunks() && fromChunkSplitter));
+            !(coll.getDefragmentCollection() && fromChunkSplitter));
 
     // Get the max chunk version for this namespace.
     auto swCollVersion = getCollectionVersion(opCtx, nss);
@@ -695,8 +695,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
     }
 
     BSONObjBuilder response;
-    currentMaxVersion.appendWithField(&response, kCollectionVersionField);
-    currentMaxVersion.appendWithField(&response, ChunkVersion::kShardVersionField);
+    currentMaxVersion.serializeToBSON(kCollectionVersionField, &response);
+    currentMaxVersion.serializeToBSON(ChunkVersion::kShardVersionField, &response);
     return response.obj();
 }
 
@@ -773,10 +773,10 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
                           << chunkRange.toString(),
             chunk.getRange() == chunkRange);
         BSONObjBuilder response;
-        swCollVersion.getValue().appendWithField(&response, kCollectionVersionField);
+        swCollVersion.getValue().serializeToBSON(kCollectionVersionField, &response);
         const auto currentShardVersion =
             getShardVersion(opCtx, coll, shardId, swCollVersion.getValue());
-        currentShardVersion.appendWithField(&response, ChunkVersion::kShardVersionField);
+        currentShardVersion.serializeToBSON(ChunkVersion::kShardVersionField, &response);
         // Makes sure that the last thing we read in getCollectionVersion and getShardVersion gets
         // majority written before to return from this command, otherwise next RoutingInfo cache
         // refresh from the shard may not see those newest information.
@@ -848,8 +848,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
         opCtx, "merge", nss.ns(), logDetail.obj(), WriteConcernOptions());
 
     BSONObjBuilder response;
-    mergeVersion.appendWithField(&response, kCollectionVersionField);
-    mergeVersion.appendWithField(&response, ChunkVersion::kShardVersionField);
+    mergeVersion.serializeToBSON(kCollectionVersionField, &response);
+    mergeVersion.serializeToBSON(ChunkVersion::kShardVersionField, &response);
     return response.obj();
 }
 
@@ -959,10 +959,10 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     if (currentChunk.getShard() == toShard) {
         // The commit was already done successfully
         BSONObjBuilder response;
-        currentCollectionVersion.appendWithField(&response, kCollectionVersionField);
+        currentCollectionVersion.serializeToBSON(kCollectionVersionField, &response);
         const auto currentShardVersion =
             getShardVersion(opCtx, coll, fromShard, currentCollectionVersion);
-        currentShardVersion.appendWithField(&response, ChunkVersion::kShardVersionField);
+        currentShardVersion.serializeToBSON(ChunkVersion::kShardVersionField, &response);
         // Makes sure that the last thing we read in getCurrentChunk, getShardVersion, and
         // getCollectionVersion gets majority written before to return from this command, otherwise
         // next RoutingInfo cache refresh from the shard may not see those newest information.
@@ -1078,14 +1078,14 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     BSONObjBuilder response;
     if (!newControlChunk) {
         // We migrated the last chunk from the donor shard.
-        newMigratedChunk.getVersion().appendWithField(&response, kCollectionVersionField);
+        newMigratedChunk.getVersion().serializeToBSON(kCollectionVersionField, &response);
         const ChunkVersion donorShardVersion(
             0, 0, currentCollectionVersion.epoch(), currentCollectionVersion.getTimestamp());
-        donorShardVersion.appendWithField(&response, ChunkVersion::kShardVersionField);
+        donorShardVersion.serializeToBSON(ChunkVersion::kShardVersionField, &response);
     } else {
-        newControlChunk.get().getVersion().appendWithField(&response, kCollectionVersionField);
-        newControlChunk.get().getVersion().appendWithField(&response,
-                                                           ChunkVersion::kShardVersionField);
+        newControlChunk.get().getVersion().serializeToBSON(kCollectionVersionField, &response);
+        newControlChunk.get().getVersion().serializeToBSON(ChunkVersion::kShardVersionField,
+                                                           &response);
     }
     return response.obj();
 }
@@ -1545,15 +1545,35 @@ void ShardingCatalogManager::bumpCollectionVersionAndChangeMetadataInTxn(
     OperationContext* opCtx,
     const NamespaceString& nss,
     unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc) {
+    bumpCollectionVersionAndChangeMetadataInTxn(
+        opCtx, nss, std::move(changeMetadataFunc), ShardingCatalogClient::kMajorityWriteConcern);
+}
 
+void ShardingCatalogManager::bumpCollectionVersionAndChangeMetadataInTxn(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc,
+    const WriteConcernOptions& writeConcern) {
     bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
-        opCtx, {nss}, std::move(changeMetadataFunc));
+        opCtx, {nss}, std::move(changeMetadataFunc), writeConcern);
 }
 
 void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
     OperationContext* opCtx,
     const std::vector<NamespaceString>& collNames,
     unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc) {
+    bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
+        opCtx,
+        collNames,
+        std::move(changeMetadataFunc),
+        ShardingCatalogClient::kMajorityWriteConcern);
+}
+
+void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
+    OperationContext* opCtx,
+    const std::vector<NamespaceString>& collNames,
+    unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc,
+    const WriteConcernOptions& writeConcern) {
 
     // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
     // migrations
@@ -1566,7 +1586,8 @@ void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTx
                             bumpCollectionMinorVersion(opCtx, nss, txnNumber);
                         }
                         changeMetadataFunc(opCtx, txnNumber);
-                    });
+                    },
+                    writeConcern);
 }
 
 void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,

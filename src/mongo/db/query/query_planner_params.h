@@ -33,10 +33,26 @@
 
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/query_knobs_gen.h"
 
 namespace mongo {
+
+/**
+ * Struct containing information about secondary collections (such as the 'from' collection in
+ * $lookup) useful for query planning.
+ */
+struct SecondaryCollectionInfo {
+    NamespaceString nss;
+    std::vector<IndexEntry> indexes{};
+    bool exists{true};
+    bool isSharded{false};
+    bool isView{false};
+
+    // The approximate size of the collection in bytes.
+    long long approximateCollectionSizeBytes{0};
+};
 
 struct QueryPlannerParams {
     QueryPlannerParams()
@@ -142,6 +158,13 @@ struct QueryPlannerParams {
     // Specifies the clusteredIndex information necessary to utilize the cluster key in bounded
     // collection scans and other query operations.
     boost::optional<ClusteredCollectionInfo> clusteredInfo;
+
+    // Specifies the collator information necessary to utilize the cluster key in bounded
+    // collection scans and other query operations.
+    const CollatorInterface* clusteredCollectionCollator;
+
+    // List of information about any secondary collections that can be executed against.
+    std::vector<SecondaryCollectionInfo> secondaryCollectionsInfo;
 };
 
 }  // namespace mongo

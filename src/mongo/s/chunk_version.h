@@ -54,52 +54,29 @@ public:
      */
     static constexpr StringData kShardVersionField = "shardVersion"_sd;
 
-    ChunkVersion(uint32_t major, uint32_t minor, const OID& epoch, Timestamp timestamp)
+    ChunkVersion(uint32_t major, uint32_t minor, const OID& epoch, const Timestamp& timestamp)
         : _combined(static_cast<uint64_t>(minor) | (static_cast<uint64_t>(major) << 32)),
           _epoch(epoch),
-          _timestamp(std::move(timestamp)) {}
+          _timestamp(timestamp) {}
 
     ChunkVersion() : ChunkVersion(0, 0, OID(), Timestamp()) {}
 
-    static StatusWith<ChunkVersion> parseFromCommand(const BSONObj& obj) {
-        return parseWithField(obj, kShardVersionField);
-    }
-
     /**
-     * Parses the BSON formatted by appendWithField. If the field is missing, returns 'NoSuchKey',
-     * otherwise if the field is not properly formatted can return any relevant parsing error
-     * (BadValue, TypeMismatch, etc).
+     * The methods below parse the "positional" formats of:
+     *
+     *  [major, minor, epoch, <optional canThrowSSVOnIgnored> timestamp]
+     *      OR
+     *  {0: major, 1:minor, 2:epoch, 3:<optional canThrowSSVOnIgnored>, 4:timestamp}
+     *
+     * The latter format was introduced by mistake in 4.4 and is no longer generated from 5.3
+     * onwards, but it is backwards compatible with the 5.2 and older binaries.
      */
-    static StatusWith<ChunkVersion> parseWithField(const BSONObj& obj, StringData field);
-
-    /**
-     * Parses 'obj', which is expected to have three elements: the major/minor versions, the object
-     * id, and the timestamp. The field names don't matter, so 'obj' can be a BSONArray.
-     */
-    static StatusWith<ChunkVersion> fromBSON(const BSONObj& obj);
-
-    /**
-     * A throwing version of 'fromBSON'.
-     */
-    static ChunkVersion fromBSONThrowing(const BSONObj& obj) {
-        return uassertStatusOK(fromBSON(obj));
-    }
-
-    static ChunkVersion fromBSONArrayThrowing(const BSONElement& element) {
+    static ChunkVersion parseArrayOrObjectPositionalFormat(const BSONElement& element);
+    static ChunkVersion parseArrayPositionalFormat(const BSONElement& element) {
         uassert(ErrorCodes::TypeMismatch,
                 "Invalid type for chunkVersion element. Expected an array",
                 element.type() == Array);
-        return fromBSONThrowing(element.Obj());
-    }
-
-    /**
-     * NOTE: This format should not be used. Use fromBSONThrowing instead.
-     *
-     * A throwing version of 'parseLegacyWithField' to resolve a compatibility issue with the
-     * ShardCollectionType IDL type.
-     */
-    static ChunkVersion legacyFromBSONThrowing(const BSONElement& element) {
-        return uassertStatusOK(parseLegacyWithField(element.wrap(), element.fieldNameStringData()));
+        return parseArrayOrObjectPositionalFormat(element);
     }
 
     /**
@@ -130,16 +107,7 @@ public:
 
     static bool isIgnoredVersion(const ChunkVersion& version) {
         return version.majorVersion() == 0 && version.minorVersion() == 0 &&
-            version.epoch() == IGNORED().epoch() &&
             version.getTimestamp() == IGNORED().getTimestamp();
-    }
-
-    /**
-     * Needed for parsing IGNORED and UNSHARDED from 5.0 that didn't include a timestamp. Should be
-     * removed after 6.0 is last-lts.
-     */
-    bool is50IgnoredOrUnsharded() {
-        return _combined == 0 && (_epoch == UNSHARDED().epoch() || _epoch == IGNORED().epoch());
     }
 
     void incMajor() {
@@ -188,17 +156,24 @@ public:
     }
 
     bool operator==(const ChunkVersion& otherVersion) const {
-        return otherVersion.epoch() == epoch() && otherVersion.getTimestamp() == getTimestamp() &&
-            otherVersion._combined == _combined;
+        return otherVersion.getTimestamp() == getTimestamp() && otherVersion._combined == _combined;
     }
 
     bool operator!=(const ChunkVersion& otherVersion) const {
         return !(otherVersion == *this);
     }
 
+    bool isSameCollection(const Timestamp& timestamp) const {
+        return getTimestamp() == timestamp;
+    }
+
+    bool isSameCollection(const ChunkVersion& other) const {
+        return isSameCollection(other.getTimestamp());
+    }
+
     // Can we write to this data and not have a problem?
     bool isWriteCompatibleWith(const ChunkVersion& other) const {
-        return epoch() == other.epoch() && majorVersion() == other.majorVersion();
+        return isSameCollection(other) && majorVersion() == other.majorVersion();
     }
 
     // Unsharded timestamp cannot be compared with other timestamps
@@ -212,7 +187,7 @@ public:
      * current version is older than the other one. Returns false otherwise.
      */
     bool isOlderThan(const ChunkVersion& otherVersion) const {
-        if (this->isNotComparableWith(otherVersion))
+        if (isNotComparableWith(otherVersion))
             return false;
 
         if (getTimestamp() != otherVersion.getTimestamp())
@@ -232,39 +207,31 @@ public:
         return isOlderThan(otherVersion) || (*this == otherVersion);
     }
 
-    void appendToCommand(BSONObjBuilder* out) const {
-        appendWithField(out, kShardVersionField);
-    }
-
     /**
      * Serializes the version held by this object to 'out' in the form:
-     *  { ..., <field>: [ <combined major/minor>, <OID epoch> ], ... }.
+     *  { ..., <field>: [ <combined major/minor>, <OID epoch>, <Timestamp> ], ... }.
      */
-    void appendWithField(BSONObjBuilder* out, StringData field) const;
+    void serializeToBSON(StringData fieldName, BSONObjBuilder* builder) const;
+    void serializeToPositionalFormatWronglyEncodedAsBSON(StringData fieldName,
+                                                         BSONObjBuilder* builder) const;
 
     /**
-     * NOTE: This format is being phased out. Use appendWithField instead.
+     * NOTE: This format is being phased out. Use serializeToBSON instead.
      *
      * Serializes the version held by this object to 'out' in the legacy form:
-     *  { ..., <field>: [ <combined major/minor> ], <field>Epoch: [ <OID epoch> ], ... }
+     *  { ..., <field>: [ <combined major/minor> ],
+     *         <field>Epoch: [ <OID epoch> ],
+     *         <field>Timestamp: [ <Timestamp> ] ... }
      */
     void appendLegacyWithField(BSONObjBuilder* out, StringData field) const;
 
-    BSONObj toBSON() const;
-
-    /**
-     * Same as ChunkVersion::appendWithField adapted for IDL
-     */
-    void serializeToBSON(StringData fieldName, BSONObjBuilder* builder) const {
-        appendWithField(builder, fieldName);
-    }
-
-    /**
-     * NOTE: This format serializes chunk version as a timestamp (without the epoch) for
-     * legacy reasons.
-     */
-    void legacyToBSON(StringData field, BSONObjBuilder* builder) const;
     std::string toString() const;
+
+    // Methods that are here for the purposes of parsing of ShardCollectionType only
+    static ChunkVersion parseMajorMinorVersionOnlyFromShardCollectionType(
+        const BSONElement& element);
+    void serialiseMajorMinorVersionOnlyForShardCollectionType(StringData field,
+                                                              BSONObjBuilder* builder) const;
 
 private:
     uint64_t _combined;

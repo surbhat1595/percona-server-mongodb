@@ -35,6 +35,7 @@
 
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/drop_collection.h"
@@ -107,7 +108,7 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
     auto catalog = CollectionCatalog::get(opCtx);
     const auto sourceColl = catalog->lookupCollectionByNamespace(opCtx, source);
     if (!sourceColl) {
-        if (ViewCatalog::get(db)->lookup(opCtx, source))
+        if (ViewCatalog::get(opCtx)->lookup(opCtx, source))
             return Status(ErrorCodes::CommandNotSupportedOnView,
                           str::stream() << "cannot rename view: " << source);
         return Status(ErrorCodes::NamespaceNotFound,
@@ -119,7 +120,7 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
     const auto targetColl = catalog->lookupCollectionByNamespace(opCtx, target);
 
     if (!targetColl) {
-        if (ViewCatalog::get(db)->lookup(opCtx, target))
+        if (ViewCatalog::get(opCtx)->lookup(opCtx, target))
             return Status(ErrorCodes::NamespaceExists,
                           str::stream() << "a view already exists with that name: " << target);
     } else {
@@ -318,6 +319,8 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
     const auto sourceColl = catalog->lookupCollectionByNamespace(opCtx, source);
     const auto targetColl = catalog->lookupCollectionByNamespace(opCtx, target);
 
+    checkCollectionUUIDMismatch(opCtx, sourceColl, options.expectedSourceUUID);
+
     AutoStatsTracker statsTracker(
         opCtx,
         source,
@@ -459,6 +462,10 @@ Status renameBetweenDBs(OperationContext* opCtx,
         str::stream() << "renameBetweenDBs not supported in multi-document transaction: source: "
                       << source << "; target: " << target);
 
+    uassert(ErrorCodes::InvalidOptions,
+            "Cannot provide an expected source collection UUID when renaming between databases",
+            !options.expectedSourceUUID);
+
     boost::optional<Lock::DBLock> sourceDbLock;
     boost::optional<Lock::CollectionLock> sourceCollLock;
     if (!opCtx->lockState()->isCollectionLockedForMode(source, MODE_S)) {
@@ -497,7 +504,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
     auto catalog = CollectionCatalog::get(opCtx);
     const auto sourceColl = catalog->lookupCollectionByNamespace(opCtx, source);
     if (!sourceColl) {
-        if (sourceDB && ViewCatalog::get(sourceDB)->lookup(opCtx, source))
+        if (ViewCatalog::get(opCtx)->lookup(opCtx, source))
             return Status(ErrorCodes::CommandNotSupportedOnView,
                           str::stream() << "cannot rename view: " << source);
         return Status(ErrorCodes::NamespaceNotFound, "source namespace does not exist");
@@ -526,7 +533,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
             return Status(ErrorCodes::NamespaceExists, "target namespace exists");
         }
 
-    } else if (targetDB && ViewCatalog::get(targetDB)->lookup(opCtx, target)) {
+    } else if (ViewCatalog::get(opCtx)->lookup(opCtx, target)) {
         return Status(ErrorCodes::NamespaceExists,
                       str::stream() << "a view already exists with that name: " << target);
     }

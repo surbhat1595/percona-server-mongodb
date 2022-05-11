@@ -40,6 +40,7 @@ namespace mongo {
 namespace {
 
 TEST(TenantNamespaceTest, TenantNamespaceMultitenancySupportDisabledBasic) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", false);
     TenantNamespace tenantNs(boost::none, NamespaceString("a.b"));
     ASSERT(!tenantNs.tenantId());
     ASSERT_EQUALS(std::string("a"), tenantNs.db());
@@ -48,12 +49,13 @@ TEST(TenantNamespaceTest, TenantNamespaceMultitenancySupportDisabledBasic) {
 }
 
 TEST(TenantNamespaceTest, TenantNamespaceParseFromDiskMultitenancySupportDisabled) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", false);
     TenantNamespace tenantNs = TenantNamespace::parseTenantNamespaceFromDisk("a.b");
     ASSERT(!tenantNs.tenantId());
     ASSERT_EQUALS(std::string("a"), tenantNs.db());
     ASSERT_EQUALS(std::string("b"), tenantNs.coll());
 
-    mongo::OID tenantId = OID::gen();
+    TenantId tenantId = TenantId(OID::gen());
     std::string ns = tenantId.toString() + "_a.b";
     TenantNamespace tenantNs2 = TenantNamespace::parseTenantNamespaceFromDisk(ns);
     ASSERT(!tenantNs2.tenantId());
@@ -74,7 +76,7 @@ TEST(TenantNamespaceTest, TenantNamespaceMultitenancySupportEnabledFeatureFlagDi
 
     // If the feature flag is disabled but a tenantId is given, the tenantId should be parsed
     // separately from the db name.
-    mongo::OID tenantId = OID::gen();
+    TenantId tenantId = TenantId(OID::gen());
     TenantNamespace tenantNs2(tenantId, NamespaceString("a.b"));
     ASSERT(tenantNs2.tenantId());
     ASSERT_EQUALS(tenantId, *tenantNs2.tenantId());
@@ -110,7 +112,7 @@ TEST(TenantNamespaceTest, TenantNamespaceMultitenancySupportEnabledBasic) {
     // TODO SERVER-62114 Remove enabling this feature flag.
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
-    mongo::OID tenantId = OID::gen();
+    TenantId tenantId = TenantId(OID::gen());
     TenantNamespace tenantNs(tenantId, NamespaceString("a.b"));
     ASSERT(tenantNs.tenantId());
     ASSERT_EQUALS(tenantId, *tenantNs.tenantId());
@@ -124,7 +126,7 @@ TEST(TenantNamespaceTest, TenantNamespaceParseFromDiskMultitenancySupportEnabled
     // TODO SERVER-62114 Remove enabling this feature flag.
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
-    mongo::OID tenantId = OID::gen();
+    TenantId tenantId = TenantId(OID::gen());
     std::string tenantNsStr = str::stream() << tenantId << "_a.b";
 
     TenantNamespace tenantNs = TenantNamespace::parseTenantNamespaceFromDisk(tenantNsStr);

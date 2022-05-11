@@ -31,12 +31,14 @@
 
 #include "mongo/db/catalog/collection_impl.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/multitenancy.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/durable_catalog_impl.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/tenant_namespace.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -83,7 +85,8 @@ protected:
                            const CollectionOptions& options,
                            DurableCatalogImpl* catalog) {
         Lock::DBLock dbLk(opCtx, ns.db(), MODE_IX);
-        auto swEntry = catalog->_addEntry(opCtx, ns, options);
+        TenantNamespace tenantNs(boost::none, ns);
+        auto swEntry = catalog->_addEntry(opCtx, tenantNs, options);
         ASSERT_OK(swEntry.getStatus());
         return swEntry.getValue().catalogId;
     }
@@ -240,7 +243,7 @@ TEST_F(KVEngineTestHarness, SimpleSorted1) {
     ASSERT(engine);
 
     std::string ident = "abc";
-    auto ns = NamespaceString("mydb.mycoll");
+    auto tenantNs = TenantNamespace(boost::none, NamespaceString("mydb.mycoll"));
 
     CollectionOptions options;
     options.uuid = UUID::gen();
@@ -259,8 +262,8 @@ TEST_F(KVEngineTestHarness, SimpleSorted1) {
     {
         auto opCtx = _makeOperationContext(engine);
         WriteUnitOfWork uow(opCtx.get());
-        collection =
-            std::make_unique<CollectionImpl>(opCtx.get(), ns, RecordId(0), options, std::move(rs));
+        collection = std::make_unique<CollectionImpl>(
+            opCtx.get(), tenantNs, RecordId(0), options, std::move(rs));
         uow.commit();
     }
 
@@ -1260,7 +1263,7 @@ TEST_F(DurableCatalogImplTest, Idx1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.ns = "a.b";
+        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1294,7 +1297,7 @@ TEST_F(DurableCatalogImplTest, Idx1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.ns = "a.b";
+        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
         putMetaData(opCtx, catalog.get(), catalogId, md);  // remove index
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
@@ -1348,7 +1351,7 @@ TEST_F(DurableCatalogImplTest, DirectoryPerDb1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.ns = "a.b";
+        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1398,7 +1401,7 @@ TEST_F(DurableCatalogImplTest, Split1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.ns = "a.b";
+        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1448,7 +1451,7 @@ TEST_F(DurableCatalogImplTest, DirectoryPerAndSplit1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.ns = "a.b";
+        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1484,7 +1487,7 @@ DEATH_TEST_REGEX_F(DurableCatalogImplTest,
     ASSERT(engine);
 
     std::string ident = "abc";
-    auto ns = NamespaceString("mydb.mycoll");
+    auto tenantNs = TenantNamespace(boost::none, NamespaceString("mydb.mycoll"));
 
     CollectionOptions options;
     options.uuid = UUID::gen();
@@ -1505,7 +1508,7 @@ DEATH_TEST_REGEX_F(DurableCatalogImplTest,
         auto opCtx = clientAndCtx.opCtx();
         WriteUnitOfWork uow(opCtx);
         collection =
-            std::make_unique<CollectionImpl>(opCtx, ns, RecordId(0), options, std::move(rs));
+            std::make_unique<CollectionImpl>(opCtx, tenantNs, RecordId(0), options, std::move(rs));
         uow.commit();
     }
 

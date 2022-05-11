@@ -6,6 +6,15 @@ load("jstests/libs/analyze_plan.js");
 load("jstests/libs/collection_drop_recreate.js");
 
 var ClusteredCollectionUtil = class {
+    static areAllCollectionsClustered(conn) {
+        const res =
+            conn.adminCommand({getParameter: 1, "failpoint.clusterAllCollectionsByDefault": 1});
+        if (res.ok)
+            return res["failpoint.clusterAllCollectionsByDefault"].mode;
+        else
+            return false;
+    }
+
     static areClusteredIndexesEnabled(conn) {
         const clusteredIndexesEnabled =
             assert
@@ -16,6 +25,15 @@ var ClusteredCollectionUtil = class {
             return false;
         }
         return true;
+    }
+
+    static isArbitraryKeySupportEnabled(conn) {
+        const arbitraryKeySupportEnabled =
+            assert
+                .commandWorked(
+                    conn.adminCommand({getParameter: 1, supportArbitraryClusterKeyIndex: 1}))
+                .supportArbitraryClusterKeyIndex.value;
+        return arbitraryKeySupportEnabled;
     }
 
     // Returns a copy of the 'createOptions' used to create the clustered collection with default

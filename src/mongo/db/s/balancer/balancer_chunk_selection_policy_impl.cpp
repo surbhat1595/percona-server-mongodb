@@ -322,7 +322,7 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToSpli
 }
 
 StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMove(
-    OperationContext* opCtx) {
+    OperationContext* opCtx, stdx::unordered_set<ShardId>* usedShards) {
     auto shardStatsStatus = _clusterStats->getStats(opCtx);
     if (!shardStatsStatus.isOK()) {
         return shardStatsStatus.getStatus();
@@ -340,7 +340,6 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
     }
 
     MigrateInfoVector candidateChunks;
-    std::set<ShardId> usedShards;
 
     std::shuffle(collections.begin(), collections.end(), _random);
 
@@ -348,7 +347,7 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
         const NamespaceString& nss(coll.getNss());
 
         if (!coll.getAllowBalance() || !coll.getAllowMigrations() || !coll.getPermitMigrations() ||
-            coll.getBalancerShouldMergeChunks()) {
+            coll.getDefragmentCollection()) {
             LOGV2_DEBUG(5966401,
                         1,
                         "Not balancing explicitly disabled collection",
@@ -356,12 +355,12 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
                         "allowBalance"_attr = coll.getAllowBalance(),
                         "allowMigrations"_attr = coll.getAllowMigrations(),
                         "permitMigrations"_attr = coll.getPermitMigrations(),
-                        "balancerShouldMergeChunks"_attr = coll.getBalancerShouldMergeChunks());
+                        "defragmentCollection"_attr = coll.getDefragmentCollection());
             continue;
         }
 
         auto candidatesStatus =
-            _getMigrateCandidatesForCollection(opCtx, nss, shardStats, &usedShards);
+            _getMigrateCandidatesForCollection(opCtx, nss, shardStats, usedShards);
         if (candidatesStatus == ErrorCodes::NamespaceNotFound) {
             // Namespace got dropped before we managed to get to it, so just skip it
             continue;
@@ -395,7 +394,7 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
     // doesn't.
     Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
 
-    std::set<ShardId> usedShards;
+    stdx::unordered_set<ShardId> usedShards;
 
     auto candidatesStatus = _getMigrateCandidatesForCollection(opCtx, nss, shardStats, &usedShards);
     if (!candidatesStatus.isOK()) {
@@ -519,7 +518,7 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::_getMigrateCandi
     OperationContext* opCtx,
     const NamespaceString& nss,
     const ShardStatisticsVector& shardStats,
-    std::set<ShardId>* usedShards) {
+    stdx::unordered_set<ShardId>* usedShards) {
     auto routingInfoStatus =
         Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx, nss);
     if (!routingInfoStatus.isOK()) {

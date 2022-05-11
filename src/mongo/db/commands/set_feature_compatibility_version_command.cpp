@@ -69,6 +69,8 @@
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
+#include "mongo/db/s/sharding_ddl_coordinator_service.h"
+#include "mongo/db/s/sharding_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/db/session_txn_record_gen.h"
@@ -77,8 +79,8 @@
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/long_collection_names_gen.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
@@ -356,7 +358,7 @@ public:
                         DBDirectClient client(opCtx);
 
                         const BSONObj collBeingDefragmentedQuery =
-                            BSON(CollectionType::kBalancerShouldMergeChunksFieldName
+                            BSON(CollectionType::kDefragmentCollectionFieldName
                                  << BSON("$exists" << true));
 
                         const bool isDefragmenting = client.count(CollectionType::ConfigNS,
@@ -384,6 +386,17 @@ public:
 
             if (request.getPhase() == SetFCVPhaseEnum::kStart) {
                 invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+                // TODO (SERVER-62325): Remove collMod draining mechanism after 6.0 branching.
+                if (actualVersion > requestedVersion &&
+                    requestedVersion < multiversion::FeatureCompatibilityVersion::kVersion_5_3) {
+                    // No more collMod coordinators will start because we have already switched
+                    // the FCV value to kDowngrading. Wait for the ongoing collMod coordinators to
+                    // finish.
+                    ShardingDDLCoordinatorService::getService(opCtx)
+                        ->waitForCoordinatorsOfGivenTypeToComplete(
+                            opCtx, DDLCoordinatorTypeEnum::kCollMod);
+                }
+
                 // If we are only running phase-1, then we are done
                 return true;
             }
@@ -393,9 +406,9 @@ public:
         invariant(!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kComplete);
 
         if (requestedVersion > actualVersion) {
-            _runUpgrade(opCtx, actualVersion, request, changeTimestamp);
+            _runUpgrade(opCtx, request, changeTimestamp);
         } else {
-            _runDowngrade(opCtx, actualVersion, request, changeTimestamp);
+            _runDowngrade(opCtx, request, changeTimestamp);
         }
 
         {
@@ -435,7 +448,6 @@ public:
 
 private:
     void _runUpgrade(OperationContext* opCtx,
-                     mongo::multiversion::FeatureCompatibilityVersion originalVersion,
                      const SetFeatureCompatibilityVersion& request,
                      boost::optional<Timestamp> changeTimestamp) {
         const auto requestedVersion = request.getCommandParameter();
@@ -520,14 +532,6 @@ private:
                 ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
 
-            // TODO: Remove once FCV 6.0 becomes last-lts
-            if (!feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
-                    originalVersion) &&
-                feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
-                    requestedVersion)) {
-                ShardingCatalogManager::get(opCtx)->enableSupportForLongCollectionName(opCtx);
-            }
-
             // Always abort the reshardCollection regardless of version to ensure that it will run
             // on a consistent version from start to finish. This will ensure that it will be able
             // to apply the oplog entries correctly.
@@ -545,13 +549,22 @@ private:
     }
 
     void _runDowngrade(OperationContext* opCtx,
-                       mongo::multiversion::FeatureCompatibilityVersion originalVersion,
                        const SetFeatureCompatibilityVersion& request,
                        boost::optional<Timestamp> changeTimestamp) {
         const auto requestedVersion = request.getCommandParameter();
         const bool preImagesFeatureFlagDisabledOnDowngradeVersion =
             !feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledOnVersion(
                 requestedVersion);
+
+        // TODO SERVER-62693: remove the following scope once 6.0 branches out
+        if (requestedVersion == multiversion::GenericFCV::kLastLTS ||
+            // TODO SERVER-62584: remove the last-continuous check once 5.3 branches out
+            requestedVersion == multiversion::GenericFCV::kLastContinuous) {
+            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
+                serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+                sharding_util::downgradeCollectionBalancingFieldsToPre53(opCtx);
+            }
+        }
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-1 of setFCV
@@ -598,18 +611,20 @@ private:
                             // in 5.2 and up. If the user tries to downgrade the cluster to an
                             // earlier version, they must first remove all incompatible secondary
                             // indexes on time-series measurements.
-                            uassert(ErrorCodes::CannotDowngrade,
-                                    str::stream()
-                                        << "Cannot downgrade the cluster when there are secondary "
-                                           "indexes on time-series measurements present. Drop all "
-                                           "secondary indexes on time-series measurements before "
-                                           "downgrading. First detected incompatible index name: '"
-                                        << indexEntry->descriptor()->indexName()
-                                        << "' on collection: '"
-                                        << collection->ns().getTimeseriesViewNamespace() << "'",
-                                    timeseries::isBucketsIndexSpecCompatibleForDowngrade(
-                                        *collection->getTimeseriesOptions(),
-                                        indexEntry->descriptor()->infoObj()));
+                            uassert(
+                                ErrorCodes::CannotDowngrade,
+                                str::stream()
+                                    << "Cannot downgrade the cluster when there are secondary "
+                                       "indexes on time-series measurements present, or when there "
+                                       "are partial indexes on a time-series collection. Drop all "
+                                       "secondary indexes on time-series measurements, and all "
+                                       "partial indexes on time-series collections, before "
+                                       "downgrading. First detected incompatible index name: '"
+                                    << indexEntry->descriptor()->indexName() << "' on collection: '"
+                                    << collection->ns().getTimeseriesViewNamespace() << "'",
+                                timeseries::isBucketsIndexSpecCompatibleForDowngrade(
+                                    *collection->getTimeseriesOptions(),
+                                    indexEntry->descriptor()->infoObj()));
 
                             if (auto filter = indexEntry->getFilterExpression()) {
                                 auto status = IndexCatalogImpl::checkValidFilterExpressions(
@@ -700,7 +715,7 @@ private:
                                    NamespaceString::kChangeStreamPreImagesNamespace,
                                    &dropReply,
                                    DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops);
-                uassert(6023700,
+                uassert(deletionStatus.code(),
                         str::stream() << "Failed to drop the change stream pre-images collection"
                                       << causedBy(deletionStatus.reason()),
                         deletionStatus.isOK() ||
@@ -748,6 +763,20 @@ private:
             LOGV2(5876101, "Completed removal of internal sessions from config.transactions.");
         }
 
+        // TODO SERVER-62338 Remove when 6.0 branches-out
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+            !resharding::gFeatureFlagRecoverableShardsvrReshardCollectionCoordinator
+                 .isEnabledOnVersion(requestedVersion)) {
+            // No more (recoverable) ReshardCollectionCoordinators will start because we
+            // have already switched the FCV value to kDowngrading. Wait for the ongoing
+            // ReshardCollectionCoordinators to finish. The fact that the the configsvr has already
+            // executed 'abortAllReshardCollection' after switching to kDowngrading FCV ensures that
+            // ReshardCollectionCoordinators will finish (Interrupted) promptly.
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kReshardCollection);
+        }
+
         uassert(ErrorCodes::Error(549181),
                 "Failing downgrade due to 'failDowngrading' failpoint set",
                 !failDowngrading.shouldFail());
@@ -766,14 +795,6 @@ private:
             uassertStatusOK(
                 ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
-
-            // TODO: Remove once FCV 6.0 becomes last-lts
-            if (feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
-                    originalVersion) &&
-                !feature_flags::gFeatureFlagLongCollectionNames.isEnabledOnVersion(
-                    requestedVersion)) {
-                ShardingCatalogManager::get(opCtx)->disableSupportForLongCollectionName(opCtx);
-            }
         }
 
         hangWhileDowngrading.pauseWhileSet(opCtx);

@@ -78,13 +78,17 @@ structs:
                 description: "If true, the original collection will remain temp if it was temp
                 before the rename."
                 default: false
+            collectionUUID:
+                type: uuid
+                description: "The expected UUID of the collection."
+                optional: true
 
     RenameCollectionResponse:
         description: "Response for the rename collection command"
         strict: false
         fields:
             collectionVersion:
-                type: ChunkVersion
+                type: ChunkVersionArrayWronglyEncodedAsBSONObjFormat
                 description: "Latest version of the collection"
                 optional: false
 
@@ -127,6 +131,10 @@ structs:
                 type: object_owned
                 description: "The collation to use for the shard key index."
                 optional: true
+            collectionUUID:
+                type: uuid
+                description: "The expected UUID of the collection."
+                optional: true
 
     CreateCollectionResponse:
         description: "Response of the create collection command"
@@ -137,7 +145,7 @@ structs:
                 description: "UUID of the created collection"
                 optional: true
             collectionVersion:
-                type: ChunkVersion
+                type: ChunkVersionArrayWronglyEncodedAsBSONObjFormat
                 description: "Latest version of the collection"
                 optional: false
 

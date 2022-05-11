@@ -41,11 +41,18 @@
 #include "mongo/db/catalog/uncommitted_collections.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/cursor_server_params_gen.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/multitenancy.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_import.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/future_util.h"
+
+// Keep the backup cursor alive by pinging twice as often as the donor's default
+// cursor timeout.
+constexpr int kBackupCursorKeepAliveIntervalMillis = mongo::kCursorTimeoutMillisDefault / 2;
 
 namespace mongo::repl {
 namespace {
@@ -127,14 +134,16 @@ void wiredTigerImportFromBackupCursor(OperationContext* opCtx,
             });
 
             // Create Collection object
+            TenantNamespace tenantNs(getActiveTenant(opCtx), nss);
             auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
             auto durableCatalog = storageEngine->getCatalog();
             ImportOptions importOptions(ImportOptions::ImportCollectionUUIDOption::kKeepOld);
             importOptions.importTimestampRule = ImportOptions::ImportTimestampRule::kStable;
 
+            // TODO SERVER-62659 Ensure the correct tenantId is used when importing the collection.
             auto importResult = uassertStatusOK(
                 DurableCatalog::get(opCtx)->importCollection(opCtx,
-                                                             collectionMetadata.ns,
+                                                             tenantNs,
                                                              collectionMetadata.catalogObject,
                                                              storageMetadata.done(),
                                                              importOptions));
@@ -144,7 +153,7 @@ void wiredTigerImportFromBackupCursor(OperationContext* opCtx,
             }
 
             std::shared_ptr<Collection> ownedCollection = Collection::Factory::get(opCtx)->make(
-                opCtx, nss, importResult.catalogId, md, std::move(importResult.rs));
+                opCtx, tenantNs, importResult.catalogId, md, std::move(importResult.rs));
             ownedCollection->init(opCtx);
             ownedCollection->setCommitted(false);
 
@@ -161,5 +170,28 @@ void wiredTigerImportFromBackupCursor(OperationContext* opCtx,
                   "dataSizeApprox"_attr = collectionMetadata.dataSize);
         });
     }
+}
+
+SemiFuture<void> keepBackupCursorAlive(CancellationSource cancellationSource,
+                                       std::shared_ptr<executor::TaskExecutor> executor,
+                                       HostAndPort hostAndPort,
+                                       CursorId cursorId,
+                                       NamespaceString namespaceString) {
+    executor::RemoteCommandRequest getMoreRequest(
+        hostAndPort,
+        namespaceString.db().toString(),
+        std::move(BSON("getMore" << cursorId << "collection" << namespaceString.coll().toString())),
+        nullptr);
+    getMoreRequest.fireAndForgetMode = executor::RemoteCommandRequest::FireAndForgetMode::kOn;
+
+    return AsyncTry([executor, getMoreRequest, cancellationSource] {
+               return executor->scheduleRemoteCommand(std::move(getMoreRequest),
+                                                      cancellationSource.token());
+           })
+        .until([](auto&&) { return false; })
+        .withDelayBetweenIterations(Milliseconds(kBackupCursorKeepAliveIntervalMillis))
+        .on(executor, cancellationSource.token())
+        .onCompletion([](auto&&) {})
+        .semi();
 }
 }  // namespace mongo::repl

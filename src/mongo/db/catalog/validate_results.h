@@ -45,6 +45,7 @@ struct IndexValidateResults {
     std::vector<std::string> warnings;
     int64_t keysTraversed = 0;
     int64_t keysTraversedFromFullValidate = 0;
+    int64_t keysRemovedFromRecordStore = 0;
 };
 
 using ValidateResultsMap = std::map<std::string, IndexValidateResults>;
@@ -62,6 +63,8 @@ struct ValidateResults {
     long long numRemovedCorruptRecords = 0;
     long long numRemovedExtraIndexEntries = 0;
     long long numInsertedMissingIndexEntries = 0;
+    long long numDocumentsMovedToLostAndFound = 0;
+    long long numOutdatedMissingIndexEntry = 0;
 
     // Maps index names to index-specific validation results.
     ValidateResultsMap indexResultsMap;

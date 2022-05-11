@@ -35,6 +35,7 @@
 
 #include <boost/algorithm/string/join.hpp>
 
+#include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
@@ -62,10 +63,9 @@ constexpr auto kIndexFieldName = "index"_sd;
 
 Status checkView(OperationContext* opCtx,
                  const NamespaceString& nss,
-                 Database* db,
                  const CollectionPtr& collection) {
     if (!collection) {
-        if (db && ViewCatalog::get(db)->lookup(opCtx, nss)) {
+        if (ViewCatalog::get(opCtx)->lookup(opCtx, nss)) {
             return Status(ErrorCodes::CommandNotSupportedOnView,
                           str::stream() << "Cannot drop indexes on view " << nss);
         }
@@ -344,14 +344,16 @@ void assertMovePrimaryInProgress(OperationContext* opCtx, const NamespaceString&
 
 DropIndexesReply dropIndexes(OperationContext* opCtx,
                              const NamespaceString& nss,
+                             const boost::optional<UUID>& expectedUUID,
                              const IndexArgument& index) {
     // We only need to hold an intent lock to send abort signals to the active index builder(s) we
     // intend to abort.
     boost::optional<AutoGetCollection> collection;
     collection.emplace(opCtx, nss, MODE_IX);
 
-    Database* db = collection->getDb();
-    uassertStatusOK(checkView(opCtx, nss, db, collection->getCollection()));
+    checkCollectionUUIDMismatch(opCtx, collection->getCollection(), expectedUUID);
+    uassertStatusOK(checkView(opCtx, nss, collection->getCollection()));
+
     const UUID collectionUUID = (*collection)->uuid();
     const NamespaceStringOrUUID dbAndUUID = {nss.db().toString(), collectionUUID};
     uassertStatusOK(checkReplState(opCtx, dbAndUUID, collection->getCollection()));
@@ -417,7 +419,6 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         // writes when removing ready indexes from disk.
         collection.emplace(opCtx, dbAndUUID, MODE_X);
 
-        db = collection->getDb();
         if (!*collection) {
             uasserted(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Collection '" << nss << "' with UUID " << dbAndUUID.uuid()
@@ -521,8 +522,7 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
         AutoGetCollection collection(opCtx, nss, MODE_X);
 
         // If db/collection does not exist, short circuit and return.
-        Database* db = collection.getDb();
-        Status status = checkView(opCtx, nss, db, collection.getCollection());
+        Status status = checkView(opCtx, nss, collection.getCollection());
         if (!status.isOK()) {
             return status;
         }

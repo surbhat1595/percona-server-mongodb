@@ -102,10 +102,16 @@ public:
                     opCtx, request().getNamespace(), !isCommandOnTimeseriesBucketNamespace)) {
                 auto timeseriesCmd =
                     timeseries::makeTimeseriesDropIndexesCommand(opCtx, request(), *options);
-                return dropIndexes(opCtx, timeseriesCmd.getNamespace(), timeseriesCmd.getIndex());
+                return dropIndexes(opCtx,
+                                   timeseriesCmd.getNamespace(),
+                                   request().getCollectionUUID(),
+                                   timeseriesCmd.getIndex());
             }
 
-            return dropIndexes(opCtx, request().getNamespace(), request().getIndex());
+            return dropIndexes(opCtx,
+                               request().getNamespace(),
+                               request().getCollectionUUID(),
+                               request().getIndex());
         }
     };
 } cmdDropIndexes;
@@ -155,8 +161,7 @@ public:
 
         AutoGetCollection autoColl(opCtx, toReIndexNss, MODE_X);
         if (!autoColl) {
-            auto db = autoColl.getDb();
-            if (db && ViewCatalog::get(db)->lookup(opCtx, toReIndexNss))
+            if (ViewCatalog::get(opCtx)->lookup(opCtx, toReIndexNss))
                 uasserted(ErrorCodes::CommandNotSupportedOnView, "can't re-index a view");
             else
                 uasserted(ErrorCodes::NamespaceNotFound, "collection does not exist");

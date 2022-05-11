@@ -783,7 +783,10 @@ public:
                                 makeNot(makeFunction("isDate", var.clone())));
         };
 
-        if (arity == 2) {
+        if (arity == 0) {
+            // Return a zero constant if the expression has no operand children.
+            _context->pushExpr(makeConstant(sbe::value::TypeTags::NumberInt32, 0));
+        } else if (arity == 2) {
             auto rhs = _context->popExpr();
             auto lhs = _context->popExpr();
             auto binds = sbe::makeEs(std::move(lhs), std::move(rhs));
@@ -1102,8 +1105,14 @@ public:
     void visit(const ExpressionConcat* expr) final {
         auto arity = expr->getChildren().size();
         _context->ensureArity(arity);
-        auto frameId = _context->state.frameId();
 
+        // Concatination of no strings is an empty string.
+        if (arity == 0) {
+            _context->pushExpr(makeConstant(""_sd));
+            return;
+        }
+
+        auto frameId = _context->state.frameId();
         sbe::EExpression::Vector binds;
         sbe::EExpression::Vector checkNullArg;
         sbe::EExpression::Vector checkStringArg;
@@ -1151,6 +1160,13 @@ public:
     void visit(const ExpressionConcatArrays* expr) final {
         auto numChildren = expr->getChildren().size();
         _context->ensureArity(numChildren);
+
+        // If there are no children, return an empty array.
+        if (numChildren == 0) {
+            auto [emptyArrTag, emptyArrValue] = sbe::value::makeNewArray();
+            _context->pushExpr(makeConstant(emptyArrTag, emptyArrValue));
+            return;
+        }
 
         sbe::EExpression::Vector nullChecks;
         std::vector<EvalStage> unionBranches;
@@ -1829,13 +1845,19 @@ public:
     }
     void visit(const ExpressionFieldPath* expr) final {
         // There's a chance that we've already generated a SBE plan stage tree for this field path,
-        // in which case we avoid regeration of the same plan stage tree.
+        // in which case we avoid regeneration of the same plan stage tree.
         if (auto it = _context->state.preGeneratedExprs.find(expr->getFieldPath().fullPath());
             it != _context->state.preGeneratedExprs.end()) {
             tassert(6089301,
                     "Expressions for top-level document or a variable must not be pre-generated",
                     expr->getFieldPath().getPathLength() != 1 && !expr->isVariableReference());
-            _context->pushExpr(it->second->clone());
+            if (auto optionalSlot = it->second.getSlot(); optionalSlot) {
+                _context->pushExpr(*optionalSlot);
+            } else {
+                auto preGeneratedExpr = it->second.extractExpr();
+                _context->pushExpr(preGeneratedExpr->clone());
+                it->second = std::move(preGeneratedExpr);
+            }
             return;
         }
 
@@ -2319,8 +2341,14 @@ public:
     void visit(const ExpressionMultiply* expr) final {
         auto arity = expr->getChildren().size();
         _context->ensureArity(arity);
-        auto frameId = _context->state.frameId();
 
+        // Return multiplicative identity if the $multiply expression has no operands.
+        if (arity == 0) {
+            _context->pushExpr(makeConstant(sbe::value::TypeTags::NumberInt32, 1));
+            return;
+        }
+
+        auto frameId = _context->state.frameId();
         sbe::EExpression::Vector binds;
         sbe::EExpression::Vector variables;
         sbe::EExpression::Vector checkExprsNull;
@@ -2390,7 +2418,28 @@ public:
             sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(notExpr)));
     }
     void visit(const ExpressionObject* expr) final {
-        unsupportedExpression("$object");
+        auto&& childExprs = expr->getChildExpressions();
+        tassert(5995102,
+                "All child expressions must have been compiled",
+                childExprs.size() == _context->evalStack.topFrame().exprsCount());
+
+        // The expression argument for 'newObj' must be a sequence of a field name constant
+        // expression and an expression for the value. So, we need 2 * childExprs.size() elements in
+        // the expression vector.
+        sbe::EExpression::Vector exprs(childExprs.size() * 2);
+        size_t i = exprs.size();
+        for (auto rit = childExprs.rbegin(); rit != childExprs.rend(); ++rit) {
+            exprs[--i] = _context->popExpr();
+            exprs[--i] = makeConstant(rit->first);
+        }
+
+        auto fieldSlot{_context->state.slotIdGenerator->generate()};
+        auto stage = makeProject(_context->extractCurrentEvalStage(),
+                                 _context->planNodeId,
+                                 fieldSlot,
+                                 sbe::makeE<sbe::EFunction>("newObj"_sd, std::move(exprs)));
+
+        _context->pushExpr(fieldSlot, std::move(stage));
     }
     void visit(const ExpressionOr* expr) final {
         visitMultiBranchLogicExpression(expr, sbe::EPrimBinary::logicOr);
@@ -2560,6 +2609,12 @@ public:
         unsupportedExpression(expr->getOpName());
     }
     void visit(const ExpressionSetIntersection* expr) final {
+        if (expr->getChildren().size() == 0) {
+            auto [emptySetTag, emptySetValue] = sbe::value::makeNewArraySet();
+            _context->pushExpr(makeConstant(emptySetTag, emptySetValue));
+            return;
+        }
+
         generateSetExpression(expr, SetOperation::Intersection);
     }
 
@@ -2567,6 +2622,12 @@ public:
         unsupportedExpression(expr->getOpName());
     }
     void visit(const ExpressionSetUnion* expr) final {
+        if (expr->getChildren().size() == 0) {
+            auto [emptySetTag, emptySetValue] = sbe::value::makeNewArraySet();
+            _context->pushExpr(makeConstant(emptySetTag, emptySetValue));
+            return;
+        }
+
         generateSetExpression(expr, SetOperation::Union);
     }
 

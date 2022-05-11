@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/storage_engine.h"
 
 namespace mongo {
@@ -44,7 +45,7 @@ struct BackupCursorState {
     std::unique_ptr<StorageEngine::StreamingCursor> streamingCursor;
     // 'otherBackupBlocks' includes the backup blocks for the encrypted storage engine in the
     // enterprise module.
-    std::vector<StorageEngine::BackupBlock> otherBackupBlocks;
+    std::vector<BackupBlock> otherBackupBlocks;
 };
 
 struct BackupCursorExtendState {

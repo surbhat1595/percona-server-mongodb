@@ -67,6 +67,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
@@ -91,6 +92,7 @@
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/repl/timestamp_block.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/server_write_concern_metrics.h"
@@ -506,6 +508,8 @@ std::vector<OpTime> logInsertOps(
     AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kLogOp);
     auto oplogInfo = oplogWrite.getOplogInfo();
 
+    write_stage_common::PreWriteFilter preWriteFilter(opCtx, nss);
+
     WriteUnitOfWork wuow(opCtx);
 
     std::vector<OpTime> opTimes(count);
@@ -534,6 +538,22 @@ std::vector<OpTime> logInsertOps(
         OplogLink oplogLink;
         if (i > 0)
             oplogLink.prevOpTime = opTimes[i - 1];
+
+        // Direct inserts to shards of orphan documents should not generate change stream events.
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+            (!oplogEntry.getFromMigrate() || !*oplogEntry.getFromMigrate()) &&
+            !OperationShardingState::isOperationVersioned(opCtx) &&
+            preWriteFilter.computeAction(Document(begin[i].doc)) ==
+                write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
+            LOGV2_DEBUG(6258100,
+                        3,
+                        "Marking insert operation of orphan document with the 'fromMigrate' flag "
+                        "to prevent a wrong change stream event",
+                        "namespace"_attr = nss,
+                        "document"_attr = begin[i].doc);
+
+            oplogEntry.setFromMigrateIfTrue(true);
+        }
         appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, begin[i].stmtIds);
 
         opTimes[i] = insertStatementOplogSlot;
@@ -1186,7 +1206,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
     const bool haveWrappingWriteUnitOfWork = opCtx->lockState()->inAWriteUnitOfWork();
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "applyOps not supported on view: " << requestNss.ns(),
-            collection || !ViewCatalog::get(db)->lookup(opCtx, requestNss));
+            collection || !ViewCatalog::get(opCtx)->lookup(opCtx, requestNss));
 
     // Decide whether to timestamp the write with the 'ts' field found in the operation. In general,
     // we do this for secondary oplog application, but there are some exceptions.
@@ -1810,7 +1830,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
         auto databaseHolder = DatabaseHolder::get(opCtx);
         auto db = databaseHolder->getDb(opCtx, nss.ns());
         if (db && !CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss) &&
-            ViewCatalog::get(db)->lookup(opCtx, nss)) {
+            ViewCatalog::get(opCtx)->lookup(opCtx, nss)) {
             return {ErrorCodes::CommandNotSupportedOnView,
                     str::stream() << "applyOps not supported on view:" << nss.ns()};
         }

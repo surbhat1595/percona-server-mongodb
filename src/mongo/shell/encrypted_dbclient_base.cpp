@@ -297,7 +297,7 @@ void EncryptedDBClientBase::generateDataKey(JSContext* cx, JS::CallArgs args) {
         kmsProvider, _encryptionOptions.getKmsProviders().toBSON());
 
     SecureVector<uint8_t> dataKey(crypto::kFieldLevelEncryptionKeySize);
-    auto res = crypto::engineRandBytes(dataKey->data(), dataKey->size());
+    auto res = crypto::engineRandBytes({dataKey->data(), dataKey->size()});
     uassert(31042, "Error generating data key: " + res.codeString(), res.isOK());
 
 
@@ -630,7 +630,8 @@ std::shared_ptr<SymmetricKey> EncryptedDBClientBase::getDataKeyFromDisk(const UU
     NamespaceString fullNameNS = getCollectionNS();
     FindCommandRequest findCmd{fullNameNS};
     findCmd.setFilter(BSON("_id" << uuid));
-    findCmd.setReadConcern(repl::ReadConcernArgs::kImplicitDefault);
+    findCmd.setReadConcern(
+        repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern).toBSONInner());
     BSONObj dataKeyObj = _conn->findOne(std::move(findCmd));
     if (dataKeyObj.isEmpty()) {
         uasserted(ErrorCodes::BadValue, "Invalid keyID.");

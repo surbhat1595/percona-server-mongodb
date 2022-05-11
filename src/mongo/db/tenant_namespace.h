@@ -36,15 +36,19 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_attr.h"
 
 namespace mongo {
 
 class TenantNamespace {
 public:
+    TenantNamespace(const TenantNamespace& tenantNs)
+        : _tenantId(tenantNs.tenantId()),
+          _nss(tenantNs.getNss()),
+          _tenantNsStr(tenantNs.toString()) {}
+
     /**
      * Constructs an empty TenantNamespace.
      */
@@ -55,17 +59,7 @@ public:
      *
      * If featureFlagRequireTenantID is set, tenantId is required.
      */
-    TenantNamespace(boost::optional<mongo::OID> tenantId, NamespaceString nss) {
-        // TODO SERVER-62114 Check instead if gMultitenancySupport is enabled.
-        if (gFeatureFlagRequireTenantID.isEnabledAndIgnoreFCV())
-            invariant(tenantId);
-
-        _tenantId = tenantId;
-        _nss = nss;
-        _tenantNsStr = _tenantId
-            ? boost::make_optional(_tenantId->toString() + "_" + _nss.toString())
-            : boost::none;
-    }
+    TenantNamespace(boost::optional<mongo::TenantId> tenantId, NamespaceString nss);
 
     /**
      * Constructs a TenantNamespace from the string "ns". When the server parameter
@@ -85,21 +79,9 @@ public:
      *
      * If featureFlagRequireTenantID is set, tenantId is required.
      */
-    static TenantNamespace parseTenantNamespaceFromDisk(StringData ns) {
-        if (!gMultitenancySupport) {
-            return TenantNamespace(boost::none, NamespaceString(ns));
-        }
+    static TenantNamespace parseTenantNamespaceFromDisk(StringData ns);
 
-        auto tenantDelim = ns.find('_');
-        if (tenantDelim == std::string::npos)
-            return TenantNamespace(boost::none, NamespaceString(ns));
-
-        auto tenantId = OID(ns.substr(0, tenantDelim));
-        auto nss = NamespaceString(ns.substr(tenantDelim + 1, ns.size() - 1 - tenantDelim));
-        return TenantNamespace(tenantId, nss);
-    }
-
-    boost::optional<mongo::OID> tenantId() const {
+    boost::optional<TenantId> tenantId() const {
         return _tenantId;
     }
 
@@ -111,7 +93,7 @@ public:
         return _nss.coll();
     }
 
-    NamespaceString getNss() const {
+    const NamespaceString& getNss() const {
         return _nss;
     }
 
@@ -149,13 +131,16 @@ public:
     }
 
     friend auto logAttrs(const TenantNamespace& nss) {
-        return "tenantNamespace"_attr = nss;
+        return "namespace"_attr = nss;
     }
 
 private:
-    boost::optional<mongo::OID> _tenantId;
+    boost::optional<TenantId> _tenantId;
     NamespaceString _nss;
     boost::optional<std::string> _tenantNsStr;  // Only set if _tenantId exists
 };
+
+std::ostream& operator<<(std::ostream& stream, const TenantNamespace& tenantNs);
+StringBuilder& operator<<(StringBuilder& builder, const TenantNamespace& tenantNs);
 
 }  // namespace mongo

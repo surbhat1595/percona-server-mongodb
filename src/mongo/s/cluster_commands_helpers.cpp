@@ -245,7 +245,7 @@ BSONObj appendDbVersionIfPresent(BSONObj cmdObj, DatabaseVersion dbVersion) {
 
 BSONObj appendShardVersion(BSONObj cmdObj, ChunkVersion version) {
     BSONObjBuilder cmdWithVersionBob(std::move(cmdObj));
-    version.appendToCommand(&cmdWithVersionBob);
+    version.serializeToBSON(ChunkVersion::kShardVersionField, &cmdWithVersionBob);
     return cmdWithVersionBob.obj();
 }
 
@@ -621,6 +621,10 @@ RawResponsesResult appendRawResponses(
     output->append("code", firstError.code());
     output->append("codeName", ErrorCodes::errorString(firstError.code()));
     *errmsg = firstError.reason();
+    if (auto extra = firstError.extraInfo()) {
+        extra->serialize(output);
+    }
+
     return {false, shardsWithSuccessResponses, successARSResponses, firstStaleConfigErrorReceived};
 }
 

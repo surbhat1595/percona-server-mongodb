@@ -67,8 +67,8 @@ public:
     struct CollectionAndChangedChunks {
         CollectionAndChangedChunks();
         CollectionAndChangedChunks(
-            OID collEpoch,
-            Timestamp collCreationTime,
+            OID epoch,
+            Timestamp timestamp,
             UUID uuid,
             const BSONObj& collShardKeyPattern,
             const BSONObj& collDefaultCollation,
@@ -78,12 +78,11 @@ public:
             boost::optional<int64_t> maxChunkSizeBytes,
             bool allowAutoSplit,
             bool allowMigrations,
-            SupportingLongNameStatusEnum supportingLongName,
             std::vector<ChunkType> chunks);
 
         // Information about the entire collection
         OID epoch;
-        Timestamp creationTime;
+        Timestamp timestamp;
         boost::optional<UUID> uuid;  // This value can never be boost::none,
                                      // except under the default constructor
         BSONObj shardKeyPattern;
@@ -102,8 +101,6 @@ public:
         bool allowAutoSplit;
 
         bool allowMigrations;
-
-        SupportingLongNameStatusEnum supportingLongName;
 
         // The chunks which have changed sorted by their chunkVersion. This list might potentially
         // contain all the chunks in the collection.

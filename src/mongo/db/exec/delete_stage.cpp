@@ -42,6 +42,7 @@
 #include "mongo/db/op_observer.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/scopeguard.h"
@@ -76,7 +77,8 @@ DeleteStage::DeleteStage(ExpressionContext* expCtx,
       _params(std::move(params)),
       _ws(ws),
       _idRetrying(WorkingSet::INVALID_ID),
-      _idReturning(WorkingSet::INVALID_ID) {
+      _idReturning(WorkingSet::INVALID_ID),
+      _preWriteFilter(opCtx(), collection->ns()) {
     _children.emplace_back(child);
 }
 
@@ -166,20 +168,25 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
         return PlanStage::NEED_TIME;
     }
 
-    {
-        BSONObj unownedDoc = member->doc.value().toBson();
-
-        if (!_params->isExplain && !_params->fromMigrate &&
-            write_stage_common::skipWriteToOrphanDocument(
-                opCtx(), collection()->ns(), unownedDoc)) {
-            LOGV2_DEBUG(
-                5983201,
-                1,
-                "Abort delete operation to orphan document to prevent a wrong change stream event",
-                "namespace"_attr = collection()->ns(),
-                "record"_attr = redact(unownedDoc));
-
-            return NEED_TIME;
+    bool writeToOrphan = false;
+    if (!_params->isExplain && !_params->fromMigrate) {
+        const auto action = _preWriteFilter.computeAction(member->doc.value());
+        if (action == write_stage_common::PreWriteFilter::Action::kSkip) {
+            LOGV2_DEBUG(5983201,
+                        3,
+                        "Skipping delete operation to orphan document to prevent a wrong change "
+                        "stream event",
+                        "namespace"_attr = collection()->ns(),
+                        "record"_attr = member->doc.value());
+            return PlanStage::NEED_TIME;
+        } else if (action == write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
+            LOGV2_DEBUG(6184700,
+                        3,
+                        "Marking delete operation to orphan document with the fromMigrate flag "
+                        "to prevent a wrong change stream event",
+                        "namespace"_attr = collection()->ns(),
+                        "record"_attr = member->doc.value());
+            writeToOrphan = true;
         }
     }
 
@@ -215,7 +222,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
                                          _params->stmtId,
                                          recordId,
                                          _params->opDebug,
-                                         _params->fromMigrate,
+                                         writeToOrphan || _params->fromMigrate,
                                          false,
                                          _params->returnDeleted ? Collection::StoreDeletedDoc::On
                                                                 : Collection::StoreDeletedDoc::Off);
@@ -272,6 +279,8 @@ void DeleteStage::doRestoreStateRequiresCollection() {
             str::stream() << "Demoted from primary while removing from " << ns.ns(),
             !opCtx()->writesAreReplicated() ||
                 repl::ReplicationCoordinator::get(opCtx())->canAcceptWritesFor(opCtx(), ns));
+
+    _preWriteFilter.restoreState();
 }
 
 unique_ptr<PlanStageStats> DeleteStage::getStats() {

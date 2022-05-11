@@ -34,10 +34,10 @@
 #include <boost/optional.hpp>
 
 #include "mongo/base/init.h"
-#include "mongo/bson/oid.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_detail.h"
 
@@ -50,15 +50,21 @@ MONGO_INITIALIZER(SecurityTokenOptionValidate)(InitializerContext*) {
             "multitenancySupport may not be specified if featureFlagMongoStore is not enabled",
             !gMultitenancySupport || gFeatureFlagMongoStore.isEnabledAndIgnoreFCV());
     if (gMultitenancySupport) {
-        logv2::detail::setGetTenantIDCallback([]() -> boost::optional<OID> {
+        logv2::detail::setGetTenantIDCallback([]() -> boost::optional<TenantId> {
             auto* client = Client::getCurrent();
-            auto* opCtx = client ? client->getOperationContext() : nullptr;
-            auto token = getSecurityToken(opCtx);
-            if (token) {
-                return token->getAuthenticatedUser().getTenant();
-            } else {
+            if (!client)
                 return boost::none;
+
+            if (auto* opCtx = client->getOperationContext()) {
+                auto token = getSecurityToken(opCtx);
+                if (token) {
+                    return token->getAuthenticatedUser().getTenant();
+                } else {
+                    return boost::none;
+                }
             }
+
+            return boost::none;
         });
     }
 }
@@ -114,10 +120,6 @@ void readSecurityTokenMetadata(OperationContext* opCtx, BSONObj securityToken) t
 }
 
 MaybeSecurityToken getSecurityToken(OperationContext* opCtx) {
-    if (!opCtx) {
-        return boost::none;
-    }
-
     return securityTokenDecoration(opCtx);
 }
 

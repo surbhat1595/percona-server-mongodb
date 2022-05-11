@@ -163,11 +163,6 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
         return status;
     }
 
-    tassert(5842500,
-            "Cannot create a sub-query from an existing CanonicalQuery that carries a non-empty "
-            "pipeline",
-            baseQuery.pipeline().empty());
-
     // Make the CQ we'll hopefully return.
     std::unique_ptr<CanonicalQuery> cq(new CanonicalQuery());
     cq->setExplain(baseQuery.getExplain());
@@ -204,6 +199,9 @@ Status CanonicalQuery::init(OperationContext* opCtx,
     }
     auto unavailableMetadata = validStatus.getValue();
     _root = MatchExpression::normalize(std::move(root));
+    if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+        MatchExpression::parameterize(_root.get());
+    }
     // The tree must always be valid after normalization.
     dassert(isValid(_root.get(), *_findCommand).isOK());
     if (auto status = isValidNormalized(_root.get()); !status.isOK()) {

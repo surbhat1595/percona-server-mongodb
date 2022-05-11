@@ -915,8 +915,7 @@ void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx) {
 
                               hangBeforeFilteringMetadataRefresh.pauseWhileSet();
 
-                              onShardVersionMismatch(
-                                  opCtx.get(), nss, boost::none /* shardVersionReceived */);
+                              recoverMigrationUntilSuccess(opCtx.get(), nss);
                           })
                           .onError([](const Status& status) {
                               LOGV2_WARNING(4798512,
@@ -952,17 +951,18 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
     store.forEach(
         opCtx,
         BSON(MigrationCoordinatorDocument::kNssFieldName << nss.toString()),
-        [&opCtx, &migrationRecoveryCount, acquireCSOnRecipient, &cancellationToken](
+        [&opCtx, &nss, &migrationRecoveryCount, acquireCSOnRecipient, &cancellationToken](
             const MigrationCoordinatorDocument& doc) {
             LOGV2_DEBUG(4798502,
                         2,
                         "Recovering migration",
                         "migrationCoordinatorDocument"_attr = redact(doc.toBSON()));
-            // ensure there is only one migrationCoordinatorDocument
-            // to be recovered for this namespace
-            invariant(++migrationRecoveryCount == 1,
-                      "Found more then one migration to recover for a single namespace");
 
+            // Ensure there is only one migrationCoordinator document to be recovered for this
+            // namespace.
+            invariant(++migrationRecoveryCount == 1,
+                      str::stream() << "Found more then one migration to recover for namespace '"
+                                    << nss << "'");
 
             // Create a MigrationCoordinator to complete the coordination.
             MigrationCoordinator coordinator(doc);
@@ -1037,7 +1037,11 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                 return true;
             }
 
-            if (currentMetadata.keyBelongsToMe(doc.getRange().getMin())) {
+            // Note this should only extend the range boundaries (if there has been a shard key
+            // refine since the migration began) and never truncate them.
+            auto chunkRangeToCompareToMetadata =
+                extendOrTruncateBoundsForMetadata(currentMetadata, doc.getRange());
+            if (currentMetadata.keyBelongsToMe(chunkRangeToCompareToMetadata.getMin())) {
                 coordinator.setMigrationDecision(DecisionEnum::kAborted);
             } else {
                 coordinator.setMigrationDecision(DecisionEnum::kCommitted);
@@ -1186,6 +1190,26 @@ void drainMigrationsPendingRecovery(OperationContext* opCtx) {
             }
             return true;
         });
+    }
+}
+
+void recoverMigrationUntilSuccess(OperationContext* opCtx, const NamespaceString& nss) noexcept {
+    try {
+        {
+            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+            auto* const csr = CollectionShardingRuntime::get(opCtx, nss);
+            if (csr->getCurrentMetadataIfKnown()) {
+                return;
+            }
+        }
+
+        refreshFilteringMetadataUntilSuccess(opCtx, nss);
+    } catch (const DBException& ex) {
+        LOGV2_DEBUG(6228200,
+                    2,
+                    "Interrupted migration recovery",
+                    "namespace"_attr = nss,
+                    "error"_attr = redact(ex));
     }
 }
 

@@ -121,17 +121,20 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+using namespace fmt::literals;
+
 namespace mongo {
 namespace repl {
 namespace {
 
 const char localDbName[] = "local";
-const char configCollectionName[] = "local.system.replset";
 const auto configDatabaseName = localDbName;
 const auto lastVoteDatabaseName = localDbName;
 const char meCollectionName[] = "local.me";
 const auto meDatabaseName = localDbName;
 const char tsFieldName[] = "ts";
+
+const NamespaceString configCollectionNS{"local", "system.replset"};
 
 MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 
@@ -431,7 +434,8 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                                {
                                    // Writes to 'local.system.replset' must be untimestamped.
                                    WriteUnitOfWork wuow(opCtx);
-                                   Helpers::putSingleton(opCtx, configCollectionName, config);
+                                   Helpers::putSingleton(
+                                       opCtx, configCollectionNS.ns().c_str(), config);
                                    wuow.commit();
                                }
                                {
@@ -562,16 +566,17 @@ void ReplicationCoordinatorExternalStateImpl::forwardSecondaryProgress() {
 StatusWith<BSONObj> ReplicationCoordinatorExternalStateImpl::loadLocalConfigDocument(
     OperationContext* opCtx) {
     try {
-        return writeConflictRetry(opCtx, "load replica set config", configCollectionName, [opCtx] {
-            BSONObj config;
-            if (!Helpers::getSingleton(opCtx, configCollectionName, config)) {
-                return StatusWith<BSONObj>(
-                    ErrorCodes::NoMatchingDocument,
-                    str::stream() << "Did not find replica set configuration document in "
-                                  << configCollectionName);
-            }
-            return StatusWith<BSONObj>(config);
-        });
+        return writeConflictRetry(
+            opCtx, "load replica set config", configCollectionNS.ns(), [opCtx] {
+                BSONObj config;
+                if (!Helpers::getSingleton(opCtx, configCollectionNS.ns().c_str(), config)) {
+                    return StatusWith<BSONObj>(
+                        ErrorCodes::NoMatchingDocument,
+                        "Did not find replica set configuration document in {}"_format(
+                            configCollectionNS.toString()));
+                }
+                return StatusWith<BSONObj>(config);
+            });
     } catch (const DBException& ex) {
         return StatusWith<BSONObj>(ex.toStatus());
     }
@@ -581,12 +586,12 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
                                                                          const BSONObj& config,
                                                                          bool writeOplog) {
     try {
-        writeConflictRetry(opCtx, "save replica set config", configCollectionName, [&] {
+        writeConflictRetry(opCtx, "save replica set config", configCollectionNS.ns(), [&] {
             {
                 // Writes to 'local.system.replset' must be untimestamped.
                 WriteUnitOfWork wuow(opCtx);
                 Lock::DBLock dbWriteLock(opCtx, configDatabaseName, MODE_X);
-                Helpers::putSingleton(opCtx, configCollectionName, config);
+                Helpers::putSingleton(opCtx, configCollectionNS.ns().c_str(), config);
                 wuow.commit();
             }
 
@@ -608,6 +613,20 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
+}
+
+Status ReplicationCoordinatorExternalStateImpl::replaceLocalConfigDocument(
+    OperationContext* opCtx, const BSONObj& config) try {
+    writeConflictRetry(opCtx, "replace replica set config", configCollectionNS.ns(), [&] {
+        WriteUnitOfWork wuow(opCtx);
+        Lock::DBLock dbWriteLock(opCtx, configDatabaseName, MODE_X);
+        Helpers::emptyCollection(opCtx, configCollectionNS);
+        Helpers::putSingleton(opCtx, configCollectionNS.ns().c_str(), config);
+        wuow.commit();
+    });
+    return Status::OK();
+} catch (const DBException& ex) {
+    return ex.toStatus();
 }
 
 Status ReplicationCoordinatorExternalStateImpl::createLocalLastVoteCollection(
@@ -980,20 +999,23 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
     Lock::GlobalLock lk(opCtx, MODE_IS);
 
     StorageEngine* storageEngine = _service->getStorageEngine();
-    std::vector<std::string> dbNames = storageEngine->listDatabases();
+    std::vector<TenantDatabaseName> tenantDbNames = storageEngine->listDatabases();
 
-    for (std::vector<std::string>::iterator it = dbNames.begin(); it != dbNames.end(); ++it) {
+    for (std::vector<TenantDatabaseName>::iterator it = tenantDbNames.begin();
+         it != tenantDbNames.end();
+         ++it) {
         // The local db is special because it isn't replicated. It is cleared at startup even on
         // replica set members.
-        if (*it == "local")
+        if (it->dbName() == "local")
             continue;
         LOGV2_DEBUG(21309,
                     2,
                     "Removing temporary collections from {db}",
                     "Removing temporary collections",
                     "db"_attr = *it);
-        AutoGetDb autoDb(opCtx, *it, MODE_IX);
-        invariant(autoDb.getDb(), str::stream() << "Unable to get reference to database " << *it);
+        AutoGetDb autoDb(opCtx, it->dbName(), MODE_IX);
+        invariant(autoDb.getDb(),
+                  str::stream() << "Unable to get reference to database " << it->dbName());
         autoDb.getDb()->clearTmpCollections(opCtx);
     }
 }

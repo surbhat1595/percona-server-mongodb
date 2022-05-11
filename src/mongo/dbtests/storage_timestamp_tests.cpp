@@ -84,6 +84,7 @@
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/storage_engine_impl.h"
+#include "mongo/db/tenant_namespace.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/transaction_participant_gen.h"
 #include "mongo/db/vector_clock_mutable.h"
@@ -2695,7 +2696,7 @@ public:
         const LogicalTime beforeDropTs = currentTime.clusterTime();
 
         // Drop all of the indexes.
-        dropIndexes(_opCtx, nss, "*");
+        dropIndexes(_opCtx, nss, boost::none, "*");
 
         // Assert that each index is dropped individually and with its own timestamp. The order of
         // dropping and creating are not guaranteed to be the same, but assert all of the created
@@ -2770,7 +2771,7 @@ public:
         const LogicalTime beforeDropTs = currentTime.clusterTime();
 
         // Drop all of the indexes.
-        dropIndexes(_opCtx, nss, std::vector<std::string>{"a_1", "b_1", "c_1"});
+        dropIndexes(_opCtx, nss, boost::none, std::vector<std::string>{"a_1", "b_1", "c_1"});
 
         // Assert that each index is dropped individually and with its own timestamp. The order of
         // dropping and creating are not guaranteed to be the same, but assert all of the created
@@ -3263,7 +3264,8 @@ public:
                 << " incorrectly exists before creation. CreateTs: " << systemViewsCreateTs;
 
             systemViewsMd = getMetaDataAtTime(durableCatalog, catalogId, systemViewsCreateTs);
-            ASSERT_EQ(systemViewsNss.ns(), systemViewsMd->ns);
+            TenantNamespace tenantNs = systemViewsMd->tenantNs;
+            ASSERT_EQ(systemViewsNss.ns(), tenantNs.getNss().ns());
 
             assertDocumentAtTimestamp(autoColl.getCollection(), systemViewsCreateTs, BSONObj());
             assertDocumentAtTimestamp(autoColl.getCollection(),

@@ -53,6 +53,7 @@
 #include "mongo/db/storage/capped_callback.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
+#include "mongo/db/tenant_namespace.h"
 #include "mongo/db/yieldable.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/platform/mutex.h"
@@ -197,7 +198,7 @@ public:
          * only constructs an in-memory representation of what already exists on disk.
          */
         virtual std::shared_ptr<Collection> make(OperationContext* opCtx,
-                                                 const NamespaceString& nss,
+                                                 const TenantNamespace& tenantNs,
                                                  RecordId catalogId,
                                                  const CollectionOptions& options,
                                                  std::unique_ptr<RecordStore> rs) const = 0;
@@ -208,7 +209,7 @@ public:
          */
         virtual std::shared_ptr<Collection> make(
             OperationContext* opCtx,
-            const NamespaceString& nss,
+            const TenantNamespace& tenantNs,
             RecordId catalogId,
             std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
             std::unique_ptr<RecordStore> rs) const = 0;
@@ -303,6 +304,8 @@ public:
 
     virtual const NamespaceString& ns() const = 0;
 
+    virtual const TenantNamespace& tenantNs() const = 0;
+
     /**
      * Sets a new namespace on this Collection, in the case that the Collection is being renamed.
      * In general, reads and writes to Collection objects are synchronized using locks from the lock
@@ -310,7 +313,9 @@ public:
      * CollectionCatalog can perform UUID to namespace lookup without holding a Collection lock. See
      * CollectionCatalog::onCollectionRename().
      */
-    virtual Status rename(OperationContext* opCtx, const NamespaceString& nss, bool stayTemp) = 0;
+    virtual Status rename(OperationContext* opCtx,
+                          const TenantNamespace& tenantNs,
+                          bool stayTemp) = 0;
 
     virtual RecordId getCatalogId() const = 0;
 
@@ -358,7 +363,8 @@ public:
                                 OpDebug* opDebug,
                                 bool fromMigrate = false,
                                 bool noWarn = false,
-                                StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off) const = 0;
+                                StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off,
+                                CheckRecordId checkRecordId = CheckRecordId::Off) const = 0;
 
     /**
      * Deletes the document from the collection.
@@ -371,6 +377,9 @@ public:
      * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
      * 'noWarn' if unindexing the record causes an error, if noWarn is true the error
      * will not be logged.
+     * 'storeDeletedDoc' whether to store the document deleted in the oplog.
+     * 'checkRecordId' whether to confirm the recordId matches the record we are removing when
+     * unindexing.
      */
     virtual void deleteDocument(OperationContext* opCtx,
                                 Snapshotted<BSONObj> doc,
@@ -379,7 +388,8 @@ public:
                                 OpDebug* opDebug,
                                 bool fromMigrate = false,
                                 bool noWarn = false,
-                                StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off) const = 0;
+                                StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off,
+                                CheckRecordId checkRecordId = CheckRecordId::Off) const = 0;
 
     /*
      * Inserts all documents inside one WUOW.

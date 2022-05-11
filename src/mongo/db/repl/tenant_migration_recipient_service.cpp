@@ -39,6 +39,7 @@
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_manager.h"
 #include "mongo/config.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/tenant_migration_donor_cmds_gen.h"
 #include "mongo/db/commands/test_commands_enabled.h"
@@ -47,6 +48,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/cloner_utils.h"
 #include "mongo/db/repl/data_replicator_external_state.h"
@@ -187,6 +189,7 @@ MONGO_FAIL_POINT_DEFINE(fpWaitUntilTimestampMajorityCommitted);
 MONGO_FAIL_POINT_DEFINE(fpAfterFetchingCommittedTransactions);
 MONGO_FAIL_POINT_DEFINE(hangAfterUpdatingTransactionEntry);
 MONGO_FAIL_POINT_DEFINE(fpBeforeAdvancingStableTimestamp);
+MONGO_FAIL_POINT_DEFINE(hangMigrationBeforeRetryCheck);
 
 namespace {
 // We never restart just the oplog fetcher.  If a failure occurs, we restart the whole state machine
@@ -910,42 +913,54 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_initializeStateDoc(
         .semi();
 }
 
-void TenantMigrationRecipientService::Instance::_killBackupCursor(WithLock lk) {
-    if (!_donorFilenameBackupCursorId || _donorFilenameBackupCursorNamespaceString.isEmpty()) {
-        return;
+ExecutorFuture<void> TenantMigrationRecipientService::Instance::_killBackupCursor() {
+    stdx::lock_guard lk(_mutex);
+
+    if (_backupCursorKeepAliveFuture) {
+        _backupCursorKeepAliveCancellation.cancel();
     }
 
-    // TODO (SERVER-61132) likely want to cancel getMore/keepalive here as well
+    return std::exchange(_backupCursorKeepAliveFuture, {})
+        .value_or(SemiFuture<void>::makeReady())
+        .thenRunOn(_recipientService->getInstanceCleanupExecutor())
+        .then([this, self = shared_from_this()] {
+            stdx::lock_guard lk(_mutex);
+            if (!_donorFilenameBackupCursorId ||
+                _donorFilenameBackupCursorNamespaceString.isEmpty()) {
+                return;
+            }
 
-    executor::RemoteCommandRequest request(
-        _client->getServerHostAndPort(),
-        _donorFilenameBackupCursorNamespaceString.db().toString(),
-        BSON("killCursors" << _donorFilenameBackupCursorNamespaceString.coll().toString()
-                           << "cursors" << BSON_ARRAY(_donorFilenameBackupCursorId)),
-        nullptr);
-    request.sslMode = transport::kGlobalSSLMode;
+            executor::RemoteCommandRequest request(
+                _client->getServerHostAndPort(),
+                _donorFilenameBackupCursorNamespaceString.db().toString(),
+                BSON("killCursors" << _donorFilenameBackupCursorNamespaceString.coll().toString()
+                                   << "cursors" << BSON_ARRAY(_donorFilenameBackupCursorId)),
+                nullptr);
+            request.sslMode = _donorUri.getSSLMode();
 
-    auto scheduleResult =
-        (**_scopedExecutor)
-            ->scheduleRemoteCommand(
-                request, [](const executor::TaskExecutor::RemoteCommandCallbackArgs& args) {
-                    if (!args.response.isOK()) {
-                        LOGV2_WARNING(6113005,
-                                      "killCursors command task failed",
-                                      "error"_attr = redact(args.response.status));
-                        return;
-                    }
-                    auto status = getStatusFromCommandResult(args.response.data);
-                    if (!status.isOK()) {
-                        LOGV2_WARNING(
-                            6113006, "killCursors command failed", "error"_attr = redact(status));
-                    }
-                });
-    if (!scheduleResult.isOK()) {
-        LOGV2_WARNING(6113004,
-                      "Failed to run killCursors command on backup cursor",
-                      "status"_attr = scheduleResult.getStatus());
-    }
+            auto scheduleResult =
+                (_recipientService->getInstanceCleanupExecutor())
+                    ->scheduleRemoteCommand(
+                        request, [](const executor::TaskExecutor::RemoteCommandCallbackArgs& args) {
+                            if (!args.response.isOK()) {
+                                LOGV2_WARNING(6113005,
+                                              "killCursors command task failed",
+                                              "error"_attr = redact(args.response.status));
+                                return;
+                            }
+                            auto status = getStatusFromCommandResult(args.response.data);
+                            if (!status.isOK()) {
+                                LOGV2_WARNING(6113006,
+                                              "killCursors command failed",
+                                              "error"_attr = redact(status));
+                            }
+                        });
+            if (!scheduleResult.isOK()) {
+                LOGV2_WARNING(6113004,
+                              "Failed to run killCursors command on backup cursor",
+                              "status"_attr = scheduleResult.getStatus());
+            }
+        });
 }
 
 ExecutorFuture<void> TenantMigrationRecipientService::Instance::_getDonorFilenames(
@@ -981,11 +996,15 @@ ExecutorFuture<void> TenantMigrationRecipientService::Instance::_getDonorFilenam
             return;
         }
 
-        stdx::lock_guard lk(_mutex);
+        auto uniqueOpCtx = cc().makeOperationContext();
+        auto opCtx = uniqueOpCtx.get();
 
         const auto& data = dataStatus.getValue();
-        _donorFilenameBackupCursorId = data.cursorId;
-        _donorFilenameBackupCursorNamespaceString = data.nss;
+        {
+            stdx::lock_guard lk(_mutex);
+            _donorFilenameBackupCursorId = data.cursorId;
+            _donorFilenameBackupCursorNamespaceString = data.nss;
+        }
 
         for (const BSONObj& doc : data.documents) {
             if (doc["metadata"]) {
@@ -993,54 +1012,49 @@ ExecutorFuture<void> TenantMigrationRecipientService::Instance::_getDonorFilenam
                 const auto& metadata = doc["metadata"].Obj();
                 auto startApplyingDonorOpTime =
                     OpTime(metadata["checkpointTimestamp"].timestamp(), OpTime::kUninitializedTerm);
-                // TODO (SERVER-61132) Uncomment the following lines when we skip
+                // TODO (SERVER-61133) Uncomment the following lines when we skip
                 // _getStartopTimesFromDonor entirely
                 // _stateDoc.setStartApplyingDonorOpTime(startApplyingDonorOpTime);
                 // _stateDoc.setStartFetchingDonorOpTime(startApplyingDonorOpTime);
                 LOGV2_INFO(6113001,
                            "Opened backup cursor on donor",
-                           "migrationId"_attr = _stateDoc.getId(),
+                           "migrationId"_attr = getMigrationUUID(),
                            "startApplyingDonorOpTime"_attr = startApplyingDonorOpTime,
                            "backupCursorId"_attr = data.cursorId);
             } else {
                 LOGV2_DEBUG(6113002,
                             1,
                             "Backup cursor entry",
-                            "migrationId"_attr = _stateDoc.getId(),
+                            "migrationId"_attr = getMigrationUUID(),
                             "filename"_attr = doc["filename"].String(),
                             "backupCursorId"_attr = data.cursorId);
 
-                auto uniqueOpCtx = cc().makeOperationContext();
-                auto opCtx = uniqueOpCtx.get();
                 auto donatedFilesNs = getDonatedFilesNs(getMigrationUUID());
                 auto status = writeConflictRetry(
                     opCtx,
                     "insertBackupCursorEntry",
                     donatedFilesNs.ns(),
                     [opCtx, donatedFilesNs, doc]() -> Status {
-                        Lock::GlobalWrite lk(opCtx);
-                        AutoGetDb autoDb(opCtx, donatedFilesNs.db(), mongo::MODE_X);
-                        auto db = autoDb.ensureDbExists(opCtx);
-                        CollectionPtr collection =
-                            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-                                opCtx, donatedFilesNs);
-                        WriteUnitOfWork wuow(opCtx);
-                        if (!collection) {
-                            CollectionOptions emptyCollOptions;
-                            uassertStatusOK(
-                                db->userCreateNS(opCtx, donatedFilesNs, emptyCollOptions));
-                            collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-                                opCtx, donatedFilesNs);
-                        }
-                        invariant(collection);
+                        // Disabling internal document validation because the fetcher batch size
+                        // can exceed the max data size limit BSONObjMaxUserSize with the
+                        // additional fields we add to documents.
+                        DisableDocumentValidation documentValidationDisabler(
+                            opCtx, DocumentValidationSettings::kDisableInternalValidation);
 
-                        auto obj =
-                            doc.addField(BSON("_id" << OID::gen()).firstElement()).getOwned();
+                        auto obj = std::vector<mongo::BSONObj>{
+                            doc.addField(BSON("_id" << OID::gen()).firstElement()).getOwned()};
+                        write_ops::InsertCommandRequest insertOp(donatedFilesNs);
+                        insertOp.setDocuments(std::move(obj));
+                        insertOp.setWriteCommandRequestBase([] {
+                            write_ops::WriteCommandRequestBase wcb;
+                            wcb.setOrdered(true);
+                            return wcb;
+                        }());
 
-                        OpDebug* const nullOpDebug = nullptr;
-                        uassertStatusOK(collection->insertDocument(
-                            opCtx, InsertStatement(obj), nullOpDebug, false));
-                        wuow.commit();
+                        auto writeResult = write_ops_exec::performInserts(opCtx, insertOp);
+                        invariant(!writeResult.results.empty());
+                        // Writes are ordered, check only the last writeOp result.
+                        uassertStatusOK(writeResult.results.back());
 
                         return Status::OK();
                     });
@@ -1098,7 +1112,7 @@ void TenantMigrationRecipientService::Instance::_getStartOpTimesFromDonor(WithLo
 
     // We only expect to already have start optimes populated if we are not
     // resuming a migration and this is a multitenant migration.
-    // TODO (SERVER-61132) Eventually we'll skip _getStartopTimesFromDonor entirely
+    // TODO (SERVER-61133) Eventually we'll skip _getStartopTimesFromDonor entirely
     // for shard merge, but currently _getDonorFilenames will populate optimes for
     // the shard merge case. We can just overwrite here since we aren't doing anything
     // with the backup cursor results yet.
@@ -1203,7 +1217,7 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     auto optTxnRetryCounter = sessionTxnRecord.getTxnRetryCounter();
     uassert(ErrorCodes::InvalidOptions,
             "txnRetryCounter is only supported in sharded clusters",
-            !optTxnRetryCounter.has_value() || *optTxnRetryCounter == 0);
+            !optTxnRetryCounter.has_value());
 
     auto uniqueOpCtx = cc().makeOperationContext();
     auto opCtx = uniqueOpCtx.get();
@@ -1215,9 +1229,6 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
         boost::make_optional<TenantMigrationRecipientInfo>(getMigrationUUID());
     opCtx->setLogicalSessionId(sessionId);
     opCtx->setTxnNumber(txnNumber);
-    if (optTxnRetryCounter) {
-        opCtx->setTxnRetryCounter(*optTxnRetryCounter);
-    }
     opCtx->setInMultiDocumentTransaction();
     MongoDOperationContextSession ocs(opCtx);
 
@@ -1837,13 +1848,12 @@ SemiFuture<void>
 TenantMigrationRecipientService::Instance::_advanceStableTimestampToStartApplyingDonorOpTime() {
     Timestamp startApplyingDonorTimestamp;
     {
+        auto opCtx = cc().makeOperationContext();
         stdx::lock_guard lk(_mutex);
 
         if (_stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge) {
             return SemiFuture<void>::makeReady();
         }
-
-        auto opCtx = cc().makeOperationContext();
 
         invariant(_stateDoc.getStartApplyingDonorOpTime());
         startApplyingDonorTimestamp = _stateDoc.getStartApplyingDonorOpTime()->getTimestamp();
@@ -2112,9 +2122,7 @@ void TenantMigrationRecipientService::Instance::_interrupt(Status status,
     stdx::lock_guard lk(_mutex);
 
     if (skipWaitingForForgetMigration) {
-        // We only get here on receiving the recipientForgetMigration command or on
-        // stepDown/shutDown. On receiving the recipientForgetMigration, the promise should have
-        // already been set.
+        // We only get here on stepDown/shutDown.
         setPromiseErrorifNotReady(lk, _receivedRecipientForgetMigrationPromise, status);
     }
 
@@ -2147,8 +2155,7 @@ void TenantMigrationRecipientService::Instance::_interrupt(Status status,
         }
     }
 
-    _taskState.setState(
-        TaskState::kInterrupted, status, skipWaitingForForgetMigration /* isExternalInterrupt */);
+    _taskState.setState(TaskState::kInterrupted, status);
 }
 
 void TenantMigrationRecipientService::Instance::interrupt(Status status) {
@@ -2218,6 +2225,8 @@ void TenantMigrationRecipientService::Instance::_cleanupOnDataSyncCompletion(Sta
 
         _donorFilenameBackupCursorId = 0;
         _donorFilenameBackupCursorFileFetcher = nullptr;
+        _backupCursorKeepAliveCancellation = {};
+        _backupCursorKeepAliveFuture = boost::none;
     }
 
     // Perform join outside the lock to avoid deadlocks.
@@ -2378,6 +2387,8 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
     return AsyncTry([this, self = shared_from_this(), executor, token, cancelWhenDurable] {
                return ExecutorFuture(**executor)
                    .then([this, self = shared_from_this()] {
+                       auto opCtx = cc().makeOperationContext();
+
                        stdx::unique_lock lk(_mutex);
                        // Instance task can be started only once for the current term on a primary.
                        invariant(!_taskState.isDone());
@@ -2402,7 +2413,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                            // retry and we can delete immediately to allow the migration to restart.
                            // Otherwise, there is a real conflict so we should throw
                            // ConflictingInProgress.
-                           auto opCtx = cc().makeOperationContext();
+                           lk.unlock();
                            auto deleted =
                                uassertStatusOK(tenantMigrationRecipientEntryHelpers::
                                                    deleteStateDocIfMarkedAsGarbageCollectable(
@@ -2412,6 +2423,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                                        << "Found active migration for tenantId \"" << _tenantId
                                        << "\" with migration id " << mtab->getMigrationId(),
                                    deleted);
+                           lk.lock();
                        }
 
                        if (_stateDoc.getState() !=
@@ -2428,7 +2440,6 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                            lk.unlock();
                            // Update the state document outside the mutex to avoid a deadlock in the
                            // case of a concurrent stepdown.
-                           auto opCtx = cc().makeOperationContext();
                            uassertStatusOK(tenantMigrationRecipientEntryHelpers::updateStateDoc(
                                opCtx.get(), stateDoc));
                            return SemiFuture<void>::makeReady();
@@ -2554,21 +2565,43 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                            })
                            .on(**_scopedExecutor, token);
                    })
-                   .then([this, self = shared_from_this()] {
+                   .then([this, self = shared_from_this(), token] {
                        if (_stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge) {
                            return;
                        }
 
+                       LOGV2_DEBUG(6113200,
+                                   1,
+                                   "Starting periodic 'getMore' requests to keep "
+                                   "backup cursor alive.");
+                       stdx::lock_guard lk(_mutex);
+                       _backupCursorKeepAliveCancellation = CancellationSource(token);
+                       _backupCursorKeepAliveFuture =
+                           keepBackupCursorAlive(_backupCursorKeepAliveCancellation,
+                                                 **_scopedExecutor,
+                                                 _client->getServerHostAndPort(),
+                                                 _donorFilenameBackupCursorId,
+                                                 _donorFilenameBackupCursorNamespaceString);
+                   })
+                   .then([this, self = shared_from_this()] {
+                       if (_stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge) {
+                           return SemiFuture<void>::makeReady();
+                       }
+
                        stdx::lock_guard lk(_mutex);
                        _stateDoc.setState(TenantMigrationRecipientStateEnum::kLearnedFilenames);
+                       return _updateStateDocForMajority(lk);
+                   })
+                   .then([this, self = shared_from_this()] {
+                       // TODO (SERVER-61133) temporarily stop fetcher/backup cursor here for
+                       // now. We'll need to move this call elsewhere eventually to shut down
+                       // the backup cursor and/or keepalive.
+                       // Some tests fail unless we do this here, punting on dealing with those
+                       // tests until later ticket(s)
+                       return _killBackupCursor();
                    })
                    .then([this, self = shared_from_this()] {
                        stdx::lock_guard lk(_mutex);
-                       // TODO (SERVER-61133) temporarily stop fetcher/backup cursor here for
-                       // now. We shut down the backup cursor in onCompletion continuation, but
-                       // some tests fail unless we do this here, punting on dealing with those
-                       // tests until later ticket(s)
-                       _killBackupCursor(lk);
                        _getStartOpTimesFromDonor(lk);
                        return _updateStateDocForMajority(lk);
                    })
@@ -2728,17 +2761,30 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
            })
         .until([this, self = shared_from_this()](
                    StatusOrStatusWith<TenantOplogApplier::OpTimePair> applierStatus) {
-            auto status = applierStatus.getStatus();
-            stdx::unique_lock lk(_mutex);
-            if (_taskState.isInterrupted()) {
-                status = _taskState.getInterruptStatus();
-            }
+            hangMigrationBeforeRetryCheck.pauseWhileSet();
 
-            // shard merge is not resumable for any replica set state transitions or network errors
-            if (_stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge &&
-                (ErrorCodes::isRetriableError(status) || isRetriableOplogFetcherError(status)) &&
-                !_taskState.isExternalInterrupt() &&
-                _stateDocPersistedPromise.getFuture().isReady()) {
+            auto shouldRetryMigration = [&](WithLock, Status status) -> bool {
+                // Shard merge is not resumable for any replica set state transitions or network
+                // errors.
+                if (getProtocol() == MigrationProtocolEnum::kShardMerge)
+                    return false;
+
+                // We shouldn't retry migration after receiving the recipientForgetMigration command
+                // or on stepDown/shutDown.
+                if (_receivedRecipientForgetMigrationPromise.getFuture().isReady())
+                    return false;
+
+                if (!_stateDocPersistedPromise.getFuture().isReady())
+                    return false;
+
+                return ErrorCodes::isRetriableError(status) || isRetriableOplogFetcherError(status);
+            };
+
+            stdx::unique_lock lk(_mutex);
+            auto status = _taskState.isInterrupted() ? _taskState.getInterruptStatus()
+                                                     : applierStatus.getStatus();
+
+            if (shouldRetryMigration(lk, status)) {
                 // Reset the task state and clear the interrupt status.
                 if (!_taskState.isRunning()) {
                     _taskState.setState(TaskState::kRunning);
@@ -2770,10 +2816,6 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
         .thenRunOn(_recipientService->getInstanceCleanupExecutor())
         .onCompletion([this, self = shared_from_this()](
                           StatusOrStatusWith<TenantOplogApplier::OpTimePair> applierStatus) {
-            {
-                stdx::lock_guard lk(_mutex);
-                _killBackupCursor(lk);
-            }
             // On shutDown/stepDown, the _scopedExecutor may have already been shut down. So we
             // need to schedule the clean up work on the parent executor.
 

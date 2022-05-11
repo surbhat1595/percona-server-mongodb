@@ -194,6 +194,10 @@ public:
     static void withTransaction(OperationContext* opCtx,
                                 const NamespaceString& namespaceForInitialFind,
                                 unique_function<void(OperationContext*, TxnNumber)> func);
+    static void withTransaction(OperationContext* opCtx,
+                                const NamespaceString& namespaceForInitialFind,
+                                unique_function<void(OperationContext*, TxnNumber)> func,
+                                const WriteConcernOptions& writeConcern);
 
     /**
      * Runs the write 'request' on namespace 'nss' in a transaction with 'txnNumber'. Write must be
@@ -325,6 +329,11 @@ public:
         OperationContext* opCtx,
         const NamespaceString& nss,
         unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc);
+    void bumpCollectionVersionAndChangeMetadataInTxn(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc,
+        const WriteConcernOptions& writeConcern);
 
     /**
      * Same as bumpCollectionVersionAndChangeMetadataInTxn, but bumps the version for several
@@ -334,6 +343,11 @@ public:
         OperationContext* opCtx,
         const std::vector<NamespaceString>& collNames,
         unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc);
+    void bumpMultipleCollectionVersionsAndChangeMetadataInTxn(
+        OperationContext* opCtx,
+        const std::vector<NamespaceString>& collNames,
+        unique_function<void(OperationContext*, TxnNumber)> changeMetadataFunc,
+        const WriteConcernOptions& writeConcern);
 
     /**
      * Performs a split on the chunk with min value "minKey". If the split fails, it is marked as
@@ -416,8 +430,8 @@ public:
 
     void configureCollectionBalancing(OperationContext* opCtx,
                                       const NamespaceString& nss,
-                                      boost::optional<int64_t> chunkSizeBytes,
-                                      boost::optional<bool> balancerShouldMergeChunks,
+                                      boost::optional<int32_t> chunkSizeMB,
+                                      boost::optional<bool> defragmentCollection,
                                       boost::optional<bool> enableAutoSplitter);
 
     //
@@ -461,31 +475,6 @@ public:
      * Runs the setFeatureCompatibilityVersion command on all shards.
      */
     Status setFeatureCompatibilityVersionOnShards(OperationContext* opCtx, const BSONObj& cmdObj);
-
-    /**
-     * Enable the support for long collection name for each entity in 'config.collections' for
-     * which the support is unset, then force the catalog cache refresh of updated collections on
-     * each shard.
-     *
-     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
-     * phase 1 or 2.
-     *
-     * TODO: Remove once FCV 6.0 becomes last-lts
-     */
-    void enableSupportForLongCollectionName(OperationContext* opCtx);
-
-    /**
-     * Disable the support for long collection name for each entity in 'config.collections' for
-     * which the support is implicitely enabled, then force the catalog cache refresh of updated
-     * collections on each shard.
-     *
-     * This metadata change is not bound to any specific setFCV phase, so it could be safely run in
-     * phase 1 or 2.
-     *
-     * TODO: Remove once FCV 6.0 becomes last-lts
-     */
-    void disableSupportForLongCollectionName(OperationContext* opCtx);
-
 
     /*
      * Rename collection metadata as part of a renameCollection operation.

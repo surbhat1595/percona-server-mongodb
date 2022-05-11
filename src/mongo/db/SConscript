@@ -75,13 +75,15 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/catalog/cannot_enable_index_constraint_info',
-        '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
+        '$BUILD_DIR/mongo/db/catalog/cannot_convert_index_to_unique_info',
         '$BUILD_DIR/mongo/db/index_names',
         '$BUILD_DIR/mongo/db/repl/tenant_migration_errors',
         '$BUILD_DIR/mongo/db/write_concern_options',
         'process_health_feature_flag',
         'shutdown_in_progress_quiesce_info',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
     ]
 )
 
@@ -89,11 +91,19 @@ env.Library(
     target='multitenancy',
     source=[
         'multitenancy.cpp',
+        'tenant_namespace.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        'auth/security_token',
+        'multitenancy_params',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/auth',
+        '$BUILD_DIR/mongo/db/auth/security_token',
+        '$BUILD_DIR/mongo/idl/feature_flag',
+        'namespace_string',
+        'server_feature_flags',
+    ]
 )
 
 env.Library(
@@ -278,6 +288,7 @@ env.Library(
     target='multitenancy_params',
     source=[
         'multitenancy.idl',
+        'tenant_id.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -1054,6 +1065,7 @@ env.Library(
         'commands/server_status_core',
         'initialize_api_parameters',
         'introspect',
+        'multitenancy',
         'not_primary_error_tracker',
         'query_exec',
         'repl/repl_server_parameters',
@@ -1320,6 +1332,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
+        '$BUILD_DIR/mongo/db/query/collation/collator_interface',
         '$BUILD_DIR/mongo/db/storage/key_string',
     ],)
 
@@ -1493,6 +1506,7 @@ env.Library(
         'index_builds_coordinator_interface',
         'rebuild_indexes',
         'repair',
+        'server_feature_flags',
     ],
 )
 
@@ -2531,6 +2545,7 @@ if wiredtiger:
             'dbmessage_test.cpp',
             'db_raii_test.cpp',
             'db_raii_multi_collection_test.cpp',
+            'dollar_tenant_decoration_test.cpp',
             "explain_test.cpp",
             'field_parser_test.cpp',
             'field_ref_set_test.cpp',
@@ -2583,6 +2598,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/bson/util/bson_extract',
             '$BUILD_DIR/mongo/client/read_preference',
             '$BUILD_DIR/mongo/db/auth/auth',
+            '$BUILD_DIR/mongo/db/auth/security_token',
             '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
             '$BUILD_DIR/mongo/db/catalog/import_collection_oplog_entry',
             '$BUILD_DIR/mongo/db/catalog/index_build_entry_idl',
@@ -2620,6 +2636,7 @@ if wiredtiger:
             'logical_session_id_helpers',
             'logical_time',
             'mirror_maestro',
+            'multitenancy',
             'multitenancy_params',
             'namespace_string',
             'op_observer',

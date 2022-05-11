@@ -34,6 +34,7 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_impl.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/multitenancy.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/durable_catalog.h"
@@ -66,6 +67,7 @@ public:
 
     StatusWith<DurableCatalog::Entry> createCollection(OperationContext* opCtx,
                                                        NamespaceString ns) {
+        TenantNamespace tenantNs(boost::none, ns);
         AutoGetDb db(opCtx, ns.db(), LockMode::MODE_X);
         CollectionOptions options;
         options.uuid = UUID::gen();
@@ -74,12 +76,12 @@ public:
         {
             WriteUnitOfWork wuow(opCtx);
             std::tie(catalogId, rs) = unittest::assertGet(
-                _storageEngine->getCatalog()->createCollection(opCtx, ns, options, true));
+                _storageEngine->getCatalog()->createCollection(opCtx, tenantNs, options, true));
             wuow.commit();
         }
         std::shared_ptr<Collection> coll = std::make_shared<CollectionImpl>(
             opCtx,
-            ns,
+            tenantNs,
             catalogId,
             _storageEngine->getCatalog()->getMetaData(opCtx, catalogId),
             std::move(rs));
@@ -137,8 +139,9 @@ public:
     bool collectionExists(OperationContext* opCtx, const NamespaceString& nss) {
         std::vector<DurableCatalog::Entry> allCollections =
             _storageEngine->getCatalog()->getAllCatalogEntries(opCtx);
+        TenantNamespace tenantNs(boost::none, nss);
         return std::count_if(allCollections.begin(), allCollections.end(), [&](auto& entry) {
-            return nss == entry.nss;
+            return tenantNs == entry.tenantNs;
         });
     }
 

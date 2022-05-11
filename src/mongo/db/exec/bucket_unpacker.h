@@ -35,6 +35,8 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
 
 namespace mongo {
 /**
@@ -63,6 +65,78 @@ public:
     void setMetaField(boost::optional<std::string>&& field);
     const boost::optional<std::string>& metaField() const;
     boost::optional<HashedFieldName> metaFieldHashed() const;
+
+    // Returns whether 'field' depends on a pushed down $addFields or computed $project.
+    bool fieldIsComputed(StringData field) const;
+
+    // Says what to do when an event-level predicate cannot be mapped to a bucket-level predicate.
+    enum class IneligiblePredicatePolicy {
+        // When optimizing a query, it's fine if some predicates can't be pushed down. We'll still
+        // run the predicate after unpacking, so the results will be correct.
+        kIgnore,
+        // When creating a partial index, it's misleading if we can't handle a predicate: the user
+        // expects every predicate in the partialFilterExpression to contribute, somehow, to making
+        // the index smaller.
+        kError,
+    };
+
+    /**
+     * Takes a predicate after $_internalUnpackBucket on a bucketed field as an argument and
+     * attempts to map it to a new predicate on the 'control' field. For example, the predicate
+     * {a: {$gt: 5}} will generate the predicate {control.max.a: {$_internalExprGt: 5}}, which will
+     * be added before the $_internalUnpackBucket stage.
+     *
+     * If the original predicate is on the bucket's timeField we may also create a new predicate
+     * on the '_id' field to assist in index utilization. For example, the predicate
+     * {time: {$lt: new Date(...)}} will generate the following predicate:
+     * {$and: [
+     *      {_id: {$lt: ObjectId(...)}},
+     *      {control.min.time: {$_internalExprLt: new Date(...)}}
+     * ]}
+     *
+     * If the provided predicate is ineligible for this mapping, the function will return a nullptr.
+     * This should be interpreted as an always-true predicate.
+     *
+     * When using IneligiblePredicatePolicy::kIgnore, if the predicate can't be pushed down, it
+     * returns null. When using IneligiblePredicatePolicy::kError it raises a user error.
+     */
+    static std::unique_ptr<MatchExpression> createPredicatesOnBucketLevelField(
+        const MatchExpression* matchExpr,
+        const BucketSpec& bucketSpec,
+        int bucketMaxSpanSeconds,
+        ExpressionContext::CollationMatchesDefault collationMatchesDefault,
+        const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
+        bool haveComputedMetaField,
+        bool assumeNoMixedSchemaData,
+        IneligiblePredicatePolicy policy);
+
+    /**
+     * Converts an event-level predicate to a bucket-level predicate, such that
+     *
+     *     {$unpackBucket ...} {$match: <event-level predicate>}
+     *
+     * gives the same result as
+     *
+     *     {$match: <bucket-level predict>} {$unpackBucket ...} {$match: <event-level predicate>}
+     *
+     * This means the bucket-level predicate must include every bucket that might contain an event
+     * matching the event-level predicate.
+     *
+     * This helper is used when creating a partial index on a time-series collection: logically,
+     * we index only events that match the event-level partialFilterExpression, but physically we
+     * index any bucket that matches the bucket-level partialFilterExpression.
+     *
+     * When using IneligiblePredicatePolicy::kIgnore, if the predicate can't be pushed down, it
+     * returns null. When using IneligiblePredicatePolicy::kError it raises a user error.
+     */
+    static BSONObj pushdownPredicate(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const TimeseriesOptions& tsOptions,
+        ExpressionContext::CollationMatchesDefault collationMatchesDefault,
+        const BSONObj& predicate,
+        bool haveComputedMetaField,
+        bool assumeNoMixedSchemaData,
+        IneligiblePredicatePolicy policy);
 
     // The set of field names in the data region that should be included or excluded.
     std::set<std::string> fieldSet;

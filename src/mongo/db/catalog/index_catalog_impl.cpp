@@ -102,6 +102,77 @@ using IndexVersion = IndexDescriptor::IndexVersion;
 
 const BSONObj IndexCatalogImpl::_idObj = BSON("_id" << 1);
 
+namespace {
+/**
+ * Similar to _isSpecOK(), checks if the indexSpec is valid, conflicts, or already exists as a
+ * clustered index.
+ *
+ * Returns Status::OK() if no clustered index exists or the 'indexSpec' does not conflict with it.
+ * Returns ErrorCodes::IndexAlreadyExists if the 'indexSpec' already exists as the clustered index.
+ * Returns an error if the indexSpec fields conflict with the clustered index.
+ */
+Status isSpecOKClusteredIndexCheck(const BSONObj& indexSpec,
+                                   const boost::optional<ClusteredCollectionInfo>& collInfo) {
+    auto key = indexSpec.getObjectField("key");
+    bool keysMatch = clustered_util::matchesClusterKey(key, collInfo);
+
+    bool clusteredOptionPresent =
+        indexSpec.hasField("clustered") && indexSpec.getBoolField("clustered");
+
+    if (clusteredOptionPresent && !keysMatch) {
+        // The 'clustered' option implies the indexSpec must match the clustered index.
+        return Status(ErrorCodes::Error(6243700),
+                      "Cannot create index with option 'clustered' that does not match an existing "
+                      "clustered index");
+    }
+
+    auto name = indexSpec.getStringField("name");
+    bool namesMatch =
+        !collInfo.is_initialized() || collInfo->getIndexSpec().getName().get() == name;
+
+
+    if (!keysMatch && !namesMatch) {
+        // The indexes don't conflict at all.
+        return Status::OK();
+    }
+
+    // The collection is guaranteed to be clustered since at least the name or key matches a
+    // clustered index.
+    auto clusteredIndexSpec = collInfo->getIndexSpec();
+
+    if (namesMatch && !keysMatch) {
+        // Prohibit creating an index with the same 'name' as the cluster key but different key
+        // pattern.
+        return Status(ErrorCodes::Error(6100906),
+                      str::stream() << "Cannot create an index where the name matches the "
+                                       "clusteredIndex but the key does not -"
+                                    << " indexSpec: " << indexSpec
+                                    << ", clusteredIndex: " << collInfo->getIndexSpec().toBSON());
+    }
+
+    // Users should be able to call createIndexes on the cluster key. If a name isn't specified, a
+    // default one is generated. Silently ignore mismatched names.
+
+    BSONElement vElt = indexSpec["v"];
+    auto version = representAs<int>(vElt.number());
+    if (clusteredIndexSpec.getV() != version) {
+        return Status(ErrorCodes::Error(6100908),
+                      "Cannot create an index with the same key pattern as the collection's "
+                      "clusteredIndex but a different 'v' field");
+    }
+
+    if (indexSpec.hasField("unique") && indexSpec.getBoolField("unique") == false) {
+        return Status(ErrorCodes::Error(6100909),
+                      "Cannot create an index with the same key pattern as the collection's "
+                      "clusteredIndex but a different 'unique' field");
+    }
+
+    // The indexSpec matches the clustered index, which already exists implicitly.
+    return Status(ErrorCodes::IndexAlreadyExists,
+                  "The index already exists implicitly as the collection's clustered index");
+};
+}  // namespace
+
 // -------------
 
 std::unique_ptr<IndexCatalog> IndexCatalogImpl::clone() const {
@@ -582,19 +653,12 @@ Status _checkValidFilterExpressions(const MatchExpression* expression,
             }
             return Status::OK();
         case MatchExpression::GEO:
-            if (timeseriesMetricIndexesFeatureFlagEnabled) {
-                return Status::OK();
-            }
-            return Status(ErrorCodes::CannotCreateIndex,
-                          str::stream() << "Expression not supported in partial index: "
-                                        << expression->debugString());
         case MatchExpression::INTERNAL_BUCKET_GEO_WITHIN:
-            if (timeseriesMetricIndexesFeatureFlagEnabled) {
-                return Status::OK();
-            }
-            return Status(ErrorCodes::CannotCreateIndex,
-                          str::stream() << "Expression not supported in partial index: "
-                                        << expression->debugString());
+        case MatchExpression::INTERNAL_EXPR_EQ:
+        case MatchExpression::INTERNAL_EXPR_LT:
+        case MatchExpression::INTERNAL_EXPR_LTE:
+        case MatchExpression::INTERNAL_EXPR_GT:
+        case MatchExpression::INTERNAL_EXPR_GTE:
         case MatchExpression::MATCH_IN:
             if (timeseriesMetricIndexesFeatureFlagEnabled) {
                 return Status::OK();
@@ -814,22 +878,12 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
     }
 
     BSONElement clusteredElt = spec["clustered"];
-    if (clusteredElt && clusteredElt.trueValue() && !collection->isClustered()) {
-        return Status(ErrorCodes::Error(6100905),
-                      "Cannot have the 'clustered' option on a non-clustered collection");
-    }
-
-    if (collection->isClustered()) {
-        auto status = clustered_util::checkSpecDoesNotConflictWithClusteredIndex(
-            spec, collection->getClusteredInfo()->getIndexSpec());
+    if (collection->isClustered() || (clusteredElt && clusteredElt.trueValue())) {
+        // Clustered collections require checks to ensure the spec does not conflict with the
+        // implicit clustered index that exists on the clustered collection.
+        auto status = isSpecOKClusteredIndexCheck(spec, collection->getClusteredInfo());
         if (!status.isOK()) {
             return status;
-        }
-
-        if (clustered_util::matchesClusterKey(key, collection->getClusteredInfo())) {
-            // The index matches the clusteredIndex which already exists implicitly.
-            return Status(ErrorCodes::IndexAlreadyExists,
-                          "The collection is clustered implicitly by the index");
         }
     }
 
@@ -898,14 +952,10 @@ Status IndexCatalogImpl::_doesSpecConflictWithExisting(OperationContext* opCtx,
 
     const BSONObj key = spec.getObjectField(IndexDescriptor::kKeyPatternFieldName);
 
-    // Check if the spec conflicts with the clusteredIndex.
     if (spec["clustered"]) {
-        uassert(6243700,
-                "Cannot create index with option 'clustered' that does not match an existing "
-                "clustered index",
-                clustered_util::matchesClusterKey(
-                    spec.getObjectField(IndexDescriptor::kKeyPatternFieldName),
-                    collection->getClusteredInfo()));
+        // Not an error, but the spec is already validated against the collection options by
+        // _isSpecOK now and we know that if 'clustered' is true, then the index already exists.
+        return Status(ErrorCodes::IndexAlreadyExists, "The clustered index is implicitly built");
     }
 
     {
@@ -1384,6 +1434,7 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     // CollectionIndexUsageTrackerDecoration (shared state among Collection instances).
     auto oldEntry = _readyIndexes.release(oldDesc);
     invariant(oldEntry);
+    auto enforceDuplicateConstraints = oldEntry->accessMethod()->isEnforcingDuplicateConstraints();
     opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
         std::move(oldEntry), collection->getSharedDecorations()));
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
@@ -1398,6 +1449,7 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     auto newDesc = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
     auto newEntry = createIndexEntry(opCtx, collection, std::move(newDesc), flags);
     invariant(newEntry->isReady(opCtx, collection));
+    newEntry->accessMethod()->setEnforceDuplicateConstraints(enforceDuplicateConstraints);
     auto desc = newEntry->descriptor();
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
         .registerIndex(desc->indexName(), desc->keyPattern());
@@ -1600,7 +1652,8 @@ void IndexCatalogImpl::_unindexKeys(OperationContext* opCtx,
                                     const BSONObj& obj,
                                     RecordId loc,
                                     bool logIfError,
-                                    int64_t* const keysDeletedOut) const {
+                                    int64_t* const keysDeletedOut,
+                                    CheckRecordId checkRecordId) const {
     InsertDeleteOptions options;
     prepareInsertDeleteOptions(opCtx, collection->ns(), index->descriptor(), &options);
     options.logIfError = logIfError;
@@ -1631,10 +1684,12 @@ void IndexCatalogImpl::_unindexKeys(OperationContext* opCtx,
     // are allowed in unique indexes, WiredTiger does not do blind unindexing, and instead confirms
     // that the recordid matches the element we are removing.
     //
-    // We need to disable blind-deletes for in-progress indexes, in order to force recordid-matching
-    // for unindex operations, since initial sync can build an index over a collection with
-    // duplicates. See SERVER-17487 for more details.
-    options.dupsAllowed = options.dupsAllowed || !index->isReady(opCtx, collection);
+    // We need to disable blind-deletes if 'checkRecordId' is explicitly set 'On', or for
+    // in-progress indexes, in order to force recordid-matching for unindex operations, since
+    // initial sync can build an index over a collection with duplicates. See SERVER-17487 for more
+    // details.
+    options.dupsAllowed = options.dupsAllowed || !index->isReady(opCtx, collection) ||
+        (checkRecordId == CheckRecordId::On);
 
     int64_t removed = 0;
     Status status = index->accessMethod()->removeKeys(opCtx, keys, loc, options, &removed);
@@ -1659,7 +1714,8 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
                                       const BSONObj& obj,
                                       const RecordId& loc,
                                       bool logIfError,
-                                      int64_t* keysDeletedOut) const {
+                                      int64_t* keysDeletedOut,
+                                      CheckRecordId checkRecordId) const {
     SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
     auto& executionCtx = StorageExecutionContext::get(opCtx);
 
@@ -1687,7 +1743,8 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
             return;
         }
     }
-    _unindexKeys(opCtx, collection, entry, *keys, obj, loc, logIfError, keysDeletedOut);
+    _unindexKeys(
+        opCtx, collection, entry, *keys, obj, loc, logIfError, keysDeletedOut, checkRecordId);
 }
 
 Status IndexCatalogImpl::indexRecords(OperationContext* opCtx,
@@ -1752,7 +1809,8 @@ void IndexCatalogImpl::unindexRecord(OperationContext* opCtx,
                                      const BSONObj& obj,
                                      const RecordId& loc,
                                      bool noWarn,
-                                     int64_t* keysDeletedOut) const {
+                                     int64_t* keysDeletedOut,
+                                     CheckRecordId checkRecordId) const {
     if (keysDeletedOut) {
         *keysDeletedOut = 0;
     }
@@ -1763,7 +1821,8 @@ void IndexCatalogImpl::unindexRecord(OperationContext* opCtx,
         IndexCatalogEntry* entry = it->get();
 
         bool logIfError = !noWarn;
-        _unindexRecord(opCtx, collection, entry, obj, loc, logIfError, keysDeletedOut);
+        _unindexRecord(
+            opCtx, collection, entry, obj, loc, logIfError, keysDeletedOut, checkRecordId);
     }
 
     for (IndexCatalogEntryContainer::const_iterator it = _buildingIndexes.begin();
@@ -1773,7 +1832,8 @@ void IndexCatalogImpl::unindexRecord(OperationContext* opCtx,
 
         // If it's a background index, we DO NOT want to log anything.
         bool logIfError = entry->isReady(opCtx, collection) ? !noWarn : false;
-        _unindexRecord(opCtx, collection, entry, obj, loc, logIfError, keysDeletedOut);
+        _unindexRecord(
+            opCtx, collection, entry, obj, loc, logIfError, keysDeletedOut, checkRecordId);
     }
 }
 

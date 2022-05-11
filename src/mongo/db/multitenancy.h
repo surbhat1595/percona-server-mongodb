@@ -31,23 +31,20 @@
 
 #include <boost/optional.hpp>
 
-#include "mongo/bson/oid.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/tenant_id.h"
 
 namespace mongo {
 
 /**
- * kSystemTenantID must be unique across all possible tenant IDs.
- * Since the first four bytes of an OID are a unix epoch timestamp,
- * we can simply select a value prior to the inception of MongoDB,
- * and be guaranteed to never have a collision with a value
- * produced by OID::gen().
+ * Parses the tenantId from the '$tenant' field in the request if it exists and
+ * "multitenancySupport" is enabled. Then, sets the parsed tenantId on the opCtx.
  */
-extern const OID kSystemTenantID;
+void parseDollarTenantFromRequest(OperationContext* opCtx, const OpMsg& request);
 
 /**
- * Extract the active TenantID for this operation.
+ * Extract the active TenantId for this operation.
  */
-boost::optional<OID> getActiveTenant(OperationContext* opCtx);
+boost::optional<TenantId> getActiveTenant(OperationContext* opCtx);
 
 }  // namespace mongo

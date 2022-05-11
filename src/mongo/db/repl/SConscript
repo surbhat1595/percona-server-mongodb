@@ -522,6 +522,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/idl/idl_parser',
         'optime',
         'optime_base',
@@ -1364,6 +1365,8 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/clientdriver_network',
+        '$BUILD_DIR/mongo/db/multitenancy',
+        '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongo_process_interface',
         '$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger_import',
         '$BUILD_DIR/mongo/db/transaction',
@@ -1571,6 +1574,23 @@ if wiredtiger:
     )
 
     env.CppUnitTest(
+        target='tenant_migration_donor_service_test',
+        source=[
+            'tenant_migration_donor_service_test.cpp',
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/client/replica_set_monitor_protocol_test_util',
+            '$BUILD_DIR/mongo/db/op_observer_impl',
+            '$BUILD_DIR/mongo/transport/transport_layer_egress_init',
+            '$BUILD_DIR/mongo/unittest/unittest',
+            '$BUILD_DIR/mongo/util/clock_source_mock',
+            '$BUILD_DIR/mongo/util/version_impl',
+            'idempotency_test_fixture',
+            'tenant_migration_donor_service',
+        ]
+    )
+
+    env.CppUnitTest(
         target='db_repl_test',
         source=[
             'abstract_async_component_test.cpp',
@@ -1623,7 +1643,6 @@ if wiredtiger:
             'tenant_migration_recipient_access_blocker_test.cpp',
             'tenant_migration_recipient_entry_helpers_test.cpp',
             'tenant_migration_recipient_service_test.cpp',
-            'tenant_migration_donor_service_test.cpp',
         ],
         LIBDEPS=[
             '$BUILD_DIR/mongo/base',
@@ -1640,6 +1659,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
             '$BUILD_DIR/mongo/db/logical_session_id_helpers',
             '$BUILD_DIR/mongo/db/logical_time',
+            '$BUILD_DIR/mongo/db/multitenancy',
             '$BUILD_DIR/mongo/db/op_observer_impl',
             '$BUILD_DIR/mongo/db/query/command_request_response',
             '$BUILD_DIR/mongo/db/s/sharding_runtime_d',

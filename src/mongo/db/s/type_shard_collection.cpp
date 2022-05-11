@@ -35,13 +35,13 @@ namespace mongo {
 
 ShardCollectionType::ShardCollectionType(NamespaceString nss,
                                          OID epoch,
-                                         Timestamp creationTime,
+                                         Timestamp timestamp,
                                          UUID uuid,
                                          KeyPattern keyPattern,
                                          bool unique)
     : ShardCollectionTypeBase(std::move(nss),
                               std::move(epoch),
-                              std::move(creationTime),
+                              std::move(timestamp),
                               std::move(uuid),
                               std::move(keyPattern),
                               unique) {}
@@ -81,18 +81,6 @@ void ShardCollectionType::setAllowMigrations(bool allowMigrations) {
         setPre50CompatibleAllowMigrations(boost::none);
     else
         setPre50CompatibleAllowMigrations(false);
-}
-
-SupportingLongNameStatusEnum ShardCollectionType::getSupportingLongName() const {
-    return ShardCollectionTypeBase::getSupportingLongName().get_value_or(
-        SupportingLongNameStatusEnum::kDisabled);
-}
-
-void ShardCollectionType::setSupportingLongName(SupportingLongNameStatusEnum value) {
-    ShardCollectionTypeBase::setSupportingLongName(
-        value == SupportingLongNameStatusEnum::kDisabled
-            ? boost::none
-            : boost::optional<SupportingLongNameStatusEnum>(value));
 }
 
 }  // namespace mongo

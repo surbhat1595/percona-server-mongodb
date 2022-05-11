@@ -130,6 +130,9 @@ variables:
       resmoke_args: --help
       resmoke_jobs_max: 1
   - func: "send benchmark results"
+  - func: "analyze benchmark results"
+    vars:
+      suite: benchmark_suite
 
 - &jepsen_config_vars
   jepsen_key_time_limit: --key-time-limit 15
@@ -860,10 +863,28 @@ functions:
       display_name: Pip Requirements
 
   "send benchmark results":
-    command: json.send
-    params:
-      name: perf
-      file: src/perf.json
+    - command: json.send
+      params:
+        name: perf
+        file: src/perf.json
+
+    - command: perf.send
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        prefix: ${task_id}_${execution}
+        file: src/cedar_report.json
+
+  "analyze benchmark results":
+    - *f_expansions_write
+    - *configure_evergreen_api_credentials
+    - command: subprocess.exec
+      type: test
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/functions/benchmark_results_analyze.sh"
 
   "cleanup environment": &cleanup_environment
     command: subprocess.exec
@@ -1459,7 +1480,7 @@ functions:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
         local_file: src/minimizer-outputs.json
-        remote_file: ${project}/${build_variant}/${revision}/artifacts/minimizer-outputs-${build_id}.json
+        remote_file: ${project}/${build_variant}/${revision}/artifacts/minimizer-outputs-${task_id}-${execution}.json
         bucket: mciuploads
         permissions: private
         visibility: signed
@@ -1471,7 +1492,7 @@ functions:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
         local_file: src/jstestfuzz/out/minimizer-outputs-minimizedtest.js
-        remote_file: ${project}/${build_variant}/${revision}/artifacts/minimizer-outputs-minimizedtest-${build_id}.js
+        remote_file: ${project}/${build_variant}/${revision}/artifacts/minimizer-outputs-minimizedtest-${task_id}-${execution}.js
         bucket: mciuploads
         permissions: private
         visibility: signed
@@ -2057,6 +2078,19 @@ functions:
         files:
           - wiki_page_location.json
 
+  "attach local resmoke invocation":
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/local-resmoke-invocation.txt
+      remote_file: ${project}/${build_variant}/${revision}/local-resmoke-invocation-${task_id}-${execution}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: atext-plain
+      display_name: Resmoke.py Invocation for Local Usage
+
 
 # Pre task steps
 pre:
@@ -2067,6 +2101,7 @@ pre:
 post:
   - func: "f_expansions_write"
   - func: "upload npm logs"
+  - func: "attach local resmoke invocation"
   - func: "attach report"
   - func: "attach artifacts"
   - func: "save ec2 task artifacts"
@@ -2774,6 +2809,11 @@ tasks:
           --link-model=dynamic-sdk
           ${csfle_task_compile_flags}
           DESTDIR='$BUILD_ROOT/csfle-lib-$MONGO_VERSION'
+    - command: subprocess.exec
+      params:
+        binary: bash
+        args:
+          - "src/evergreen/csfle_run_tests.sh"
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -2784,6 +2824,86 @@ tasks:
         permissions: public-read
         content_type: ${content_type|application/tar}
         display_name: "Mongo CSFLE Library"
+
+- name: csfle_create_debug_lib
+  tags: []
+  commands:
+    - *f_expansions_write
+    - func: "scons compile"
+      vars:
+        targets: archive-mongo-csfle-dev archive-mongo-csfle-debug
+        task_compile_flags: >-
+          --dbg=on
+          --opt=off
+          --allocator=system
+          --enable-free-mon=off
+          --enterprise-features=fle
+          --js-engine=none
+          --link-model=dynamic-sdk
+          DESTDIR='$BUILD_ROOT/csfle-lib-$MONGO_VERSION'
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: "src/mongo-csfle-dev.${ext|tgz}"
+        remote_file: "${project}/mongo_csfle/${build_variant}/${revision}/mongo_csfle_v1_dev-${version}.${ext|tgz}"
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/tar}
+        display_name: "Mongo CSFLE Library dev"
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: "src/mongo-csfle-debug.${ext|tgz}"
+        remote_file: "${project}/mongo_csfle/${build_variant}/${revision}/mongo_csfle_v1_debug-${version}.${ext|tgz}"
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/tar}
+        display_name: "Mongo CSFLE Library debug"
+
+- name: csfle_install_tests
+  tags: []
+  depends_on:
+    - name: csfle_create_debug_lib
+  commands:
+    - *f_expansions_write
+    - func: "scons compile"
+      vars:
+        targets: archive-mongo-csfle-shlib-test
+        compiling_for_test: true
+        task_install_action:
+          default
+        task_compile_flags: >-
+          --allocator=system
+          --enable-free-mon=off
+          --enterprise-features=fle
+          --js-engine=none
+          --link-model=static
+          DESTDIR='$BUILD_ROOT/csfle-lib-$MONGO_VERSION'
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: "src/mongo-csfle-shlib-test-runtime.${ext|tgz}"
+        remote_file: "${project}/mongo_csfle/${build_variant}/${revision}/mongo_csfle_shlib_test-${version}.${ext|tgz}"
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/tar}
+        display_name: "Mongo CSFLE Shared Library Test"
+
+- name: csfle_run_tests
+  tags: []
+  depends_on:
+    - name: csfle_install_tests
+  commands:
+    - *f_expansions_write
+    - command: subprocess.exec
+      type: test
+      params:
+        binary: bash
+        args:
+          - "src/evergreen/csfle_run_tests.sh"
 
 - name: compile_benchmarks
   tags: []
@@ -3029,6 +3149,9 @@ tasks:
       exec_timeout_secs: 10800  # 3 hour timeout.
       resmoke_jobs_max: 1
   - func: "send benchmark results"
+  - func: "analyze benchmark results"
+    vars:
+      suite: benchmarks
 
 - <<: *benchmark_template
   name: benchmarks_sharding
@@ -3040,6 +3163,7 @@ tasks:
       suite: benchmarks_sharding
       resmoke_jobs_max: 1
   - func: "send benchmark results"
+  - func: "analyze benchmark results"
 
 - <<: *benchmark_template
   name: benchmarks_cst
@@ -3051,6 +3175,7 @@ tasks:
       suite: benchmarks_cst
       resmoke_jobs_max: 1
   - func: "send benchmark results"
+  - func: "analyze benchmark results"
 
 - <<: *benchmark_template
   name: benchmarks_bsoncolumn
@@ -3062,6 +3187,7 @@ tasks:
       suite: benchmarks_bsoncolumn
       resmoke_jobs_max: 1
   - func: "send benchmark results"
+  - func: "analyze benchmark results"
 
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
@@ -4949,7 +5075,16 @@ tasks:
 
 - <<: *gen_task_template
   name: clustered_collection_passthrough_gen
-  tags: ["large"]
+  tags: ["large", "clustered_collections"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: sharding_clustered_collections_gen
+  tags: ["large", "clustered_collections"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4972,21 +5107,19 @@ tasks:
     vars:
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_metrics
+- <<: *gen_task_template
+  name: concurrency_metrics_gen
   tags: ["concurrency"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_replication_metrics
+- <<: *gen_task_template
+  name: concurrency_replication_metrics_gen
   tags: ["concurrency", "repl", "disabled_on_code_coverage"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
       resmoke_jobs_max: 1
 
@@ -6811,6 +6944,116 @@ tasks:
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
 
+- name: csfle_push
+  tags: ["publish_csfle"]
+  patchable: false
+  stepback: false
+  depends_on:
+   - name: csfle_create_lib
+  commands:
+    - command: manifest.load
+    - func: "f_expansions_write"
+    - func: "git get project and add git tag"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
+    - func: "kill processes"
+    - func: "cleanup environment"
+    - func: "set up venv"
+    - func: "upload pip requirements"
+    - func: "get buildnumber"
+    - func: "f_expansions_write"
+    - func: "generate compile expansions"
+    - func: "apply compile expansions"
+    - func: "f_expansions_write"
+    - command: s3.get
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        remote_file: ${project}/mongo_csfle/${build_variant}/${revision}/mongo_csfle_v1-${version}.${ext|tgz}
+        bucket: mciuploads
+        local_file: src/mongo_csfle_v1.${ext|tgz}
+    - func: "generate compile expansions"
+    - func: "apply compile expansions"
+    - func: "set up remote credentials"
+      vars:
+        aws_key_remote: ${repo_aws_key}
+        aws_secret_remote: ${repo_aws_secret}
+    - func: "f_expansions_write"
+    - func: "set up notary client credentials"
+    - command: subprocess.exec
+      type: test
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/notary_client_csfle_run.sh"
+    # Put the csfle tarball/zipfile
+    - command: s3.put
+      params:
+        aws_secret: ${aws_secret}
+        local_file: src/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}
+        aws_key: ${aws_key}
+        bucket: build-push-testing
+        permissions: public-read
+        content_type: ${content_type|application/gzip}
+        remote_file: ${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}
+    # Put the csfle tarball signature
+    - command: s3.put
+      params:
+        aws_secret: ${aws_secret}
+        local_file: src/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig
+        aws_key: ${aws_key}
+        bucket: build-push-testing
+        permissions: public-read
+        content_type: ${content_type|application/gzip}
+        remote_file: ${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig
+    # Put the csfle tarball sha1
+    - command: s3.put
+      params:
+        aws_secret: ${aws_secret}
+        local_file: src/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1
+        aws_key: ${aws_key}
+        permissions: public-read
+        bucket: build-push-testing
+        content_type: text/plain
+        remote_file: ${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1
+    # Put the csfle tarball sha256
+    - command: s3.put
+      params:
+        aws_secret: ${aws_secret}
+        local_file: src/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256
+        permissions: public-read
+        aws_key: ${aws_key}
+        bucket: build-push-testing
+        content_type: text/plain
+        remote_file: ${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256
+    # Put the csfle tarball md5
+    - command: s3.put
+      params:
+        aws_secret: ${aws_secret}
+        local_file: src/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5
+        aws_key: ${aws_key}
+        bucket: build-push-testing
+        permissions: public-read
+        content_type: text/plain
+        remote_file: ${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5
+    - command: s3Copy.copy
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        s3_copy_files:
+            #Binaries
+            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}', 'bucket': 'build-push-testing'},
+               'destination': {'path': '${push_path}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'}}
+            #SHA1 for binaries
+            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
+               'destination': {'path': '${push_path}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'}}
+            #SHA256 for binaries
+            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256', 'bucket': 'build-push-testing'},
+               'destination': {'path': '${push_path}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256', 'bucket': '${push_bucket}'}}
+            #MD5 for binaries
+            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
+               'destination': {'path': '${push_path}/mongo_csfle_v1-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
+
 - <<: *task_template
   name: search
   tags: []
@@ -7257,6 +7500,36 @@ task_groups:
   tasks:
     - "csfle_create_lib"
 
+- name: csfle_build_debug_and_test
+  setup_task:
+    - func: "f_expansions_write"
+    - func: "apply compile expansions"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
+  teardown_task:
+  - func: "attach scons logs"
+  setup_group_can_fail_task: true
+  setup_group:
+    - command: manifest.load
+    - func: "git get project and add git tag"
+    - func: "set task expansion macros"
+    - func: "f_expansions_write"
+    - func: "kill processes"
+    - func: "cleanup environment"
+    - func: "set up venv"
+    - func: "upload pip requirements"
+    - func: "get buildnumber"
+    - func: "f_expansions_write"
+    - func: "set up win mount script"
+    - func: "generate compile expansions"
+  teardown_group:
+    - func: "umount shared scons directory"
+  max_hosts: 1
+  tasks:
+    - "csfle_create_debug_lib"
+    - "csfle_install_tests"
+    - "csfle_run_tests"
+
 #######################################
 #               Modules               #
 #######################################
@@ -7314,7 +7587,7 @@ buildvariants:
   - name: .auth !.audit !.multiversion
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams !.secondary_reads
-  - name: clustered_collection_passthrough_gen
+  - name: .clustered_collections
   - name: .misc_js
   - name: disk_wiredtiger
   - name: free_monitoring
@@ -7466,7 +7739,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-ubuntu1804
     compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: --excludeWithAnyTags=requires_ocsp_stapling
@@ -7495,6 +7768,7 @@ buildvariants:
     - ubuntu1804-build
   - name: build_variant_gen
   - name: .csfle
+  - name: .publish_csfle
 #  - name: .aggfuzzer .common # Disabled for FCV 5.3
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
@@ -7552,7 +7826,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-enterprise-ubuntu1804
     compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     test_flags: --excludeWithAnyTags=requires_ocsp_stapling
     resmoke_jobs_max: 4 # Avoid starting too many mongod's on ARM test servers
     has_packages: true
@@ -7587,6 +7861,9 @@ buildvariants:
   - name: .ssl
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
+    distros:
+    - ubuntu1804-test
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -7700,7 +7977,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-ubuntu2004
     compile_flags: --ssl MONGO_DISTMOD=ubuntu2004 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: ubuntu2004
     multiversion_edition: enterprise
     has_packages: true
@@ -7716,6 +7993,7 @@ buildvariants:
     - ubuntu2004-large
   - name: build_variant_gen
   - name: .csfle
+  - name: .publish_csfle
 #  - name: .aggfuzzer .common !.multiversion # Disabled for FCV 5.3
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
@@ -7755,7 +8033,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-enterprise-ubuntu2004
     compile_flags: --ssl MONGO_DISTMOD=ubuntu2004 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     resmoke_jobs_max: 4 # Avoid starting too many mongod's on ARM test servers
     has_packages: true
     packager_script: packager_enterprise.py
@@ -7789,6 +8067,7 @@ buildvariants:
   - name: .ssl
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -8110,7 +8389,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-amzn64
     compile_flags: --ssl MONGO_DISTMOD=amzn64 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
     multiversion_platform: amzn64
     multiversion_edition: enterprise
@@ -8148,6 +8427,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -8229,7 +8509,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-amazon2
     compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: amazon2
     multiversion_edition: enterprise
     has_packages: true
@@ -8264,6 +8544,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -8342,7 +8623,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-enterprise-amazon2
     compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
     test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip
     has_packages: true
@@ -8380,6 +8661,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -8858,6 +9140,9 @@ buildvariants:
       - windows-vsCurrent-large
   - name: .concurrency .common
   - name: .csfle
+  - name: .publish_csfle
+    distros:
+    - rhel70-small
   - name: disk_wiredtiger
   - name: .jscore .common !.auth
   - name: json_schema
@@ -8975,14 +9260,14 @@ buildvariants:
   display_name: macOS
   cron: "0 12 * * *" # Every day starting at 12:00
   run_on:
-  - macos-1014
+  - macos-1100
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     push_path: osx
     push_bucket: downloads.mongodb.org
     push_name: macos
     push_arch: x86_64
-    compile_env: DEVELOPER_DIR=/Applications/Xcode10.2.app
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
     compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
   tasks:
@@ -9028,11 +9313,11 @@ buildvariants:
   display_name: "* Shared Library macOS DEBUG"
   cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
-  - macos-1014
+  - macos-1100
   expansions: &macos-debug-expansions
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     resmoke_jobs_max: 6
-    compile_env: DEVELOPER_DIR=/Applications/Xcode10.2.app
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
     compile_flags: --ssl --dbg=on --opt=on -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars --link-model=dynamic
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -9059,7 +9344,7 @@ buildvariants:
   modules:
   - enterprise
   run_on:
-  - macos-1014
+  - macos-1100
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
@@ -9067,7 +9352,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: macos
     push_arch: x86_64-enterprise
-    compile_env: DEVELOPER_DIR=/Applications/Xcode10.2.app
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
     compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
   tasks:
@@ -9091,35 +9376,9 @@ buildvariants:
     distros:
     - rhel70-small
   - name: .csfle
-
-- name: enterprise-macos-xcode-current
-  display_name: "~ Enterprise macOS Xcode Current"
-  cron: "0 12 * * *" # Every day starting at 12:00
-  modules:
-  - enterprise
-  run_on:
-  - macos-1015
-  expansions:
-    test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
-    compile_env: DEVELOPER_DIR=/Applications/Xcode12.4.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --variables-files=etc/scons/xcode_macosx.vars
-    resmoke_jobs_max: 6
-    num_scons_link_jobs_available: 0.99
-  tasks:
-  - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
-  - name: audit
-  - name: auth_audit_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore !.ssl
-  - name: .jscore .common !.decimal !.sharding
-  - name: .jstestfuzz .common
-  - name: .logical_session_cache .one_sec
-  - name: mqlrun
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough_gen
-  - name: sasl
-  - name: .csfle
+  - name: .publish_csfle
+    distros:
+    - rhel70-small
 
 - name: enterprise-macos-rosetta-2
   display_name: "Enterprise macOS Via Rosetta 2"
@@ -9149,13 +9408,13 @@ buildvariants:
   - name: sasl
   - name: .csfle
 
-- name: enterprise-macos-rosetta-2-cxx20
-  display_name: "Enterprise macOS Via Rosetta 2 C++20 DEBUG"
+- name: enterprise-macos-cxx20
+  display_name: "Enterprise macOS C++20 DEBUG"
   cron: "0 12 * * *" # Every day starting at 12:00
   modules:
   - enterprise
   run_on:
-  - macos-1100-arm64
+  - macos-1100
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
@@ -9200,12 +9459,12 @@ buildvariants:
 - name: embedded-sdk-macos
   display_name: "Embedded SDK - macOS"
   run_on:
-  - macos-1014
+  - macos-1100
   cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
   expansions:
     test_flags: --excludeWithAnyTags=uses_transactions,incompatible_with_macos
     cmake_path: /Applications/cmake-3.11.0-Darwin-x86_64/CMake.app/Contents/bin/cmake
-    compile_env: DEVELOPER_DIR=/Applications/Xcode10.2.app
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
     compile_flags: >-
       --lto
       --variables-files=etc/scons/xcode_macosx.vars
@@ -9373,7 +9632,7 @@ buildvariants:
   expansions: &enterprise-rhel-80-64-bit-dynamic-required-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     has_packages: false
@@ -9488,6 +9747,9 @@ buildvariants:
   - name: .csfle
     distros:
       - rhel80-xlarge
+  - name: csfle_build_debug_and_test
+    distros:
+      - rhel80-xlarge
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
@@ -9510,7 +9772,7 @@ buildvariants:
   expansions: &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     has_packages: false
@@ -9552,7 +9814,7 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: clustered_collection_passthrough_gen
+  - name: .clustered_collections
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
     distros:
@@ -9932,7 +10194,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-rhel70
     compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: rhel70
     multiversion_edition: enterprise
     has_packages: true
@@ -9983,6 +10245,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: unittest_shell_hang_analyzer_gen
   - name: test_packages
     distros:
@@ -10030,7 +10293,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-rhel80
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     has_packages: true
@@ -10070,8 +10333,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
-    distros:
-      - rhel80-xlarge
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -10095,7 +10357,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-enterprise-rhel82
     compile_flags: --ssl MONGO_DISTMOD=rhel82 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: aarch64
@@ -10131,6 +10393,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -10246,6 +10509,41 @@ buildvariants:
   - name: sharding_auth_gen
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
+
+
+- name: ubuntu1804-sbe-yielding-debug
+  display_name: "Shared Library Ubuntu 18.04 DEBUG Yielding Support for SBE"
+  cron: "0 12 * * *" # Every day starting at 12:00
+  run_on:
+  - ubuntu1804-test
+  expansions:
+    resmoke_jobs_factor: 0.5  # Avoid starting too many mongod's
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    large_distro_name: ubuntu1804-large
+    test_flags: >-
+      --mongodSetParameters="{maintainValidCursorsAcrossSBEYieldandReadCommands: true}"
+  tasks:
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+      - ubuntu1804-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+      - ubuntu1804-xlarge
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
+    distros:
+      - ubuntu1804-xlarge
+  - name: build_variant_gen
+  - name: jsCore
+  - name: .aggregation
+  - name: replica_sets_jscore_passthrough
+  - name: sharded_collections_jscore_passthrough
+  - name: sharding_gen
+  - name: noPassthrough_gen
+  - name: noPassthroughWithMongod_gen
+  - name: .concurrency
 
 - name: ubuntu1804-container
   display_name: "Ubuntu 18.04 Container"
@@ -10455,7 +10753,7 @@ buildvariants:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
     compile_flags: --ssl MONGO_DISTMOD=rhel81 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     resmoke_jobs_factor: 0.25
     has_packages: true
     packager_script: packager_enterprise.py
@@ -10492,6 +10790,9 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
+    distros:
+    - rhel70-small
   - name: .publish
     distros:
     - rhel70-small
@@ -10540,7 +10841,7 @@ buildvariants:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     release_buid: true
     compile_flags: --ssl MONGO_DISTMOD=rhel72 -j3 --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     resmoke_jobs_max: 2
     has_packages: true
     packager_script: packager_enterprise.py
@@ -10577,6 +10878,9 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
+    distros:
+    - rhel70-small
   - name: .publish
     distros:
     - rhel70-small
@@ -10661,7 +10965,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-suse12
     compile_flags: --ssl MONGO_DISTMOD=suse12 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: suse12
     multiversion_edition: enterprise
     has_packages: true
@@ -10689,6 +10993,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -10763,7 +11068,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-suse15
     compile_flags: --ssl MONGO_DISTMOD=suse15 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: x86_64
@@ -10789,6 +11094,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: .publish
     distros:
     - suse15-small
@@ -10863,7 +11169,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-debian92
     compile_flags: --ssl MONGO_DISTMOD=debian92 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     num_scons_link_jobs_available: 0.0625
     multiversion_platform: debian92
     multiversion_edition: enterprise
@@ -10893,6 +11199,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -10969,7 +11276,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-debian10
     compile_flags: --ssl MONGO_DISTMOD=debian10 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic"
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: linux_x86_64
     multiversion_edition: base
     multiversion_platform_42_or_later: debian10
@@ -11003,6 +11310,7 @@ buildvariants:
   - name: snmp
   - name: .stitch
   - name: .csfle
+  - name: .publish_csfle
   - name: test_packages
     distros:
     - ubuntu2004-package

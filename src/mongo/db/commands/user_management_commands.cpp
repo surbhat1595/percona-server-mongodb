@@ -65,12 +65,14 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/multitenancy.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/factory.h"
@@ -208,7 +210,7 @@ Status checkOkayToGrantPrivilegesToRole(const RoleName& role, const PrivilegeVec
 
 // Temporary placeholder pending availability of NamespaceWithTenant.
 NamespaceString getNamespaceWithTenant(const NamespaceString& nss,
-                                       const boost::optional<OID>& tenant) {
+                                       const boost::optional<TenantId>& tenant) {
     if (tenant) {
         return NamespaceString(str::stream() << tenant.get() << '_' << nss.db(), nss.coll());
     } else {
@@ -454,7 +456,7 @@ Status removeRoleDocuments(OperationContext* opCtx,
  */
 Status insertPrivilegeDocument(OperationContext* opCtx,
                                const BSONObj& userObj,
-                               const boost::optional<OID>& tenant = boost::none) {
+                               const boost::optional<TenantId>& tenant = boost::none) {
     auto nss = getNamespaceWithTenant(AuthorizationManager::usersCollectionNamespace, tenant);
     Status status = insertAuthzDocument(opCtx, nss, userObj);
     if (status.isOK()) {
@@ -1020,7 +1022,7 @@ void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCt
     uassert(ErrorCodes::BadValue,
             "Username cannot contain NULL characters",
             cmd.getCommandParameter().find('\0') == std::string::npos);
-    UserName userName(cmd.getCommandParameter(), dbname, cmd.getTenantOverride());
+    UserName userName(cmd.getCommandParameter(), dbname, getActiveTenant(opCtx));
 
     uassert(ErrorCodes::BadValue,
             "Must provide a 'pwd' field for all user documents, except those"

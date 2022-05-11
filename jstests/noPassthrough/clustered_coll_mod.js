@@ -80,7 +80,6 @@ function testCollMod(coll, clusterKey, clusterKeyName) {
 }
 
 testCollMod(conn.getDB(jsTestName())["coll"], {_id: 1}, "_id_");
-testCollMod(conn.getDB("local")["coll"], {ts: 1}, "ts_1");
 
 MongoRunner.stopMongod(conn);
 })();

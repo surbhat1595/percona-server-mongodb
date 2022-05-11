@@ -179,9 +179,16 @@ public:
      */
     void notifyPersistedBalancerSettingsChanged();
 
+    /**
+     * Informs the balancer that the user has requested defragmentation to be stopped on a
+     * collection.
+     */
+    void abortCollectionDefragmentation(OperationContext* opCtx, const NamespaceString& nss);
+
     struct BalancerStatus {
         bool balancerCompliant;
         boost::optional<std::string> firstComplianceViolation;
+        boost::optional<BSONObj> details;
     };
     /**
      * Returns if a given collection is draining due to a removed shard, has chunks on an invalid
@@ -278,7 +285,9 @@ private:
      * Schedules migrations for the specified set of chunks and returns how many chunks were
      * successfully processed.
      */
-    int _moveChunks(OperationContext* opCtx, const MigrateInfoVector& candidateChunks);
+    int _moveChunks(OperationContext* opCtx,
+                    const MigrateInfoVector& chunksToRebalance,
+                    const MigrateInfoVector& chunksToDefragment);
 
     // Protects the state below
     Mutex _mutex = MONGO_MAKE_LATCH("Balancer::_mutex");

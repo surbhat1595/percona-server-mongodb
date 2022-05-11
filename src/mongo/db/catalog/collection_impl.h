@@ -43,13 +43,13 @@ class CollectionImpl final : public Collection {
 public:
     // TODO SERVER-56999: We should just need one API to create Collections
     explicit CollectionImpl(OperationContext* opCtx,
-                            const NamespaceString& nss,
+                            const TenantNamespace& tenantNs,
                             RecordId catalogId,
                             const CollectionOptions& options,
                             std::unique_ptr<RecordStore> recordStore);
 
     explicit CollectionImpl(OperationContext* opCtx,
-                            const NamespaceString& nss,
+                            const TenantNamespace& tenantNs,
                             RecordId catalogId,
                             std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
                             std::unique_ptr<RecordStore> recordStore);
@@ -62,14 +62,14 @@ public:
     public:
         // TODO SERVER-56999: We should just need one API to create Collections
         std::shared_ptr<Collection> make(OperationContext* opCtx,
-                                         const NamespaceString& nss,
+                                         const TenantNamespace& tenantNs,
                                          RecordId catalogId,
                                          const CollectionOptions& options,
                                          std::unique_ptr<RecordStore> rs) const final;
 
         std::shared_ptr<Collection> make(
             OperationContext* opCtx,
-            const NamespaceString& nss,
+            const TenantNamespace& tenantNs,
             RecordId catalogId,
             std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
             std::unique_ptr<RecordStore> rs) const final;
@@ -83,10 +83,14 @@ public:
     void setCommitted(bool val) final;
 
     const NamespaceString& ns() const final {
-        return _ns;
+        return _tenantNs.getNss();
     }
 
-    Status rename(OperationContext* opCtx, const NamespaceString& nss, bool stayTemp) final;
+    const TenantNamespace& tenantNs() const final {
+        return _tenantNs;
+    }
+
+    Status rename(OperationContext* opCtx, const TenantNamespace& tenantNs, bool stayTemp) final;
 
     RecordId getCatalogId() const final {
         return _catalogId;
@@ -147,7 +151,8 @@ public:
         OpDebug* opDebug,
         bool fromMigrate = false,
         bool noWarn = false,
-        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off) const final;
+        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off,
+        CheckRecordId checkRecordId = CheckRecordId::Off) const final;
 
     /**
      * Deletes the document from the collection.
@@ -160,10 +165,11 @@ public:
      * real delete.
      * 'loc' key to uniquely identify a record in a collection.
      * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
-     * 'cappedOK' if true, allows deletes on capped collections (Cloner::copyDB uses this).
      * 'noWarn' if unindexing the record causes an error, if noWarn is true the error
      * will not be logged.
      * 'storeDeletedDoc' whether to store the document deleted in the oplog.
+     * 'checkRecordId' whether to confirm the recordId matches the record we are removing when
+     * unindexing.
      */
     void deleteDocument(
         OperationContext* opCtx,
@@ -173,7 +179,8 @@ public:
         OpDebug* opDebug,
         bool fromMigrate = false,
         bool noWarn = false,
-        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off) const final;
+        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off,
+        CheckRecordId checkRecordId = CheckRecordId::Off) const final;
 
     /*
      * Inserts all documents inside one WUOW.
@@ -579,7 +586,7 @@ private:
         RecordId _cappedFirstRecord;
     };
 
-    NamespaceString _ns;
+    TenantNamespace _tenantNs;
     RecordId _catalogId;
     UUID _uuid;
     bool _cachedCommitted = true;

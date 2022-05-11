@@ -220,6 +220,8 @@ public:
     virtual const MemberConfig* findConfigMemberByHostAndPort(
         const HostAndPort& hap) const override;
 
+    virtual Status validateWriteConcern(const WriteConcernOptions& writeConcern) const override;
+
     virtual bool isConfigLocalHostAllowed() const override;
 
     virtual Milliseconds getConfigHeartbeatInterval() const override;
@@ -309,6 +311,8 @@ public:
     virtual Status updateTerm(OperationContext* opCtx, long long term);
 
     virtual void clearCommittedSnapshot() override;
+
+    void setCurrentCommittedSnapshotOpTime(OpTime time);
 
     virtual OpTime getCurrentCommittedSnapshotOpTime() const override;
 
@@ -413,6 +417,7 @@ private:
     Date_t _myLastDurableWallTime;
     OpTime _myLastAppliedOpTime;
     Date_t _myLastAppliedWallTime;
+    OpTime _currentCommittedSnapshotOpTime;
 
     long long _term = OpTime::kInitialTerm;
     bool _resetLastOpTimesCalled = false;

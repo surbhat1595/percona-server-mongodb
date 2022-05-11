@@ -46,17 +46,23 @@ public:
 
     virtual DefragmentationPhaseEnum getType() const = 0;
 
+    virtual DefragmentationPhaseEnum getNextPhase() const = 0;
+
     virtual boost::optional<DefragmentationAction> popNextStreamableAction(
         OperationContext* opCtx) = 0;
 
     virtual boost::optional<MigrateInfo> popNextMigration(
-        const stdx::unordered_set<ShardId>& unavailableShards) = 0;
+        OperationContext* opCtx, stdx::unordered_set<ShardId>* usedShards) = 0;
 
     virtual void applyActionResult(OperationContext* opCtx,
                                    const DefragmentationAction& action,
                                    const DefragmentationActionResponse& response) = 0;
 
+    virtual BSONObj reportProgress() const = 0;
+
     virtual bool isComplete() const = 0;
+
+    virtual void userAbort() = 0;
 };
 
 class BalancerDefragmentationPolicyImpl : public BalancerDefragmentationPolicy {
@@ -72,6 +78,11 @@ public:
     bool isDefragmentingCollection(const UUID& uuid) override {
         return _defragmentationStates.contains(uuid);
     }
+
+    virtual BSONObj reportProgressOn(const UUID& uuid) override;
+
+    MigrateInfoVector selectChunksToMove(OperationContext* opCtx,
+                                         stdx::unordered_set<ShardId>* usedShards) override;
 
     SemiFuture<DefragmentationAction> getNextStreamingAction(OperationContext* opCtx) override;
 
@@ -91,10 +102,17 @@ public:
                                    DataSizeInfo action,
                                    const StatusWith<DataSizeResponse>& result) override;
 
+    void acknowledgeMoveResult(OperationContext* opCtx,
+                               MigrateInfo action,
+                               const Status& result) override;
+
     void closeActionStream() override;
 
     void refreshCollectionDefragmentationStatus(OperationContext* opCtx,
                                                 const CollectionType& coll) override;
+
+    void abortCollectionDefragmentation(OperationContext* opCtx,
+                                        const NamespaceString& nss) override;
 
 private:
     static constexpr int kMaxConcurrentOperations = 50;
@@ -102,7 +120,7 @@ private:
     /**
      * Returns the next action from any collection in phase 1 or 3 or boost::none if there are no
      * actions to perform.
-     * Must be called while holding the _streamingMutex.
+     * Must be called while holding the _stateMutex.
      */
     boost::optional<DefragmentationAction> _nextStreamingAction(OperationContext* opCtx);
 
@@ -112,9 +130,15 @@ private:
     DefragmentationPhaseEnum _getNextPhase(DefragmentationPhaseEnum currentPhase);
 
     /**
+     * Advances the defragmentation state of the specified collection to the next actionable phase
+     * (or sets the related DefragmentationPhase object to nullptr if nothing more can be done).
+     */
+    bool _refreshDefragmentationPhaseFor(OperationContext* opCtx, const UUID& collUuid);
+
+    /**
      * Move to the next phase and persist the phase change. This will end defragmentation if the
      * next phase is kFinished.
-     * Must be called while holding the _streamingMutex.
+     * Must be called while holding the _stateMutex.
      */
     std::unique_ptr<DefragmentationPhase> _transitionPhases(OperationContext* opCtx,
                                                             const CollectionType& coll,
@@ -130,7 +154,7 @@ private:
     /**
      * Write the new phase to the defragmentationPhase field in config.collections. If phase is
      * kFinished, the field will be removed.
-     * Must be called while holding the _streamingMutex.
+     * Must be called while holding the _stateMutex.
      */
     void _persistPhaseUpdate(OperationContext* opCtx,
                              DefragmentationPhaseEnum phase,
@@ -138,19 +162,15 @@ private:
 
     /**
      * Remove all datasize fields from config.chunks for the given namespace.
-     * Must be called while holding the _streamingMutex.
+     * Must be called while holding the _stateMutex.
      */
-    void _clearDataSizeInformation(OperationContext* opCtx, const UUID& uuid);
-
-    void _applyActionResult(OperationContext* opCtx,
-                            const UUID& uuid,
-                            const NamespaceString& nss,
-                            const DefragmentationAction& action,
-                            const DefragmentationActionResponse& response);
+    void _clearDefragmentationState(OperationContext* opCtx, const UUID& uuid);
 
     void _processEndOfAction(WithLock, OperationContext* opCtx);
 
-    Mutex _streamingMutex = MONGO_MAKE_LATCH("BalancerChunkMergerImpl::_streamingMutex");
+    void _yieldNextStreamingAction(WithLock, OperationContext* opCtx);
+
+    Mutex _stateMutex = MONGO_MAKE_LATCH("BalancerChunkMergerImpl::_stateMutex");
 
     unsigned _concurrentStreamingOps{0};
 

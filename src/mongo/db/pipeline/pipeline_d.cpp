@@ -106,8 +106,7 @@ namespace {
  *    0. When the 'internalQueryForceClassicEngine' feature flag is 'false'.
  *    1. When 'allowDiskUse' is false. We currently don't support spilling in the SBE HashAgg
  *       stage. This will change once that is supported when SERVER-58436 is complete.
- *    2. $match stage does not have $or and thus, does not need subplanning.
- *    3. When the DocumentSourceGroup has 'doingMerge=false', this will change when we implement
+ *    2. When the DocumentSourceGroup has 'doingMerge=false', this will change when we implement
  *       hash table spilling in SERVER-58436.
  */
 std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleGroupsForPushdown(
@@ -119,12 +118,6 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleGr
     // which requires stages to be wrapped in an interface.
     std::vector<std::unique_ptr<InnerPipelineStageInterface>> groupsForPushdown;
 
-    // In case that we have a top $or for $match stage, it triggers the tripwire assertion 5842500
-    // because subplanning does not expect that the base query has pushed down $group stage(s) but
-    // it does when $group stage exist in pipeline.
-    // TODO SERVER-60197: Remove this check after supporting this scenario.
-    auto queryNeedsSubplanning = SubplanStage::needsSubplanning(*cq);
-
     // This handles the case of unionWith against an unknown collection.
     if (collection == nullptr) {
         return {};
@@ -132,7 +125,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleGr
 
     if (!feature_flags::gFeatureFlagSBEGroupPushdown.isEnabled(
             serverGlobalParams.featureCompatibility) ||
-        cq->getForceClassicEngine() || queryNeedsSubplanning) {
+        cq->getForceClassicEngine()) {
         return {};
     }
 
@@ -153,7 +146,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleGr
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExecutor(
     const intrusive_ptr<ExpressionContext>& expCtx,
-    const CollectionPtr& collection,
+    const MultiCollection& collections,
     const NamespaceString& nss,
     BSONObj queryObj,
     BSONObj projectionObj,
@@ -165,6 +158,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     const size_t plannerOpts,
     const MatchExpressionParser::AllowedFeatureSet& matcherFeatures,
     Pipeline* pipeline) {
+    const auto& collection = collections.getMainCollection();
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     query_request_helper::setTailableMode(expCtx->tailableMode, findCommand.get());
     findCommand->setFilter(queryObj.getOwned());
@@ -260,7 +254,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
 
     auto permitYield = true;
     return getExecutorFind(expCtx->opCtx,
-                           &collection,
+                           collections,
                            std::move(cq.getValue()),
                            [&](auto* canonicalQuery) {
                                canonicalQuery->setPipeline(extractSbeCompatibleGroupsForPushdown(
@@ -626,10 +620,11 @@ PipelineD::buildInnerQueryExecutorSample(DocumentSourceSample* sampleStage,
 }
 
 std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutor(const CollectionPtr& collection,
+PipelineD::buildInnerQueryExecutor(const MultiCollection& collections,
                                    const NamespaceString& nss,
                                    const AggregateCommandRequest* aggRequest,
                                    Pipeline* pipeline) {
+    const auto& collection = collections.getMainCollection();
     auto expCtx = pipeline->getContext();
 
     // We will be modifying the source vector as we go.
@@ -659,17 +654,18 @@ PipelineD::buildInnerQueryExecutor(const CollectionPtr& collection,
     const auto geoNearStage =
         sources.empty() ? nullptr : dynamic_cast<DocumentSourceGeoNear*>(sources.front().get());
     if (geoNearStage) {
-        return buildInnerQueryExecutorGeoNear(collection, nss, aggRequest, pipeline);
+        return buildInnerQueryExecutorGeoNear(collections, nss, aggRequest, pipeline);
     } else {
-        return buildInnerQueryExecutorGeneric(collection, nss, aggRequest, pipeline);
+        return buildInnerQueryExecutorGeneric(collections, nss, aggRequest, pipeline);
     }
 }
 
 void PipelineD::attachInnerQueryExecutorToPipeline(
-    const CollectionPtr& collection,
+    const MultiCollection& collections,
     PipelineD::AttachExecutorCallback attachExecutorCallback,
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
     Pipeline* pipeline) {
+    auto& collection = collections.getMainCollection();
     // If the pipeline doesn't need a $cursor stage, there will be no callback function and
     // PlanExecutor provided in the 'attachExecutorCallback' object, so we don't need to do
     // anything.
@@ -679,14 +675,14 @@ void PipelineD::attachInnerQueryExecutorToPipeline(
 }
 
 void PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
-    const CollectionPtr& collection,
+    const MultiCollection& collections,
     const NamespaceString& nss,
     const AggregateCommandRequest* aggRequest,
     Pipeline* pipeline) {
 
-    auto callback = PipelineD::buildInnerQueryExecutor(collection, nss, aggRequest, pipeline);
+    auto callback = PipelineD::buildInnerQueryExecutor(collections, nss, aggRequest, pipeline);
     PipelineD::attachInnerQueryExecutorToPipeline(
-        collection, callback.first, std::move(callback.second), pipeline);
+        collections, callback.first, std::move(callback.second), pipeline);
 }
 
 namespace {
@@ -815,7 +811,7 @@ auto buildProjectionForPushdown(const DepsTracker& deps,
 }  // namespace
 
 std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutorGeneric(const CollectionPtr& collection,
+PipelineD::buildInnerQueryExecutorGeneric(const MultiCollection& collections,
                                           const NamespaceString& nss,
                                           const AggregateCommandRequest* aggRequest,
                                           Pipeline* pipeline) {
@@ -872,7 +868,7 @@ PipelineD::buildInnerQueryExecutorGeneric(const CollectionPtr& collection,
     // Create the PlanExecutor.
     bool shouldProduceEmptyDocs = false;
     auto exec = uassertStatusOK(prepareExecutor(expCtx,
-                                                collection,
+                                                collections,
                                                 nss,
                                                 pipeline,
                                                 sortStage,
@@ -906,10 +902,11 @@ PipelineD::buildInnerQueryExecutorGeneric(const CollectionPtr& collection,
 }
 
 std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutorGeoNear(const CollectionPtr& collection,
+PipelineD::buildInnerQueryExecutorGeoNear(const MultiCollection& collections,
                                           const NamespaceString& nss,
                                           const AggregateCommandRequest* aggRequest,
                                           Pipeline* pipeline) {
+    const auto& collection = collections.getMainCollection();
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "$geoNear requires a geo index to run, but " << nss.ns()
                           << " does not exist",
@@ -934,7 +931,7 @@ PipelineD::buildInnerQueryExecutorGeoNear(const CollectionPtr& collection,
     bool shouldProduceEmptyDocs = false;
     auto exec = uassertStatusOK(
         prepareExecutor(expCtx,
-                        collection,
+                        collections,
                         nss,
                         pipeline,
                         nullptr, /* sortStage */
@@ -968,7 +965,7 @@ PipelineD::buildInnerQueryExecutorGeoNear(const CollectionPtr& collection,
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prepareExecutor(
     const intrusive_ptr<ExpressionContext>& expCtx,
-    const CollectionPtr& collection,
+    const MultiCollection& collections,
     const NamespaceString& nss,
     Pipeline* pipeline,
     const boost::intrusive_ptr<DocumentSourceSort>& sortStage,
@@ -1060,7 +1057,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prep
         // See if the query system can handle the $group and $sort stage using a DISTINCT_SCAN
         // (SERVER-9507).
         auto swExecutorGrouped = attemptToGetExecutor(expCtx,
-                                                      collection,
+                                                      collections,
                                                       nss,
                                                       queryObj,
                                                       projObj,
@@ -1109,7 +1106,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prep
         isChangeStream ? expCtx->temporarilyChangeCollator(std::move(collatorForCursor)) : nullptr;
 
     return attemptToGetExecutor(expCtx,
-                                collection,
+                                collections,
                                 nss,
                                 queryObj,
                                 projObj,

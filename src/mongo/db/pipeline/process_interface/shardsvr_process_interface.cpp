@@ -68,7 +68,6 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& nss,
     ChunkVersion targetCollectionVersion) const {
-
     auto const shardId = ShardingState::get(expCtx->opCtx)->shardId();
     auto* catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
 
@@ -84,37 +83,10 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
         routingInfo.isSharded() ? routingInfo.getVersion() : ChunkVersion::UNSHARDED();
 
     uassert(StaleEpochInfo(nss),
-            str::stream() << "could not act as router for " << nss.ns() << ", wanted "
+            str::stream() << "Could not act as router for " << nss.ns() << ", wanted "
                           << targetCollectionVersion.toString() << ", but found "
                           << foundVersion.toString(),
-            foundVersion.epoch() == targetCollectionVersion.epoch());
-}
-
-std::pair<std::vector<FieldPath>, bool>
-ShardServerProcessInterface::collectDocumentKeyFieldsForHostedCollection(OperationContext* opCtx,
-                                                                         const NamespaceString& nss,
-                                                                         UUID uuid) const {
-    invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
-
-    auto* const catalogCache = Grid::get(opCtx)->catalogCache();
-    auto swCM = catalogCache->getCollectionRoutingInfo(opCtx, nss);
-    if (swCM.isOK()) {
-        const auto& cm = swCM.getValue();
-        if (cm.isSharded() && cm.uuidMatches(uuid)) {
-            // Unpack the shard key. Collection is now sharded so the document key fields will never
-            // change, mark as final.
-            return {_shardKeyToDocumentKeyFields(cm.getShardKeyPattern().getKeyPatternFields()),
-                    true};
-        }
-    } else if (swCM != ErrorCodes::NamespaceNotFound) {
-        uassertStatusOK(std::move(swCM));
-    }
-
-    // An unsharded collection can still become sharded so is not final. If the uuid doesn't match
-    // the one stored in the ScopedCollectionDescription, this implies that the collection has been
-    // dropped and recreated as sharded. We don't know what the old document key fields might have
-    // been in this case so we return just _id.
-    return {{"_id"}, false};
+            foundVersion.isSameCollection(targetCollectionVersion));
 }
 
 boost::optional<Document> ShardServerProcessInterface::lookupSingleDocument(

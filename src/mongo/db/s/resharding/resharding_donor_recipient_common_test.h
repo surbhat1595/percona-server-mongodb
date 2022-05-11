@@ -51,7 +51,7 @@ using namespace fmt::literals;
 class ReshardingDonorRecipientCommonInternalsTest : public ShardServerTestFixture {
 public:
     const UUID kExistingUUID = UUID::gen();
-    const Timestamp kExistingTimestamp = Timestamp();
+    const Timestamp kExistingTimestamp = Timestamp(10, 5);
     const NamespaceString kOriginalNss = NamespaceString("db", "foo");
 
     const NamespaceString kTemporaryReshardingNss =
@@ -130,7 +130,7 @@ protected:
         if (!OperationShardingState::isOperationVersioned(opCtx)) {
             const auto version = cm.getVersion(kThisShard.getShardId());
             BSONObjBuilder builder;
-            version.appendToCommand(&builder);
+            version.serializeToBSON(ChunkVersion::kShardVersionField, &builder);
 
             auto& oss = OperationShardingState::get(opCtx);
             oss.initializeClientRoutingVersionsFromCommand(nss, builder.obj());

@@ -635,16 +635,16 @@ void TransactionParticipant::Participant::_uassertNoConflictingInternalTransacti
             continue;
         }
 
-        uassert(
-            ErrorCodes::RetryableTransactionInProgress,
-            str::stream() << "Cannot run retryable write with session id " << _sessionId()
-                          << " and transaction number " << txnNumberAndRetryCounter.getTxnNumber()
-                          << " because it is being executed in a retryable internal transaction "
-                          << " with session id " << txnParticipant._sessionId()
-                          << " and transaction number "
-                          << txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber()
-                          << " in state " << txnParticipant.o().txnState,
-            !txnParticipant.transactionIsOpen());
+        uassert(ErrorCodes::RetryableTransactionInProgress,
+                str::stream() << "Cannot run retryable write with session id " << _sessionId()
+                              << " and transaction number "
+                              << txnNumberAndRetryCounter.getTxnNumber()
+                              << " because it is being executed in a retryable internal transaction"
+                              << " with session id " << txnParticipant._sessionId()
+                              << " and transaction number "
+                              << txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber()
+                              << " in state " << txnParticipant.o().txnState,
+                !txnParticipant.transactionIsOpen());
     }
 }
 
@@ -989,6 +989,40 @@ SharedSemiFuture<void> TransactionParticipant::Participant::onExitPrepare() cons
     // The participant is in prepare, so return a future that will be signaled when the participant
     // transitions out of prepare.
     return o().txnState._exitPreparePromise->getFuture();
+}
+
+SharedSemiFuture<void> TransactionParticipant::Participant::onCompletion() const {
+    if (!o().txnState._completionPromise) {
+        // The participant is not in progress or in prepare.
+        invariant(!o().txnState.isOpen());
+        return Future<void>::makeReady();
+    }
+
+    // The participant is in progress or in prepare, so return a future that will be signaled when
+    // the participant commits or aborts.
+    invariant(o().txnState.isOpen());
+    return o().txnState._completionPromise->getFuture();
+}
+
+SharedSemiFuture<void>
+TransactionParticipant::Participant::onConflictingInternalTransactionCompletion(
+    OperationContext* opCtx) const {
+    auto& retryableWriteTxnParticipantCatalog =
+        getRetryableWriteTransactionParticipantCatalog(opCtx);
+    invariant(retryableWriteTxnParticipantCatalog.isValid());
+
+    for (const auto& [_, txnParticipant] : retryableWriteTxnParticipantCatalog.getParticipants()) {
+        if (txnParticipant._sessionId() == _sessionId() ||
+            !txnParticipant._isInternalSessionForRetryableWrite()) {
+            continue;
+        }
+        if (txnParticipant.transactionIsOpen()) {
+            return txnParticipant.onCompletion();
+        }
+    }
+
+    // There is no conflicting internal transaction.
+    return Future<void>::makeReady();
 }
 
 void TransactionParticipant::Participant::_setReadSnapshot(OperationContext* opCtx,
@@ -1618,7 +1652,7 @@ void TransactionParticipant::Participant::addTransactionOperation(
     invariant(p().autoCommit && !*p().autoCommit &&
               o().activeTxnNumberAndRetryCounter.getTxnNumber() != kUninitializedTxnNumber);
     invariant(opCtx->lockState()->inAWriteUnitOfWork());
-    p().transactionOperations.push_back(operation);
+
     const auto stmtIds = operation.getStatementIds();
     for (auto stmtId : stmtIds) {
         auto [_, inserted] = p().transactionStmtIds.insert(stmtId);
@@ -1626,6 +1660,7 @@ void TransactionParticipant::Participant::addTransactionOperation(
                 str::stream() << "Found two operations using the same stmtId of " << stmtId,
                 inserted);
     }
+    p().transactionOperations.push_back(operation);
 
     p().transactionOperationBytes +=
         repl::DurableOplogEntry::getDurableReplOperationSize(operation);
@@ -2277,7 +2312,7 @@ void TransactionParticipant::TransactionState::transitionTo(StateFlag newState,
                                 << ", Illegal attempted next state: " << toString(newState));
     }
 
-    // If we are transitioning out of prepare, signal waiters by fulfilling the completion promise.
+    // If we are transitioning out of prepare, fulfill and reset the exit prepare promise.
     if (isPrepared()) {
         invariant(_exitPreparePromise);
         _exitPreparePromise->emplaceValue();
@@ -2286,11 +2321,23 @@ void TransactionParticipant::TransactionState::transitionTo(StateFlag newState,
 
     _state = newState;
 
-    // If we have transitioned into prepare, set the completion promise so other threads can wait
-    // on the participant to transition out of prepare.
+    // If we have transitioned into prepare, initialize the exit prepare promise so other threads
+    // can wait for the participant to transition out of prepare.
     if (isPrepared()) {
         invariant(!_exitPreparePromise);
         _exitPreparePromise.emplace();
+    }
+
+    if (isOpen() && !_completionPromise) {
+        // If we have transitioned into the in progress or prepare state, initialize the commit or
+        // abort promise so other threads can wait for the participant to commit or abort.
+        _completionPromise.emplace();
+    } else if (!isOpen() && _completionPromise) {
+        // If we have transitioned into the commited or aborted or none state, fulfill and reset the
+        // commit or abort promise. If the state transition is caused by a refresh, the promise is
+        // expected to have not been initialized and no work is required.
+        _completionPromise->emplaceValue();
+        _completionPromise.reset();
     }
 }
 
@@ -2319,6 +2366,8 @@ std::string TransactionParticipant::Participant::_transactionInfoForLog(
     lsidBuilder.doneFast();
 
     parametersBuilder.append("txnNumber", o().activeTxnNumberAndRetryCounter.getTxnNumber());
+    parametersBuilder.append("txnRetryCounter",
+                             *o().activeTxnNumberAndRetryCounter.getTxnRetryCounter());
     parametersBuilder.append("autocommit", p().autoCommit ? *p().autoCommit : true);
     apiParameters.appendInfo(&parametersBuilder);
     readConcernArgs.appendInfo(&parametersBuilder);
@@ -2393,6 +2442,8 @@ void TransactionParticipant::Participant::_transactionInfoForLog(
     lsidBuilder.doneFast();
 
     parametersBuilder.append("txnNumber", o().activeTxnNumberAndRetryCounter.getTxnNumber());
+    parametersBuilder.append("txnRetryCounter",
+                             *o().activeTxnNumberAndRetryCounter.getTxnRetryCounter());
     parametersBuilder.append("autocommit", p().autoCommit ? *p().autoCommit : true);
     apiParameters.appendInfo(&parametersBuilder);
     readConcernArgs.appendInfo(&parametersBuilder);
@@ -2581,8 +2632,7 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
     _resetTransactionState(lk, TransactionState::kNone);
 
     // Reset the transactions metrics
-    o(lk).transactionMetricsObserver.resetSingleTransactionStats(
-        txnNumberAndRetryCounter.getTxnNumber());
+    o(lk).transactionMetricsObserver.resetSingleTransactionStats(txnNumberAndRetryCounter);
 }
 
 void RetryableWriteTransactionParticipantCatalog::addParticipant(
@@ -2657,15 +2707,12 @@ void TransactionParticipant::Participant::_refreshSelfFromStorageIfNeeded(Operat
         o(lg).activeTxnNumberAndRetryCounter.setTxnNumber(lastTxnRecord->getTxnNum());
         o(lg).activeTxnNumberAndRetryCounter.setTxnRetryCounter([&] {
             if (lastTxnRecord->getState()) {
-                if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
-                    uassert(5875200,
-                            str::stream()
-                                << "Expected the config.transactions entry for transaction "
-                                << lastTxnRecord->getTxnNum() << " on session "
-                                << lastTxnRecord->getSessionId()
-                                << " to have a 'txnRetryCounter' field",
-                            lastTxnRecord->getTxnRetryCounter().has_value());
+                if (lastTxnRecord->getTxnRetryCounter().has_value()) {
+                    uassert(
+                        ErrorCodes::InvalidOptions,
+                        "TxnRetryCounter is only supported when internal transactions are enabled",
+                        feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                            serverGlobalParams.featureCompatibility));
                     return *lastTxnRecord->getTxnRetryCounter();
                 }
                 return 0;
@@ -2845,7 +2892,7 @@ void TransactionParticipant::Participant::_invalidate(WithLock wl) {
 
     // Reset the transactions metrics.
     o(wl).transactionMetricsObserver.resetSingleTransactionStats(
-        o().activeTxnNumberAndRetryCounter.getTxnNumber());
+        o().activeTxnNumberAndRetryCounter);
 }
 
 void TransactionParticipant::Participant::_resetRetryableWriteState() {
@@ -3004,11 +3051,13 @@ UpdateRequest TransactionParticipant::Participant::_makeUpdateRequest(
     return updateRequest;
 }
 
-void TransactionParticipant::Participant::setCommittedStmtIdsForTest(
-    OperationContext* opCtx, std::vector<int> stmtIdsCommitted) {
+void TransactionParticipant::Participant::addCommittedStmtIds(
+    OperationContext* opCtx,
+    const std::vector<StmtId>& stmtIdsCommitted,
+    const repl::OpTime& writeOpTime) {
     stdx::lock_guard<Client> lg(*opCtx->getClient());
     for (auto stmtId : stmtIdsCommitted) {
-        p().activeTxnCommittedStatements.emplace(stmtId, repl::OpTime());
+        p().activeTxnCommittedStatements.emplace(stmtId, writeOpTime);
     }
 }
 

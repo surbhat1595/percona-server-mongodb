@@ -199,6 +199,15 @@ shellPrint = function(x) {
         shellPrintHelper(x);
 };
 
+_originalPrint = print;
+disablePrint = function() {
+    print = Function.prototype;
+};
+
+enablePrint = function() {
+    print = _originalPrint;
+};
+
 print.captureAllOutput = function(fn, args) {
     var res = {};
     res.output = [];

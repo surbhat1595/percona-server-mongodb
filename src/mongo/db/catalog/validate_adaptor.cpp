@@ -75,8 +75,9 @@ void _validateClusteredCollectionRecordId(OperationContext* opCtx,
                                           const RecordId& rid,
                                           const BSONObj& doc,
                                           const ClusteredIndexSpec& indexSpec,
+                                          const CollatorInterface* collator,
                                           ValidateResults* results) {
-    const auto ridFromDoc = record_id_helpers::keyForDoc(doc, indexSpec);
+    const auto ridFromDoc = record_id_helpers::keyForDoc(doc, indexSpec, collator);
     if (!ridFromDoc.isOK()) {
         results->valid = false;
         results->errors.push_back(str::stream() << rid << " " << ridFromDoc.getStatus().reason());
@@ -119,8 +120,12 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
 
     const CollectionPtr& coll = _validateState->getCollection();
     if (coll->isClustered()) {
-        _validateClusteredCollectionRecordId(
-            opCtx, recordId, recordBson, coll->getClusteredInfo()->getIndexSpec(), results);
+        _validateClusteredCollectionRecordId(opCtx,
+                                             recordId,
+                                             recordBson,
+                                             coll->getClusteredInfo()->getIndexSpec(),
+                                             coll->getDefaultCollator(),
+                                             results);
     }
 
     auto& executionCtx = StorageExecutionContext::get(opCtx);
@@ -633,6 +638,10 @@ void ValidateAdaptor::validateIndexKeyCount(OperationContext* opCtx,
     const std::string indexName = desc->indexName();
     IndexInfo* indexInfo = &_indexConsistency->getIndexInfo(indexName);
     auto numTotalKeys = indexInfo->numKeys;
+
+    // Update numRecords by subtracting number of records removed from record store in repair mode
+    // when validating index consistency
+    _numRecords -= results.keysRemovedFromRecordStore;
 
     // Do not fail on finding too few index entries compared to collection entries when full:false.
     bool hasTooFewKeys = false;

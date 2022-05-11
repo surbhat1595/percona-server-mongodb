@@ -1832,14 +1832,32 @@ if not env.TargetOSIs('windows'):
 # following appends contents of SHLINKFLAGS_EXTRA variable to the linker command
 env.AppendUnique(SHLINKFLAGS=['$SHLINKFLAGS_EXTRA'])
 
+class ForceVerboseConftest():
+    """
+    This class allows for configurable substition calls to enable forcing
+    the conftest to use verbose logs even when verbose mode is not specified.
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __call__(self, target, source, env, for_signature):
+        for t in target:
+            # TODO: SERVER-60915 switch to SCons api conftest check
+            if 'conftest' in str(t):
+                return None
+        return self.msg
+
 if not env.Verbose():
-    env.Append( CCCOMSTR = "Compiling $TARGET" )
-    env.Append( CXXCOMSTR = env["CCCOMSTR"] )
-    env.Append( SHCCCOMSTR = "Compiling $TARGET" )
-    env.Append( SHCXXCOMSTR = env["SHCCCOMSTR"] )
-    env.Append( LINKCOMSTR = "Linking $TARGET" )
-    env.Append( SHLINKCOMSTR = env["LINKCOMSTR"] )
-    env.Append( ARCOMSTR = "Generating library $TARGET" )
+    # Even though we are not in Verbose mode, conftest logs should
+    # always be verbose, because they go to a file and not seen
+    # by the user anyways.
+    env.Append( CCCOMSTR = ForceVerboseConftest("Compiling $TARGET") )
+    env.Append( CXXCOMSTR = ForceVerboseConftest(env["CCCOMSTR"] ) )
+    env.Append( SHCCCOMSTR = ForceVerboseConftest("Compiling $TARGET" ) )
+    env.Append( SHCXXCOMSTR = ForceVerboseConftest(env["SHCCCOMSTR"] ) )
+    env.Append( LINKCOMSTR = ForceVerboseConftest("Linking $TARGET" ) )
+    env.Append( SHLINKCOMSTR = ForceVerboseConftest(env["LINKCOMSTR"] ) )
+    env.Append( ARCOMSTR = ForceVerboseConftest("Generating library $TARGET" ) )
 
 # Link tools other than mslink don't setup TEMPFILE in LINKCOM,
 # disabling SCons automatically falling back to a temp file when
@@ -2724,7 +2742,7 @@ def doConfigure(myenv):
             }
             """ % (compiler_minimum_string, compiler_minimum_string))
         else:
-            compiler_minimum_string = "clang 7.0 (or Apple XCode 10.2)"
+            compiler_minimum_string = "clang 7.0 (or Apple XCode 13.0)"
             compiler_test_body = textwrap.dedent(
             """
             #if !defined(__clang__)
@@ -2732,7 +2750,7 @@ def doConfigure(myenv):
             #endif
 
             #if defined(__apple_build_version__)
-            #if __apple_build_version__ < 10010046
+            #if __apple_build_version__ < 13000029
             #error %s or newer is required to build MongoDB
             #endif
             #elif (__clang_major__ < 7) || (__clang_major__ == 7 && __clang_minor__ < 0)

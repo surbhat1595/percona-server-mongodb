@@ -46,16 +46,27 @@ public:
 
     /**
      * Checks if the collection should be running defragmentation. If a new defragmentation should
-     * be started, this will initialize the defragmentation. If defragmentation has been turned off
-     * on a collection, this will stop the defragmentation.
+     * be started, this will initialize the defragmentation.
      */
     virtual void refreshCollectionDefragmentationStatus(OperationContext* opCtx,
                                                         const CollectionType& coll) = 0;
 
     /**
+     * Checks if the collection is currently being defragmented, and signals the defragmentation
+     * to end if so.
+     */
+    virtual void abortCollectionDefragmentation(OperationContext* opCtx,
+                                                const NamespaceString& nss) = 0;
+
+    /**
      * Returns true if the specified collection is currently being defragmented.
      */
     virtual bool isDefragmentingCollection(const UUID& uuid) = 0;
+
+    virtual BSONObj reportProgressOn(const UUID& uuid) = 0;
+
+    virtual MigrateInfoVector selectChunksToMove(OperationContext* opCtx,
+                                                 stdx::unordered_set<ShardId>* usedShards) = 0;
 
     /**
      * Generates a descriptor detailing the next defragmentation action (and the targeted
@@ -93,5 +104,9 @@ public:
     virtual void acknowledgeDataSizeResult(OperationContext* opCtx,
                                            DataSizeInfo action,
                                            const StatusWith<DataSizeResponse>& result) = 0;
+
+    virtual void acknowledgeMoveResult(OperationContext* opCtx,
+                                       MigrateInfo action,
+                                       const Status& result) = 0;
 };
 }  // namespace mongo

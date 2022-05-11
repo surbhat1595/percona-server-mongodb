@@ -46,7 +46,6 @@ public:
     using ShardCollectionTypeBase::kNssFieldName;
     using ShardCollectionTypeBase::kRefreshingFieldName;
     using ShardCollectionTypeBase::kReshardingFieldsFieldName;
-    using ShardCollectionTypeBase::kSupportingLongNameFieldName;
     using ShardCollectionTypeBase::kTimeseriesFieldsFieldName;
     using ShardCollectionTypeBase::kTimestampFieldName;
     using ShardCollectionTypeBase::kUniqueFieldName;
@@ -70,20 +69,15 @@ public:
     using ShardCollectionTypeBase::setAllowAutoSplit;
     using ShardCollectionTypeBase::setDefaultCollation;
     using ShardCollectionTypeBase::setEnterCriticalSectionCounter;
-    using ShardCollectionTypeBase::setEpoch;
     using ShardCollectionTypeBase::setKeyPattern;
-    using ShardCollectionTypeBase::setLastRefreshedCollectionVersion;
     using ShardCollectionTypeBase::setMaxChunkSizeBytes;
-    using ShardCollectionTypeBase::setNss;
     using ShardCollectionTypeBase::setRefreshing;
     using ShardCollectionTypeBase::setReshardingFields;
     using ShardCollectionTypeBase::setTimeseriesFields;
-    using ShardCollectionTypeBase::setUnique;
-    using ShardCollectionTypeBase::setUuid;
 
     ShardCollectionType(NamespaceString nss,
                         OID epoch,
-                        Timestamp creationTime,
+                        Timestamp timestamp,
                         UUID uuid,
                         KeyPattern keyPattern,
                         bool unique);
@@ -97,13 +91,9 @@ public:
     BSONObj toBSON() const;
 
     bool getAllowMigrations() const {
-        return getPre50CompatibleAllowMigrations().get_value_or(true);
+        return getPre50CompatibleAllowMigrations().value_or(true);
     }
     void setAllowMigrations(bool allowMigrations);
-
-    SupportingLongNameStatusEnum getSupportingLongName() const;
-
-    void setSupportingLongName(SupportingLongNameStatusEnum value);
 };
 
 }  // namespace mongo

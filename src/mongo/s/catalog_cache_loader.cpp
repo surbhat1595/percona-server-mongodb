@@ -42,8 +42,8 @@ const auto catalogCacheLoaderDecoration =
 CatalogCacheLoader::CollectionAndChangedChunks::CollectionAndChangedChunks() = default;
 
 CatalogCacheLoader::CollectionAndChangedChunks::CollectionAndChangedChunks(
-    OID collEpoch,
-    Timestamp collCreationTime,
+    OID epoch,
+    Timestamp timestamp,
     UUID collUuid,
     const BSONObj& collShardKeyPattern,
     const BSONObj& collDefaultCollation,
@@ -53,10 +53,9 @@ CatalogCacheLoader::CollectionAndChangedChunks::CollectionAndChangedChunks(
     boost::optional<int64_t> maxChunkSizeBytes,
     bool allowAutoSplit,
     bool allowMigrations,
-    SupportingLongNameStatusEnum supportingLongName,
     std::vector<ChunkType> chunks)
-    : epoch(std::move(collEpoch)),
-      creationTime(std::move(collCreationTime)),
+    : epoch(std::move(epoch)),
+      timestamp(std::move(timestamp)),
       uuid(std::move(collUuid)),
       shardKeyPattern(collShardKeyPattern),
       defaultCollation(collDefaultCollation),
@@ -66,7 +65,6 @@ CatalogCacheLoader::CollectionAndChangedChunks::CollectionAndChangedChunks(
       maxChunkSizeBytes(std::move(maxChunkSizeBytes)),
       allowAutoSplit(allowAutoSplit),
       allowMigrations(allowMigrations),
-      supportingLongName(supportingLongName),
       changedChunks(std::move(chunks)) {}
 
 void CatalogCacheLoader::set(ServiceContext* serviceContext,

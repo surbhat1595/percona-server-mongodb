@@ -220,12 +220,12 @@ clientDriverEnv.Library(
         'replica_set_monitor.cpp',
         'replica_set_monitor_manager.cpp',
         'replica_set_monitor_stats.cpp',
-        'scanning_replica_set_monitor.cpp',
         'streamable_replica_set_monitor.cpp',
         'streamable_replica_set_monitor_query_processor.cpp',
         'streamable_replica_set_monitor_error_handler.cpp',
         'server_discovery_monitor.cpp',
         'server_ping_monitor.cpp',
+        'streamable_replica_set_monitor_discovery_time_processor.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/sdam/sdam',
@@ -370,6 +370,7 @@ if wiredtiger:
             'server_discovery_monitor_test.cpp',
             'server_ping_monitor_test.cpp',
             'streamable_replica_set_monitor_error_handler_test.cpp',
+            'streamable_replica_set_monitor_discovery_time_processor_test.cpp'
         ],
         LIBDEPS=[
             '$BUILD_DIR/mongo/client/sdam/sdam',

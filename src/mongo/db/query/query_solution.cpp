@@ -1486,12 +1486,16 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
     addIndent(ss, indent + 1);
     *ss << "key = ";
     auto idx = 0;
-    for (auto&& [groupName, expr] : groupByExpressions) {
-        if (idx > 0) {
-            *ss << ", ";
+    if (auto exprObj = dynamic_cast<const ExpressionObject*>(groupByExpression.get()); exprObj) {
+        for (auto&& [groupName, expr] : exprObj->getChildExpressions()) {
+            if (idx > 0) {
+                *ss << ", ";
+            }
+            *ss << "{" << groupName << ": " << exprObj->serialize(false).toString() << "}";
+            ++idx;
         }
-        *ss << "{" << groupName << ": " << expr->serialize(false).toString() << "}";
-        ++idx;
+    } else {
+        *ss << "{_id: " << groupByExpression->serialize(false).toString() << "}";
     }
     *ss << '\n';
     addIndent(ss, indent + 1);
@@ -1514,12 +1518,41 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
 QuerySolutionNode* GroupNode::clone() const {
     auto copy =
         std::make_unique<GroupNode>(std::unique_ptr<QuerySolutionNode>(children[0]->clone()),
-                                    groupByExpressions,
+                                    groupByExpression,
                                     accumulators,
                                     doingMerge);
     return copy.release();
 }
 
+/**
+ * EqLookupNode.
+ */
+void EqLookupNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "EQ_LOOKUP\n";
+    addIndent(ss, indent + 1);
+    *ss << "from = " << foreignCollection << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "as = " << joinField << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "localField = " << joinFieldLocal << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "foreignField = " << joinFieldForeign << "\n";
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+QuerySolutionNode* EqLookupNode::clone() const {
+    auto copy =
+        std::make_unique<EqLookupNode>(std::unique_ptr<QuerySolutionNode>(children[0]->clone()),
+                                       foreignCollection,
+                                       joinFieldLocal,
+                                       joinFieldForeign,
+                                       joinField);
+    return copy.release();
+}
 /**
  * SentinelNode.
  */

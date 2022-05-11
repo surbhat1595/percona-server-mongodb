@@ -319,12 +319,6 @@ std::pair<std::vector<OplogEntry>, bool> _readTransactionOperationsFromOplogChai
         invariant(operationEntry.isPartialTransaction());
         auto prevOpsEnd = ops.size();
         repl::ApplyOps::extractOperationsTo(operationEntry, lastEntryInTxnObj, &ops);
-        for (auto opIter = ops.begin() + prevOpsEnd; opIter != ops.end(); ++opIter) {
-            auto& op = *opIter;
-            if (op.getNeedsRetryImage()) {
-                op.setTimestampForRetryImage(operationEntry.getTimestamp());
-            }
-        }
 
         // Because BSONArrays do not have fast way of determining size without iterating through
         // them, and we also have no way of knowing how many oplog entries are in a transaction
@@ -469,6 +463,15 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
         }
 
         auto status = _applyOperationsForTransaction(opCtx, ops, mode);
+
+        if (opCtx->isRetryableWrite()) {
+            for (const auto& op : ops) {
+                if (!op.getStatementIds().empty()) {
+                    txnParticipant.addCommittedStmtIds(
+                        opCtx, op.getStatementIds(), entry.getOpTime());
+                }
+            }
+        }
 
         if (MONGO_unlikely(applyPrepareTxnOpsFailsWithWriteConflict.shouldFail())) {
             LOGV2(4947101, "Hit applyPrepareTxnOpsFailsWithWriteConflict failpoint");

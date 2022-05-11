@@ -37,7 +37,7 @@ class DatabaseImpl final : public Database {
 public:
     explicit DatabaseImpl(StringData name);
 
-    void init(OperationContext*) const final;
+    Status init(OperationContext*) final;
 
     const std::string& name() const final {
         return _name;
@@ -49,7 +49,10 @@ public:
 
     bool isDropPending(OperationContext* opCtx) const final;
 
-    void getStats(OperationContext* opCtx, BSONObjBuilder* output, double scale = 1) const final;
+    void getStats(OperationContext* opCtx,
+                  BSONObjBuilder* output,
+                  bool includeFreeStorage,
+                  double scale = 1) const final;
 
     /**
      * dropCollection() will refuse to drop system collections. Use dropCollectionEvenIfSystem() if

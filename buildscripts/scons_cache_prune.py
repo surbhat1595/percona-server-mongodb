@@ -57,7 +57,7 @@ def collect_cache_contents(cache_path):
                     hash_length = -32
                     tmp_length = -len('.cksum.tmp') + hash_length
                     cksum_type = (file_path.lower().endswith('.cksum')
-                                  or file_path.lower().endswith('.cksum.del')
+                                  or file_path.lower().endswith('.del')
                                   or file_path.lower()[tmp_length:hash_length] == '.cksum.tmp')
 
                     if not cksum_type:
@@ -106,6 +106,12 @@ def prune_cache(cache_path, cache_size_gb, clean_ratio):
                 return False
 
             cache_item = contents.pop()
+
+            # check the atime again just to make sure something wasn't accessed while
+            # we pruning other files.
+            if cache_item.time < os.stat(cache_item.path).st_atime:
+                continue
+
             to_remove = cache_item.path + ".del"
             try:
                 os.rename(cache_item.path, to_remove)

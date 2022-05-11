@@ -49,7 +49,7 @@ const countUnique = function(coll, key) {
 
 /**
  * Starts and pauses a unique index conversion in the collection.
- * While the 'collMod' command in paused, runs 'doCrudOpsFunc' before resuming the
+ * While the 'collMod' command in paused, runs 'performCrudOpsFunc' before resuming the
  * conversion process. Confirms expected 'collMod' behavior.
  */
 const testCollModConvertUniqueWithSideWrites = function(performCrudOpsFunc, expectedViolations) {
@@ -97,7 +97,7 @@ const testCollModConvertUniqueWithSideWrites = function(performCrudOpsFunc, expe
                 primary,
                 testDB,
                 {collMod: collName, index: {keyPattern: {a: 1}, unique: true}},
-                ErrorCodes.CannotEnableIndexConstraint,
+                ErrorCodes.CannotConvertIndexToUnique,
                 assertViolations,
                 expectedViolations);
         }
@@ -115,7 +115,7 @@ const testCollModConvertUniqueWithSideWrites = function(performCrudOpsFunc, expe
                                                     connectionId: {$exists: true},
                                                     ns: `${coll.getDB().$cmd.getFullName()}`,
                                                     'command.collMod': coll.getName(),
-                                                    'locks.Collection': 'r'
+                                                    'locks.Collection': 'w'
                                                 }
                                             },
                                         ],
@@ -129,7 +129,7 @@ const testCollModConvertUniqueWithSideWrites = function(performCrudOpsFunc, expe
         assert(collModOp.hasOwnProperty('locks'),
                'no lock info in collMod op from db.currentOp(): ' + tojson(collModOp));
         assert.eq(collModOp.locks.Collection,
-                  'r',
+                  'w',
                   'collMod is not holding collection lock in read mode: ' + tojson(collModOp));
 
         jsTestLog('Performing CRUD ops on collection while collMod is paused: ' +

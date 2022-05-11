@@ -134,6 +134,13 @@ public:
                 }
             } else {
                 // Clustered collection.
+                if (cmd.getCapped()) {
+                    uassert(ErrorCodes::Error(6127800),
+                            "Clustered capped collection only available with 'enableTestCommands' "
+                            "server parameter",
+                            getTestCommandsEnabled());
+                }
+
                 uassert(ErrorCodes::Error(6049200),
                         str::stream() << "'size' field for capped collections is not "
                                          "allowed on clustered collections. "
@@ -289,12 +296,6 @@ public:
                 (cmd.getChangeStreamPreAndPostImages() &&
                  cmd.getChangeStreamPreAndPostImages()->getEnabled());
 
-            // Acquire shared lock on FCV if 'changeStreamPreAndPostImages' is enabled.
-            boost::optional<FixedFCVRegion> fcvRegion;
-            if (isChangeStreamPreAndPostImagesEnabled) {
-                fcvRegion.emplace(opCtx);
-            }
-
             if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
                     serverGlobalParams.featureCompatibility)) {
                 const auto isRecordPreImagesEnabled = cmd.getRecordPreImages().get_value_or(false);
@@ -303,7 +304,7 @@ public:
                         "set to true simultaneously",
                         !(isChangeStreamPreAndPostImagesEnabled && isRecordPreImagesEnabled));
             } else {
-                uassert(5846900,
+                uassert(ErrorCodes::InvalidOptions,
                         "BSON field 'changeStreamPreAndPostImages' is an unknown field.",
                         !cmd.getChangeStreamPreAndPostImages().has_value());
             }

@@ -411,25 +411,25 @@ Status StorageInterfaceImpl::insertDocuments(OperationContext* opCtx,
 Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
     Lock::GlobalWrite globalWriteLock(opCtx);
 
-    std::vector<std::string> dbNames =
+    std::vector<TenantDatabaseName> tenantDbNames =
         opCtx->getServiceContext()->getStorageEngine()->listDatabases();
-    invariant(!dbNames.empty());
+    invariant(!tenantDbNames.empty());
     LOGV2(21754,
           "dropReplicatedDatabases - dropping {numDatabases} databases",
           "dropReplicatedDatabases - dropping databases",
-          "numDatabases"_attr = dbNames.size());
+          "numDatabases"_attr = tenantDbNames.size());
 
     ReplicationCoordinator::get(opCtx)->clearCommittedSnapshot();
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto hasLocalDatabase = false;
-    for (const auto& dbName : dbNames) {
-        if (dbName == "local") {
+    for (const auto& tenantDbName : tenantDbNames) {
+        if (tenantDbName.dbName() == "local") {
             hasLocalDatabase = true;
             continue;
         }
-        writeConflictRetry(opCtx, "dropReplicatedDatabases", dbName, [&] {
-            if (auto db = databaseHolder->getDb(opCtx, dbName)) {
+        writeConflictRetry(opCtx, "dropReplicatedDatabases", tenantDbName.dbName(), [&] {
+            if (auto db = databaseHolder->getDb(opCtx, tenantDbName.dbName())) {
                 databaseHolder->dropDb(opCtx, db);
             } else {
                 // This is needed since dropDatabase can't be rolled back.
@@ -439,7 +439,7 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
                       "database names but before drop: {dbName}",
                       "dropReplicatedDatabases - database disappeared after retrieving list of "
                       "database names but before drop",
-                      "dbName"_attr = dbName);
+                      "dbName"_attr = tenantDbName);
             }
         });
     }
@@ -447,7 +447,7 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
     LOGV2(21756,
           "dropReplicatedDatabases - dropped {numDatabases} databases",
           "dropReplicatedDatabases - dropped databases",
-          "numDatabases"_attr = dbNames.size());
+          "numDatabases"_attr = tenantDbNames.size());
 
     return Status::OK();
 }
@@ -732,13 +732,16 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                                   "bounded collection scans only support forward scans");
                 }
 
+                auto collator = collection->getDefaultCollator();
                 boost::optional<RecordId> minRecord, maxRecord;
                 if (!startKey.isEmpty()) {
-                    minRecord = RecordId(record_id_helpers::keyForElem(startKey.firstElement()));
+                    minRecord =
+                        RecordId(record_id_helpers::keyForElem(startKey.firstElement(), collator));
                 }
 
                 if (!endKey.isEmpty()) {
-                    maxRecord = RecordId(record_id_helpers::keyForElem(endKey.firstElement()));
+                    maxRecord =
+                        RecordId(record_id_helpers::keyForElem(endKey.firstElement(), collator));
                 }
 
                 planExecutor = isFind

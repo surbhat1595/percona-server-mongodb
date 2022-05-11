@@ -94,8 +94,8 @@ public:
                                                                       request().getChunkRange(),
                                                                       request().getShard(),
                                                                       request().getValidAfter()));
-            return ConfigSvrMergeResponse{
-                ChunkVersion::fromBSONThrowing(shardAndCollVers["shardVersion"].Obj())};
+            return ConfigSvrMergeResponse{ChunkVersion::parseArrayOrObjectPositionalFormat(
+                shardAndCollVers[ChunkVersion::kShardVersionField])};
         }
 
     private:

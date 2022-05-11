@@ -552,8 +552,8 @@ void ShardingCatalogManager::updateShardingCatalogEntryForCollectionInTxn(
 void ShardingCatalogManager::configureCollectionBalancing(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    boost::optional<int64_t> chunkSizeBytes,
-    boost::optional<bool> balancerShouldMergeChunks,
+    boost::optional<int32_t> chunkSizeMB,
+    boost::optional<bool> defragmentCollection,
     boost::optional<bool> enableAutoSplitter) {
 
     // Hold the FCV region to serialize with the setFeatureCompatibilityVersion command
@@ -566,36 +566,40 @@ void ShardingCatalogManager::configureCollectionBalancing(
 
     uassert(ErrorCodes::InvalidOptions,
             "invalid collection auto splitter config update",
-            chunkSizeBytes || balancerShouldMergeChunks || enableAutoSplitter);
+            chunkSizeMB || defragmentCollection || enableAutoSplitter);
 
     short updatedFields = 0;
-    bool doMerge, doSplit = false;
     BSONObjBuilder updateCmd;
     {
         BSONObjBuilder setBuilder(updateCmd.subobjStart("$set"));
-        if (chunkSizeBytes && *chunkSizeBytes != 0) {
+        if (chunkSizeMB && *chunkSizeMB != 0) {
             // verify we got a positive integer in range [1MB, 1GB]
             uassert(ErrorCodes::InvalidOptions,
-                    str::stream() << "Chunk size '" << *chunkSizeBytes
-                                  << "' out of range [1MB, 1GB]",
-                    *chunkSizeBytes > 0 &&
-                        ChunkSizeSettingsType::checkMaxChunkSizeValid(*chunkSizeBytes));
-
-            setBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, *chunkSizeBytes);
+                    str::stream() << "Chunk size '" << *chunkSizeMB << "' out of range [1MB, 1GB]",
+                    *chunkSizeMB > 0 &&
+                        *chunkSizeMB < std::numeric_limits<int32_t>::max() / (1024 * 1024) &&
+                        ChunkSizeSettingsType::checkMaxChunkSizeValid(*chunkSizeMB * 1024 * 1024));
+            setBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName,
+                              *chunkSizeMB * 1024 * 1024);
             updatedFields++;
         }
-        if (balancerShouldMergeChunks) {
-            doMerge = balancerShouldMergeChunks.get();
-            setBuilder.append(CollectionType::kBalancerShouldMergeChunksFieldName, doMerge);
-            updatedFields++;
+        if (defragmentCollection) {
+            bool doDefragmentation = defragmentCollection.get();
+            if (doDefragmentation) {
+                setBuilder.append(CollectionType::kDefragmentCollectionFieldName,
+                                  doDefragmentation);
+                updatedFields++;
+            } else {
+                Balancer::get(opCtx)->abortCollectionDefragmentation(opCtx, nss);
+            }
         }
         if (enableAutoSplitter) {
-            doSplit = enableAutoSplitter.get();
+            bool doSplit = enableAutoSplitter.get();
             setBuilder.append(CollectionType::kNoAutoSplitFieldName, !doSplit);
             updatedFields++;
         }
     }
-    if (chunkSizeBytes && *chunkSizeBytes == 0) {
+    if (chunkSizeMB && *chunkSizeMB == 0) {
         BSONObjBuilder unsetBuilder(updateCmd.subobjStart("$unset"));
         unsetBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, 0);
         updatedFields++;

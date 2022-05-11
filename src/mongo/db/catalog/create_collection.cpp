@@ -80,6 +80,12 @@ Status validateClusteredIndexSpec(OperationContext* opCtx,
 
     bool clusterKeyOnId =
         SimpleBSONObjComparator::kInstance.evaluate(spec.getKey() == BSON("_id" << 1));
+
+    if (!clusterKeyOnId && !gSupportArbitraryClusterKeyIndex) {
+        return Status(ErrorCodes::InvalidIndexSpecificationOption,
+                      "The clusteredIndex option is only supported for key: {_id: 1}");
+    }
+
     if (nss.isReplicated() && !clusterKeyOnId) {
         return Status(ErrorCodes::Error(5979701),
                       "The clusteredIndex option is only supported for key: {_id: 1} on replicated "
@@ -281,7 +287,7 @@ Status _createTimeseries(OperationContext* opCtx,
             }
 
             auto db = autoDb.ensureDbExists(opCtx);
-            if (auto view = ViewCatalog::get(db)->lookup(opCtx, ns); view) {
+            if (auto view = ViewCatalog::get(opCtx)->lookup(opCtx, ns); view) {
                 if (view->timeseries()) {
                     return Status(ErrorCodes::NamespaceExists,
                                   str::stream()
@@ -370,7 +376,7 @@ Status _createTimeseries(OperationContext* opCtx,
         }
 
         auto db = autoColl.ensureDbExists(opCtx);
-        if (auto view = ViewCatalog::get(db)->lookup(opCtx, ns)) {
+        if (auto view = ViewCatalog::get(opCtx)->lookup(opCtx, ns)) {
             if (view->timeseries()) {
                 return {ErrorCodes::NamespaceExists,
                         str::stream() << "A timeseries collection already exists. NS: " << ns};
@@ -384,6 +390,7 @@ Status _createTimeseries(OperationContext* opCtx,
             return {ErrorCodes::NotWritablePrimary,
                     str::stream() << "Not primary while creating collection " << ns};
         }
+
 
         _createSystemDotViewsIfNecessary(opCtx, db);
 
@@ -448,8 +455,9 @@ Status _createCollection(OperationContext* opCtx,
             return Status(ErrorCodes::NamespaceExists,
                           str::stream() << "Collection already exists. NS: " << nss);
         }
+
         auto db = autoDb.ensureDbExists(opCtx);
-        if (auto view = ViewCatalog::get(db)->lookup(opCtx, nss); view) {
+        if (auto view = ViewCatalog::get(opCtx)->lookup(opCtx, nss); view) {
             if (view->timeseries()) {
                 return Status(ErrorCodes::NamespaceExists,
                               str::stream()
@@ -459,12 +467,34 @@ Status _createCollection(OperationContext* opCtx,
                           str::stream() << "A view already exists. NS: " << nss);
         }
 
-        if (!collectionOptions.clusteredIndex && (!idIndex || idIndex->isEmpty()) &&
-            // Capped, clustered collections different in behavior significantly from normal capped
-            // collections. Notably, they allow out-of-order insertion.
-            !collectionOptions.capped && clusterAllCollectionsByDefault.shouldFail()) {
+        // If the FCV has changed while executing the command to the version, where the feature flag
+        // is disabled, enabling changeStreamPreAndPostImagesOptions is not allowed.
+        // TODO SERVER-58584: remove the feature flag.
+        if (!feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
+                serverGlobalParams.featureCompatibility) &&
+            collectionOptions.changeStreamPreAndPostImagesOptions.getEnabled()) {
+            return Status(ErrorCodes::InvalidOptions,
+                          "The 'changeStreamPreAndPostImages' is an unknown field.");
+        }
+
+        if (!collectionOptions.clusteredIndex && collectionOptions.expireAfterSeconds) {
+            return Status(ErrorCodes::InvalidOptions,
+                          "'expireAfterSeconds' requires clustering to be enabled");
+        }
+
+        if (MONGO_unlikely(clusterAllCollectionsByDefault.shouldFail()) &&
+            !collectionOptions.clusteredIndex.is_initialized() &&
+            (!idIndex || idIndex->isEmpty()) && !collectionOptions.capped &&
+            !clustered_util::requiresLegacyFormat(nss) &&
+            feature_flags::gClusteredIndexes.isEnabled(serverGlobalParams.featureCompatibility)) {
+            // Capped, clustered collections different in behavior significantly from normal
+            // capped collections. Notably, they allow out-of-order insertion.
+            //
+            // Additionally, don't set the collection to be clustered in the default format if it
+            // requires legacy format.
             collectionOptions.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
         }
+
         if (auto clusteredIndex = collectionOptions.clusteredIndex) {
             bool clusteredIndexesEnabled =
                 feature_flags::gClusteredIndexes.isEnabled(serverGlobalParams.featureCompatibility);

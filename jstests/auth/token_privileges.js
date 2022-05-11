@@ -17,8 +17,10 @@ if (!isMongoStoreEnabled) {
 function runTest(conn, rst = undefined) {
     const admin = conn.getDB('admin');
     const external = conn.getDB('$external');
-    assert.commandWorked(admin.runCommand({createUser: 'admin', pwd: 'admin', roles: ['root']}));
-    assert(admin.auth('admin', 'admin'));
+
+    // Must be authenticated as a user with ActionType::useTenant in order to use $tenant
+    assert.commandWorked(admin.runCommand({createUser: 'admin', pwd: 'pwd', roles: ['root']}));
+    assert(admin.auth('admin', 'pwd'));
 
     // Create tenant-specific users.
     const users = {

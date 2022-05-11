@@ -61,7 +61,7 @@ public:
      * Inform the encryption storage system to prepare its data such that its files can be copied
      * along with MongoDB data files for a backup.
      */
-    virtual StatusWith<std::vector<StorageEngine::BackupBlock>> beginNonBlockingBackup(
+    virtual StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
         const StorageEngine::BackupOptions& options) override;
 
     /**

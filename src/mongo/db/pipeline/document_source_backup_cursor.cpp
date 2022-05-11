@@ -102,14 +102,14 @@ DocumentSource::GetNextResult DocumentSourceBackupCursor::doGetNext() {
     // If length or offset is not 0 then output 4 fields,
     // otherwise output filename, fileSize only
     Document doc;
-    if (_docIt->length != 0 || _docIt->offset != 0) {
-        doc = Document{{"filename"_sd, _docIt->filename},
-                       {"offset"_sd, static_cast<long long>(_docIt->offset)},
-                       {"length"_sd, static_cast<long long>(_docIt->length)},
-                       {"fileSize"_sd, static_cast<long long>(_docIt->fileSize)}};
+    if (_docIt->length() != 0 || _docIt->offset() != 0) {
+        doc = Document{{"filename"_sd, _docIt->filename()},
+                       {"offset"_sd, static_cast<long long>(_docIt->offset())},
+                       {"length"_sd, static_cast<long long>(_docIt->length())},
+                       {"fileSize"_sd, static_cast<long long>(_docIt->fileSize())}};
     } else {
-        doc = Document{{"filename"_sd, _docIt->filename},
-                       {"fileSize"_sd, static_cast<long long>(_docIt->fileSize)}};
+        doc = Document{{"filename"_sd, _docIt->filename()},
+                       {"fileSize"_sd, static_cast<long long>(_docIt->fileSize())}};
     }
     ++_docIt;
 

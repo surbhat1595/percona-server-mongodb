@@ -394,15 +394,14 @@ static void copy_keydb_files(const boost::filesystem::path& from,
 
 namespace {
 
-StatusWith<std::vector<StorageEngine::BackupBlock>> getBackupBlocksFromBackupCursor(
-    WT_SESSION* session,
-    WT_CURSOR* cursor,
-    bool incrementalBackup,
-    bool fullBackup,
-    std::string dbPath,
-    const char* statusPrefix) {
+StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(WT_SESSION* session,
+                                                                     WT_CURSOR* cursor,
+                                                                     bool incrementalBackup,
+                                                                     bool fullBackup,
+                                                                     std::string dbPath,
+                                                                     const char* statusPrefix) {
     int wtRet;
-    std::vector<StorageEngine::BackupBlock> backupBlocks;
+    std::vector<BackupBlock> backupBlocks;
     const char* filename;
     const auto directoryPath = boost::filesystem::path(dbPath);
     const auto wiredTigerLogFilePrefix = "WiredTigerLog";
@@ -452,7 +451,7 @@ StatusWith<std::vector<StorageEngine::BackupBlock>> getBackupBlocksFromBackupCur
                             "offset"_attr = offset,
                             "size"_attr = size,
                             "type"_attr = type);
-                backupBlocks.push_back({filePath.string(), offset, size, fileSize});
+                backupBlocks.push_back(BackupBlock(filePath.string(), offset, size, fileSize));
             }
 
             // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows
@@ -460,7 +459,7 @@ StatusWith<std::vector<StorageEngine::BackupBlock>> getBackupBlocksFromBackupCur
             // backup.
             if (fileUnchangedFlag) {
                 backupBlocks.push_back(
-                    {filePath.string(), 0 /* offset */, 0 /* length */, fileSize});
+                    BackupBlock(filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
             }
 
             if (wtRet != WT_NOTFOUND) {
@@ -476,7 +475,8 @@ StatusWith<std::vector<StorageEngine::BackupBlock>> getBackupBlocksFromBackupCur
             // to an entire file. Full backups cannot open an incremental cursor, even if they
             // are the initial incremental backup.
             const std::uint64_t length = incrementalBackup ? fileSize : 0;
-            backupBlocks.push_back({filePath.string(), 0 /* offset */, length, fileSize});
+            backupBlocks.push_back(
+                BackupBlock(filePath.string(), 0 /* offset */, length, fileSize));
         }
     }
 
@@ -1664,7 +1664,7 @@ StatusWith<std::vector<std::string>> WiredTigerKVEngine::extendBackupCursor(
 
 // Similar to beginNonBlockingBackup but
 // - returns empty list of files
-StatusWith<std::vector<StorageEngine::BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup() {
+StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup() {
     // This cursor will be freed by the backupSession being closed as the session is uncached
     auto sessionRaii = std::make_unique<WiredTigerSession>(_conn);
     WT_CURSOR* cursor = nullptr;
@@ -1679,10 +1679,10 @@ StatusWith<std::vector<StorageEngine::BackupBlock>> EncryptionKeyDB::_disableInc
     _backupSession = std::move(sessionRaii);
     _backupCursor = cursor;
 
-    return std::vector<StorageEngine::BackupBlock>();
+    return std::vector<BackupBlock>();
 }
 
-StatusWith<std::vector<StorageEngine::BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
+StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
     const StorageEngine::BackupOptions& options) {
     // incrementalBackup and disableIncrementalBackup are mutually exclusive
     // this is guaranteed by checks in DocumentSourceBackupCursor::createFromBson
@@ -1773,7 +1773,7 @@ StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor() {
     // journal files returned by this method to ensure a consistent backup of the data is taken.
     std::vector<std::string> filenames;
     for (const auto& entry : swBackupBlocks.getValue()) {
-        filenames.push_back(entry.filename);
+        filenames.push_back(entry.filename());
     }
 
     return {filenames};

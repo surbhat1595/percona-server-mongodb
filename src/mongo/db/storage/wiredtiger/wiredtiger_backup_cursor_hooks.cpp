@@ -173,7 +173,7 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
                 oplogStart < oplogEnd);
     }
 
-    std::vector<StorageEngine::BackupBlock> eseBackupBlocks;
+    std::vector<BackupBlock> eseBackupBlocks;
     auto* encHooks = EncryptionHooks::get(opCtx->getServiceContext());
     if (encHooks->enabled()) {
         eseBackupBlocks = uassertStatusOK(encHooks->beginNonBlockingBackup(options));

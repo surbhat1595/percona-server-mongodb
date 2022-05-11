@@ -89,7 +89,7 @@ public:
     // _srng use protected by _lock_key
     void generate_secure_key(unsigned char* key);
 
-    StatusWith<std::vector<StorageEngine::BackupBlock>> beginNonBlockingBackup(
+    StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
         const StorageEngine::BackupOptions& options);
 
     Status endNonBlockingBackup();
@@ -103,7 +103,7 @@ private:
 
     int _openWiredTiger(const std::string& path, const std::string& wtOpenConfig);
 
-    StatusWith<std::vector<StorageEngine::BackupBlock>> _disableIncrementalBackup();
+    StatusWith<std::vector<BackupBlock>> _disableIncrementalBackup();
 
     void close_handles();
     int store_gcm_iv_reserved();

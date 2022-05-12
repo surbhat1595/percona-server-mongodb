@@ -49,6 +49,7 @@
 #include "mongo/base/shim.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/client/replica_set_monitor.h"
+#include "mongo/db/auth/security_token.h"
 #include "mongo/db/hasher.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/mutex.h"
@@ -62,6 +63,7 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/quick_exit.h"
+#include "mongo/util/represent_as.h"
 #include "mongo/util/text.h"
 #include "mongo/util/version.h"
 
@@ -305,25 +307,28 @@ BSONObj JSGetMemInfo(const BSONObj& args, void* data) {
 thread_local auto _prng = PseudoRandom(0);
 
 BSONObj JSSrand(const BSONObj& a, void* data) {
-    int64_t seed;
-    // grab the least significant bits of either the supplied argument or
-    // a random number from SecureRandom.
+    boost::optional<int64_t> prngSeed = boost::none;
+    boost::optional<int64_t> asDouble = boost::none;
+
+    // Grab the least significant bits of either the supplied argument or a random number from
+    // SecureRandom.
     if (a.nFields() == 1 && a.firstElement().isNumber()) {
-        seed = a.firstElement().safeNumberLong();
+        asDouble = representAs<double>(a.firstElement().safeNumberLong());
+        prngSeed = asDouble ? representAs<int64_t>(*asDouble) : boost::none;
+        uassert(6290200, "Cannot represent seed as 64 bit integral or double value", prngSeed);
     } else {
-        seed = SecureRandom().nextInt64();
+        // Use secure random number generator to get the seed value that can be safely
+        // represented as double.
+        auto asInt64 = SecureRandom().nextInt64SafeDoubleRepresentable();
+        asDouble = representAs<double>(asInt64);
+        invariant(asDouble);
+        prngSeed = representAs<int64_t>(*asDouble);
     }
-    // Make sure the seed is representable as both an int64_t and a double, so that the value we
-    // return (as a double) can be fed back in to JSSrand() to initialize the prng (as an int64_t)
-    // to the same state. To do so, we cast to the double first which may lose precision for large
-    // numbers. Then after the potential precision loss we go back to an int64_t which should not
-    // change precision at all. Using that (potentially) new int64_t as the seed, we can now
-    // confidently return the double version and know it can be used to set the same exact seed
-    // later.
-    double asDouble = static_cast<double>(seed);
-    int64_t asInt64 = static_cast<int64_t>(asDouble);
-    _prng = PseudoRandom(asInt64);
-    return BSON("" << asDouble);
+
+    // The seed is representable as both an int64_t and a double, so that the value we return (as a
+    // double) can be fed back in to JSSrand() to initialize the prng (as an int64_t).
+    _prng = PseudoRandom(*prngSeed);
+    return BSON("" << *asDouble);
 }
 
 BSONObj JSRand(const BSONObj& a, void* data) {
@@ -425,20 +430,10 @@ BSONObj _createSecurityToken(const BSONObj& args, void* data) {
     uassert(6161500,
             "_createSecurityToken requires a single object argument",
             (args.nFields() == 1) && (args.firstElement().type() == Object));
+
+    constexpr auto authUserFieldName = auth::SecurityToken::kAuthenticatedUserFieldName;
     auto authUser = args.firstElement().Obj();
-
-    // Temporary algorithm.
-    auto digest =
-        SHA256Block::computeHash({ConstDataRange(authUser.objdata(), authUser.objsize())});
-
-    BSONObjBuilder ret;
-    {
-        BSONObjBuilder token(ret.subobjStart(""_sd));
-        token.append("authenticatedUser"_sd, authUser);
-        token.appendBinData("sig"_sd, digest.size(), BinDataGeneral, digest.data());
-        token.doneFast();
-    }
-    return ret.obj();
+    return BSON("" << auth::signSecurityToken(BSON(authUserFieldName << authUser)));
 }
 
 BSONObj replMonitorStats(const BSONObj& a, void* data) {

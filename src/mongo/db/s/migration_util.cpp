@@ -612,13 +612,15 @@ void submitOrphanRanges(OperationContext* opCtx, const NamespaceString& nss, con
 
 void submitOrphanRangesForCleanup(OperationContext* opCtx) {
     auto catalog = CollectionCatalog::get(opCtx);
-    const auto& dbs = catalog->getAllDbNames();
+    const auto& tenantDbNames = catalog->getAllDbNames();
 
-    for (const auto& dbName : dbs) {
-        if (dbName == NamespaceString::kLocalDb)
+    for (const auto& tenantDbName : tenantDbNames) {
+        if (tenantDbName.dbName() == NamespaceString::kLocalDb)
             continue;
 
-        for (auto collIt = catalog->begin(opCtx, dbName); collIt != catalog->end(opCtx); ++collIt) {
+        for (auto collIt = catalog->begin(opCtx, tenantDbName.dbName());
+             collIt != catalog->end(opCtx);
+             ++collIt) {
             auto uuid = collIt.uuid().get();
             auto nss = catalog->lookupNSSByUUID(opCtx, uuid).get();
             LOGV2_DEBUG(22034,
@@ -840,7 +842,7 @@ void deleteMigrationCoordinatorDocumentLocally(OperationContext* opCtx, const UU
         NamespaceString::kMigrationCoordinatorsNamespace);
     store.remove(opCtx,
                  BSON(MigrationCoordinatorDocument::kIdFieldName << migrationId),
-                 {1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)});
+                 WriteConcernOptions{1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)});
 }
 
 void ensureChunkVersionIsGreaterThan(OperationContext* opCtx,

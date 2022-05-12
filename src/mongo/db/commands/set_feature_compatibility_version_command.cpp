@@ -80,6 +80,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
+#include "mongo/s/refine_collection_shard_key_coordinator_feature_flags_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
@@ -241,17 +242,15 @@ public:
         // TODO SERVER-25778: replace this with the general mechanism for specifying a default
         // writeConcern.
         ON_BLOCK_EXIT([&] {
-            // Propagate the user's wTimeout if one was given.
-            auto timeout = opCtx->getWriteConcern().isImplicitDefaultWriteConcern()
-                ? INT_MAX
-                : opCtx->getWriteConcern().wTimeout;
             WriteConcernResult res;
             auto waitForWCStatus = waitForWriteConcern(
                 opCtx,
                 repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp(),
-                WriteConcernOptions(repl::ReplSetConfig::kMajorityWriteConcernModeName,
-                                    WriteConcernOptions::SyncMode::UNSET,
-                                    timeout),
+                WriteConcernOptions(
+                    repl::ReplSetConfig::kMajorityWriteConcernModeName,
+                    WriteConcernOptions::SyncMode::UNSET,
+                    // Propagate the user's wTimeout if one was given. Default is kNoTimeout.
+                    opCtx->getWriteConcern().wTimeout),
                 &res);
             CommandHelpers::appendCommandWCStatus(result, waitForWCStatus, res);
         });
@@ -395,6 +394,18 @@ public:
                     ShardingDDLCoordinatorService::getService(opCtx)
                         ->waitForCoordinatorsOfGivenTypeToComplete(
                             opCtx, DDLCoordinatorTypeEnum::kCollMod);
+                }
+
+                // TODO SERVER-62850 Remove when 6.0 branches-out
+                if (actualVersion > requestedVersion &&
+                    !feature_flags::gFeatureFlagRecoverableRefineCollectionShardKeyCoordinator
+                         .isEnabledOnVersion(requestedVersion)) {
+                    // No more (recoverable) ReshardCollectionCoordinators will start because we
+                    // have already switched the FCV value to kDowngrading. Wait for the ongoing
+                    // RefineCollectionCoordinators to finish.
+                    ShardingDDLCoordinatorService::getService(opCtx)
+                        ->waitForCoordinatorsOfGivenTypeToComplete(
+                            opCtx, DDLCoordinatorTypeEnum::kRefineCollectionShardKey);
                 }
 
                 // If we are only running phase-1, then we are done

@@ -232,8 +232,9 @@ public:
         std::set<std::string> cappedCollectionSet;
 
         bool noError = true;
+        const TenantDatabaseName tenantDbName(boost::none, dbname);
         catalog::forEachCollectionFromDb(
-            opCtx, dbname, MODE_IS, [&](const CollectionPtr& collection) {
+            opCtx, tenantDbName, MODE_IS, [&](const CollectionPtr& collection) {
                 auto collNss = collection->ns();
 
                 if (collNss.size() - 1 <= dbname.size()) {
@@ -341,7 +342,7 @@ private:
                                   << minSnapshot->toString(),
                     !minSnapshot || *mySnapshot >= *minSnapshot);
         } else {
-            invariant(opCtx->lockState()->isDbLockedForMode(db->name(), MODE_S));
+            invariant(opCtx->lockState()->isDbLockedForMode(db->name().dbName(), MODE_S));
         }
 
         auto desc = collection->getIndexCatalog()->findIdIndex(opCtx);

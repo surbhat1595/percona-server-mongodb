@@ -117,6 +117,7 @@ let testCases = {
     _configsvrRepairShardedCollectionChunksHistory: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
     _configsvrSetAllowMigrations: {skip: "internal command"},
+    _configsvrSetUserWriteBlockMode: {skip: "internal command"},
     _configsvrShardCollection:
         {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
@@ -270,6 +271,7 @@ let testCases = {
         useLogs: true,
     },
     compact: {skip: "does not accept read or write concern"},
+    compactStructuredEncryptionData: {skip: "does not accept read or write concern"},
     configureCollectionAutoSplitter: {
         skip: "does not accept read or write concern"
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release

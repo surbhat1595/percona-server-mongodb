@@ -498,8 +498,10 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
     if (shouldProceedWithBatchInsert) {
         try {
             if (!collection->getCollection()->isCapped() && !inTxn && batch.size() > 1) {
-                checkCollectionUUIDMismatch(
-                    opCtx, collection->getCollection(), wholeOp.getCollectionUUID());
+                checkCollectionUUIDMismatch(opCtx,
+                                            wholeOp.getNamespace(),
+                                            collection->getCollection(),
+                                            wholeOp.getCollectionUUID());
 
                 // First try doing it all together. If all goes well, this is all we need to do.
                 // See Collection::_insertDocuments for why we do all capped inserts one-at-a-time.
@@ -543,8 +545,10 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     // Transactions are not allowed to operate on capped collections.
                     uassertStatusOK(
                         checkIfTransactionOnCappedColl(opCtx, collection->getCollection()));
-                    checkCollectionUUIDMismatch(
-                        opCtx, collection->getCollection(), wholeOp.getCollectionUUID());
+                    checkCollectionUUIDMismatch(opCtx,
+                                                wholeOp.getNamespace(),
+                                                collection->getCollection(),
+                                                wholeOp.getCollectionUUID());
                     lastOpFixer->startingOp();
                     insertDocuments(opCtx,
                                     collection->getCollection(),
@@ -724,6 +728,7 @@ WriteResult performInserts(OperationContext* opCtx,
         } else if (wasAlreadyExecuted) {
             containsRetry = true;
             RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
+            out.retriedStmtIds.push_back(stmtId);
             out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
         }
     }
@@ -826,7 +831,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
 
-    checkCollectionUUIDMismatch(opCtx, collection->getCollection(), opCollectionUUID);
+    checkCollectionUUIDMismatch(opCtx, ns, collection->getCollection(), opCollectionUUID);
 
     const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest->getNamespaceString());
     ParsedUpdate parsedUpdate(opCtx, updateRequest, extensionsCallback, forgoOpCounterIncrements);
@@ -1022,6 +1027,7 @@ WriteResult performUpdates(OperationContext* opCtx,
                 containsRetry = true;
                 RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
                 out.results.emplace_back(parseOplogEntryForUpdate(*entry));
+                out.retriedStmtIds.push_back(stmtId);
                 continue;
             }
         }
@@ -1163,7 +1169,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
             timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
-    checkCollectionUUIDMismatch(opCtx, collection.getCollection(), opCollectionUUID);
+    checkCollectionUUIDMismatch(opCtx, ns, collection.getCollection(), opCollectionUUID);
 
     ParsedDelete parsedDelete(opCtx, &request);
     uassertStatusOK(parsedDelete.parseRequest());
@@ -1247,6 +1253,7 @@ WriteResult performDeletes(OperationContext* opCtx,
             containsRetry = true;
             RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
             out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
+            out.retriedStmtIds.push_back(stmtId);
             continue;
         }
 

@@ -39,6 +39,7 @@
 
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/commands/cqf/cqf_aggregate.h"
@@ -295,8 +296,8 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
     // 'resolvedNamespaces' from changing relative to those in the acquired ViewCatalog. The
     // resolution of the view definitions below might lead into an endless cycle if any are allowed
     // to change.
-    auto viewCatalog =
-        DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, request.getNamespace().db());
+    const TenantDatabaseName tenantDbName(boost::none, request.getNamespace().db());
+    auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
 
     std::deque<NamespaceString> involvedNamespacesQueue(pipelineInvolvedNamespaces.begin(),
                                                         pipelineInvolvedNamespaces.end());
@@ -319,8 +320,11 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                     str::stream() << "Failed to resolve view '" << involvedNs.ns());
             }
 
-            resolvedNamespaces[ns.coll()] = {resolvedView.getValue().getNamespace(),
-                                             resolvedView.getValue().getPipeline()};
+            auto&& underlyingNs = resolvedView.getValue().getNamespace();
+            // Attempt to acquire UUID of the underlying collection using lock free method.
+            auto uuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, underlyingNs);
+            resolvedNamespaces[ns.coll()] = {
+                underlyingNs, resolvedView.getValue().getPipeline(), uuid};
 
             // We parse the pipeline corresponding to the resolved view in case we must resolve
             // other view namespaces that are also involved.
@@ -344,8 +348,9 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                 // require a lookup stage involving a view on the 'local' database.
                 // If the involved namespace is 'local.system.tenantMigration.oplogView', resolve
                 // its view definition.
+                const TenantDatabaseName involvedTenantDbName(boost::none, involvedNs.db());
                 auto involvedDbViewCatalog =
-                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, involvedNs.db());
+                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, involvedTenantDbName);
 
                 // It is safe to assume that the ViewCatalog for the `local` database always
                 // exists because replica sets forbid dropping the oplog and the `local` database.
@@ -373,12 +378,14 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
             }
         } else if (!viewCatalog ||
                    CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, involvedNs)) {
+            // Attempt to acquire UUID of the collection using lock free method.
+            auto uuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, involvedNs);
             // If the aggregation database exists and 'involvedNs' refers to a collection namespace,
             // then we resolve it as an empty pipeline in order to read directly from the underlying
             // collection. If the database doesn't exist, then we still resolve it as an empty
             // pipeline because 'involvedNs' doesn't refer to a view namespace in our consistent
             // snapshot of the view catalog.
-            resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}};
+            resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}, uuid};
         } else if (viewCatalog->lookup(opCtx, involvedNs)) {
             auto status = resolveViewDefinition(involvedNs, viewCatalog);
             if (!status.isOK()) {
@@ -402,7 +409,8 @@ Status collatorCompatibleWithPipeline(OperationContext* opCtx,
                                       StringData dbName,
                                       const CollatorInterface* collator,
                                       const LiteParsedPipeline& liteParsedPipeline) {
-    auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, dbName);
+    const TenantDatabaseName tenantDbName(boost::none, dbName);
+    auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
     if (!viewCatalog) {
         return Status::OK();
     }
@@ -658,8 +666,13 @@ Status runAggregate(OperationContext* opCtx,
     auto initContext = [&](AutoGetCollectionViewMode m) -> void {
         ctx.emplace(opCtx, nss, m);
         for (const auto& ns : secondaryExecNssList) {
-            secondaryCtx.emplace_back(
-                std::make_unique<AutoGetCollectionForReadCommandMaybeLockFree>(opCtx, ns, m));
+            // Avoid locking the main namespace multiple times (we can't lock a secondary
+            // namespace multiple times because 'secondaryExecNssList is a set already). This
+            // emulates the behavior of 'AutoGetCollectionMulti'.
+            if (ns != nss) {
+                secondaryCtx.emplace_back(
+                    std::make_unique<AutoGetCollectionForReadCommandMaybeLockFree>(opCtx, ns, m));
+            }
         }
         collections = MultiCollection(ctx, secondaryCtx);
     };
@@ -703,8 +716,10 @@ Status runAggregate(OperationContext* opCtx,
 
             // Raise an error if 'origNss' is a view. We do not need to check this if we are opening
             // a stream on an entire db or across the cluster.
+            const TenantDatabaseName origTenantDbName(boost::none, origNss.db());
             if (!origNss.isCollectionlessAggregateNS()) {
-                auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, origNss.db());
+                auto viewCatalog =
+                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, origTenantDbName);
                 if (viewCatalog) {
                     auto view = viewCatalog->lookup(opCtx, origNss);
                     uassert(ErrorCodes::CommandNotSupportedOnView,
@@ -770,10 +785,12 @@ Status runAggregate(OperationContext* opCtx,
         if (ctx && ctx->getView() && !liteParsedPipeline.startsWithCollStats()) {
             invariant(nss != NamespaceString::kRsOplogNamespace);
             invariant(!nss.isCollectionlessAggregateNS());
-            uassert(ErrorCodes::OptionNotSupportedOnView,
-                    str::stream() << AggregateCommandRequest::kCollectionUUIDFieldName
-                                  << " is not supported against a view",
-                    !request.getCollectionUUID());
+
+            checkCollectionUUIDMismatch(opCtx,
+                                        nss,
+                                        collections.getMainCollection(),
+                                        request.getCollectionUUID(),
+                                        false /* checkFeatureFlag */);
 
             uassert(ErrorCodes::CommandNotSupportedOnView,
                     "mapReduce on a view is not supported",
@@ -802,7 +819,8 @@ Status runAggregate(OperationContext* opCtx,
             // Check that the database/view catalog still exist, in case this is a lock-free
             // operation. It's possible for a view to disappear after we release locks below, so
             // it's safe to quit early if the view disappears while running lock-free.
-            auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, nss.db());
+            const TenantDatabaseName tenantDbName(boost::none, nss.db());
+            auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "Namespace '" << nss << "' no longer exists",
                     viewCatalog);
@@ -851,13 +869,12 @@ Status runAggregate(OperationContext* opCtx,
             return status;
         }
 
-        if (request.getCollectionUUID()) {
-            // If the namespace is not a view and collectionUUID was provided, verify the collection
-            // exists and has the expected UUID.
-            uassert(ErrorCodes::NamespaceNotFound,
-                    "No collection found with the given namespace and UUID",
-                    uuid && uuid == *request.getCollectionUUID());
-        }
+        // If collectionUUID was provided, verify the collection exists and has the expected UUID.
+        checkCollectionUUIDMismatch(opCtx,
+                                    nss,
+                                    collections.getMainCollection(),
+                                    request.getCollectionUUID(),
+                                    false /* checkFeatureFlag */);
 
         invariant(collatorToUse);
         expCtx = makeExpressionContext(

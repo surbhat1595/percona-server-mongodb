@@ -199,8 +199,9 @@ void createIndexForApplyOps(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(indexNss, MODE_X));
 
     // Check if collection exists.
+    const TenantDatabaseName tenantDbName(boost::none, indexNss.db());
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto db = databaseHolder->getDb(opCtx, indexNss.ns());
+    auto db = databaseHolder->getDb(opCtx, tenantDbName);
     auto indexCollection =
         db ? CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, indexNss) : nullptr;
     uassert(ErrorCodes::NamespaceNotFound,
@@ -1083,10 +1084,11 @@ void writeChangeStreamPreImage(OperationContext* opCtx,
                                const CollectionPtr& collection,
                                const mongo::repl::OplogEntry& oplogEntry,
                                const BSONObj& preImage) {
-    ChangeStreamPreImageId preImageId{
-        collection->uuid(), oplogEntry.getTimestamp(), 0 /*applyOpsIndex*/};
+    ChangeStreamPreImageId preImageId{collection->uuid(),
+                                      oplogEntry.getTimestampForPreImage(),
+                                      static_cast<int64_t>(oplogEntry.getApplyOpsIndex())};
     ChangeStreamPreImage preImageDocument{
-        std::move(preImageId), oplogEntry.getWallClockTime(), preImage};
+        std::move(preImageId), oplogEntry.getWallClockTimeForPreImage(), preImage};
     writeToChangeStreamPreImagesCollection(opCtx, preImageDocument);
 }
 }  // namespace
@@ -1552,15 +1554,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     // document.
                     invariant(op.getObject2());
                     auto&& documentId = *op.getObject2();
-
-                    // Assume that either an index on _id exists or the collection is clustered by
-                    // _id.
-                    const bool requireIndex{false};
-
-                    // TODO: SERVER-61480 use a more efficient implementation - bypass the find
-                    // component.
-                    auto documentFound = Helpers::findOne(
-                        opCtx, collection, documentId, changeStreamPreImage, requireIndex);
+                    auto documentFound = Helpers::findById(
+                        opCtx, db, collection->ns().ns(), documentId, changeStreamPreImage);
                     invariant(documentFound);
                 }
 
@@ -1633,18 +1628,17 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 }
 
                 if (op.getNeedsRetryImage()) {
-                    writeToImageCollection(
-                        opCtx,
-                        op.getSessionId().get(),
-                        op.getTxnNumber().get(),
-                        op.getTimestampForRetryImage().value_or(op.getTimestamp()),
-                        op.getNeedsRetryImage().get(),
-                        // If we did not request an image because we're in
-                        // initial sync, the value passed in here is conveniently
-                        // the empty BSONObj.
-                        ur.requestedDocImage,
-                        getInvalidatingReason(mode, isDataConsistent),
-                        &upsertConfigImage);
+                    writeToImageCollection(opCtx,
+                                           op.getSessionId().get(),
+                                           op.getTxnNumber().get(),
+                                           op.getApplyOpsTimestamp().value_or(op.getTimestamp()),
+                                           op.getNeedsRetryImage().get(),
+                                           // If we did not request an image because we're in
+                                           // initial sync, the value passed in here is conveniently
+                                           // the empty BSONObj.
+                                           ur.requestedDocImage,
+                                           getInvalidatingReason(mode, isDataConsistent),
+                                           &upsertConfigImage);
                 }
 
                 if (recordChangeStreamPreImage) {
@@ -1729,15 +1723,14 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     // isn't strictly necessary for correctness -- the `config.transactions` table
                     // is responsible for whether to retry. The motivation here is to simply reduce
                     // the number of states related documents in the two collections can be in.
-                    writeToImageCollection(
-                        opCtx,
-                        op.getSessionId().get(),
-                        op.getTxnNumber().get(),
-                        op.getTimestampForRetryImage().value_or(op.getTimestamp()),
-                        repl::RetryImageEnum::kPreImage,
-                        result.requestedPreImage.value_or(BSONObj()),
-                        getInvalidatingReason(mode, isDataConsistent),
-                        &upsertConfigImage);
+                    writeToImageCollection(opCtx,
+                                           op.getSessionId().get(),
+                                           op.getTxnNumber().get(),
+                                           op.getApplyOpsTimestamp().value_or(op.getTimestamp()),
+                                           repl::RetryImageEnum::kPreImage,
+                                           result.requestedPreImage.value_or(BSONObj()),
+                                           getInvalidatingReason(mode, isDataConsistent),
+                                           &upsertConfigImage);
                 }
 
                 if (recordChangeStreamPreImage) {
@@ -1745,7 +1738,11 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     writeChangeStreamPreImage(opCtx, collection, op, *(result.requestedPreImage));
                 }
 
-                if (result.nDeleted == 0 && mode == OplogApplication::Mode::kSecondary) {
+                // It is legal for a delete operation on the pre-images collection to delete zero
+                // documents - pre-image collections are not guaranteed to contain the same set of
+                // documents at all times.
+                if (result.nDeleted == 0 && mode == OplogApplication::Mode::kSecondary &&
+                    !requestNss.isChangeStreamPreImagesCollection()) {
                     LOGV2_WARNING(2170002,
                                   "Applied a delete which did not delete anything in steady state "
                                   "replication",
@@ -1827,8 +1824,9 @@ Status applyCommand_inlock(OperationContext* opCtx,
         // Command application doesn't always acquire the global writer lock for transaction
         // commands, so we acquire its own locks here.
         Lock::DBLock lock(opCtx, nss.db(), MODE_IS);
+        const TenantDatabaseName tenantDbName(boost::none, nss.db());
         auto databaseHolder = DatabaseHolder::get(opCtx);
-        auto db = databaseHolder->getDb(opCtx, nss.ns());
+        auto db = databaseHolder->getDb(opCtx, tenantDbName);
         if (db && !CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss) &&
             ViewCatalog::get(opCtx)->lookup(opCtx, nss)) {
             return {ErrorCodes::CommandNotSupportedOnView,

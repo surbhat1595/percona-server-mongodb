@@ -32,6 +32,7 @@ global:
     - "mongo/db/commands/create_command_validation.h"
 
 imports:
+    - "mongo/crypto/encryption_fields.idl"
     - "mongo/db/auth/access_checks.idl"
     - "mongo/db/auth/action_type.idl"
     - "mongo/db/catalog/collection_options.idl"
@@ -85,6 +86,8 @@ commands:
                               must also set a maximum size in the 'size' field."
                 type: safeBool
                 default: false
+                # The capped parameter should actually be unstable, and in practice it is, because
+                # it is required to also set the 'size' field, which is properly marked as unstable.
                 unstable: false
             autoIndexId:
                 description: "Specify false to disable the automatic creation of an index on the
@@ -192,6 +195,11 @@ commands:
             expireAfterSeconds:
                 description: "The number of seconds after which old data should be deleted."
                 type: safeInt64
+                optional: true
+                unstable: false
+            encryptedFields:
+                description: "Specifies the fields that are encrypted by client-side FLE."
+                type: EncryptedFieldConfig
                 optional: true
                 unstable: false
             temp:

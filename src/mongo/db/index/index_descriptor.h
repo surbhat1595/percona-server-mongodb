@@ -88,7 +88,7 @@ public:
     static constexpr StringData kUniqueFieldName = "unique"_sd;
     static constexpr StringData kWeightsFieldName = "weights"_sd;
     static constexpr StringData kOriginalSpecFieldName = "originalSpec"_sd;
-    static constexpr StringData kCommentFieldName = "comment"_sd;
+    static constexpr StringData kDisallowNewDuplicateKeysFieldName = "disallowNewDuplicateKeys"_sd;
 
     /**
      * infoObj is a copy of the index-describing BSONObj contained in the catalog.
@@ -227,8 +227,8 @@ public:
         return _partialFilterExpression;
     }
 
-    const BSONObj& comment() const {
-        return _comment;
+    bool disallowNewDuplicateKeys() const {
+        return _disallowNewDuplicateKeys;
     }
 
     /**
@@ -280,7 +280,7 @@ private:
     IndexVersion _version;
     BSONObj _collation;
     BSONObj _partialFilterExpression;
-    BSONObj _comment;
+    bool _disallowNewDuplicateKeys = false;
 
     // Many query stages require going from an IndexDescriptor to its IndexCatalogEntry, so for
     // now we need this.

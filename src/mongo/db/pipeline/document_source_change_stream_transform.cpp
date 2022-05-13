@@ -237,32 +237,44 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
                                    update_oplog_entry::kDiffObjectFieldName,
                                BSONType::Object);
 
-                const auto& deltaDesc =
-                    change_stream_document_diff_parser::parseDiff(diffObj.getDocument().toBson());
+                if (_changeStreamSpec.getShowRawUpdateDescription()) {
+                    updateDescription = input[repl::OplogEntry::kObjectFieldName];
+                } else {
+                    const auto& deltaDesc = change_stream_document_diff_parser::parseDiff(
+                        diffObj.getDocument().toBson());
 
-                updateDescription = Value(Document{{"updatedFields", deltaDesc.updatedFields},
-                                                   {"removedFields", deltaDesc.removedFields},
-                                                   {"truncatedArrays", deltaDesc.truncatedArrays}});
+                    updateDescription =
+                        Value(Document{{"updatedFields", deltaDesc.updatedFields},
+                                       {"removedFields", deltaDesc.removedFields},
+                                       {"truncatedArrays", deltaDesc.truncatedArrays}});
+                }
             } else if (id.missing()) {
                 operationType = DocumentSourceChangeStream::kUpdateOpType;
                 checkValueType(input[repl::OplogEntry::kObjectFieldName],
                                repl::OplogEntry::kObjectFieldName,
                                BSONType::Object);
-                Document opObject = input[repl::OplogEntry::kObjectFieldName].getDocument();
-                Value updatedFields = opObject["$set"];
-                Value removedFields = opObject["$unset"];
 
-                // Extract the field names of $unset document.
-                vector<Value> removedFieldsVector;
-                if (removedFields.getType() == BSONType::Object) {
-                    auto iter = removedFields.getDocument().fieldIterator();
-                    while (iter.more()) {
-                        removedFieldsVector.push_back(Value(iter.next().first));
+                if (_changeStreamSpec.getShowRawUpdateDescription()) {
+                    updateDescription = input[repl::OplogEntry::kObjectFieldName];
+                } else {
+                    Document opObject = input[repl::OplogEntry::kObjectFieldName].getDocument();
+                    Value updatedFields = opObject["$set"];
+                    Value removedFields = opObject["$unset"];
+
+                    // Extract the field names of $unset document.
+                    vector<Value> removedFieldsVector;
+                    if (removedFields.getType() == BSONType::Object) {
+                        auto iter = removedFields.getDocument().fieldIterator();
+                        while (iter.more()) {
+                            removedFieldsVector.push_back(Value(iter.next().first));
+                        }
                     }
+
+                    updateDescription = Value(
+                        Document{{"updatedFields",
+                                  updatedFields.missing() ? Value(Document()) : updatedFields},
+                                 {"removedFields", removedFieldsVector}});
                 }
-                updateDescription = Value(Document{
-                    {"updatedFields", updatedFields.missing() ? Value(Document()) : updatedFields},
-                    {"removedFields", removedFieldsVector}});
             } else {
                 operationType = DocumentSourceChangeStream::kReplaceOpType;
                 fullDocument = input[repl::OplogEntry::kObjectFieldName];
@@ -291,9 +303,33 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
                 // The "o.to" field contains the target namespace for the rename.
                 const auto renameTargetNss =
                     NamespaceString(input.getNestedField("o.to").getString());
-                doc.addField(DocumentSourceChangeStream::kRenameTargetNssField,
-                             Value(Document{{"db", renameTargetNss.db()},
-                                            {"coll", renameTargetNss.coll()}}));
+                const Value renameTarget(Document{
+                    {"db", renameTargetNss.db()},
+                    {"coll", renameTargetNss.coll()},
+                });
+
+                // The 'to' field predates the 'operationDescription' field which was added in 5.3.
+                // We keep the top-level 'to' field for backwards-compatibility.
+                doc.addField(DocumentSourceChangeStream::kRenameTargetNssField, renameTarget);
+
+                // If 'showExpandedEvents' is set, include full details of the rename in
+                // 'operationDescription'.
+                if (_changeStreamSpec.getShowExpandedEvents()) {
+                    MutableDocument operationDescription;
+                    operationDescription.addField(DocumentSourceChangeStream::kRenameTargetNssField,
+                                                  renameTarget);
+
+                    // If present, 'dropTarget' is the UUID of the collection that previously owned
+                    // the target namespace and was dropped during the rename operation.
+                    const auto dropTarget = input.getNestedField("o.dropTarget");
+                    if (!dropTarget.missing()) {
+                        checkValueType(dropTarget, "o.dropTarget", BSONType::BinData);
+                        operationDescription.addField("dropTarget", dropTarget);
+                    }
+
+                    doc.addField(DocumentSourceChangeStream::kOperationDescriptionField,
+                                 operationDescription.freezeToValue());
+                }
             } else if (!input.getNestedField("o.dropDatabase").missing()) {
                 operationType = DocumentSourceChangeStream::kDropDatabaseOpType;
 
@@ -350,6 +386,7 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
     // unwinding a transaction.
     auto txnOpIndex = input[DocumentSourceChangeStream::kTxnOpIndexField];
     auto applyOpsIndex = input[DocumentSourceChangeStream::kApplyOpsIndexField];
+    auto applyOpsEntryTs = input[DocumentSourceChangeStream::kApplyOpsTsField];
 
     // Add some additional fields only relevant to transactions.
     if (!txnOpIndex.missing()) {
@@ -376,6 +413,16 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
     // since we will subsequently rely upon it to generate a correct postBatchResumeToken.
     const bool isSingleElementKey = true;
     doc.metadata().setSortKey(Value{resumeToken}, isSingleElementKey);
+
+    if (_changeStreamSpec.getShowExpandedEvents()) {
+        // Note: If the UUID is a missing value (which can be true for events like 'dropDatabase'),
+        // 'addField' will not add anything to the document.
+        doc.addField(DocumentSourceChangeStream::kCollectionUuidField, uuid);
+
+        const auto wallTime = input[repl::OplogEntry::kWallClockTimeFieldName];
+        checkValueType(wallTime, repl::OplogEntry::kWallClockTimeFieldName, BSONType::Date);
+        doc.addField(DocumentSourceChangeStream::kWallTimeField, wallTime);
+    }
 
     // Invalidation, topology change, and resharding events have fewer fields.
     if (operationType == DocumentSourceChangeStream::kInvalidateOpType ||
@@ -405,10 +452,10 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
         } else {
             // Set 'kPreImageIdField' to the 'ChangeStreamPreImageId'. The DSCSAddPreImage stage
             // will use the id in order to fetch the pre-image from the pre-images collection.
-            const auto preImageId =
-                ChangeStreamPreImageId(uuid.getUuid(),
-                                       ts.getTimestamp(),
-                                       applyOpsIndex.missing() ? 0 : applyOpsIndex.getLong());
+            const auto preImageId = ChangeStreamPreImageId(
+                uuid.getUuid(),
+                applyOpsEntryTs.missing() ? ts.getTimestamp() : applyOpsEntryTs.getTimestamp(),
+                applyOpsIndex.missing() ? 0 : applyOpsIndex.getLong());
             doc.addField(DocumentSourceChangeStream::kPreImageIdField, Value(preImageId.toBSON()));
         }
     }
@@ -418,9 +465,13 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
                      : Value(Document{{"db", nss.db()}, {"coll", nss.coll()}}));
     doc.addField(DocumentSourceChangeStream::kDocumentKeyField, std::move(documentKey));
 
-    // Note that 'updateDescription' might be the 'missing' value, in which case it will not be
-    // serialized.
-    doc.addField("updateDescription", std::move(updateDescription));
+    // Note that the update description field might be the 'missing' value, in which case it will
+    // not be serialized.
+    auto updateDescriptionFieldName = _changeStreamSpec.getShowRawUpdateDescription()
+        ? DocumentSourceChangeStream::kRawUpdateDescriptionField
+        : DocumentSourceChangeStream::kUpdateDescriptionField;
+    doc.addField(updateDescriptionFieldName, std::move(updateDescription));
+
     return doc.freeze();
 }
 
@@ -446,10 +497,12 @@ DepsTracker::State DocumentSourceChangeStreamTransform::getDependencies(DepsTrac
     deps->fields.insert(repl::OplogEntry::kSessionIdFieldName.toString());
     deps->fields.insert(repl::OplogEntry::kTxnNumberFieldName.toString());
     deps->fields.insert(DocumentSourceChangeStream::kTxnOpIndexField.toString());
+    deps->fields.insert(repl::OplogEntry::kWallClockTimeFieldName.toString());
 
-    if (_preImageRequested) {
+    if (_preImageRequested || _postImageRequested) {
         deps->fields.insert(repl::OplogEntry::kPreImageOpTimeFieldName.toString());
         deps->fields.insert(DocumentSourceChangeStream::kApplyOpsIndexField.toString());
+        deps->fields.insert(DocumentSourceChangeStream::kApplyOpsTsField.toString());
     }
     return DepsTracker::State::EXHAUSTIVE_ALL;
 }

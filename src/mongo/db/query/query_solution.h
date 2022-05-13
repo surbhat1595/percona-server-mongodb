@@ -40,6 +40,7 @@
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/plan_enumerator_explain_info.h"
+#include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/util/id_generator.h"
 
@@ -444,11 +445,11 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
 
     // If present, this parameter sets the start point of a forward scan or the end point of a
     // reverse scan.
-    boost::optional<RecordId> minRecord;
+    boost::optional<RecordIdBound> minRecord;
 
     // If present, this parameter sets the start point of a reverse scan or the end point of a
     // forward scan.
-    boost::optional<RecordId> maxRecord;
+    boost::optional<RecordIdBound> maxRecord;
 
     // If true, the collection scan will return a token that can be used to resume the scan.
     bool requestResumeToken = false;
@@ -480,6 +481,43 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
 
     // Once the first matching document is found, assume that all documents after it must match.
     bool stopApplyingFilterAfterFirstMatch = false;
+};
+
+struct ColumnIndexScanNode : public QuerySolutionNode {
+    ColumnIndexScanNode(ColumnIndexEntry);
+
+    virtual StageType getType() const {
+        return STAGE_COLUMN_IXSCAN;
+    }
+
+    void appendToString(str::stream* ss, int indent) const override;
+
+    bool fetched() const {
+        return false;
+    }
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        for (const auto& availableField : fields) {
+            if (field == availableField) {
+                return FieldAvailability::kFullyProvided;
+            }
+        }
+        return FieldAvailability::kNotProvided;
+    }
+    bool sortedByDiskLoc() const {
+        return true;
+    }
+
+    const ProvidedSortSet& providedSorts() const {
+        return kEmptySet;
+    }
+
+    QuerySolutionNode* clone() const {
+        return new ColumnIndexScanNode(indexEntry);
+    }
+
+    ColumnIndexEntry indexEntry;
+
+    std::vector<std::string> fields;
 };
 
 /**
@@ -1343,6 +1381,20 @@ struct GroupNode : public QuerySolutionNode {
  * by direct name rather than QuerySolutionNode.
  */
 struct EqLookupNode : public QuerySolutionNode {
+    /**
+     * Enum describing the possible algorithms that can be used to execute a pushed down $lookup.
+     */
+    enum class LookupStrategy {
+        // Execute the join by storing entries from the foreign collection in a hash table.
+        kHashJoin,
+
+        // Execute the join by doing an index lookup in the foreign collection.
+        kIndexedLoopJoin,
+
+        // Execute the join by iterating over the foreign collection for each local key.
+        kNestedLoopJoin,
+    };
+
     EqLookupNode(std::unique_ptr<QuerySolutionNode> child,
                  const std::string& foreignCollection,
                  const std::string& joinFieldLocal,
@@ -1407,6 +1459,18 @@ struct EqLookupNode : public QuerySolutionNode {
      * If the field already exists in the local (outer) document, the field will be overwritten.
      */
     std::string joinField;
+
+    /**
+     * The algorithm that will be used to execute this 'EqLookupNode'. Defaults to nested loop join
+     * as it's applicable independent of collection sizes or the availability of indexes.
+     */
+    LookupStrategy lookupStrategy = LookupStrategy::kNestedLoopJoin;
+
+    /**
+     * The index to be used if we can answer the join predicate with an index on the foreign
+     * collection. Set to 'boost::none' by default and if a non-indexed strategy is chosen.
+     */
+    boost::optional<IndexEntry> idxEntry = boost::none;
 };
 
 struct SentinelNode : public QuerySolutionNode {

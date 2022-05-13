@@ -90,8 +90,8 @@ DocumentSource::GetNextResult DocumentSourceBackupCursor::doGetNext() {
 
     if (_docIt == _backupBlocks.cend()) {
         constexpr std::size_t batchSize = 100;
-        _backupBlocks =
-            uassertStatusOK(_backupCursorState.streamingCursor->getNextBatch(batchSize));
+        _backupBlocks = uassertStatusOK(
+            _backupCursorState.streamingCursor->getNextBatch(pExpCtx->opCtx, batchSize));
         _docIt = _backupBlocks.cbegin();
         // Empty batch means streaming cursor is exhausted
         if (_backupBlocks.empty()) {
@@ -103,12 +103,12 @@ DocumentSource::GetNextResult DocumentSourceBackupCursor::doGetNext() {
     // otherwise output filename, fileSize only
     Document doc;
     if (_docIt->length() != 0 || _docIt->offset() != 0) {
-        doc = Document{{"filename"_sd, _docIt->filename()},
+        doc = Document{{"filename"_sd, _docIt->filePath()},
                        {"offset"_sd, static_cast<long long>(_docIt->offset())},
                        {"length"_sd, static_cast<long long>(_docIt->length())},
                        {"fileSize"_sd, static_cast<long long>(_docIt->fileSize())}};
     } else {
-        doc = Document{{"filename"_sd, _docIt->filename()},
+        doc = Document{{"filename"_sd, _docIt->filePath()},
                        {"fileSize"_sd, static_cast<long long>(_docIt->fileSize())}};
     }
     ++_docIt;

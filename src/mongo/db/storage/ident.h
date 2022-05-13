@@ -31,6 +31,8 @@
 
 #include <string>
 
+#include "mongo/base/string_data.h"
+
 namespace mongo {
 
 /**
@@ -38,7 +40,7 @@ namespace mongo {
  */
 class Ident {
 public:
-    explicit Ident(std::string ident) : _ident(std::move(ident)) {}
+    explicit Ident(StringData ident) : _ident(ident.toString()) {}
     virtual ~Ident() = default;
 
     const std::string& getIdent() const {

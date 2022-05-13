@@ -36,6 +36,7 @@
 #include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
+#include "mongo/db/pipeline/change_stream_filter_helpers.h"
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
@@ -84,6 +85,7 @@ constexpr StringData DocumentSourceChangeStream::kNamespaceField;
 constexpr StringData DocumentSourceChangeStream::kUuidField;
 constexpr StringData DocumentSourceChangeStream::kReshardingUuidField;
 constexpr StringData DocumentSourceChangeStream::kUpdateDescriptionField;
+constexpr StringData DocumentSourceChangeStream::kRawUpdateDescriptionField;
 constexpr StringData DocumentSourceChangeStream::kOperationTypeField;
 constexpr StringData DocumentSourceChangeStream::kStageName;
 constexpr StringData DocumentSourceChangeStream::kClusterTimeField;
@@ -306,6 +308,11 @@ std::list<boost::intrusive_ptr<DocumentSource>> DocumentSourceChangeStream::_bui
         stages.push_back(DocumentSourceChangeStreamEnsureResumeTokenPresent::create(expCtx, spec));
     }
 
+    // If 'showExpandedEvents' is NOT set, add a filter that returns only classic change events.
+    if (!spec.getShowExpandedEvents()) {
+        stages.push_back(DocumentSourceMatch::create(
+            change_stream_filter::getMatchFilterForClassicOperationTypes(), expCtx));
+    }
     return stages;
 }
 
@@ -372,6 +379,12 @@ void DocumentSourceChangeStream::assertIsLegalSpecification(
             "'showEnhancedEvents:true' in the change stream spec",
             feature_flags::gFeatureFlagChangeStreamsVisibility.isEnabledAndIgnoreFCV() ||
                 !spec.getShowExpandedEvents());
+
+    uassert(6189400,
+            "the 'featureFlagChangeStreamsVisibility' should be enabled to use "
+            "'showRawUpdateDescription:true' in the change stream spec",
+            feature_flags::gFeatureFlagChangeStreamsVisibility.isEnabledAndIgnoreFCV() ||
+                !spec.getShowRawUpdateDescription());
 
     uassert(31123,
             "Change streams from mongos may not show migration events",

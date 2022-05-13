@@ -90,6 +90,8 @@ static const Timestamp kDefaultTs(100, 1);
 static const repl::OpTime kDefaultOpTime(kDefaultTs, 1);
 static const NamespaceString nss("unittests.change_stream");
 static const BSONObj kDefaultSpec = fromjson("{$changeStream: {}}");
+static const BSONObj kShowExpandedEventsSpec =
+    fromjson("{$changeStream: {showExpandedEvents: true}}");
 
 class ChangeStreamStageTestNoSetup : public AggregationContextFixture {
 public:
@@ -434,6 +436,9 @@ public:
         expCtx->ns = NamespaceString("a.collection");
         expCtx->inMongos = true;
 
+        // Always enable 'featureFlagChangeStreamsVisibility' since some tests rely on
+        // 'showExpandedEvents'.
+        RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
         auto pipeline = Pipeline::parse(rawPipeline, expCtx);
         pipeline->optimizePipeline();
 
@@ -822,6 +827,36 @@ TEST_F(ChangeStreamStageTest, TransformUpdateFields) {
     checkTransformation(updateField, expectedUpdateField);
 }
 
+TEST_F(ChangeStreamStageTest, TransformUpdateFieldsShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    BSONObj o = BSON("$set" << BSON("y" << 1));
+    BSONObj o2 = BSON("_id" << 1 << "x" << 2);
+    auto updateField = makeOplogEntry(OpTypeEnum::kUpdate,  // op type
+                                      nss,                  // namespace
+                                      o,                    // o
+                                      testUuid(),           // uuid
+                                      boost::none,          // fromMigrate
+                                      o2);                  // o2
+
+    // Update fields
+    Document expectedUpdateField{
+        {DSChangeStream::kIdField, makeResumeToken(kDefaultTs, testUuid(), o2)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kUpdateOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kCollectionUuidField, testUuid()},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}, {"coll", nss.coll()}}},
+        {DSChangeStream::kDocumentKeyField, D{{"_id", 1}, {"x", 2}}},
+        {
+            "updateDescription",
+            D{{"updatedFields", D{{"y", 1}}}, {"removedFields", vector<V>()}},
+        },
+    };
+    checkTransformation(updateField, expectedUpdateField, kShowExpandedEventsSpec);
+}
+
 TEST_F(ChangeStreamStageTest, TransformSimpleDeltaOplogUpdatedFields) {
     BSONObj diff = BSON("u" << BSON("a" << 1 << "b"
                                         << "updated"));
@@ -1021,6 +1056,33 @@ TEST_F(ChangeStreamStageTest, TransformReplace) {
     checkTransformation(replace, expectedReplace);
 }
 
+TEST_F(ChangeStreamStageTest, TransformReplaceShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    BSONObj o = BSON("_id" << 1 << "x" << 2 << "y" << 1);
+    BSONObj o2 = BSON("_id" << 1 << "x" << 2);
+    auto replace = makeOplogEntry(OpTypeEnum::kUpdate,  // op type
+                                  nss,                  // namespace
+                                  o,                    // o
+                                  testUuid(),           // uuid
+                                  boost::none,          // fromMigrate
+                                  o2);                  // o2
+
+    // Replace
+    Document expectedReplace{
+        {DSChangeStream::kIdField, makeResumeToken(kDefaultTs, testUuid(), o2)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kReplaceOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kCollectionUuidField, testUuid()},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kFullDocumentField, D{{"_id", 1}, {"x", 2}, {"y", 1}}},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}, {"coll", nss.coll()}}},
+        {DSChangeStream::kDocumentKeyField, D{{"_id", 1}, {"x", 2}}},
+    };
+    checkTransformation(replace, expectedReplace, kShowExpandedEventsSpec);
+}
+
 TEST_F(ChangeStreamStageTest, TransformDelete) {
     BSONObj o = BSON("_id" << 1 << "x" << 2);
     auto deleteEntry = makeOplogEntry(OpTypeEnum::kDelete,  // op type
@@ -1049,6 +1111,41 @@ TEST_F(ChangeStreamStageTest, TransformDelete) {
                                        deleteEntry.getObject2());  // o2
 
     checkTransformation(deleteEntry2, expectedDelete);
+}
+
+TEST_F(ChangeStreamStageTest, TransformDeleteShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    BSONObj o = BSON("_id" << 1 << "x" << 2);
+    auto deleteEntry = makeOplogEntry(OpTypeEnum::kDelete,  // op type
+                                      nss,                  // namespace
+                                      o,                    // o
+                                      testUuid(),           // uuid
+                                      boost::none,          // fromMigrate
+                                      boost::none);         // o2
+
+    // Delete
+    Document expectedDelete{
+        {DSChangeStream::kIdField, makeResumeToken(kDefaultTs, testUuid(), o)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kDeleteOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kCollectionUuidField, testUuid()},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}, {"coll", nss.coll()}}},
+        {DSChangeStream::kDocumentKeyField, D{{"_id", 1}, {"x", 2}}},
+    };
+    checkTransformation(deleteEntry, expectedDelete, kShowExpandedEventsSpec);
+
+    bool fromMigrate = false;  // also check actual "fromMigrate: false" not filtered
+    auto deleteEntry2 = makeOplogEntry(deleteEntry.getOpType(),    // op type
+                                       deleteEntry.getNss(),       // namespace
+                                       deleteEntry.getObject(),    // o
+                                       deleteEntry.getUuid(),      // uuid
+                                       fromMigrate,                // fromMigrate
+                                       deleteEntry.getObject2());  // o2
+
+    checkTransformation(deleteEntry2, expectedDelete, kShowExpandedEventsSpec);
 }
 
 TEST_F(ChangeStreamStageTest, TransformDeleteFromMigrate) {
@@ -1105,6 +1202,32 @@ TEST_F(ChangeStreamStageTest, TransformDrop) {
     checkTransformation(dropColl, expectedDrop, kDefaultSpec, expectedInvalidate);
 }
 
+TEST_F(ChangeStreamStageTest, TransformDropShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    OplogEntry dropColl = createCommand(BSON("drop" << nss.coll()), testUuid());
+
+    Document expectedDrop{
+        {DSChangeStream::kIdField, makeResumeToken(kDefaultTs, testUuid())},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kDropCollectionOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kCollectionUuidField, testUuid()},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}, {"coll", nss.coll()}}},
+    };
+    Document expectedInvalidate{
+        {DSChangeStream::kIdField,
+         makeResumeToken(
+             kDefaultTs, testUuid(), Value(), ResumeTokenData::FromInvalidate::kFromInvalidate)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kInvalidateOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kWallTimeField, Date_t()},
+    };
+
+    checkTransformation(dropColl, expectedDrop, kShowExpandedEventsSpec, expectedInvalidate);
+}
+
 TEST_F(ChangeStreamStageTest, TransformRename) {
     NamespaceString otherColl("test.bar");
     OplogEntry rename =
@@ -1127,6 +1250,43 @@ TEST_F(ChangeStreamStageTest, TransformRename) {
     };
 
     checkTransformation(rename, expectedRename, kDefaultSpec, expectedInvalidate);
+}
+
+TEST_F(ChangeStreamStageTest, TransformRenameShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    NamespaceString otherColl("test.bar");
+    auto dropTarget = UUID::gen();
+    OplogEntry rename = createCommand(BSON("renameCollection" << nss.ns() << "to" << otherColl.ns()
+                                                              << "dropTarget" << dropTarget),
+                                      testUuid());
+
+    Document expectedRename{
+        {DSChangeStream::kRenameTargetNssField,
+         D{{"db", otherColl.db()}, {"coll", otherColl.coll()}}},
+        {DSChangeStream::kOperationDescriptionField,
+         D{
+             {"to", D{{"db", otherColl.db()}, {"coll", otherColl.coll()}}},
+             {"dropTarget", dropTarget},
+         }},
+        {DSChangeStream::kIdField, makeResumeToken(kDefaultTs, testUuid())},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kRenameCollectionOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kCollectionUuidField, testUuid()},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}, {"coll", nss.coll()}}},
+    };
+    Document expectedInvalidate{
+        {DSChangeStream::kIdField,
+         makeResumeToken(
+             kDefaultTs, testUuid(), Value(), ResumeTokenData::FromInvalidate::kFromInvalidate)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kInvalidateOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kWallTimeField, Date_t()},
+    };
+
+    checkTransformation(rename, expectedRename, kShowExpandedEventsSpec, expectedInvalidate);
 }
 
 TEST_F(ChangeStreamStageTest, TransformInvalidateFromMigrate) {
@@ -2178,7 +2338,7 @@ TEST_F(ChangeStreamStageTest, TransformationShouldBeAbleToReParseSerializedStage
 
     vector<intrusive_ptr<DocumentSource>> allStages(std::begin(result), std::end(result));
 
-    ASSERT_EQ(allStages.size(), 5);
+    ASSERT_EQ(allStages.size(), 6);
 
     auto stage = allStages[2];
     ASSERT(dynamic_cast<DocumentSourceChangeStreamTransform*>(stage.get()));
@@ -2204,7 +2364,7 @@ TEST_F(ChangeStreamStageTest, TransformationShouldBeAbleToReParseSerializedStage
         DSChangeStream::createFromBson(serializedBson.firstElement(), expCtx), expCtx);
     auto newSerialization = roundTripped->serialize();
 
-    ASSERT_EQ(newSerialization.size(), 5UL);
+    ASSERT_EQ(newSerialization.size(), 6UL);
 
     // DSCSTransform stage should be the third stage after DSCSOplogMatch and
     // DSCSUnwindTransactions stages.
@@ -2226,7 +2386,7 @@ TEST_F(ChangeStreamStageTest, DSCSTransformStageEmptySpecSerializeResumeAfter) {
     ASSERT(!expCtx->initialPostBatchResumeToken.isEmpty());
 
     vector<intrusive_ptr<DocumentSource>> allStages(std::begin(result), std::end(result));
-    ASSERT_EQ(allStages.size(), 5);
+    ASSERT_EQ(allStages.size(), 6);
     auto transformStage = allStages[2];
     ASSERT(dynamic_cast<DocumentSourceChangeStreamTransform*>(transformStage.get()));
 
@@ -2653,6 +2813,31 @@ TEST_F(ChangeStreamStageDBTest, TransformInsert) {
     checkTransformation(insert, expectedInsert);
 }
 
+TEST_F(ChangeStreamStageDBTest, TransformInsertShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    auto insert = makeOplogEntry(OpTypeEnum::kInsert,
+                                 nss,
+                                 BSON("_id" << 1 << "x" << 2),
+                                 testUuid(),
+                                 boost::none,
+                                 BSON("x" << 2 << "_id" << 1));
+
+    Document expectedInsert{
+        {DSChangeStream::kIdField,
+         makeResumeToken(kDefaultTs, testUuid(), BSON("x" << 2 << "_id" << 1))},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kInsertOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kCollectionUuidField, testUuid()},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kFullDocumentField, D{{"_id", 1}, {"x", 2}}},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}, {"coll", nss.coll()}}},
+        {DSChangeStream::kDocumentKeyField, D{{"x", 2}, {"_id", 1}}},  // Note _id <-> x reversal.
+    };
+    checkTransformation(insert, expectedInsert, kShowExpandedEventsSpec);
+}
+
 TEST_F(ChangeStreamStageDBTest, InsertOnOtherCollections) {
     NamespaceString otherNss("unittests.other_collection.");
     auto insertOtherColl = makeOplogEntry(OpTypeEnum::kInsert,
@@ -2907,6 +3092,32 @@ TEST_F(ChangeStreamStageDBTest, TransformDropDatabase) {
     };
 
     checkTransformation(dropDB, expectedDropDatabase, kDefaultSpec, expectedInvalidate);
+}
+
+TEST_F(ChangeStreamStageDBTest, TransformDropDatabaseShowExpandedEvents) {
+    // TODO SERVER-52254: Remove this feature flag.
+    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
+
+    OplogEntry dropDB = createCommand(BSON("dropDatabase" << 1), boost::none, false);
+
+    // Drop database entry doesn't have a UUID.
+    Document expectedDropDatabase{
+        {DSChangeStream::kIdField, makeResumeToken(kDefaultTs)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kDropDatabaseOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kWallTimeField, Date_t()},
+        {DSChangeStream::kNamespaceField, D{{"db", nss.db()}}},
+    };
+    Document expectedInvalidate{
+        {DSChangeStream::kIdField,
+         makeResumeToken(
+             kDefaultTs, Value(), Value(), ResumeTokenData::FromInvalidate::kFromInvalidate)},
+        {DSChangeStream::kOperationTypeField, DSChangeStream::kInvalidateOpType},
+        {DSChangeStream::kClusterTimeField, kDefaultTs},
+        {DSChangeStream::kWallTimeField, Date_t()},
+    };
+
+    checkTransformation(dropDB, expectedDropDatabase, kShowExpandedEventsSpec, expectedInvalidate);
 }
 
 TEST_F(ChangeStreamStageTest, TransformPreImageForDelete) {
@@ -3491,12 +3702,15 @@ TEST_F(ChangeStreamStageDBTest, StartAfterSucceedsEvenIfResumeTokenDoesNotContai
         insertEntry, expectedInsert, BSON("$changeStream" << BSON("startAfter" << resumeToken)));
 }
 
+//
+// Tests that the single '$match' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleMatch) {
-    //
-    // Tests that the single '$match' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        fromjson("{$changeStream: {}}"),
+        kShowExpandedEventsSpec,
         fromjson("{$match: {operationType: 'insert'}}"),
     };
 
@@ -3513,12 +3727,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleMatch) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$match' gets merged and promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleMatch) {
-    //
-    // Tests that multiple '$match' gets merged and promoted before the
-    // '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$match: {operationType: 'insert'}}"),
                                               fromjson("{$match: {operationType: 'delete'}}")};
 
@@ -3535,15 +3751,18 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleMatch) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$match' gets merged and promoted before the
+// '$_internalChangeStreamCheckTopologyChange' when resume token is present.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleMatchAndResumeToken) {
-    //
-    // Tests that multiple '$match' gets merged and promoted before the
-    // '$_internalUpdateOnAddShard' if resume token if present.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        BSON("$changeStream" << BSON("resumeAfter" << resumeToken)),
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
         BSON("$match" << BSON("operationType"
                               << "insert")),
         BSON("$match" << BSON("operationType"
@@ -3563,11 +3782,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleMatchAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that the single '$project' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleProject) {
-    //
-    // Tests that the single'$project' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$project: {operationType: 1}}")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3583,11 +3805,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleProject) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$project' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleProject) {
-    //
-    // Tests that multiple '$project' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$project: {operationType: 1}}"),
                                               fromjson("{$project: {fullDocument: 1}}")};
 
@@ -3605,15 +3830,18 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleProject) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$project' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange' if resume token is present.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleProjectAndResumeToken) {
-    //
-    // Tests that multiple '$project' gets promoted before the '$_internalUpdateOnAddShard' if
-    // resume token is present.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        BSON("$changeStream" << BSON("resumeAfter" << resumeToken)),
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
         BSON("$project" << BSON("operationType" << 1)),
         BSON("$project" << BSON("fullDocument" << 1))};
 
@@ -3632,15 +3860,18 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleProjectAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that a '$project' followed by a '$match' gets optimized and they get promoted before
+// the '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithProjectMatchAndResumeToken) {
-    //
-    // Tests that a '$project' followed by a '$match' gets optimized and they get promoted before
-    // the '$_internalUpdateOnAddShard'.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        BSON("$changeStream" << BSON("resumeAfter" << resumeToken)),
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
         BSON("$project" << BSON("operationType" << 1)),
         BSON("$match" << BSON("operationType"
                               << "insert"))};
@@ -3660,12 +3891,15 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithProjectMatchAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that the single '$unset' gets promoted before the
+// '$_internalChangeStreamCheckTopologyChange' as
+// '$project'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleUnset) {
-    //
-    // Tests that the single'$unset' gets promoted before the '$_internalUpdateOnAddShard' as
-    // '$project'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$unset: 'operationType'}")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3681,12 +3915,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleUnset) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$unset' gets promoted before the '$_internalChangeStreamCheckTopologyChange'
+// as '$project'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleUnset) {
-    //
-    // Tests that multiple '$unset' gets promoted before the '$_internalUpdateOnAddShard' as
-    // '$project'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$unset: 'operationType'}"),
                                               fromjson("{$unset: 'fullDocument'}")};
 
@@ -3704,17 +3940,20 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleUnset) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that the '$unset' gets promoted before the '$_internalChangeStreamCheckTopologyChange' as
+// '$project' even if resume token is present.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithUnsetAndResumeToken) {
-    //
-    // Tests that the '$unset' gets promoted before the '$_internalUpdateOnAddShard' as '$project'
-    // even if resume token is present.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
-    const std::vector<BSONObj> rawPipeline = {BSON("$changeStream"
-                                                   << BSON("resumeAfter" << resumeToken)),
-                                              BSON("$unset"
-                                                   << "operationType")};
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
+        BSON("$unset"
+             << "operationType")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
 
@@ -3730,11 +3969,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithUnsetAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that the single'$addFields' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleAddFields) {
-    //
-    // Tests that the single'$addFields' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$addFields: {stockPrice: 100}}")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3750,11 +3992,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleAddFields) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$addFields' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleAddFields) {
-    //
-    // Tests that multiple '$addFields' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$addFields: {stockPrice: 100}}"),
                                               fromjson("{$addFields: {quarter: 'Q1'}}")};
 
@@ -3772,15 +4017,18 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleAddFields) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that the '$addFields' gets promoted before the '$_internalChangeStreamCheckTopologyChange'
+// if resume token is present.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithAddFieldsAndResumeToken) {
-    //
-    // Tests that the '$addFields' gets promoted before the '$_internalUpdateOnAddShard' if
-    // resume token is present.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        BSON("$changeStream" << BSON("resumeAfter" << resumeToken)),
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
         BSON("$addFields" << BSON("stockPrice" << 100))};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3797,11 +4045,14 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithAddFieldsAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that the single '$set' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleSet) {
-    //
-    // Tests that the single'$set' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$set: {stockPrice: 100}}")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3817,11 +4068,13 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleSet) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that multiple '$set' gets promoted before the '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleSet) {
-    //
-    // Tests that multiple '$set' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$set: {stockPrice: 100}}"),
                                               fromjson("{$set: {quarter: 'Q1'}}")};
 
@@ -3839,15 +4092,18 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithMultipleSet) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that the '$set' gets promoted before the '$_internalChangeStreamCheckTopologyChange' if
+// resume token is present.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSetAndResumeToken) {
-    //
-    // Tests that the '$set' gets promoted before the '$_internalUpdateOnAddShard' if
-    // resume token is present.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        BSON("$changeStream" << BSON("resumeAfter" << resumeToken)),
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
         BSON("$set" << BSON("stockPrice" << 100))};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3864,12 +4120,15 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSetAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that the single '$replaceRoot' gets promoted before the
+// '$_internalChangeStreamHandleTopologyChange'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleReplaceRoot) {
-    //
-    // Tests that the single'$replaceRoot' gets promoted before the '$_internalUpdateOnAddShard'.
-    //
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        fromjson("{$changeStream: {}}"), fromjson("{$replaceRoot: {newRoot: '$fullDocument'}}")};
+        kShowExpandedEventsSpec, fromjson("{$replaceRoot: {newRoot: '$fullDocument'}}")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
 
@@ -3884,15 +4143,18 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleReplaceRoot) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that the '$replaceRoot' gets promoted before the
+// '$_internalChangeStreamCheckTopologyChange' if resume token is present.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithReplaceRootAndResumeToken) {
-    //
-    // Tests that the '$replaceRoot' gets promoted before the '$_internalUpdateOnAddShard' if
-    // resume token is present.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
     const std::vector<BSONObj> rawPipeline = {
-        BSON("$changeStream" << BSON("resumeAfter" << resumeToken)),
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
         BSON("$replaceRoot" << BSON("newRoot"
                                     << "$fullDocument"))};
 
@@ -3910,12 +4172,15 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithReplaceRootAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
+//
+// Tests that the single '$replaceWith' gets promoted before the
+// '$_internalChangeStreamCheckTopologyChange' as
+// '$replaceRoot'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleReplaceWith) {
-    //
-    // Tests that the single '$replaceWith' gets promoted before the '$_internalUpdateOnAddShard' as
-    // '$replaceRoot'.
-    //
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec,
                                               fromjson("{$replaceWith: '$fullDocument'}")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -3931,17 +4196,20 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithSingleReplaceWith) {
                            "$_internalChangeStreamHandleTopologyChange"});
 }
 
+//
+// Tests that the '$replaceWith' gets promoted before the
+// '$_internalChangeStreamCheckTopologyChange' if resume token is present as '$replaceRoot'.
+//
 TEST_F(ChangeStreamStageTest, ChangeStreamWithReplaceWithAndResumeToken) {
-    //
-    // Tests that the '$replaceWith' gets promoted before the '$_internalUpdateOnAddShard' if
-    // resume token is present as '$replaceRoot'.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
-
-    const std::vector<BSONObj> rawPipeline = {BSON("$changeStream"
-                                                   << BSON("resumeAfter" << resumeToken)),
-                                              BSON("$replaceWith"
-                                                   << "$fullDocument")};
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj> rawPipeline = {
+        BSON("$changeStream" << BSON("resumeAfter"
+                                     << makeResumeToken(kDefaultTs, testUuid())
+                                     << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                     << true)),
+        BSON("$replaceWith"
+             << "$fullDocument")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
 
@@ -3957,27 +4225,118 @@ TEST_F(ChangeStreamStageTest, ChangeStreamWithReplaceWithAndResumeToken) {
                            "$_internalChangeStreamEnsureResumeTokenPresent"});
 }
 
-TEST_F(ChangeStreamStageTest, ChangeStreamWithAllStagesAndResumeToken) {
-    //
-    // Tests that when all allowed stages are included along with the resume token, the final
-    // pipeline gets optimized.
-    //
-    auto resumeToken = makeResumeToken(kDefaultTs, testUuid());
+//
+//  Tests that when 'showExpandedEvents' is true, we do not inject any additional stages.
+//
+TEST_F(ChangeStreamStageTest, ChangeStreamWithShowExpandedEventsTrueDoesNotInjectMatchStage) {
+    const std::vector<BSONObj> rawPipeline = {kShowExpandedEventsSpec};
 
-    const std::vector<BSONObj> rawPipeline = {BSON("$changeStream"
-                                                   << BSON("resumeAfter" << resumeToken)),
-                                              BSON("$project" << BSON("operationType" << 1)),
-                                              BSON("$unset"
-                                                   << "_id"),
-                                              BSON("$addFields" << BSON("stockPrice" << 100)),
-                                              BSON("$set"
-                                                   << BSON("fullDocument.stockPrice" << 100)),
-                                              BSON("$match" << BSON("operationType"
-                                                                    << "insert")),
-                                              BSON("$replaceRoot" << BSON("newRoot"
-                                                                          << "$fullDocument")),
-                                              BSON("$replaceWith"
-                                                   << "fullDocument.stockPrice")};
+    auto pipeline = buildTestPipeline(rawPipeline);
+
+    assertStagesNameOrder(std::move(pipeline),
+                          {"$_internalChangeStreamOplogMatch",
+                           "$_internalChangeStreamUnwindTransaction",
+                           "$_internalChangeStreamTransform",
+                           "$_internalChangeStreamCheckInvalidate",
+                           "$_internalChangeStreamCheckResumability",
+                           "$_internalChangeStreamCheckTopologyChange",
+                           "$_internalChangeStreamHandleTopologyChange"});
+}
+
+//
+// Tests that when 'showExpandedEvents' is unset, we inject an additional $match stage and promote
+// it before the '$_internalChangeStreamHandleTopologyChange'.
+//
+TEST_F(ChangeStreamStageTest, ChangeStreamWithShowExpandedEventsFalseInjectsMatchStage) {
+    const std::vector<BSONObj> rawPipeline = {kDefaultSpec};
+
+    auto pipeline = buildTestPipeline(rawPipeline);
+
+    assertStagesNameOrder(std::move(pipeline),
+                          {"$_internalChangeStreamOplogMatch",
+                           "$_internalChangeStreamUnwindTransaction",
+                           "$_internalChangeStreamTransform",
+                           "$_internalChangeStreamCheckInvalidate",
+                           "$_internalChangeStreamCheckResumability",
+                           "$_internalChangeStreamCheckTopologyChange",
+                           "$match",
+                           "$_internalChangeStreamHandleTopologyChange"});
+}
+
+//
+// Tests that when 'showExpandedEvents' is false, the injected match stage gets merged with the user
+// match stage and gets promoted before the '$_internalChangeStreamHandleTopologyChange'.
+//
+TEST_F(ChangeStreamStageTest, ChangeStreamWithShowExpandedEventsFalseAndUserMatch) {
+    const std::vector<BSONObj> rawPipeline = {
+        fromjson("{$changeStream: {showExpandedEvents: false}}"),
+        BSON("$match" << BSON("operationType"
+                              << "insert"))};
+
+    auto pipeline = buildTestPipeline(rawPipeline);
+
+    assertStagesNameOrder(std::move(pipeline),
+                          {"$_internalChangeStreamOplogMatch",
+                           "$_internalChangeStreamUnwindTransaction",
+                           "$_internalChangeStreamTransform",
+                           "$_internalChangeStreamCheckInvalidate",
+                           "$_internalChangeStreamCheckResumability",
+                           "$_internalChangeStreamCheckTopologyChange",
+                           "$match",
+                           "$_internalChangeStreamHandleTopologyChange"});
+}
+
+//
+// Tests that when 'showExpandedEvents' is false, the injected match stage can be merged with the
+// user match stage and can be promoted before the user '$project' and
+// '$_internalChangeStreamHandleTopologyChange'.
+//
+TEST_F(ChangeStreamStageTest, ChangeStreamWithShowExpandedEventsFalseAndUserProjectMatch) {
+    const std::vector<BSONObj> rawPipeline = {
+        fromjson("{$changeStream: {showExpandedEvents: false}}"),
+        BSON("$project" << BSON("operationType" << 1)),
+        BSON("$match" << BSON("operationType"
+                              << "insert")),
+    };
+
+    auto pipeline = buildTestPipeline(rawPipeline);
+
+    assertStagesNameOrder(std::move(pipeline),
+                          {"$_internalChangeStreamOplogMatch",
+                           "$_internalChangeStreamUnwindTransaction",
+                           "$_internalChangeStreamTransform",
+                           "$_internalChangeStreamCheckInvalidate",
+                           "$_internalChangeStreamCheckResumability",
+                           "$_internalChangeStreamCheckTopologyChange",
+                           "$match",
+                           "$project",
+                           "$_internalChangeStreamHandleTopologyChange"});
+}
+
+//
+// Tests that when all allowed stages are included along with the resume token, the final
+// pipeline gets optimized.
+//
+TEST_F(ChangeStreamStageTest, ChangeStreamWithAllStagesAndResumeToken) {
+    // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
+    // filters out newly added events.
+    const std::vector<BSONObj>
+        rawPipeline = {BSON("$changeStream"
+                            << BSON("resumeAfter"
+                                    << makeResumeToken(kDefaultTs, testUuid())
+                                    << DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName
+                                    << true)),
+                       BSON("$project" << BSON("operationType" << 1)),
+                       BSON("$unset"
+                            << "_id"),
+                       BSON("$addFields" << BSON("stockPrice" << 100)),
+                       BSON("$set" << BSON("fullDocument.stockPrice" << 100)),
+                       BSON("$match" << BSON("operationType"
+                                             << "insert")),
+                       BSON("$replaceRoot" << BSON("newRoot"
+                                                   << "$fullDocument")),
+                       BSON("$replaceWith"
+                            << "fullDocument.stockPrice")};
 
     auto pipeline = buildTestPipeline(rawPipeline);
 
@@ -4322,7 +4681,7 @@ TEST_F(ChangeStreamRewriteTest, CanRewriteEqPredicateOnOperationTypeWithInvalidO
     ASSERT_BSONOBJ_EQ(rewrittenPredicate, fromjson("{$alwaysFalse: 1}"));
 }
 
-TEST_F(ChangeStreamRewriteTest, CannotRewriteEqPredicateOnOperationTypeWithUnknownOpType) {
+TEST_F(ChangeStreamRewriteTest, CanRewriteEqPredicateOnOperationTypeWithUnknownOpType) {
     auto statusWithMatchExpression = MatchExpressionParser::parse(BSON("operationType"
                                                                        << "nonExisting"),
                                                                   getExpCtx());
@@ -4330,7 +4689,10 @@ TEST_F(ChangeStreamRewriteTest, CannotRewriteEqPredicateOnOperationTypeWithUnkno
 
     auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
         getExpCtx(), statusWithMatchExpression.getValue().get(), {"operationType"});
-    ASSERT_FALSE(rewrittenMatchExpression);
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, fromjson("{$alwaysFalse: 1}"));
 }
 
 TEST_F(ChangeStreamRewriteTest, CanRewriteEqNullPredicateOnOperationType) {
@@ -4469,7 +4831,18 @@ TEST_F(ChangeStreamRewriteTest, CanRewriteInPredicateOnOperationType) {
 }
 
 TEST_F(ChangeStreamRewriteTest, CannotRewriteInPredicateWithRegexOnOperationType) {
-    auto expr = BSON("operationType" << BSON("$in" << BSON_ARRAY("/^in*sert")));
+    auto expr =
+        BSON("operationType" << BSON("$in" << BSON_ARRAY(BSONRegEx("^in*sert") << "update")));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, getExpCtx());
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        getExpCtx(), statusWithMatchExpression.getValue().get(), {"operationType"});
+    ASSERT_FALSE(rewrittenMatchExpression);
+}
+
+TEST_F(ChangeStreamRewriteTest, CannotRewriteRegexPredicateOnOperationType) {
+    auto expr = BSON("operationType" << BSONRegEx("^in*sert"));
     auto statusWithMatchExpression = MatchExpressionParser::parse(expr, getExpCtx());
     ASSERT_OK(statusWithMatchExpression.getStatus());
 
@@ -4506,7 +4879,7 @@ TEST_F(ChangeStreamRewriteTest,
                       BSON(OR(fromjson("{$alwaysFalse: 1}"), fromjson("{op: {$eq: 'i'}}"))));
 }
 
-TEST_F(ChangeStreamRewriteTest, CannotRewriteInPredicateOnOperationTypeWithUnknownOpType) {
+TEST_F(ChangeStreamRewriteTest, CanRewriteInPredicateOnOperationTypeWithUnknownOpType) {
     auto expr = BSON("operationType" << BSON("$in" << BSON_ARRAY("unknown"
                                                                  << "insert")));
     auto statusWithMatchExpression = MatchExpressionParser::parse(expr, getExpCtx());
@@ -4514,7 +4887,11 @@ TEST_F(ChangeStreamRewriteTest, CannotRewriteInPredicateOnOperationTypeWithUnkno
 
     auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
         getExpCtx(), statusWithMatchExpression.getValue().get(), {"operationType"});
-    ASSERT_FALSE(rewrittenMatchExpression);
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate,
+                      BSON(OR(fromjson("{op: {$eq: 'i'}}"), fromjson("{$alwaysFalse: 1}"))));
 }
 
 TEST_F(ChangeStreamRewriteTest, CanRewriteEmptyInPredicateOnOperationType) {

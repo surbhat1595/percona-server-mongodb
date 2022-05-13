@@ -46,11 +46,6 @@ namespace mongo {
 namespace crypto {
 
 namespace {
-// Convenience wrapper for getting mutable pointer from DataRange.
-std::uint8_t* asUint8(DataRange out) {
-    return const_cast<std::uint8_t*>(out.data<std::uint8_t>());
-}
-
 template <typename Parent>
 class SymmetricImplApple : public Parent {
 public:
@@ -61,28 +56,44 @@ public:
                 std::is_same<Parent, SymmetricDecryptor>::value,
             "SymmetricImplApple must inherit from SymmetricEncryptor or SymmetricDecryptor");
 
-        uassert(ErrorCodes::UnsupportedFormat,
-                "Native crypto on this platform only supports AES256-CBC",
-                mode == aesMode::cbc);
-
-        // Note: AES256 uses a 256byte keysize,
-        // but is still functionally a 128bit block algorithm.
-        // Therefore we expect a 128 bit block length.
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "Invalid ivlen for selected algorithm, expected "
-                              << kCCBlockSizeAES128 << ", got " << static_cast<int>(iv.length()),
-                iv.length() == kCCBlockSizeAES128);
+        CCMode ccMode;
+        if (mode == aesMode::cbc) {
+            ccMode = kCCModeCBC;
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "Invalid ivlen for selected algorithm, expected "
+                                  << aesCBCIVSize << ", got " << static_cast<int>(iv.length()),
+                    iv.length() == aesCBCIVSize);
+        } else if (mode == aesMode::ctr) {
+            ccMode = kCCModeCTR;
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "Invalid ivlen for selected algorithm, expected "
+                                  << aesCTRIVSize << ", got " << static_cast<int>(iv.length()),
+                    iv.length() == aesCTRIVSize);
+        } else {
+            uassert(ErrorCodes::UnsupportedFormat,
+                    "Native crypto on this platform only supports AES256-CBC or AES256-CTR",
+                    false);
+        }
 
         CCCryptorRef context = nullptr;
         constexpr auto op =
             std::is_same<Parent, SymmetricEncryptor>::value ? kCCEncrypt : kCCDecrypt;
-        const auto status = CCCryptorCreate(op,
-                                            kCCAlgorithmAES,
-                                            kCCOptionPKCS7Padding,
-                                            key.getKey(),
-                                            key.getKeySize(),
-                                            iv.data<std::uint8_t>(),
-                                            &context);
+        constexpr void* tweak = nullptr;
+        constexpr size_t tweakLength = 0;
+        constexpr int numRounds = 0;
+        constexpr CCModeOptions ccModeOptions = 0;
+        const auto status = CCCryptorCreateWithMode(op,
+                                                    ccMode,
+                                                    kCCAlgorithmAES,
+                                                    kCCOptionPKCS7Padding,
+                                                    iv.data<std::uint8_t>(),
+                                                    key.getKey(),
+                                                    key.getKeySize(),
+                                                    tweak,
+                                                    tweakLength,
+                                                    numRounds,
+                                                    ccModeOptions,
+                                                    &context);
         uassert(ErrorCodes::UnknownError,
                 str::stream() << "CCCryptorCreate failure: " << status,
                 status == kCCSuccess);
@@ -93,7 +104,7 @@ public:
     StatusWith<std::size_t> update(ConstDataRange in, DataRange out) final {
         std::size_t outUsed = 0;
         const auto status = CCCryptorUpdate(
-            _ctx.get(), in.data(), in.length(), asUint8(out), out.length(), &outUsed);
+            _ctx.get(), in.data(), in.length(), out.data<std::uint8_t>(), out.length(), &outUsed);
         if (status != kCCSuccess) {
             return Status(ErrorCodes::UnknownError,
                           str::stream() << "Unable to perform CCCryptorUpdate: " << status);
@@ -108,7 +119,8 @@ public:
 
     StatusWith<size_t> finalize(DataRange out) final {
         size_t outUsed = 0;
-        const auto status = CCCryptorFinal(_ctx.get(), asUint8(out), out.length(), &outUsed);
+        const auto status =
+            CCCryptorFinal(_ctx.get(), out.data<std::uint8_t>(), out.length(), &outUsed);
         if (status != kCCSuccess) {
             return Status(ErrorCodes::UnknownError,
                           str::stream() << "Unable to perform CCCryptorFinal: " << status);
@@ -147,11 +159,12 @@ public:
 }  // namespace
 
 std::set<std::string> getSupportedSymmetricAlgorithms() {
-    return {aes256CBCName};
+    return {aes256CBCName, aes256CTRName};
 }
 
 Status engineRandBytes(DataRange buffer) {
-    auto result = SecRandomCopyBytes(kSecRandomDefault, buffer.length(), asUint8(buffer));
+    auto result =
+        SecRandomCopyBytes(kSecRandomDefault, buffer.length(), buffer.data<std::uint8_t>());
     if (result != errSecSuccess) {
         return {ErrorCodes::UnknownError,
                 str::stream() << "Failed generating random bytes: " << result};

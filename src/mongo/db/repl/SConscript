@@ -22,6 +22,9 @@ env.Library(
     source=[
         'tenant_migration_decoration.cpp',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+    ]
 )
 
 env.Library(
@@ -61,6 +64,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/op_observer',
         '$BUILD_DIR/mongo/db/op_observer_util',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_pre_image_helpers',
@@ -245,6 +249,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/database_holder',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/storage/oplog_cap_maintainer_thread',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
@@ -435,6 +440,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/index_build_oplog_entry',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/db/storage/journal_flusher',
     ],
@@ -472,6 +478,7 @@ env.Library(
         'rollback_test_fixture.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/op_observer',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults_mock',
@@ -506,6 +513,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/import_collection_oplog_entry',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/idl/server_parameter',
         'drop_pending_collection_reaper',
@@ -522,12 +530,12 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
-        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/idl/idl_parser',
         'optime',
         'optime_base',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/namespace_string',
     ],
 )
@@ -1347,7 +1355,9 @@ env.Library(
 env.Library(
     target='tenant_migration_recipient_service',
     source=[
+        'tenant_file_cloner.cpp',
         'tenant_migration_recipient_coordinator.cpp',
+        'tenant_migration_recipient_op_observer.cpp',
         'tenant_migration_recipient_service.cpp',
         'tenant_migration_shard_merge_util.cpp',
         'vote_commit_migration_progress.cpp',
@@ -1372,6 +1382,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/transaction',
         'cloner_utils',
         'oplog',
+        'oplog_application_interface',
         'oplog_buffer_collection',
         'oplog_entry',
         'oplog_fetcher',
@@ -1391,9 +1402,7 @@ env.Library(
         'tenant_migration_access_blocker_server_status_section.cpp',
         'tenant_migration_access_blocker_util.cpp',
         'tenant_migration_donor_access_blocker.cpp',
-        'tenant_migration_donor_op_observer.cpp',
         'tenant_migration_recipient_access_blocker.cpp',
-        'tenant_migration_recipient_op_observer.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -1421,6 +1430,7 @@ env.Library(
 env.Library(
     target='tenant_migration_donor_service',
     source=[
+        'tenant_migration_donor_op_observer.cpp',
         'tenant_migration_donor_service.cpp',
     ],
     LIBDEPS=[
@@ -1538,6 +1548,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/catalog/database_holder',
             '$BUILD_DIR/mongo/db/catalog/document_validation',
             '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+            '$BUILD_DIR/mongo/db/multitenancy',
             '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
             '$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger',
             'drop_pending_collection_reaper',
@@ -1632,6 +1643,7 @@ if wiredtiger:
             'speculative_majority_read_info_test.cpp',
             'split_horizon_test.cpp',
             'storage_interface_impl_test.cpp',
+            'storage_timestamp_test.cpp',
             'sync_source_resolver_test.cpp',
             'task_runner_test.cpp',
             'task_runner_test_fixture.cpp',
@@ -1656,6 +1668,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
             '$BUILD_DIR/mongo/db/dbdirectclient',
             '$BUILD_DIR/mongo/db/index/index_access_methods',
+            '$BUILD_DIR/mongo/db/index_build_entry_helpers',
             '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
             '$BUILD_DIR/mongo/db/logical_session_id_helpers',
             '$BUILD_DIR/mongo/db/logical_time',
@@ -1728,6 +1741,7 @@ if wiredtiger:
             'tenant_migration_recipient_service',
             'tenant_migration_utils',
             'tenant_oplog_processing',
+            'timestamp_block',
             'wait_for_majority_service',
         ],
     )

@@ -39,15 +39,23 @@ public:
     static constexpr auto code = ErrorCodes::CollectionUUIDMismatch;
 
     explicit CollectionUUIDMismatchInfo(const UUID& collectionUUID,
-                                        const NamespaceString& actualNamespace)
-        : _collectionUUID(collectionUUID), _actualNamespace(actualNamespace) {}
+                                        const NamespaceString& expectedNamespace,
+                                        const boost::optional<NamespaceString>& actualNamespace)
+        : _collectionUUID(collectionUUID),
+          _expectedNamespace(expectedNamespace),
+          _actualNamespace(actualNamespace) {}
 
     static std::shared_ptr<const ErrorExtraInfo> parse(const BSONObj& obj);
 
     void serialize(BSONObjBuilder* builder) const override;
 
+    const auto& actualNamespace() const {
+        return _actualNamespace;
+    }
+
 private:
     UUID _collectionUUID;
-    NamespaceString _actualNamespace;
+    NamespaceString _expectedNamespace;
+    boost::optional<NamespaceString> _actualNamespace;
 };
 }  // namespace mongo

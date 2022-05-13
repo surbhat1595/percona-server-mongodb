@@ -413,8 +413,7 @@ public:
     }
 
     /**
-     * Refreshes a read transaction by starting a new one at the same read timestamp and then ending
-     * the current one.
+     * Refreshes a read transaction by resetting the snapshot in use
      */
     virtual void refreshSnapshot() {}
 
@@ -483,6 +482,10 @@ public:
     virtual ReadSource getTimestampReadSource() const {
         return ReadSource::kNoTimestamp;
     };
+
+    virtual boost::optional<int64_t> getOplogVisibilityTs() {
+        return boost::none;
+    }
 
     /**
      * Pinning informs callers not to change the ReadSource on this RecoveryUnit. Callers are

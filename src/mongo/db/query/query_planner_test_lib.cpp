@@ -151,8 +151,8 @@ Status intervalMatches(const BSONObj& testInt, const Interval trueInt) {
         return Status::OK();
     }
     return {ErrorCodes::Error{5619217},
-            str::stream() << "provided interval did not match. Expected: " << toCompare.toString()
-                          << " Found: " << trueInt.toString()};
+            str::stream() << "provided interval did not match. Expected: "
+                          << toCompare.toString(false) << " Found: " << trueInt.toString(false)};
 }
 
 bool bsonObjFieldsAreInSet(BSONObj obj, const std::set<std::string>& allowedFields) {
@@ -1208,6 +1208,44 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
                                      "actual solution. Expected: "
                                   << testSoln << " Found: " << actualSentinelNode};
         }
+        return Status::OK();
+    } else if (STAGE_COLUMN_IXSCAN == trueSoln->getType()) {
+        const auto* actualColumnIxScanNode = static_cast<const ColumnIndexScanNode*>(trueSoln);
+        auto expectedElem = testSoln["column_ixscan"];
+        if (expectedElem.eoo() || !expectedElem.isABSONObj()) {
+            return {ErrorCodes::Error{5842490},
+                    "found a 'column_ixscan' object in the test solution but no corresponding "
+                    "'column_ixscan' "
+                    "object "
+                    "in the expected JSON"};
+        }
+        auto obj = expectedElem.Obj();
+
+        if (!obj["fields"].eoo()) {
+            std::set<std::string> expectedFields;
+            for (auto& field : obj["fields"].Obj()) {
+                expectedFields.insert(field.fieldName());
+            }
+
+            std::set<std::string> actualFields(actualColumnIxScanNode->fields.begin(),
+                                               actualColumnIxScanNode->fields.end());
+            if (expectedFields != std::set<std::string>(actualFields.begin(), actualFields.end())) {
+                return {ErrorCodes::Error{5842491}, str::stream() << "fields mismatch."};
+            }
+        }
+
+        if (!actualColumnIxScanNode->children.empty()) {
+            return {
+                ErrorCodes::Error{5842492},
+                str::stream() << "found a column_ixscan stage with more than zero children in the "
+                                 "actual solution:"};
+        }
+
+        if (auto filter = obj["filter"]) {
+            return filterMatches(filter.Obj(), BSONObj(), trueSoln)
+                .withContext("mismatching 'filter' for 'column_ixscan' node");
+        }
+
         return Status::OK();
     }
     return {ErrorCodes::Error{5698301},

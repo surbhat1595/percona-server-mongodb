@@ -89,7 +89,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 hint: clusterKey,
             },
             expectedWinningPlanStats: {
-                stage: "COLLSCAN",
+                stage: "CLUSTERED_IXSCAN",
                 direction: "forward",
                 minRecord: arbitraryDocId,
                 maxRecord: arbitraryDocId
@@ -104,7 +104,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 max: {[clusterKeyFieldName]: MaxKey}
             },
             expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "forward", minRecord: 101, maxRecord: MaxKey}
+                {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 101, maxRecord: MaxKey}
         });
         validateClusteredCollectionHint(coll, {
             expectedNReturned: 0,
@@ -115,7 +115,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 max: {[clusterKeyFieldName]: -2}
             },
             expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "forward", minRecord: MinKey, maxRecord: -2}
+                {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: MinKey, maxRecord: -2}
         });
         validateClusteredCollectionHint(coll, {
             expectedNReturned: 1,
@@ -125,7 +125,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 hint: clusterKeyName,
             },
             expectedWinningPlanStats: {
-                stage: "COLLSCAN",
+                stage: "CLUSTERED_IXSCAN",
                 direction: "forward",
                 minRecord: arbitraryDocId,
                 maxRecord: arbitraryDocId
@@ -138,8 +138,12 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 filter: {[clusterKeyFieldName]: {$lt: arbitraryDocId}},
                 hint: clusterKey,
             },
-            expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "forward", maxRecord: arbitraryDocId}
+            expectedWinningPlanStats: {
+                stage: "CLUSTERED_IXSCAN",
+                direction: "forward",
+                minRecord: NaN,
+                maxRecord: arbitraryDocId
+            }
         });
         validateClusteredCollectionHint(coll, {
             expectedNReturned: batchSize - arbitraryDocId,
@@ -148,8 +152,12 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 filter: {[clusterKeyFieldName]: {$gte: arbitraryDocId}},
                 hint: clusterKey,
             },
-            expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "forward", minRecord: arbitraryDocId}
+            expectedWinningPlanStats: {
+                stage: "CLUSTERED_IXSCAN",
+                direction: "forward",
+                minRecord: arbitraryDocId,
+                maxRecord: Infinity
+            }
         });
 
         // Find with $natural hints.
@@ -206,7 +214,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 updates: [{q: {[clusterKeyFieldName]: 3}, u: {$inc: {a: -2}}, hint: clusterKey}]
             },
             expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "forward", minRecord: 3, maxRecord: 3}
+                {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 3, maxRecord: 3}
         });
 
         // Update with reverse $natural hint.
@@ -218,7 +226,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                     [{q: {[clusterKeyFieldName]: 80}, u: {$inc: {a: 80}}, hint: {$natural: -1}}]
             },
             expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "backward", minRecord: 80, maxRecord: 80}
+                {stage: "CLUSTERED_IXSCAN", direction: "backward", minRecord: 80, maxRecord: 80}
         });
 
         // Update with hint on secondary index.
@@ -239,7 +247,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 deletes: [{q: {[clusterKeyFieldName]: 2}, limit: 0, hint: clusterKey}]
             },
             expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "forward", minRecord: 2, maxRecord: 2}
+                {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 2, maxRecord: 2}
         });
 
         // Delete reverse $natural hint.
@@ -250,7 +258,7 @@ function testClusteredCollectionHint(coll, clusterKey, clusterKeyName) {
                 deletes: [{q: {[clusterKeyFieldName]: 30}, limit: 0, hint: {$natural: -1}}]
             },
             expectedWinningPlanStats:
-                {stage: "COLLSCAN", direction: "backward", minRecord: 30, maxRecord: 30}
+                {stage: "CLUSTERED_IXSCAN", direction: "backward", minRecord: 30, maxRecord: 30}
         });
 
         // Delete with hint on standard index.
@@ -282,15 +290,15 @@ function validateClusteredCollectionHint(coll,
     assert.neq(null, stageOfInterest);
 
     for (const [key, value] of Object.entries(expectedWinningPlanStats)) {
-        assert(stageOfInterest[key], tojson(explain));
+        assert(stageOfInterest[key] !== undefined, tojson(explain));
         assert.eq(stageOfInterest[key], value, tojson(explain));
     }
 
     // Explicitly check that the plan is not bounded by default.
     if (!expectedWinningPlanStats.hasOwnProperty("minRecord")) {
-        assert(!actualWinningPlan["minRecord"], tojson(explain));
+        assert(!actualWinningPlan.hasOwnProperty("minRecord"), tojson(explain));
     }
     if (!expectedWinningPlanStats.hasOwnProperty("maxRecord")) {
-        assert(!actualWinningPlan["maxRecord"], tojson(explain));
+        assert(!actualWinningPlan.hasOwnProperty("maxRecord"), tojson(explain));
     }
 }

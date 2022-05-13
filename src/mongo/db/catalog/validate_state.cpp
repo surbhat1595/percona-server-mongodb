@@ -174,27 +174,8 @@ void ValidateState::_yieldCursors(OperationContext* opCtx) {
     _seekRecordStoreCursor->save();
 
     if (isBackground() && _validateTs) {
-        // End current transaction and begin a new one, to help ameliorate WiredTiger cache
-        // pressure.
-
-        // First, move all cursor objects off our operation context, which has the effect of closing
-        // all storage engine cursors in the active transaction.
-        for (const auto& indexCursor : _indexCursors) {
-            indexCursor.second->detachFromOperationContext();
-        }
-        _traverseRecordStoreCursor->detachFromOperationContext();
-        _seekRecordStoreCursor->detachFromOperationContext();
-
-        // This begins a new transaction and then ends the current transaction, in order to preserve
-        // the history required to construct the same snapshot as before.
+        // Reset snapshot to help ameliorate WiredTiger cache pressure.
         opCtx->recoveryUnit()->refreshSnapshot();
-
-        // Move the cursor objects back in preparation for restoring.
-        for (const auto& indexCursor : _indexCursors) {
-            indexCursor.second->reattachToOperationContext(opCtx);
-        }
-        _traverseRecordStoreCursor->reattachToOperationContext(opCtx);
-        _seekRecordStoreCursor->reattachToOperationContext(opCtx);
     }
 
     // Restore all the cursors.
@@ -263,10 +244,13 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
         const IndexCatalogEntry* entry = it->next();
         const IndexDescriptor* desc = entry->descriptor();
 
-        _indexCursors.emplace(desc->indexName(),
-                              std::make_unique<SortedDataInterfaceThrottleCursor>(
-                                  opCtx, entry->accessMethod(), &_dataThrottle));
+        auto iam = entry->accessMethod()->asSortedData();
+        if (!iam)
+            continue;
 
+        _indexCursors.emplace(
+            desc->indexName(),
+            std::make_unique<SortedDataInterfaceThrottleCursor>(opCtx, iam, &_dataThrottle));
 
         _indexes.push_back(indexCatalog->getEntryShared(desc));
     }
@@ -298,7 +282,9 @@ void ValidateState::_relockDatabaseAndCollection(OperationContext* opCtx) {
         << " while validating collection: " << _nss << " (" << *_uuid << ")";
 
     _databaseLock.emplace(opCtx, _nss.db(), MODE_IS);
-    _database = DatabaseHolder::get(opCtx)->getDb(opCtx, _nss.db());
+    // TODO SERVER-63106 Have the ValidateState implementation use TenantNamespace
+    const TenantDatabaseName tenantDbName(boost::none, _nss.db());
+    _database = DatabaseHolder::get(opCtx)->getDb(opCtx, tenantDbName);
     uassert(ErrorCodes::Interrupted, dbErrMsg, _database);
     uassert(ErrorCodes::Interrupted, dbErrMsg, !_database->isDropPending(opCtx));
 

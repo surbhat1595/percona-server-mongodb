@@ -133,6 +133,15 @@ private:
             return _currentApplyOpsIndex - 1;
         }
 
+        /**
+         * Returns the timestamp of the "applyOps" entry containing the last operation returned by
+         * 'getNextTransactionOp()'. If 'getNextTransactionOp()' has not been called, returns the
+         * timestamp of the first "applyOps" entry in the transaction.
+         */
+        Timestamp applyOpsTs() const {
+            return _currentApplyOpsTs;
+        }
+
         Timestamp clusterTime() const {
             return _clusterTime;
         }
@@ -194,12 +203,16 @@ private:
         // The index of the next entry within the current 'applyOps' array.
         size_t _currentApplyOpsIndex;
 
+        // The timestamp of the current 'applyOps' entry.
+        Timestamp _currentApplyOpsTs;
+
         // Our current place within the entire transaction, which may consist of multiple 'applyOps'
         // arrays.
         size_t _txnOpIndex;
 
-        // The clusterTime of the _applyOps.
+        // Cluster time and wall-clock time of the oplog entry which committed the transaction.
         Timestamp _clusterTime;
+        Date_t _wallTime;
 
         // Fields that were taken from the '_applyOps' oplog entry.
         Document _lsid;

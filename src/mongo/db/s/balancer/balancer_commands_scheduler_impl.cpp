@@ -98,14 +98,14 @@ Status persistRecoveryInfo(OperationContext* opCtx, const CommandInfo& command) 
 }
 
 std::vector<RequestData> rebuildRequestsFromRecoveryInfo(
-    OperationContext* opCtx, const MigrationsRecoveryConfiguration& configuration) {
+    OperationContext* opCtx, const MigrationsRecoveryDefaultValues& defaultValues) {
     std::vector<RequestData> rebuiltRequests;
-    auto documentProcessor = [&rebuiltRequests, &configuration](const BSONObj& recoveryDoc) {
+    auto documentProcessor = [&rebuiltRequests, &defaultValues](const BSONObj& recoveryDoc) {
         auto swTypeMigration = MigrationType::fromBSON(recoveryDoc);
         if (swTypeMigration.isOK()) {
             auto requestId = UUID::gen();
             auto recoveredMigrationCommand =
-                MoveChunkCommandInfo::recoverFrom(swTypeMigration.getValue(), configuration);
+                MoveChunkCommandInfo::recoverFrom(swTypeMigration.getValue(), defaultValues);
             LOGV2_DEBUG(5847210,
                         1,
                         "Command request recovered and set for rescheduling",
@@ -168,14 +168,16 @@ BalancerCommandsSchedulerImpl::~BalancerCommandsSchedulerImpl() {
 }
 
 void BalancerCommandsSchedulerImpl::start(OperationContext* opCtx,
-                                          const MigrationsRecoveryConfiguration& configuration) {
-    LOGV2(5847200, "Balancer command scheduler start requested");
+                                          const MigrationsRecoveryDefaultValues& defaultValues) {
+    auto requestsToRecover = rebuildRequestsFromRecoveryInfo(opCtx, defaultValues);
+    LOGV2(5847200,
+          "Balancer command scheduler start requested",
+          "numRequestsToRecover"_attr = requestsToRecover.size());
     stdx::lock_guard<Latch> lg(_mutex);
     invariant(!_workerThreadHandle.joinable());
     if (!_executor) {
         _executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
     }
-    auto requestsToRecover = rebuildRequestsFromRecoveryInfo(opCtx, configuration);
     _numRequestsToRecover = requestsToRecover.size();
     _state = _numRequestsToRecover == 0 ? SchedulerState::Running : SchedulerState::Recovering;
 

@@ -31,7 +31,7 @@ function getOplogEntriesForTxnWithRetries(rs, lsid, txnNumber) {
     return oplogEntries;
 }
 
-function RetryableInternalTransactionTest() {
+function RetryableInternalTransactionTest(collectionOptions = {}) {
     // Set a large oplogSize since this test runs a find command to get the oplog entries for
     // every transaction that it runs including large transactions and with the default oplogSize,
     // oplog reading done by the find command may not be able to keep up with the oplog truncation,
@@ -39,6 +39,10 @@ function RetryableInternalTransactionTest() {
     const st = new ShardingTest({shards: 1, rs: {nodes: 2, oplogSize: 256}});
 
     const kTestMode = {kNonRecovery: 1, kRestart: 2, kFailover: 3, kRollback: 4};
+
+    // Used when testing large transactions (i.e. in 'testRetryLargeTxn') for specifying which
+    // applyOps oplog entry should contain the entry for retryable write being tested.
+    // 'testRetryLargeTxn' runs a large transaction with three applyOps oplog entries.
     const kOplogEntryLocation = {kFirst: 1, kMiddle: 2, kLast: 3};
 
     // For creating documents that will result in large transactions.
@@ -47,13 +51,17 @@ function RetryableInternalTransactionTest() {
     const kDbName = "testDb";
     const kCollName = "testColl";
     const mongosTestDB = st.s.getDB(kDbName);
+    assert.commandWorked(mongosTestDB.createCollection(kCollName, collectionOptions));
     const mongosTestColl = mongosTestDB.getCollection(kCollName);
-
-    assert.commandWorked(mongosTestDB.createCollection(kCollName));
 
     function makeSessionIdForRetryableInternalTransaction() {
         return {id: UUID(), txnNumber: NumberLong(0), txnUUID: UUID()};
     }
+
+    const getRandomOplogEntryLocation = function() {
+        const locations = Object.values(kOplogEntryLocation);
+        return locations[Math.floor(Math.random() * locations.length)];
+    };
 
     function getTransactionState(lsid, txnNumber) {
         return {
@@ -91,9 +99,8 @@ function RetryableInternalTransactionTest() {
         if (isPreparedTxn && !isRetry) {
             const shard0Primary = st.rs0.getPrimary();
             const prepareCmdObj = makePrepareTransactionCmdObj(lsid, txnNumber);
-            const isPreparedTxnRes =
-                assert.commandWorked(shard0Primary.adminCommand(prepareCmdObj));
-            commitCmdObj.commitTimestamp = isPreparedTxnRes.prepareTimestamp;
+            const prepareRes = assert.commandWorked(shard0Primary.adminCommand(prepareCmdObj));
+            commitCmdObj.commitTimestamp = prepareRes.prepareTimestamp;
             assert.commandWorked(shard0Primary.adminCommand(commitCmdObj));
         }
         assert.commandWorked(mongosTestDB.adminCommand(commitCmdObj));
@@ -434,6 +441,9 @@ function RetryableInternalTransactionTest() {
         testOptions.lastUsedTxnNumber =
             testOptions.lastUsedTxnNumber ? testOptions.lastUsedTxnNumber : 0;
         testOptions.txnOptions = testOptions.txnOptions ? testOptions.txnOptions : {};
+        if (testOptions.txnOptions.isLargeTxn) {
+            testOptions.txnOptions.oplogEntryLocation = getRandomOplogEntryLocation();
+        }
         jsTest.log(`Testing insert, update and delete with options: ${tojson(testOptions)}`);
 
         testRetryInserts(lsid, testOptions.lastUsedTxnNumber++, testOptions);
@@ -441,38 +451,35 @@ function RetryableInternalTransactionTest() {
         testRetryDeletes(lsid, testOptions.lastUsedTxnNumber++, testOptions);
     };
 
-    this.runFindAndModifyTests = function(lsid, testOptions) {
+    function runFindAndModifyTests(lsid, testOptions) {
         testOptions.lastUsedTxnNumber =
             testOptions.lastUsedTxnNumber ? testOptions.lastUsedTxnNumber : 0;
         testOptions.txnOptions = testOptions.txnOptions ? testOptions.txnOptions : {};
-
-        const oplogEntryLocations = testOptions.txnOptions.isLargeTxn
-            ? [kOplogEntryLocation.kFirst, kOplogEntryLocation.kMiddle, kOplogEntryLocation.kLast]
-            : [kOplogEntryLocation.kFirst];
-        for (let oplogEntryLocation in oplogEntryLocations) {
-            testOptions.txnOptions.oplogEntryLocation = oplogEntryLocation;
-            jsTest.log(`Testing findAndModify with options: ${tojson(testOptions)}`);
-
-            testOptions.enableFindAndModifyImageCollection = true;
-            testRetryFindAndModifyUpsert(lsid, testOptions.lastUsedTxnNumber++, testOptions);
-            testRetryFindAndModifyUpdateWithPreImage(
-                lsid, testOptions.lastUsedTxnNumber++, testOptions);
-            testRetryFindAndModifyUpdateWithPostImage(
-                lsid, testOptions.lastUsedTxnNumber++, testOptions);
-            testRetryFindAndModifyRemove(lsid, testOptions.lastUsedTxnNumber++, testOptions);
-
-            testOptions.enableFindAndModifyImageCollection = false;
-            testRetryFindAndModifyUpsert(lsid, testOptions.lastUsedTxnNumber++, testOptions);
-            testRetryFindAndModifyUpdateWithPreImage(
-                lsid, testOptions.lastUsedTxnNumber++, testOptions);
-            testRetryFindAndModifyUpdateWithPostImage(
-                lsid, testOptions.lastUsedTxnNumber++, testOptions);
-            testRetryFindAndModifyRemove(lsid, testOptions.lastUsedTxnNumber++, testOptions);
+        if (testOptions.txnOptions.isLargeTxn) {
+            testOptions.txnOptions.oplogEntryLocation = getRandomOplogEntryLocation();
         }
+        jsTest.log(`Testing findAndModify with options: ${tojson(testOptions)}`);
+
+        testRetryFindAndModifyUpsert(lsid, testOptions.lastUsedTxnNumber++, testOptions);
+        testRetryFindAndModifyUpdateWithPreImage(
+            lsid, testOptions.lastUsedTxnNumber++, testOptions);
+        testRetryFindAndModifyUpdateWithPostImage(
+            lsid, testOptions.lastUsedTxnNumber++, testOptions);
+        testRetryFindAndModifyRemove(lsid, testOptions.lastUsedTxnNumber++, testOptions);
+    }
+
+    this.runFindAndModifyTestsEnableImageCollection = function(lsid, testOptions) {
+        testOptions.enableFindAndModifyImageCollection = true;
+        runFindAndModifyTests(lsid, testOptions);
     };
 
-    this.runTestsForAllRetryableInternalTransactionTypes = function(
-        runTestsFunc, testMode = kTestMode.kNonRecovery) {
+    this.runFindAndModifyTestsDisableImageCollection = function(lsid, testOptions) {
+        testOptions.enableFindAndModifyImageCollection = false;
+        runFindAndModifyTests(lsid, testOptions);
+    };
+
+    this.runTestsForAllUnpreparedRetryableInternalTransactionTypes = function(runTestsFunc,
+                                                                              testMode) {
         const expectRetryToSucceed = true;
 
         runTestsFunc(makeSessionIdForRetryableInternalTransaction(), {
@@ -483,15 +490,25 @@ function RetryableInternalTransactionTest() {
 
         runTestsFunc(
             makeSessionIdForRetryableInternalTransaction(),
+            {expectRetryToSucceed, txnOptions: {isPreparedTxn: false, isLargeTxn: true}, testMode});
+    };
+
+    this.runTestsForAllPreparedRetryableInternalTransactionTypes = function(runTestsFunc,
+                                                                            testMode) {
+        const expectRetryToSucceed = true;
+
+        runTestsFunc(
+            makeSessionIdForRetryableInternalTransaction(),
             {expectRetryToSucceed, txnOptions: {isPreparedTxn: true, isLargeTxn: false}, testMode});
 
         runTestsFunc(
             makeSessionIdForRetryableInternalTransaction(),
-            {expectRetryToSucceed, txnOptions: {isPreparedTxn: false, isLargeTxn: true}, testMode});
-
-        runTestsFunc(
-            makeSessionIdForRetryableInternalTransaction(),
             {expectRetryToSucceed, txnOptions: {isPreparedTxn: true, isLargeTxn: true}, testMode});
+    };
+
+    this.runTestsForAllRetryableInternalTransactionTypes = function(runTestsFunc, testMode) {
+        this.runTestsForAllUnpreparedRetryableInternalTransactionTypes(runTestsFunc, testMode);
+        this.runTestsForAllPreparedRetryableInternalTransactionTypes(runTestsFunc, testMode);
     };
 
     this.stop = function() {

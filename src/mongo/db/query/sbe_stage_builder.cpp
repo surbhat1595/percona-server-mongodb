@@ -37,6 +37,7 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
+#include "mongo/db/exec/sbe/stages/column_scan.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
@@ -578,9 +579,10 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
                     str::stream() << "IndexAccessMethod not found for index " << indexId,
                     it != iamTable.end());
 
-            auto iam = it->second;
+            auto iam = it->second->asSortedData();
             tassert(5290709,
-                    str::stream() << "Expected to find IndexAccessMethod for index " << indexId,
+                    str::stream() << "Expected to find SortedDataIndexAccessMethod for index "
+                                  << indexId,
                     iam);
 
             auto& executionCtx = StorageExecutionContext::get(opCtx);
@@ -597,8 +599,8 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
                          collection,
                          pooledBuilder,
                          nextRecord.data.toBson(),
-                         IndexAccessMethod::GetKeysMode::kEnforceConstraints,
-                         IndexAccessMethod::GetKeysContext::kValidatingKeys,
+                         InsertDeleteOptions::ConstraintEnforcementMode::kEnforceConstraints,
+                         SortedDataIndexAccessMethod::GetKeysContext::kValidatingKeys,
                          keys.get(),
                          multikeyMetadataKeys,
                          multikeyPaths,
@@ -642,12 +644,13 @@ std::unique_ptr<fts::FTSMatcher> makeFtsMatcher(OperationContext* opCtx,
 }  // namespace
 
 SlotBasedStageBuilder::SlotBasedStageBuilder(OperationContext* opCtx,
-                                             const CollectionPtr& collection,
+                                             const MultiCollection& collections,
                                              const CanonicalQuery& cq,
                                              const QuerySolution& solution,
                                              PlanYieldPolicySBE* yieldPolicy,
                                              ShardFiltererFactoryInterface* shardFiltererFactory)
-    : StageBuilder(opCtx, collection, cq, solution),
+    : StageBuilder(opCtx, cq, solution),
+      _collections(collections),
       _yieldPolicy(yieldPolicy),
       _data(makeRuntimeEnvironment(_cq, _opCtx, &_slotIdGenerator)),
       _shardFiltererFactory(shardFiltererFactory),
@@ -711,8 +714,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     auto csn = static_cast<const CollectionScanNode*>(root);
 
-    auto [stage, outputs] = generateCollScan(
-        _state, _collection, csn, _yieldPolicy, reqs.getIsTailableCollScanResumeBranch());
+    auto [stage, outputs] =
+        generateCollScan(_state,
+                         _collections.lookupCollection(NamespaceString{csn->name}),
+                         csn,
+                         _yieldPolicy,
+                         reqs.getIsTailableCollScanResumeBranch());
 
     if (reqs.has(kReturnKey)) {
         // Assign the 'returnKeySlot' to be the empty object.
@@ -827,8 +834,13 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         iamMap = nullptr;
     }
 
-    auto [stage, outputs] = generateIndexScan(
-        _state, _collection, ixn, indexKeyBitset, _yieldPolicy, iamMap, reqs.has(kIndexKeyPattern));
+    auto [stage, outputs] = generateIndexScan(_state,
+                                              _collections.getMainCollection(),
+                                              ixn,
+                                              indexKeyBitset,
+                                              _yieldPolicy,
+                                              iamMap,
+                                              reqs.has(kIndexKeyPattern));
 
     if (reqs.has(PlanStageSlots::kReturnKey)) {
         sbe::EExpression::Vector mkObjArgs;
@@ -869,6 +881,37 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     return {std::move(stage), std::move(outputs)};
 }
 
+std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildColumnScan(
+    const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    invariant(!reqs.getIndexKeyBitset());
+
+    auto csn = static_cast<const ColumnIndexScanNode*>(root);
+
+    PlanStageSlots outputs;
+
+    auto recordSlot = _slotIdGenerator.generate();
+    outputs.set(kResult, recordSlot);
+
+    boost::optional<sbe::value::SlotId> ridSlot;
+
+    if (reqs.has(kRecordId)) {
+        ridSlot = _slotIdGenerator.generate();
+        outputs.set(kRecordId, *ridSlot);
+    }
+
+    auto fieldSlotIds = _slotIdGenerator.generateMultiple(csn->fields.size());
+    auto stage = std::make_unique<sbe::ColumnScanStage>(_collections.getMainCollection()->uuid(),
+                                                        csn->indexEntry.catalogName,
+                                                        fieldSlotIds,
+                                                        csn->fields,
+                                                        recordSlot,
+                                                        ridSlot,
+                                                        _yieldPolicy,
+                                                        csn->nodeId());
+
+    return {std::move(stage), std::move(outputs)};
+}
+
 std::tuple<sbe::value::SlotId, sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>>
 SlotBasedStageBuilder::makeLoopJoinForFetch(std::unique_ptr<sbe::PlanStage> inputStage,
                                             sbe::value::SlotId seekKeySlot,
@@ -887,7 +930,7 @@ SlotBasedStageBuilder::makeLoopJoinForFetch(std::unique_ptr<sbe::PlanStage> inpu
         indexKeyCorruptionCheckCallback,
         std::bind(indexKeyConsistencyCheckCallback, _1, std::move(iamMap), _2, _3, _4, _5, _6));
     // Scan the collection in the range [seekKeySlot, Inf).
-    auto scanStage = sbe::makeS<sbe::ScanStage>(_collection->uuid(),
+    auto scanStage = sbe::makeS<sbe::ScanStage>(_collections.getMainCollection()->uuid(),
                                                 resultSlot,
                                                 recordIdSlot,
                                                 snapshotIdSlot,
@@ -1818,7 +1861,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildTextMatch(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    tassert(5432212, "no collection object", _collection);
+    const auto& mainColl = _collections.getMainCollection();
+    tassert(5432212, "no collection object", mainColl);
     tassert(5432213, "index keys requsted for text match node", !reqs.getIndexKeyBitset());
     tassert(5432215,
             str::stream() << "text match node must have one child, but got "
@@ -1837,7 +1881,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     // Create an FTS 'matcher' to apply 'ftsQuery' to matching documents.
     auto matcher = makeFtsMatcher(
-        _opCtx, _collection, textNode->index.identifier.catalogName, textNode->ftsQuery.get());
+        _opCtx, mainColl, textNode->index.identifier.catalogName, textNode->ftsQuery.get());
 
     // Build an 'ftsMatch' expression to match a document stored in the 'kResult' slot using the
     // 'matcher' instance.
@@ -2599,6 +2643,24 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     return {std::move(outStage), std::move(outputs)};
 }
 
+std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildLookup(
+    const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    const auto lookupStage = static_cast<const EqLookupNode*>(root);
+    switch (lookupStage->lookupStrategy) {
+        case EqLookupNode::LookupStrategy::kHashJoin:
+            uasserted(5842602, "$lookup planning logic picked hash join");
+            break;
+        case EqLookupNode::LookupStrategy::kIndexedLoopJoin:
+            uasserted(5842603, "$lookup planning logic picked indexed loop join");
+            break;
+        case EqLookupNode::LookupStrategy::kNestedLoopJoin:
+            uasserted(5842604, "$lookup planning logic picked nested loop join");
+            break;
+        default:
+            MONGO_UNREACHABLE_TASSERT(5842605);
+    }
+    MONGO_UNREACHABLE_TASSERT(5842606);
+}
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
 SlotBasedStageBuilder::makeUnionForTailableCollScan(const QuerySolutionNode* root,
                                                     const PlanStageReqs& reqs) {
@@ -2941,6 +3003,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             {STAGE_COLLSCAN, &SlotBasedStageBuilder::buildCollScan},
             {STAGE_VIRTUAL_SCAN, &SlotBasedStageBuilder::buildVirtualScan},
             {STAGE_IXSCAN, &SlotBasedStageBuilder::buildIndexScan},
+            {STAGE_COLUMN_IXSCAN, &SlotBasedStageBuilder::buildColumnScan},
             {STAGE_FETCH, &SlotBasedStageBuilder::buildFetch},
             {STAGE_LIMIT, &SlotBasedStageBuilder::buildLimit},
             {STAGE_SKIP, &SlotBasedStageBuilder::buildSkip},
@@ -2961,6 +3024,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             {STAGE_AND_SORTED, &SlotBasedStageBuilder::buildAndSorted},
             {STAGE_SORT_MERGE, &SlotBasedStageBuilder::buildSortMerge},
             {STAGE_GROUP, &SlotBasedStageBuilder::buildGroup},
+            {STAGE_EQ_LOOKUP, &SlotBasedStageBuilder::buildLookup},
             {STAGE_SHARDING_FILTER, &SlotBasedStageBuilder::buildShardFilter}};
 
     tassert(4822884,

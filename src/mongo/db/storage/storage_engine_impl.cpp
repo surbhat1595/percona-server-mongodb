@@ -249,6 +249,32 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx, LastShutdownState l
         lastShutdownState == LastShutdownState::kUnclean || _options.forRepair;
     BatchedCollectionCatalogWriter catalogBatchWriter{opCtx};
     for (DurableCatalog::Entry entry : catalogEntries) {
+        if (_options.forRestore) {
+            // When restoring a subset of user collections from a backup, the collections not
+            // restored are in the catalog but are unknown to the storage engine. The catalog
+            // entries for these collections will be removed.
+            const auto collectionIdent = entry.ident;
+            bool restoredIdent = std::binary_search(identsKnownToStorageEngine.begin(),
+                                                    identsKnownToStorageEngine.end(),
+                                                    collectionIdent);
+
+            if (!restoredIdent) {
+                LOGV2(6260800,
+                      "Removing catalog entry for collection not restored",
+                      logAttrs(entry.tenantNs.getNss()),
+                      "ident"_attr = collectionIdent);
+
+                WriteUnitOfWork wuow(opCtx);
+                fassert(6260801, _catalog->_removeEntry(opCtx, entry.catalogId));
+                wuow.commit();
+
+                continue;
+            }
+
+            // A collection being restored needs to also restore all of its indexes.
+            _checkForIndexFiles(opCtx, entry, identsKnownToStorageEngine);
+        }
+
         if (loadingFromUncleanShutdownOrRepair) {
             // If we are loading the catalog after an unclean shutdown or during repair, it's
             // possible that there are collections in the catalog that are unknown to the storage
@@ -419,6 +445,27 @@ Status StorageEngineImpl::_recoverOrphanedCollection(OperationContext* opCtx,
     }
     wuow.commit();
     return Status::OK();
+}
+
+void StorageEngineImpl::_checkForIndexFiles(
+    OperationContext* opCtx,
+    const DurableCatalog::Entry& entry,
+    std::vector<std::string>& identsKnownToStorageEngine) const {
+    std::vector<std::string> indexIdents = _catalog->getIndexIdents(opCtx, entry.catalogId);
+    for (const std::string& indexIdent : indexIdents) {
+        bool restoredIndexIdent = std::binary_search(
+            identsKnownToStorageEngine.begin(), identsKnownToStorageEngine.end(), indexIdent);
+
+        if (restoredIndexIdent) {
+            continue;
+        }
+
+        LOGV2_FATAL_NOTRACE(6261000,
+                            "Collection is missing an index file",
+                            logAttrs(entry.tenantNs.getNss()),
+                            "collectionIdent"_attr = entry.ident,
+                            "missingIndexIdent"_attr = indexIdent);
+    }
 }
 
 bool StorageEngineImpl::_handleInternalIdent(OperationContext* opCtx,
@@ -808,7 +855,7 @@ Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, StringData db) {
         }
     }
 
-    std::vector<UUID> toDrop = catalog->getAllCollectionUUIDsFromDb(db);
+    std::vector<UUID> toDrop = catalog->getAllCollectionUUIDsFromDb(tenantDbName);
 
     // Do not timestamp any of the following writes. This will remove entries from the catalog as
     // well as drop any underlying tables. It's not expected for dropping tables to be reversible
@@ -1289,14 +1336,17 @@ int64_t StorageEngineImpl::sizeOnDiskForDb(OperationContext* opCtx, StringData d
         return true;
     };
 
+    // TODO SERVER-63187: Change StorageEngine APIs to accept TenantDatabaseName.
+    const TenantDatabaseName tenantDbName(boost::none, dbName);
     if (opCtx->isLockFreeReadsOp()) {
         auto collectionCatalog = CollectionCatalog::get(opCtx);
-        for (auto it = collectionCatalog->begin(opCtx, dbName); it != collectionCatalog->end(opCtx);
+        for (auto it = collectionCatalog->begin(opCtx, tenantDbName);
+             it != collectionCatalog->end(opCtx);
              ++it) {
             perCollectionWork(*it);
         }
     } else {
-        catalog::forEachCollectionFromDb(opCtx, dbName, MODE_IS, perCollectionWork);
+        catalog::forEachCollectionFromDb(opCtx, tenantDbName, MODE_IS, perCollectionWork);
     };
 
     return size;

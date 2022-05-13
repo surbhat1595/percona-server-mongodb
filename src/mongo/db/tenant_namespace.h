@@ -37,6 +37,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/tenant_database_name.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_attr.h"
 
@@ -44,15 +45,12 @@ namespace mongo {
 
 class TenantNamespace {
 public:
-    TenantNamespace(const TenantNamespace& tenantNs)
-        : _tenantId(tenantNs.tenantId()),
-          _nss(tenantNs.getNss()),
-          _tenantNsStr(tenantNs.toString()) {}
+    TenantNamespace(const TenantNamespace& tenantNs) = default;
 
     /**
      * Constructs an empty TenantNamespace.
      */
-    TenantNamespace() : _tenantId(boost::none), _nss(), _tenantNsStr() {}
+    TenantNamespace() = default;
 
     /**
      * Constructs a TenantNamespace from the given tenantId and NamespaceString.
@@ -60,6 +58,11 @@ public:
      * If featureFlagRequireTenantID is set, tenantId is required.
      */
     TenantNamespace(boost::optional<mongo::TenantId> tenantId, NamespaceString nss);
+
+    /**
+     * Create a TenantDatabaseName from the TenantNamespace.
+     */
+    TenantDatabaseName createTenantDatabaseName() const;
 
     /**
      * Constructs a TenantNamespace from the string "ns". When the server parameter
@@ -136,7 +139,7 @@ public:
 
 private:
     boost::optional<TenantId> _tenantId;
-    NamespaceString _nss;
+    NamespaceString _nss{};
     boost::optional<std::string> _tenantNsStr;  // Only set if _tenantId exists
 };
 

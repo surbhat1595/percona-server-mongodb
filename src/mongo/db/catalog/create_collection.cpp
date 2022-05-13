@@ -55,6 +55,8 @@
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/tenant_database_name.h"
+#include "mongo/db/tenant_namespace.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/idl/command_generic_argument.h"
@@ -665,7 +667,6 @@ Status createCollection(OperationContext* opCtx,
 
     return createCollection(opCtx, nss, collectionOptions, idIndex);
 }
-
 }  // namespace
 
 Status createCollection(OperationContext* opCtx,
@@ -682,7 +683,7 @@ Status createCollection(OperationContext* opCtx,
 Status createCollection(OperationContext* opCtx,
                         const NamespaceString& ns,
                         const CreateCommand& cmd) {
-    auto options = CollectionOptions::fromCreateCommand(cmd);
+    auto options = CollectionOptions::fromCreateCommand(ns, cmd);
     auto idIndex = std::exchange(options.idIndex, {});
     bool hasExplicitlyDisabledClustering = cmd.getClusteredIndex() &&
         stdx::holds_alternative<bool>(*cmd.getClusteredIndex()) &&
@@ -711,6 +712,7 @@ void createChangeStreamPreImagesCollection(OperationContext* opCtx) {
             status.isOK() || status.code() == ErrorCodes::NamespaceExists);
 }
 
+// TODO SERVER-62880 pass TenantDatabaseName instead of dbName.
 Status createCollectionForApplyOps(OperationContext* opCtx,
                                    const std::string& dbName,
                                    const boost::optional<UUID>& ui,
@@ -723,7 +725,8 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
     auto newCmd = cmdObj;
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto* const db = databaseHolder->getDb(opCtx, dbName);
+    const TenantDatabaseName tenantDbName(boost::none, dbName);
+    auto* const db = databaseHolder->getDb(opCtx, tenantDbName);
 
     // If a UUID is given, see if we need to rename a collection out of the way, and whether the
     // collection already exists under a different name. If so, rename it into place. As this is

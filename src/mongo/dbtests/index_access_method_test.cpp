@@ -34,13 +34,13 @@
 #include "mongo/db/client.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/json.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
 namespace {
-using std::vector;
 
 KeyStringSet makeKeyStringSet(std::initializer_list<BSONObj> objs) {
     KeyStringSet keyStrings;
@@ -55,7 +55,7 @@ KeyStringSet makeKeyStringSet(std::initializer_list<BSONObj> objs) {
 TEST(IndexAccessMethodSetDifference, EmptyInputsShouldHaveNoDifference) {
     KeyStringSet left;
     KeyStringSet right;
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQ(0UL, diff.first.size());
     ASSERT_EQ(0UL, diff.second.size());
 }
@@ -64,7 +64,7 @@ TEST(IndexAccessMethodSetDifference, EmptyLeftShouldHaveNoDifference) {
     KeyStringSet left;
     auto right = makeKeyStringSet({BSON("" << 0)});
 
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQ(0UL, diff.first.size());
     ASSERT_EQ(1UL, diff.second.size());
 }
@@ -73,7 +73,7 @@ TEST(IndexAccessMethodSetDifference, EmptyRightShouldReturnAllOfLeft) {
     auto left = makeKeyStringSet({BSON("" << 0), BSON("" << 1)});
     KeyStringSet right;
 
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQ(2UL, diff.first.size());
     ASSERT_EQ(0UL, diff.second.size());
 }
@@ -88,7 +88,7 @@ TEST(IndexAccessMethodSetDifference, IdenticalSetsShouldHaveNoDifference) {
                                         << "string"),
                                    BSON("" << BSONNULL)});
 
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQ(0UL, diff.first.size());
     ASSERT_EQ(0UL, diff.second.size());
 }
@@ -100,7 +100,7 @@ TEST(IndexAccessMethodSetDifference, IdenticalSetsShouldHaveNoDifference) {
 void assertDistinct(BSONObj left, BSONObj right) {
     auto leftSet = makeKeyStringSet({left});
     auto rightSet = makeKeyStringSet({right});
-    auto diff = AbstractIndexAccessMethod::setDifference(leftSet, rightSet);
+    auto diff = SortedDataIndexAccessMethod::setDifference(leftSet, rightSet);
     ASSERT_EQ(1UL, diff.first.size());
     ASSERT_EQ(1UL, diff.second.size());
 }
@@ -153,7 +153,7 @@ TEST(IndexAccessMethodSetDifference, ShouldDetectOneDifferenceAmongManySimilarit
                                    BSON("" << BSON("sub"
                                                    << "document")),
                                    BSON("" << BSON_ARRAY(1 << "hi" << 42))});
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQUALS(1UL, diff.first.size());
     ASSERT_EQUALS(1UL, diff.second.size());
 }
@@ -161,7 +161,7 @@ TEST(IndexAccessMethodSetDifference, ShouldDetectOneDifferenceAmongManySimilarit
 TEST(IndexAccessMethodSetDifference, SingleObjInLeftShouldFindCorrespondingObjInRight) {
     auto left = makeKeyStringSet({BSON("" << 2)});
     auto right = makeKeyStringSet({BSON("" << 1), BSON("" << 2), BSON("" << 3)});
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQUALS(0UL, diff.first.size());
     ASSERT_EQUALS(2UL, diff.second.size());
 }
@@ -169,7 +169,7 @@ TEST(IndexAccessMethodSetDifference, SingleObjInLeftShouldFindCorrespondingObjIn
 TEST(IndexAccessMethodSetDifference, SingleObjInRightShouldFindCorrespondingObjInLeft) {
     auto left = makeKeyStringSet({BSON("" << 1), BSON("" << 2), BSON("" << 3)});
     auto right = makeKeyStringSet({BSON("" << 2)});
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQUALS(2UL, diff.first.size());
     ASSERT_EQUALS(0UL, diff.second.size());
 }
@@ -177,7 +177,7 @@ TEST(IndexAccessMethodSetDifference, SingleObjInRightShouldFindCorrespondingObjI
 TEST(IndexAccessMethodSetDifference, LeftSetAllSmallerThanRightShouldBeDisjoint) {
     auto left = makeKeyStringSet({BSON("" << 1), BSON("" << 2), BSON("" << 3)});
     auto right = makeKeyStringSet({BSON("" << 4), BSON("" << 5), BSON("" << 6)});
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQUALS(3UL, diff.first.size());
     ASSERT_EQUALS(3UL, diff.second.size());
     for (auto&& obj : diff.first) {
@@ -191,7 +191,7 @@ TEST(IndexAccessMethodSetDifference, LeftSetAllSmallerThanRightShouldBeDisjoint)
 TEST(IndexAccessMethodSetDifference, LeftSetAllLargerThanRightShouldBeDisjoint) {
     auto left = makeKeyStringSet({BSON("" << 4), BSON("" << 5), BSON("" << 6)});
     auto right = makeKeyStringSet({BSON("" << 1), BSON("" << 2), BSON("" << 3)});
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQUALS(3UL, diff.first.size());
     ASSERT_EQUALS(3UL, diff.second.size());
     for (auto&& obj : diff.first) {
@@ -206,7 +206,7 @@ TEST(IndexAccessMethodSetDifference, ShouldNotReportOverlapsFromNonDisjointSets)
     auto left = makeKeyStringSet({BSON("" << 0), BSON("" << 1), BSON("" << 4), BSON("" << 6)});
     auto right = makeKeyStringSet(
         {BSON("" << -1), BSON("" << 1), BSON("" << 3), BSON("" << 4), BSON("" << 7)});
-    auto diff = AbstractIndexAccessMethod::setDifference(left, right);
+    auto diff = SortedDataIndexAccessMethod::setDifference(left, right);
     ASSERT_EQUALS(2UL, diff.first.size());   // 0, 6.
     ASSERT_EQUALS(3UL, diff.second.size());  // -1, 3, 7.
     for (auto&& keyString : diff.first) {
@@ -237,8 +237,8 @@ TEST(IndexAccessMethodInsertKeys, DuplicatesCheckingOnSecondaryUniqueIndexes) {
     AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
     const auto& coll = autoColl.getCollection();
     auto indexDescriptor = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    IndexAccessMethod* indexAccessMethod =
-        coll->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod();
+    auto indexAccessMethod =
+        coll->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod()->asSortedData();
 
     KeyString::HeapBuilder keyString1(
         KeyString::Version::kLatestVersion, BSON("" << 1), Ordering::make(BSONObj()), RecordId(1));
@@ -249,105 +249,101 @@ TEST(IndexAccessMethodInsertKeys, DuplicatesCheckingOnSecondaryUniqueIndexes) {
     int64_t numInserted;
 
     // Checks duplicates and returns the error code when constraints are enforced.
-    auto status = indexAccessMethod->insertKeys(opCtx, coll, keys, {}, options, {}, &numInserted);
+    auto status = indexAccessMethod->insertKeys(opCtx, coll, keys, options, {}, &numInserted);
     ASSERT_EQ(status.code(), ErrorCodes::DuplicateKey);
     ASSERT_EQ(numInserted, 0);
 
     // Skips the check on duplicates when constraints are not enforced.
     opCtx->setEnforceConstraints(false);
-    ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, keys, {}, options, {}, &numInserted));
+    ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, keys, options, {}, &numInserted));
     ASSERT_EQ(numInserted, 2);
 }
 
-TEST(IndexAccessMethodInsertKeys, InsertWhenEnforcingDuplicateConstraints) {
-    ServiceContext::UniqueOperationContext opCtxRaii = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxRaii.get();
-    NamespaceString nss("unittests.InsertWhenEnforcingDuplicateConstraints");
-    auto indexName = "a_1";
-    auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
-                                 << static_cast<int>(IndexDescriptor::IndexVersion::kV2));
-    ASSERT_OK(dbtests::createIndexFromSpec(opCtx, nss.ns(), indexSpec));
+TEST(IndexAccessMethodInsertKeys, InsertWhenDisallowNewDuplicateKeys) {
+    if (feature_flags::gCollModIndexUnique.isEnabled(serverGlobalParams.featureCompatibility)) {
+        ServiceContext::UniqueOperationContext opCtxRaii = cc().makeOperationContext();
+        OperationContext* opCtx = opCtxRaii.get();
+        NamespaceString nss("unittests.InsertWhenDisallowNewDuplicateKeys");
+        auto indexName = "a_1";
+        auto indexSpec =
+            BSON("name" << indexName << "key" << BSON("a" << 1) << "disallowNewDuplicateKeys"
+                        << true << "v" << static_cast<int>(IndexDescriptor::IndexVersion::kV2));
+        ASSERT_OK(dbtests::createIndexFromSpec(opCtx, nss.ns(), indexSpec));
 
-    AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
-    const auto& coll = autoColl.getCollection();
-    auto indexDescriptor = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    IndexAccessMethod* indexAccessMethod =
-        coll->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod();
+        AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
+        const auto& coll = autoColl.getCollection();
+        auto indexDescriptor = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
+        auto indexAccessMethod =
+            coll->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod()->asSortedData();
 
-    KeyString::HeapBuilder keyString1(
-        KeyString::Version::kLatestVersion, BSON("" << 1), Ordering::make(BSONObj()), RecordId(1));
-    KeyString::HeapBuilder keyString2(
-        KeyString::Version::kLatestVersion, BSON("" << 1), Ordering::make(BSONObj()), RecordId(2));
-    KeyString::HeapBuilder keyString3(
-        KeyString::Version::kLatestVersion, BSON("" << 1), Ordering::make(BSONObj()), RecordId(3));
-    KeyStringSet keys1{keyString1.release(), keyString2.release()};
-    KeyStringSet keys2{keyString3.release()};
-    struct InsertDeleteOptions options;
-    int64_t numInserted;
+        KeyString::HeapBuilder keyString1(KeyString::Version::kLatestVersion,
+                                          BSON("" << 1),
+                                          Ordering::make(BSONObj()),
+                                          RecordId(1));
+        KeyString::HeapBuilder keyString2(KeyString::Version::kLatestVersion,
+                                          BSON("" << 1),
+                                          Ordering::make(BSONObj()),
+                                          RecordId(2));
+        KeyStringSet keys{keyString1.release(), keyString2.release()};
+        struct InsertDeleteOptions options;
+        int64_t numInserted;
 
-    // Allows duplicates in a regular index.
-    ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, keys1, {}, options, {}, &numInserted));
-    ASSERT_EQ(numInserted, 2);
-
-    // Enforces the duplicate constraint on the index and rejects duplicates when inserting.
-    indexAccessMethod->setEnforceDuplicateConstraints(true);
-    auto status = indexAccessMethod->insertKeys(opCtx, coll, keys2, {}, options, {}, &numInserted);
-    ASSERT_EQ(status.code(), ErrorCodes::DuplicateKey);
-    ASSERT_EQ(numInserted, 0);
-
-    // Resets the duplicate constraint and accepts duplicates again.
-    indexAccessMethod->setEnforceDuplicateConstraints(false);
-    ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, keys2, {}, options, {}, &numInserted));
-    ASSERT_EQ(numInserted, 1);
+        // Disallows new duplicates in a regular index and rejects the insert.
+        auto status = indexAccessMethod->insertKeys(opCtx, coll, keys, options, {}, &numInserted);
+        ASSERT_EQ(status.code(), ErrorCodes::DuplicateKey);
+        ASSERT_EQ(numInserted, 0);
+    }
 }
 
-TEST(IndexAccessMethodUpdateKeys, UpdateWhenEnforcingDuplicateConstraints) {
-    ServiceContext::UniqueOperationContext opCtxRaii = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxRaii.get();
-    NamespaceString nss("unittests.UpdateWhenEnforcingDuplicateConstraints");
-    auto indexName = "a_1";
-    auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
-                                 << static_cast<int>(IndexDescriptor::IndexVersion::kV2));
-    ASSERT_OK(dbtests::createIndexFromSpec(opCtx, nss.ns(), indexSpec));
+TEST(IndexAccessMethodUpdateKeys, UpdateWhenDisallowNewDuplicateKeys) {
+    if (feature_flags::gCollModIndexUnique.isEnabled(serverGlobalParams.featureCompatibility)) {
+        ServiceContext::UniqueOperationContext opCtxRaii = cc().makeOperationContext();
+        OperationContext* opCtx = opCtxRaii.get();
+        NamespaceString nss("unittests.UpdateWhenDisallowNewDuplicateKeys");
+        auto indexName = "a_1";
+        auto indexSpec =
+            BSON("name" << indexName << "key" << BSON("a" << 1) << "disallowNewDuplicateKeys"
+                        << true << "v" << static_cast<int>(IndexDescriptor::IndexVersion::kV2));
+        ASSERT_OK(dbtests::createIndexFromSpec(opCtx, nss.ns(), indexSpec));
 
-    AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
-    const auto& coll = autoColl.getCollection();
-    auto indexDescriptor = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    IndexAccessMethod* indexAccessMethod =
-        coll->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod();
+        AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
+        const auto& coll = autoColl.getCollection();
+        auto indexDescriptor = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
+        auto indexAccessMethod =
+            coll->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod()->asSortedData();
 
-    KeyString::HeapBuilder keyString1(
-        KeyString::Version::kLatestVersion, BSON("" << 1), Ordering::make(BSONObj()), RecordId(1));
-    KeyString::HeapBuilder keyString2_old(
-        KeyString::Version::kLatestVersion, BSON("" << 2), Ordering::make(BSONObj()), RecordId(2));
-    KeyString::HeapBuilder keyString2_new(
-        KeyString::Version::kLatestVersion, BSON("" << 1), Ordering::make(BSONObj()), RecordId(2));
-    KeyStringSet key1{keyString1.release()};
-    KeyStringSet key2_old{keyString2_old.release()};
-    KeyStringSet key2_new{keyString2_new.release()};
-    struct InsertDeleteOptions options;
-    UpdateTicket ticket{true, {}, {}, {}, key2_old, key2_new, RecordId(2), true, {}};
-    int64_t numInserted;
-    int64_t numDeleted;
+        KeyString::HeapBuilder keyString1(KeyString::Version::kLatestVersion,
+                                          BSON("" << 1),
+                                          Ordering::make(BSONObj()),
+                                          RecordId(1));
+        KeyString::HeapBuilder keyString2_old(KeyString::Version::kLatestVersion,
+                                              BSON("" << 2),
+                                              Ordering::make(BSONObj()),
+                                              RecordId(2));
+        KeyString::HeapBuilder keyString2_new(KeyString::Version::kLatestVersion,
+                                              BSON("" << 1),
+                                              Ordering::make(BSONObj()),
+                                              RecordId(2));
+        KeyStringSet key1{keyString1.release()};
+        KeyStringSet key2_old{keyString2_old.release()};
+        KeyStringSet key2_new{keyString2_new.release()};
+        struct InsertDeleteOptions options;
+        UpdateTicket ticket{true, {}, {}, {}, key2_old, key2_new, RecordId(2), true, {}};
+        int64_t numInserted;
+        int64_t numDeleted;
 
-    // Inserts two keys.
-    ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, key1, {}, options, {}, &numInserted));
-    ASSERT_EQ(numInserted, 1);
-    ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, key2_old, {}, options, {}, &numInserted));
-    ASSERT_EQ(numInserted, 1);
+        // Inserts two keys.
+        ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, key1, options, {}, &numInserted));
+        ASSERT_EQ(numInserted, 1);
+        ASSERT_OK(indexAccessMethod->insertKeys(opCtx, coll, key2_old, options, {}, &numInserted));
+        ASSERT_EQ(numInserted, 1);
 
-    // Enforces the duplicate constraint on the index and rejects duplicates when updating.
-    indexAccessMethod->setEnforceDuplicateConstraints(true);
-    auto status = indexAccessMethod->update(opCtx, coll, ticket, &numInserted, &numDeleted);
-    ASSERT_EQ(status.code(), ErrorCodes::DuplicateKey);
-    ASSERT_EQ(numInserted, 0);
-    ASSERT_EQ(numDeleted, 0);
-
-    // Resets the duplicate constraint and accepts duplicates again.
-    indexAccessMethod->setEnforceDuplicateConstraints(false);
-    ASSERT_OK(indexAccessMethod->update(opCtx, coll, ticket, &numInserted, &numDeleted));
-    ASSERT_EQ(numInserted, 1);
-    ASSERT_EQ(numDeleted, 1);
+        // Disallows new duplicates in a regular index and rejects the update.
+        auto status = indexAccessMethod->doUpdate(opCtx, coll, ticket, &numInserted, &numDeleted);
+        ASSERT_EQ(status.code(), ErrorCodes::DuplicateKey);
+        ASSERT_EQ(numInserted, 0);
+        ASSERT_EQ(numDeleted, 0);
+    }
 }
 
 }  // namespace

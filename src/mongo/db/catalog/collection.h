@@ -607,6 +607,13 @@ public:
      */
     virtual void updateUniqueSetting(OperationContext* opCtx, StringData idxName) = 0;
 
+    /*
+     * Disallows or allows new duplicates in the given index.
+     */
+    virtual void updateDisallowNewDuplicateKeysSetting(OperationContext* opCtx,
+                                                       StringData idxName,
+                                                       bool disallowNewDuplicateKeys) = 0;
+
     /**
      * Removes invalid index options on all indexes in this collection. Returns a list of index
      * names that contained invalid index options.
@@ -875,14 +882,6 @@ public:
 
     void yield() const override;
     void restore() const override;
-
-    RestoreFn detachRestoreFn() {
-        return std::move(_restoreFn);
-    }
-
-    void attachRestoreFn(RestoreFn newRestoreFn) {
-        _restoreFn = std::move(newRestoreFn);
-    }
 
     friend std::ostream& operator<<(std::ostream& os, const CollectionPtr& coll);
 

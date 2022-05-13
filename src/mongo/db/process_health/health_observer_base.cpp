@@ -42,16 +42,14 @@ HealthObserverBase::HealthObserverBase(ServiceContext* svcCtx)
     : _svcCtx(svcCtx), _rand(PseudoRandom(SecureRandom().nextInt64())) {}
 
 SharedSemiFuture<HealthCheckStatus> HealthObserverBase::periodicCheck(
-    std::shared_ptr<executor::TaskExecutor> taskExecutor, CancellationToken token) {
+    std::shared_ptr<executor::TaskExecutor> taskExecutor, CancellationToken token) noexcept {
     // If we have reached here, the intensity of this health observer must not be off
     {
-        auto lk = stdx::lock_guard(_mutex);
-        if (_currentlyRunningHealthCheck) {
-            return _deadlineFuture->get();
-        }
 
         LOGV2_DEBUG(6007902, 2, "Start periodic health check", "observerType"_attr = getType());
         const auto now = _svcCtx->getPreciseClockSource()->now();
+
+        auto lk = stdx::lock_guard(_mutex);
         _lastTimeTheCheckWasRun = now;
         _currentlyRunningHealthCheck = true;
     }
@@ -60,21 +58,19 @@ SharedSemiFuture<HealthCheckStatus> HealthObserverBase::periodicCheck(
         taskExecutor,
         periodicCheckImpl({token, taskExecutor})
             .onCompletion([this](StatusWith<HealthCheckStatus> status) {
-                if (!status.isOK()) {
-                    return status;
-                }
-
-                auto healthStatus = status.getValue();
-
                 const auto now = _svcCtx->getPreciseClockSource()->now();
+
                 auto lk = stdx::lock_guard(_mutex);
                 ++_completedChecksCount;
                 invariant(_currentlyRunningHealthCheck);
-                if (!HealthCheckStatus::isResolved(healthStatus.getSeverity())) {
-                    ++_completedChecksWithFaultCount;
-                }
                 _currentlyRunningHealthCheck = false;
                 _lastTimeCheckCompleted = now;
+
+                if (!status.isOK() ||
+                    !HealthCheckStatus::isResolved(status.getValue().getSeverity())) {
+                    ++_completedChecksWithFaultCount;
+                }
+
                 return status;
             }),
         getObserverTimeout());
@@ -83,15 +79,24 @@ SharedSemiFuture<HealthCheckStatus> HealthObserverBase::periodicCheck(
 }
 
 HealthCheckStatus HealthObserverBase::makeHealthyStatus() const {
-    return HealthCheckStatus(getType());
+    return makeHealthyStatusWithType(getType());
+}
+
+HealthCheckStatus HealthObserverBase::makeHealthyStatusWithType(FaultFacetType type) {
+    return HealthCheckStatus(type);
 }
 
 HealthCheckStatus HealthObserverBase::makeSimpleFailedStatus(Severity severity,
                                                              std::vector<Status>&& failures) const {
+    return makeSimpleFailedStatusWithType(getType(), severity, std::move(failures));
+}
+
+HealthCheckStatus HealthObserverBase::makeSimpleFailedStatusWithType(
+    FaultFacetType type, Severity severity, std::vector<Status>&& failures) {
     if (severity == Severity::kOk) {
         LOGV2_WARNING(6007903,
                       "Creating faulty health check status requires non-ok severity",
-                      "observerType"_attr = getType());
+                      "observerType"_attr = type);
     }
     StringBuilder sb;
     for (const auto& s : failures) {
@@ -99,7 +104,7 @@ HealthCheckStatus HealthObserverBase::makeSimpleFailedStatus(Severity severity,
         sb.append(" ");
     }
 
-    return HealthCheckStatus(getType(), severity, sb.stringData());
+    return HealthCheckStatus(type, severity, sb.stringData());
 }
 
 HealthObserverLivenessStats HealthObserverBase::getStats() const {

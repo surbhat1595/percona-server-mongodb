@@ -128,13 +128,6 @@ public:
         const auto forceJumboElt = cmdObj["forceJumbo"];
         const auto forceJumbo = forceJumboElt && forceJumboElt.Bool();
 
-        // so far, chunk size serves test purposes; it may or may not become a supported parameter
-        long long maxChunkSizeBytes = cmdObj["maxChunkSizeBytes"].numberLong();
-        if (maxChunkSizeBytes == 0) {
-            maxChunkSizeBytes =
-                Grid::get(opCtx)->getBalancerConfiguration()->getMaxChunkSizeBytes();
-        }
-
         BSONObj find = cmdObj.getObjectField("find");
         BSONObj bounds = cmdObj.getObjectField("bounds");
 
@@ -193,7 +186,6 @@ public:
                                                     nss,
                                                     chunkType,
                                                     to->getId(),
-                                                    maxChunkSizeBytes,
                                                     secondaryThrottle,
                                                     cmdObj["_waitForDelete"].trueValue() ||
                                                         cmdObj["waitForDelete"].trueValue(),

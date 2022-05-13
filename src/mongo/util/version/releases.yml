@@ -15,6 +15,7 @@ featureCompatibilityVersions:
   - "5.1"
   - "5.2"
   - "5.3"
+  - "6.0"
   - "100.0" # This version is not an actual version and used for testing only
 # All LTS releases starting with 4.0.
 longTermSupportReleases:

@@ -156,8 +156,8 @@ structs:
                 type: safeBool
                 optional: true
                 unstable: false
-            comment:
-                type: object_owned
+            disallowNewDuplicateKeys:
+                type: safeBool
                 optional: true
                 unstable: true
             #

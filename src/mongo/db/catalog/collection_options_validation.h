@@ -31,7 +31,11 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/crypto/encryption_fields_gen.h"
 
 namespace mongo::collection_options_validation {
 Status validateStorageEngineOptions(const BSONObj& storageEngine);
+
+EncryptedFieldConfig processAndValidateEncryptedFields(EncryptedFieldConfig config);
+
 }  // namespace mongo::collection_options_validation

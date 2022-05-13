@@ -35,21 +35,22 @@
 
 namespace mongo {
 void checkCollectionUUIDMismatch(OperationContext* opCtx,
+                                 const NamespaceString& ns,
                                  const CollectionPtr& coll,
-                                 const boost::optional<UUID>& uuid) {
+                                 const boost::optional<UUID>& uuid,
+                                 bool checkFeatureFlag) {
     if (!uuid) {
         return;
     }
 
     uassert(ErrorCodes::InvalidOptions,
             "The collectionUUID parameter is not enabled",
-            feature_flags::gCommandsAcceptCollectionUUID.isEnabled(
-                serverGlobalParams.featureCompatibility));
+            !checkFeatureFlag ||
+                feature_flags::gCommandsAcceptCollectionUUID.isEnabled(
+                    serverGlobalParams.featureCompatibility));
 
-    uassert((CollectionUUIDMismatchInfo{*uuid,
-                                        CollectionCatalog::get(opCtx)
-                                            ->lookupNSSByUUID(opCtx, *uuid)
-                                            .value_or(NamespaceString{})}),
+    uassert((CollectionUUIDMismatchInfo{
+                *uuid, ns, CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, *uuid)}),
             "Collection UUID does not match that specified",
             coll && coll->uuid() == *uuid);
 }

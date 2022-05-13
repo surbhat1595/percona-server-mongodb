@@ -39,12 +39,15 @@ namespace mongo {
 
 using ScopedTaskExecutorPtr = std::shared_ptr<executor::ScopedTaskExecutor>;
 
+namespace detail {
 std::function<bool(const std::vector<sdam::ServerDescriptionPtr>&)>
-makeRecipientAcceptSplitPredicate(std::string name, int expectedSize);
+makeRecipientAcceptSplitPredicate(const ConnectionString& recipientConnectionString);
 
-SemiFuture<void> getRecipientAcceptSplitFuture(ExecutorPtr executor,
-                                               const CancellationToken& token,
-                                               MongoURI recipientConnectionString);
+SemiFuture<void> makeRecipientAcceptSplitFuture(ExecutorPtr executor,
+                                                const CancellationToken& token,
+                                                const StringData& recipientTagName,
+                                                const StringData& recipientSetName);
+};  // namespace detail
 
 class ShardSplitDonorService final : public repl::PrimaryOnlyService {
 public:
@@ -147,6 +150,9 @@ private:
     ExecutorFuture<void> _waitForMajorityWriteConcern(const ScopedTaskExecutorPtr& executor,
                                                       repl::OpTime opTime,
                                                       const CancellationToken& token);
+
+    void _initiateTimeout(const ScopedTaskExecutorPtr& executor,
+                          const CancellationToken& abortToken);
 
     void _createReplicaSetMonitor(const ExecutorPtr& executor, const CancellationToken& abortToken);
 

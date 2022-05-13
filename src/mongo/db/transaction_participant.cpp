@@ -56,6 +56,7 @@
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/update.h"
+#include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -375,7 +376,8 @@ void updateSessionEntry(OperationContext* opCtx,
                           << NamespaceString::kSessionTransactionsTableNamespace.ns(),
             idIndex);
 
-    auto indexAccess = collection->getIndexCatalog()->getEntry(idIndex)->accessMethod();
+    auto indexAccess =
+        collection->getIndexCatalog()->getEntry(idIndex)->accessMethod()->asSortedData();
     // Since we are looking up a key inside the _id index, create a key object consisting of only
     // the _id field.
     auto idToFetch = updateRequest.getQuery().firstElement();
@@ -540,8 +542,9 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
         Lock::DBLock dbLock(opCtx.get(), nss.db(), MODE_IS, deadline);
         Lock::CollectionLock collLock(opCtx.get(), nss, MODE_IS, deadline);
 
+        const TenantDatabaseName tenantDbName(boost::none, nss.db());
         auto databaseHolder = DatabaseHolder::get(opCtx.get());
-        auto db = databaseHolder->getDb(opCtx.get(), nss.db());
+        auto db = databaseHolder->getDb(opCtx.get(), tenantDbName);
         if (!db) {
             // There is no config database, so there cannot be any active transactions.
             return boost::none;
@@ -859,11 +862,21 @@ void TransactionParticipant::Participant::beginOrContinue(
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
     boost::optional<bool> startTransaction) {
-    if (_isInternalSession() && startTransaction) {
-        uassert(ErrorCodes::InternalTransactionNotSupported,
-                "Internal transactions are not enabled",
-                feature_flags::gFeatureFlagInternalTransactions.isEnabled(
-                    serverGlobalParams.featureCompatibility));
+    if (startTransaction) {
+        if (_isInternalSession()) {
+            uassert(ErrorCodes::InternalTransactionNotSupported,
+                    "Internal transactions are not enabled",
+                    feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                        serverGlobalParams.featureCompatibility));
+        }
+        if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
+            txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
+            // TODO: (SERVER-62375): Remove upgrade/downgrade code for internal transactions
+            uassert(ErrorCodes::TxnRetryCounterNotSupported,
+                    "TxnRetryCounter support is not enabled",
+                    feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                        serverGlobalParams.featureCompatibility));
+        }
     }
 
     if (_isInternalSessionForRetryableWrite()) {
@@ -1306,17 +1319,6 @@ void TransactionParticipant::Participant::stashTransactionResources(OperationCon
     }
 }
 
-void TransactionParticipant::Participant::resetRetryableWriteState(OperationContext* opCtx) {
-    if (opCtx->getClient()->isInDirectClient()) {
-        return;
-    }
-    invariant(opCtx->getTxnNumber());
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
-    if (o().txnState.isNone() && p().autoCommit == boost::none) {
-        _resetRetryableWriteState();
-    }
-}
-
 void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
     OperationContext* opCtx, MaxLockTimeout maxLockTimeout, AcquireTicket acquireTicket) {
     // Transaction resources already exist for this transaction.  Transfer them from the
@@ -1533,6 +1535,12 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
     // collection multiple times: it is a costly check.
     stdx::unordered_set<UUID, UUID::Hash> transactionOperationUuids;
     for (const auto& transactionOp : completedTransactionOperations) {
+        if (transactionOp.getOpType() == repl::OpTypeEnum::kNoop) {
+            // No-ops can't modify data, so there's no need to check if they involved a temporary
+            // collection.
+            continue;
+        }
+
         transactionOperationUuids.insert(transactionOp.getUuid().get());
     }
     auto catalog = CollectionCatalog::get(opCtx);
@@ -1666,7 +1674,10 @@ void TransactionParticipant::Participant::addTransactionOperation(
         repl::DurableOplogEntry::getDurableReplOperationSize(operation);
     if (!operation.getPreImage().isEmpty()) {
         p().transactionOperationBytes += operation.getPreImage().objsize();
-        ++p().numberOfPrePostImagesToWrite;
+        if (operation.isChangeStreamPreImageRecordedInOplog() ||
+            operation.isPreImageRecordedForRetryableInternalTransaction()) {
+            ++p().numberOfPrePostImagesToWrite;
+        }
     }
     if (!operation.getPostImage().isEmpty()) {
         p().transactionOperationBytes += operation.getPostImage().objsize();
@@ -2708,11 +2719,6 @@ void TransactionParticipant::Participant::_refreshSelfFromStorageIfNeeded(Operat
         o(lg).activeTxnNumberAndRetryCounter.setTxnRetryCounter([&] {
             if (lastTxnRecord->getState()) {
                 if (lastTxnRecord->getTxnRetryCounter().has_value()) {
-                    uassert(
-                        ErrorCodes::InvalidOptions,
-                        "TxnRetryCounter is only supported when internal transactions are enabled",
-                        feature_flags::gFeatureFlagInternalTransactions.isEnabled(
-                            serverGlobalParams.featureCompatibility));
                     return *lastTxnRecord->getTxnRetryCounter();
                 }
                 return 0;
@@ -3058,6 +3064,40 @@ void TransactionParticipant::Participant::addCommittedStmtIds(
     stdx::lock_guard<Client> lg(*opCtx->getClient());
     for (auto stmtId : stmtIdsCommitted) {
         p().activeTxnCommittedStatements.emplace(stmtId, writeOpTime);
+    }
+}
+
+void TransactionParticipant::Participant::handleWouldChangeOwningShardError(
+    OperationContext* opCtx) {
+    if (o().txnState.isNone() && p().autoCommit == boost::none) {
+        // If this was a retryable write, reset the transaction state so this participant can be
+        // reused for the transaction mongos will use to handle the WouldChangeOwningShard error.
+
+        if (opCtx->getClient()->isInDirectClient()) {
+            return;
+        }
+
+        invariant(opCtx->getTxnNumber());
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        _resetRetryableWriteState();
+    } else if (_isInternalSessionForRetryableWrite()) {
+        // If this was a retryable transaction, add a sentinel noop to the transaction's operations
+        // so retries can detect that a WouldChangeOwningShard error was thrown and know to throw
+        // IncompleteTransactionHistory.
+
+        uassert(5918601,
+                "Expected retryable internal session to have a transaction, not a retryable write",
+                p().autoCommit != boost::none);
+        repl::ReplOperation operation;
+        operation.setOpType(repl::OpTypeEnum::kNoop);
+        operation.setNss(NamespaceString());
+        operation.setObject(kWouldChangeOwningShardSentinel);
+
+        // The operation that triggers WouldChangeOwningShard should always be the first in its
+        // transaction.
+        operation.setInitializedStatementIds({0});
+
+        addTransactionOperation(opCtx, operation);
     }
 }
 

@@ -74,7 +74,7 @@ public:
     }
 
     const TenantNamespace& tenantNs() const {
-        MONGO_UNREACHABLE;
+        return _tenantNs;
     }
 
     Status rename(OperationContext* opCtx, const TenantNamespace& tenantNs, bool stayTemp) final {
@@ -257,7 +257,7 @@ public:
     }
 
     bool isClustered() const {
-        std::abort();
+        return false;
     }
 
     boost::optional<ClusteredCollectionInfo> getClusteredInfo() const {
@@ -410,6 +410,12 @@ public:
     }
 
     void updateUniqueSetting(OperationContext* opCtx, StringData idxName) {
+        std::abort();
+    }
+
+    void updateDisallowNewDuplicateKeysSetting(OperationContext* opCtx,
+                                               StringData idxName,
+                                               bool disallowNewDuplicateKeys) {
         std::abort();
     }
 

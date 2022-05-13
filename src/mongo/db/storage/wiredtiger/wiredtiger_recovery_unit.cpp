@@ -45,6 +45,9 @@
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/testing_proctor.h"
 
+#include <fmt/compile.h>
+#include <fmt/format.h>
+
 namespace mongo {
 namespace {
 
@@ -369,10 +372,6 @@ void WiredTigerRecoveryUnit::preallocateSnapshotForOplogRead() {
 }
 
 void WiredTigerRecoveryUnit::refreshSnapshot() {
-    // First, start a new transaction at the same timestamp as the current one.  Then end the
-    // current transaction.  This overlap will prevent WT from cleaning up history required to serve
-    // the read timestamp.
-
     // Currently, this code only works for kNoOverlap or kNoTimestamp.
     invariant(_timestampReadSource == ReadSource::kNoOverlap ||
               _timestampReadSource == ReadSource::kNoTimestamp);
@@ -381,27 +380,10 @@ void WiredTigerRecoveryUnit::refreshSnapshot() {
     invariant(!_noEvictionAfterRollback);
     invariant(_abandonSnapshotMode == AbandonSnapshotMode::kAbort);
 
-    auto newSession = _sessionCache->getSession();
-    WiredTigerBeginTxnBlock txnOpen(newSession->getSession(),
-                                    _prepareConflictBehavior,
-                                    _roundUpPreparedTimestamps,
-                                    RoundUpReadTimestamp::kNoRoundForce);
-    if (_timestampReadSource != ReadSource::kNoTimestamp) {
-        auto status = txnOpen.setReadSnapshot(_readAtTimestamp);
-        fassert(5035300, status);
-    }
-    txnOpen.done();
-
-    // Now end the previous transaction.
-    auto wtSession = _session->getSession();
-    auto wtRet = wtSession->rollback_transaction(wtSession, nullptr);
-    invariantWTOK(wtRet, wtSession);
-    LOGV2_DEBUG(5035301,
-                3,
-                "WT begin_transaction & rollback_transaction",
-                "snapshotId"_attr = getSnapshotId().toNumber());
-
-    _session = std::move(newSession);
+    auto session = _session->getSession();
+    invariantWTOK(session->reset_snapshot(session), session);
+    LOGV2_DEBUG(
+        6235000, 3, "WT refreshed snapshot", "snapshotId"_attr = getSnapshotId().toNumber());
 }
 
 void WiredTigerRecoveryUnit::_txnClose(bool commit) {
@@ -468,27 +450,40 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
 
     int wtRet;
     if (commit) {
-        StringBuilder conf;
+        // Avoid heap allocation in favour of a stack allocation for the commit string.
+        static constexpr auto commitTimestampFmtString = "commit_timestamp={:X},";
+        static constexpr auto durableTimestampFmtString = "durable_timestamp={:X}";
+        static constexpr auto bytesRequired =
+            std::char_traits<char>::length(commitTimestampFmtString) +
+            (sizeof(decltype(_commitTimestamp.asULL())) * 2) +
+            std::char_traits<char>::length(durableTimestampFmtString) +
+            (sizeof(decltype(_durableTimestamp.asULL())) * 2) + 1;
+        std::array<char, bytesRequired> conf;
+        auto end = conf.begin();
         if (!_commitTimestamp.isNull()) {
             // There is currently no scenario where it is intentional to commit before the current
             // read timestamp.
             invariant(_readAtTimestamp.isNull() || _commitTimestamp >= _readAtTimestamp);
 
             if (MONGO_likely(!doUntimestampedWritesForIdempotencyTests.shouldFail())) {
-                conf << "commit_timestamp=" << unsignedHex(_commitTimestamp.asULL()) << ",";
+                end = fmt::format_to(
+                    end, FMT_STRING(commitTimestampFmtString), _commitTimestamp.asULL());
             }
             _isTimestamped = true;
         }
 
         if (!_durableTimestamp.isNull()) {
-            conf << "durable_timestamp=" << unsignedHex(_durableTimestamp.asULL());
+            end = fmt::format_to(
+                end, FMT_STRING(durableTimestampFmtString), _durableTimestamp.asULL());
         }
 
         if (_mustBeTimestamped) {
             invariant(_isTimestamped);
         }
 
-        wtRet = s->commit_transaction(s, conf.str().c_str());
+        *end = '\0';
+
+        wtRet = s->commit_transaction(s, conf.data());
 
         LOGV2_DEBUG(
             22412, 3, "WT commit_transaction", "snapshotId"_attr = getSnapshotId().toNumber());
@@ -689,17 +684,6 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtAllDurableTimestamp(WT_SESS
     return readTimestamp;
 }
 
-namespace {
-/**
- * This mutex serializes starting read transactions at lastApplied. This throttles new transactions
- * so they do not overwhelm the WiredTiger spinlock that manages the global read timestamp queue.
- * Because this queue can grow larger than the number of active transactions, the MongoDB ticketing
- * system alone cannot restrict its growth and thus bound the amount of time the queue is locked.
- * TODO: WT-6709
- */
-Mutex _lastAppliedTxnMutex = MONGO_MAKE_LATCH("lastAppliedTxnMutex");
-}  // namespace
-
 Timestamp WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION* session) {
     auto lastApplied = _sessionCache->snapshotManager().getLastApplied();
     if (!lastApplied) {
@@ -719,16 +703,13 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SES
         return Timestamp();
     }
 
-    {
-        stdx::lock_guard<Mutex> lock(_lastAppliedTxnMutex);
-        WiredTigerBeginTxnBlock txnOpen(session,
-                                        _prepareConflictBehavior,
-                                        _roundUpPreparedTimestamps,
-                                        RoundUpReadTimestamp::kRound);
-        auto status = txnOpen.setReadSnapshot(*lastApplied);
-        fassert(4847501, status);
-        txnOpen.done();
-    }
+    WiredTigerBeginTxnBlock txnOpen(session,
+                                    _prepareConflictBehavior,
+                                    _roundUpPreparedTimestamps,
+                                    RoundUpReadTimestamp::kRound);
+    auto status = txnOpen.setReadSnapshot(*lastApplied);
+    fassert(4847501, status);
+    txnOpen.done();
 
     // We might have rounded to oldest between calling getLastApplied and setReadSnapshot. We
     // need to get the actual read timestamp we used.
@@ -848,8 +829,15 @@ Status WiredTigerRecoveryUnit::setTimestamp(Timestamp timestamp) {
         return Status::OK();
     }
 
-    const std::string conf = "commit_timestamp=" + unsignedHex(timestamp.asULL());
-    auto rc = session->timestamp_transaction(session, conf.c_str());
+    // Avoid heap allocation in favour of a stack allocation.
+    static constexpr auto formatString = "commit_timestamp={:X}";
+    static constexpr auto bytesToAllocate = std::char_traits<char>::length(formatString) +
+        (sizeof(decltype(timestamp.asULL())) * 2) + 1;
+    std::array<char, bytesToAllocate> conf;
+    auto end = fmt::format_to(conf.begin(), FMT_COMPILE(formatString), timestamp.asULL());
+    // Manual null-termination
+    *end = '\0';
+    auto rc = session->timestamp_transaction(session, conf.data());
     if (rc == 0) {
         _isTimestamped = true;
     }

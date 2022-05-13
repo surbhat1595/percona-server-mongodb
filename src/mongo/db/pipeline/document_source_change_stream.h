@@ -114,6 +114,13 @@ public:
                         "API Version 1",
                         _spec.Obj()[DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName]
                             .eoo());
+
+                uassert(
+                    ErrorCodes::APIStrictError,
+                    "The 'showRawUpdateDescription' parameter to $changeStream is not supported in "
+                    "API Version 1",
+                    _spec.Obj()[DocumentSourceChangeStreamSpec::kShowRawUpdateDescriptionFieldName]
+                        .eoo());
             }
         }
 
@@ -145,8 +152,14 @@ public:
     static constexpr StringData kNamespaceField = "ns"_sd;
 
     // Name of the field which stores information about updates. Only applies when OperationType
-    // is "update".
+    // is "update". Note that this field will be omitted if the 'showRawUpdateDescription' option
+    // is enabled in the change stream spec.
     static constexpr StringData kUpdateDescriptionField = "updateDescription"_sd;
+
+    // Name of the field which stores the raw update description from the oplog about updates.
+    // Only applies when OperationType is "update". Note that this field is only present when
+    // the 'showRawUpdateDescription' option is enabled in the change stream spec.
+    static constexpr StringData kRawUpdateDescriptionField = "rawUpdateDescription"_sd;
 
     // The name of the subfield of '_id' where the UUID of the namespace will be located after the
     // transformation.
@@ -174,10 +187,20 @@ public:
     static constexpr StringData kLsidField = "lsid"_sd;
     static constexpr StringData kTxnOpIndexField = "txnOpIndex"_sd;
     static constexpr StringData kApplyOpsIndexField = "applyOpsIndex"_sd;
+    static constexpr StringData kApplyOpsTsField = "applyOpsTs"_sd;
     static constexpr StringData kRawOplogUpdateSpecField = "rawOplogUpdateSpec"_sd;
 
     // The target namespace of a rename operation.
     static constexpr StringData kRenameTargetNssField = "to"_sd;
+
+    // Wall time of the corresponding oplog entry.
+    static constexpr StringData kWallTimeField = "wallTime"_sd;
+
+    // UUID of a collection corresponding to the event (if applicable).
+    static constexpr StringData kCollectionUuidField = "collectionUUID"_sd;
+
+    // Object with additional description of operation.
+    static constexpr StringData kOperationDescriptionField = "operationDescription"_sd;
 
     // The different types of operations we can use for the operation type.
     static constexpr StringData kUpdateOpType = "update"_sd;

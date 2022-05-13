@@ -36,6 +36,7 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/tenant_database_name.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/uuid.h"
 
@@ -68,10 +69,12 @@ public:
     public:
         using value_type = CollectionPtr;
 
-        iterator(OperationContext* opCtx, StringData dbName, const CollectionCatalog& catalog);
         iterator(OperationContext* opCtx,
-                 std::map<std::pair<std::string, UUID>, std::shared_ptr<Collection>>::const_iterator
-                     mapIter,
+                 const TenantDatabaseName& tenantDbName,
+                 const CollectionCatalog& catalog);
+        iterator(OperationContext* opCtx,
+                 std::map<std::pair<TenantDatabaseName, UUID>,
+                          std::shared_ptr<Collection>>::const_iterator mapIter,
                  const CollectionCatalog& catalog);
         value_type operator*();
         iterator operator++();
@@ -91,9 +94,9 @@ public:
         bool _exhausted();
 
         OperationContext* _opCtx;
-        std::string _dbName;
+        TenantDatabaseName _tenantDbName;
         boost::optional<UUID> _uuid;
-        std::map<std::pair<std::string, UUID>, std::shared_ptr<Collection>>::const_iterator
+        std::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>::const_iterator
             _mapIter;
         const CollectionCatalog* _catalog;
     };
@@ -163,7 +166,7 @@ public:
      */
     void dropCollection(OperationContext* opCtx, Collection* coll) const;
 
-    void onCloseDatabase(OperationContext* opCtx, std::string dbName);
+    void onCloseDatabase(OperationContext* opCtx, TenantDatabaseName tenantDbName);
 
     /**
      * Register the collection with `uuid`.
@@ -199,7 +202,8 @@ public:
      * Collections. When creating new view its namespace should be registered with registerView()
      * above.
      */
-    void replaceViewsForDatabase(StringData dbName, absl::flat_hash_set<NamespaceString> views);
+    void replaceViewsForDatabase(const TenantDatabaseName& tenantDbName,
+                                 absl::flat_hash_set<NamespaceString> views);
 
     /**
      * This function gets the Collection pointer that corresponds to the UUID.
@@ -283,25 +287,25 @@ public:
     bool checkIfCollectionSatisfiable(UUID uuid, CollectionInfoFn predicate) const;
 
     /**
-     * This function gets the UUIDs of all collections from `dbName`.
+     * This function gets the UUIDs of all collections from `tenantDbName`.
      *
      * If the caller does not take a strong database lock, some of UUIDs might no longer exist (due
      * to collection drop) after this function returns.
      *
-     * Returns empty vector if the 'dbName' is not known.
+     * Returns empty vector if the 'tenantDbName' is not known.
      */
-    std::vector<UUID> getAllCollectionUUIDsFromDb(StringData dbName) const;
+    std::vector<UUID> getAllCollectionUUIDsFromDb(const TenantDatabaseName& tenantDbName) const;
 
     /**
-     * This function gets the ns of all collections from `dbName`. The result is not sorted.
+     * This function gets the ns of all collections from `tenantDbName`. The result is not sorted.
      *
      * Caller must take a strong database lock; otherwise, collections returned could be dropped or
      * renamed.
      *
-     * Returns empty vector if the 'dbName' is not known.
+     * Returns empty vector if the 'tenantDbName' is not known.
      */
-    std::vector<NamespaceString> getAllCollectionNamesFromDb(OperationContext* opCtx,
-                                                             StringData dbName) const;
+    std::vector<NamespaceString> getAllCollectionNamesFromDb(
+        OperationContext* opCtx, const TenantDatabaseName& tenantDbName) const;
 
     /**
      * This functions gets all the database names. The result is sorted in alphabetical ascending
@@ -349,6 +353,8 @@ public:
         int userCollections = 0;
         // Non-system capped collections on non-internal databases
         int userCapped = 0;
+        // Non-system clustered collection on non-internal databases.
+        int userClustered = 0;
         // System collections or collections on internal databases
         int internal = 0;
     };
@@ -392,7 +398,7 @@ public:
      */
     uint64_t getEpoch() const;
 
-    iterator begin(OperationContext* opCtx, StringData db) const;
+    iterator begin(OperationContext* opCtx, const TenantDatabaseName& tenantDbName) const;
     iterator end(OperationContext* opCtx) const;
 
     /**
@@ -426,17 +432,17 @@ private:
 
     using CollectionCatalogMap = stdx::unordered_map<UUID, std::shared_ptr<Collection>, UUID::Hash>;
     using OrderedCollectionMap =
-        std::map<std::pair<std::string, UUID>, std::shared_ptr<Collection>>;
+        std::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>;
     using NamespaceCollectionMap =
         stdx::unordered_map<NamespaceString, std::shared_ptr<Collection>>;
     using DatabaseProfileSettingsMap = StringMap<ProfileSettings>;
 
     CollectionCatalogMap _catalog;
-    OrderedCollectionMap _orderedCollections;  // Ordered by <dbName, collUUID> pair
+    OrderedCollectionMap _orderedCollections;  // Ordered by <tenantDbName, collUUID> pair
     NamespaceCollectionMap _collections;
 
     // Map of database names to a set of their views. Only databases with views are present.
-    StringMap<absl::flat_hash_set<NamespaceString>> _views;
+    absl::flat_hash_map<TenantDatabaseName, absl::flat_hash_set<NamespaceString>> _views;
 
     // Incremented whenever the CollectionCatalog gets closed and reopened (onCloseCatalog and
     // onOpenCatalog).

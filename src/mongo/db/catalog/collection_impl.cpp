@@ -58,7 +58,6 @@
 #include "mongo/db/matcher/doc_validation_error.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/multitenancy.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/update_request.h"
@@ -955,6 +954,12 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
 
     if (opDebug) {
         opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
+        // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+        if (!opCtx->inMultiDocumentTransaction()) {
+            opCtx->recoveryUnit()->onRollback([opDebug, keysInserted]() {
+                opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+            });
+        }
     }
 
     opCtx->getServiceContext()->getOpObserver()->onInserts(
@@ -1186,11 +1191,9 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
                                     bool noWarn,
                                     Collection::StoreDeletedDoc storeDeletedDoc,
                                     CheckRecordId checkRecordId) const {
-    if (isCapped() && !isClustered() && opCtx->isEnforcingConstraints()) {
-        // System operations such as tenant migration, secondary batch application or TTL on a
-        // capped clustered collection can delete from capped collections.
-        LOGV2(20291, "failing remove on a capped ns", logAttrs(_tenantNs));
-        uasserted(10089, "cannot remove from a capped collection");
+    if (isCapped() && opCtx->inMultiDocumentTransaction()) {
+        uasserted(ErrorCodes::IllegalOperation,
+                  "Cannot remove from a capped collection in a multi-document transaction");
     }
 
     std::vector<OplogSlot> oplogSlots;
@@ -1237,6 +1240,12 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
 
     if (opDebug) {
         opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
+        // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+        if (!opCtx->inMultiDocumentTransaction()) {
+            opCtx->recoveryUnit()->onRollback([opDebug, keysDeleted]() {
+                opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+            });
+        }
     }
 }
 
@@ -1359,6 +1368,13 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         if (opDebug) {
             opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
             opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
+            // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+            if (!opCtx->inMultiDocumentTransaction()) {
+                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
+                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+                });
+            }
         }
     }
 
@@ -1964,6 +1980,17 @@ void CollectionImpl::updateUniqueSetting(OperationContext* opCtx, StringData idx
     });
 }
 
+void CollectionImpl::updateDisallowNewDuplicateKeysSetting(OperationContext* opCtx,
+                                                           StringData idxName,
+                                                           bool disallowNewDuplicateKeys) {
+    int offset = _metadata->findIndexOffset(idxName);
+    invariant(offset >= 0);
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        md.indexes[offset].updateDisallowNewDuplicateKeysSetting(disallowNewDuplicateKeys);
+    });
+}
+
 std::vector<std::string> CollectionImpl::removeInvalidIndexOptions(OperationContext* opCtx) {
     std::vector<std::string> indexesWithInvalidOptions;
 
@@ -2177,13 +2204,19 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
         uncommittedMultikeys = std::make_shared<UncommittedMultikey::MultikeyMap>();
     }
     BSONCollectionCatalogEntry::MetaData* metadata = nullptr;
+    bool hasSetMultikey = false;
     if (auto it = uncommittedMultikeys->find(this); it != uncommittedMultikeys->end()) {
         metadata = &it->second;
+        hasSetMultikey = setMultikey(*metadata);
     } else {
-        metadata = &uncommittedMultikeys->emplace(this, *_metadata).first->second;
+        BSONCollectionCatalogEntry::MetaData metadataLocal(*_metadata);
+        hasSetMultikey = setMultikey(metadataLocal);
+        if (hasSetMultikey) {
+            metadata = &uncommittedMultikeys->emplace(this, std::move(metadataLocal)).first->second;
+        }
     }
 
-    if (!setMultikey(*metadata))
+    if (!hasSetMultikey)
         return false;
 
     opCtx->recoveryUnit()->onRollback(

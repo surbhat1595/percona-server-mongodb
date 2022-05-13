@@ -123,11 +123,12 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
     // Read-write role
     readWriteRoleActions += readRoleActions;
     readWriteRoleActions
+        << ActionType::compactStructuredEncryptionData
         << ActionType::convertToCapped  // db admin gets this also
         << ActionType::createCollection  // db admin gets this also
+        << ActionType::createIndex
         << ActionType::dropCollection
         << ActionType::dropIndex
-        << ActionType::createIndex
         << ActionType::insert
         << ActionType::remove
         << ActionType::renameCollectionSameDB  // db admin gets this also
@@ -677,11 +678,14 @@ void addRestorePrivileges(PrivilegeVector* privileges) {
             ResourcePattern::forExactNamespace(AuthorizationManager::rolesCollectionNamespace),
             ActionType::createIndex));
 
-    // Need to be able to force UUID consistency in sharded restores
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forClusterResource(),
-                  {ActionType::forceUUID, ActionType::useUUID}));
+                  {// Need to be able to force UUID consistency in sharded restores
+                   ActionType::forceUUID,
+                   ActionType::useUUID,
+                   // Need to be able to bypass write blocking mode for C2C replication
+                   ActionType::bypassWriteBlockingMode}));
 }
 
 void addRootRolePrivileges(PrivilegeVector* privileges) {

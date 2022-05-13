@@ -52,6 +52,7 @@
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
@@ -59,6 +60,7 @@
 #include "mongo/db/ttl_gen.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/grid.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/log_with_sampling.h"
@@ -216,6 +218,41 @@ private:
                                   "TTLMonitor was interrupted, waiting before doing another pass",
                                   "wait"_attr = Milliseconds(Seconds(ttlMonitorSleepSecs.load())));
                     return;
+                } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
+                    // The TTL index tried to delete some information from a sharded collection
+                    // through a direct operation against the shard but the filtering metadata was
+                    // not available.
+                    //
+                    // The current TTL task cannot be completed. However, if the critical section is
+                    // not held the code below will fire an asynchronous refresh, hoping that the
+                    // next time this task is re-executed the filtering information is already
+                    // present.
+                    if (auto staleInfo = ex.extraInfo<StaleConfigInfo>();
+                        staleInfo && !staleInfo->getCriticalSectionSignal()) {
+                        auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+                        ExecutorFuture<void>(executor)
+                            .then([serviceContext = opCtx->getServiceContext(), nss, staleInfo] {
+                                ThreadClient tc("TTLShardVersionRecovery", serviceContext);
+                                {
+                                    stdx::lock_guard<Client> lk(*tc.get());
+                                    tc->setSystemOperationKillableByStepdown(lk);
+                                }
+
+                                auto uniqueOpCtx = tc->makeOperationContext();
+                                auto opCtx = uniqueOpCtx.get();
+
+                                onShardVersionMismatchNoExcept(
+                                    opCtx, *nss, staleInfo->getVersionWanted())
+                                    .ignore();
+                            })
+                            .getAsync([](auto) {});
+                    }
+                    LOGV2_WARNING(6353000,
+                                  "Error running TTL job on collection: the shard should refresh "
+                                  "before being able to complete this task",
+                                  logAttrs(*nss),
+                                  "error"_attr = ex);
+                    continue;
                 } catch (const DBException& ex) {
                     LOGV2_ERROR(5400703,
                                 "Error running TTL job on collection",
@@ -271,14 +308,14 @@ private:
         if (coll.getDb() &&
             nullptr !=
                 (mtab = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
-                            .getTenantMigrationAccessBlockerForDbName(coll.getDb()->name(),
-                                                                      MtabType::kRecipient)) &&
+                            .getTenantMigrationAccessBlockerForDbName(
+                                coll.getDb()->name().fullName(), MtabType::kRecipient)) &&
             mtab->checkIfShouldBlockTTL()) {
             LOGV2_DEBUG(53768,
                         1,
                         "Postpone TTL of DB because of active tenant migration",
                         "tenantMigrationAccessBlocker"_attr = mtab->getDebugInfo().jsonString(),
-                        "database"_attr = coll.getDb()->name());
+                        "database"_attr = coll.getDb()->name().dbName());
             return;
         }
 
@@ -446,24 +483,24 @@ private:
      * delete entries of type 'ObjectId'. All other collections must only delete entries of type
      * 'Date'.
      */
-    RecordId makeCollScanEndBound(const CollectionPtr& collection, Date_t expirationDate) {
+    RecordIdBound makeCollScanEndBound(const CollectionPtr& collection, Date_t expirationDate) {
         if (collection->getTimeseriesOptions()) {
             auto endOID = OID();
             endOID.init(expirationDate, true /* max */);
-            return record_id_helpers::keyForOID(endOID);
+            return RecordIdBound(record_id_helpers::keyForOID(endOID));
         }
 
-        return record_id_helpers::keyForDate(expirationDate);
+        return RecordIdBound(record_id_helpers::keyForDate(expirationDate));
     }
 
-    RecordId makeCollScanStartBound(const CollectionPtr& collection, const Date_t startDate) {
+    RecordIdBound makeCollScanStartBound(const CollectionPtr& collection, const Date_t startDate) {
         if (collection->getTimeseriesOptions()) {
             auto startOID = OID();
             startOID.init(startDate, false /* max */);
-            return record_id_helpers::keyForOID(startOID);
+            return RecordIdBound(record_id_helpers::keyForOID(startOID));
         }
 
-        return record_id_helpers::keyForDate(startDate);
+        return RecordIdBound(record_id_helpers::keyForDate(startDate));
     }
 
     /*

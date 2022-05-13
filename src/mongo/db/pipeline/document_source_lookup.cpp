@@ -163,7 +163,8 @@ DocumentSourceLookUp::DocumentSourceLookUp(
     const auto& resolvedNamespace = expCtx->getResolvedNamespace(_fromNs);
     _resolvedNs = resolvedNamespace.ns;
     _resolvedPipeline = resolvedNamespace.pipeline;
-    _fromExpCtx = expCtx->copyForSubPipeline(resolvedNamespace.ns);
+
+    _fromExpCtx = expCtx->copyForSubPipeline(resolvedNamespace.ns, resolvedNamespace.uuid);
     if (fromCollator) {
         _fromExpCtx->setCollator(std::move(fromCollator.get()));
         _hasExplicitCollation = true;
@@ -254,7 +255,8 @@ DocumentSourceLookUp::DocumentSourceLookUp(
 }
 
 DocumentSourceLookUp::DocumentSourceLookUp(const DocumentSourceLookUp& original)
-    : DocumentSource(kStageName, original.pExpCtx->copyWith(original.pExpCtx->ns)),
+    : DocumentSource(kStageName,
+                     original.pExpCtx->copyWith(original.pExpCtx->ns, original.pExpCtx->uuid)),
       _fromNs(original._fromNs),
       _resolvedNs(original._resolvedNs),
       _as(original._as),
@@ -264,7 +266,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(const DocumentSourceLookUp& original)
       _fieldMatchPipelineIdx(original._fieldMatchPipelineIdx),
       _variables(original._variables),
       _variablesParseState(original._variablesParseState.copyWith(_variables.useIdGenerator())),
-      _fromExpCtx(original._fromExpCtx->copyWith(_resolvedNs)),
+      _fromExpCtx(original._fromExpCtx->copyWith(_resolvedNs, original._fromExpCtx->uuid)),
       _hasExplicitCollation(original._hasExplicitCollation),
       _resolvedPipeline(original._resolvedPipeline),
       _userPipeline(original._userPipeline),
@@ -513,7 +515,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipelineFr
 
     // Update the expression context with any new namespaces the resolved pipeline has introduced.
     LiteParsedPipeline liteParsedPipeline(resolvedNamespace.ns, resolvedNamespace.pipeline);
-    _fromExpCtx = _fromExpCtx->copyWith(resolvedNamespace.ns);
+    _fromExpCtx = _fromExpCtx->copyWith(resolvedNamespace.ns, resolvedNamespace.uuid);
     _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
 
     return pipeline;
@@ -681,6 +683,9 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
     // following $unwind stage.
     if (nextUnwind && !_unwindSrc && nextUnwind->getUnwindPath() == _as.fullPath()) {
         _unwindSrc = std::move(nextUnwind);
+
+        // We cannot push absorbed $unwind stages into SBE.
+        _sbeCompatible = false;
         container->erase(std::next(itr));
         return itr;
     }
@@ -765,7 +770,10 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
         return std::next(itr);
     }
 
-    // We can internalize the $match.
+    // We can internalize the $match. This $lookup should already be marked as SBE incompatible
+    // because a $match can only be internalized if an $unwind, which is SBE incompatible, was
+    // absorbed as well.
+    tassert(5843701, "This $lookup cannot be compatible with SBE", !_sbeCompatible);
     if (!_matchSrc) {
         _matchSrc = nextMatch;
     } else {
@@ -1249,12 +1257,17 @@ intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
                 "$lookup with a 'let' argument must also specify 'pipeline'",
                 !hasLet);
 
-        return new DocumentSourceLookUp(std::move(fromNs),
-                                        std::move(as),
-                                        std::move(localField),
-                                        std::move(foreignField),
-                                        std::move(fromCollator),
-                                        pExpCtx);
+        auto lookupStage = new DocumentSourceLookUp(std::move(fromNs),
+                                                    std::move(as),
+                                                    std::move(localField),
+                                                    std::move(foreignField),
+                                                    std::move(fromCollator),
+                                                    pExpCtx);
+
+        // $lookup stages with local/foreignField specified are eligible for pushdown into SBE if
+        // the context allows it.
+        lookupStage->_sbeCompatible = pExpCtx->sbeCompatible;
+        return lookupStage;
     }
 }
 

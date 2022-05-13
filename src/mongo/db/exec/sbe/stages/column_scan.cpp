@@ -37,21 +37,31 @@ namespace mongo {
 namespace sbe {
 ColumnScanStage::ColumnScanStage(UUID collectionUuid,
                                  StringData columnIndexName,
-                                 std::vector<value::SlotId> fieldSlots,
+                                 value::SlotVector fieldSlots,
                                  std::vector<std::string> paths,
+                                 boost::optional<value::SlotId> recordSlot,
+                                 boost::optional<value::SlotId> recordIdSlot,
                                  PlanYieldPolicy* yieldPolicy,
                                  PlanNodeId nodeId)
     : PlanStage("columnscan"_sd, yieldPolicy, nodeId),
       _collUuid(collectionUuid),
       _columnIndexName(columnIndexName),
       _fieldSlots(std::move(fieldSlots)),
-      _paths(std::move(paths)) {
+      _paths(std::move(paths)),
+      _recordSlot(recordSlot),
+      _recordIdSlot(recordIdSlot) {
     invariant(_fieldSlots.size() == _paths.size());
 }
 
 std::unique_ptr<PlanStage> ColumnScanStage::clone() const {
-    return std::make_unique<ColumnScanStage>(
-        _collUuid, _columnIndexName, _fieldSlots, _paths, _yieldPolicy, _commonStats.nodeId);
+    return std::make_unique<ColumnScanStage>(_collUuid,
+                                             _columnIndexName,
+                                             _fieldSlots,
+                                             _paths,
+                                             _recordSlot,
+                                             _recordIdSlot,
+                                             _yieldPolicy,
+                                             _commonStats.nodeId);
 }
 
 void ColumnScanStage::prepare(CompileCtx& ctx) {
@@ -61,22 +71,76 @@ void ColumnScanStage::prepare(CompileCtx& ctx) {
         auto [it, inserted] = _outputFieldsMap.emplace(_fieldSlots[idx], &_outputFields[idx]);
         uassert(6298601, str::stream() << "duplicate slot: " << _fieldSlots[idx], inserted);
     }
+
+    if (_recordSlot) {
+        _recordAccessor = std::make_unique<value::OwnedValueAccessor>();
+    }
+    if (_recordIdSlot) {
+        _recordIdAccessor = std::make_unique<value::OwnedValueAccessor>();
+    }
+
+    tassert(6298602, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
+    std::tie(_coll, _collName, _catalogEpoch) = acquireCollection(_opCtx, _collUuid);
 }
 
 value::SlotAccessor* ColumnScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
+    if (_recordSlot && slot == *_recordSlot) {
+        return _recordAccessor.get();
+    }
+
+    if (_recordIdSlot && slot == *_recordIdSlot) {
+        return _recordIdAccessor.get();
+    }
+
     if (auto it = _outputFieldsMap.find(slot); it != _outputFieldsMap.end()) {
         return it->second;
     }
     return ctx.getAccessor(slot);
 }
 
-void ColumnScanStage::doSaveState(bool relinquishCursor) {}
+void ColumnScanStage::doSaveState(bool relinquishCursor) {
+    if (_cursor && relinquishCursor) {
+        _cursor->save();
+    }
 
-void ColumnScanStage::doRestoreState(bool relinquishCursor) {}
+    if (_cursor) {
+        _cursor->setSaveStorageCursorOnDetachFromOperationContext(!relinquishCursor);
+    }
 
-void ColumnScanStage::doDetachFromOperationContext() {}
+    _coll.reset();
+}
 
-void ColumnScanStage::doAttachToOperationContext(OperationContext* opCtx) {}
+void ColumnScanStage::doRestoreState(bool relinquishCursor) {
+    invariant(_opCtx);
+    invariant(!_coll);
+
+    // If this stage has not been prepared, then yield recovery is a no-op.
+    if (!_collName) {
+        return;
+    }
+
+    tassert(6298603, "Catalog epoch should be initialized", _catalogEpoch);
+    _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
+
+    if (_cursor) {
+        if (relinquishCursor) {
+            const bool couldRestore = _cursor->restore();
+            invariant(couldRestore);
+        }
+    }
+}
+
+void ColumnScanStage::doDetachFromOperationContext() {
+    if (_cursor) {
+        _cursor->detachFromOperationContext();
+    }
+}
+
+void ColumnScanStage::doAttachToOperationContext(OperationContext* opCtx) {
+    if (_cursor) {
+        _cursor->reattachToOperationContext(opCtx);
+    }
+}
 
 void ColumnScanStage::doDetachFromTrialRunTracker() {
     _tracker = nullptr;
@@ -88,13 +152,62 @@ PlanStage::TrialRunTrackerAttachResultMask ColumnScanStage::doAttachToTrialRunTr
     return childrenAttachResult | TrialRunTrackerAttachResultFlags::AttachedToStreamingStage;
 }
 
-void ColumnScanStage::open(bool reOpen) {}
+void ColumnScanStage::open(bool reOpen) {
+    auto optTimer(getOptTimer(_opCtx));
+
+    _commonStats.opens++;
+    invariant(_opCtx);
+
+    if (_open) {
+        tassert(6298604, "reopened ColumnScanStage but reOpen=false", reOpen);
+        tassert(6298605, "ColumnScanStage is open but _coll is not null", _coll);
+        tassert(6298606, "ColumnScanStage is open but don't have _cursor", _cursor);
+    } else {
+        tassert(6298607, "first open to ColumnScanStage but reOpen=true", !reOpen);
+        if (!_coll) {
+            // We're being opened after 'close()'. We need to re-acquire '_coll' in this case and
+            // make some validity checks (the collection has not been dropped, renamed, etc.).
+            tassert(6298608, "ColumnScanStage is not open but have _cursor", !_cursor);
+            tassert(6298609, "Collection name should be initialized", _collName);
+            tassert(6298610, "Catalog epoch should be initialized", _catalogEpoch);
+            _coll = restoreCollection(_opCtx, *_collName, _collUuid, *_catalogEpoch);
+        }
+    }
+
+    if (!_cursor) {
+        _cursor = _coll->getCursor(_opCtx, true);
+    }
+
+    _open = true;
+    _firstGetNext = true;
+}
 
 PlanState ColumnScanStage::getNext() {
+    auto optTimer(getOptTimer(_opCtx));
+
+    // We are about to call next() on a storage cursor so do not bother saving our internal state in
+    // case it yields as the state will be completely overwritten after the next() call.
+    disableSlotAccess();
+
+    // This call to checkForInterrupt() may result in a call to save() or restore() on the entire
+    // PlanStage tree if a yield occurs. It's important that we call checkForInterrupt() before
+    // checking '_needsToCheckCappedPositionLost' since a call to restoreState() may set
+    // '_needsToCheckCappedPositionLost'.
+    checkForInterrupt(_opCtx);
+
+    _firstGetNext = false;
+
     return trackPlanState(PlanState::IS_EOF);
 }
 
-void ColumnScanStage::close() {}
+void ColumnScanStage::close() {
+    auto optTimer(getOptTimer(_opCtx));
+
+    trackClose();
+    _cursor.reset();
+    _coll.reset();
+    _open = false;
+}
 
 std::unique_ptr<PlanStageStats> ColumnScanStage::getStats(bool includeDebugInfo) const {
     auto ret = std::make_unique<PlanStageStats>(_commonStats);
@@ -130,6 +243,18 @@ std::vector<DebugPrinter::Block> ColumnScanStage::debugPrint() const {
         DebugPrinter::addIdentifier(ret, _fieldSlots[idx]);
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
+
+    if (_recordSlot) {
+        DebugPrinter::addIdentifier(ret, _recordSlot.get());
+    } else {
+        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+    }
+
+    if (_recordIdSlot) {
+        DebugPrinter::addIdentifier(ret, _recordIdSlot.get());
+    } else {
+        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+    }
 
     // Print out paths.
     ret.emplace_back(DebugPrinter::Block("[`"));

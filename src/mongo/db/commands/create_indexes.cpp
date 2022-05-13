@@ -310,8 +310,9 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
     bool createCollImplicitly) {
     WriteUnitOfWork wunit(opCtx);
 
+    const TenantDatabaseName tenantDbName(boost::none, ns.db());
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto db = databaseHolder->getDb(opCtx, ns.db());
+    auto db = databaseHolder->getDb(opCtx, tenantDbName);
     uassert(ErrorCodes::CommandNotSupportedOnView,
             "Cannot create indexes on a view",
             !db || !ViewCatalog::get(opCtx)->lookup(opCtx, ns));
@@ -441,7 +442,8 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
             AutoGetCollection collection(opCtx, ns, MODE_IS);
             CollectionShardingState::get(opCtx, ns)->checkShardVersionOrThrow(opCtx);
 
-            checkCollectionUUIDMismatch(opCtx, collection.getCollection(), cmd.getCollectionUUID());
+            checkCollectionUUIDMismatch(
+                opCtx, ns, collection.getCollection(), cmd.getCollectionUUID());
 
             // Before potentially taking an exclusive collection lock, check if all indexes already
             // exist while holding an intent lock.

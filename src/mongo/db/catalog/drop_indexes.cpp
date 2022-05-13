@@ -231,14 +231,14 @@ Status dropIndexByDescriptor(OperationContext* opCtx,
     // exist in standalone mode.
     auto entry = indexCatalog->getEntry(desc);
     if (entry->isFrozen()) {
-        invariant(!entry->isReady(opCtx, collection));
+        invariant(!entry->isReady(opCtx));
         invariant(getReplSetMemberInStandaloneMode(opCtx->getServiceContext()));
         // Return here. No need to fall through to op observer on standalone.
         return indexCatalog->dropUnfinishedIndex(opCtx, collection, desc);
     }
 
     // Do not allow dropping unfinished indexes that are not frozen.
-    if (!entry->isReady(opCtx, collection)) {
+    if (!entry->isReady(opCtx)) {
         return Status(ErrorCodes::IndexNotFound,
                       str::stream()
                           << "can't drop unfinished index with name: " << desc->indexName());
@@ -351,7 +351,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
     boost::optional<AutoGetCollection> collection;
     collection.emplace(opCtx, nss, MODE_IX);
 
-    checkCollectionUUIDMismatch(opCtx, collection->getCollection(), expectedUUID);
+    checkCollectionUUIDMismatch(opCtx, nss, collection->getCollection(), expectedUUID);
     uassertStatusOK(checkView(opCtx, nss, collection->getCollection()));
 
     const UUID collectionUUID = (*collection)->uuid();

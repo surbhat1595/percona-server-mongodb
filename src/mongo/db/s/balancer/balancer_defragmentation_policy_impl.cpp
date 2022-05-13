@@ -39,6 +39,7 @@
 #include "mongo/s/grid.h"
 
 #include <fmt/format.h>
+#include <tuple>
 
 using namespace fmt::literals;
 
@@ -46,7 +47,7 @@ namespace mongo {
 
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(beforeTransitioningDefragmentationPhase);
+MONGO_FAIL_POINT_DEFINE(skipDefragmentationPhaseTransition);
 MONGO_FAIL_POINT_DEFINE(afterBuildingNextDefragmentationPhase);
 
 using ShardStatistics = ClusterStatistics::ShardStatistics;
@@ -91,7 +92,7 @@ ZoneInfo getCollectionZones(OperationContext* opCtx, const CollectionType& coll)
 
 bool isRetriableForDefragmentation(const Status& error) {
     return (ErrorCodes::isA<ErrorCategory::RetriableError>(error) ||
-            error == ErrorCodes::StaleShardVersion || error == ErrorCodes::StaleConfig);
+            error == ErrorCodes::StaleConfig);
 }
 
 void handleActionResult(OperationContext* opCtx,
@@ -107,7 +108,7 @@ void handleActionResult(OperationContext* opCtx,
         return;
     }
 
-    if (status.isA<ErrorCategory::StaleShardVersionError>()) {
+    if (status == ErrorCodes::StaleConfig) {
         if (auto staleInfo = status.extraInfo<StaleConfigInfo>()) {
             Grid::get(opCtx)
                 ->catalogCache()
@@ -497,7 +498,7 @@ public:
                         _shardInfos.at(moveRequest.getDestinationShard()).currentSizeBytes +=
                             transferredAmount;
                         _shardProcessingOrder.sort([this](const ShardId& lhs, const ShardId& rhs) {
-                            return _shardInfos.at(lhs).currentSizeBytes >=
+                            return _shardInfos.at(lhs).currentSizeBytes >
                                 _shardInfos.at(rhs).currentSizeBytes;
                         });
                         _actionableMerges.push_back(std::move(moveRequest));
@@ -685,9 +686,10 @@ private:
         // Small chunks are ordered by decreasing order of estimatedSizeBytes
         // except the ones that we failed to move due to temporary constraints that will be at the
         // end of the list ordered by last attempt time
-        return lhs->lastFailedAttemptTime.value_or(Date_t::min()) <=
-            rhs->lastFailedAttemptTime.value_or(Date_t::min()) &&
-            lhs->estimatedSizeBytes < rhs->estimatedSizeBytes;
+        auto lhsLastFailureTime = lhs->lastFailedAttemptTime.value_or(Date_t::min());
+        auto rhsLastFailureTime = rhs->lastFailedAttemptTime.value_or(Date_t::min());
+        return std::tie(lhsLastFailureTime, lhs->estimatedSizeBytes) <
+            std::tie(rhsLastFailureTime, rhs->estimatedSizeBytes);
     }
 
     // Helper class to generate the Migration and Merge actions required to join together the chunks
@@ -828,7 +830,7 @@ private:
             _shardProcessingOrder.push_back(shardId);
         }
         _shardProcessingOrder.sort([this](const ShardId& lhs, const ShardId& rhs) {
-            return _shardInfos.at(lhs).currentSizeBytes >= _shardInfos.at(rhs).currentSizeBytes;
+            return _shardInfos.at(lhs).currentSizeBytes > _shardInfos.at(rhs).currentSizeBytes;
         });
     }
 
@@ -884,6 +886,8 @@ private:
         if (matchingShardInfo == _smallChunksByShard.end()) {
             return false;
         }
+
+        smallChunkSiblings->clear();
         auto& smallChunksInShard = matchingShardInfo->second;
         for (auto candidateIt = smallChunksInShard.begin();
              candidateIt != smallChunksInShard.end();) {
@@ -980,7 +984,8 @@ private:
                 ? kMergeSolvesTwoPendingChunks
                 : kMergeSolvesOnePendingChunk;
         }
-        if (_shardInfos.at(mergeableSibling.shard)
+        if (chunkTobeMovedAndMerged.shard == mergeableSibling.shard ||
+            _shardInfos.at(mergeableSibling.shard)
                 .hasCapacityFor(chunkTobeMovedAndMerged.estimatedSizeBytes)) {
             ranking += kDestinationNotMaxedOut;
         }
@@ -1438,37 +1443,70 @@ MigrateInfoVector BalancerDefragmentationPolicyImpl::selectChunksToMove(
     OperationContext* opCtx, stdx::unordered_set<ShardId>* usedShards) {
     MigrateInfoVector chunksToMove;
     stdx::lock_guard<Latch> lk(_stateMutex);
-    // TODO (SERVER-61635) evaluate fairness
-    bool done = false;
-    while (!done) {
-        auto selectedChunksFromPreviousRound = chunksToMove.size();
-        for (auto it = _defragmentationStates.begin(); it != _defragmentationStates.end();) {
+
+    std::vector<UUID> collectionUUIDs;
+    collectionUUIDs.reserve(_defragmentationStates.size());
+    for (const auto& defragState : _defragmentationStates) {
+        collectionUUIDs.push_back(defragState.first);
+    }
+    std::shuffle(collectionUUIDs.begin(), collectionUUIDs.end(), _random);
+
+    auto popCollectionUUID =
+        [&](std::vector<UUID>::iterator elemIt) -> std::vector<UUID>::iterator {
+        if (std::next(elemIt) == collectionUUIDs.end()) {
+            return collectionUUIDs.erase(elemIt);
+        }
+
+        *elemIt = std::move(collectionUUIDs.back());
+        collectionUUIDs.pop_back();
+        return elemIt;
+    };
+
+    while (!collectionUUIDs.empty()) {
+        for (auto it = collectionUUIDs.begin(); it != collectionUUIDs.end();) {
+
+            const auto& collUUID = *it;
+
             try {
-                const auto phaseAdvanced = _refreshDefragmentationPhaseFor(opCtx, it->first);
-                auto& collDefragmentationPhase = it->second;
+                auto defragStateIt = _defragmentationStates.find(collUUID);
+                if (defragStateIt == _defragmentationStates.end()) {
+                    it = popCollectionUUID(it);
+                    continue;
+                };
+
+                const auto phaseAdvanced = _advanceToNextActionablePhase(opCtx, collUUID);
+                auto& collDefragmentationPhase = defragStateIt->second;
                 if (!collDefragmentationPhase) {
-                    it = _defragmentationStates.erase(it, std::next(it));
+                    _defragmentationStates.erase(defragStateIt);
+                    it = popCollectionUUID(it);
                     continue;
                 }
                 auto actionableMigration =
                     collDefragmentationPhase->popNextMigration(opCtx, usedShards);
-                if (actionableMigration.has_value()) {
-                    chunksToMove.push_back(std::move(*actionableMigration));
-                } else if (phaseAdvanced) {
-                    _yieldNextStreamingAction(lk, opCtx);
+                if (!actionableMigration.has_value()) {
+                    // The following check aims at reducing the amount of unneeded invocations to
+                    // _yieldNextStreamingAction() (which resolve into no-ops, but with a
+                    // non-negligible time cost)
+                    // TODO (SERVER-63416) minimise the performance impact
+                    if (phaseAdvanced || usedShards->empty()) {
+                        _yieldNextStreamingAction(lk, opCtx);
+                    }
+                    it = popCollectionUUID(it);
+                    continue;
                 }
+                chunksToMove.push_back(std::move(*actionableMigration));
                 ++it;
             } catch (DBException& e) {
                 // Catch getCollection and getShardVersion errors. Should only occur if collection
                 // has been removed.
                 LOGV2_ERROR(6172700,
                             "Error while getting next migration",
-                            "uuid"_attr = it->first,
+                            "uuid"_attr = collUUID,
                             "error"_attr = redact(e));
-                it = _defragmentationStates.erase(it, std::next(it));
+                _defragmentationStates.erase(collUUID);
+                it = popCollectionUUID(it);
             }
         }
-        done = (chunksToMove.size() == selectedChunksFromPreviousRound);
     }
     return chunksToMove;
 }
@@ -1487,11 +1525,12 @@ SemiFuture<DefragmentationAction> BalancerDefragmentationPolicyImpl::getNextStre
     return std::move(future).semi();
 }
 
-bool BalancerDefragmentationPolicyImpl::_refreshDefragmentationPhaseFor(OperationContext* opCtx,
-                                                                        const UUID& collUuid) {
+bool BalancerDefragmentationPolicyImpl::_advanceToNextActionablePhase(OperationContext* opCtx,
+                                                                      const UUID& collUuid) {
     auto& currentPhase = _defragmentationStates.at(collUuid);
     auto currentPhaseCompleted = [&currentPhase] {
-        return currentPhase && currentPhase->isComplete();
+        return currentPhase && currentPhase->isComplete() &&
+            MONGO_likely(!skipDefragmentationPhaseTransition.shouldFail());
     };
 
     if (!currentPhaseCompleted()) {
@@ -1508,29 +1547,45 @@ bool BalancerDefragmentationPolicyImpl::_refreshDefragmentationPhaseFor(Operatio
 
 boost::optional<DefragmentationAction> BalancerDefragmentationPolicyImpl::_nextStreamingAction(
     OperationContext* opCtx) {
-    // TODO (SERVER-61635) validate fairness through collections
-    for (auto it = _defragmentationStates.begin(); it != _defragmentationStates.end();) {
+
+    // Visit the defrag state in round robin fashion starting from a random one
+
+    auto stateIt = [&] {
+        auto it = _defragmentationStates.begin();
+        if (_defragmentationStates.size() > 1) {
+            std::uniform_int_distribution<size_t> uniDist{0, _defragmentationStates.size() - 1};
+            std::advance(it, uniDist(_random));
+        }
+        return it;
+    }();
+
+    for (auto stateToVisit = _defragmentationStates.size(); stateToVisit != 0; --stateToVisit) {
         try {
-            _refreshDefragmentationPhaseFor(opCtx, it->first);
-            auto& currentCollectionDefragmentationState = it->second;
-            if (!currentCollectionDefragmentationState) {
-                it = _defragmentationStates.erase(it, std::next(it));
-                continue;
+            _advanceToNextActionablePhase(opCtx, stateIt->first);
+            auto& currentCollectionDefragmentationState = stateIt->second;
+            if (currentCollectionDefragmentationState) {
+                // Get next action
+                auto nextAction =
+                    currentCollectionDefragmentationState->popNextStreamableAction(opCtx);
+                if (nextAction) {
+                    return nextAction;
+                }
+                ++stateIt;
+            } else {
+                stateIt = _defragmentationStates.erase(stateIt, std::next(stateIt));
             }
-            // Get next action
-            auto nextAction = currentCollectionDefragmentationState->popNextStreamableAction(opCtx);
-            if (nextAction) {
-                return nextAction;
-            }
-            ++it;
         } catch (DBException& e) {
             // Catch getCollection and getShardVersion errors. Should only occur if collection has
             // been removed.
             LOGV2_ERROR(6153301,
                         "Error while getting next defragmentation action",
-                        "uuid"_attr = it->first,
+                        "uuid"_attr = stateIt->first,
                         "error"_attr = redact(e));
-            it = _defragmentationStates.erase(it, std::next(it));
+            stateIt = _defragmentationStates.erase(stateIt, std::next(stateIt));
+        }
+
+        if (stateIt == _defragmentationStates.end()) {
+            stateIt = _defragmentationStates.begin();
         }
     }
 
@@ -1640,7 +1695,6 @@ std::unique_ptr<DefragmentationPhase> BalancerDefragmentationPolicyImpl::_transi
     const CollectionType& coll,
     DefragmentationPhaseEnum nextPhase,
     bool shouldPersistPhase) {
-    beforeTransitioningDefragmentationPhase.pauseWhileSet();
     std::unique_ptr<DefragmentationPhase> nextPhaseObject(nullptr);
     try {
         if (shouldPersistPhase) {
@@ -1668,7 +1722,7 @@ std::unique_ptr<DefragmentationPhase> BalancerDefragmentationPolicyImpl::_transi
         }
         afterBuildingNextDefragmentationPhase.pauseWhileSet();
         LOGV2(6172702,
-              "Collection defragmentation transitioning to new phase",
+              "Collection defragmentation transitioned to new phase",
               "namespace"_attr = coll.getNss(),
               "phase"_attr = nextPhaseObject
                   ? DefragmentationPhase_serializer(nextPhaseObject->getType())
@@ -1688,12 +1742,16 @@ std::unique_ptr<DefragmentationPhase> BalancerDefragmentationPolicyImpl::_transi
 void BalancerDefragmentationPolicyImpl::_initializeCollectionState(WithLock,
                                                                    OperationContext* opCtx,
                                                                    const CollectionType& coll) {
+    if (MONGO_unlikely(skipDefragmentationPhaseTransition.shouldFail())) {
+        return;
+    }
     auto phaseToBuild = coll.getDefragmentationPhase()
         ? coll.getDefragmentationPhase().get()
         : DefragmentationPhaseEnum::kMergeAndMeasureChunks;
     auto collectionPhase = _transitionPhases(
         opCtx, coll, phaseToBuild, !coll.getDefragmentationPhase().is_initialized());
-    while (collectionPhase && collectionPhase->isComplete()) {
+    while (collectionPhase && collectionPhase->isComplete() &&
+           MONGO_likely(!skipDefragmentationPhaseTransition.shouldFail())) {
         collectionPhase = _transitionPhases(opCtx, coll, collectionPhase->getNextPhase());
     }
     if (collectionPhase) {

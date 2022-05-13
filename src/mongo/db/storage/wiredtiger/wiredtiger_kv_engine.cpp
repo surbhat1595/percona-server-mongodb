@@ -394,7 +394,8 @@ static void copy_keydb_files(const boost::filesystem::path& from,
 
 namespace {
 
-StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(WT_SESSION* session,
+StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(OperationContext* opCtx,
+                                                                     WT_SESSION* session,
                                                                      WT_CURSOR* cursor,
                                                                      bool incrementalBackup,
                                                                      bool fullBackup,
@@ -451,15 +452,16 @@ StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(WT_SESSION*
                             "offset"_attr = offset,
                             "size"_attr = size,
                             "type"_attr = type);
-                backupBlocks.push_back(BackupBlock(filePath.string(), offset, size, fileSize));
+                backupBlocks.push_back(
+                    BackupBlock(opCtx, filePath.string(), offset, size, fileSize));
             }
 
             // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows
             // us to distinguish between an unchanged file and a deleted file in an incremental
             // backup.
             if (fileUnchangedFlag) {
-                backupBlocks.push_back(
-                    BackupBlock(filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
+                backupBlocks.push_back(BackupBlock(
+                    opCtx, filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
             }
 
             if (wtRet != WT_NOTFOUND) {
@@ -476,7 +478,7 @@ StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(WT_SESSION*
             // are the initial incremental backup.
             const std::uint64_t length = incrementalBackup ? fileSize : 0;
             backupBlocks.push_back(
-                BackupBlock(filePath.string(), 0 /* offset */, length, fileSize));
+                BackupBlock(opCtx, filePath.string(), 0 /* offset */, length, fileSize));
         }
     }
 
@@ -1373,7 +1375,8 @@ public:
 
     ~StreamingCursorImpl() = default;
 
-    StatusWith<std::vector<BackupBlock>> getNextBatch(const std::size_t batchSize) {
+    StatusWith<std::vector<BackupBlock>> getNextBatch(OperationContext* opCtx,
+                                                      const std::size_t batchSize) {
         int wtRet;
         std::vector<BackupBlock> backupBlocks;
 
@@ -1423,7 +1426,7 @@ public:
                 //
                 // 'backupBlocks' is an out parameter.
                 Status status = _getNextIncrementalBatchForFile(
-                    filename, filePath, fileSize, batchSize, &backupBlocks);
+                    opCtx, filename, filePath, fileSize, batchSize, &backupBlocks);
 
                 if (!status.isOK()) {
                     return status;
@@ -1434,7 +1437,7 @@ public:
                 // are the initial incremental backup.
                 const std::uint64_t length = options.incrementalBackup ? fileSize : 0;
                 backupBlocks.push_back(
-                    BackupBlock(filePath.string(), 0 /* offset */, length, fileSize));
+                    BackupBlock(opCtx, filePath.string(), 0 /* offset */, length, fileSize));
             }
         }
 
@@ -1446,7 +1449,8 @@ public:
     }
 
 private:
-    Status _getNextIncrementalBatchForFile(const char* filename,
+    Status _getNextIncrementalBatchForFile(OperationContext* opCtx,
+                                           const char* filename,
                                            boost::filesystem::path filePath,
                                            const std::uint64_t fileSize,
                                            const std::size_t batchSize,
@@ -1487,14 +1491,14 @@ private:
                         "offset"_attr = offset,
                         "size"_attr = size,
                         "type"_attr = type);
-            backupBlocks->push_back(BackupBlock(filePath.string(), offset, size, fileSize));
+            backupBlocks->push_back(BackupBlock(opCtx, filePath.string(), offset, size, fileSize));
         }
 
         // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows us
         // to distinguish between an unchanged file and a deleted file in an incremental backup.
         if (fileUnchangedFlag) {
             backupBlocks->push_back(
-                BackupBlock(filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
+                BackupBlock(opCtx, filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
         }
 
         // If the duplicate backup cursor has been exhausted, close it and set
@@ -1724,7 +1728,8 @@ StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
     }
 
     const bool fullBackup = !options.srcBackupName;
-    auto swBackupBlocks = getBackupBlocksFromBackupCursor(session,
+    auto swBackupBlocks = getBackupBlocksFromBackupCursor(opCtx,
+                                                          session,
                                                           cursor,
                                                           options.incrementalBackup,
                                                           fullBackup,
@@ -1759,7 +1764,8 @@ StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor(Operati
         return wtRCToStatus(wtRet, session);
     }
 
-    auto swBackupBlocks = getBackupBlocksFromBackupCursor(session,
+    auto swBackupBlocks = getBackupBlocksFromBackupCursor(opCtx,
+                                                          session,
                                                           cursor,
                                                           /*incrementalBackup=*/false,
                                                           /*fullBackup=*/true,
@@ -1782,7 +1788,7 @@ StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor(Operati
     // journal files returned by this method to ensure a consistent backup of the data is taken.
     std::vector<std::string> filenames;
     for (const auto& entry : swBackupBlocks.getValue()) {
-        filenames.push_back(entry.filename());
+        filenames.push_back(entry.filePath());
     }
 
     return {filenames};

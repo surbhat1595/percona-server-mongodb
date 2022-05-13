@@ -161,6 +161,10 @@ structs:
                 type: KeyPattern
                 description: "The index specification document to use as the new shard key."
                 optional: false
+            collectionUUID:
+                type: uuid
+                description: "The expected UUID of the collection."
+                optional: true
 
     ReshardCollectionRequest:
         description: "Parameters for the reshard collection command"
@@ -191,6 +195,10 @@ structs:
                 description: >-
                     "Mapping of chunk ranges to be used as the initial split output. This is only
                     for testing purposes."
+                optional: true
+            collectionUUID:
+                type: uuid
+                description: "The expected UUID of the collection."
                 optional: true
 
     SetAllowMigrationsRequest:
@@ -258,6 +266,11 @@ commands:
         api_version: ""
         cpp_name: ShardsvrDropCollection
         strict: false
+        fields:
+            collectionUUID:
+                type: uuid
+                description: "The expected UUID of the collection."
+                optional: true
 
     _shardsvrDropCollectionParticipant:
         description: "Parser for the _shardsvrDropCollectionParticipant command"
@@ -355,3 +368,12 @@ commands:
         namespace: concatenate_with_db
         chained_structs:
             CollModRequest: CollModRequest
+
+    _configsvrSetUserWriteBlockMode:
+        command_name: _configsvrSetUserWriteBlockMode
+        cpp_name: ConfigsvrSetUserWriteBlockMode
+        description: "internal _configsvrSetUserWriteBlockMode command"
+        namespace: type
+        api_version: ""
+        type: bool
+        strict: false

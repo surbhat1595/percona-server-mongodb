@@ -223,7 +223,7 @@ Balancer::Balancer()
           std::make_unique<BalancerChunkSelectionPolicyImpl>(_clusterStats.get(), _random)),
       _commandScheduler(std::make_unique<BalancerCommandsSchedulerImpl>()),
       _defragmentationPolicy(
-          std::make_unique<BalancerDefragmentationPolicyImpl>(_clusterStats.get())) {}
+          std::make_unique<BalancerDefragmentationPolicyImpl>(_clusterStats.get(), _random)) {}
 
 Balancer::~Balancer() {
     // Terminate the balancer thread so it doesn't leak memory.
@@ -323,7 +323,12 @@ Status Balancer::rebalanceSingleChunk(OperationContext* opCtx,
         return refreshStatus;
     }
 
-    MoveChunkSettings settings(balancerConfig->getMaxChunkSizeBytes(),
+    auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
+        opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
+    auto maxChunkSize =
+        coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
+
+    MoveChunkSettings settings(maxChunkSize,
                                balancerConfig->getSecondaryThrottle(),
                                balancerConfig->waitForDelete(),
                                migrateInfo->forceJumbo);
@@ -339,7 +344,6 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  const ChunkType& chunk,
                                  const ShardId& newShardId,
-                                 uint64_t maxChunkSizeBytes,
                                  const MigrationSecondaryThrottleOptions& secondaryThrottle,
                                  bool waitForDelete,
                                  bool forceJumbo) {
@@ -348,7 +352,20 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
         return moveAllowedStatus;
     }
 
-    MoveChunkSettings settings(maxChunkSizeBytes,
+    auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
+        opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
+    auto maxChunkSize = coll.getMaxChunkSizeBytes().value_or(-1);
+    if (maxChunkSize <= 0) {
+        auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
+        Status refreshStatus = balancerConfig->refreshAndCheck(opCtx);
+        if (!refreshStatus.isOK()) {
+            return refreshStatus;
+        }
+
+        maxChunkSize = balancerConfig->getMaxChunkSizeBytes();
+    }
+
+    MoveChunkSettings settings(maxChunkSize,
                                secondaryThrottle,
                                waitForDelete,
                                forceJumbo ? MoveChunkRequest::ForceJumbo::kForceManual
@@ -392,7 +409,7 @@ void Balancer::_consumeActionStreamLoop() {
         // Non-blocking call, assumes the requests are returning a SemiFuture<>
         stdx::visit(
             visit_helper::Overloaded{
-                [&](MergeInfo mergeAction) {
+                [&](MergeInfo&& mergeAction) {
                     applyThrottling();
                     auto result =
                         _commandScheduler
@@ -402,16 +419,17 @@ void Balancer::_consumeActionStreamLoop() {
                                                  mergeAction.chunkRange,
                                                  mergeAction.collectionVersion)
                             .thenRunOn(*executor)
-                            .onCompletion([this, mergeAction](const Status& status) {
-                                ThreadClient tc(
-                                    "BalancerDefragmentationPolicy::acknowledgeMergeResult",
-                                    getGlobalServiceContext());
-                                auto opCtx = tc->makeOperationContext();
-                                _defragmentationPolicy->acknowledgeMergeResult(
-                                    opCtx.get(), mergeAction, status);
-                            });
+                            .onCompletion(
+                                [this, command = std::move(mergeAction)](const Status& status) {
+                                    ThreadClient tc(
+                                        "BalancerDefragmentationPolicy::acknowledgeMergeResult",
+                                        getGlobalServiceContext());
+                                    auto opCtx = tc->makeOperationContext();
+                                    _defragmentationPolicy->acknowledgeMergeResult(
+                                        opCtx.get(), command, status);
+                                });
                 },
-                [&](DataSizeInfo dataSizeAction) {
+                [&](DataSizeInfo&& dataSizeAction) {
                     auto result =
                         _commandScheduler
                             ->requestDataSize(opCtx.get(),
@@ -422,17 +440,17 @@ void Balancer::_consumeActionStreamLoop() {
                                               dataSizeAction.keyPattern,
                                               dataSizeAction.estimatedValue)
                             .thenRunOn(*executor)
-                            .onCompletion([this, dataSizeAction](
+                            .onCompletion([this, command = std::move(dataSizeAction)](
                                               const StatusWith<DataSizeResponse>& swDataSize) {
                                 ThreadClient tc(
                                     "BalancerDefragmentationPolicy::acknowledgeDataSizeResult",
                                     getGlobalServiceContext());
                                 auto opCtx = tc->makeOperationContext();
                                 _defragmentationPolicy->acknowledgeDataSizeResult(
-                                    opCtx.get(), dataSizeAction, swDataSize);
+                                    opCtx.get(), command, swDataSize);
                             });
                 },
-                [&](AutoSplitVectorInfo splitVectorAction) {
+                [&](AutoSplitVectorInfo&& splitVectorAction) {
                     auto result =
                         _commandScheduler
                             ->requestAutoSplitVector(opCtx.get(),
@@ -443,7 +461,7 @@ void Balancer::_consumeActionStreamLoop() {
                                                      splitVectorAction.maxKey,
                                                      splitVectorAction.maxChunkSizeBytes)
                             .thenRunOn(*executor)
-                            .onCompletion([this, splitVectorAction](
+                            .onCompletion([this, command = std::move(splitVectorAction)](
                                               const StatusWith<std::vector<BSONObj>>&
                                                   swSplitPoints) {
                                 ThreadClient tc(
@@ -451,10 +469,10 @@ void Balancer::_consumeActionStreamLoop() {
                                     getGlobalServiceContext());
                                 auto opCtx = tc->makeOperationContext();
                                 _defragmentationPolicy->acknowledgeAutoSplitVectorResult(
-                                    opCtx.get(), splitVectorAction, swSplitPoints);
+                                    opCtx.get(), command, swSplitPoints);
                             });
                 },
-                [&](SplitInfoWithKeyPattern splitAction) {
+                [&](SplitInfoWithKeyPattern&& splitAction) {
                     applyThrottling();
                     auto result =
                         _commandScheduler
@@ -467,21 +485,22 @@ void Balancer::_consumeActionStreamLoop() {
                                                 splitAction.info.maxKey,
                                                 splitAction.info.splitKeys)
                             .thenRunOn(*executor)
-                            .onCompletion([this, splitAction](const Status& status) {
-                                ThreadClient tc(
-                                    "BalancerDefragmentationPolicy::acknowledgeSplitResult",
-                                    getGlobalServiceContext());
-                                auto opCtx = tc->makeOperationContext();
-                                _defragmentationPolicy->acknowledgeSplitResult(
-                                    opCtx.get(), splitAction, status);
-                            });
+                            .onCompletion(
+                                [this, command = std::move(splitAction)](const Status& status) {
+                                    ThreadClient tc(
+                                        "BalancerDefragmentationPolicy::acknowledgeSplitResult",
+                                        getGlobalServiceContext());
+                                    auto opCtx = tc->makeOperationContext();
+                                    _defragmentationPolicy->acknowledgeSplitResult(
+                                        opCtx.get(), command, status);
+                                });
                 },
-                [](MigrateInfo _) {
+                [](MigrateInfo&& _) {
                     uasserted(ErrorCodes::BadValue,
                               "Migrations cannot be processed as Streaming Actions");
                 },
                 [](EndOfActionStream eoa) {}},
-            action);
+            std::move(action));
     }
 }
 
@@ -531,7 +550,7 @@ void Balancer::_mainThread() {
 
     _commandScheduler->start(
         opCtx.get(),
-        MigrationsRecoveryConfiguration(balancerConfig->getMaxChunkSizeBytes(),
+        MigrationsRecoveryDefaultValues(balancerConfig->getMaxChunkSizeBytes(),
                                         balancerConfig->getSecondaryThrottle()));
 
     _actionStreamConsumerThread = stdx::thread([&] { _consumeActionStreamLoop(); });
@@ -579,7 +598,14 @@ void Balancer::_mainThread() {
                     warnOnMultiVersion(uassertStatusOK(_clusterStats->getStats(opCtx.get())));
                 }
 
-                _initializeDefragmentations(opCtx.get());
+                // Collect and apply up-to-date configuration values on the cluster collections.
+                {
+                    OperationContext* ctx = opCtx.get();
+                    auto allCollections = Grid::get(ctx)->catalogClient()->getCollections(ctx, {});
+                    for (const auto& coll : allCollections) {
+                        _defragmentationPolicy->refreshCollectionDefragmentationStatus(ctx, coll);
+                    }
+                }
 
                 Status status = _splitChunksIfNeeded(opCtx.get());
                 if (!status.isOK()) {
@@ -793,13 +819,6 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
     return true;
 }
 
-void Balancer::_initializeDefragmentations(OperationContext* opCtx) {
-    auto collections = Grid::get(opCtx)->catalogClient()->getCollections(opCtx, {});
-    for (const auto& coll : collections) {
-        _defragmentationPolicy->refreshCollectionDefragmentationStatus(opCtx, coll);
-    }
-}
-
 Status Balancer::_splitChunksIfNeeded(OperationContext* opCtx) {
     auto chunksToSplitStatus = _chunkSelectionPolicy->selectChunksToSplit(opCtx);
     if (!chunksToSplitStatus.isOK()) {
@@ -858,7 +877,12 @@ int Balancer::_moveChunks(OperationContext* opCtx,
         chunk.setShard(migrateInfo.from);
         chunk.setVersion(migrateInfo.version);
 
-        MoveChunkSettings settings(balancerConfig->getMaxChunkSizeBytes(),
+        auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
+            opCtx, migrateInfo.nss, repl::ReadConcernLevel::kMajorityReadConcern);
+        auto maxChunkSizeBytes =
+            coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
+
+        MoveChunkSettings settings(maxChunkSizeBytes,
                                    balancerConfig->getSecondaryThrottle(),
                                    balancerConfig->waitForDelete(),
                                    migrateInfo.forceJumbo);
@@ -898,7 +922,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
                   "error"_attr = redact(status));
 
             const CollectionType collection = catalogClient->getCollection(
-                opCtx, migrateInfo.uuid, repl::ReadConcernLevel::kLocalReadConcern);
+                opCtx, migrateInfo.uuid, repl::ReadConcernLevel::kMajorityReadConcern);
 
             ShardingCatalogManager::get(opCtx)->splitOrMarkJumbo(
                 opCtx, collection.getNss(), migrateInfo.minKey);

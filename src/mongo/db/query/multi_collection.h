@@ -50,7 +50,6 @@ public:
                         secondaryCollCtxes) {
         if (mainCollCtx) {
             _mainColl = &mainCollCtx->getCollection();
-            _mainCollName = mainCollCtx->getNss();
         }
 
         for (auto& secondaryColl : secondaryCollCtxes) {
@@ -80,6 +79,15 @@ public:
         return _secondaryColls;
     }
 
+    const CollectionPtr& lookupCollection(const NamespaceString& nss) const {
+        if (_mainColl && nss == _mainColl->get()->ns()) {
+            return *_mainColl;
+        } else if (auto itr = _secondaryColls.find(nss); itr != _secondaryColls.end()) {
+            return itr->second;
+        }
+        return CollectionPtr::null;
+    }
+
     void clear() {
         _mainColl = &CollectionPtr::null;
         _secondaryColls.clear();
@@ -87,7 +95,6 @@ public:
 
 private:
     const CollectionPtr* _mainColl{&CollectionPtr::null};
-    boost::optional<NamespaceString> _mainCollName = boost::none;
 
     // Map from namespace to a corresponding CollectionPtr.
     std::map<NamespaceString, const CollectionPtr&> _secondaryColls{};

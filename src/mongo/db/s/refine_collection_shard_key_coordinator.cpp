@@ -31,7 +31,9 @@
 
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
 
+#include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/s/dist_lock_manager.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/logv2/log.h"
@@ -121,6 +123,12 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
+
+                {
+                    AutoGetCollection coll{
+                        opCtx, nss(), MODE_IS, AutoGetCollectionViewMode::kViewsPermitted};
+                    checkCollectionUUIDMismatch(opCtx, nss(), *coll, _doc.getCollectionUUID());
+                }
 
                 const auto cm = uassertStatusOK(
                     Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(

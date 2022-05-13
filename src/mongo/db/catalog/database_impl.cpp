@@ -58,7 +58,6 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/introspect.h"
-#include "mongo/db/multitenancy.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -152,12 +151,12 @@ Status DatabaseImpl::validateDBName(StringData dbname) {
     return Status::OK();
 }
 
-DatabaseImpl::DatabaseImpl(const StringData name)
-    : _name(name.toString()),
-      _viewsName(_name + "." + DurableViewCatalog::viewsCollectionName().toString()) {}
+DatabaseImpl::DatabaseImpl(const TenantDatabaseName& tenantDbName)
+    : _name(tenantDbName),
+      _viewsName(_name.dbName() + "." + DurableViewCatalog::viewsCollectionName().toString()) {}
 
 Status DatabaseImpl::init(OperationContext* const opCtx) {
-    Status status = validateDBName(_name);
+    Status status = validateDBName(_name.dbName());
 
     if (!status.isOK()) {
         LOGV2_WARNING(20325,
@@ -168,7 +167,7 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
     }
 
     auto durableViewCatalog = std::make_unique<DurableViewCatalogImpl>(this);
-    status = ViewCatalog::registerDatabase(opCtx, _name, std::move(durableViewCatalog));
+    status = ViewCatalog::registerDatabase(opCtx, _name.dbName(), std::move(durableViewCatalog));
     if (!status.isOK()) {
         return status;
     }
@@ -199,9 +198,11 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
         // Realistically no one else can be accessing the collection, and there's no chance of this
         // blocking.
         Lock::CollectionLock systemViewsLock(
-            opCtx, NamespaceString(_name, NamespaceString::kSystemDotViewsCollectionName), MODE_IS);
-        Status reloadStatus =
-            ViewCatalog::reload(opCtx, _name, ViewCatalogLookupBehavior::kValidateDurableViews);
+            opCtx,
+            NamespaceString(_name.dbName(), NamespaceString::kSystemDotViewsCollectionName),
+            MODE_IS);
+        Status reloadStatus = ViewCatalog::reload(
+            opCtx, _name.dbName(), ViewCatalogLookupBehavior::kValidateDurableViews);
         if (!reloadStatus.isOK()) {
             LOGV2_WARNING_OPTIONS(20326,
                                   {logv2::LogTag::kStartupWarnings},
@@ -212,11 +213,65 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
         }
     }
 
+    // When in restore mode, views created on collections that weren't restored will be removed.
+    if (storageGlobalParams.restore) {
+        invariant(opCtx->lockState()->isW());
+
+        try {
+            auto viewCatalog = ViewCatalog::get(opCtx);
+            viewCatalog->iterate(_name.dbName(), [&](const ViewDefinition& view) {
+                auto swResolvedView = viewCatalog->resolveView(opCtx, view.name(), boost::none);
+                if (!swResolvedView.isOK()) {
+                    LOGV2_WARNING(6260802,
+                                  "Could not resolve view during restore",
+                                  "view"_attr = view.name(),
+                                  "viewOn"_attr = view.viewOn(),
+                                  "reason"_attr = swResolvedView.getStatus().reason());
+                    return true;
+                }
+
+                // The name of the most resolved namespace, which is a collection.
+                auto resolvedNs = swResolvedView.getValue().getNamespace();
+
+                if (catalog->lookupCollectionByNamespace(opCtx, resolvedNs)) {
+                    // The collection exists for this view.
+                    return true;
+                }
+
+                LOGV2(6260803,
+                      "Removing view on collection not restored",
+                      "view"_attr = view.name(),
+                      "viewOn"_attr = view.viewOn(),
+                      "resolvedNs"_attr = resolvedNs);
+
+                WriteUnitOfWork wuow(opCtx);
+                Status status = viewCatalog->dropView(opCtx, view.name());
+                if (!status.isOK()) {
+                    LOGV2_WARNING(6260804,
+                                  "Failed to remove view on unrestored collection",
+                                  "view"_attr = view.name(),
+                                  "viewOn"_attr = view.viewOn(),
+                                  "resolvedNs"_attr = resolvedNs,
+                                  "reason"_attr = status.reason());
+                    return true;
+                }
+                wuow.commit();
+
+                return true;
+            });
+        } catch (const ExceptionFor<ErrorCodes::InvalidViewDefinition>& e) {
+            LOGV2_WARNING(6260805,
+                          "Failed to access the view catalog during restore",
+                          "db"_attr = _name,
+                          "reason"_attr = e.reason());
+        }
+    }
+
     return status;
 }
 
 void DatabaseImpl::clearTmpCollections(OperationContext* opCtx) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
+    invariant(opCtx->lockState()->isDbLockedForMode(name().dbName(), MODE_IX));
 
     CollectionCatalog::CollectionInfoFn callback = [&](const CollectionPtr& collection) {
         try {
@@ -250,12 +305,12 @@ void DatabaseImpl::clearTmpCollections(OperationContext* opCtx) const {
 
 void DatabaseImpl::setDropPending(OperationContext* opCtx, bool dropPending) {
     auto mode = dropPending ? MODE_X : MODE_IX;
-    invariant(opCtx->lockState()->isDbLockedForMode(name(), mode));
+    invariant(opCtx->lockState()->isDbLockedForMode(name().dbName(), mode));
     _dropPending.store(dropPending);
 }
 
 bool DatabaseImpl::isDropPending(OperationContext* opCtx) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(name().dbName(), MODE_IS));
     return _dropPending.load();
 }
 
@@ -274,7 +329,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
     long long indexSize = 0;
     long long indexFreeStorageSize = 0;
 
-    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(name().dbName(), MODE_IS));
 
     catalog::forEachCollectionFromDb(
         opCtx, name(), MODE_IS, [&](const CollectionPtr& collection) -> bool {
@@ -297,7 +352,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
         });
 
 
-    ViewCatalog::get(opCtx)->iterate(name(), [&](const ViewDefinition& view) {
+    ViewCatalog::get(opCtx)->iterate(name().dbName(), [&](const ViewDefinition& view) {
         nViews += 1;
         return true;
     });
@@ -324,8 +379,10 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
     output->appendNumber("scaleFactor", scale);
 
     if (!opCtx->getServiceContext()->getStorageEngine()->isEphemeral()) {
+        // It does not matter whether _name.dbName() or _name.fullName() is passed in here since
+        // directoryPerDB isn't supported in Serverless. We choose _name.dbName().
         boost::filesystem::path dbpath(
-            opCtx->getServiceContext()->getStorageEngine()->getFilesystemPathForDb(_name));
+            opCtx->getServiceContext()->getStorageEngine()->getFilesystemPathForDb(_name.dbName()));
         boost::system::error_code ec;
         boost::filesystem::space_info spaceInfo = boost::filesystem::space(dbpath, ec);
         if (!ec) {
@@ -344,7 +401,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
 }
 
 Status DatabaseImpl::dropView(OperationContext* opCtx, NamespaceString viewName) const {
-    dassert(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
+    dassert(opCtx->lockState()->isDbLockedForMode(name().dbName(), MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(NamespaceString(_viewsName), MODE_X));
 
@@ -364,18 +421,17 @@ Status DatabaseImpl::dropCollection(OperationContext* opCtx,
         return Status::OK();
     }
 
-    invariant(nss.db() == _name);
+    invariant(nss.db() == _name.dbName());
 
     if (nss.isSystem()) {
         if (nss.isSystemDotProfile()) {
-            if (CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_name) != 0)
+            if (CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_name.dbName()) != 0)
                 return Status(ErrorCodes::IllegalOperation,
                               "turn off profiling before dropping system.profile collection");
         } else if (nss.isSystemDotViews()) {
             if (!MONGO_unlikely(allowSystemViewsDrop.shouldFail())) {
-                const auto viewCatalog =
-                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, nss.db());
-                const auto viewStats = viewCatalog->getStats(nss.db());
+                const auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, _name);
+                const auto viewStats = viewCatalog->getStats(_name.dbName());
                 uassert(ErrorCodes::CommandFailed,
                         str::stream() << "cannot drop collection " << nss
                                       << " when time-series collections are present.",
@@ -546,7 +602,7 @@ Status DatabaseImpl::dropCollectionEvenIfSystem(OperationContext* opCtx,
 void DatabaseImpl::_dropCollectionIndexes(OperationContext* opCtx,
                                           const NamespaceString& nss,
                                           Collection* collection) const {
-    invariant(_name == nss.db());
+    invariant(_name.dbName() == nss.db());
     LOGV2_DEBUG(
         20316, 1, "dropCollection: {namespace} - dropAllIndexes start", "namespace"_attr = nss);
     collection->getIndexCatalog()->dropAllIndexes(opCtx, collection, true);
@@ -586,8 +642,8 @@ Status DatabaseImpl::renameCollection(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(fromNss, MODE_X));
     invariant(opCtx->lockState()->isCollectionLockedForMode(toNss, MODE_X));
 
-    invariant(fromNss.db() == _name);
-    invariant(toNss.db() == _name);
+    invariant(fromNss.db() == _name.dbName());
+    invariant(toNss.db() == _name.dbName());
     if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, toNss)) {
         return Status(ErrorCodes::NamespaceExists,
                       str::stream() << "Cannot rename '" << fromNss << "' to '" << toNss
@@ -614,7 +670,7 @@ Status DatabaseImpl::renameCollection(OperationContext* opCtx,
     // because the CollectionCatalog manages the necessary isolation for this Collection until the
     // WUOW commits.
     auto writableCollection = collToRename.getWritableCollection();
-    TenantNamespace toTenantNs(getActiveTenant(opCtx), toNss);
+    TenantNamespace toTenantNs(boost::none, toNss);
     Status status = writableCollection->rename(opCtx, toTenantNs, stayTemp);
     if (!status.isOK())
         return status;
@@ -661,7 +717,7 @@ void DatabaseImpl::_checkCanCreateCollection(OperationContext* opCtx,
 Status DatabaseImpl::createView(OperationContext* opCtx,
                                 const NamespaceString& viewName,
                                 const CollectionOptions& options) const {
-    dassert(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
+    dassert(opCtx->lockState()->isDbLockedForMode(name().dbName(), MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(NamespaceString(_viewsName), MODE_X));
 
@@ -752,7 +808,7 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
 
     // Create Collection object
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    TenantNamespace tenantNs(getActiveTenant(opCtx), nss);
+    TenantNamespace tenantNs(boost::none, nss);
     std::pair<RecordId, std::unique_ptr<RecordStore>> catalogIdRecordStorePair =
         uassertStatusOK(storageEngine->getCatalog()->createCollection(
             opCtx, tenantNs, optionsWithUUID, true /*allocateDefaultSpace*/));
@@ -810,7 +866,7 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
 
 StatusWith<NamespaceString> DatabaseImpl::makeUniqueCollectionNamespace(
     OperationContext* opCtx, StringData collectionNameModel) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
+    invariant(opCtx->lockState()->isDbLockedForMode(name().dbName(), MODE_IX));
 
     // There must be at least one percent sign in the collection name model.
     auto numPercentSign = std::count(collectionNameModel.begin(), collectionNameModel.end(), '%');
@@ -846,7 +902,7 @@ StatusWith<NamespaceString> DatabaseImpl::makeUniqueCollectionNamespace(
                        collectionName.begin(),
                        replacePercentSign);
 
-        NamespaceString nss(_name, collectionName);
+        NamespaceString nss(_name.dbName(), collectionName);
         if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)) {
             return nss;
         }
@@ -860,7 +916,7 @@ StatusWith<NamespaceString> DatabaseImpl::makeUniqueCollectionNamespace(
 }
 
 void DatabaseImpl::checkForIdIndexesAndDropPendingCollections(OperationContext* opCtx) const {
-    if (name() == "local") {
+    if (name().dbName() == "local") {
         // Collections in the local database are not replicated, so we do not need an _id index on
         // any collection. For the same reason, it is not possible for the local database to contain
         // any drop-pending collections (drops are effective immediately).

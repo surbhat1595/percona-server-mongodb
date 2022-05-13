@@ -246,6 +246,9 @@ public:
     }
 };
 
+DevNullKVEngine::DevNullKVEngine() {
+    _mockBackupBlocks.push_back(BackupBlock(/*opCtx=*/nullptr, "filename.wt"));
+}
 
 std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* opCtx,
                                                              StringData ns,
@@ -287,7 +290,8 @@ public:
         return BSONObj();
     }
 
-    StatusWith<std::vector<BackupBlock>> getNextBatch(const std::size_t batchSize) {
+    StatusWith<std::vector<BackupBlock>> getNextBatch(OperationContext* opCtx,
+                                                      const std::size_t batchSize) {
         if (_exhaustCursor) {
             std::vector<BackupBlock> emptyVector;
             return emptyVector;

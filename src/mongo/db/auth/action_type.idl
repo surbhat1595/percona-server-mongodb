@@ -54,6 +54,7 @@ enums:
            authenticate :  "authenticate"    # ID only
            authSchemaUpgrade :  "authSchemaUpgrade"
            bypassDocumentValidation :  "bypassDocumentValidation"
+           bypassWriteBlockingMode :  "bypassWriteBlockingMode"
            changeCustomData :  "changeCustomData"
            changePassword :  "changePassword"
            changeOwnPassword :  "changeOwnPassword"
@@ -66,6 +67,7 @@ enums:
            collMod :  "collMod"
            collStats :  "collStats"
            compact :  "compact"
+           compactStructuredEncryptionData: "compactStructuredEncryptionData"
            connPoolStats :  "connPoolStats"
            connPoolSync :  "connPoolSync"
            convertToCapped :  "convertToCapped"
@@ -222,6 +224,7 @@ enums:
                         - changeStream
                         - collMod
                         - collStats
+                        - compactStructuredEncryptionData
                         - convertToCapped
                         - createCollection
                         - createIndex
@@ -259,6 +262,7 @@ enums:
                         - changeStream
                         - collMod
                         - collStats
+                        - compactStructuredEncryptionData
                         - convertToCapped
                         - createCollection
                         - createIndex

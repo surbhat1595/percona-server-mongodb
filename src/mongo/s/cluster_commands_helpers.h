@@ -41,7 +41,6 @@
 #include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/commands/strategy.h"
 
 namespace mongo {
 
@@ -51,6 +50,13 @@ struct RawResponsesResult {
     std::vector<AsyncRequestsSender::Response> successResponses;
     boost::optional<Status> firstStaleConfigError;
 };
+
+/**
+ * This function appends the provided WriteConcernErrorDetail to the sharded response.
+ */
+void appendWriteConcernErrorDetailToCmdResponse(const ShardId& shardId,
+                                                WriteConcernErrorDetail wcError,
+                                                BSONObjBuilder& responseBuilder);
 
 /**
  * This function appends the provided writeConcernError BSONElement to the sharded response.

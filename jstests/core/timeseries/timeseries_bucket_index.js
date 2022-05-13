@@ -4,6 +4,7 @@
  * @tags: [
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
+ *   requires_fcv_53,
  *   requires_getmore,
  * ]
  */
@@ -40,7 +41,7 @@ TimeseriesTest.run((insert) => {
 
     assert.docEq(buckets, bucketsColl.find({_id: bucketId}).toArray());
     let explain = bucketsColl.find({_id: bucketId}).explain();
-    assert(planHasStage(db, explain, "COLLSCAN"), explain);
+    assert(planHasStage(db, explain, "CLUSTERED_IXSCAN"), explain);
 
     assert.docEq(buckets, bucketsColl.find({"control.max.time": maxTime}).toArray());
     explain = bucketsColl.find({"control.max.time": minTime}).explain();

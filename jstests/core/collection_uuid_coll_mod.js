@@ -28,7 +28,8 @@ let res = assert.commandFailedWithCode(
     testDB.runCommand({collMod: coll.getName(), collectionUUID: nonexistentUUID}),
     ErrorCodes.CollectionUUIDMismatch);
 assert.eq(res.collectionUUID, nonexistentUUID);
-assert.eq(res.actualNamespace, "");
+assert.eq(res.expectedNamespace, coll.getFullName());
+assert.eq(res.actualNamespace, null);
 
 // 3. The command fails when the provided UUID corresponds to a different collection.
 const coll2 = testDB['coll_2'];
@@ -37,5 +38,16 @@ res = assert.commandFailedWithCode(
     testDB.runCommand({collMod: coll2.getName(), collectionUUID: uuid}),
     ErrorCodes.CollectionUUIDMismatch);
 assert.eq(res.collectionUUID, uuid);
+assert.eq(res.expectedNamespace, coll2.getFullName());
+assert.eq(res.actualNamespace, coll.getFullName());
+
+// 3. The command fails when the provided UUID corresponds to a different collection, even if the
+// provided namespace does not exist.
+coll2.drop();
+res = assert.commandFailedWithCode(
+    testDB.runCommand({collMod: coll2.getName(), collectionUUID: uuid}),
+    ErrorCodes.CollectionUUIDMismatch);
+assert.eq(res.collectionUUID, uuid);
+assert.eq(res.expectedNamespace, coll2.getFullName());
 assert.eq(res.actualNamespace, coll.getFullName());
 })();

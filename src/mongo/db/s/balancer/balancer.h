@@ -33,7 +33,6 @@
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
 #include "mongo/db/s/balancer/balancer_random.h"
 #include "mongo/platform/mutex.h"
-#include "mongo/s/grid.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/thread.h"
 
@@ -164,7 +163,6 @@ public:
                            const NamespaceString& nss,
                            const ChunkType& chunk,
                            const ShardId& newShardId,
-                           uint64_t maxChunkSizeBytes,
                            const MigrationSecondaryThrottleOptions& secondaryThrottle,
                            bool waitForDelete,
                            bool forceJumbo);
@@ -263,12 +261,6 @@ private:
      * distinct processes (no hostname mixup).
      */
     bool _checkOIDs(OperationContext* opCtx);
-
-    /**
-     * Queries config.collections for all collections that should be running defragmentation and
-     * passes this information to the defragmentation policy.
-     */
-    void _initializeDefragmentations(OperationContext* opCtx);
 
     /**
      * Iterates through all chunks in all collections. If the collection is the sessions collection,

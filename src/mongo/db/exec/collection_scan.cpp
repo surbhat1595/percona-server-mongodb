@@ -42,6 +42,7 @@
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
@@ -51,8 +52,13 @@ namespace mongo {
 using std::unique_ptr;
 using std::vector;
 
-// static
-const char* CollectionScan::kStageType = "COLLSCAN";
+namespace {
+const char* getStageName(const CollectionPtr& coll, const CollectionScanParams& params) {
+    return (!coll->ns().isOplog() && (params.minRecord || params.maxRecord)) ? "CLUSTERED_IXSCAN"
+                                                                             : "COLLSCAN";
+}
+}  // namespace
+
 
 CollectionScan::CollectionScan(ExpressionContext* expCtx,
                                const CollectionPtr& collection,
@@ -60,7 +66,8 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
                                WorkingSet* workingSet,
                                const MatchExpression* filter,
                                bool relaxCappedConstraints)
-    : RequiresCollectionStage(kStageType, expCtx, collection, relaxCappedConstraints),
+    : RequiresCollectionStage(
+          getStageName(collection, params), expCtx, collection, relaxCappedConstraints),
       _workingSet(workingSet),
       _filter((filter && !filter->isTriviallyTrue()) ? filter : nullptr),
       _params(params) {
@@ -196,13 +203,13 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
         if (_lastSeenId.isNull() && _params.direction == CollectionScanParams::FORWARD &&
             _params.minRecord) {
             // Seek to the approximate start location.
-            record = _cursor->seekNear(*_params.minRecord);
+            record = _cursor->seekNear(_params.minRecord->recordId());
         }
 
         if (_lastSeenId.isNull() && _params.direction == CollectionScanParams::BACKWARD &&
             _params.maxRecord) {
             // Seek to the approximate start location (at the end).
-            record = _cursor->seekNear(*_params.maxRecord);
+            record = _cursor->seekNear(_params.maxRecord->recordId());
         }
 
         if (!record) {
@@ -298,7 +305,7 @@ bool pastEndOfRange(const CollectionScanParams& params, const WorkingSetMember& 
             return false;
         }
 
-        auto endRecord = *params.maxRecord;
+        auto endRecord = params.maxRecord->recordId();
         return member.recordId > endRecord ||
             (member.recordId == endRecord && !shouldIncludeEndRecord(params));
     } else {
@@ -306,7 +313,7 @@ bool pastEndOfRange(const CollectionScanParams& params, const WorkingSetMember& 
         if (!params.minRecord) {
             return false;
         }
-        auto endRecord = *params.minRecord;
+        auto endRecord = params.minRecord->recordId();
 
         return member.recordId < endRecord ||
             (member.recordId == endRecord && !shouldIncludeEndRecord(params));
@@ -320,7 +327,7 @@ bool beforeStartOfRange(const CollectionScanParams& params, const WorkingSetMemb
             return false;
         }
 
-        auto startRecord = *params.minRecord;
+        auto startRecord = params.minRecord->recordId();
         return member.recordId < startRecord ||
             (member.recordId == startRecord && !shouldIncludeStartRecord(params));
     } else {
@@ -328,7 +335,7 @@ bool beforeStartOfRange(const CollectionScanParams& params, const WorkingSetMemb
         if (!params.maxRecord) {
             return false;
         }
-        auto startRecord = *params.maxRecord;
+        auto startRecord = params.maxRecord->recordId();
         return member.recordId > startRecord ||
             (member.recordId == startRecord && !shouldIncludeStartRecord(params));
     }

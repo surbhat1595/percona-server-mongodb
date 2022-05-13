@@ -110,7 +110,7 @@ void _processCollModIndexRequestHidden(OperationContext* opCtx,
  */
 void getKeysForIndex(OperationContext* opCtx,
                      const CollectionPtr& collection,
-                     const IndexAccessMethod* accessMethod,
+                     const SortedDataIndexAccessMethod* accessMethod,
                      const BSONObj& doc,
                      KeyStringSet* keys) {
     SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
@@ -119,8 +119,8 @@ void getKeysForIndex(OperationContext* opCtx,
                           collection,
                           pooledBuilder,
                           doc,
-                          IndexAccessMethod::GetKeysMode::kEnforceConstraints,
-                          IndexAccessMethod::GetKeysContext::kAddingKeys,
+                          InsertDeleteOptions::ConstraintEnforcementMode::kEnforceConstraints,
+                          SortedDataIndexAccessMethod::GetKeysContext::kAddingKeys,
                           keys,
                           nullptr,       //  multikeyMetadataKeys
                           nullptr,       //  multikeyPaths
@@ -140,12 +140,13 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
     invariant(!idx->unique(), str::stream() << "Index is already unique: " << idx->infoObj());
     const auto& collection = autoColl->getCollection();
 
-    // Checks for duplicates on the primary or for the 'applyOps' command.
-    // TODO(SERVER-61356): revisit this condition for tenant migration, which uses kInitialSync.
+    // Checks for duplicates on the primary or for the 'applyOps' command. In the
+    // tenant migration case, assumes similarly to initial sync that we don't need to perform this
+    // check in the destination cluster.
     std::list<std::set<RecordId>> duplicateRecordsList;
     if (!mode) {
         auto entry = idx->getEntry();
-        auto accessMethod = entry->accessMethod();
+        auto accessMethod = entry->accessMethod()->asSortedData();
 
         invariant(docsForUniqueIndex,
                   fmt::format("Unique index conversion requires valid set of changed docs from "
@@ -183,11 +184,12 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
 
     *newUnique = true;
     autoColl->getWritableCollection(opCtx)->updateUniqueSetting(opCtx, idx->indexName());
-    idx->getEntry()->accessMethod()->setEnforceDuplicateConstraints(false);
+    autoColl->getWritableCollection(opCtx)->updateDisallowNewDuplicateKeysSetting(
+        opCtx, idx->indexName(), false);
 }
 
 /**
- * Adjusts enforceDuplicateConstraints setting on an index.
+ * Adjusts disallowNewDuplicateKeys setting on an index.
  */
 void _processCollModIndexRequestDisallowNewDuplicateKeys(
     OperationContext* opCtx,
@@ -197,10 +199,10 @@ void _processCollModIndexRequestDisallowNewDuplicateKeys(
     boost::optional<bool>* newDisallowNewDuplicateKeys,
     boost::optional<bool>* oldDisallowNewDuplicateKeys) {
     *newDisallowNewDuplicateKeys = indexDisallowNewDuplicateKeys;
-    auto accessMethod = idx->getEntry()->accessMethod();
-    *oldDisallowNewDuplicateKeys = accessMethod->isEnforcingDuplicateConstraints();
+    *oldDisallowNewDuplicateKeys = idx->disallowNewDuplicateKeys();
     if (*oldDisallowNewDuplicateKeys != *newDisallowNewDuplicateKeys) {
-        accessMethod->setEnforceDuplicateConstraints(indexDisallowNewDuplicateKeys);
+        autoColl->getWritableCollection(opCtx)->updateDisallowNewDuplicateKeysSetting(
+            opCtx, idx->indexName(), indexDisallowNewDuplicateKeys);
     }
 }
 
@@ -268,8 +270,8 @@ void processCollModIndexRequest(OperationContext* opCtx,
                          newHidden,
                          oldHidden,
                          newUnique,
-                         oldDisallowNewDuplicateKeys,
                          newDisallowNewDuplicateKeys,
+                         oldDisallowNewDuplicateKeys,
                          idx->indexName()};
 
     // This matches the default for IndexCatalog::refreshEntry().
@@ -310,7 +312,6 @@ void processCollModIndexRequest(OperationContext* opCtx,
             result->appendBool("unique_new", true);
         }
         if (newDisallowNewDuplicateKeys) {
-            // Unlike other fields, 'disallowNewDuplicateKeys' can have the same old and new values.
             invariant(oldDisallowNewDuplicateKeys);
             result->append("disallowNewDuplicateKeys_old", *oldDisallowNewDuplicateKeys);
             result->append("disallowNewDuplicateKeys_new", *newDisallowNewDuplicateKeys);
@@ -329,7 +330,7 @@ std::list<std::set<RecordId>> scanIndexForDuplicates(
     const IndexDescriptor* idx,
     boost::optional<KeyString::Value> firstKeyString) {
     auto entry = idx->getEntry();
-    auto accessMethod = entry->accessMethod();
+    auto accessMethod = entry->accessMethod()->asSortedData();
     // Only scans for the duplicates on one key if 'firstKeyString' is provided.
     bool scanOneKey = static_cast<bool>(firstKeyString);
 

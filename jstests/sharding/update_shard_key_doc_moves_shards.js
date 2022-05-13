@@ -16,7 +16,7 @@ load("jstests/sharding/libs/update_shard_key_helpers.js");
 const st = new ShardingTest({
     mongos: 1,
     shards: {rs0: {nodes: 3}, rs1: {nodes: 3}},
-    shardOptions:
+    rsOptions:
         {setParameter: {maxTransactionLockRequestTimeoutMillis: ReplSetTest.kDefaultTimeoutMS}}
 });
 const kDbName = 'db';
@@ -201,8 +201,9 @@ changeShardKeyOptions.forEach(function(updateConfig) {
         if (!isFindAndModify) {
             assertCannotUpdateWithMultiTrue(
                 st, kDbName, ns, session, sessionDB, runInTxn, {"x": 300}, {"$set": {"x": 30}});
+
+            changeShardKeyWhenFailpointsSet(session, sessionDB, runInTxn, isFindAndModify);
         }
-        changeShardKeyWhenFailpointsSet(session, sessionDB, runInTxn, isFindAndModify);
     }
 });
 

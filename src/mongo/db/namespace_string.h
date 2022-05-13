@@ -52,6 +52,11 @@ public:
     constexpr static size_t MaxNSCollectionLenFCV42 = 120U;
     constexpr static size_t MaxNsCollectionLen = 255;
 
+    // The maximum namespace length of sharded collections is less than that of unsharded ones since
+    // the namespace of the cached chunks metadata, local to each shard, is composed by the
+    // namespace of the related sharded collection (i.e., config.cache.chunks.<ns>).
+    constexpr static size_t MaxNsShardedCollectionLen = 235;  // 255 - len(ChunkType::ShardNSPrefix)
+
     // Reserved system namespaces
 
     // Namespace for the admin database
@@ -192,6 +197,9 @@ public:
 
     // Namespace used for storing retryable findAndModify images.
     static const NamespaceString kConfigImagesNamespace;
+
+    // Namespace used for persisting ConfigsvrCoordinator state documents.
+    static const NamespaceString kConfigsvrCoordinatorsNamespace;
 
     /**
      * Constructs an empty NamespaceString.

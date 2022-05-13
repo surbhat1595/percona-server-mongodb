@@ -61,6 +61,8 @@
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/classic_plan_cache.h"
@@ -104,6 +106,7 @@
 #include "mongo/util/str.h"
 
 namespace mongo {
+MONGO_FAIL_POINT_DEFINE(includeFakeColumnarIndex);
 
 boost::intrusive_ptr<ExpressionContext> makeExpressionContextForGetExecutor(
     OperationContext* opCtx, const BSONObj& requestCollation, const NamespaceString& nss) {
@@ -306,6 +309,10 @@ void fillOutPlannerParams(OperationContext* opCtx,
     // If it's not NULL, we may have indices. Access the catalog and fill out IndexEntry(s)
     fillOutIndexEntries(opCtx, apiStrict, canonicalQuery, collection, plannerParams->indices);
 
+    if (includeFakeColumnarIndex.shouldFail()) {
+        plannerParams->columnarIndexes.push_back(ColumnIndexEntry{"fakeColumnIndex"});
+    }
+
     // If query supports index filters, filter params.indices by indices in query settings.
     // Ignore index filters when it is possible to use the id-hack.
     applyIndexFilters(collection, *canonicalQuery, plannerParams);
@@ -371,24 +378,33 @@ void fillOutPlannerParams(OperationContext* opCtx,
     }
 }
 
-void fillOutSecondaryCollectionsInformation(OperationContext* opCtx,
-                                            const MultiCollection& collections,
-                                            CanonicalQuery* canonicalQuery,
-                                            QueryPlannerParams* plannerParams) {
+std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsInformation(
+    OperationContext* opCtx, const MultiCollection& collections, CanonicalQuery* canonicalQuery) {
+    std::map<NamespaceString, SecondaryCollectionInfo> infoMap;
     bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
-    for (auto& [collName, secondaryColl] : collections.getSecondaryCollections()) {
-        plannerParams->secondaryCollectionsInfo.emplace_back(SecondaryCollectionInfo());
-        auto& info = plannerParams->secondaryCollectionsInfo.back();
-        info.nss = collName;
+    auto fillOutSecondaryInfo = [&](const NamespaceString& nss,
+                                    const CollectionPtr& secondaryColl) {
+        auto secondaryInfo = SecondaryCollectionInfo();
         if (secondaryColl) {
-            fillOutIndexEntries(opCtx, apiStrict, canonicalQuery, secondaryColl, info.indexes);
-            info.isSharded = secondaryColl.isSharded();
-            info.approximateCollectionSizeBytes = secondaryColl.get()->dataSize(opCtx);
-            info.isView = !secondaryColl.get()->getCollectionOptions().viewOn.empty();
+            fillOutIndexEntries(
+                opCtx, apiStrict, canonicalQuery, secondaryColl, secondaryInfo.indexes);
+            secondaryInfo.approximateCollectionSizeBytes = secondaryColl.get()->dataSize(opCtx);
         } else {
-            info.exists = false;
+            secondaryInfo.exists = false;
         }
+        infoMap.emplace(nss, std::move(secondaryInfo));
+    };
+    for (auto& [collName, secondaryColl] : collections.getSecondaryCollections()) {
+        fillOutSecondaryInfo(collName, secondaryColl);
     }
+
+    // In the event of a self $lookup, we must have an entry for the main collection in the map
+    // of secondary collections.
+    if (collections.hasMainCollection()) {
+        const auto& mainColl = collections.getMainCollection();
+        fillOutSecondaryInfo(mainColl->ns(), mainColl);
+    }
+    return infoMap;
 }
 
 void fillOutPlannerParams(OperationContext* opCtx,
@@ -396,7 +412,8 @@ void fillOutPlannerParams(OperationContext* opCtx,
                           CanonicalQuery* canonicalQuery,
                           QueryPlannerParams* plannerParams) {
     fillOutPlannerParams(opCtx, collections.getMainCollection(), canonicalQuery, plannerParams);
-    fillOutSecondaryCollectionsInformation(opCtx, collections, canonicalQuery, plannerParams);
+    plannerParams->secondaryCollectionsInfo =
+        fillOutSecondaryCollectionsInformation(opCtx, collections, canonicalQuery);
 }
 
 bool shouldWaitForOplogVisibility(OperationContext* opCtx,
@@ -566,11 +583,6 @@ public:
      */
     virtual const CollectionPtr& getMainCollection() const = 0;
 
-    /**
-     * Fills out planning params needed for the target execution engine.
-     */
-    virtual void fillOutPlannerParamsHelper(QueryPlannerParams* plannerParams) = 0;
-
     StatusWith<std::unique_ptr<ResultType>> prepare() {
         const auto& mainColl = getMainCollection();
         if (!mainColl) {
@@ -593,7 +605,7 @@ public:
         // Fill out the planning params.  We use these for both cached solutions and non-cached.
         QueryPlannerParams plannerParams;
         plannerParams.options = _plannerOptions;
-        fillOutPlannerParamsHelper(&plannerParams);
+        fillOutPlannerParams(_opCtx, getMainCollection(), _cq, &plannerParams);
         tassert(
             5842901,
             "Fast count queries aren't supported in SBE, therefore, should never lower parts of "
@@ -777,10 +789,6 @@ public:
         return _collection;
     }
 
-    virtual void fillOutPlannerParamsHelper(QueryPlannerParams* plannerParams) override {
-        fillOutPlannerParams(_opCtx, getMainCollection(), _cq, plannerParams);
-    }
-
 protected:
     std::unique_ptr<PlanStage> buildExecutableTree(const QuerySolution& solution) const final {
         return stage_builder::buildClassicExecutableTree(_opCtx, _collection, *_cq, solution, _ws);
@@ -956,17 +964,13 @@ public:
         return _collections.getMainCollection();
     }
 
-    void fillOutPlannerParamsHelper(QueryPlannerParams* plannerParams) override {
-        fillOutPlannerParams(_opCtx, _collections, _cq, plannerParams);
-    }
-
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> buildExecutableTree(
         const QuerySolution& solution) const final {
-        // TODO SERVER-58437 We don't pass '_collections' to the function below because at the
+        // TODO SERVER-62677 We don't pass '_collections' to the function below because at the
         // moment, no pushdown is actually happening. This should be changed once the logic for
         // pushdown is implemented.
         return stage_builder::buildSlotBasedExecutableTree(
-            _opCtx, getMainCollection(), *_cq, solution, _yieldPolicy);
+            _opCtx, _collections, *_cq, solution, _yieldPolicy);
     }
 
 protected:
@@ -1069,6 +1073,10 @@ protected:
         auto sbeYieldPolicy = dynamic_cast<PlanYieldPolicySBE*>(_yieldPolicy);
         invariant(sbeYieldPolicy);
         sbeYieldPolicy->registerPlan(root.get());
+
+        // If the cached plan is parameterized, bind new values for the parameters into the runtime
+        // environment.
+        input_params::bind(*_cq, stageData.inputParamToSlotMap, stageData.env);
 
         auto result = makeResult();
         result->setDecisionWorks(cacheEntry->decisionWorks);
@@ -1190,13 +1198,20 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     PlanYieldPolicySBE* yieldPolicy,
     size_t plannerOptions,
     std::unique_ptr<plan_cache_debug_info::DebugInfoSBE> debugInfo) {
-    const auto& mainColl = collections.getMainCollection();
 
     // If we have multiple solutions, we always need to do the runtime planning.
     if (numSolutions > 1) {
         invariant(!needsSubplanning && !decisionWorks);
-        return std::make_unique<sbe::MultiPlanner>(
-            opCtx, mainColl, *canonicalQuery, PlanCachingMode::AlwaysCache, yieldPolicy);
+        QueryPlannerParams plannerParams;
+        plannerParams.options = plannerOptions;
+        fillOutPlannerParams(opCtx, collections, canonicalQuery, &plannerParams);
+
+        return std::make_unique<sbe::MultiPlanner>(opCtx,
+                                                   collections,
+                                                   *canonicalQuery,
+                                                   plannerParams,
+                                                   PlanCachingMode::AlwaysCache,
+                                                   yieldPolicy);
     }
 
     // If the query can be run as sub-queries, the needSubplanning flag will be set to true and
@@ -1210,7 +1225,7 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
         fillOutPlannerParams(opCtx, collections, canonicalQuery, &plannerParams);
 
         return std::make_unique<sbe::SubPlanner>(
-            opCtx, mainColl, *canonicalQuery, plannerParams, yieldPolicy);
+            opCtx, collections, *canonicalQuery, plannerParams, yieldPolicy);
     }
 
     invariant(numSolutions == 1);
@@ -1225,7 +1240,7 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
         fillOutPlannerParams(opCtx, collections, canonicalQuery, &plannerParams);
 
         return std::make_unique<sbe::CachedSolutionPlanner>(opCtx,
-                                                            mainColl,
+                                                            collections,
                                                             *canonicalQuery,
                                                             plannerParams,
                                                             *decisionWorks,
@@ -1311,7 +1326,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
     invariant(roots.size() == 1);
     if (!cq->pipeline().empty()) {
         // Need to extend the solution with the agg pipeline and rebuild the execution tree.
-        solutions[0] = QueryPlanner::extendWithAggPipeline(*cq, std::move(solutions[0]));
+        solutions[0] = QueryPlanner::extendWithAggPipeline(
+            *cq,
+            std::move(solutions[0]),
+            fillOutSecondaryCollectionsInformation(opCtx, collections, cq.get()));
         roots[0] = helper.buildExecutableTree(*(solutions[0]));
     }
     return plan_executor_factory::make(opCtx,
@@ -1474,11 +1492,16 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
         }
     }
 
-    if (collection && collection->isCapped() && opCtx->isEnforcingConstraints()) {
-        // System operations such as tenant migration or secondary batch application can delete
-        // from capped collections.
-        return Status(ErrorCodes::IllegalOperation,
-                      str::stream() << "cannot remove from a capped collection: " << nss.ns());
+    if (collection && collection->isCapped() && opCtx->inMultiDocumentTransaction()) {
+        // This check is duplicated from CollectionImpl::deleteDocument() for two reasons:
+        // - Performing a remove on an empty capped collection would not call
+        //   CollectionImpl::deleteDocument().
+        // - We can avoid doing lookups on documents and erroring later when trying to delete them.
+        return Status(
+            ErrorCodes::IllegalOperation,
+            str::stream()
+                << "Cannot remove from a capped collection in a multi-document transaction: "
+                << nss.ns());
     }
 
     bool userInitiatedWritesAndNotPrimary = opCtx->writesAreReplicated() &&
@@ -2413,7 +2436,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorForS
 
     auto dn = std::make_unique<DistinctNode>(plannerParams.indices[distinctNodeIndex]);
     dn->direction = 1;
-    IndexBoundsBuilder::allValuesBounds(dn->index.keyPattern, &dn->bounds);
+    IndexBoundsBuilder::allValuesBounds(
+        dn->index.keyPattern, &dn->bounds, dn->index.collator != nullptr);
     dn->queryCollator = collator;
     dn->fieldNo = 0;
 

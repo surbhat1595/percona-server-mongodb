@@ -68,8 +68,10 @@ namespace {
  */
 class ViewCatalogWriter {
 public:
-    ViewCatalogWriter(Mutex& mutex, std::shared_ptr<ViewCatalog>* storage)
-        : _mutex(mutex), _storage(storage) {}
+    ViewCatalogWriter(Mutex& mutex,
+                      std::shared_ptr<const ViewCatalog> instance,
+                      std::shared_ptr<ViewCatalog>* storage)
+        : _mutex(mutex), _read(std::move(instance)), _storage(storage) {}
 
     ViewCatalogWriter(ViewCatalogWriter&&) = delete;
     ViewCatalogWriter& operator=(ViewCatalogWriter&&) = delete;
@@ -78,22 +80,26 @@ public:
         if (_write)
             return _write.get();
 
-        // TODO (SERVER-57250): This atomic_load will be deprecated in C++20
-        return atomic_load(_storage).get();
+        return _read.get();
     }
 
     ViewCatalog* writable() {
         if (!_write) {
             _lock = stdx::unique_lock<Mutex>(_mutex);
             // TODO (SERVER-57250): This atomic_load will be deprecated in C++20
+            // We must copy from `_storage` here under the lock so we include any changes that may
+            // have happened since we copied '_read'.
             _write = std::make_shared<ViewCatalog>(*atomic_load(_storage));
+            _read.reset();
         }
         return _write.get();
     }
 
     void commit() {
         if (_write) {
-            atomic_store(_storage, std::move(_write));
+            atomic_store(_storage, _write);
+            // Set _read and clear _write so we can use this instance in read mode after the commit.
+            _read = std::move(_write);
             _lock.unlock();
         }
     }
@@ -101,16 +107,14 @@ public:
 private:
     Mutex& _mutex;
     stdx::unique_lock<Mutex> _lock;
+    std::shared_ptr<const ViewCatalog> _read;
     std::shared_ptr<ViewCatalog> _write;
     std::shared_ptr<ViewCatalog>* _storage;
 };
 
 /**
- * Decoration on the Database object for storing the latest ViewCatalog instance and its associated
+ * Decoration on the ServiceContext for storing the latest ViewCatalog instance and its associated
  * write mutex.
- *
- * We don't want a non-const Database to be required to do modifications on the ViewCatalog, so all
- * members of this class are mutable.
  */
 class ViewCatalogStorage {
 public:
@@ -118,15 +122,15 @@ public:
         return atomic_load(&_catalog);
     }
 
-    void set(std::shared_ptr<ViewCatalog> instance) const {
+    void set(std::shared_ptr<ViewCatalog> instance) {
         atomic_store(&_catalog, std::move(instance));
     }
 
-    ViewCatalogWriter writer() const {
-        return ViewCatalogWriter(_mutex, &_catalog);
+    ViewCatalogWriter writer() {
+        return ViewCatalogWriter(_mutex, get(), &_catalog);
     }
 
-    void setIgnoreExternalChange(StringData dbName, bool value) const {
+    void setIgnoreExternalChange(StringData dbName, bool value) {
         stdx::lock_guard lk{_externalChangeMutex};
         if (value) {
             _ignoreExternalChange.emplace(dbName);
@@ -142,11 +146,11 @@ public:
     }
 
 private:
-    mutable std::shared_ptr<ViewCatalog> _catalog = std::make_shared<ViewCatalog>();
+    std::shared_ptr<ViewCatalog> _catalog = std::make_shared<ViewCatalog>();
     mutable Mutex _mutex = MONGO_MAKE_LATCH("ViewCatalogStorage::_mutex");  // Serializes writes
     mutable Mutex _externalChangeMutex = MONGO_MAKE_LATCH(
         "ViewCatalogStorage::_externalChangeMutex");  // Guards _ignoreExternalChange set
-    mutable StringSet _ignoreExternalChange;
+    StringSet _ignoreExternalChange;
 };  // namespace
 const auto getViewCatalog = ServiceContext::declareDecoration<ViewCatalogStorage>();
 
@@ -188,7 +192,7 @@ Status ViewCatalog::registerDatabase(OperationContext* opCtx,
 
 void ViewCatalog::unregisterDatabase(OperationContext* opCtx, Database* db) {
     auto catalog = getViewCatalog(opCtx->getServiceContext()).writer();
-    auto it = catalog.writable()->_viewsForDatabase.find(db->name());
+    auto it = catalog.writable()->_viewsForDatabase.find(db->name().dbName());
     if (it != catalog.writable()->_viewsForDatabase.end() && it->second.durable->belongsTo(db)) {
         catalog.writable()->_viewsForDatabase.erase(it);
         catalog.commit();
@@ -278,7 +282,9 @@ Status ViewCatalog::_reload(OperationContext* opCtx,
             CollectionCatalog::write(
                 opCtx,
                 [&dbName, viewsForDb = std::move(viewNamesForDb)](CollectionCatalog& catalog) {
-                    catalog.replaceViewsForDatabase(dbName, std::move(viewsForDb));
+                    // TODO SERVER-63206: Use instead TenantDatabaseName passed in by caller.
+                    catalog.replaceViewsForDatabase(TenantDatabaseName(boost::none, dbName),
+                                                    std::move(viewsForDb));
                 });
         }
     } catch (const DBException& ex) {
@@ -314,8 +320,9 @@ void ViewCatalog::clear(OperationContext* opCtx, StringData dbName) {
     vfdb.valid = true;
     vfdb.viewGraphNeedsRefresh = false;
     vfdb.stats = {};
+    // TODO SERVER-63206: Use instead TenantDatabaseName passed in by caller.
     CollectionCatalog::write(opCtx, [db = dbName.toString()](CollectionCatalog& catalog) {
-        catalog.replaceViewsForDatabase(db, {});
+        catalog.replaceViewsForDatabase(TenantDatabaseName(boost::none, db), {});
     });
     catalog.commit();
 }
@@ -581,7 +588,7 @@ Status ViewCatalog::createView(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    const auto& catalogStorage = getViewCatalog(opCtx->getServiceContext());
+    auto& catalogStorage = getViewCatalog(opCtx->getServiceContext());
     auto catalog = catalogStorage.writer();
 
     if (viewName.db() != viewOn.db())
@@ -623,7 +630,7 @@ Status ViewCatalog::modifyView(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    const auto& catalogStorage = getViewCatalog(opCtx->getServiceContext());
+    auto& catalogStorage = getViewCatalog(opCtx->getServiceContext());
     auto catalog = catalogStorage.writer();
 
     if (viewName.db() != viewOn.db())
@@ -676,7 +683,7 @@ Status ViewCatalog::dropView(OperationContext* opCtx, const NamespaceString& vie
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    const auto& catalogStorage = getViewCatalog(opCtx->getServiceContext());
+    auto& catalogStorage = getViewCatalog(opCtx->getServiceContext());
     auto catalog = catalogStorage.writer();
 
     auto it = catalog.writable()->_viewsForDatabase.find(viewName.db());

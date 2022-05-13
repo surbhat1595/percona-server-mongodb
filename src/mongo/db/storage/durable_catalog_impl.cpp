@@ -40,7 +40,6 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/multitenancy.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -401,6 +400,48 @@ std::string DurableCatalogImpl::getIndexIdent(OperationContext* opCtx,
     BSONObj obj = _findEntry(opCtx, catalogId);
     BSONObj idxIdent = obj["idxIdent"].Obj();
     return idxIdent[idxName].String();
+}
+
+std::vector<std::string> DurableCatalogImpl::getIndexIdents(OperationContext* opCtx,
+                                                            RecordId catalogId) const {
+    std::vector<std::string> idents;
+
+    BSONObj obj = _findEntry(opCtx, catalogId);
+    if (obj["idxIdent"].eoo()) {
+        // No index entries for this catalog entry.
+        return idents;
+    }
+
+    BSONObj idxIdent = obj["idxIdent"].Obj();
+
+    BSONObjIterator it(idxIdent);
+    while (it.more()) {
+        BSONElement elem = it.next();
+        idents.push_back(elem.String());
+    }
+
+    return idents;
+}
+
+bool DurableCatalogImpl::isIndexInEntry(OperationContext* opCtx,
+                                        RecordId catalogId,
+                                        StringData idxIdent) const {
+    BSONObj obj = _findEntry(opCtx, catalogId);
+    if (obj["idxIdent"].eoo()) {
+        return false;
+    }
+
+    BSONObj idxIdentObj = obj["idxIdent"].Obj();
+
+    BSONObjIterator it(idxIdentObj);
+    while (it.more()) {
+        BSONElement elem = it.next();
+        if (elem.valueStringData() == idxIdent) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 BSONObj DurableCatalogImpl::_findEntry(OperationContext* opCtx, RecordId catalogId) const {

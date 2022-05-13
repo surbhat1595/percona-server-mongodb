@@ -81,6 +81,12 @@ public:
                                       RecordId id,
                                       StringData idxName) const = 0;
 
+    virtual std::vector<std::string> getIndexIdents(OperationContext* opCtx, RecordId id) const = 0;
+
+    virtual bool isIndexInEntry(OperationContext* opCtx,
+                                RecordId id,
+                                StringData idxIdent) const = 0;
+
     virtual BSONObj getCatalogEntry(OperationContext* opCtx, RecordId catalogId) const = 0;
 
     virtual std::shared_ptr<BSONCollectionCatalogEntry::MetaData> getMetaData(

@@ -112,6 +112,7 @@ DepsTracker::State DocumentSourceChangeStreamUnwindTransaction::getDependencies(
     deps->fields.insert(repl::OplogEntry::kSessionIdFieldName.toString());
     deps->fields.insert(repl::OplogEntry::kTermFieldName.toString());
     deps->fields.insert(repl::OplogEntry::kTxnNumberFieldName.toString());
+    deps->fields.insert(repl::OplogEntry::kWallClockTimeFieldName.toString());
 
     return DepsTracker::State::SEE_NEXT;
 }
@@ -206,6 +207,11 @@ DocumentSourceChangeStreamUnwindTransaction::TransactionOpIterator::TransactionO
                                                       << input[repl::OpTime::kTermFieldName]));
     _clusterTime = txnOpTime.getTimestamp();
 
+    Value wallTime = input[repl::OplogEntry::kWallClockTimeFieldName];
+    DocumentSourceChangeStream::checkValueType(
+        wallTime, repl::OplogEntry::kWallClockTimeFieldName, BSONType::Date);
+    _wallTime = wallTime.getDate();
+
     auto commandObj = input["o"].getDocument();
     Value applyOps = commandObj["applyOps"];
 
@@ -268,6 +274,7 @@ DocumentSourceChangeStreamUnwindTransaction::TransactionOpIterator::TransactionO
 
     // Initialize iterators at the beginning of the transaction.
     _currentApplyOpsIt = _currentApplyOps.getArray().begin();
+    _currentApplyOpsTs = firstTimestamp.getTimestamp();
     _currentApplyOpsIndex = 0;
     _txnOpIndex = 0;
 }
@@ -304,6 +311,7 @@ DocumentSourceChangeStreamUnwindTransaction::TransactionOpIterator::getNextTrans
                 BSONType::Array == bsonOp["applyOps"].type());
 
         _currentApplyOps = Value(bsonOp["applyOps"]);
+        _currentApplyOpsTs = applyOpsEntry.getTimestamp();
         _currentApplyOpsIt = _currentApplyOps.getArray().begin();
         _currentApplyOpsIndex = 0;
     }
@@ -338,11 +346,13 @@ DocumentSourceChangeStreamUnwindTransaction::TransactionOpIterator::_addRequired
     // the current entry.
     newDoc.addField(DocumentSourceChangeStream::kApplyOpsIndexField,
                     Value(static_cast<long long>(applyOpsIndex())));
+    newDoc.addField(DocumentSourceChangeStream::kApplyOpsTsField, Value(applyOpsTs()));
 
     newDoc.addField(repl::OplogEntry::kTimestampFieldName, Value(_clusterTime));
     newDoc.addField(repl::OplogEntry::kSessionIdFieldName, Value(_lsid));
     newDoc.addField(repl::OplogEntry::kTxnNumberFieldName,
                     Value(static_cast<long long>(_txnNumber)));
+    newDoc.addField(repl::OplogEntry::kWallClockTimeFieldName, Value(_wallTime));
 
     return newDoc.freeze();
 }

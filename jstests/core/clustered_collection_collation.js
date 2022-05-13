@@ -17,11 +17,6 @@ load("jstests/libs/collection_drop_recreate.js");  // For assertDropCollection.
 load("jstests/libs/clustered_collections/clustered_collection_util.js");
 load("jstests/libs/clustered_collections/clustered_collection_hint_common.js");
 
-if (ClusteredCollectionUtil.areClusteredIndexesEnabled(db.getMongo()) == false) {
-    jsTestLog('Skipping test because the clustered indexes feature flag is disabled');
-    return;
-}
-
 const collatedName = 'clustered_collection_with_collation';
 const collated = db[collatedName];
 
@@ -138,6 +133,18 @@ const verifyNoBoundsAndFindsN = function(coll, expected, predicate, queryCollati
     assert.eq(expected, coll.find(predicate).count(), "Didn't find the expected records");
 };
 
+const verifyNoTightBoundsAndFindsN = function(coll, expected, predicate, queryCollation) {
+    const res = queryCollation === undefined
+        ? assert.commandWorked(coll.find(predicate).explain())
+        : assert.commandWorked(coll.find(predicate).collation(queryCollation).explain());
+    const min = res.queryPlanner.winningPlan.minRecord;
+    const max = res.queryPlanner.winningPlan.maxRecord;
+    assert.neq(null, min, "No min bound");
+    assert.neq(null, max, "No max bound");
+    assert.neq(min, max, "COLLSCAN bounds are equal");
+    assert.eq(expected, coll.find(predicate).count(), "Didn't find the expected records");
+};
+
 const testBounds = function(coll, expected, defaultCollation) {
     // Test non string types.
     verifyHasBoundsAndFindsN(coll, 1, {_id: 5});
@@ -160,10 +167,10 @@ const testBounds = function(coll, expected, defaultCollation) {
     verifyNoBoundsAndFindsN(coll, expected, {data: ["a", "B"]});
 
     // Test non compatible query collations don't generate bounds
-    verifyNoBoundsAndFindsN(coll, expected, {_id: "A"}, incompatibleCollation);
-    verifyNoBoundsAndFindsN(coll, expected, {_id: {str: "A"}}, incompatibleCollation);
-    verifyNoBoundsAndFindsN(coll, expected, {_id: {strs: ["A", "b"]}}, incompatibleCollation);
-    verifyNoBoundsAndFindsN(coll, expected, {_id: {strs: ["a", "B"]}}, incompatibleCollation);
+    verifyNoTightBoundsAndFindsN(coll, expected, {_id: "A"}, incompatibleCollation);
+    verifyNoTightBoundsAndFindsN(coll, expected, {_id: {str: "A"}}, incompatibleCollation);
+    verifyNoTightBoundsAndFindsN(coll, expected, {_id: {strs: ["A", "b"]}}, incompatibleCollation);
+    verifyNoTightBoundsAndFindsN(coll, expected, {_id: {strs: ["a", "B"]}}, incompatibleCollation);
 
     // Test compatible query collations generate bounds
     verifyHasBoundsAndFindsN(coll, expected, {_id: "A"}, defaultCollation);
@@ -195,7 +202,7 @@ validateClusteredCollectionHint(collated, {
     expectedNReturned: 2,
     cmd: {find: collatedName, hint: {_id: 1}, min: {_id: "a"}, max: {_id: "C"}},
     expectedWinningPlanStats: {
-        stage: "COLLSCAN",
+        stage: "CLUSTERED_IXSCAN",
         direction: "forward",
         minRecord: collatedEncodings["a"],
         maxRecord: collatedEncodings["C"]
@@ -209,7 +216,7 @@ validateClusteredCollectionHint(noncollated, {
     expectedNReturned: 3,  // "a", "b" and "B"
     cmd: {find: noncollatedName, hint: {_id: 1}, min: {_id: "A"}, max: {_id: "c"}},
     expectedWinningPlanStats:
-        {stage: "COLLSCAN", direction: "forward", minRecord: "A", maxRecord: "c"}
+        {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: "A", maxRecord: "c"}
 });
 
 // Strings with incompatible collation.
@@ -241,12 +248,14 @@ assert.commandFailedWithCode(
 validateClusteredCollectionHint(collated, {
     expectedNReturned: 2,
     cmd: {find: collatedName, hint: {_id: 1}, min: {_id: 5}, max: {_id: 11}},
-    expectedWinningPlanStats: {stage: "COLLSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
+    expectedWinningPlanStats:
+        {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
 });
 validateClusteredCollectionHint(noncollated, {
     expectedNReturned: 2,
     cmd: {find: noncollatedName, hint: {_id: 1}, min: {_id: 5}, max: {_id: 11}},
-    expectedWinningPlanStats: {stage: "COLLSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
+    expectedWinningPlanStats:
+        {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
 });
 
 // Numeric with incompatible collation.
@@ -259,7 +268,8 @@ validateClusteredCollectionHint(collated, {
         max: {_id: 11},
         collation: incompatibleCollation
     },
-    expectedWinningPlanStats: {stage: "COLLSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
+    expectedWinningPlanStats:
+        {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
 });
 validateClusteredCollectionHint(noncollated, {
     expectedNReturned: 2,
@@ -270,6 +280,7 @@ validateClusteredCollectionHint(noncollated, {
         max: {_id: 11},
         collation: incompatibleCollation
     },
-    expectedWinningPlanStats: {stage: "COLLSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
+    expectedWinningPlanStats:
+        {stage: "CLUSTERED_IXSCAN", direction: "forward", minRecord: 5, maxRecord: 11}
 });
 })();

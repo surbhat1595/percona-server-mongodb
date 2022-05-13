@@ -32,6 +32,7 @@
 
 #include "mongo/db/process_health/fault_manager.h"
 
+#include "mongo/db/concurrency/locker_noop_client_observer.h"
 #include "mongo/db/process_health/health_observer_mock.h"
 #include "mongo/db/process_health/health_observer_registration.h"
 #include "mongo/executor/network_interface_factory.h"
@@ -136,6 +137,8 @@ public:
             _svcCtx->setFastClockSource(std::make_unique<ClockSourceMock>());
             _svcCtx->setPreciseClockSource(std::make_unique<ClockSourceMock>());
             _svcCtx->setTickSource(std::make_unique<TickSourceMock<Milliseconds>>());
+            _svcCtx->registerClientObserver(
+                std::make_unique<LockerNoopClientObserverWithReplacementPolicy>());
             advanceTime(Seconds(100));
         }
     }
@@ -254,21 +257,6 @@ public:
         ASSERT(false);
     }
 
-    static inline const Milliseconds kCheckTimeIncrement{100};
-    void assertSoonWithHealthCheck(std::function<bool()> predicate,
-                                   Milliseconds timeout = kWaitTimeout) {
-        auto predicate2 = [=]() {
-            if (predicate())
-                return true;
-            else {
-                advanceTime(kCheckTimeIncrement);
-                manager().schedulePeriodicHealthCheckThreadTest();
-                return false;
-            }
-        };
-        assertSoon(predicate2, timeout);
-    }
-
     bool hasFault() {
         return static_cast<bool>(manager().currentFault());
     }
@@ -282,7 +270,7 @@ public:
     }
 
     void waitForTransitionIntoState(FaultState state) {
-        assertSoonWithHealthCheck([=]() { return manager().getFaultState() == state; });
+        assertSoon([=]() { return manager().getFaultState() == state; });
     }
 
 private:

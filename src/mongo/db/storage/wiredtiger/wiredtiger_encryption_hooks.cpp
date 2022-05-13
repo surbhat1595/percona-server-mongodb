@@ -109,16 +109,17 @@ bool WiredTigerEncryptionHooks::restartRequired() {
 }
 
 StatusWith<std::vector<BackupBlock>> WiredTigerEncryptionHooks::beginNonBlockingBackup(
-    const StorageEngine::BackupOptions& options) {
-    return _encryptionKeyDB->beginNonBlockingBackup(options);
+    OperationContext* opCtx, const StorageEngine::BackupOptions& options) {
+    return _encryptionKeyDB->beginNonBlockingBackup(opCtx, options);
 }
 
-Status WiredTigerEncryptionHooks::endNonBlockingBackup() {
-    return _encryptionKeyDB->endNonBlockingBackup();
+Status WiredTigerEncryptionHooks::endNonBlockingBackup(OperationContext* opCtx) {
+    return _encryptionKeyDB->endNonBlockingBackup(opCtx);
 }
 
-StatusWith<std::vector<std::string>> WiredTigerEncryptionHooks::extendBackupCursor() {
-    return _encryptionKeyDB->extendBackupCursor();
+StatusWith<std::vector<std::string>> WiredTigerEncryptionHooks::extendBackupCursor(
+    OperationContext* opCtx) {
+    return _encryptionKeyDB->extendBackupCursor(opCtx);
 }
 
 const unsigned char* WiredTigerEncryptionHooks::dbKey(boost::optional<std::string> dbName,

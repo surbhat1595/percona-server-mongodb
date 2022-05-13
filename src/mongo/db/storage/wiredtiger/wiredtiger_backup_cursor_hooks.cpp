@@ -176,7 +176,7 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
     std::vector<BackupBlock> eseBackupBlocks;
     auto* encHooks = EncryptionHooks::get(opCtx->getServiceContext());
     if (encHooks->enabled()) {
-        eseBackupBlocks = uassertStatusOK(encHooks->beginNonBlockingBackup(options));
+        eseBackupBlocks = uassertStatusOK(encHooks->beginNonBlockingBackup(opCtx, options));
     }
 
     BSONObjBuilder builder;
@@ -218,7 +218,7 @@ void WiredTigerBackupCursorHooks::_closeBackupCursor(OperationContext* opCtx,
     engine->endNonBlockingBackup(opCtx);
     auto* encHooks = EncryptionHooks::get(opCtx->getServiceContext());
     if (encHooks->enabled()) {
-        fassert(50934, encHooks->endNonBlockingBackup());
+        fassert(50934, encHooks->endNonBlockingBackup(opCtx));
     }
     LOGV2(29092, "Closed backup cursor", "backupId"_attr = backupId);
     _state = kInactive;
@@ -262,7 +262,7 @@ BackupCursorExtendState WiredTigerBackupCursorHooks::extendBackupCursor(Operatio
     // use extendBackupCursor on KeyDB
     auto* encHooks = EncryptionHooks::get(opCtx->getServiceContext());
     if (encHooks->enabled()) {
-        auto res = encHooks->extendBackupCursor();
+        auto res = encHooks->extendBackupCursor(opCtx);
         if (!res.isOK()) {
             LOGV2_FATAL(29095, "Failed to extend backup cursor", "reason"_attr = res.getStatus());
         }

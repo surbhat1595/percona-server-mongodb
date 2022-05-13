@@ -1692,7 +1692,7 @@ StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup(
 }
 
 StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
-    const StorageEngine::BackupOptions& options) {
+    OperationContext* opCtx, const StorageEngine::BackupOptions& options) {
     // incrementalBackup and disableIncrementalBackup are mutually exclusive
     // this is guaranteed by checks in DocumentSourceBackupCursor::createFromBson
     if (options.disableIncrementalBackup) {
@@ -1741,13 +1741,13 @@ StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
     return swBackupBlocks;
 }
 
-Status EncryptionKeyDB::endNonBlockingBackup() {
+Status EncryptionKeyDB::endNonBlockingBackup(OperationContext* opCtx) {
     _backupSession.reset();
     _backupCursor = nullptr;
     return Status::OK();
 }
 
-StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor() {
+StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor(OperationContext* opCtx) {
     invariant(_backupCursor);
 
     // The "target=(\"log:\")" configuration string for the cursor will ensure that we only see the

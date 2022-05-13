@@ -62,19 +62,20 @@ public:
      * along with MongoDB data files for a backup.
      */
     virtual StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
-        const StorageEngine::BackupOptions& options) override;
+        OperationContext* opCtx, const StorageEngine::BackupOptions& options) override;
 
     /**
      * Inform the encryption storage system that it can release resources associated with a
      * previous call to `beginNonBlockingBackup`. This function may be called without a pairing
      * `beginNonBlockingBackup`. In that case it must return `Status::OK()`;
      */
-    virtual Status endNonBlockingBackup() override;
+    virtual Status endNonBlockingBackup(OperationContext* opCtx) override;
 
     /**
      * Get list of log files changed since the moment of backup cursor creation
      */
-    virtual StatusWith<std::vector<std::string>> extendBackupCursor() override;
+    virtual StatusWith<std::vector<std::string>> extendBackupCursor(
+        OperationContext* opCtx) override;
 
 protected:
     EncryptionKeyDB* _encryptionKeyDB;

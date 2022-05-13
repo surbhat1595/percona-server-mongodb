@@ -90,11 +90,11 @@ public:
     void generate_secure_key(unsigned char* key);
 
     StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
-        const StorageEngine::BackupOptions& options);
+        OperationContext* opCtx, const StorageEngine::BackupOptions& options);
 
-    Status endNonBlockingBackup();
+    Status endNonBlockingBackup(OperationContext* opCtx);
 
-    StatusWith<std::vector<std::string>> extendBackupCursor();
+    StatusWith<std::vector<std::string>> extendBackupCursor(OperationContext* opCtx);
 
 private:
     typedef boost::multiprecision::uint128_t _gcm_iv_type;

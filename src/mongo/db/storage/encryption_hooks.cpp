@@ -96,15 +96,15 @@ Status EncryptionHooks::unprotectTmpData(const uint8_t* in,
 }
 
 StatusWith<std::vector<BackupBlock>> EncryptionHooks::beginNonBlockingBackup(
-    const StorageEngine::BackupOptions&) {
+    OperationContext* opCtx, const StorageEngine::BackupOptions&) {
     return std::vector<BackupBlock>();
 }
 
-Status EncryptionHooks::endNonBlockingBackup() {
+Status EncryptionHooks::endNonBlockingBackup(OperationContext* opCtx) {
     return Status::OK();
 }
 
-StatusWith<std::vector<std::string>> EncryptionHooks::extendBackupCursor() {
+StatusWith<std::vector<std::string>> EncryptionHooks::extendBackupCursor(OperationContext* opCtx) {
     return {std::vector<std::string>()};
 }
 }  // namespace mongo

@@ -30,21 +30,22 @@
 #pragma once
 
 #include "mongo/db/s/sharding_data_transform_metrics.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 class ShardingDataTransformMetricsObserverInterface {
 public:
-    virtual long getRemainingTimeMillis() const = 0;
-    virtual long getTimeRunningMillis() const = 0;
+    virtual int64_t getRemainingTimeMillis() const = 0;
+    virtual int64_t getStartTimestamp() const = 0;
+    virtual const UUID& getUuid() const = 0;
 };
 
 class ShardingDataTransformMetricsObserver : public ShardingDataTransformMetricsObserverInterface {
 public:
-    ShardingDataTransformMetricsObserver(ShardingDataTransformInstanceMetrics* metrics)
-        : _metrics(metrics) {}
-    long getRemainingTimeMillis() const override;
-
-    long getTimeRunningMillis() const override;
+    ShardingDataTransformMetricsObserver(ShardingDataTransformInstanceMetrics* metrics);
+    int64_t getRemainingTimeMillis() const override;
+    int64_t getStartTimestamp() const override;
+    const UUID& getUuid() const override;
 
 private:
     ShardingDataTransformInstanceMetrics* _metrics;

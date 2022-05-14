@@ -13,6 +13,8 @@ var $config = (function() {
     var states = (function() {
         function init(db, collName) {
             this.docNum = 0;
+            assertAlways.commandWorked(db[collName].insertOne({_id: this.docNum}));
+            checkForDocument(db[collName], this.docNum);
         }
 
         function checkForDocument(coll, docNum) {
@@ -54,7 +56,7 @@ var $config = (function() {
     })();
 
     var transitions = {
-        init: {createShardedCollection: 0.5, createUnshardedCollection: 0.5},
+        init: {dropCollection: 0.5, dropDatabase: 0.5},
         createShardedCollection: {dropCollection: 0.5, dropDatabase: 0.5},
         createUnshardedCollection: {dropCollection: 0.5, dropDatabase: 0.5},
         dropCollection: {createShardedCollection: 0.5, createUnshardedCollection: 0.5},

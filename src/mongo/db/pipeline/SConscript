@@ -475,6 +475,7 @@ env.Library(
         'change_stream_expired_pre_image_remover.cpp'
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/db_raii',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/record_id_helpers',
@@ -555,6 +556,7 @@ env.CppUnitTest(
         'document_source_internal_unpack_bucket_test/group_reorder_test.cpp',
         'document_source_internal_unpack_bucket_test/internalize_project_test.cpp',
         'document_source_internal_unpack_bucket_test/optimize_pipeline_test.cpp',
+        'document_source_internal_unpack_bucket_test/optimize_lastpoint_test.cpp',
         'document_source_internal_unpack_bucket_test/pushdown_computed_meta_projections_test.cpp',
         'document_source_internal_unpack_bucket_test/sample_reorder_test.cpp',
         'document_source_internal_unpack_bucket_test/sort_reorder_test.cpp',

@@ -32,8 +32,10 @@
 #include <boost/filesystem.hpp>
 #include <string>
 
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -53,6 +55,7 @@ class BackupBlock final {
 public:
     explicit BackupBlock(OperationContext* opCtx,
                          std::string filePath,
+                         boost::optional<Timestamp> checkpointTimestamp,
                          std::uint64_t offset = 0,
                          std::uint64_t length = 0,
                          std::uint64_t fileSize = 0);
@@ -64,12 +67,6 @@ public:
     }
 
     std::string ns() const {
-        // Remove "system.buckets." from time-series collection namespaces since it is an
-        // internal detail that is not intended to be visible externally.
-        if (_nss.isTimeseriesBucketsCollection()) {
-            return _nss.getTimeseriesViewNamespace().toString();
-        }
-
         return _nss.toString();
     }
 
@@ -85,6 +82,10 @@ public:
         return _fileSize;
     }
 
+    boost::optional<UUID> uuid() const {
+        return _uuid;
+    }
+
     /**
      * Returns whether the file must be copied regardless of choice for selective backups.
      */
@@ -92,12 +93,17 @@ public:
 
 private:
     /**
-     * Sets '_nss' for:
+     * Sets '_nss' and '_uuid' that is representative of the ident at the checkpoint timestamp for:
      * - collections
-     * - indexes, to the NSS of their respective collection
+     * - indexes, to the NSS/UUID of their respective collection
+     *
+     * The 'checkpointTimestamp' will be boost::none if the backup is being taken on a standalone
+     * node.
      * A null opCtx is ignored. A null opCtx is exercised by FCBIS unit tests.
      */
-    void _setNamespaceString(OperationContext* opCtx);
+    void _initialize(OperationContext* opCtx, boost::optional<Timestamp> checkpointTimestamp);
+    void _setNamespaceString(const NamespaceString& nss);
+    void _setUuid(OperationContext* opCtx, DurableCatalog* catalog, RecordId catalogId);
 
     const std::string _filePath;
     const std::uint64_t _offset;
@@ -106,5 +112,6 @@ private:
 
     std::string _filenameStem;
     NamespaceString _nss;
+    boost::optional<UUID> _uuid;
 };
 }  // namespace mongo

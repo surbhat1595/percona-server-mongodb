@@ -96,7 +96,9 @@ Status EncryptionHooks::unprotectTmpData(const uint8_t* in,
 }
 
 StatusWith<std::vector<BackupBlock>> EncryptionHooks::beginNonBlockingBackup(
-    OperationContext* opCtx, const StorageEngine::BackupOptions&) {
+    OperationContext* opCtx,
+    boost::optional<Timestamp> checkpointTimestamp,
+    const StorageEngine::BackupOptions&) {
     return std::vector<BackupBlock>();
 }
 

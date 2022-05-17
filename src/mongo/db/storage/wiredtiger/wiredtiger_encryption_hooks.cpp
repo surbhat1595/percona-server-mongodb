@@ -109,8 +109,10 @@ bool WiredTigerEncryptionHooks::restartRequired() {
 }
 
 StatusWith<std::vector<BackupBlock>> WiredTigerEncryptionHooks::beginNonBlockingBackup(
-    OperationContext* opCtx, const StorageEngine::BackupOptions& options) {
-    return _encryptionKeyDB->beginNonBlockingBackup(opCtx, options);
+    OperationContext* opCtx,
+    boost::optional<Timestamp> checkpointTimestamp,
+    const StorageEngine::BackupOptions& options) {
+    return _encryptionKeyDB->beginNonBlockingBackup(opCtx, checkpointTimestamp, options);
 }
 
 Status WiredTigerEncryptionHooks::endNonBlockingBackup(OperationContext* opCtx) {

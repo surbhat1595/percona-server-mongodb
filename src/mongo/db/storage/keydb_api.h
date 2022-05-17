@@ -31,6 +31,10 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 
 #pragma once
 
+namespace mongo {
+class TenantDatabaseName;
+}
+
 namespace percona {
 
 /**
@@ -43,9 +47,9 @@ struct KeyDBAPI {
     /**
      * Returns whether the engine supports feature compatibility version 3.6
      */
-    virtual void keydbDropDatabase(const std::string& db) {
+    virtual void keydbDropDatabase(const mongo::TenantDatabaseName& tenantDbName) {
         // do nothing for engines which do not support KeyDB
     }
 };
 
-}  // end of percona namespace.
+}  // namespace percona

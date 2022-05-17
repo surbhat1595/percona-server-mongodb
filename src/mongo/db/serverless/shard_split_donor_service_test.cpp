@@ -36,6 +36,7 @@
 #include "mongo/client/streamable_replica_set_monitor_for_testing.h"
 #include "mongo/db/catalog/database_holder_mock.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/op_observer_impl.h"
 #include "mongo/db/op_observer_registry.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/serverless/shard_split_donor_service.h"
 #include "mongo/db/serverless/shard_split_state_machine_gen.h"
 #include "mongo/db/serverless/shard_split_test_utils.h"
+#include "mongo/db/serverless/shard_split_utils.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
@@ -59,8 +61,10 @@
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
@@ -102,12 +106,30 @@ std::ostringstream& operator<<(std::ostringstream& builder,
         case mongo::ShardSplitDonorStateEnum::kCommitted:
             builder << "kCommitted";
             break;
-        case mongo::ShardSplitDonorStateEnum::kDataSync:
-            builder << "kDataSync";
-            break;
     }
 
     return builder;
+}
+
+void fastForwardCommittedSnapshotOpTime(
+    std::shared_ptr<ShardSplitDonorService::DonorStateMachine> instance,
+    ServiceContext* serviceContext,
+    OperationContext* opCtx,
+    const UUID& uuid) {
+    // When a state document is transitioned to kAborted, the ShardSplitDonorOpObserver will
+    // transition tenant access blockers to a kAborted state if, and only if, the abort timestamp
+    // is less than or equal to the currentCommittedSnapshotOpTime. Since we are using the
+    // ReplicationCoordinatorMock, we must manually manage the currentCommittedSnapshotOpTime
+    // using this method.
+    auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(serviceContext));
+
+    auto foundStateDoc = uassertStatusOK(serverless::getStateDocument(opCtx, uuid));
+    invariant(foundStateDoc.getCommitOrAbortOpTime());
+
+    replCoord->setCurrentCommittedSnapshotOpTime(*foundStateDoc.getCommitOrAbortOpTime());
+    serviceContext->getOpObserver()->onMajorityCommitPointUpdate(
+        serviceContext, *foundStateDoc.getCommitOrAbortOpTime());
 }
 
 class ShardSplitDonorServiceTest : public repl::PrimaryOnlyServiceMongoDTest {
@@ -150,7 +172,6 @@ protected:
                        << _recipientTagName << "recipientSetName" << _recipientSetName));
     }
 
-
     UUID _uuid = UUID::gen();
     MockReplicaSet _replSet{
         "donorSetForTest", 3, true /* hasPrimary */, false /* dollarPrefixHosts */};
@@ -173,7 +194,7 @@ TEST_F(ShardSplitDonorServiceTest, BasicShardSplitDonorServiceInstanceCreation) 
     ASSERT(serviceInstance.get());
     ASSERT_EQ(_uuid, serviceInstance->getId());
 
-    auto completionFuture = serviceInstance->completionFuture();
+    auto decisionFuture = serviceInstance->decisionFuture();
 
     std::shared_ptr<TopologyDescription> topologyDescriptionOld =
         std::make_shared<sdam::TopologyDescription>(sdam::SdamConfiguration());
@@ -192,27 +213,29 @@ TEST_F(ShardSplitDonorServiceTest, BasicShardSplitDonorServiceInstanceCreation) 
 
     publisher->onTopologyDescriptionChangedEvent(topologyDescriptionOld, topologyDescriptionNew);
 
-    completionFuture.wait();
+    decisionFuture.wait();
 
-    auto result = completionFuture.get();
+    auto result = decisionFuture.get();
     ASSERT(!result.abortReason);
     ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kCommitted);
+
+    serviceInstance->tryForget();
+
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 }
 
 TEST_F(ShardSplitDonorServiceTest, ShardSplitDonorServiceTimeout) {
     auto opCtx = makeOperationContext();
+    auto serviceContext = getServiceContext();
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _replSet.getHosts());
+        serviceContext, _recipientTagName, _replSet.getHosts());
 
     auto stateDocument = defaultStateDocument();
 
     // Set a timeout of 200 ms, and make sure we reset after this test is run
-    ON_BLOCK_EXIT([splitTimout = repl::shardSplitTimeoutMS.load()] {
-        repl::shardSplitTimeoutMS.store(splitTimout);
-    });
-
-    repl::shardSplitTimeoutMS.store(200);
+    RAIIServerParameterControllerForTest controller{"shardSplitTimeoutMS", 200};
 
     // Create and start the instance.
     auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
@@ -220,12 +243,18 @@ TEST_F(ShardSplitDonorServiceTest, ShardSplitDonorServiceTimeout) {
     ASSERT(serviceInstance.get());
     ASSERT_EQ(_uuid, serviceInstance->getId());
 
-    auto completionFuture = serviceInstance->completionFuture();
+    auto decisionFuture = serviceInstance->decisionFuture();
 
-    auto result = completionFuture.get();
+    auto result = decisionFuture.get();
 
     ASSERT(result.abortReason);
     ASSERT_EQ(result.abortReason->code(), ErrorCodes::ExceededTimeLimit);
+
+    fastForwardCommittedSnapshotOpTime(serviceInstance, serviceContext, opCtx.get(), _uuid);
+    serviceInstance->tryForget();
+
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 }
 
 // Abort scenario : abortSplit called before startSplit.
@@ -241,24 +270,30 @@ TEST_F(ShardSplitDonorServiceTest, CreateInstanceInAbortState) {
         opCtx.get(), _service, stateDocument.toBSON());
     ASSERT(serviceInstance.get());
 
-    auto result = serviceInstance->completionFuture().get(opCtx.get());
+    auto result = serviceInstance->decisionFuture().get(opCtx.get());
 
     ASSERT(!!result.abortReason);
     ASSERT_EQ(result.abortReason->code(), ErrorCodes::TenantMigrationAborted);
     ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kAborted);
+
+    serviceInstance->tryForget();
+
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 }
 
 // Abort scenario : instance created through startSplit then calling abortSplit.
 TEST_F(ShardSplitDonorServiceTest, CreateInstanceThenAbort) {
     auto opCtx = makeOperationContext();
+    auto serviceContext = getServiceContext();
 
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _replSet.getHosts());
+        serviceContext, _recipientTagName, _replSet.getHosts());
 
     std::shared_ptr<ShardSplitDonorService::DonorStateMachine> serviceInstance;
     {
-        FailPointEnableBlock fp("pauseShardSplitAfterInitialSync");
+        FailPointEnableBlock fp("pauseShardSplitBeforeBlocking");
         auto initialTimesEntered = fp.initialTimesEntered();
 
         serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
@@ -269,11 +304,18 @@ TEST_F(ShardSplitDonorServiceTest, CreateInstanceThenAbort) {
 
         serviceInstance->tryAbort();
     }
-    auto result = serviceInstance->completionFuture().get(opCtx.get());
+
+    auto result = serviceInstance->decisionFuture().get(opCtx.get());
 
     ASSERT(!!result.abortReason);
     ASSERT_EQ(result.abortReason->code(), ErrorCodes::TenantMigrationAborted);
     ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kAborted);
+
+    fastForwardCommittedSnapshotOpTime(serviceInstance, serviceContext, opCtx.get(), _uuid);
+    serviceInstance->tryForget();
+
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 }
 
 TEST_F(ShardSplitDonorServiceTest, StepDownTest) {
@@ -285,7 +327,7 @@ TEST_F(ShardSplitDonorServiceTest, StepDownTest) {
     std::shared_ptr<ShardSplitDonorService::DonorStateMachine> serviceInstance;
 
     {
-        FailPointEnableBlock fp("pauseShardSplitAfterInitialSync");
+        FailPointEnableBlock fp("pauseShardSplitBeforeBlocking");
         auto initialTimesEntered = fp.initialTimesEntered();
 
         serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
@@ -297,9 +339,120 @@ TEST_F(ShardSplitDonorServiceTest, StepDownTest) {
         stepDown();
     }
 
-    auto result = serviceInstance->completionFuture().getNoThrow();
+    auto result = serviceInstance->decisionFuture().getNoThrow();
     ASSERT_FALSE(result.isOK());
     ASSERT_EQ(ErrorCodes::InterruptedDueToReplStateChange, result.getStatus());
+
+    ASSERT_EQ(serviceInstance->completionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+    ASSERT_FALSE(serviceInstance->isGarbageCollectable());
+}
+
+// TODO(SERVER-62363) : Remove this test once the ticket is completed.
+DEATH_TEST_F(ShardSplitDonorServiceTest, StartWithExpireAtAlreadySet, "invariant") {
+    auto opCtx = makeOperationContext();
+
+    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
+
+    auto stateDocument = defaultStateDocument();
+    stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
+
+    auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
+        opCtx.get(), _service, stateDocument.toBSON());
+
+    ASSERT(serviceInstance.get());
+
+    // this triggers an invariant updateResult.numDocsModified == 1 in _updateStateDocument when
+    // going in the _handleErrorOrEnterAbortedState.
+    auto result = serviceInstance->decisionFuture().get(opCtx.get());
+}
+
+TEST_F(ShardSplitDonorServiceTest, StepUpWithkCommitted) {
+    auto opCtx = makeOperationContext();
+
+    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
+    test::shard_split::reconfigToAddRecipientNodes(
+        getServiceContext(), _recipientTagName, _replSet.getHosts());
+
+    auto nss = NamespaceString::kTenantSplitDonorsNamespace;
+    auto stateDocument = defaultStateDocument();
+    stateDocument.setState(ShardSplitDonorStateEnum::kUninitialized);
+
+    // insert the document for the first time.
+    ASSERT_OK(serverless::insertStateDoc(opCtx.get(), stateDocument));
+
+    {
+        // update to kCommitted
+        stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
+        boost::optional<mongo::Date_t> expireAt = getServiceContext()->getFastClockSource()->now() +
+            Milliseconds{repl::shardSplitGarbageCollectionDelayMS.load()};
+        stateDocument.setExpireAt(expireAt);
+        stateDocument.setBlockTimestamp(Timestamp(1, 1));
+        stateDocument.setCommitOrAbortOpTime(repl::OpTime(Timestamp(1, 1), 1));
+
+        ASSERT_OK(serverless::updateStateDoc(opCtx.get(), stateDocument));
+
+        auto foundStateDoc = uassertStatusOK(serverless::getStateDocument(opCtx.get(), _uuid));
+        invariant(foundStateDoc.getExpireAt());
+        ASSERT_EQ(*foundStateDoc.getExpireAt(), *expireAt);
+    }
+
+    auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
+        opCtx.get(), _service, stateDocument.toBSON());
+    ASSERT(serviceInstance.get());
+
+    auto result = serviceInstance->decisionFuture().get();
+    ASSERT(!result.abortReason);
+    ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kCommitted);
+
+    // we don't need to call tryForget since expireAt is already set the completionPromise will
+    // complete.
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
+}
+
+TEST_F(ShardSplitDonorServiceTest, TimeoutAbortsAwaitReplication) {
+    auto opCtx = makeOperationContext();
+    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
+    test::shard_split::reconfigToAddRecipientNodes(
+        getServiceContext(), _recipientTagName, _replSet.getHosts());
+
+    RAIIServerParameterControllerForTest controller{"shardSplitTimeoutMS", 200};
+
+    AtomicWord<bool> sleptForWaitingForBlockTimestamp{false};
+    std::shared_ptr<ShardSplitDonorService::DonorStateMachine> serviceInstance;
+    {
+        FailPointEnableBlock fp("pauseShardSplitAfterBlocking");
+        serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
+            opCtx.get(), _service, defaultStateDocument().toBSON());
+        ASSERT(serviceInstance.get());
+
+        fp->waitForTimesEntered(fp.initialTimesEntered() + 1);
+
+        auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
+            repl::ReplicationCoordinator::get(cc().getServiceContext()));
+        replCoord->setAwaitReplicationReturnValueFunction(
+            [&sleptForWaitingForBlockTimestamp](OperationContext* opCtx, const repl::OpTime&) {
+                bool alreadySlept = false;
+                if (sleptForWaitingForBlockTimestamp.compareAndSwap(&alreadySlept, true)) {
+                    opCtx->sleepFor(Hours{1});
+                }
+
+                return repl::ReplicationCoordinator::StatusAndDuration(Status::OK(),
+                                                                       Milliseconds(0));
+            });
+    }
+
+    uassertStatusOK(serviceInstance->decisionFuture().getNoThrow());
+    auto result = serviceInstance->decisionFuture().get(opCtx.get());
+    ASSERT(result.abortReason);
+    ASSERT_EQ(result.abortReason->code(), ErrorCodes::ExceededTimeLimit);
+
+    fastForwardCommittedSnapshotOpTime(serviceInstance, getServiceContext(), opCtx.get(), _uuid);
+    serviceInstance->tryForget();
+
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 }
 
 class SplitReplicaSetObserverTest : public ServiceContextTest {

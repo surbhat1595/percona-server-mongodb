@@ -301,6 +301,7 @@ let viewsCommandTests = {
     donorWaitForMigrationToCommit: {skip: isUnrelated},
     abortShardSplit: {skip: isUnrelated},
     commitShardSplit: {skip: isUnrelated},
+    forgetShardSplit: {skip: isUnrelated},
     driverOIDTest: {skip: isUnrelated},
     drop: {command: {drop: "view"}},
     dropAllRolesFromDatabase: {skip: isUnrelated},
@@ -586,6 +587,7 @@ let viewsCommandTests = {
     setFreeMonitoring: {skip: isUnrelated},
     setParameter: {skip: isUnrelated},
     setShardVersion: {skip: isUnrelated},
+    setUserWriteBlockMode: {skip: isUnrelated},
     shardCollection: {
         command: {shardCollection: "test.view", key: {_id: 1}},
         setup: function(conn) {

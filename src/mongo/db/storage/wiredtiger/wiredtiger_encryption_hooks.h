@@ -62,7 +62,9 @@ public:
      * along with MongoDB data files for a backup.
      */
     virtual StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
-        OperationContext* opCtx, const StorageEngine::BackupOptions& options) override;
+        OperationContext* opCtx,
+        boost::optional<Timestamp> checkpointTimestamp,
+        const StorageEngine::BackupOptions& options) override;
 
     /**
      * Inform the encryption storage system that it can release resources associated with a

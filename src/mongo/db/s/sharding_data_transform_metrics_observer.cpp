@@ -28,8 +28,10 @@
  */
 
 #include "mongo/db/s/sharding_data_transform_metrics_observer.h"
-#include "mongo/util/assert_util.h"
 
+namespace {
+constexpr int64_t kPlaceholderTimeRemainingForTesting = 0;
+}
 namespace mongo {
 
 ShardingDataTransformMetricsObserver::ShardingDataTransformMetricsObserver(
@@ -37,15 +39,15 @@ ShardingDataTransformMetricsObserver::ShardingDataTransformMetricsObserver(
     : _metrics(metrics) {}
 
 int64_t ShardingDataTransformMetricsObserver::getRemainingTimeMillis() const {
-    MONGO_UNREACHABLE;
+    return kPlaceholderTimeRemainingForTesting;
 }
 
 int64_t ShardingDataTransformMetricsObserver::getStartTimestamp() const {
-    MONGO_UNREACHABLE;
+    return _metrics->getStartTimestamp();
 }
 
 const UUID& ShardingDataTransformMetricsObserver::getUuid() const {
-    MONGO_UNREACHABLE;
+    return _metrics->getUuid();
 }
 
 }  // namespace mongo

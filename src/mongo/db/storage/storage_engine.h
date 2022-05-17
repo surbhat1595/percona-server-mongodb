@@ -236,12 +236,14 @@ public:
     /**
      * Closes all file handles associated with a database.
      */
-    virtual Status closeDatabase(OperationContext* opCtx, StringData db) = 0;
+    virtual Status closeDatabase(OperationContext* opCtx,
+                                 const TenantDatabaseName& tenantDbName) = 0;
 
     /**
      * Deletes all data and metadata for a database.
      */
-    virtual Status dropDatabase(OperationContext* opCtx, StringData db) = 0;
+    virtual Status dropDatabase(OperationContext* opCtx,
+                                const TenantDatabaseName& tenantDbName) = 0;
 
     /**
      * Checkpoints the data to disk.
@@ -334,7 +336,9 @@ public:
     };
 
     virtual StatusWith<std::unique_ptr<StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx, const BackupOptions& options) = 0;
+        OperationContext* opCtx,
+        boost::optional<Timestamp> checkpointTimestamp,
+        const BackupOptions& options) = 0;
 
     virtual void endNonBlockingBackup(OperationContext* opCtx) = 0;
 
@@ -456,9 +460,10 @@ public:
                                      DropIdentCallback&& onDrop = nullptr) = 0;
 
     /**
-     * Periodically drop idents queued by addDropPendingIdent.
+     * Starts the timestamp monitor. This periodically drops idents queued by addDropPendingIdent,
+     * and removes historical ident entries no longer necessary.
      */
-    virtual void startDropPendingIdentReaper() = 0;
+    virtual void startTimestampMonitor() = 0;
 
     /**
      * Called when the checkpoint thread instructs the storage engine to take a checkpoint. The
@@ -622,9 +627,10 @@ public:
     /**
      * Returns the path to the directory which has the data files of database with `dbName`.
      */
-    virtual std::string getFilesystemPathForDb(const std::string& dbName) const = 0;
+    virtual std::string getFilesystemPathForDb(const TenantDatabaseName& tenantDbName) const = 0;
 
-    virtual int64_t sizeOnDiskForDb(OperationContext* opCtx, StringData dbName) = 0;
+    virtual int64_t sizeOnDiskForDb(OperationContext* opCtx,
+                                    const TenantDatabaseName& tenantDbName) = 0;
 
     virtual bool isUsingDirectoryPerDb() const = 0;
 

@@ -40,7 +40,6 @@ enums:
         type: string
         values:
             kUninitialized: "uninitialized"
-            kDataSync: "data sync"
             kBlocking: "blocking"
             kCommitted: "committed"
             kAborted: "aborted"
@@ -85,4 +84,10 @@ structs:
             abortReason:
                 type: object_owned
                 description: "The error that caused the split to abort."
+                optional: true
+            expireAt:
+                type: date
+                description: >-
+                    The wall-clock time at which the state machine document should be
+                    removed by the TTL monitor.
                 optional: true

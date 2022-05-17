@@ -301,6 +301,8 @@ variables:
   - name: buildscripts_test
   - name: causally_consistent_jscore_txns_passthrough
   - name: .csfle
+    distros:
+      - windows-vsCurrent-xlarge
   - name: .encrypt !.aggregation !.gcm
   - name: external_auth
   - name: external_auth_aws
@@ -1182,6 +1184,17 @@ functions:
         binary: bash
         args:
           - "./src/evergreen/gen_tasks_activate.sh"
+
+  # Used by generator
+  "validate resmoke tests runtime":
+    - *f_expansions_write
+    - *configure_evergreen_api_credentials
+    - command: subprocess.exec
+      type: test
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/resmoke_tests_runtime_validate.sh"
 
   # Used by generator
   "run generated tests":
@@ -5935,6 +5948,14 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *task_template
+  name: fle2_query_analysis
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "load aws test credentials"
+  - func: "run tests"
+
+- <<: *task_template
   name: fle2
   tags: ["encrypt"]
   commands:
@@ -9112,12 +9133,15 @@ buildvariants:
       distros:
         - windows-vsCurrent-large
     - name: .csfle
+      distros:
+        - windows-vsCurrent-xlarge
     - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
     - name: external_auth
     - name: external_auth_aws
     - name: external_auth_windows
       distros:
         - windows-2016-dc
+    - name: fle2_query_analysis
     - name: .jscore .common !.sharding
     - name: jsCore_auth
     - name: jsCore_ese
@@ -9504,7 +9528,7 @@ buildvariants:
 
 - &macos-debug-template
   name: macos-debug-suggested
-  display_name: "* Shared Library macOS DEBUG"
+  display_name: "* macOS DEBUG"
   cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
   - macos-1100
@@ -9512,7 +9536,7 @@ buildvariants:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     resmoke_jobs_max: 6
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: --ssl --dbg=on --opt=on -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars --link-model=dynamic
+    compile_flags: --ssl --dbg=on --opt=on -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
@@ -9552,7 +9576,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: libdeps_graph_linting_TG
   - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
@@ -9597,7 +9620,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --variables-files=etc/scons/xcode_macosx.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -9625,7 +9648,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: --ssl --dbg=on --opt=on -j$(sysctl -n hw.logicalcpu) --libc++ --link-model=dynamic --variables-files=etc/scons/xcode_macosx.vars --cxx-std=20
+    compile_flags: --ssl --dbg=on --opt=on -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars --cxx-std=20
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -9652,7 +9675,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --link-model=dynamic --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
+    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -10053,6 +10076,7 @@ buildvariants:
   - name: disk_wiredtiger
   - name: .encrypt
   - name: feature_flag_multiversion_gen
+  - name: fle2_query_analysis
   - name: idl_tests
   - name: initial_sync_fuzzer_gen
   - name: .integration
@@ -10778,7 +10802,11 @@ buildvariants:
   - name: sharding_gen
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
-  - name: .concurrency
+  # Exclude concurrency tasks which are ubsan-specific, test interaction between causal consistency
+  # and transactions, or involve stepdowns/termination. These should not have any particularly
+  # interesting interaction with the new yielding behavior and may exceed the standard testing time
+  # limits.
+  - name: .concurrency !.ubsan !.no_txns !.stepdowns !.kill_terminate
 
 - name: ubuntu1804-container
   display_name: "Ubuntu 18.04 Container"

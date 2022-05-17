@@ -65,6 +65,7 @@
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/migration_coordinator_document_gen.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
@@ -81,6 +82,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
+#include "mongo/s/pm2583_feature_flags_gen.h"
 #include "mongo/s/refine_collection_shard_key_coordinator_feature_flags_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
@@ -334,10 +336,14 @@ public:
 
                 // Drain moveChunks if the actualVersion relies on the new migration protocol but
                 // the requestedVersion uses the old one (downgrading).
-                if (feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
-                        actualVersion) &&
-                    !feature_flags::gFeatureFlagMigrationRecipientCriticalSection
-                         .isEnabledOnVersion(requestedVersion)) {
+                if ((feature_flags::gFeatureFlagMigrationRecipientCriticalSection
+                         .isEnabledOnVersion(actualVersion) &&
+                     !feature_flags::gFeatureFlagMigrationRecipientCriticalSection
+                          .isEnabledOnVersion(requestedVersion)) ||
+                    (feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabledOnVersion(
+                         actualVersion) &&
+                     !feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabledOnVersion(
+                         requestedVersion))) {
                     drainNewMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionDowngrade");
 
                     // At this point, because we are holding the MigrationBlockingGuard, no new
@@ -427,11 +433,16 @@ public:
             boost::optional<MigrationBlockingGuard> drainOldMoveChunks;
 
             // Drain moveChunks if the actualVersion relies on the old migration protocol but the
-            // requestedVersion uses the new one (upgrading).
-            if (!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
-                    actualVersion) &&
-                feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
-                    requestedVersion)) {
+            // requestedVersion uses the new one (upgrading) or we're persisting the new chunk
+            // version format.
+            if ((!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                     actualVersion) &&
+                 feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                     requestedVersion)) ||
+                (!feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabledOnVersion(
+                     actualVersion) &&
+                 feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabledOnVersion(
+                     requestedVersion))) {
                 drainOldMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
 
                 // At this point, because we are holding the MigrationBlockingGuard, no new
@@ -719,6 +730,36 @@ private:
                     });
             }
 
+            // TODO SERVER-63563: Only check on last-lts when FCV 5.3 becomes last-continuous.
+            // TODO SERVER-63564: Remove once FCV 6.0 becomes last-lts.
+            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
+                const auto& dbName = tenantDbName.dbName();
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                catalog::forEachCollectionFromDb(
+                    opCtx, tenantDbName, MODE_X, [&](const CollectionPtr& collection) {
+                        auto indexCatalog = collection->getIndexCatalog();
+                        auto indexIt = indexCatalog->getIndexIterator(
+                            opCtx, true /* includeUnfinishedIndexes */);
+                        while (indexIt->more()) {
+                            auto indexEntry = indexIt->next();
+                            uassert(
+                                ErrorCodes::CannotDowngrade,
+                                fmt::format(
+                                    "Cannot downgrade the cluster when there are indexes that have "
+                                    "the 'disallowNewDuplicateKeys' field. Use listIndexes to find "
+                                    "them and drop "
+                                    "the indexes or use collMod to manually set it to false to "
+                                    "remove the field "
+                                    "before downgrading. First detected incompatible index name: "
+                                    "'{}' on collection: '{}'",
+                                    indexEntry->descriptor()->indexName(),
+                                    collection->ns().toString()),
+                                !indexEntry->descriptor()->disallowNewDuplicateKeys());
+                        }
+                        return true;
+                    });
+            }
+
             // Drop the pre-images collection if 'changeStreamPreAndPostImages' feature flag is not
             // enabled on the downgrade version.
             // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
@@ -990,7 +1031,6 @@ private:
         auto response = client.runCommand(deleteOp.serialize({}));
         uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
     }
-
 } setFeatureCompatibilityVersionCommand;
 
 }  // namespace

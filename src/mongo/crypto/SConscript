@@ -105,6 +105,7 @@ env.Library(
         '$BUILD_DIR/mongo/idl/idl_parser',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
         'aead_encryption',
         'sha_block_${MONGO_CRYPTO}',
     ],
@@ -125,7 +126,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/base/secure_allocator',
         'aead_encryption' if "tom" not in env["MONGO_CRYPTO"] else [],
-        'fle_crypto',
+        'fle_crypto' if "tom" not in env["MONGO_CRYPTO"] else [],
         'sha_block_${MONGO_CRYPTO}',
     ],
 )

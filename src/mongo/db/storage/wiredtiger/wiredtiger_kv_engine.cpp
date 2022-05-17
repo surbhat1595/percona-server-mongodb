@@ -394,13 +394,15 @@ static void copy_keydb_files(const boost::filesystem::path& from,
 
 namespace {
 
-StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(OperationContext* opCtx,
-                                                                     WT_SESSION* session,
-                                                                     WT_CURSOR* cursor,
-                                                                     bool incrementalBackup,
-                                                                     bool fullBackup,
-                                                                     std::string dbPath,
-                                                                     const char* statusPrefix) {
+StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(
+    OperationContext* opCtx,
+    boost::optional<Timestamp> checkpointTimestamp,
+    WT_SESSION* session,
+    WT_CURSOR* cursor,
+    bool incrementalBackup,
+    bool fullBackup,
+    std::string dbPath,
+    const char* statusPrefix) {
     int wtRet;
     std::vector<BackupBlock> backupBlocks;
     const char* filename;
@@ -452,16 +454,20 @@ StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(OperationCo
                             "offset"_attr = offset,
                             "size"_attr = size,
                             "type"_attr = type);
-                backupBlocks.push_back(
-                    BackupBlock(opCtx, filePath.string(), offset, size, fileSize));
+                backupBlocks.push_back(BackupBlock(
+                    opCtx, filePath.string(), checkpointTimestamp, offset, size, fileSize));
             }
 
             // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows
             // us to distinguish between an unchanged file and a deleted file in an incremental
             // backup.
             if (fileUnchangedFlag) {
-                backupBlocks.push_back(BackupBlock(
-                    opCtx, filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
+                backupBlocks.push_back(BackupBlock(opCtx,
+                                                   filePath.string(),
+                                                   checkpointTimestamp,
+                                                   0 /* offset */,
+                                                   0 /* length */,
+                                                   fileSize));
             }
 
             if (wtRet != WT_NOTFOUND) {
@@ -477,8 +483,8 @@ StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(OperationCo
             // to an entire file. Full backups cannot open an incremental cursor, even if they
             // are the initial incremental backup.
             const std::uint64_t length = incrementalBackup ? fileSize : 0;
-            backupBlocks.push_back(
-                BackupBlock(opCtx, filePath.string(), 0 /* offset */, length, fileSize));
+            backupBlocks.push_back(BackupBlock(
+                opCtx, filePath.string(), checkpointTimestamp, 0 /* offset */, length, fileSize));
         }
     }
 
@@ -1366,11 +1372,13 @@ public:
     StreamingCursorImpl() = delete;
     explicit StreamingCursorImpl(WT_SESSION* session,
                                  std::string path,
+                                 boost::optional<Timestamp> checkpointTimestamp,
                                  StorageEngine::BackupOptions options,
                                  WiredTigerBackup* wtBackup)
         : StorageEngine::StreamingCursor(options),
           _session(session),
           _path(path),
+          _checkpointTimestamp(checkpointTimestamp),
           _wtBackup(wtBackup){};
 
     ~StreamingCursorImpl() = default;
@@ -1436,8 +1444,12 @@ public:
                 // to an entire file. Full backups cannot open an incremental cursor, even if they
                 // are the initial incremental backup.
                 const std::uint64_t length = options.incrementalBackup ? fileSize : 0;
-                backupBlocks.push_back(
-                    BackupBlock(opCtx, filePath.string(), 0 /* offset */, length, fileSize));
+                backupBlocks.push_back(BackupBlock(opCtx,
+                                                   filePath.string(),
+                                                   _checkpointTimestamp,
+                                                   0 /* offset */,
+                                                   length,
+                                                   fileSize));
             }
         }
 
@@ -1491,14 +1503,19 @@ private:
                         "offset"_attr = offset,
                         "size"_attr = size,
                         "type"_attr = type);
-            backupBlocks->push_back(BackupBlock(opCtx, filePath.string(), offset, size, fileSize));
+            backupBlocks->push_back(BackupBlock(
+                opCtx, filePath.string(), _checkpointTimestamp, offset, size, fileSize));
         }
 
         // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows us
         // to distinguish between an unchanged file and a deleted file in an incremental backup.
         if (fileUnchangedFlag) {
-            backupBlocks->push_back(
-                BackupBlock(opCtx, filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
+            backupBlocks->push_back(BackupBlock(opCtx,
+                                                filePath.string(),
+                                                _checkpointTimestamp,
+                                                0 /* offset */,
+                                                0 /* length */,
+                                                fileSize));
         }
 
         // If the duplicate backup cursor has been exhausted, close it and set
@@ -1517,6 +1534,7 @@ private:
 
     WT_SESSION* _session;
     std::string _path;
+    boost::optional<Timestamp> _checkpointTimestamp;
     WiredTigerBackup* _wtBackup;  // '_wtBackup' is an out parameter.
 };
 
@@ -1549,6 +1567,7 @@ WiredTigerKVEngine::_disableIncrementalBackup() {
 
 StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>>
 WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
+                                           boost::optional<Timestamp> checkpointTimestamp,
                                            const StorageEngine::BackupOptions& options) {
     uassert(51034, "Cannot open backup cursor with in-memory mode.", !isEphemeral());
 
@@ -1600,8 +1619,8 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
 
     invariant(_wtBackup.logFilePathsSeenByExtendBackupCursor.empty());
     invariant(_wtBackup.logFilePathsSeenByGetNextBatch.empty());
-    auto streamingCursor =
-        std::make_unique<StreamingCursorImpl>(session, _path, options, &_wtBackup);
+    auto streamingCursor = std::make_unique<StreamingCursorImpl>(
+        session, _path, checkpointTimestamp, options, &_wtBackup);
 
     pinOplogGuard.dismiss();
     _backupSession = std::move(sessionRaii);
@@ -1696,7 +1715,9 @@ StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup(
 }
 
 StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
-    OperationContext* opCtx, const StorageEngine::BackupOptions& options) {
+    OperationContext* opCtx,
+    boost::optional<Timestamp> checkpointTimestamp,
+    const StorageEngine::BackupOptions& options) {
     // incrementalBackup and disableIncrementalBackup are mutually exclusive
     // this is guaranteed by checks in DocumentSourceBackupCursor::createFromBson
     if (options.disableIncrementalBackup) {
@@ -1729,6 +1750,7 @@ StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
 
     const bool fullBackup = !options.srcBackupName;
     auto swBackupBlocks = getBackupBlocksFromBackupCursor(opCtx,
+                                                          checkpointTimestamp,
                                                           session,
                                                           cursor,
                                                           options.incrementalBackup,
@@ -1765,6 +1787,7 @@ StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor(Operati
     }
 
     auto swBackupBlocks = getBackupBlocksFromBackupCursor(opCtx,
+                                                          boost::none,
                                                           session,
                                                           cursor,
                                                           /*incrementalBackup=*/false,
@@ -3026,15 +3049,13 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
     invariantWTOK(ret, session.getSession());
 }
 
-void WiredTigerKVEngine::keydbDropDatabase(const std::string& db) {
+void WiredTigerKVEngine::keydbDropDatabase(const TenantDatabaseName& tenantDbName) {
     if (_encryptionKeyDB) {
-        int res = _encryptionKeyDB->delete_key_by_id(db);
+        int res = _encryptionKeyDB->delete_key_by_id(tenantDbName.toString());
         if (res) {
             // we cannot throw exceptions here because we are inside WUOW::commit
             // every other part of DB is already dropped so we just log error message
-            LOGV2_ERROR(29001,
-                        "failed to delete encryption key for db: {db}",
-                        "db"_attr = db);
+            LOGV2_ERROR(29001, "failed to delete encryption key for db", logAttrs(tenantDbName));
         }
     }
 }

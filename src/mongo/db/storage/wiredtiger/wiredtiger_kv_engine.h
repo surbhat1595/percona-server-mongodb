@@ -183,7 +183,7 @@ public:
                             StringData ident,
                             const IndexDescriptor* desc) override;
 
-    void keydbDropDatabase(const std::string& db) override;
+    void keydbDropDatabase(const TenantDatabaseName& tenantDbName) override;
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
@@ -194,7 +194,9 @@ public:
     Status disableIncrementalBackup(OperationContext* opCtx) override;
 
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx, const StorageEngine::BackupOptions& options) override;
+        OperationContext* opCtx,
+        boost::optional<Timestamp> checkpointTimestamp,
+        const StorageEngine::BackupOptions& options) override;
 
     void endNonBlockingBackup(OperationContext* opCtx) override;
 

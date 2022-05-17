@@ -790,17 +790,27 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     // for workloads where updates increase the size of documents.
     ss << "split_pct=90,";
     ss << "leaf_value_max=64MB,";
-    if (TestingProctor::instance().isEnabled() &&
-        // TODO (SERVER-60719): Remove special handling for index build side tables.
-        !ident.startsWith("internal-") &&
-        // TODO (SERVER-60754): Remove special handling for setting multikey.
-        !ident.startsWith("_mdb_catalog") &&
-        // TODO (SERVER-60753): Remove special handling for index build during recovery.
-        ns != "config.system.indexBuilds") {
-        ss << "write_timestamp_usage=ordered,";
+    if (TestingProctor::instance().isEnabled()) {
+        if (NamespaceString(ns).isOplog() ||
+            // TODO (SERVER-60754): Remove special handling for setting multikey.
+            ident.startsWith("_mdb_catalog")) {
+
+            // For the above clauses we do not assert any particular `write_timestamp_usage`. In
+            // particular for the oplog, WT removes all timestamp information. There's nothing in
+            // MDB's control to assert against.
+        } else if (
+            // Side table drains are not timestamped.
+            ident.startsWith("internal-") ||
+            // TODO (SERVER-60753): Remove special handling for index build during recovery.
+            ns == NamespaceString::kIndexBuildEntryNamespace.ns()) {
+            ss << "write_timestamp_usage=mixed_mode,";
+        } else {
+            ss << "write_timestamp_usage=ordered,";
+        }
         ss << "assert=(write_timestamp=on),";
         ss << "verbose=[write_timestamp],";
     }
+
     ss << "checksum=on,";
     if (wiredTigerGlobalOptions.useCollectionPrefixCompression) {
         ss << "prefix_compression,";
@@ -1120,7 +1130,8 @@ bool WiredTigerRecordStore::findRecord(OperationContext* opCtx,
 }
 
 void WiredTigerRecordStore::deleteRecord(OperationContext* opCtx, const RecordId& id) {
-    dassert(opCtx->lockState()->isWriteLocked());
+    // Only check if a write lock is held for regular (non-temporary) record stores.
+    dassert(ns() == "" || opCtx->lockState()->isWriteLocked());
     invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
     // SERVER-48453: Initialize the next record id counter before deleting. This ensures we won't
     // reuse record ids, which can be problematic for the _mdb_catalog.
@@ -1316,7 +1327,8 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
                                              Record* records,
                                              const Timestamp* timestamps,
                                              size_t nRecords) {
-    dassert(opCtx->lockState()->isWriteLocked());
+    // Only check if a write lock is held for regular (non-temporary) record stores.
+    dassert(ns() == "" || opCtx->lockState()->isWriteLocked());
     invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
 
     int64_t totalLength = 0;
@@ -1494,7 +1506,8 @@ Status WiredTigerRecordStore::updateRecord(OperationContext* opCtx,
                                            const RecordId& id,
                                            const char* data,
                                            int len) {
-    dassert(opCtx->lockState()->isWriteLocked());
+    // Only check if a write lock is held for regular (non-temporary) record stores.
+    dassert(ns() == "" || opCtx->lockState()->isWriteLocked());
     invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
 
     WiredTigerCursor curwrap(_uri, _tableId, true, opCtx);
@@ -1931,7 +1944,7 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     int ret = cursor->largest_key(cursor);
     if (ret == WT_CACHE_FULL) {
         // Force the caller to rollback its transaction if we can't make progess with eviction.
-        // TODO (SERVER-60839): Convert this to a different error code that is distinguishable from
+        // TODO (SERVER-63620): Convert this to a different error code that is distinguishable from
         // a true write conflict.
         throw WriteConflictException(
             fmt::format("Cache full while performing initial write to '{}'", _ns));

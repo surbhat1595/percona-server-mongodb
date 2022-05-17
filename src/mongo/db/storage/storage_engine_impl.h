@@ -66,7 +66,7 @@ class StorageEngineImpl final : public StorageEngineInterface, public StorageEng
     Status hotBackup(OperationContext* opCtx, const std::string& path) override;
     Status hotBackupTar(OperationContext* opCtx, const std::string& path) override;
     Status hotBackup(OperationContext* opCtx, const percona::S3BackupParameters& s3params) override;
-    void keydbDropDatabase(const std::string& db) override;
+    void keydbDropDatabase(const TenantDatabaseName& tenantDbName) override;
 
 public:
     StorageEngineImpl(OperationContext* opCtx,
@@ -85,9 +85,11 @@ public:
         return _supportsCappedCollections;
     }
 
-    virtual Status closeDatabase(OperationContext* opCtx, StringData db) override;
+    virtual Status closeDatabase(OperationContext* opCtx,
+                                 const TenantDatabaseName& tenantDbName) override;
 
-    virtual Status dropDatabase(OperationContext* opCtx, StringData db) override;
+    virtual Status dropDatabase(OperationContext* opCtx,
+                                const TenantDatabaseName& tenantDbName) override;
 
     virtual void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
@@ -98,7 +100,9 @@ public:
     virtual Status disableIncrementalBackup(OperationContext* opCtx) override;
 
     virtual StatusWith<std::unique_ptr<StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx, const BackupOptions& options) override;
+        OperationContext* opCtx,
+        boost::optional<Timestamp> checkpointTimestamp,
+        const BackupOptions& options) override;
 
     virtual void endNonBlockingBackup(OperationContext* opCtx) override;
 
@@ -257,7 +261,7 @@ public:
         /**
          * Starts monitoring timestamp changes in the background with an initial listener.
          */
-        TimestampMonitor(KVEngine* engine, TimestampListener* listener, PeriodicRunner* runner);
+        TimestampMonitor(KVEngine* engine, PeriodicRunner* runner);
 
         ~TimestampMonitor();
 
@@ -270,7 +274,7 @@ public:
          * Adds a new listener to the monitor if it isn't already registered. A listener can only be
          * bound to one type of timestamp at a time.
          */
-        void addListener_forTestOnly(TimestampListener* listener);
+        void addListener(TimestampListener* listener);
 
         /**
          * Remove a listener.
@@ -321,14 +325,14 @@ public:
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) override;
 
-    void startDropPendingIdentReaper() override;
+    void startTimestampMonitor() override;
 
     void checkpoint() override;
 
     StatusWith<ReconcileResult> reconcileCatalogAndIdents(
         OperationContext* opCtx, LastShutdownState lastShutdownState) override;
 
-    std::string getFilesystemPathForDb(const std::string& dbName) const override;
+    std::string getFilesystemPathForDb(const TenantDatabaseName& tenantDbName) const override;
 
     DurableCatalog* getCatalog() override;
 
@@ -349,7 +353,8 @@ public:
         return _dropPendingIdentReaper.getAllIdentNames();
     }
 
-    int64_t sizeOnDiskForDb(OperationContext* opCtx, StringData dbName) override;
+    int64_t sizeOnDiskForDb(OperationContext* opCtx,
+                            const TenantDatabaseName& tenantDbName) override;
 
     bool isUsingDirectoryPerDb() const override {
         return _options.directoryPerDB;
@@ -435,6 +440,10 @@ private:
 
     // Listener for min of checkpoint and oldest timestamp changes.
     TimestampMonitor::TimestampListener _minOfCheckpointAndOldestTimestampListener;
+
+    // Listener for checkpoint timestamp changes to remove historical ident entries older than the
+    // checkpoint timestamp.
+    TimestampMonitor::TimestampListener _historicalIdentTimestampListener;
 
     const bool _supportsCappedCollections;
 

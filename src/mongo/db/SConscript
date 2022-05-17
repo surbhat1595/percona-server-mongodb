@@ -541,7 +541,8 @@ env.Library(
         'write_block_bypass.cpp',
     ],
     LIBDEPS_PRIVATE=[
-        'service_context'
+        'auth/auth',
+        'service_context',
     ],
 )
 
@@ -1074,6 +1075,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/stats/top',
         '$BUILD_DIR/mongo/db/storage/storage_engine_lock_file',
         '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
+        '$BUILD_DIR/mongo/db/write_block_bypass',
         "auth/user_acquisition_stats",
         'commands/server_status_core',
         'initialize_api_parameters',
@@ -1438,6 +1440,7 @@ env.Library(
         'query/sbe_stage_builder_expression.cpp',
         'query/sbe_stage_builder_filter.cpp',
         'query/sbe_stage_builder_index_scan.cpp',
+        'query/sbe_stage_builder_lookup.cpp',
         'query/sbe_stage_builder_projection.cpp',
         'query/sbe_sub_planner.cpp',
         'query/sbe_utils.cpp',
@@ -1578,10 +1581,12 @@ envWithAsio.Library(
         'service_liaison_mock.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/executor/async_timer_mock',
         '$BUILD_DIR/mongo/util/periodic_runner_factory',
         'kill_sessions',
         'service_liaison',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/executor/async_timer_mock',
     ],
 )
 
@@ -2027,7 +2032,7 @@ env.Library(
     source=[
         'write_block_bypass_propagation_egress_hook.cpp',
     ],
-    LIBDEPS=[
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/rpc/metadata',
     ],
 )
@@ -2395,6 +2400,8 @@ env.Library(
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
+        '$BUILD_DIR/mongo/idl/cluster_server_parameter',
+        '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
         '$BUILD_DIR/mongo/scripting/scripting',
@@ -2409,6 +2416,7 @@ env.Library(
         '$BUILD_DIR/mongo/util/signal_handlers',
         '$BUILD_DIR/mongo/watchdog/watchdog_mongod',
         'auth/auth_op_observer',
+        'catalog/catalog_helpers',
         'catalog/catalog_impl',
         'catalog/collection',
         'catalog/health_log',

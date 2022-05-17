@@ -15,7 +15,19 @@
 #define S3_ALLOCATION_TAG ""
 /*
  * S3Connection --
- *     Constructor for AWS S3 bucket connection.
+ *     Constructor for AWS S3 bucket connection with provided credentials.
+ */
+S3Connection::S3Connection(const Aws::Auth::AWSCredentials &credentials,
+  const Aws::S3Crt::ClientConfiguration &config, const std::string &bucketName,
+  const std::string &objPrefix)
+    : _s3CrtClient(credentials, config), _bucketName(bucketName), _objectPrefix(objPrefix)
+{
+}
+
+/*
+ * S3Connection --
+ *     Constructor for AWS S3 bucket connection with credentials in local file.
+ *     https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html
  */
 S3Connection::S3Connection(const Aws::S3Crt::ClientConfiguration &config,
   const std::string &bucketName, const std::string &objPrefix)
@@ -42,8 +54,10 @@ S3Connection::ListObjects(const std::string &prefix, std::vector<std::string> &o
     if (!outcomes.IsSuccess())
         return (1);
     auto result = outcomes.GetResult();
+
+    /* Returning the object name with the prefix stripped. */
     for (const auto &object : result.GetContents())
-        objects.push_back(object.GetKey());
+        objects.push_back(object.GetKey().substr(_objectPrefix.length()));
 
     if (listSingle)
         return (0);
@@ -134,12 +148,14 @@ S3Connection::GetObject(const std::string &objectKey, const std::string &path) c
 
 /*
  * ObjectExists --
- *     Checks whether an object with the given key exists in the S3 bucket.
+ *     Checks whether an object with the given key exists in the S3 bucket and also retrieves
+ *     size of the object.
  */
 int
-S3Connection::ObjectExists(const std::string &objectKey, bool &exists) const
+S3Connection::ObjectExists(const std::string &objectKey, bool &exists, size_t &objectSize) const
 {
     exists = false;
+    objectSize = 0;
 
     Aws::S3Crt::Model::HeadObjectRequest request;
     request.SetBucket(_bucketName);
@@ -152,6 +168,7 @@ S3Connection::ObjectExists(const std::string &objectKey, bool &exists) const
      */
     if (outcome.IsSuccess()) {
         exists = true;
+        objectSize = outcome.GetResult().GetContentLength();
         return (0);
     } else if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND)
         return (0);

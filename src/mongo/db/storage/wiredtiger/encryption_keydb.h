@@ -90,7 +90,9 @@ public:
     void generate_secure_key(unsigned char* key);
 
     StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
-        OperationContext* opCtx, const StorageEngine::BackupOptions& options);
+        OperationContext* opCtx,
+        boost::optional<Timestamp> checkpointTimestamp,
+        const StorageEngine::BackupOptions& options);
 
     Status endNonBlockingBackup(OperationContext* opCtx);
 

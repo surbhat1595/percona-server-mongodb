@@ -73,6 +73,11 @@ public:
             return;
         }
 
+        const auto& requiredProjections =
+            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
+        const ProjectionName& ridProjName = _ridProjections.at(node.getScanDefName());
+        const bool needsRID = requiredProjections.find(ridProjName).second;
+
         const auto& indexReq = getPropertyConst<IndexingRequirement>(_physProps);
         const IndexReqTarget indexReqTarget = indexReq.getIndexReqTarget();
         switch (indexReqTarget) {
@@ -84,7 +89,6 @@ public:
                 if (_hints._disableIndexes == DisableIndexOptions::DisableAll) {
                     return;
                 }
-                uassert(6624102, "RID projection is required for seek", indexReq.getNeedsRID());
                 // Fall through to code below.
                 break;
 
@@ -112,8 +116,7 @@ public:
         }
 
         FieldProjectionMap fieldProjectionMap;
-        for (const ProjectionName& required :
-             getPropertyConst<ProjectionRequirement>(_physProps).getAffectedProjectionNames()) {
+        for (const ProjectionName& required : requiredProjections.getVector()) {
             if (required == node.getProjectionName()) {
                 fieldProjectionMap._rootProjection = node.getProjectionName();
             } else {
@@ -122,8 +125,6 @@ public:
             }
         }
 
-        const ProjectionName& ridProjName = _ridProjections.at(
-            getPropertyConst<IndexingAvailability>(_logicalProps).getScanDefName());
         if (indexReqTarget == IndexReqTarget::Seek) {
             NodeCEMap nodeCEMap;
 
@@ -139,7 +140,7 @@ public:
             optimizeChildrenNoAssert(
                 _queue, kDefaultPriority, std::move(limitSkip), {}, std::move(nodeCEMap));
         } else {
-            if (indexReq.getNeedsRID()) {
+            if (needsRID) {
                 fieldProjectionMap._ridProjection = ridProjName;
             }
             ABT physicalScan = make<PhysicalScanNode>(
@@ -369,8 +370,10 @@ public:
                 _memo.getGroup(requirements.getSatisfiedPartialIndexesGroupId())._logicalProperties)
                 .getSatisfiedPartialIndexes();
 
-        const bool needsRID = requirements.getNeedsRID();
+        const auto& requiredProjections =
+            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
         const ProjectionName& ridProjName = _ridProjections.at(scanDefName);
+        const bool needsRID = requiredProjections.find(ridProjName).second;
 
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
         const GroupIdType scanGroupId = indexingAvailability.getScanGroupId();
@@ -398,11 +401,12 @@ public:
             }
         }
 
-        const auto& requiredProjections =
-            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
         bool requiresRootProjection = false;
         {
             auto projectionsLeftToSatisfy = requiredProjections;
+            if (needsRID) {
+                projectionsLeftToSatisfy.erase(ridProjName);
+            }
             if (indexReqTarget != IndexReqTarget::Index) {
                 // Deliver root projection if required.
                 requiresRootProjection = projectionsLeftToSatisfy.erase(scanProjectionName);
@@ -456,8 +460,11 @@ public:
                     }
                 }
 
-                const auto availableDirections = indexSatisfiesCollation(
-                    indexDef.getCollationSpec(), candidateIndexEntry, requiredCollation);
+                const auto availableDirections =
+                    indexSatisfiesCollation(indexDef.getCollationSpec(),
+                                            candidateIndexEntry,
+                                            requiredCollation,
+                                            ridProjName);
                 if (!availableDirections._forward && !availableDirections._backward) {
                     // Failed to satisfy collation.
                     continue;
@@ -625,6 +632,7 @@ public:
                 return;
             }
         }
+        const auto& ridProjName = _ridProjections.at(scanDefName);
 
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // Cannot satisfy limit-skip.
@@ -678,8 +686,19 @@ public:
         // Split required projections between inner and outer side.
         ProjectionNameOrderPreservingSet leftChildProjections;
         ProjectionNameOrderPreservingSet rightChildProjections;
+
+        // If we are performing an intersection we need to obtain rids from both sides.
+        leftChildProjections.emplace_back(ridProjName);
+        if (isIndex) {
+            rightChildProjections.emplace_back(ridProjName);
+        }
+
         for (const ProjectionName& projectionName :
              getPropertyConst<ProjectionRequirement>(_physProps).getProjections().getVector()) {
+            if (projectionName == ridProjName) {
+                continue;
+            }
+
             if (projectionName != node.getScanProjectionName() &&
                 leftProjections.count(projectionName) > 0) {
                 leftChildProjections.emplace_back(projectionName);
@@ -703,9 +722,9 @@ public:
 
         // Split collation between inner and outer side.
         const CollationSplitResult& collationLeftRightSplit =
-            splitCollationSpec(collationSpec, leftProjections, rightProjections);
+            splitCollationSpec(ridProjName, collationSpec, leftProjections, rightProjections);
         const CollationSplitResult& collationRightLeftSplit =
-            splitCollationSpec(collationSpec, rightProjections, leftProjections);
+            splitCollationSpec(ridProjName, collationSpec, rightProjections, leftProjections);
 
         // We are propagating the distribution requirements to both sides.
         PhysProps leftPhysProps = _physProps;
@@ -719,18 +738,14 @@ public:
         getProperty<DistributionRequirement>(leftPhysProps).setDisableExchanges(false);
         getProperty<DistributionRequirement>(rightPhysProps).setDisableExchanges(false);
 
-        const ProjectionName& ridProjName = _ridProjections.at(
-            getPropertyConst<IndexingAvailability>(_logicalProps).getScanDefName());
         setPropertyOverwrite<IndexingRequirement>(
             leftPhysProps,
             {IndexReqTarget::Index,
-             true /*needRID*/,
              !isIndex && dedupRID,
              requirements.getSatisfiedPartialIndexesGroupId()});
         setPropertyOverwrite<IndexingRequirement>(
             rightPhysProps,
             {isIndex ? IndexReqTarget::Index : IndexReqTarget::Seek,
-             true /*needRID*/,
              !isIndex && dedupRID,
              requirements.getSatisfiedPartialIndexesGroupId()});
 
@@ -1024,7 +1039,16 @@ public:
 
     void operator()(const ABT& n, const RootNode& node) {
         PhysProps newProps = _physProps;
-        setPropertyOverwrite<ProjectionRequirement>(newProps, node.getProperty());
+
+        if (hasProperty<ProjectionRequirement>(newProps)) {
+            auto& projections = getProperty<ProjectionRequirement>(newProps).getProjections();
+            for (const auto& projName : node.getProperty().getProjections().getVector()) {
+                projections.emplace_back(projName);
+            }
+        } else {
+            setPropertyOverwrite<ProjectionRequirement>(newProps, node.getProperty());
+        }
+
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
 
         ABT rootNode = n;
@@ -1038,7 +1062,7 @@ public:
 
     ImplementationVisitor(const Memo& memo,
                           const QueryHints& hints,
-                          const opt::unordered_map<std::string, ProjectionName>& ridProjections,
+                          const RIDProjectionsMap& ridProjections,
                           PrefixId& prefixId,
                           PhysRewriteQueue& queue,
                           const PhysProps& physProps,
@@ -1071,7 +1095,8 @@ private:
     IndexAvailableDirections indexSatisfiesCollation(
         const IndexCollationSpec& indexCollationSpec,
         const CandidateIndexEntry& candidateIndexEntry,
-        const ProjectionCollationSpec& requiredCollationSpec) {
+        const ProjectionCollationSpec& requiredCollationSpec,
+        const ProjectionName& ridProjName) {
         if (requiredCollationSpec.empty()) {
             return {true, true};
         }
@@ -1081,51 +1106,62 @@ private:
         bool indexSuitable = true;
         const auto& fieldProjections = candidateIndexEntry._fieldProjectionMap._fieldProjections;
 
-        // Verify the index is compatible with our collation requirement, and can deliver the right
-        // order of paths.
-        for (size_t indexField = 0; indexField < indexCollationSpec.size(); indexField++) {
-            const bool needsCollation = candidateIndexEntry._fieldsToCollate.count(indexField) > 0;
+        const auto updateDirectionsFn = [&result](const CollationOp availableOp,
+                                                  const CollationOp reqOp) {
+            result._forward &= collationOpsCompatible(availableOp, reqOp);
+            result._backward &= collationOpsCompatible(reverseCollationOp(availableOp), reqOp);
+        };
 
-            auto it = fieldProjections.find(encodeIndexKeyName(indexField));
-            if (it == fieldProjections.cend()) {
-                // No bound projection for this index field.
-                if (needsCollation) {
-                    // We cannot satisfy the rest of the collation requirements.
+        // Verify the index is compatible with our collation requirement, and can deliver the right
+        // order of paths. Note: we are iterating to index one past the size. We assume there is an
+        // implicit rid index field which is collated in increasing order.
+        for (size_t indexField = 0; indexField < indexCollationSpec.size() + 1; indexField++) {
+            const auto& [reqProjName, reqOp] = requiredCollationSpec.at(collationSpecIndex);
+
+            if (indexField < indexCollationSpec.size()) {
+                const bool needsCollation =
+                    candidateIndexEntry._fieldsToCollate.count(indexField) > 0;
+
+                auto it = fieldProjections.find(encodeIndexKeyName(indexField));
+                if (it == fieldProjections.cend()) {
+                    // No bound projection for this index field.
+                    if (needsCollation) {
+                        // We cannot satisfy the rest of the collation requirements.
+                        indexSuitable = false;
+                        break;
+                    }
+                    continue;
+                }
+                const ProjectionName& projName = it->second;
+
+                if (!needsCollation) {
+                    // We do not need to collate this field because of equality.
+                    if (requiredCollationSpec.at(collationSpecIndex).first == projName) {
+                        // We can satisfy the next collation requirement independent of collation
+                        // op.
+                        if (++collationSpecIndex >= requiredCollationSpec.size()) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                if (reqProjName != projName) {
                     indexSuitable = false;
                     break;
                 }
-                continue;
-            }
-            const ProjectionName& projName = it->second;
-
-            if (!needsCollation) {
-                // We do not need to collate this field because of equality.
-                if (requiredCollationSpec.at(collationSpecIndex).first == projName) {
-                    // We can satisfy the next collation requirement independent of collation op.
-                    if (++collationSpecIndex >= requiredCollationSpec.size()) {
-                        break;
-                    }
+                updateDirectionsFn(indexCollationSpec.at(indexField)._op, reqOp);
+            } else {
+                // If we fall through here, we are trying to satisfy a trailing collation
+                // requirement on rid.
+                if (reqProjName != ridProjName ||
+                    candidateIndexEntry._intervalPrefixSize != indexCollationSpec.size()) {
+                    indexSuitable = false;
+                    break;
                 }
-                continue;
+                updateDirectionsFn(CollationOp::Ascending, reqOp);
             }
 
-            // Check if we can satisfy the next collation requirement.
-            const auto& collationEntry = requiredCollationSpec.at(collationSpecIndex);
-            if (collationEntry.first != projName) {
-                indexSuitable = false;
-                break;
-            }
-
-            const auto& indexCollationEntry = indexCollationSpec.at(indexField);
-            if (result._forward &&
-                !collationOpsCompatible(indexCollationEntry._op, collationEntry.second)) {
-                result._forward = false;
-            }
-            if (result._backward &&
-                !collationOpsCompatible(reverseCollationOp(indexCollationEntry._op),
-                                        collationEntry.second)) {
-                result._backward = false;
-            }
             if (!result._forward && !result._backward) {
                 indexSuitable = false;
                 break;
@@ -1293,8 +1329,18 @@ private:
                 PhysProps leftPhysPropsLocal = leftPhysProps;
                 PhysProps rightPhysPropsLocal = rightPhysProps;
 
-                setCollationForRIDIntersect(
-                    collationLeftRightSplit, leftPhysPropsLocal, rightPhysPropsLocal);
+                // Add collation requirement on rid to both sides if needed.
+                CollationSplitResult split = collationLeftRightSplit;
+                if (split._leftCollation.empty() ||
+                    split._leftCollation.back().first != ridProjectionName) {
+                    split._leftCollation.emplace_back(ridProjectionName, CollationOp::Ascending);
+                }
+                if (split._rightCollation.empty() ||
+                    split._rightCollation.back().first != ridProjectionName) {
+                    split._rightCollation.emplace_back(ridProjectionName, CollationOp::Ascending);
+                }
+                setCollationForRIDIntersect(split, leftPhysPropsLocal, rightPhysPropsLocal);
+
                 if (dedupRID) {
                     getProperty<IndexingRequirement>(leftPhysPropsLocal)
                         .setDedupRID(true /*dedupRID*/);
@@ -1412,7 +1458,7 @@ private:
     // We don't own any of those;
     const Memo& _memo;
     const QueryHints& _hints;
-    const opt::unordered_map<std::string, ProjectionName>& _ridProjections;
+    const RIDProjectionsMap& _ridProjections;
     PrefixId& _prefixId;
     PhysRewriteQueue& _queue;
     const PhysProps& _physProps;
@@ -1421,7 +1467,7 @@ private:
 
 void addImplementers(const Memo& memo,
                      const QueryHints& hints,
-                     const opt::unordered_map<std::string, ProjectionName>& ridProjections,
+                     const RIDProjectionsMap& ridProjections,
                      PrefixId& prefixId,
                      PhysOptimizationResult& bestResult,
                      const properties::LogicalProps& logicalProps,

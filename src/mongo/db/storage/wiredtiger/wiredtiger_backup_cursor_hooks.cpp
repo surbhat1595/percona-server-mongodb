@@ -125,7 +125,8 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
         checkpointTimestamp = engine->getLastStableRecoveryTimestamp();
     };
 
-    auto filesToBackup = uassertStatusOK(engine->beginNonBlockingBackup(opCtx, options));
+    auto filesToBackup =
+        uassertStatusOK(engine->beginNonBlockingBackup(opCtx, checkpointTimestamp, options));
     _state = kBackupCursorOpened;
     _openCursor = UUID::gen();
     LOGV2(29093, "Opened backup cursor", "backupId"_attr = _openCursor.get());
@@ -176,7 +177,8 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
     std::vector<BackupBlock> eseBackupBlocks;
     auto* encHooks = EncryptionHooks::get(opCtx->getServiceContext());
     if (encHooks->enabled()) {
-        eseBackupBlocks = uassertStatusOK(encHooks->beginNonBlockingBackup(opCtx, options));
+        eseBackupBlocks =
+            uassertStatusOK(encHooks->beginNonBlockingBackup(opCtx, checkpointTimestamp, options));
     }
 
     BSONObjBuilder builder;

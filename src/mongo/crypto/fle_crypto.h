@@ -498,4 +498,272 @@ public:
                               ESCTwiceDerivedValueToken valueToken);
 };
 
+
+/**
+ * ECC Collection
+ * - a record of deleted documents
+ *
+ * {
+ *    _id : HMAC(ECCTwiceDerivedTagToken, type || pos )
+ *    value : Encrypt(ECCTwiceDerivedValueToken,  count OR start || end)
+ * }
+ *
+ * where
+ *  type = uint64_t
+ *  pos = uint64_t
+ *  value is either:
+ *       count = uint64_t  // Null records
+ *    OR
+ *       start = uint64_t  // Other records
+ *       end = uint64_t
+ *
+ * where type:
+ *   0 - null record
+ *   1 - regular record or compaction record
+ *
+ * where start and end:
+ *   [0..UINT_64_MAX) - regular start and end
+ *   UINT64_MAX - compaction placeholder
+ *
+ * Record types:
+ *
+ * Document Counts
+ * Null: 0 or 1
+ * Regular: 0 or more
+ * Compaction: 0 or 1
+ *
+ * Null record:
+ * {
+ *    _id : HMAC(ECCTwiceDerivedTagToken, null )
+ *    value : Encrypt(ECCTwiceDerivedValueToken,  count)
+ * }
+ *
+ * Regular record:
+ * {
+ *    _id : HMAC(ECCTwiceDerivedTagToken, pos )
+ *    value : Encrypt(ECCTwiceDerivedValueToken,  start || end)
+ * }
+ *
+ * Compaction placeholder record:
+ * {
+ *    _id : HMAC(ECCTwiceDerivedTagToken, pos )
+ *    value : Encrypt(ECCTwiceDerivedValueToken,  UINT64_MAX || UINT64_MAX)
+ * }
+ *
+ * PlainText of tag
+ * struct {
+ *    uint64_t type;
+ *    uint64_t pos;
+ * }
+ *
+ * PlainText of value for null records
+ * struct {
+ *    uint64_t count;
+ * }
+ *
+ * PlainText of value for non-null records
+ * struct {
+ *    uint64_t start;
+ *    uint64_t end;
+ * }
+ */
+enum class ECCValueType : uint64_t {
+    kNormal = 0,
+    kCompactionPlaceholder = 1,
+};
+
+
+struct ECCNullDocument {
+    // Id is not included as it HMAC generated and cannot be reversed
+    uint64_t pos;
+};
+
+
+struct ECCDocument {
+    // Id is not included as it HMAC generated and cannot be reversed
+    ECCValueType valueType;
+    uint64_t start;
+    uint64_t end;
+};
+
+class ECCCollection {
+public:
+    /**
+     * Generate the _id value
+     */
+    static PrfBlock generateId(ECCTwiceDerivedTagToken tagToken, boost::optional<uint64_t> index);
+
+    /**
+     * Generate a null document which will be the "first" document for a given field.
+     */
+    static BSONObj generateNullDocument(ECCTwiceDerivedTagToken tagToken,
+                                        ECCTwiceDerivedValueToken valueToken,
+                                        uint64_t count);
+
+    /**
+     * Generate a regular ECC document for (count).
+     *
+     * Note: it is stored as (count, count)
+     */
+    static BSONObj generateDocument(ECCTwiceDerivedTagToken tagToken,
+                                    ECCTwiceDerivedValueToken valueToken,
+                                    uint64_t index,
+                                    uint64_t count);
+
+    /**
+     * Generate a regular ECC document for (start, end)
+     */
+    static BSONObj generateDocument(ECCTwiceDerivedTagToken tagToken,
+                                    ECCTwiceDerivedValueToken valueToken,
+                                    uint64_t index,
+                                    uint64_t start,
+                                    uint64_t end);
+
+    /**
+     * Generate a compaction ECC document.
+     */
+    static BSONObj generateCompactionDocument(ECCTwiceDerivedTagToken tagToken,
+                                              ECCTwiceDerivedValueToken valueToken,
+                                              uint64_t index);
+
+    /**
+     * Decrypt the null document.
+     */
+    static StatusWith<ECCNullDocument> decryptNullDocument(ECCTwiceDerivedValueToken valueToken,
+                                                           BSONObj& doc);
+
+    /**
+     * Decrypt a regular document.
+     */
+    static StatusWith<ECCDocument> decryptDocument(ECCTwiceDerivedValueToken valueToken,
+                                                   BSONObj& doc);
+
+    /**
+     * Search for the highest document id for a given field/value pair based on the token.
+     */
+    static uint64_t emuBinary(FLEStateCollectionReader* reader,
+                              ECCTwiceDerivedTagToken tagToken,
+                              ECCTwiceDerivedValueToken valueToken);
+};
+
+/**
+ * Type safe abstraction over the key vault to support unit testing. Used by the various decryption
+ * routines to retrieve the correct keys.
+ *
+ * Keys are identified by UUID in the key vault.
+ */
+class FLEKeyVault {
+public:
+    virtual ~FLEKeyVault();
+
+    FLEUserKeyAndId getUserKeyById(UUID uuid) {
+        return getKeyById<FLEKeyType::User>(uuid);
+    }
+
+    FLEIndexKeyAndId getIndexKeyById(UUID uuid) {
+        return getKeyById<FLEKeyType::Index>(uuid);
+    }
+
+protected:
+    virtual KeyMaterial getKey(UUID uuid) = 0;
+
+private:
+    template <FLEKeyType KeyT>
+    FLEKeyAndId<KeyT> getKeyById(UUID uuid) {
+        auto keyMaterial = getKey(uuid);
+        return FLEKeyAndId<KeyT>(keyMaterial, uuid);
+    }
+};
+
+
+class FLEClientCrypto {
+public:
+    /**
+     * Explicit encrypt a single value into a placeholder.
+     *
+     * Returns FLE2InsertUpdate payload
+     */
+    static std::vector<uint8_t> encrypt(BSONElement element,
+                                        FLEIndexKeyAndId indexKey,
+                                        FLEUserKeyAndId userKey,
+                                        FLECounter counter);
+
+    /**
+     * Generates a client-side payload that is sent to the server.
+     *
+     * Input is a document with FLE2EncryptionPlaceholder placeholders.
+     *
+     * For each field, transforms the field into BinData 6 with a prefix byte of 4
+     *
+     * {
+     *   d : EDCDerivedFromDataTokenAndContentionFactorToken
+     *   s : ESCDerivedFromDataTokenAndContentionFactorToken
+     *   c : ECCDerivedFromDataTokenAndContentionFactorToken
+     *   p : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken ||
+     * ECCDerivedFromDataTokenAndContentionFactorToken) v : Encrypt(K_KeyId, value),
+     *   e : ServerDataEncryptionLevel1Token,
+     * }
+     */
+    static BSONObj generateInsertOrUpdateFromPlaceholders(const BSONObj& obj,
+                                                          FLEKeyVault* keyVault);
+};
+
+/*
+ * Values of ECOC documents
+ *
+ * Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken ||
+ * ECCDerivedFromDataTokenAndContentionFactorToken)
+ *
+ * struct {
+ *    uint8_t[64] esc;
+ *    uint8_t[64] ecc;
+ * }
+ */
+struct EncryptedStateCollectionTokens {
+public:
+    EncryptedStateCollectionTokens(ESCDerivedFromDataTokenAndContentionFactorToken s,
+                                   ECCDerivedFromDataTokenAndContentionFactorToken c)
+        : esc(s), ecc(c) {}
+
+    static StatusWith<EncryptedStateCollectionTokens> decryptAndParse(ECOCToken token,
+                                                                      ConstDataRange cdr);
+    StatusWith<std::vector<uint8_t>> serialize(ECOCToken token);
+
+    ESCDerivedFromDataTokenAndContentionFactorToken esc;
+    ECCDerivedFromDataTokenAndContentionFactorToken ecc;
+};
+
+
+struct ECOCCompactionDocument {
+    // Id is not included as it unimportant
+    std::string fieldName;
+    ESCDerivedFromDataTokenAndContentionFactorToken esc;
+    ECCDerivedFromDataTokenAndContentionFactorToken ecc;
+};
+
+
+/**
+ * ECOC Collection schema
+ * {
+ *    _id : ObjectId() -- omitted so MongoDB can auto choose it
+ *    fieldName : String,S
+ *    value : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken ||
+ * ECCDerivedFromDataTokenAndContentionFactorToken)
+ * }
+ *
+ * where
+ *  value comes from client, see EncryptedStateCollectionTokens or
+ * FLE2InsertUpdatePayload.getEncryptedTokens()
+ *
+ * Note:
+ * - ECOC is a set of documents, they are unordered
+ */
+class ECOCollection {
+public:
+    static BSONObj generateDocument(StringData fieldName, ConstDataRange payload);
+
+    static ECOCCompactionDocument parseAndDecrypt(BSONObj& doc, ECOCToken token);
+};
+
+
 }  // namespace mongo

@@ -581,8 +581,9 @@ void addQueryableBackupPrivileges(PrivilegeVector* privileges) {
 
 void addBackupPrivileges(PrivilegeVector* privileges) {
     ActionSet clusterActions;
-    clusterActions << ActionType::appendOplogNote;  // For BRS
-    clusterActions << ActionType::serverStatus;     // For push based initial sync
+    clusterActions << ActionType::appendOplogNote;        // For BRS
+    clusterActions << ActionType::serverStatus;           // For push based initial sync
+    clusterActions << ActionType::setUserWriteBlockMode;  // For C2C replication
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forClusterResource(), clusterActions));
 
@@ -681,11 +682,14 @@ void addRestorePrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forClusterResource(),
-                  {// Need to be able to force UUID consistency in sharded restores
-                   ActionType::forceUUID,
-                   ActionType::useUUID,
-                   // Need to be able to bypass write blocking mode for C2C replication
-                   ActionType::bypassWriteBlockingMode}));
+                  {
+                      // Need to be able to force UUID consistency in sharded restores
+                      ActionType::forceUUID,
+                      ActionType::useUUID,
+                      // Need to be able to set and bypass write blocking mode for C2C replication
+                      ActionType::bypassWriteBlockingMode,
+                      ActionType::setUserWriteBlockMode,
+                  }));
 }
 
 void addRootRolePrivileges(PrivilegeVector* privileges) {

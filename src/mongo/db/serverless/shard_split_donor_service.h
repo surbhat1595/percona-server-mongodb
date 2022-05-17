@@ -31,6 +31,7 @@
 
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/sdam/sdam_datatypes.h"
+#include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/serverless/shard_split_state_machine_gen.h"
 #include "mongo/executor/cancelable_executor.h"
@@ -79,6 +80,12 @@ protected:
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override;
 
 private:
+    ExecutorFuture<void> _createStateDocumentTTLIndex(
+        std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token);
+
+    ExecutorFuture<void> _rebuildService(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                         const CancellationToken& token) override;
+
     ServiceContext* const _serviceContext;
 };
 
@@ -102,6 +109,12 @@ public:
      */
     void tryAbort();
 
+    /**
+     * Try to forget the shard split operation. If the operation is not in a final state, the
+     * promise will be set but the garbage collection will be skipped.
+     */
+    void tryForget();
+
     Status checkIfOptionsConflict(const ShardSplitDonorDocument& stateDoc) const;
 
     SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
@@ -109,7 +122,11 @@ public:
 
     void interrupt(Status status) override;
 
-    SharedSemiFuture<DurableState> completionFuture() const {
+    SharedSemiFuture<DurableState> decisionFuture() const {
+        return _decisionPromise.getFuture();
+    }
+
+    SharedSemiFuture<void> completionFuture() const {
         return _completionPromise.getFuture();
     }
 
@@ -128,13 +145,21 @@ public:
         MongoProcessInterface::CurrentOpConnectionsMode connMode,
         MongoProcessInterface::CurrentOpSessionsMode sessionMode) noexcept override;
 
+    /**
+     * Returns true if the state doc was marked to expire (marked garbage collectable).
+     */
+    bool isGarbageCollectable() const {
+        stdx::lock_guard<Latch> lg(_mutex);
+        return !!_stateDoc.getExpireAt();
+    }
+
 private:
     // Tasks
-    ExecutorFuture<void> _enterDataSyncState(const ScopedTaskExecutorPtr& executor,
-                                             const CancellationToken& token);
-
     ExecutorFuture<void> _enterBlockingState(const ScopedTaskExecutorPtr& executor,
                                              const CancellationToken& token);
+
+    ExecutorFuture<void> _waitForRecipientToReachBlockTimestamp(
+        const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
 
     ExecutorFuture<void> _waitForRecipientToAcceptSplit(const ScopedTaskExecutorPtr& executor,
                                                         const CancellationToken& token);
@@ -154,13 +179,20 @@ private:
     void _initiateTimeout(const ScopedTaskExecutorPtr& executor,
                           const CancellationToken& abortToken);
 
-    void _createReplicaSetMonitor(const ExecutorPtr& executor, const CancellationToken& abortToken);
+    void _createReplicaSetMonitor(const ScopedTaskExecutorPtr& executor,
+                                  const CancellationToken& abortToken);
 
     ExecutorFuture<DurableState> _handleErrorOrEnterAbortedState(
         StatusWith<DurableState> durableState,
         const ScopedTaskExecutorPtr& executor,
         const CancellationToken& instanceAbortToken,
         const CancellationToken& abortToken);
+
+    ExecutorFuture<repl::OpTime> _markStateDocAsGarbageCollectable(
+        std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token);
+
+    ExecutorFuture<void> _waitForForgetCmdThenMarkGarbageCollectible(
+        const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
 
 private:
     const NamespaceString _stateDocumentsNS = NamespaceString::kTenantSplitDonorsNamespace;
@@ -171,6 +203,12 @@ private:
     ShardSplitDonorService* const _shardSplitService;
     ShardSplitDonorDocument _stateDoc;
 
+    // ThreadPool used by CancelableOperationContext.
+    // CancelableOperationContext must have a thread that is always available to it to mark its
+    // opCtx as killed when the cancelToken has been cancelled.
+    const std::shared_ptr<ThreadPool> _markKilledExecutor;
+    boost::optional<CancelableOperationContextFactory> _cancelableOpCtxFactory;
+
     bool _abortRequested = false;
     boost::optional<CancellationSource> _abortSource;
     boost::optional<Status> _abortReason;
@@ -178,11 +216,17 @@ private:
     // A promise fulfilled when the replicaSetMonitor has been created;
     SharedPromise<void> _replicaSetMonitorCreatedPromise;
 
-    // A promise fulfilled when the shard split operation has fully completed
-    SharedPromise<DurableState> _completionPromise;
+    // A promise fulfilled when the shard split has committed or aborted.
+    SharedPromise<DurableState> _decisionPromise;
+
+    // A promise fulfilled when the shard split operation has fully completed.
+    SharedPromise<void> _completionPromise;
 
     // A promise fulfilled when all recipient nodes have accepted the split.
     SharedPromise<void> _recipientAcceptedSplit;
+
+    // A promise fulfilled when tryForget is called.
+    SharedPromise<void> _forgetShardSplitReceivedPromise;
 };
 
 }  // namespace mongo

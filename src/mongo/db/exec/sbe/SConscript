@@ -20,6 +20,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/exec/js_function',
         '$BUILD_DIR/mongo/db/fts/base_fts',
         '$BUILD_DIR/mongo/db/index/key_generator',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface',
@@ -208,19 +209,28 @@ env.CppUnitTest(
     ],
 )
 
+env.Library(
+    target='sbe_abt_test_util',
+    source=[
+        'abt/sbe_abt_test_util.cpp',
+        ],
+    LIBDEPS=[
+            "$BUILD_DIR/mongo/db/auth/authmocks",
+            '$BUILD_DIR/mongo/db/query/query_test_service_context',
+            '$BUILD_DIR/mongo/db/query_exec',
+            '$BUILD_DIR/mongo/db/service_context_test_fixture',
+            'query_sbe_abt',
+        ]
+    )
+
 env.CppUnitTest(
     target='sbe_abt_test',
     source=[
         'abt/sbe_abt_diff_test.cpp',
         'abt/sbe_abt_test.cpp',
-        'abt/sbe_abt_test_util.cpp',
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/db/auth/authmocks",
-        '$BUILD_DIR/mongo/db/query/query_test_service_context',
-        '$BUILD_DIR/mongo/db/query_exec',
-        '$BUILD_DIR/mongo/db/service_context_test_fixture',
         '$BUILD_DIR/mongo/unittest/unittest',
-        'query_sbe_abt',
+        'sbe_abt_test_util'
     ],
 )

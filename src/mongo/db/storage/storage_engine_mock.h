@@ -55,10 +55,10 @@ public:
     }
     void loadCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) final {}
     void closeCatalog(OperationContext* opCtx) final {}
-    Status closeDatabase(OperationContext* opCtx, StringData db) final {
+    Status closeDatabase(OperationContext* opCtx, const TenantDatabaseName& tenantDbName) final {
         return Status::OK();
     }
-    Status dropDatabase(OperationContext* opCtx, StringData db) final {
+    Status dropDatabase(OperationContext* opCtx, const TenantDatabaseName& tenantDbName) final {
         return Status::OK();
     }
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) final {}
@@ -72,7 +72,9 @@ public:
                       "The current storage engine doesn't support backup mode");
     }
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx, const StorageEngine::BackupOptions& options) final {
+        OperationContext* opCtx,
+        boost::optional<Timestamp> checkpointTimestamp,
+        const StorageEngine::BackupOptions& options) final {
         return Status(ErrorCodes::CommandNotSupported,
                       "The current storage engine doesn't support backup mode");
     }
@@ -160,7 +162,7 @@ public:
     boost::optional<Timestamp> getOplogNeededForCrashRecovery() const final {
         return boost::none;
     }
-    std::string getFilesystemPathForDb(const std::string& dbName) const final {
+    std::string getFilesystemPathForDb(const TenantDatabaseName& tenantDbName) const final {
         return "";
     }
     std::set<std::string> getDropPendingIdents() const final {
@@ -169,11 +171,11 @@ public:
     void addDropPendingIdent(const Timestamp& dropTimestamp,
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) final {}
-    void startDropPendingIdentReaper() final {}
+    void startTimestampMonitor() final {}
 
     void checkpoint() final {}
 
-    int64_t sizeOnDiskForDb(OperationContext* opCtx, StringData dbName) final {
+    int64_t sizeOnDiskForDb(OperationContext* opCtx, const TenantDatabaseName& tenantDbName) final {
         return 0;
     }
     bool isUsingDirectoryPerDb() const final {

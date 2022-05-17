@@ -42,10 +42,19 @@ class test_s3_store01(wttest.WiredTigerTestCase):
 
     fs_config = 'prefix=' + prefix
 
+    fs_config += ',region=ap-southeast-2'
+
     # Bucket name can be overridden by an environment variable.
     bucket_name = os.getenv('WT_S3_EXT_BUCKET')
     if bucket_name is None:
         bucket_name = "s3testext"
+
+    # Auth token contains the AWS access key ID and the AWS secret key as comma-separated values.
+    access_key = os.getenv('AWS_ACCESS_KEY_ID')
+    secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+    auth_token = None
+    if access_key and secret_key:
+        auth_token = access_key + "," + secret_key
 
     # Load the s3 store extension, skip the test if missing.
     def conn_extensions(self, extlist):
@@ -64,7 +73,7 @@ class test_s3_store01(wttest.WiredTigerTestCase):
     
         session = self.session
         s3_store = self.get_s3_storage_source()
-        fs = s3_store.ss_customize_file_system(session, self.bucket_name, "Secret", self.fs_config)
+        fs = s3_store.ss_customize_file_system(session, self.bucket_name, self.auth_token, self.fs_config)
        
         # Test flush functionality and flushing to cache and checking if file exists.
         f = open(filename, 'wb')
@@ -80,16 +89,17 @@ class test_s3_store01(wttest.WiredTigerTestCase):
         inbytes = bytes(1000000)         # An empty buffer with a million zero bytes.
         fh.fh_read(session, 0, inbytes)  # Read into the buffer.
         self.assertEquals(outbytes[0:1000000], inbytes)
+        self.assertTrue(fs.fs_size(session, filename), len(outbytes))
+        self.assertEquals(fh.fh_size(session), len(outbytes))
         fh.close(session)
 
         # Checking that the file still exists in S3 after removing it from the cache.
         os.remove(cache_prefix + self.bucket_name + '/' + filename)
         self.assertTrue(fs.fs_exist(session, filename))
-
-        file_list = [self.prefix + object_name]
+        file_list = [object_name]
         self.assertEquals(fs.fs_directory_list(session, None, None), file_list)
 
-        fs2 = s3_store.ss_customize_file_system(session, self.bucket_name, "Secret", self.fs_config)
+        fs2 = s3_store.ss_customize_file_system(session, self.bucket_name, self.auth_token, self.fs_config)
         self.assertEquals(fs.fs_directory_list(session, None, None), file_list)
 
         s3_store.terminate(session)

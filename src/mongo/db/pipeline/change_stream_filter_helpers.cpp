@@ -56,9 +56,9 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const MatchExpression* userMatch) {
 
     // Regexes to match each of the necessary namespace components for the current stream type.
-    auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx->ns);
-    auto collRegex = DocumentSourceChangeStream::getCollRegexForChangeStream(expCtx->ns);
-    auto cmdNsRegex = DocumentSourceChangeStream::getCmdNsRegexForChangeStream(expCtx->ns);
+    auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx);
+    auto collRegex = DocumentSourceChangeStream::getCollRegexForChangeStream(expCtx);
+    auto cmdNsRegex = DocumentSourceChangeStream::getCmdNsRegexForChangeStream(expCtx);
 
     auto streamType = DocumentSourceChangeStream::getChangeStreamType(expCtx->ns);
 
@@ -106,12 +106,18 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     auto renameToEvent =
         BSON("o.renameCollection" << BSON("$exists" << true) << "o.to" << BSONRegEx(nsRegex));
     const auto createEvent = BSON("o.create" << BSONRegEx(collRegex));
+    const auto createIndexesEvent = BSON("o.createIndexes" << BSONRegEx(collRegex));
+    const auto commitIndexBuildEvent = BSON("o.commitIndexBuild" << BSONRegEx(collRegex));
+    const auto dropIndexesEvent = BSON("o.dropIndexes" << BSONRegEx(collRegex));
 
     auto orCmdEvents = std::make_unique<OrMatchExpression>();
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(dropEvent, expCtx));
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(renameFromEvent, expCtx));
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(renameToEvent, expCtx));
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(createEvent, expCtx));
+    orCmdEvents->add(MatchExpressionParser::parseAndNormalize(createIndexesEvent, expCtx));
+    orCmdEvents->add(MatchExpressionParser::parseAndNormalize(commitIndexBuildEvent, expCtx));
+    orCmdEvents->add(MatchExpressionParser::parseAndNormalize(dropIndexesEvent, expCtx));
 
     // Omit dropDatabase on single-collection streams. While the stream will be invalidated before
     // it sees this event, the user will incorrectly see it if they startAfter the invalidate.
@@ -186,9 +192,9 @@ std::unique_ptr<MatchExpression> buildTransactionFilter(
         BSONArrayBuilder orBuilder(applyOpsBuilder.subarrayStart("$or"));
         {
             // Regexes for full-namespace, collection, and command-namespace matching.
-            auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx->ns);
-            auto collRegex = DocumentSourceChangeStream::getCollRegexForChangeStream(expCtx->ns);
-            auto cmdNsRegex = DocumentSourceChangeStream::getCmdNsRegexForChangeStream(expCtx->ns);
+            auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx);
+            auto collRegex = DocumentSourceChangeStream::getCollRegexForChangeStream(expCtx);
+            auto cmdNsRegex = DocumentSourceChangeStream::getCmdNsRegexForChangeStream(expCtx);
 
             // Match relevant CRUD events on the monitored namespaces.
             orBuilder.append(BSON("o.applyOps.ns" << BSONRegEx(nsRegex)));
@@ -245,6 +251,12 @@ std::unique_ptr<MatchExpression> buildInternalOpFilter(
     for (const auto& eventName : internalOpTypes) {
         internalOpTypeOrBuilder.append(BSON("o2.type" << eventName));
     }
+
+    // Also filter for shardCollection events, which are recorded as {op: 'n'} in the oplog.
+    auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx);
+    internalOpTypeOrBuilder.append(BSON("o2.shardCollection" << BSONRegEx(nsRegex)));
+
+    // Finalize the array of $or filter predicates.
     internalOpTypeOrBuilder.done();
 
     return MatchExpressionParser::parseAndNormalize(BSON("op"

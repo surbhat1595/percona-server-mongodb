@@ -63,7 +63,7 @@ public:
                 "featureFlagUserWriteBlocking not enabled",
                 gFeatureFlagUserWriteBlocking.isEnabled(serverGlobalParams.featureCompatibility));
 
-            const auto startBlocking = request().getCommandParameter();
+            const auto startBlocking = request().getGlobal();
 
             SetUserWriteBlockModeCoordinatorDocument coordinatorDoc{startBlocking};
             coordinatorDoc.setConfigsvrCoordinatorMetadata(
@@ -71,11 +71,7 @@ public:
             const auto coordinatorDocBSON = coordinatorDoc.toBSON();
 
             const auto service = ConfigsvrCoordinatorService::getService(opCtx);
-            const auto instance = checked_pointer_cast<SetUserWriteBlockModeCoordinator>(
-                SetUserWriteBlockModeCoordinator::getOrCreate(opCtx, service, coordinatorDocBSON));
-            uassert(ErrorCodes::ConflictingOperationInProgress,
-                    "Another SetUserWriteBlockMode with different arguments is already running",
-                    instance->hasSameOptions(coordinatorDocBSON));
+            const auto instance = service->getOrCreateService(opCtx, coordinatorDoc.toBSON());
 
             instance->getCompletionFuture().get(opCtx);
         }

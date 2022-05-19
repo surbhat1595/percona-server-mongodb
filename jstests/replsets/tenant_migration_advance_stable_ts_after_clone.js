@@ -26,7 +26,7 @@ const kTenantIdPrefix = "testTenantId";
 const kUnrelatedDbNameDonor = "unrelatedDBDonor";
 const kUnrelatedDbNameRecipient = "unrelatedDBRecipient";
 const collName = "foo";
-const tenantId = kTenantIdPrefix + "_0";
+const tenantId = kTenantIdPrefix + "-0";
 const migrationId = UUID();
 const migrationOpts = {
     migrationIdString: extractUUIDFromObject(migrationId),
@@ -63,12 +63,12 @@ assert.soon(function() {
         assert
             .commandWorked(donorPrimary.getDB(kUnrelatedDbNameDonor).runCommand({
                 insert: collName,
-                documents: [{_id: 1}],
+                documents: [{n: 1}],
                 writeConcern: {w: "majority"}
             }))
             .operationTime;
 
-    return bsonWoCompare(donorAdvancedStableTs, recipientHoldStableTs) >= 0;
+    return bsonWoCompare(donorAdvancedStableTs, recipientHoldStableTs) > 0;
 });
 assert.commandWorked(donorPrimary.adminCommand({fsync: 1}));
 

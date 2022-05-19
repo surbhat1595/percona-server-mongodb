@@ -42,7 +42,7 @@
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
@@ -76,24 +76,6 @@ const OperationContext::Decoration<bool> operationBlockedBehindCatalogCacheRefre
 AtomicWord<uint64_t> ComparableDatabaseVersion::_disambiguatingSequenceNumSource{1ULL};
 AtomicWord<uint64_t> ComparableDatabaseVersion::_forcedRefreshSequenceNumSource{1ULL};
 
-CachedDatabaseInfo::CachedDatabaseInfo(DatabaseTypeValueHandle&& dbt) : _dbt(std::move(dbt)){};
-
-DatabaseType CachedDatabaseInfo::getDatabaseType() const {
-    return *_dbt;
-}
-
-const ShardId& CachedDatabaseInfo::primaryId() const {
-    return _dbt->getPrimary();
-}
-
-bool CachedDatabaseInfo::shardingEnabled() const {
-    return _dbt->getSharded();
-}
-
-DatabaseVersion CachedDatabaseInfo::databaseVersion() const {
-    return _dbt->getVersion();
-}
-
 ComparableDatabaseVersion ComparableDatabaseVersion::makeComparableDatabaseVersion(
     const boost::optional<DatabaseVersion>& version) {
     return ComparableDatabaseVersion(version,
@@ -112,7 +94,7 @@ void ComparableDatabaseVersion::setDatabaseVersion(const DatabaseVersion& versio
     _dbVersion = version;
 }
 
-BSONObj ComparableDatabaseVersion::toBSONForLogging() const {
+std::string ComparableDatabaseVersion::toString() const {
     BSONObjBuilder builder;
     if (_dbVersion)
         builder.append("dbVersion"_sd, _dbVersion->toBSON());
@@ -124,7 +106,7 @@ BSONObj ComparableDatabaseVersion::toBSONForLogging() const {
 
     builder.append("forcedRefreshSequenceNum"_sd, static_cast<int64_t>(_forcedRefreshSequenceNum));
 
-    return builder.obj();
+    return builder.obj().toString();
 }
 
 bool ComparableDatabaseVersion::operator==(const ComparableDatabaseVersion& other) const {
@@ -197,7 +179,7 @@ StatusWith<CachedDatabaseInfo> CatalogCache::getDatabase(OperationContext* opCtx
                 str::stream() << "database " << dbName << " not found",
                 dbEntry);
 
-        return {CachedDatabaseInfo(std::move(dbEntry))};
+        return dbEntry;
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -246,8 +228,8 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionRoutingInfoAt(
 
             if (collEntryFuture.isReady()) {
                 setOperationShouldBlockBehindCatalogCacheRefresh(opCtx, false);
-                return ChunkManager(dbInfo.primaryId(),
-                                    dbInfo.databaseVersion(),
+                return ChunkManager(dbInfo->getPrimary(),
+                                    dbInfo->getVersion(),
                                     collEntryFuture.get(opCtx),
                                     atClusterTime);
             } else {
@@ -270,8 +252,8 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionRoutingInfoAt(
 
                 setOperationShouldBlockBehindCatalogCacheRefresh(opCtx, false);
 
-                return ChunkManager(dbInfo.primaryId(),
-                                    dbInfo.databaseVersion(),
+                return ChunkManager(dbInfo->getPrimary(),
+                                    dbInfo->getVersion(),
                                     std::move(collEntry),
                                     atClusterTime);
             } catch (const DBException& ex) {
@@ -359,7 +341,7 @@ void CatalogCache::onStaleDatabaseVersion(const StringData dbName,
                                   2,
                                   "Registering new database version",
                                   "db"_attr = dbName,
-                                  "version"_attr = version.toBSONForLogging());
+                                  "version"_attr = version);
         _databaseCache.advanceTimeInStore(dbName, version);
     } else {
         _databaseCache.invalidateKey(dbName);
@@ -561,8 +543,8 @@ CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDa
                                   1,
                                   "Refreshed cached database entry",
                                   "db"_attr = dbName,
-                                  "newDbVersion"_attr = newDbVersion.toBSONForLogging(),
-                                  "oldDbVersion"_attr = previousDbVersion.toBSONForLogging(),
+                                  "newDbVersion"_attr = newDbVersion,
+                                  "oldDbVersion"_attr = previousDbVersion,
                                   "duration"_attr = Milliseconds(t.millis()));
         return CatalogCache::DatabaseCache::LookupResult(std::move(newDb), std::move(newDbVersion));
     } catch (const DBException& ex) {
@@ -651,7 +633,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
                                   "Refreshing cached collection",
                                   "namespace"_attr = nss,
                                   "lookupSinceVersion"_attr = lookupVersion,
-                                  "timeInStore"_attr = previousVersion.toBSONForLogging());
+                                  "timeInStore"_attr = previousVersion);
 
         auto collectionAndChunks = _catalogCacheLoader.getChunksSince(nss, lookupVersion).get();
 
@@ -761,8 +743,8 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
                                   "Refreshed cached collection",
                                   "namespace"_attr = nss,
                                   "lookupSinceVersion"_attr = lookupVersion,
-                                  "newVersion"_attr = newComparableVersion.toBSONForLogging(),
-                                  "timeInStore"_attr = previousVersion.toBSONForLogging(),
+                                  "newVersion"_attr = newComparableVersion,
+                                  "timeInStore"_attr = previousVersion,
                                   "duration"_attr = Milliseconds(t.millis()));
         _updateRefreshesStats(isIncremental, false);
 

@@ -91,6 +91,9 @@ struct WiredTigerBackup {
     // cursor is already open.
     Mutex wtBackupDupCursorMutex = MONGO_MAKE_LATCH("WiredTigerKVEngine::wtBackupDupCursorMutex");
     stdx::condition_variable wtBackupDupCursorCV;
+
+    // This file flags there was an ongoing backup when an unclean shutdown happened.
+    inline static const std::string kOngoingBackupFile = "ongoingBackup.lock";
 };
 
 class WiredTigerKVEngine final : public KVEngine {
@@ -182,6 +185,8 @@ public:
     void alterIdentMetadata(OperationContext* opCtx,
                             StringData ident,
                             const IndexDescriptor* desc) override;
+
+    Status alterMetadata(StringData uri, StringData config);
 
     void keydbDropDatabase(const TenantDatabaseName& tenantDbName) override;
 
@@ -401,6 +406,8 @@ private:
     // srcPath, destPath, filename, size to copy
     typedef std::tuple<boost::filesystem::path, boost::filesystem::path, boost::uintmax_t, std::time_t> FileTuple;
 
+    void _checkpoint(WT_SESSION* session);
+
     Status _hotBackupPopulateLists(OperationContext* opCtx,
                                    const std::string& path,
                                    std::vector<DBTuple>& dbList,
@@ -538,5 +545,10 @@ private:
     // Pins the oplog so that OplogStones will not truncate oplog history equal or newer to this
     // timestamp.
     AtomicWord<std::uint64_t> _pinnedOplogTimestamp;
+
+    // Limits the actions of concurrent checkpoint callers as we update some internal data during a
+    // checkpoint. WT has a mutex of its own to only have one checkpoint active at all times so this
+    // is only to protect our internal updates.
+    Mutex _checkpointMutex = MONGO_MAKE_LATCH("WiredTigerKVEngine::_checkpointMutex");
 };
 }  // namespace mongo

@@ -41,7 +41,7 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
@@ -394,10 +394,12 @@ public:
      * exists, and if not, creates a new one that matches these prerequisites. If a database already
      * exists and matches all the prerequisites returns success, otherwise throws NamespaceNotFound.
      */
-    DatabaseType createDatabase(OperationContext* opCtx,
-                                StringData dbName,
-                                const boost::optional<ShardId>& optPrimaryShard,
-                                bool enableSharding);
+    DatabaseType createDatabase(
+        OperationContext* opCtx,
+        StringData dbName,
+        const boost::optional<ShardId>& optPrimaryShard,
+        // # TODO SERVER-63983: remove enableSharding paramter when 6.0 becomes lastLTS
+        bool enableSharding = false);
 
     //
     // Collection Operations
@@ -464,6 +466,12 @@ public:
      * the current draining status. See ShardDrainingStatus enum definition for more details.
      */
     RemoveShardProgress removeShard(OperationContext* opCtx, const ShardId& shardId);
+
+    /**
+     * Returns a scoped lock object, which holds the _kShardMembershipLock in shared mode. While
+     * this lock is held no topology changes can occur.
+     */
+    Lock::SharedLock enterStableTopologyRegion(OperationContext* opCtx);
 
     //
     // Cluster Upgrade Operations

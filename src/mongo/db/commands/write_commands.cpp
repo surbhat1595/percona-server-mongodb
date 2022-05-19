@@ -33,6 +33,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
@@ -71,7 +72,6 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_stats.h"
 #include "mongo/db/transaction_participant.h"
-#include "mongo/db/views/view_catalog.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/redaction.h"
@@ -319,78 +319,59 @@ boost::optional<std::pair<Status, bool>> checkFailUnorderedTimeseriesInsertFailP
     return boost::none;
 }
 
-boost::optional<BSONObj> generateError(OperationContext* opCtx,
-                                       const Status& status,
-                                       int index,
-                                       size_t numErrors) {
+boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
+                                                     const Status& status,
+                                                     int index,
+                                                     size_t numErrors) {
     if (status.isOK()) {
         return boost::none;
     }
 
-    auto errorMessage = [numErrors, errorSize = size_t(0)](StringData rawMessage) mutable {
-        // Start truncating error messages once both of these limits are exceeded.
-        constexpr size_t kErrorSizeTruncationMin = 1024 * 1024;
-        constexpr size_t kErrorCountTruncationMin = 2;
-        if (errorSize >= kErrorSizeTruncationMin && numErrors >= kErrorCountTruncationMin) {
-            return ""_sd;
-        }
+    boost::optional<Status> overwrittenStatus;
 
-        errorSize += rawMessage.size();
-        return rawMessage;
-    };
-
-    BSONSizeTracker errorsSizeTracker;
-    BSONObjBuilder error(errorsSizeTracker);
-    error.append("index", index);
-    if (auto staleInfo = status.extraInfo<StaleConfigInfo>()) {
-        error.append("code", int(ErrorCodes::StaleShardVersion));  // Different from exception!
-        {
-            BSONObjBuilder errInfo(error.subobjStart("errInfo"));
-            staleInfo->serialize(&errInfo);
-        }
-    } else if (auto docValidationError =
-                   status.extraInfo<doc_validation_error::DocumentValidationFailureInfo>()) {
-        error.append("code", static_cast<int>(ErrorCodes::DocumentValidationFailure));
-        error.append("errInfo", docValidationError->getDetails());
-    } else if (status.code() == ErrorCodes::TenantMigrationConflict) {
+    if (status == ErrorCodes::TenantMigrationConflict) {
         hangWriteBeforeWaitingForMigrationDecision.pauseWhileSet(opCtx);
 
-        auto migrationStatus =
-            tenant_migration_access_blocker::handleTenantMigrationConflict(opCtx, status);
+        overwrittenStatus.emplace(
+            tenant_migration_access_blocker::handleTenantMigrationConflict(opCtx, status));
 
         // Interruption errors encountered during batch execution fail the entire batch, so throw on
         // such errors here for consistency.
-        if (ErrorCodes::isInterruption(migrationStatus)) {
-            uassertStatusOK(migrationStatus);
+        if (ErrorCodes::isInterruption(*overwrittenStatus)) {
+            uassertStatusOK(*overwrittenStatus);
         }
 
-        error.append("code", migrationStatus.code());
-
-        // We want to append an empty errmsg for the errors after the first one, so let the
-        // code below that appends errmsg do that.
-        if (status.reason() != "") {
-            error.append("errmsg", errorMessage(migrationStatus.reason()));
-        }
-    } else {
-        error.append("code", int(status.code()));
-        if (auto const extraInfo = status.extraInfo()) {
-            extraInfo->serialize(&error);
+        // Tenant migration errors, similarly to migration errors consume too much space in the
+        // ordered:false responses and get truncated. Since the call to
+        // 'handleTenantMigrationConflict' above replaces the original status, we need to manually
+        // truncate the new reason if the original 'status' was also truncated.
+        if (status.reason().empty()) {
+            overwrittenStatus = overwrittenStatus->withReason("");
         }
     }
 
-    // Skip appending errmsg if it has already been appended like in the case of
-    // TenantMigrationConflict.
-    if (!error.hasField("errmsg")) {
-        error.append("errmsg", errorMessage(status.reason()));
+    constexpr size_t kMaxErrorReasonsToReport = 1;
+    constexpr size_t kMaxErrorSizeToReportAfterMaxReasonsReached = 1024 * 1024;
+
+    if (numErrors > kMaxErrorReasonsToReport) {
+        size_t errorSize =
+            overwrittenStatus ? overwrittenStatus->reason().size() : status.reason().size();
+        if (errorSize > kMaxErrorSizeToReportAfterMaxReasonsReached)
+            overwrittenStatus =
+                overwrittenStatus ? overwrittenStatus->withReason("") : status.withReason("");
     }
-    return error.obj();
+
+    if (overwrittenStatus)
+        return write_ops::WriteError(index, std::move(*overwrittenStatus));
+    else
+        return write_ops::WriteError(index, status);
 }
 
 template <typename T>
-boost::optional<BSONObj> generateError(OperationContext* opCtx,
-                                       const StatusWith<T>& result,
-                                       int index,
-                                       size_t numErrors) {
+boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
+                                                     const StatusWith<T>& result,
+                                                     int index,
+                                                     size_t numErrors) {
     return generateError(opCtx, result.getStatus(), index, numErrors);
 }
 
@@ -417,7 +398,6 @@ void populateReply(OperationContext* opCtx,
                    write_ops_exec::WriteResult result,
                    CommandReplyType* cmdReply,
                    boost::optional<PopulateReplyHooks> hooks = boost::none) {
-
     invariant(cmdReply);
 
     if (shouldSkipOutput(opCtx))
@@ -440,11 +420,10 @@ void populateReply(OperationContext* opCtx,
     }
 
     long long nVal = 0;
-    std::vector<BSONObj> errors;
-
+    std::vector<write_ops::WriteError> errors;
     for (size_t i = 0; i < result.results.size(); ++i) {
         if (auto error = generateError(opCtx, result.results[i], i, errors.size())) {
-            errors.push_back(*error);
+            errors.emplace_back(std::move(*error));
             continue;
         }
 
@@ -457,13 +436,13 @@ void populateReply(OperationContext* opCtx,
     }
 
     auto& replyBase = cmdReply->getWriteCommandReplyBase();
+
     replyBase.setN(nVal);
     if (!result.retriedStmtIds.empty()) {
-        replyBase.setRetriedStmtIds(result.retriedStmtIds);
+        replyBase.setRetriedStmtIds(std::move(result.retriedStmtIds));
     }
-
     if (!errors.empty()) {
-        replyBase.setWriteErrors(errors);
+        replyBase.setWriteErrors(std::move(errors));
     }
 
     // writeConcernError field is handled by command processor.
@@ -481,7 +460,6 @@ void populateReply(OperationContext* opCtx,
         }
     }
 
-    // Call the called-defined post processing handler.
     if (hooks && hooks->postProcessHandler)
         hooks->postProcessHandler();
 }
@@ -545,22 +523,20 @@ public:
 
         write_ops::InsertCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
-            write_ops::InsertCommandReply insertReply;
 
             if (isTimeseries(opCtx, request())) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
-                    _performTimeseriesWrites(opCtx, &insertReply);
+                    return _performTimeseriesWrites(opCtx);
                 } catch (DBException& ex) {
                     ex.addContext(str::stream() << "time-series insert failed: " << ns().ns());
                     throw;
                 }
-
-                return insertReply;
             }
             auto reply = write_ops_exec::performInserts(opCtx, request());
 
+            write_ops::InsertCommandReply insertReply;
             populateReply(opCtx,
                           !request().getWriteCommandRequestBase().getOrdered(),
                           request().getDocuments().size(),
@@ -775,21 +751,19 @@ public:
                                      size_t start,
                                      size_t index,
                                      std::vector<StmtId>&& stmtIds,
-                                     std::vector<BSONObj>* errors,
+                                     std::vector<write_ops::WriteError>* errors,
                                      boost::optional<repl::OpTime>* opTime,
                                      boost::optional<OID>* electionId,
-                                     std::vector<size_t>* docsToRetry) const {
+                                     std::vector<size_t>* docsToRetry) const try {
             auto& bucketCatalog = BucketCatalog::get(opCtx);
 
             auto metadata = bucketCatalog.getMetadata(batch->bucket());
-            bool prepared = bucketCatalog.prepareCommit(batch);
-            if (!prepared) {
+            auto status = bucketCatalog.prepareCommit(batch);
+            if (!status.isOK()) {
                 invariant(batch->finished());
                 docsToRetry->push_back(index);
                 return true;
             }
-            // Now that the batch is prepared, make sure we clean up if we throw.
-            ScopeGuard batchGuard([&] { bucketCatalog.abort(batch); });
 
             hangTimeseriesInsertBeforeWrite.pauseWhileSet();
 
@@ -800,9 +774,8 @@ public:
                     _performTimeseriesInsert(opCtx, batch, metadata, std::move(stmtIds));
                 if (auto error =
                         generateError(opCtx, output.result, start + index, errors->size())) {
-                    errors->push_back(*error);
+                    errors->emplace_back(std::move(*error));
                     bucketCatalog.abort(batch, output.result.getStatus());
-                    batchGuard.dismiss();
                     return output.canContinue;
                 }
 
@@ -815,9 +788,8 @@ public:
                     _performTimeseriesUpdate(opCtx, batch, metadata, std::move(stmtIds));
                 if (auto error =
                         generateError(opCtx, output.result, start + index, errors->size())) {
-                    errors->push_back(*error);
+                    errors->emplace_back(std::move(*error));
                     bucketCatalog.abort(batch, output.result.getStatus());
-                    batchGuard.dismiss();
                     return output.canContinue;
                 }
 
@@ -832,26 +804,34 @@ public:
             auto closedBucket =
                 bucketCatalog.finish(batch, BucketCatalog::CommitInfo{*opTime, *electionId});
 
-            batchGuard.dismiss();
-
             if (closedBucket) {
                 // If this write closed a bucket, compress the bucket
                 auto output = _performTimeseriesBucketCompression(opCtx, *closedBucket);
                 if (auto error =
                         generateError(opCtx, output.result, start + index, errors->size())) {
-                    errors->push_back(*error);
+                    errors->emplace_back(std::move(*error));
                     return output.canContinue;
                 }
             }
             return true;
+        } catch (const DBException& ex) {
+            BucketCatalog::get(opCtx).abort(batch, ex.toStatus());
+            throw;
         }
 
-        bool _commitTimeseriesBucketsAtomically(OperationContext* opCtx,
-                                                TimeseriesBatches* batches,
-                                                TimeseriesStmtIds&& stmtIds,
-                                                std::vector<BSONObj>* errors,
-                                                boost::optional<repl::OpTime>* opTime,
-                                                boost::optional<OID>* electionId) const {
+        enum struct TimeseriesAtomicWriteResult {
+            kSuccess,
+            kContinuableError,
+            kNonContinuableError,
+        };
+
+        TimeseriesAtomicWriteResult _commitTimeseriesBucketsAtomically(
+            OperationContext* opCtx,
+            TimeseriesBatches* batches,
+            TimeseriesStmtIds&& stmtIds,
+            std::vector<write_ops::WriteError>* errors,
+            boost::optional<repl::OpTime>* opTime,
+            boost::optional<OID>* electionId) const {
             auto& bucketCatalog = BucketCatalog::get(opCtx);
 
             std::vector<std::reference_wrapper<std::shared_ptr<BucketCatalog::WriteBatch>>>
@@ -864,7 +844,7 @@ public:
             }
 
             if (batchesToCommit.empty()) {
-                return true;
+                return TimeseriesAtomicWriteResult::kSuccess;
             }
 
             // Sort by bucket so that preparing the commit for each batch cannot deadlock.
@@ -872,7 +852,7 @@ public:
                 return left.get()->bucket().id < right.get()->bucket().id;
             });
 
-            boost::optional<Status> abortStatus;
+            Status abortStatus = Status::OK();
             ScopeGuard batchGuard{[&] {
                 for (auto batch : batchesToCommit) {
                     if (batch.get()) {
@@ -881,62 +861,67 @@ public:
                 }
             }};
 
-            std::vector<write_ops::InsertCommandRequest> insertOps;
-            std::vector<write_ops::UpdateCommandRequest> updateOps;
+            try {
+                std::vector<write_ops::InsertCommandRequest> insertOps;
+                std::vector<write_ops::UpdateCommandRequest> updateOps;
 
-            for (auto batch : batchesToCommit) {
-                auto metadata = bucketCatalog.getMetadata(batch.get()->bucket());
-                if (!bucketCatalog.prepareCommit(batch)) {
-                    return false;
-                }
-
-                if (batch.get()->numPreviouslyCommittedMeasurements() == 0) {
-                    insertOps.push_back(_makeTimeseriesInsertOp(
-                        batch, metadata, std::move(stmtIds[batch.get()->bucket().id])));
-                } else {
-                    updateOps.push_back(_makeTimeseriesUpdateOp(
-                        opCtx, batch, metadata, std::move(stmtIds[batch.get()->bucket().id])));
-                }
-            }
-
-            hangTimeseriesInsertBeforeWrite.pauseWhileSet();
-
-            auto result =
-                write_ops_exec::performAtomicTimeseriesWrites(opCtx, insertOps, updateOps);
-            if (!result.isOK()) {
-                abortStatus = result;
-                return false;
-            }
-
-            getOpTimeAndElectionId(opCtx, opTime, electionId);
-
-            bool compressClosedBuckets = true;
-            for (auto batch : batchesToCommit) {
-                auto closedBucket =
-                    bucketCatalog.finish(batch, BucketCatalog::CommitInfo{*opTime, *electionId});
-                batch.get().reset();
-
-                if (!closedBucket || !compressClosedBuckets) {
-                    continue;
-                }
-
-                // If this write closed a bucket, compress the bucket
-                auto ret = _performTimeseriesBucketCompression(opCtx, *closedBucket);
-                if (!ret.result.isOK()) {
-                    // Don't try to compress any other buckets if we fail. We're not allowed to do
-                    // more write operations.
-                    compressClosedBuckets = false;
-                }
-                if (!ret.canContinue) {
-                    if (!ret.result.isOK()) {
-                        abortStatus = ret.result.getStatus();
+                for (auto batch : batchesToCommit) {
+                    auto metadata = bucketCatalog.getMetadata(batch.get()->bucket());
+                    auto prepareCommitStatus = bucketCatalog.prepareCommit(batch);
+                    if (!prepareCommitStatus.isOK()) {
+                        abortStatus = prepareCommitStatus;
+                        return TimeseriesAtomicWriteResult::kContinuableError;
                     }
-                    return false;
+
+                    if (batch.get()->numPreviouslyCommittedMeasurements() == 0) {
+                        insertOps.push_back(_makeTimeseriesInsertOp(
+                            batch, metadata, std::move(stmtIds[batch.get()->bucket().id])));
+                    } else {
+                        updateOps.push_back(_makeTimeseriesUpdateOp(
+                            opCtx, batch, metadata, std::move(stmtIds[batch.get()->bucket().id])));
+                    }
                 }
+
+                hangTimeseriesInsertBeforeWrite.pauseWhileSet();
+
+                auto result =
+                    write_ops_exec::performAtomicTimeseriesWrites(opCtx, insertOps, updateOps);
+                if (!result.isOK()) {
+                    abortStatus = result;
+                    return TimeseriesAtomicWriteResult::kContinuableError;
+                }
+
+                getOpTimeAndElectionId(opCtx, opTime, electionId);
+
+                bool compressClosedBuckets = true;
+                for (auto batch : batchesToCommit) {
+                    auto closedBucket = bucketCatalog.finish(
+                        batch, BucketCatalog::CommitInfo{*opTime, *electionId});
+                    batch.get().reset();
+
+                    if (!closedBucket || !compressClosedBuckets) {
+                        continue;
+                    }
+
+                    // If this write closed a bucket, compress the bucket
+                    auto ret = _performTimeseriesBucketCompression(opCtx, *closedBucket);
+                    if (!ret.result.isOK()) {
+                        // Don't try to compress any other buckets if we fail. We're not allowed to
+                        // do more write operations.
+                        compressClosedBuckets = false;
+                    }
+                    if (!ret.canContinue) {
+                        abortStatus = ret.result.getStatus();
+                        return TimeseriesAtomicWriteResult::kNonContinuableError;
+                    }
+                }
+            } catch (const DBException& ex) {
+                abortStatus = ex.toStatus();
+                throw;
             }
 
             batchGuard.dismiss();
-            return true;
+            return TimeseriesAtomicWriteResult::kSuccess;
         }
 
         std::tuple<TimeseriesBatches,
@@ -947,7 +932,7 @@ public:
                                  size_t start,
                                  size_t numDocs,
                                  const std::vector<size_t>& indices,
-                                 std::vector<BSONObj>* errors,
+                                 std::vector<write_ops::WriteError>* errors,
                                  bool* containsRetry) const {
             auto& bucketCatalog = BucketCatalog::get(opCtx);
 
@@ -991,7 +976,7 @@ public:
                     _canCombineTimeseriesInsertWithOtherClients(opCtx));
 
                 if (auto error = generateError(opCtx, result, start + index, errors->size())) {
-                    errors->push_back(*error);
+                    errors->emplace_back(std::move(*error));
                     return false;
                 } else {
                     const auto& batch = result.getValue().batch;
@@ -1015,7 +1000,7 @@ public:
                         // Bucket compression only fail when we may not try to perform any other
                         // write operation. When handleError() inside write_ops_exec.cpp return
                         // false.
-                        errors->push_back(*error);
+                        errors->emplace_back(std::move(*error));
                         canContinue = false;
                         return false;
                     }
@@ -1041,28 +1026,16 @@ public:
                     canContinue};
         }
 
-        BSONObj _cloneErrorWithIndex(BSONObj error, size_t index) const {
-            BSONObjBuilder bob;
-            for (auto&& elem : error) {
-                if (elem.fieldNameStringData() == "index") {
-                    bob.append("index", static_cast<int>(index));
-                } else {
-                    bob.append(elem);
-                }
-            }
-            return bob.obj();
-        }
-
         void _getTimeseriesBatchResults(OperationContext* opCtx,
                                         const TimeseriesBatches& batches,
                                         size_t start,
                                         size_t indexOfLastProcessedBatch,
                                         bool canContinue,
-                                        std::vector<BSONObj>* errors,
+                                        std::vector<write_ops::WriteError>* errors,
                                         boost::optional<repl::OpTime>* opTime,
                                         boost::optional<OID>* electionId,
                                         std::vector<size_t>* docsToRetry = nullptr) const {
-            boost::optional<BSONObj> lastError;
+            boost::optional<write_ops::WriteError> lastError;
             if (!errors->empty()) {
                 lastError = errors->back();
             }
@@ -1076,14 +1049,8 @@ public:
                 // If there are any unprocessed batches, we mark them as error with the last known
                 // error.
                 if (itr > indexOfLastProcessedBatch && batch->claimCommitRights()) {
-                    auto& bucketCatalog = BucketCatalog::get(opCtx);
-                    bucketCatalog.abort(batch);
-
-                    tassert(
-                        6023100,
-                        "there should be at least one error if the batch processing exited early",
-                        lastError);
-                    errors->push_back(_cloneErrorWithIndex(*lastError, start + index));
+                    BucketCatalog::get(opCtx).abort(batch, lastError->getStatus());
+                    errors->emplace_back(start + index, lastError->getStatus());
                     continue;
                 }
 
@@ -1095,7 +1062,7 @@ public:
                 }
                 if (auto error = generateError(
                         opCtx, swCommitInfo.getStatus(), start + index, errors->size())) {
-                    errors->push_back(*error);
+                    errors->emplace_back(std::move(*error));
                     continue;
                 }
 
@@ -1112,49 +1079,59 @@ public:
             // error.
             if (!canContinue && docsToRetry) {
                 for (auto&& index : *docsToRetry) {
-                    errors->push_back(_cloneErrorWithIndex(*lastError, start + index));
+                    errors->emplace_back(start + index, lastError->getStatus());
                 }
                 docsToRetry->clear();
             }
         }
 
-        bool _performOrderedTimeseriesWritesAtomically(OperationContext* opCtx,
-                                                       std::vector<BSONObj>* errors,
-                                                       boost::optional<repl::OpTime>* opTime,
-                                                       boost::optional<OID>* electionId,
-                                                       bool* containsRetry) const {
+        TimeseriesAtomicWriteResult _performOrderedTimeseriesWritesAtomically(
+            OperationContext* opCtx,
+            std::vector<write_ops::WriteError>* errors,
+            boost::optional<repl::OpTime>* opTime,
+            boost::optional<OID>* electionId,
+            bool* containsRetry) const {
             auto [batches, stmtIds, numInserted, canContinue] = _insertIntoBucketCatalog(
                 opCtx, 0, request().getDocuments().size(), {}, errors, containsRetry);
             if (!canContinue) {
-                // If we are not allowed to continue with any write operation return true here to
-                // prevent the ordered inserts from being retried one by one.
-                return true;
+                return TimeseriesAtomicWriteResult::kNonContinuableError;
             }
 
             hangTimeseriesInsertBeforeCommit.pauseWhileSet();
 
-            if (!_commitTimeseriesBucketsAtomically(
-                    opCtx, &batches, std::move(stmtIds), errors, opTime, electionId)) {
-                return false;
+            auto result = _commitTimeseriesBucketsAtomically(
+                opCtx, &batches, std::move(stmtIds), errors, opTime, electionId);
+            if (result != TimeseriesAtomicWriteResult::kSuccess) {
+                return result;
             }
 
             _getTimeseriesBatchResults(
                 opCtx, batches, 0, batches.size(), true, errors, opTime, electionId);
 
-            return true;
+            return TimeseriesAtomicWriteResult::kSuccess;
         }
 
         /**
          * Returns the number of documents that were inserted.
          */
         size_t _performOrderedTimeseriesWrites(OperationContext* opCtx,
-                                               std::vector<BSONObj>* errors,
+                                               std::vector<write_ops::WriteError>* errors,
                                                boost::optional<repl::OpTime>* opTime,
                                                boost::optional<OID>* electionId,
                                                bool* containsRetry) const {
-            if (_performOrderedTimeseriesWritesAtomically(
-                    opCtx, errors, opTime, electionId, containsRetry)) {
-                return request().getDocuments().size();
+            auto result = _performOrderedTimeseriesWritesAtomically(
+                opCtx, errors, opTime, electionId, containsRetry);
+            switch (result) {
+                case TimeseriesAtomicWriteResult::kSuccess:
+                    return request().getDocuments().size();
+                case TimeseriesAtomicWriteResult::kNonContinuableError:
+                    // If we can't continue, we know that 0 were inserted since this function should
+                    // guarantee that the inserts are atomic.
+                    return 0;
+                case TimeseriesAtomicWriteResult::kContinuableError:
+                    break;
+                default:
+                    MONGO_UNREACHABLE;
             }
 
             for (size_t i = 0; i < request().getDocuments().size(); ++i) {
@@ -1174,14 +1151,15 @@ public:
          * can be passed as the 'indices' parameter in a subsequent call to this function, in order
          * to to be retried.
          */
-        std::vector<size_t> _performUnorderedTimeseriesWrites(OperationContext* opCtx,
-                                                              size_t start,
-                                                              size_t numDocs,
-                                                              const std::vector<size_t>& indices,
-                                                              std::vector<BSONObj>* errors,
-                                                              boost::optional<repl::OpTime>* opTime,
-                                                              boost::optional<OID>* electionId,
-                                                              bool* containsRetry) const {
+        std::vector<size_t> _performUnorderedTimeseriesWrites(
+            OperationContext* opCtx,
+            size_t start,
+            size_t numDocs,
+            const std::vector<size_t>& indices,
+            std::vector<write_ops::WriteError>* errors,
+            boost::optional<repl::OpTime>* opTime,
+            boost::optional<OID>* electionId,
+            bool* containsRetry) const {
             auto [batches, bucketStmtIds, _, canContinue] =
                 _insertIntoBucketCatalog(opCtx, start, numDocs, indices, errors, containsRetry);
 
@@ -1225,13 +1203,14 @@ public:
             return docsToRetry;
         }
 
-        void _performUnorderedTimeseriesWritesWithRetries(OperationContext* opCtx,
-                                                          size_t start,
-                                                          size_t numDocs,
-                                                          std::vector<BSONObj>* errors,
-                                                          boost::optional<repl::OpTime>* opTime,
-                                                          boost::optional<OID>* electionId,
-                                                          bool* containsRetry) const {
+        void _performUnorderedTimeseriesWritesWithRetries(
+            OperationContext* opCtx,
+            size_t start,
+            size_t numDocs,
+            std::vector<write_ops::WriteError>* errors,
+            boost::optional<repl::OpTime>* opTime,
+            boost::optional<OID>* electionId,
+            bool* containsRetry) const {
             std::vector<size_t> docsToRetry;
             do {
                 docsToRetry = _performUnorderedTimeseriesWrites(
@@ -1239,8 +1218,7 @@ public:
             } while (!docsToRetry.empty());
         }
 
-        void _performTimeseriesWrites(OperationContext* opCtx,
-                                      write_ops::InsertCommandReply* insertReply) const {
+        write_ops::InsertCommandReply _performTimeseriesWrites(OperationContext* opCtx) const {
             auto& curOp = *CurOp::get(opCtx);
             ON_BLOCK_EXIT([&] {
                 // This is the only part of finishCurOp we need to do for inserts because they reuse
@@ -1271,12 +1249,13 @@ public:
                 curOp.debug().additiveMetrics.ninserted = 0;
             }
 
-            std::vector<BSONObj> errors;
+            std::vector<write_ops::WriteError> errors;
             boost::optional<repl::OpTime> opTime;
             boost::optional<OID> electionId;
             bool containsRetry = false;
 
-            auto& baseReply = insertReply->getWriteCommandReplyBase();
+            write_ops::InsertCommandReply insertReply;
+            auto& baseReply = insertReply.getWriteCommandReplyBase();
 
             if (request().getOrdered()) {
                 baseReply.setN(_performOrderedTimeseriesWrites(
@@ -1293,7 +1272,7 @@ public:
             }
 
             if (!errors.empty()) {
-                baseReply.setWriteErrors(errors);
+                baseReply.setWriteErrors(std::move(errors));
             }
             if (opTime) {
                 baseReply.setOpTime(*opTime);
@@ -1306,6 +1285,7 @@ public:
             }
 
             curOp.debug().additiveMetrics.ninserted = baseReply.getN();
+            return insertReply;
         }
     };
 } cmdInsert;

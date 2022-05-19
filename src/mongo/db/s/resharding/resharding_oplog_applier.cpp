@@ -40,6 +40,7 @@
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/uuid.h"
@@ -53,6 +54,7 @@ MONGO_FAIL_POINT_DEFINE(reshardingApplyOplogBatchTwice);
 ReshardingOplogApplier::ReshardingOplogApplier(
     std::unique_ptr<Env> env,
     ReshardingSourceId sourceId,
+    NamespaceString oplogBufferNss,
     NamespaceString outputNss,
     std::vector<NamespaceString> allStashNss,
     size_t myStashIdx,
@@ -66,8 +68,9 @@ ReshardingOplogApplier::ReshardingOplogApplier(
                        myStashIdx,
                        _sourceId.getShardId(),
                        std::move(sourceChunkMgr),
-                       _env->metrics()},
-      _sessionApplication{},
+                       _env->metrics(),
+                       _env->metricsNew()},
+      _sessionApplication{std::move(oplogBufferNss)},
       _batchApplier{_crudApplication, _sessionApplication},
       _oplogIter(std::move(oplogIterator)) {}
 
@@ -76,8 +79,8 @@ SemiFuture<void> ReshardingOplogApplier::_applyBatch(
     CancellationToken cancelToken,
     CancelableOperationContextFactory factory) {
     Timer latencyTimer;
-    auto crudWriterVectors =
-        _batchPreparer.makeCrudOpWriterVectors(_currentBatchToApply, _currentDerivedOps);
+    auto crudWriterVectors = _batchPreparer.makeCrudOpWriterVectors(
+        _currentBatchToApply, _currentDerivedOpsForCrudWriters);
 
     CancellationSource errorSource(cancelToken);
 
@@ -97,7 +100,8 @@ SemiFuture<void> ReshardingOplogApplier::_applyBatch(
         }
     }
 
-    auto sessionWriterVectors = _batchPreparer.makeSessionOpWriterVectors(_currentBatchToApply);
+    auto sessionWriterVectors = _batchPreparer.makeSessionOpWriterVectors(
+        _currentBatchToApply, _currentDerivedOpsForSessionWriters);
     batchApplierFutures.reserve(crudWriterVectors.size() + sessionWriterVectors.size());
 
     for (auto&& writer : sessionWriterVectors) {
@@ -150,7 +154,8 @@ SemiFuture<void> ReshardingOplogApplier::run(
                                  "reshardingApplyOplogBatchTwice failpoint enabled, applying batch "
                                  "a second time",
                                  "batchSize"_attr = _currentBatchToApply.size());
-                           _currentDerivedOps.clear();
+                           _currentDerivedOpsForCrudWriters.clear();
+                           _currentDerivedOpsForSessionWriters.clear();
                            return _applyBatch(executor, cancelToken, factory);
                        }
                        return SemiFuture<void>();
@@ -233,9 +238,13 @@ void ReshardingOplogApplier::_clearAppliedOpsAndStoreProgress(OperationContext* 
         BSON(ReshardingOplogApplierProgress::kOplogSourceIdFieldName << _sourceId.toBSON()),
         builder.obj());
     _env->metrics()->onOplogEntriesApplied(_currentBatchToApply.size());
+    if (feature_flags::gFeatureFlagShardingDataTransformMetrics.isEnabledAndIgnoreFCV()) {
+        _env->metricsNew()->onOplogEntriesApplied(_currentBatchToApply.size());
+    }
 
     _currentBatchToApply.clear();
-    _currentDerivedOps.clear();
+    _currentDerivedOpsForCrudWriters.clear();
+    _currentDerivedOpsForSessionWriters.clear();
 }
 
 NamespaceString ReshardingOplogApplier::ensureStashCollectionExists(

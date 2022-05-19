@@ -32,6 +32,8 @@
 #include "mongo/db/s/shard_key_util.h"
 
 #include "mongo/bson/simple_bsonelement_comparator.h"
+#include "mongo/crypto/encryption_fields_util.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -104,7 +106,7 @@ bool validShardKeyIndexExists(OperationContext* opCtx,
                               const NamespaceString& nss,
                               const ShardKeyPattern& shardKeyPattern,
                               const boost::optional<BSONObj>& defaultCollation,
-                              bool unique,
+                              bool requiresUnique,
                               const ShardKeyValidationBehaviors& behaviors) {
     auto indexes = behaviors.loadIndexes(nss);
 
@@ -144,7 +146,7 @@ bool validShardKeyIndexExists(OperationContext* opCtx,
     }
 
     // 3. If proposed key is required to be unique, additionally check for exact match.
-    if (hasUsefulIndexForKey && unique) {
+    if (hasUsefulIndexForKey && requiresUnique) {
         BSONObj eqQuery = BSON("ns" << nss.ns() << "key" << shardKeyPattern.toBSON());
         BSONObj eqQueryResult;
 
@@ -184,12 +186,16 @@ bool validateShardKeyIndexExistsOrCreateIfPossible(OperationContext* opCtx,
                                                    const ShardKeyPattern& shardKeyPattern,
                                                    const boost::optional<BSONObj>& defaultCollation,
                                                    bool unique,
+                                                   bool enforceUniquenessCheck,
                                                    const ShardKeyValidationBehaviors& behaviors) {
-    if (validShardKeyIndexExists(
-            opCtx, nss, shardKeyPattern, defaultCollation, unique, behaviors)) {
+    if (validShardKeyIndexExists(opCtx,
+                                 nss,
+                                 shardKeyPattern,
+                                 defaultCollation,
+                                 unique && enforceUniquenessCheck,
+                                 behaviors)) {
         return false;
     }
-
 
     // 4. If no useful index, verify we can create one.
     behaviors.verifyCanCreateShardKeyIndex(nss);
@@ -200,6 +206,48 @@ bool validateShardKeyIndexExistsOrCreateIfPossible(OperationContext* opCtx,
     //    the simple collation as part of the createIndex request.
     behaviors.createShardKeyIndex(nss, shardKeyPattern.toBSON(), defaultCollation, unique);
     return true;
+}
+
+// TODO: SERVER-64187 move calls to validateShardKeyIsNotEncrypted into
+// validateShardKeyIndexExistsOrCreateIfPossible
+void validateShardKeyIsNotEncrypted(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    const ShardKeyPattern& shardKeyPattern) {
+    if (!gFeatureFlagFLE2.isEnabledAndIgnoreFCV()) {
+        return;
+    }
+
+    AutoGetCollection collection(opCtx, nss, MODE_IS, AutoGetCollectionViewMode::kViewsPermitted);
+    if (!collection || collection.getView()) {
+        return;
+    }
+
+    const auto& encryptConfig = collection->getCollectionOptions().encryptedFieldConfig;
+    if (!encryptConfig) {
+        // this collection is not encrypted
+        return;
+    }
+
+    auto& encryptedFields = encryptConfig->getFields();
+    std::vector<FieldRef> encryptedFieldRefs;
+    std::transform(encryptedFields.begin(),
+                   encryptedFields.end(),
+                   std::back_inserter(encryptedFieldRefs),
+                   [](auto& path) { return FieldRef(path.getPath()); });
+
+    for (const auto& keyFieldRef : shardKeyPattern.getKeyPatternFields()) {
+        auto match = findMatchingEncryptedField(*keyFieldRef, encryptedFieldRefs);
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Sharding is not allowed on keys that are equal to, or a "
+                                 "prefix of, the encrypted field "
+                              << match->encryptedField.dottedField(),
+                !match || !match->keyIsPrefixOrEqual);
+        uassert(
+            ErrorCodes::InvalidOptions,
+            str::stream() << "Sharding is not allowed on keys whose prefix is the encrypted field "
+                          << match->encryptedField.dottedField(),
+            !match || match->keyIsPrefixOrEqual);
+    }
 }
 
 std::vector<BSONObj> ValidationBehaviorsShardCollection::loadIndexes(

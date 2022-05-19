@@ -498,7 +498,9 @@ void TransactionRouter::Router::processParticipantResponse(OperationContext* opC
     }
 
     auto commandStatus = getStatusFromCommandResult(responseObj);
-    if (!commandStatus.isOK()) {
+    // WouldChangeOwningShard errors don't abort their transaction and the responses containing them
+    // include transaction metadata, so we treat them as successful responses.
+    if (!commandStatus.isOK() && commandStatus != ErrorCodes::WouldChangeOwningShard) {
         return;
     }
 
@@ -932,86 +934,43 @@ void TransactionRouter::Router::_setAtClusterTime(
     o(lk).atClusterTime->setTime(candidateTime, p().latestStmtId);
 }
 
-void TransactionRouter::Router::_beginOrContinueActiveTxnNumber(
-    OperationContext* opCtx,
-    TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-    TransactionActions action) {
+void TransactionRouter::Router::_continueTxn(OperationContext* opCtx,
+                                             TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+                                             TransactionActions action) {
     invariant(txnNumberAndRetryCounter.getTxnNumber() ==
               o().txnNumberAndRetryCounter.getTxnNumber());
-
-    if (txnNumberAndRetryCounter.getTxnRetryCounter() <
-        o().txnNumberAndRetryCounter.getTxnRetryCounter()) {
-        uasserted(TxnRetryCounterTooOldInfo(*o().txnNumberAndRetryCounter.getTxnRetryCounter()),
-                  str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
-                                << txnNumberAndRetryCounter.getTxnNumber() << " on session "
-                                << _sessionId() << " using txnRetryCounter "
-                                << txnNumberAndRetryCounter.getTxnRetryCounter()
-                                << " because the transaction has already been restarted using"
-                                << " a higher txnRetryCounter "
-                                << o().txnNumberAndRetryCounter.getTxnRetryCounter());
-    } else if (txnNumberAndRetryCounter.getTxnRetryCounter() ==
-               o().txnNumberAndRetryCounter.getTxnRetryCounter()) {
-        switch (action) {
-            case TransactionActions::kStart: {
-                uassert(ErrorCodes::ConflictingOperationInProgress,
-                        str::stream() << "txnNumber " << o().txnNumberAndRetryCounter.getTxnNumber()
-                                      << " txnRetryCounter "
-                                      << o().txnNumberAndRetryCounter.getTxnRetryCounter()
-                                      << " for session " << _sessionId() << " already started",
-                        isInternalSessionForRetryableWrite(_sessionId()));
-                break;
-            }
-            case TransactionActions::kContinue: {
-                uassert(ErrorCodes::InvalidOptions,
-                        "Only the first command in a transaction may specify a readConcern",
-                        repl::ReadConcernArgs::get(opCtx).isEmpty());
-
-                APIParameters::get(opCtx) = o().apiParameters;
-                repl::ReadConcernArgs::get(opCtx) = o().readConcernArgs;
-
-                ++p().latestStmtId;
-                _onContinue(opCtx);
-                break;
-            }
-            case TransactionActions::kCommit:
-                ++p().latestStmtId;
-                _onContinue(opCtx);
-                break;
+    switch (action) {
+        case TransactionActions::kStart: {
+            uassert(ErrorCodes::ConflictingOperationInProgress,
+                    str::stream() << "txnNumber " << o().txnNumberAndRetryCounter.getTxnNumber()
+                                  << " txnRetryCounter "
+                                  << o().txnNumberAndRetryCounter.getTxnRetryCounter()
+                                  << " for session " << _sessionId() << " already started",
+                    isInternalSessionForRetryableWrite(_sessionId()));
+            break;
         }
-    } else {
-        uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
-                              << txnNumberAndRetryCounter.getTxnNumber() << " on session "
-                              << _sessionId() << " using txnRetryCounter "
-                              << txnNumberAndRetryCounter.getTxnRetryCounter()
-                              << " because it has already started to commit using "
-                              << "a lower txnRetryCounter "
-                              << o().txnNumberAndRetryCounter.getTxnRetryCounter(),
-                o().commitType == CommitType::kNotInitiated || !o().abortCause.empty());
+        case TransactionActions::kContinue: {
+            uassert(ErrorCodes::InvalidOptions,
+                    "Only the first command in a transaction may specify a readConcern",
+                    repl::ReadConcernArgs::get(opCtx).isEmpty());
 
-        if (action == TransactionActions::kCommit) {
-            // If the first action seen by the router for this txnRetryCounter is to commit, that
-            // means that the client is attempting to recover a commit decision.
-            _resetRouterState(opCtx, txnNumberAndRetryCounter);
-            p().isRecoveringCommit = true;
-            return;
+            APIParameters::get(opCtx) = o().apiParameters;
+            repl::ReadConcernArgs::get(opCtx) = o().readConcernArgs;
+
+            ++p().latestStmtId;
+            _onContinue(opCtx);
+            break;
         }
-        uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Cannot " << actionTypeToString(action) << " transaction "
-                              << txnNumberAndRetryCounter.getTxnNumber() << " on session "
-                              << _sessionId() << " using txnRetryCounter "
-                              << txnNumberAndRetryCounter.getTxnRetryCounter()
-                              << " because it is using a lower txnRetryCounter "
-                              << o().txnNumberAndRetryCounter.getTxnRetryCounter(),
-                action == TransactionActions::kStart);
-        _resetRouterStateForStartTransaction(opCtx, txnNumberAndRetryCounter);
+        case TransactionActions::kCommit:
+            ++p().latestStmtId;
+            _onContinue(opCtx);
+            break;
     }
 }
 
-void TransactionRouter::Router::_beginNewTxnNumber(
-    OperationContext* opCtx,
-    TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-    TransactionActions action) {
+void TransactionRouter::Router::_beginTxn(OperationContext* opCtx,
+                                          TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+                                          TransactionActions action) {
     invariant(txnNumberAndRetryCounter.getTxnNumber() >
               o().txnNumberAndRetryCounter.getTxnNumber());
 
@@ -1046,12 +1005,10 @@ void TransactionRouter::Router::_beginNewTxnNumber(
     };
 }
 
-void TransactionRouter::Router::beginOrContinueTxn(
-    OperationContext* opCtx,
-    TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-    TransactionActions action) {
-    invariant(txnNumberAndRetryCounter.getTxnRetryCounter() >= 0,
-              "Cannot specify a negative txnRetryCounter");
+void TransactionRouter::Router::beginOrContinueTxn(OperationContext* opCtx,
+                                                   TxnNumber txnNumber,
+                                                   TransactionActions action) {
+    const TxnNumberAndRetryCounter txnNumberAndRetryCounter{txnNumber, 0};
 
     if (txnNumberAndRetryCounter.getTxnNumber() < o().txnNumberAndRetryCounter.getTxnNumber()) {
         // This transaction is older than the transaction currently in progress, so throw an error.
@@ -1072,10 +1029,10 @@ void TransactionRouter::Router::beginOrContinueTxn(
                                                 o().apiParameters.toBSON().toString()),
                 apiParamsFromClient == o().apiParameters);
         }
-        _beginOrContinueActiveTxnNumber(opCtx, txnNumberAndRetryCounter, action);
+        _continueTxn(opCtx, txnNumberAndRetryCounter, action);
     } else {
         // This is a newer transaction.
-        _beginNewTxnNumber(opCtx, txnNumberAndRetryCounter, action);
+        _beginTxn(opCtx, txnNumberAndRetryCounter, action);
     }
 
     _updateLastClientInfo(opCtx->getClient());
@@ -1089,6 +1046,19 @@ void TransactionRouter::Router::stash(OperationContext* opCtx) {
     auto tickSource = opCtx->getServiceContext()->getTickSource();
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     o(lk).metricsTracker->trySetInactive(tickSource, tickSource->getTicks());
+}
+
+void TransactionRouter::Router::unstash(OperationContext* opCtx) {
+    if (!isInitialized()) {
+        return;
+    }
+
+    // TODO SERVER-64052: Validate that the transaction number hasn't changed and metrics are
+    // updated appropriately.
+
+    auto tickSource = opCtx->getServiceContext()->getTickSource();
+    stdx::lock_guard<Client> lk(*opCtx->getClient());
+    o(lk).metricsTracker->trySetActive(tickSource, tickSource->getTicks());
 }
 
 BSONObj TransactionRouter::Router::_handOffCommitToCoordinator(OperationContext* opCtx) {
@@ -1292,7 +1262,7 @@ BSONObj TransactionRouter::Router::abortTransaction(OperationContext* opCtx) {
                 3,
                 "{sessionId}:{txnNumber} Aborting transaction on {numParticipantShards} shard(s)",
                 "Aborting transaction on all participant shards",
-                "sessionId"_attr = _sessionId().getId(),
+                "sessionId"_attr = _sessionId(),
                 "txnNumber"_attr = o().txnNumberAndRetryCounter.getTxnNumber(),
                 "txnRetryCounter"_attr = o().txnNumberAndRetryCounter.getTxnRetryCounter(),
                 "numParticipantShards"_attr = o().participants.size());
@@ -1340,7 +1310,7 @@ void TransactionRouter::Router::implicitlyAbortTransaction(OperationContext* opC
             "may have been handed off to the coordinator",
             "Not sending implicit abortTransaction to participant shards after error because "
             "coordinating the commit decision may have been handed off to the coordinator shard",
-            "sessionId"_attr = _sessionId().getId(),
+            "sessionId"_attr = _sessionId(),
             "txnNumber"_attr = o().txnNumberAndRetryCounter.getTxnNumber(),
             "txnRetryCounter"_attr = o().txnNumberAndRetryCounter.getTxnRetryCounter(),
             "error"_attr = redact(status));
@@ -1369,7 +1339,7 @@ void TransactionRouter::Router::implicitlyAbortTransaction(OperationContext* opC
                 "{sessionId}:{txnNumber} Implicitly aborting transaction on {numParticipantShards} "
                 "shard(s) due to error: {error}",
                 "Implicitly aborting transaction on all participant shards",
-                "sessionId"_attr = _sessionId().getId(),
+                "sessionId"_attr = _sessionId(),
                 "txnNumber"_attr = o().txnNumberAndRetryCounter.getTxnNumber(),
                 "txnRetryCounter"_attr = o().txnNumberAndRetryCounter.getTxnRetryCounter(),
                 "numParticipantShards"_attr = o().participants.size(),
@@ -1387,7 +1357,7 @@ void TransactionRouter::Router::implicitlyAbortTransaction(OperationContext* opC
                     3,
                     "{sessionId}:{txnNumber} Implicitly aborting transaction failed {error}",
                     "Implicitly aborting transaction failed",
-                    "sessionId"_attr = _sessionId().getId(),
+                    "sessionId"_attr = _sessionId(),
                     "txnNumber"_attr = o().txnNumberAndRetryCounter.getTxnNumber(),
                     "txnRetryCounter"_attr = o().txnNumberAndRetryCounter.getTxnRetryCounter(),
                     "error"_attr = ex);

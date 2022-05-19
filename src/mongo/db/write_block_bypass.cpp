@@ -43,6 +43,11 @@ bool WriteBlockBypass::isWriteBlockBypassEnabled() const {
 }
 
 void WriteBlockBypass::setFromMetadata(OperationContext* opCtx, const BSONElement& elem) {
+    // If we are in direct client, the bypass state should already be set by the initial call of
+    // setFromMetadata.
+    if (opCtx->getClient()->isInDirectClient()) {
+        return;
+    }
     if (elem) {
         // If the mayBypassWriteBlocking field is set, then (after ensuring the client is
         // authorized) set our state from that field.
@@ -57,6 +62,10 @@ void WriteBlockBypass::setFromMetadata(OperationContext* opCtx, const BSONElemen
         _writeBlockBypassEnabled =
             AuthorizationSession::get(opCtx->getClient())->mayBypassWriteBlockingMode();
     }
+}
+
+void WriteBlockBypass::writeAsMetadata(BSONObjBuilder* builder) {
+    builder->append(fieldName(), _writeBlockBypassEnabled);
 }
 
 WriteBlockBypass& WriteBlockBypass::get(OperationContext* opCtx) {

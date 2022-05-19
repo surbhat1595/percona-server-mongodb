@@ -35,6 +35,7 @@
 
 #include <boost/algorithm/string/join.hpp>
 
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
@@ -49,7 +50,6 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/visit_helper.h"
 
@@ -65,7 +65,7 @@ Status checkView(OperationContext* opCtx,
                  const NamespaceString& nss,
                  const CollectionPtr& collection) {
     if (!collection) {
-        if (ViewCatalog::get(opCtx)->lookup(opCtx, nss)) {
+        if (CollectionCatalog::get(opCtx)->lookupView(opCtx, nss)) {
             return Status(ErrorCodes::CommandNotSupportedOnView,
                           str::stream() << "Cannot drop indexes on view " << nss);
         }
@@ -425,6 +425,9 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
                                     << " in database " << dbAndUUID.db() << " does not exist.");
         }
 
+        // The collection could have been renamed when we dropped locks.
+        collNs = (*collection)->ns();
+
         uassertStatusOK(checkReplState(opCtx, dbAndUUID, collection->getCollection()));
 
         // Check to see if a new index build was started that the caller requested to be
@@ -437,10 +440,10 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         }
 
         if (!abortAgain) {
-            assertMovePrimaryInProgress(opCtx, nss);
-            CollectionShardingState::get(opCtx, nss)
+            assertMovePrimaryInProgress(opCtx, collNs);
+            CollectionShardingState::get(opCtx, collNs)
                 ->getCollectionDescription(opCtx)
-                .throwIfReshardingInProgress(nss);
+                .throwIfReshardingInProgress(collNs);
             break;
         }
     }

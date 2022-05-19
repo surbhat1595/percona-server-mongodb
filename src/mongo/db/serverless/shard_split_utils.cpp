@@ -33,6 +33,7 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/ops/delete.h"
 #include "mongo/db/repl/repl_set_config.h"
 
 namespace mongo {
@@ -103,11 +104,14 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
     uassert(6201801, "No recipient members found for split config.", !recipientMembers.empty());
     uassert(6201802, "No donor members found for split config.", !donorMembers.empty());
 
-    const auto configNoMembersBson = config.toBSON().removeField("members");
+    const auto updatedVersion = config.getConfigVersion() + 1;
+    const auto configNoMembersBson = config.toBSON().removeField("members").removeField("version");
 
     BSONObjBuilder recipientConfigBob(
         configNoMembersBson.removeField("_id").removeField("settings"));
-    recipientConfigBob.append("_id", recipientSetName).append("members", recipientMembers);
+    recipientConfigBob.append("_id", recipientSetName)
+        .append("members", recipientMembers)
+        .append("version", updatedVersion);
     if (configNoMembersBson.hasField("settings") &&
         configNoMembersBson.getField("settings").isABSONObj()) {
         BSONObj settings = configNoMembersBson.getField("settings").Obj();
@@ -117,6 +121,7 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
     }
 
     BSONObjBuilder splitConfigBob(configNoMembersBson);
+    splitConfigBob.append("version", updatedVersion);
     splitConfigBob.append("members", donorMembers);
     splitConfigBob.append("recipientConfig", recipientConfigBob.obj());
 
@@ -184,8 +189,11 @@ StatusWith<ShardSplitDonorDocument> getStateDocument(OperationContext* opCtx,
     }
 
     BSONObj result;
-    auto foundDoc = Helpers::findOne(
-        opCtx, collection.getCollection(), BSON("_id" << shardSplitId), result, true);
+    auto foundDoc = Helpers::findOne(opCtx,
+                                     collection.getCollection(),
+                                     BSON(ShardSplitDonorDocument::kIdFieldName << shardSplitId),
+                                     result,
+                                     true);
 
     if (!foundDoc) {
         return Status(ErrorCodes::NoMatchingDocument,
@@ -203,6 +211,61 @@ StatusWith<ShardSplitDonorDocument> getStateDocument(OperationContext* opCtx,
     }
 }
 
+StatusWith<bool> deleteStateDoc(OperationContext* opCtx, const UUID& shardSplitId) {
+    const auto nss = NamespaceString::kTenantSplitDonorsNamespace;
+    AutoGetCollection collection(opCtx, nss, MODE_IX);
+
+    if (!collection) {
+        return Status(ErrorCodes::NamespaceNotFound,
+                      str::stream() << nss.ns() << " does not exist");
+    }
+    auto query = BSON(ShardSplitDonorDocument::kIdFieldName << shardSplitId);
+    return writeConflictRetry(opCtx, "ShardSplitDonorDeleteStateDoc", nss.ns(), [&]() -> bool {
+        auto nDeleted =
+            deleteObjects(opCtx, collection.getCollection(), nss, query, true /* justOne */);
+        return nDeleted > 0;
+    });
+}
+
+bool shouldRemoveStateDocumentOnRecipient(OperationContext* opCtx,
+                                          const ShardSplitDonorDocument& stateDocument) {
+    if (!stateDocument.getRecipientSetName()) {
+        return false;
+    }
+    auto recipientSetName = *stateDocument.getRecipientSetName();
+    auto config = repl::ReplicationCoordinator::get(cc().getServiceContext())->getConfig();
+    return recipientSetName == config.getReplSetName() &&
+        stateDocument.getState() == ShardSplitDonorStateEnum::kBlocking;
+}
+
+RecipientAcceptSplitListener::RecipientAcceptSplitListener(
+    const ConnectionString& recipientConnectionString)
+    : _numberOfRecipient(recipientConnectionString.getServers().size()),
+      _recipientSetName(recipientConnectionString.getSetName()) {}
+
+void RecipientAcceptSplitListener::onServerHeartbeatSucceededEvent(const HostAndPort& hostAndPort,
+                                                                   const BSONObj reply) {
+    if (_fulfilled.load() || !reply["setName"]) {
+        return;
+    }
+
+    stdx::lock_guard<Latch> lg(_mutex);
+    _reportedSetNames[hostAndPort] = reply["setName"].str();
+
+    auto allReportCorrectly =
+        std::all_of(_reportedSetNames.begin(),
+                    _reportedSetNames.end(),
+                    [&](const auto& entry) { return entry.second == _recipientSetName; }) &&
+        _reportedSetNames.size() == _numberOfRecipient;
+    if (allReportCorrectly) {
+        _fulfilled.store(true);
+        _promise.emplaceValue();
+    }
+}
+
+SharedSemiFuture<void> RecipientAcceptSplitListener::getFuture() const {
+    return _promise.getFuture();
+}
 
 }  // namespace serverless
 }  // namespace mongo

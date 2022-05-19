@@ -38,7 +38,7 @@
 
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/coll_mod_index.h"
-#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/index_catalog.h"
@@ -59,7 +59,7 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/ttl_collection_cache.h"
-#include "mongo/db/views/view_catalog.h"
+#include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
@@ -113,6 +113,8 @@ struct ParsedCollModRequest {
     boost::optional<ChangeStreamPreAndPostImagesOptions> changeStreamPreAndPostImagesOptions;
     int numModifications = 0;
     bool dryRun = false;
+    boost::optional<long long> cappedSize;
+    boost::optional<long long> cappedMax;
 };
 
 StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
@@ -130,6 +132,25 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
         checkCollectionUUIDMismatch(opCtx, nss, coll, cmd.getCollModRequest().getCollectionUUID());
     } catch (const DBException& ex) {
         return ex.toStatus();
+    }
+
+    if (cmd.getCollModRequest().getCappedSize() || cmd.getCollModRequest().getCappedMax()) {
+        // TODO (SERVER-64042): Remove FCV check once 6.1 is released.
+        if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            serverGlobalParams.featureCompatibility.isLessThan(
+                multiversion::FeatureCompatibilityVersion::kVersion_6_0)) {
+            return Status(ErrorCodes::InvalidOptions,
+                          "Cannot change the size limits of a capped collection.");
+        } else if (!coll->isCapped()) {
+            return Status(ErrorCodes::InvalidOptions, "Collection must be capped.");
+        } else if (coll->ns().isOplog()) {
+            return Status(ErrorCodes::InvalidOptions,
+                          "Cannot resize the oplog using this command. Use the "
+                          "'replSetResizeOplog' command instead.");
+        } else {
+            cmr.cappedSize = cmd.getCollModRequest().getCappedSize();
+            cmr.cappedMax = cmd.getCollModRequest().getCappedMax();
+        }
     }
 
     // TODO (SERVER-62732): Check options directly rather than using a loop.
@@ -164,21 +185,28 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             }
 
             if (!cmdIndex.getExpireAfterSeconds() && !cmdIndex.getHidden() &&
-                !cmdIndex.getUnique() && !cmdIndex.getDisallowNewDuplicateKeys()) {
-                return Status(
-                    ErrorCodes::InvalidOptions,
-                    "no expireAfterSeconds, hidden, unique, or disallowNewDuplicateKeys field");
+                !cmdIndex.getUnique() && !cmdIndex.getPrepareUnique() &&
+                !cmdIndex.getForceNonUnique()) {
+                return Status(ErrorCodes::InvalidOptions,
+                              "no expireAfterSeconds, hidden, unique, or prepareUnique field");
             }
 
             auto cmrIndex = &cmr.indexRequest;
             auto indexObj = e.Obj();
 
-            if (cmdIndex.getUnique() || cmdIndex.getDisallowNewDuplicateKeys()) {
+            if (cmdIndex.getUnique() || cmdIndex.getPrepareUnique()) {
                 uassert(ErrorCodes::InvalidOptions,
                         "collMod does not support converting an index to 'unique' or to "
-                        "'disallowNewDuplicateKeys' mode",
+                        "'prepareUnique' mode",
                         feature_flags::gCollModIndexUnique.isEnabled(
                             serverGlobalParams.featureCompatibility));
+            }
+
+            if (cmdIndex.getUnique() && cmdIndex.getForceNonUnique()) {
+                return Status(
+                    ErrorCodes::InvalidOptions,
+                    "collMod does not support 'unique' and 'forceNonUnique' options at the "
+                    "same time");
             }
 
             if (cmdIndex.getExpireAfterSeconds()) {
@@ -275,23 +303,22 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             auto indexObjForOplog = indexObj;
 
             if (cmdIndex.getUnique()) {
-                // Disallow one-step unique convertion. The user has to set
-                // 'disallowNewDuplicateKeys' to true first.
-                if (!cmrIndex->idx->disallowNewDuplicateKeys()) {
-                    return Status(ErrorCodes::InvalidOptions,
-                                  "Cannot make index unique with 'disallowNewDuplicateKeys=false'. "
-                                  "Run collMod to set it first.");
-                }
-
                 cmr.numModifications++;
                 if (bool unique = *cmdIndex.getUnique(); !unique) {
-                    return Status(ErrorCodes::BadValue, "Cannot make index non-unique");
+                    return Status(ErrorCodes::BadValue, "'Unique: false' option is not supported");
                 }
 
-                // Attempting to converting a unique index should be treated as a no-op.
+                // Attempting to convert a unique index should be treated as a no-op.
                 if (cmrIndex->idx->unique()) {
                     indexObjForOplog = indexObjForOplog.removeField(CollModIndex::kUniqueFieldName);
                 } else {
+                    // Disallow one-step unique convertion. The user has to set
+                    // 'prepareUnique' to true first.
+                    if (!cmrIndex->idx->prepareUnique()) {
+                        return Status(ErrorCodes::InvalidOptions,
+                                      "Cannot make index unique with 'prepareUnique=false'. "
+                                      "Run collMod to set it first.");
+                    }
                     cmrIndex->indexUnique = true;
                 }
             }
@@ -319,16 +346,29 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
                 }
             }
 
-            if (cmdIndex.getDisallowNewDuplicateKeys()) {
+            if (cmdIndex.getPrepareUnique()) {
                 cmr.numModifications++;
                 // Attempting to modify with the same value should be treated as a no-op.
-                if (cmrIndex->idx->disallowNewDuplicateKeys() ==
-                    *cmdIndex.getDisallowNewDuplicateKeys()) {
-                    indexObjForOplog = indexObjForOplog.removeField(
-                        CollModIndex::kDisallowNewDuplicateKeysFieldName);
+                if (cmrIndex->idx->prepareUnique() == *cmdIndex.getPrepareUnique()) {
+                    indexObjForOplog =
+                        indexObjForOplog.removeField(CollModIndex::kPrepareUniqueFieldName);
                 } else {
-                    cmrIndex->indexDisallowNewDuplicateKeys =
-                        cmdIndex.getDisallowNewDuplicateKeys();
+                    cmrIndex->indexPrepareUnique = cmdIndex.getPrepareUnique();
+                }
+            }
+
+            if (cmdIndex.getForceNonUnique()) {
+                cmr.numModifications++;
+                if (bool unique = *cmdIndex.getForceNonUnique(); !unique) {
+                    return Status(ErrorCodes::BadValue, "'forceNonUnique: false' is not supported");
+                }
+
+                // Attempting to convert a non-unique index should be treated as a no-op.
+                if (!cmrIndex->idx->unique()) {
+                    indexObjForOplog =
+                        indexObjForOplog.removeField(CollModIndex::kForceNonUniqueFieldName);
+                } else {
+                    cmrIndex->indexForceNonUnique = true;
                 }
             }
 
@@ -454,6 +494,20 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
             // The dry run option should never be included in a collMod oplog entry.
             continue;
         } else if (fieldName == CollMod::kCollectionUUIDFieldName) {
+        } else if (fieldName == CollMod::kCappedSizeFieldName) {
+            const long long minSize = 4096;
+            auto swCappedSize = CollectionOptions::checkAndAdjustCappedSize(*cmr.cappedSize);
+            if (!swCappedSize.isOK()) {
+                return swCappedSize.getStatus();
+            }
+            cmr.cappedSize =
+                (swCappedSize.getValue() < minSize) ? minSize : swCappedSize.getValue();
+        } else if (fieldName == CollMod::kCappedMaxFieldName) {
+            auto swCappedMaxDocs = CollectionOptions::checkAndAdjustCappedMaxDocs(*cmr.cappedMax);
+            if (!swCappedMaxDocs.isOK()) {
+                return swCappedMaxDocs.getStatus();
+            }
+            cmr.cappedMax = swCappedMaxDocs.getValue();
         } else {
             if (isTimeseries) {
                 return Status(ErrorCodes::InvalidOptions,
@@ -473,10 +527,10 @@ StatusWith<ParsedCollModRequest> parseCollModRequest(OperationContext* opCtx,
         oplogEntryBuilder->append(e);
     }
 
-    // Currently disallows the use of 'indexDisallowNewDuplicateKeys' with other collMod options.
-    if (cmr.indexRequest.indexDisallowNewDuplicateKeys && cmr.numModifications > 1) {
+    // Currently disallows the use of 'indexPrepareUnique' with other collMod options.
+    if (cmr.indexRequest.indexPrepareUnique && cmr.numModifications > 1) {
         return {ErrorCodes::InvalidOptions,
-                "disallowNewDuplicateKeys cannot be combined with any other modification."};
+                "prepareUnique cannot be combined with any other modification."};
     }
 
     return {std::move(cmr)};
@@ -567,8 +621,7 @@ Status _processCollModDryRunMode(OperationContext* opCtx,
     // Throws exception if index contains duplicates.
     auto violatingRecordsList = scanIndexForDuplicates(opCtx, collection, cmr.indexRequest.idx);
     if (!violatingRecordsList.empty()) {
-        uassertStatusOK(buildConvertUniqueErrorStatus(
-            buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
+        uassertStatusOK(buildConvertUniqueErrorStatus(opCtx, collection, violatingRecordsList));
     }
 
     return Status::OK();
@@ -606,8 +659,7 @@ StatusWith<const IndexDescriptor*> _setUpCollModIndexUnique(OperationContext* op
                                                      nss);
 
     if (!violatingRecordsList.empty()) {
-        uassertStatusOK(buildConvertUniqueErrorStatus(
-            buildDuplicateViolations(opCtx, collection, violatingRecordsList)));
+        uassertStatusOK(buildConvertUniqueErrorStatus(opCtx, collection, violatingRecordsList));
     }
 
     return idx;
@@ -655,7 +707,7 @@ Status _collModInternal(OperationContext* opCtx,
     // May also modify a view instead of a collection.
     boost::optional<ViewDefinition> view;
     if (!coll) {
-        const auto sharedView = ViewCatalog::get(opCtx)->lookup(opCtx, nss);
+        const auto sharedView = CollectionCatalog::get(opCtx)->lookupView(opCtx, nss);
         if (sharedView) {
             // We copy the ViewDefinition as it is modified below to represent the requested state.
             view = {*sharedView};
@@ -723,8 +775,8 @@ Status _collModInternal(OperationContext* opCtx,
     return writeConflictRetry(opCtx, "collMod", nss.ns(), [&] {
         WriteUnitOfWork wunit(opCtx);
 
-        // Handle collMod on a view and return early. The View Catalog handles the creation of oplog
-        // entries for modifications on a view.
+        // Handle collMod on a view and return early. The CollectionCatalog handles the creation of
+        // oplog entries for modifications on a view.
         if (view) {
             if (cmd.getPipeline())
                 view->setPipeline(*cmd.getPipeline());
@@ -737,7 +789,11 @@ Status _collModInternal(OperationContext* opCtx,
                 pipeline.append(item);
             }
             auto errorStatus =
-                ViewCatalog::modifyView(opCtx, nss, view->viewOn(), BSONArray(pipeline.obj()));
+                CollectionCatalog::get(opCtx)->modifyView(opCtx,
+                                                          nss,
+                                                          view->viewOn(),
+                                                          BSONArray(pipeline.obj()),
+                                                          view_catalog_helpers::validatePipeline);
             if (!errorStatus.isOK()) {
                 return errorStatus;
             }
@@ -775,6 +831,13 @@ Status _collModInternal(OperationContext* opCtx,
                 return Status(ErrorCodes::InvalidOptions,
                               "The 'changeStreamPreAndPostImages' is an unknown field.");
             }
+        }
+
+        if (cmrNew.cappedSize || cmrNew.cappedMax) {
+            // If the current capped collection size exceeds the newly set limits, future document
+            // inserts will prompt document deletion.
+            uassertStatusOK(coll.getWritableCollection(opCtx)->updateCappedSize(
+                opCtx, cmrNew.cappedSize, cmrNew.cappedMax));
         }
 
         boost::optional<IndexCollModInfo> indexCollModInfo;

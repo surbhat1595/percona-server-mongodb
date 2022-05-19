@@ -5,12 +5,12 @@
  *  featureFlagFLE2,
  * ]
  */
+load("jstests/fle2/libs/encrypted_client_util.js");
+
 (function() {
 'use strict';
 
-const isFLE2Enabled = TestData == undefined || TestData.setParameters.featureFlagFLE2;
-
-if (!isFLE2Enabled) {
+if (!isFLE2Enabled()) {
     return;
 }
 
@@ -39,6 +39,12 @@ assert.commandFailedWithCode(
         "basic", {timeseries: {timeField: 'time'}, encryptedFields: sampleEncryptedFields}),
     6346401,
     "Create with encryptedFields and timeseries passed");
+
+assert.commandFailedWithCode(
+    dbTest.createCollection("basic",
+                            {capped: true, size: 100000, encryptedFields: sampleEncryptedFields}),
+    6367301,
+    "Create with encryptedFields and capped passed");
 
 assert.commandWorked(dbTest.createCollection("basic", {encryptedFields: sampleEncryptedFields}));
 

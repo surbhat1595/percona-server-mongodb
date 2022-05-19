@@ -31,13 +31,18 @@
 
 #include "mongo/shell/encrypted_dbclient_base.h"
 
+#include <js/Object.h>
+#include <js/ValueArray.h>
+
 #include "mongo/base/data_cursor.h"
 #include "mongo/base/data_type_validated.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/config.h"
 #include "mongo/crypto/aead_encryption.h"
+#include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_data_frames.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/symmetric_crypto.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
@@ -57,6 +62,7 @@
 #include "mongo/shell/kms.h"
 #include "mongo/shell/kms_gen.h"
 #include "mongo/shell/shell_options.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -193,11 +199,22 @@ void EncryptedDBClientBase::decryptPayload(ConstDataRange data,
     }
 }
 
-std::pair<rpc::UniqueReply, DBClientBase*> EncryptedDBClientBase::processResponse(
+std::pair<rpc::UniqueReply, DBClientBase*> EncryptedDBClientBase::processResponseFLE1(
     rpc::UniqueReply result, const StringData databaseName) {
     auto rawReply = result->getCommandReply();
-    BSONObj decryptedDoc = encryptDecryptCommand(rawReply, false, databaseName);
+    return prepareReply(
+        std::move(result), databaseName, encryptDecryptCommand(rawReply, false, databaseName));
+}
 
+std::pair<rpc::UniqueReply, DBClientBase*> EncryptedDBClientBase::processResponseFLE2(
+    rpc::UniqueReply result, const StringData databaseName) {
+    auto rawReply = result->getCommandReply();
+    return prepareReply(
+        std::move(result), databaseName, FLEClientCrypto::decryptDocument(rawReply, this));
+}
+
+std::pair<rpc::UniqueReply, DBClientBase*> EncryptedDBClientBase::prepareReply(
+    rpc::UniqueReply result, const StringData databaseName, BSONObj decryptedDoc) {
     rpc::OpMsgReplyBuilder replyBuilder;
     replyBuilder.setCommandReply(StatusWith<BSONObj>(decryptedDoc));
     auto msg = replyBuilder.done();
@@ -219,7 +236,8 @@ std::pair<rpc::UniqueReply, DBClientBase*> EncryptedDBClientBase::runCommandWith
     }
 
     auto result = _conn->runCommandWithTarget(std::move(request)).first;
-    return processResponse(std::move(result), databaseName);
+    return processResponseFLE1(processResponseFLE2(std::move(result), databaseName).first,
+                               databaseName);
 }
 
 /**
@@ -358,7 +376,7 @@ void EncryptedDBClientBase::encrypt(mozjs::MozJSImplScope* scope,
     BufBuilder plaintextBuilder;
     if (args.get(1).isObject()) {
         JS::RootedObject rootedObj(cx, &args.get(1).toObject());
-        auto jsclass = JS_GetClass(rootedObj);
+        auto jsclass = JS::GetClass(rootedObj);
 
         if (strcmp(jsclass->name, "Object") == 0 || strcmp(jsclass->name, "Array") == 0) {
             uassert(ErrorCodes::BadValue,
@@ -460,7 +478,7 @@ void EncryptedDBClientBase::encrypt(mozjs::MozJSImplScope* scope,
     ConstDataRange ciphertextBlob(encryptionFrame.get());
     std::string blobStr =
         base64::encode(StringData(ciphertextBlob.data(), ciphertextBlob.length()));
-    JS::AutoValueArray<2> arr(cx);
+    JS::RootedValueArray<2> arr(cx);
 
     arr[0].setInt32(BinDataType::Encrypt);
     mozjs::ValueReader(cx, arr[1]).fromStringData(blobStr);
@@ -495,6 +513,48 @@ void EncryptedDBClientBase::decrypt(mozjs::MozJSImplScope* scope,
         mozjs::ValueReader(cx, args.rval())
             .fromBSONElement(decryptedObj.firstElement(), parent, true);
     }
+}
+
+boost::optional<EncryptedFieldConfig> EncryptedDBClientBase::getEncryptedFieldConfig(
+    const NamespaceString& nss) {
+    auto collsList = _conn->getCollectionInfos(nss.db().toString(), BSON("name" << nss.coll()));
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "Namespace not found: " << nss.toString(),
+            !collsList.empty());
+    auto info = collsList.front();
+    auto opts = info.getField("options");
+    if (opts.eoo() || !opts.isABSONObj()) {
+        return boost::none;
+    }
+    auto efc = opts.Obj().getField("encryptedFields");
+    if (efc.eoo() || !efc.isABSONObj()) {
+        return boost::none;
+    }
+    return EncryptedFieldConfig::parse(IDLParserErrorContext("encryptedFields"), efc.Obj());
+}
+
+void EncryptedDBClientBase::compact(JSContext* cx, JS::CallArgs args) {
+    if (args.length() != 1) {
+        uasserted(ErrorCodes::BadValue, "compact requires 1 arg");
+    }
+    if (!args.get(0).isString()) {
+        uasserted(ErrorCodes::BadValue, "1st param to compact has to be a string");
+    }
+    std::string fullName = mozjs::ValueWriter(cx, args.get(0)).toString();
+    NamespaceString nss(fullName);
+    uassert(
+        ErrorCodes::BadValue, str::stream() << "Invalid namespace: " << fullName, nss.isValid());
+
+    auto efc = getEncryptedFieldConfig(nss);
+    BSONObjBuilder builder;
+    builder.append("compactStructuredEncryptionData", nss.coll());
+    builder.append("compactionTokens",
+                   efc ? FLEClientCrypto::generateCompactionTokens(*efc, this) : BSONObj());
+
+    BSONObj reply;
+    runCommand(nss.db().toString(), builder.obj(), reply, 0);
+    reply = reply.getOwned();
+    mozjs::ValueReader(cx, args.rval()).fromBSON(reply, nullptr, false);
 }
 
 void EncryptedDBClientBase::trace(JSTracer* trc) {
@@ -604,7 +664,7 @@ std::vector<uint8_t> EncryptedDBClientBase::getBinDataArg(
             str::stream() << "Incorrect bindata type, expected" << typeName(type) << " but got "
                           << typeName(binType),
             binType == type);
-    auto str = static_cast<std::string*>(JS_GetPrivate(args.get(index).toObjectOrNull()));
+    auto str = static_cast<std::string*>(JS::GetPrivate(args.get(index).toObjectOrNull()));
     uassert(ErrorCodes::BadValue, "Cannot call getter on BinData prototype", str);
     std::string string = base64::decode(*str);
     return std::vector<uint8_t>(string.data(), string.data() + string.length());
@@ -626,7 +686,7 @@ std::shared_ptr<SymmetricKey> EncryptedDBClientBase::getDataKey(const UUID& uuid
     return key;
 }
 
-std::shared_ptr<SymmetricKey> EncryptedDBClientBase::getDataKeyFromDisk(const UUID& uuid) {
+SecureVector<uint8_t> EncryptedDBClientBase::getKeyMaterialFromDisk(const UUID& uuid) {
     NamespaceString fullNameNS = getCollectionNS();
     FindCommandRequest findCmd{fullNameNS};
     findCmd.setFilter(BSON("_id" << uuid));
@@ -657,8 +717,22 @@ std::shared_ptr<SymmetricKey> EncryptedDBClientBase::getDataKeyFromDisk(const UU
         _encryptionOptions.getKmsProviders().toBSON(), keyStoreRecord.getMasterKey());
     SecureVector<uint8_t> decryptedKey =
         kmsService->decrypt(dataKey, keyStoreRecord.getMasterKey());
+    return decryptedKey;
+}
+
+std::shared_ptr<SymmetricKey> EncryptedDBClientBase::getDataKeyFromDisk(const UUID& uuid) {
+    auto decryptedKey = getKeyMaterialFromDisk(uuid);
     return std::make_shared<SymmetricKey>(
         std::move(decryptedKey), crypto::aesAlgorithm, "kms_encryption");
+}
+
+KeyMaterial EncryptedDBClientBase::getKey(const UUID& uuid) {
+    auto decryptedKey = getKeyMaterialFromDisk(uuid);
+
+    KeyMaterial km;
+    km->resize(decryptedKey->size());
+    std::copy(decryptedKey->data(), decryptedKey->data() + decryptedKey->size(), km->data());
+    return km;
 }
 
 #ifdef MONGO_CONFIG_SSL
@@ -693,7 +767,7 @@ void createCollectionObject(JSContext* cx,
 
     // The collection object requires a database object to be constructed as well.
     JS::RootedValue databaseRV(cx);
-    JS::AutoValueArray<2> databaseArgs(cx);
+    JS::RootedValueArray<2> databaseArgs(cx);
 
     databaseArgs[0].setObject(client.toObject());
     mozjs::ValueReader(cx, databaseArgs[1]).fromStringData(ns.db());
@@ -702,7 +776,7 @@ void createCollectionObject(JSContext* cx,
     invariant(databaseRV.isObject());
     auto databaseObj = databaseRV.toObjectOrNull();
 
-    JS::AutoValueArray<4> collectionArgs(cx);
+    JS::RootedValueArray<4> collectionArgs(cx);
     collectionArgs[0].setObject(client.toObject());
     collectionArgs[1].setObject(*databaseObj);
     mozjs::ValueReader(cx, collectionArgs[2]).fromStringData(ns.coll());

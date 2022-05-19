@@ -107,6 +107,7 @@ let testCases = {
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: "internal command"},
     _configsvrMoveChunk: {skip: "internal command"},
     _configsvrMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
+    _configsvrMoveRange: {skip: "internal command"},
     _configsvrRefineCollectionShardKey: {skip: "internal command"},
     _configsvrRemoveChunks: {skip: "internal command"},
     _configsvrRemoveShard: {skip: "internal command"},
@@ -116,7 +117,9 @@ let testCases = {
     _configsvrRenameCollectionMetadata: {skip: "internal command"},
     _configsvrRepairShardedCollectionChunksHistory: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
+    _configsvrRunRestore: {skip: "internal command"},
     _configsvrSetAllowMigrations: {skip: "internal command"},
+    _configsvrSetClusterParameter: {skip: "internal command"},
     _configsvrSetUserWriteBlockMode: {skip: "internal command"},
     _configsvrShardCollection:
         {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
@@ -151,6 +154,10 @@ let testCases = {
     _shardsvrDropDatabase: {skip: "internal command"},
     _shardsvrDropDatabaseParticipant: {skip: "internal command"},
     _shardsvrMovePrimary: {skip: "internal command"},
+    _shardsvrMoveRange: {
+        skip:
+            "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
+    },
     _shardsvrRefineCollectionShardKey: {skip: "internal command"},
     _shardsvrRenameCollection: {skip: "internal command"},
     _shardsvrRenameCollectionParticipant: {skip: "internal command"},
@@ -158,6 +165,7 @@ let testCases = {
     _shardsvrReshardCollection: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
     _shardsvrSetAllowMigrations: {skip: "internal command"},
+    _shardsvrSetUserWriteBlockMode: {skip: "internal command"},
     _shardsvrCollMod: {skip: "internal command"},
     _shardsvrCollModParticipant: {skip: "internal command"},
     _shardsvrShardCollection:
@@ -553,6 +561,10 @@ let testCases = {
             "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
     },
     movePrimary: {skip: "does not accept read or write concern"},
+    moveRange: {
+        skip:
+            "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
+    },
     multicast: {skip: "does not accept read or write concern"},
     netstat: {skip: "internal command"},
     pinHistoryReplicated: {skip: "internal command"},
@@ -567,6 +579,7 @@ let testCases = {
     reapLogicalSessionCacheNow: {skip: "does not accept read or write concern"},
     recipientForgetMigration: {skip: "does not accept read or write concern"},
     recipientSyncData: {skip: "does not accept read or write concern"},
+    recipientVoteImportedFiles: {skip: "does not accept read or write concern"},
     refineCollectionShardKey: {skip: "does not accept read or write concern"},
     refreshLogicalSessionCacheNow: {skip: "does not accept read or write concern"},
     refreshSessions: {skip: "does not accept read or write concern"},
@@ -686,6 +699,7 @@ let testCases = {
     stopRecordingTraffic: {skip: "does not accept read or write concern"},
     testDeprecation: {skip: "does not accept read or write concern"},
     testDeprecationInVersion2: {skip: "does not accept read or write concern"},
+    testInternalTransactions: {skip: "internal command"},
     testRemoval: {skip: "does not accept read or write concern"},
     testReshardCloneCollection: {skip: "internal command"},
     testVersions1And2: {skip: "does not accept read or write concern"},
@@ -730,7 +744,7 @@ let testCases = {
     validateDBMetadata: {skip: "does not accept read or write concern"},
     voteCommitImportCollection: {skip: "internal command"},
     voteCommitIndexBuild: {skip: "internal command"},
-    voteCommitMigrationProgress: {skip: "internal command"},
+    voteCommitMigrationProgress: {skip: "internal command"},  // TODO (SERVER-64296): Remove in 6.1.
     waitForFailPoint: {skip: "does not accept read or write concern"},
     waitForOngoingChunkSplits: {skip: "does not accept read or write concern"},
     whatsmysni: {skip: "does not accept read or write concern"},

@@ -33,6 +33,8 @@ var ReshardingTest = class {
         writePeriodicNoops: writePeriodicNoops = undefined,
         enableElections: enableElections = false,
         logComponentVerbosity: logComponentVerbosity = undefined,
+        storeFindAndModifyImagesInSideCollection: storeFindAndModifyImagesInSideCollection = true,
+        oplogSize: oplogSize = undefined
     } = {}) {
         // The @private JSDoc comments cause VS Code to not display the corresponding properties and
         // methods in its autocomplete list. This makes it simpler for test authors to know what the
@@ -59,6 +61,9 @@ var ReshardingTest = class {
         this._enableElections = enableElections;
         /** @private */
         this._logComponentVerbosity = logComponentVerbosity;
+        /** @private */
+        this._storeFindAndModifyImagesInSideCollection = storeFindAndModifyImagesInSideCollection;
+        this._oplogSize = oplogSize;
 
         // Properties set by setup().
         /** @private */
@@ -96,7 +101,15 @@ var ReshardingTest = class {
     setup() {
         const mongosOptions = {setParameter: {}};
         const configOptions = {setParameter: {}};
-        const rsOptions = {setParameter: {storeFindAndModifyImagesInSideCollection: true}};
+        const rsOptions = {
+            setParameter: {
+                storeFindAndModifyImagesInSideCollection:
+                    this._storeFindAndModifyImagesInSideCollection
+            }
+        };
+        if (this._oplogSize) {
+            rsOptions.oplogSize = this._oplogSize;
+        }
         const configReplSetTestOptions = {};
 
         let nodesPerShard = 2;
@@ -229,8 +242,7 @@ var ReshardingTest = class {
         ];
     }
 
-    /** @private */
-    _getReplSetForShard(shardName) {
+    getReplSetForShard(shardName) {
         const res = this._allReplSetTests().find(shardInfo => shardInfo.shardName === shardName);
         return res.rs;
     }
@@ -817,7 +829,7 @@ var ReshardingTest = class {
     stepUpNewPrimaryOnShard(shardName) {
         jsTestLog(`ReshardingTestFixture stepping up new primary on shard ${shardName}`);
 
-        const replSet = this._getReplSetForShard(shardName);
+        const replSet = this.getReplSetForShard(shardName);
         let originalPrimary = replSet.getPrimary();
         let secondaries = replSet.getSecondaries();
 
@@ -864,7 +876,7 @@ var ReshardingTest = class {
     killAndRestartPrimaryOnShard(shardName) {
         jsTestLog(`ReshardingTestFixture killing and restarting primary on shard ${shardName}`);
 
-        const replSet = this._getReplSetForShard(shardName);
+        const replSet = this.getReplSetForShard(shardName);
         const originalPrimaryConn = replSet.getPrimary();
 
         const SIGKILL = 9;
@@ -877,7 +889,7 @@ var ReshardingTest = class {
         jsTestLog(
             `ReshardingTestFixture shutting down and restarting primary on shard ${shardName}`);
 
-        const replSet = this._getReplSetForShard(shardName);
+        const replSet = this.getReplSetForShard(shardName);
         const originalPrimaryConn = replSet.getPrimary();
 
         const SIGTERM = 15;

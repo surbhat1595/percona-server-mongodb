@@ -90,9 +90,21 @@ ZoneInfo getCollectionZones(OperationContext* opCtx, const CollectionType& coll)
     return zones;
 }
 
-bool isRetriableForDefragmentation(const Status& error) {
-    return (ErrorCodes::isA<ErrorCategory::RetriableError>(error) ||
-            error == ErrorCodes::StaleConfig);
+bool isRetriableForDefragmentation(const Status& status) {
+    if (ErrorCodes::isA<ErrorCategory::RetriableError>(status))
+        return true;
+
+    if (status == ErrorCodes::StaleConfig) {
+        if (auto staleInfo = status.extraInfo<StaleConfigInfo>()) {
+            // If the staleInfo error contains a "wanted" version, this means the donor shard which
+            // returned this error has its versioning information up-to-date (as opposed to UNKNOWN)
+            // and it couldn't find the chunk that the defragmenter expected. Such a situation can
+            // only arise as a result of manual split/merge/move concurrently with the defragmenter.
+            return !staleInfo->getVersionWanted();
+        }
+    }
+
+    return false;
 }
 
 void handleActionResult(OperationContext* opCtx,
@@ -144,15 +156,6 @@ bool areMergeable(const ChunkType& firstChunk,
         collectionZones.getZoneForChunk(firstChunk.getRange()) ==
         collectionZones.getZoneForChunk(secondChunk.getRange()) &&
         SimpleBSONObjComparator::kInstance.evaluate(firstChunk.getMax() == secondChunk.getMin());
-}
-
-void checkForWriteErrors(const write_ops::UpdateCommandReply& response) {
-    const auto& writeErrors = response.getWriteErrors();
-    if (writeErrors) {
-        BSONObj firstWriteError = writeErrors->front();
-        uasserted(ErrorCodes::Error(firstWriteError.getIntField("code")),
-                  firstWriteError.getStringField("errmsg"));
-    }
 }
 
 class MergeAndMeasureChunksPhase : public DefragmentationPhase {
@@ -707,10 +710,13 @@ private:
                                   const NamespaceString& nss,
                                   const ChunkVersion& version) const {
             return MigrateInfo(chunkToMergeWith->shard,
+                               chunkToMove->shard,
                                nss,
-                               ChunkType(collUuid, chunkToMove->range, version, chunkToMove->shard),
-                               MoveChunkRequest::ForceJumbo::kForceBalancer,
-                               MigrateInfo::chunksImbalance);
+                               collUuid,
+                               chunkToMove->range.getMin(),
+                               chunkToMove->range.getMax(),
+                               version,
+                               MoveChunkRequest::ForceJumbo::kForceBalancer);
         }
 
         ChunkRange asMergedRange() const {
@@ -1271,12 +1277,6 @@ public:
         return boost::none;
     }
 
-    bool moreSplitPointsToReceive(const SplitPoints& splitPoints) {
-        auto addBSONSize = [](const int& size, const BSONObj& obj) { return size + obj.objsize(); };
-        int totalSize = std::accumulate(splitPoints.begin(), splitPoints.end(), 0, addBSONSize);
-        return totalSize >= BSONObjMaxUserSize - 4096;
-    }
-
     void applyActionResult(OperationContext* opCtx,
                            const DefragmentationAction& action,
                            const DefragmentationActionResponse& response) override {
@@ -1293,7 +1293,8 @@ public:
                     uasserted(ErrorCodes::BadValue, "Unexpected action type");
                 },
                 [&](const AutoSplitVectorInfo& autoSplitVectorAction) {
-                    auto& splitVectorResponse = stdx::get<StatusWith<SplitPoints>>(response);
+                    auto& splitVectorResponse =
+                        stdx::get<StatusWith<AutoSplitVectorResponse>>(response);
                     handleActionResult(
                         opCtx,
                         _nss,
@@ -1301,16 +1302,15 @@ public:
                         getType(),
                         splitVectorResponse.getStatus(),
                         [&]() {
-                            auto& splitPoints = splitVectorResponse.getValue();
+                            auto& splitPoints = splitVectorResponse.getValue().getSplitKeys();
                             if (!splitPoints.empty()) {
                                 auto& pendingActions =
                                     _pendingActionsByShards[autoSplitVectorAction.shardId];
                                 pendingActions.rangesToSplit.push_back(
                                     std::make_pair(ChunkRange(autoSplitVectorAction.minKey,
                                                               autoSplitVectorAction.maxKey),
-                                                   splitVectorResponse.getValue()));
-                                // TODO (SERVER-61678): replace with check for continuation flag
-                                if (moreSplitPointsToReceive(splitPoints)) {
+                                                   splitPoints));
+                                if (splitVectorResponse.getValue().getContinuation()) {
                                     pendingActions.rangesToFindSplitPoints.emplace_back(
                                         splitPoints.back(), autoSplitVectorAction.maxKey);
                                 }
@@ -1630,7 +1630,9 @@ void BalancerDefragmentationPolicyImpl::acknowledgeDataSizeResult(
 }
 
 void BalancerDefragmentationPolicyImpl::acknowledgeAutoSplitVectorResult(
-    OperationContext* opCtx, AutoSplitVectorInfo action, const StatusWith<SplitPoints>& result) {
+    OperationContext* opCtx,
+    AutoSplitVectorInfo action,
+    const StatusWith<AutoSplitVectorResponse>& result) {
     stdx::lock_guard<Latch> lk(_stateMutex);
     // Check if collection defragmentation has been canceled
     if (!_defragmentationStates.contains(action.uuid)) {
@@ -1780,8 +1782,7 @@ void BalancerDefragmentationPolicyImpl::_persistPhaseUpdate(OperationContext* op
                                 << DefragmentationPhase_serializer(phase)))));
         return entry;
     }()});
-    auto response = dbClient.update(updateOp);
-    checkForWriteErrors(response);
+    auto response = write_ops::checkWriteErrors(dbClient.update(updateOp));
     uassert(ErrorCodes::NoMatchingDocument,
             "Collection {} not found while persisting phase change"_format(uuid.toString()),
             response.getN() > 0);
@@ -1794,29 +1795,29 @@ void BalancerDefragmentationPolicyImpl::_persistPhaseUpdate(OperationContext* op
 void BalancerDefragmentationPolicyImpl::_clearDefragmentationState(OperationContext* opCtx,
                                                                    const UUID& uuid) {
     DBDirectClient dbClient(opCtx);
+
     // Clear datasize estimates from chunks
-    write_ops::UpdateCommandRequest removeDataSize(ChunkType::ConfigNS);
-    removeDataSize.setUpdates({[&] {
-        write_ops::UpdateOpEntry entry;
-        entry.setQ(BSON(CollectionType::kUuidFieldName << uuid));
-        entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
-            BSON("$unset" << BSON(ChunkType::estimatedSizeBytes.name() << ""))));
-        entry.setMulti(true);
-        return entry;
-    }()});
-    checkForWriteErrors(dbClient.update(removeDataSize));
+    write_ops::checkWriteErrors(dbClient.update(write_ops::UpdateCommandRequest(
+        ChunkType::ConfigNS, {[&] {
+            write_ops::UpdateOpEntry entry;
+            entry.setQ(BSON(CollectionType::kUuidFieldName << uuid));
+            entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
+                BSON("$unset" << BSON(ChunkType::estimatedSizeBytes.name() << ""))));
+            entry.setMulti(true);
+            return entry;
+        }()})));
+
     // Clear defragmentation phase and defragmenting flag from collection
-    write_ops::UpdateCommandRequest removeCollectionFlags(CollectionType::ConfigNS);
-    removeCollectionFlags.setUpdates({[&] {
-        write_ops::UpdateOpEntry entry;
-        entry.setQ(BSON(CollectionType::kUuidFieldName << uuid));
-        entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
-            BSON("$unset" << BSON(CollectionType::kDefragmentCollectionFieldName
-                                  << "" << CollectionType::kDefragmentationPhaseFieldName << ""))));
-        return entry;
-    }()});
-    auto response = dbClient.update(removeCollectionFlags);
-    checkForWriteErrors(response);
+    write_ops::checkWriteErrors(dbClient.update(write_ops::UpdateCommandRequest(
+        CollectionType::ConfigNS, {[&] {
+            write_ops::UpdateOpEntry entry;
+            entry.setQ(BSON(CollectionType::kUuidFieldName << uuid));
+            entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(BSON(
+                "$unset" << BSON(CollectionType::kDefragmentCollectionFieldName
+                                 << "" << CollectionType::kDefragmentationPhaseFieldName << ""))));
+            return entry;
+        }()})));
+
     WriteConcernResult ignoreResult;
     const auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     uassertStatusOK(waitForWriteConcern(

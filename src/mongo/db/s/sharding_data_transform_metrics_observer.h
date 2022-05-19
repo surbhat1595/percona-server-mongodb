@@ -38,9 +38,11 @@ namespace mongo {
 class ShardingDataTransformMetricsObserver : public ShardingDataTransformMetricsObserverInterface {
 public:
     ShardingDataTransformMetricsObserver(ShardingDataTransformInstanceMetrics* metrics);
-    int64_t getRemainingTimeMillis() const override;
+    int64_t getHighEstimateRemainingTimeMillis() const override;
+    int64_t getLowEstimateRemainingTimeMillis() const override;
     int64_t getStartTimestamp() const override;
     const UUID& getUuid() const override;
+    ShardingDataTransformMetrics::Role getRole() const override;
 
 private:
     ShardingDataTransformInstanceMetrics* _metrics;

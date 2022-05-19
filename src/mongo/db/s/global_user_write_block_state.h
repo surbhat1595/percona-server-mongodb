@@ -42,22 +42,32 @@ public:
     static GlobalUserWriteBlockState* get(OperationContext* opCtx);
 
     /**
-     * Methods to control the global user write blocking state. Callers must be hold the GlobalLock
-     * in MODE_X.
+     * Methods to control the global user write blocking state.
      */
     void enableUserWriteBlocking(OperationContext* opCtx);
     void disableUserWriteBlocking(OperationContext* opCtx);
 
     /**
      * Checks that user writes are allowed on the specified namespace. Callers must hold the
-     * GlobalLock in any mode.
+     * GlobalLock in any mode. Throws OperationFailed if user writes are disallowed.
      */
     void checkUserWritesAllowed(OperationContext* opCtx, const NamespaceString& nss) const;
 
+    /**
+     * Methods to enable/disable blocking new sharded DDL operations.
+     */
+    void enableUserShardedDDLBlocking(OperationContext* opCtx);
+    void disableUserShardedDDLBlocking(OperationContext* opCtx);
+
+    /**
+     * Checks that new sharded DDL operations are allowed to start. Throws OperationFailed if
+     * starting new sharded DDL operations is disallowed.
+     */
+    void checkShardedDDLAllowedToStart(OperationContext* opCtx, const NamespaceString& nss) const;
+
 private:
-    // Modifying the state below requires holding the GlobalLock in X mode; holding the DBLock in
-    // any mode is acceptable for reading it.
     bool _globalUserWritesBlocked{false};
+    AtomicWord<bool> _userShardedDDLBlocked{false};
 };
 
 }  // namespace mongo

@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/exec/batched_delete_stage.h"
 #include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/ops/delete_request_gen.h"
@@ -38,7 +39,7 @@
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/count_command_gen.h"
-#include "mongo/db/query/multi_collection.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/parsed_distinct.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_planner_params.h"
@@ -85,7 +86,9 @@ void fillOutIndexEntries(OperationContext* opCtx,
  * Fills out information about secondary collections held by 'collections' in 'plannerParams'.
  */
 std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsInformation(
-    OperationContext* opCtx, const MultiCollection& collections, CanonicalQuery* canonicalQuery);
+    OperationContext* opCtx,
+    const MultipleCollectionAccessor& collections,
+    CanonicalQuery* canonicalQuery);
 
 /**
  * Fill out the provided 'plannerParams' for the 'canonicalQuery' operating on the collection
@@ -103,18 +106,9 @@ void fillOutPlannerParams(OperationContext* opCtx,
  * secondary collections held by 'collections' on 'plannerParams'.
  */
 void fillOutPlannerParams(OperationContext* opCtx,
-                          const MultiCollection& collections,
+                          const MultipleCollectionAccessor& collections,
                           CanonicalQuery* canonicalQuery,
                           QueryPlannerParams* plannerParams);
-
-/**
- * Prepare the "PlanStageData" for execution by populating necessary value to "RuntimeEnvironment"
- * and binding parameterized values with corresponding slots.
- */
-void prepareExecutionTree(OperationContext* opCtx,
-                          const CollectionPtr& collection,
-                          const CanonicalQuery& cq,
-                          stage_builder::PlanStageData* data);
 
 /**
  * Return whether or not any component of the path 'path' is multikey given an index key pattern
@@ -162,13 +156,13 @@ bool shouldWaitForOplogVisibility(OperationContext* opCtx,
  * attach them to the provided 'CanonicalQuery'. This function should capture the Pipeline that
  * stages should be extracted from.
  *
- * Note that the first overload takes a 'MultiCollection' and can construct a PlanExecutor over
- * multiple collections, while the second overload takes a single 'CollectionPtr' and can only
- * construct a PlanExecutor over a single collection.
+ * Note that the first overload takes a 'MultipleCollectionAccessor' and can construct a
+ * PlanExecutor over multiple collections, while the second overload takes a single 'CollectionPtr'
+ * and can only construct a PlanExecutor over a single collection.
  */
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     OperationContext* opCtx,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
@@ -197,13 +191,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
  * attach them to the provided 'CanonicalQuery'. This function should capture the Pipeline that
  * stages should be extracted from.
  *
- * Note that the first overload takes a 'MultiCollection' and can construct a PlanExecutor over
- * multiple collections, while the second overload takes a single 'CollectionPtr' and can only
- * construct a PlanExecutor over a single collection.
+ * Note that the first overload takes a 'MultipleCollectionAccessor' and can construct a
+ * PlanExecutor over multiple collections, while the second overload takes a single
+ * 'CollectionPtr' and can only construct a PlanExecutor over a single collection.
  */
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     OperationContext* opCtx,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     bool permitYield = false,

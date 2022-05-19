@@ -889,7 +889,26 @@ env.Library(
         'logical_session_id_helpers',
         'repl/repl_coordinator_interface',
         'service_context',
+        'session_catalog',
         'shared_request_handling',
+    ],
+)
+
+env.Library(
+    target='fle_crud',
+    source=[
+        'fle_crud.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/executor/task_executor_pool',
+        '$BUILD_DIR/mongo/s/grid',
+        '$BUILD_DIR/mongo/s/sharding_router_api',
+        'logical_session_id',
+        'transaction_api',
     ],
 )
 
@@ -1046,6 +1065,21 @@ env.Library(
         '$BUILD_DIR/mongo/db/kill_sessions_local',
         '$BUILD_DIR/mongo/executor/egress_tag_closer_manager',
         'op_observer_impl',
+    ],
+)
+
+env.Library(
+    target="user_write_block_mode_op_observer",
+    source=[
+        "user_write_block_mode_op_observer.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        'op_observer',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/s/sharding_api_d',
+        '$BUILD_DIR/mongo/db/s/user_writes_recoverable_critical_section',
     ],
 )
 
@@ -1361,6 +1395,8 @@ env.Library(
         'cursor_manager.cpp',
         'exec/and_hash.cpp',
         'exec/and_sorted.cpp',
+        'exec/batched_delete_stage.idl',
+        'exec/batched_delete_stage.cpp',
         'exec/cached_plan.cpp',
         'exec/collection_scan.cpp',
         'exec/count.cpp',
@@ -1472,6 +1508,7 @@ env.Library(
         'db_raii',
         'dbdirectclient',
         'exec/projection_executor',
+        'exec/sbe/query_sbe_abt',
         'exec/sbe/query_sbe_storage',
         'exec/scoped_timer',
         'exec/sort_executor',
@@ -1985,11 +2022,11 @@ env.Library(
         'vector_clock_mutable',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/s/sharding_api_d',
         '$BUILD_DIR/mongo/s/grid',
         'dbdirectclient',
         'repl/replica_set_aware_service',
         'rw_concern_d',
+        's/sharding_api_d',
         'server_options_core',
     ],
 )
@@ -2021,19 +2058,12 @@ env.Library(
     source=[
         'client_metadata_propagation_egress_hook.cpp',
     ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/rpc/client_metadata',
-        '$BUILD_DIR/mongo/rpc/metadata_impersonated_user',
-    ],
-)
-
-env.Library(
-    target='write_block_bypass_propagation_egress_hook',
-    source=[
-        'write_block_bypass_propagation_egress_hook.cpp',
-    ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/feature_flag',
+        '$BUILD_DIR/mongo/rpc/client_metadata',
         '$BUILD_DIR/mongo/rpc/metadata',
+        '$BUILD_DIR/mongo/rpc/metadata_impersonated_user',
+        'server_feature_flags',
     ],
 )
 
@@ -2399,7 +2429,9 @@ env.Library(
         # mongod_initializers.
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
+        '$BUILD_DIR/mongo/db/commands/set_user_write_block_mode_command',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
+        '$BUILD_DIR/mongo/db/s/shardsvr_set_user_write_block_mode_command',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
         '$BUILD_DIR/mongo/s/grid',
@@ -2469,6 +2501,7 @@ env.Library(
         'storage/storage_engine_common',
         'system_index',
         'ttl_d',
+        'user_write_block_mode_op_observer',
         'vector_clock',
     ],
     LIBDEPS_TAGS=[
@@ -2587,6 +2620,7 @@ if wiredtiger:
             'field_parser_test.cpp',
             'field_ref_set_test.cpp',
             'field_ref_test.cpp',
+            'fle_crud_test.cpp',
             'hasher_test.cpp',
             'index_build_entry_helpers_test.cpp',
             'index_builds_coordinator_mongod_test.cpp',
@@ -2623,6 +2657,7 @@ if wiredtiger:
             'transaction_participant_retryable_writes_test.cpp',
             'transaction_participant_test.cpp',
             'update_index_data_test.cpp',
+            'user_write_block_mode_op_observer_test.cpp',
             'vector_clock_mongod_test.cpp',
             'vector_clock_test.cpp',
             'wire_version_test.cpp',
@@ -2634,6 +2669,8 @@ if wiredtiger:
             '$BUILD_DIR/mongo/base',
             '$BUILD_DIR/mongo/bson/util/bson_extract',
             '$BUILD_DIR/mongo/client/read_preference',
+            '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+            '$BUILD_DIR/mongo/crypto/fle_crypto',
             '$BUILD_DIR/mongo/db/auth/auth',
             '$BUILD_DIR/mongo/db/auth/security_token',
             '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
@@ -2663,6 +2700,7 @@ if wiredtiger:
             'dbdirectclient',
             'dbmessage',
             'fcv_op_observer',
+            'fle_crud',
             'index_build_entry_helpers',
             'index_builds_coordinator_mongod',
             'keys_collection_client_direct',
@@ -2712,6 +2750,7 @@ if wiredtiger:
             'transaction',
             'transaction_api',
             'update_index_data',
+            'user_write_block_mode_op_observer',
             'vector_clock',
             'vector_clock_test_fixture',
             'write_concern_options',

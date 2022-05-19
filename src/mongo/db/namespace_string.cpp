@@ -59,6 +59,9 @@ const NamespaceString NamespaceString::kServerConfigurationNamespace(NamespaceSt
 const NamespaceString NamespaceString::kLogicalSessionsNamespace(NamespaceString::kConfigDb,
                                                                  "system.sessions");
 
+const NamespaceString NamespaceString::kConfigDatabasesNamespace(NamespaceString::kConfigDb,
+                                                                 "databases");
+
 // Persisted state for a shard participating in a transaction or retryable write.
 const NamespaceString NamespaceString::kSessionTransactionsTableNamespace(
     NamespaceString::kConfigDb, "transactions");
@@ -66,6 +69,9 @@ const NamespaceString NamespaceString::kSessionTransactionsTableNamespace(
 // Persisted state for a shard coordinating a cross-shard transaction.
 const NamespaceString NamespaceString::kTransactionCoordinatorsNamespace(
     NamespaceString::kConfigDb, "transaction_coordinators");
+
+const NamespaceString NamespaceString::kConfigsvrRestoreNamespace(NamespaceString::kLocalDb,
+                                                                  "system.collections_to_restore");
 
 const NamespaceString NamespaceString::kMigrationCoordinatorsNamespace(NamespaceString::kConfigDb,
                                                                        "migrationCoordinators");
@@ -145,6 +151,9 @@ const NamespaceString NamespaceString::kConfigImagesNamespace(NamespaceString::k
 const NamespaceString NamespaceString::kConfigsvrCoordinatorsNamespace(
     NamespaceString::kConfigDb, "sharding_configsvr_coordinators");
 
+const NamespaceString NamespaceString::kUserWritesCriticalSectionsNamespace(
+    NamespaceString::kConfigDb, "user_writes_critical_sections");
+
 bool NamespaceString::isListCollectionsCursorNS() const {
     return coll() == listCollectionsCursorCol;
 }
@@ -179,6 +188,8 @@ bool NamespaceString::isLegalClientSystemNS(
         if (coll() == kSystemReplSetNamespace.coll())
             return true;
         if (coll() == "system.healthlog")
+            return true;
+        if (coll() == kConfigsvrRestoreNamespace.coll())
             return true;
     }
 

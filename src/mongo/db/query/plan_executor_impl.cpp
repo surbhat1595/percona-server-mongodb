@@ -230,6 +230,14 @@ const NamespaceString& PlanExecutorImpl::nss() const {
     return _nss;
 }
 
+const std::vector<NamespaceStringOrUUID>& PlanExecutorImpl::getSecondaryNamespaces() const {
+    // Return a reference to an empty static array. This array will never contain any elements
+    // because a PlanExecutorImpl is only capable of executing against a single namespace. As
+    // such, it will never lock more than one namespace.
+    const static std::vector<NamespaceStringOrUUID> emptyNssVector;
+    return emptyNssVector;
+}
+
 OperationContext* PlanExecutorImpl::getOpCtx() const {
     return _opCtx;
 }
@@ -564,7 +572,8 @@ long long PlanExecutorImpl::executeDelete() {
             return static_cast<const DeleteStats*>(stats)->docsDeleted;
         }
         default: {
-            invariant(StageType::STAGE_DELETE == _root->stageType());
+            invariant(StageType::STAGE_DELETE == _root->stageType() ||
+                      StageType::STAGE_BATCHED_DELETE == _root->stageType());
             const auto* deleteStats = static_cast<const DeleteStats*>(_root->getSpecificStats());
             return deleteStats->docsDeleted;
         }

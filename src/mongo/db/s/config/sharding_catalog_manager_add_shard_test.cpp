@@ -48,7 +48,7 @@
 #include "mongo/s/catalog/config_server_version.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_config_version.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_identity_loader.h"
@@ -380,14 +380,10 @@ TEST_F(AddShardTest, StandaloneBasicSuccess) {
     expectedShard.setMaxSizeMB(100);
     expectedShard.setState(ShardType::ShardState::kShardAware);
 
-    DatabaseType discoveredDB1("TestDB1",
-                               ShardId("StandaloneShard"),
-                               false,
-                               DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
-    DatabaseType discoveredDB2("TestDB2",
-                               ShardId("StandaloneShard"),
-                               false,
-                               DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB1(
+        "TestDB1", ShardId("StandaloneShard"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB2(
+        "TestDB2", ShardId("StandaloneShard"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto expectWriteConcern = ShardingCatalogClient::kMajorityWriteConcern;
 
@@ -470,14 +466,10 @@ TEST_F(AddShardTest, StandaloneGenerateName) {
     expectedShard.setMaxSizeMB(100);
     expectedShard.setState(ShardType::ShardState::kShardAware);
 
-    DatabaseType discoveredDB1("TestDB1",
-                               ShardId(expectedShardName),
-                               false,
-                               DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
-    DatabaseType discoveredDB2("TestDB2",
-                               ShardId(expectedShardName),
-                               false,
-                               DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB1(
+        "TestDB1", ShardId(expectedShardName), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB2(
+        "TestDB2", ShardId(expectedShardName), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this, &expectedShardName, &shardTarget] {
         ThreadClient tc(getServiceContext());
@@ -819,11 +811,11 @@ TEST_F(AddShardTest, ShardContainsExistingDatabase) {
     std::string expectedShardName = "mySet";
 
     DatabaseType existingDB(
-        "existing", ShardId("existingShard"), false, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+        "existing", ShardId("existingShard"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     // Add a pre-existing database.
     ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    DatabaseType::ConfigNS,
+                                                    NamespaceString::kConfigDatabasesNamespace,
                                                     existingDB.toBSON(),
                                                     ShardingCatalogClient::kMajorityWriteConcern));
     assertDatabaseExists(existingDB);
@@ -873,10 +865,8 @@ TEST_F(AddShardTest, SuccessfullyAddReplicaSet) {
     expectedShard.setMaxSizeMB(100);
     expectedShard.setState(ShardType::ShardState::kShardAware);
 
-    DatabaseType discoveredDB("shardDB",
-                              ShardId(expectedShardName),
-                              false,
-                              DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB(
+        "shardDB", ShardId(expectedShardName), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this, &expectedShardName, &connString] {
         ThreadClient tc(getServiceContext());
@@ -940,10 +930,8 @@ TEST_F(AddShardTest, ReplicaSetExtraHostsDiscovered) {
     expectedShard.setMaxSizeMB(100);
     expectedShard.setState(ShardType::ShardState::kShardAware);
 
-    DatabaseType discoveredDB("shardDB",
-                              ShardId(expectedShardName),
-                              false,
-                              DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB(
+        "shardDB", ShardId(expectedShardName), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this, &expectedShardName, &seedString] {
         ThreadClient tc(getServiceContext());
@@ -1008,14 +996,10 @@ TEST_F(AddShardTest, AddShardSucceedsEvenIfAddingDBsFromNewShardFails) {
     expectedShard.setMaxSizeMB(100);
     expectedShard.setState(ShardType::ShardState::kShardAware);
 
-    DatabaseType discoveredDB1("TestDB1",
-                               ShardId("StandaloneShard"),
-                               false,
-                               DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
-    DatabaseType discoveredDB2("TestDB2",
-                               ShardId("StandaloneShard"),
-                               false,
-                               DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB1(
+        "TestDB1", ShardId("StandaloneShard"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType discoveredDB2(
+        "TestDB2", ShardId("StandaloneShard"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     // Enable fail point to cause all updates to fail.  Since we add the databases detected from
     // the shard being added with upserts, but we add the shard document itself via insert, this

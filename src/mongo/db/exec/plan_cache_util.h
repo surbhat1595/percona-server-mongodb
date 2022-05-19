@@ -87,11 +87,6 @@ plan_cache_debug_info::DebugInfo buildDebugInfo(
 plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution);
 
 /**
- * Resets all the parameterized slots in the RuntimeEnvironment of 'data'.
- */
-void resetRuntimeEnvironmentBeforeCaching(stage_builder::PlanStageData* data);
-
-/**
  * Caches the best candidate plan, chosen from the given 'candidates' based on the 'ranking'
  * decision, if the 'query' is of a type that can be cached. Otherwise, does nothing.
  *
@@ -107,8 +102,7 @@ void updatePlanCache(
     PlanCachingMode cachingMode,
     const CanonicalQuery& query,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
-    const std::vector<plan_ranker::BaseCandidatePlan<PlanStageType, ResultType, Data>>&
-        candidates) {
+    std::vector<plan_ranker::BaseCandidatePlan<PlanStageType, ResultType, Data>>& candidates) {
     auto winnerIdx = ranking->candidateOrder[0];
     invariant(winnerIdx >= 0 && winnerIdx < candidates.size());
     auto& winningPlan = candidates[winnerIdx];
@@ -187,42 +181,46 @@ void updatePlanCache(
     if (shouldCacheQuery(query) && canCache) {
         auto rankingDecision = ranking.get();
         auto cacheClassicPlan = [&]() {
-            PlanCacheLoggingCallbacks<PlanCacheKey,
-                                      SolutionCacheData,
-                                      plan_cache_debug_info::DebugInfo>
-                callbacks{query};
+            auto buildDebugInfoFn = [&]() -> plan_cache_debug_info::DebugInfo {
+                return buildDebugInfo(query, std::move(ranking));
+            };
+            PlanCacheCallbacksImpl<PlanCacheKey,
+                                   SolutionCacheData,
+                                   plan_cache_debug_info::DebugInfo>
+                callbacks{query, buildDebugInfoFn};
             uassertStatusOK(CollectionQueryInfo::get(collection)
                                 .getPlanCache()
                                 ->set(plan_cache_key_factory::make<PlanCacheKey>(query, collection),
                                       winningPlan.solution->cacheData->clone(),
                                       *rankingDecision,
                                       opCtx->getServiceContext()->getPreciseClockSource()->now(),
-                                      buildDebugInfo(query, std::move(ranking)),
-                                      boost::none, /* worksGrowthCoefficient */
-                                      &callbacks));
+                                      &callbacks,
+                                      boost::none /* worksGrowthCoefficient */));
         };
 
         if (winningPlan.solution->cacheData != nullptr) {
             if constexpr (std::is_same_v<PlanStageType, std::unique_ptr<sbe::PlanStage>>) {
                 if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+                    tassert(6142201,
+                            "The winning CandidatePlan should contain the original plan",
+                            winningPlan.clonedPlan);
                     // Clone the winning SBE plan and its auxiliary data.
                     auto cachedPlan = std::make_unique<sbe::CachedSbePlan>(
-                        winningPlan.root->clone(), winningPlan.data);
-
-                    resetRuntimeEnvironmentBeforeCaching(&cachedPlan->planStageData);
-
-                    PlanCacheLoggingCallbacks<sbe::PlanCacheKey,
-                                              sbe::CachedSbePlan,
-                                              plan_cache_debug_info::DebugInfoSBE>
-                        callbacks{query};
+                        std::move(winningPlan.clonedPlan->first),
+                        std::move(winningPlan.clonedPlan->second));
+                    auto buildDebugInfoFn = [soln = winningPlan.solution.get()]()
+                        -> plan_cache_debug_info::DebugInfoSBE { return buildDebugInfo(soln); };
+                    PlanCacheCallbacksImpl<sbe::PlanCacheKey,
+                                           sbe::CachedSbePlan,
+                                           plan_cache_debug_info::DebugInfoSBE>
+                        callbacks{query, buildDebugInfoFn};
                     uassertStatusOK(sbe::getPlanCache(opCtx).set(
                         plan_cache_key_factory::make<sbe::PlanCacheKey>(query, collection),
                         std::move(cachedPlan),
                         *rankingDecision,
                         opCtx->getServiceContext()->getPreciseClockSource()->now(),
-                        buildDebugInfo(winningPlan.solution.get()),
-                        boost::none, /* worksGrowthCoefficient */
-                        &callbacks));
+                        &callbacks,
+                        boost::none /* worksGrowthCoefficient */));
                 } else {
                     // Fall back to use the classic plan cache. Remove this branch after
                     // "gFeatureFlagSbePlanCache" is removed.

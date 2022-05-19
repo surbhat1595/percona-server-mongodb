@@ -1202,9 +1202,11 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         // TODO SERVER-63123: Check if the columnar index actually provides the fields we need.
         auto columnScan = std::make_unique<ColumnIndexScanNode>(params.columnarIndexes.front());
         columnScan->fields = query.getProj()->getRequiredFields();
-        columnScan->filter = query.root()->shallowClone();
-        auto plan = QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(columnScan));
-        out.push_back(std::move(plan));
+        if (auto filterSplitByColumn = expression::splitMatchExpressionForColumns(query.root())) {
+            columnScan->filtersByPath = std::move(*filterSplitByColumn);
+            out.push_back(
+                QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(columnScan)));
+        }
     }
 
     // The caller can explicitly ask for a collscan.
@@ -1273,9 +1275,9 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
 
         auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(innerStage->documentSource());
         if (lookupStage) {
-            tassert(5842409,
-                    "Only $lookup that use local/foreign field syntax should be lowered",
-                    lookupStage->getLocalField() && lookupStage->getForeignField());
+            tassert(6369000,
+                    "This $lookup stage should be compatible with SBE",
+                    lookupStage->sbeCompatible());
             auto eqLookupNode =
                 std::make_unique<EqLookupNode>(std::move(solnForAgg),
                                                lookupStage->getFromNs().toString(),

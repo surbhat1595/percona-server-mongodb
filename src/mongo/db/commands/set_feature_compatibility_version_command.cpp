@@ -67,6 +67,7 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/migration_coordinator_document_gen.h"
 #include "mongo/db/s/migration_util.h"
+#include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
@@ -78,13 +79,13 @@
 #include "mongo/db/session_txn_record_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/vector_clock.h"
-#include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/s/pm2583_feature_flags_gen.h"
 #include "mongo/s/refine_collection_shard_key_coordinator_feature_flags_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
@@ -392,6 +393,12 @@ public:
 
             if (request.getPhase() == SetFCVPhaseEnum::kStart) {
                 invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+                // TODO SERVER-64162 Destroy the BalancerStatsRegistry
+                if (actualVersion > requestedVersion &&
+                    !feature_flags::gNoMoreAutoSplitter.isEnabledOnVersion(requestedVersion)) {
+                    clearOrphanCountersFromRangeDeletionTasks(opCtx);
+                }
+
                 // TODO (SERVER-62325): Remove collMod draining mechanism after 6.0 branching.
                 if (actualVersion > requestedVersion &&
                     requestedVersion < multiversion::FeatureCompatibilityVersion::kVersion_5_3) {
@@ -562,6 +569,13 @@ private:
             abortAllReshardCollection(opCtx);
         }
 
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+            request.getPhase() == SetFCVPhaseEnum::kComplete &&
+            feature_flags::gNoMoreAutoSplitter.isEnabledOnVersion(requestedVersion)) {
+            // TODO SERVER-64162 Initialize the BalancerStatsRegistry
+            setOrphanCountersOnRangeDeletionTasks(opCtx);
+        }
+
         // Create the pre-images collection if the feature flag is enabled on the requested version.
         // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
         if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledOnVersion(
@@ -730,7 +744,6 @@ private:
                     });
             }
 
-            // TODO SERVER-63563: Only check on last-lts when FCV 5.3 becomes last-continuous.
             // TODO SERVER-63564: Remove once FCV 6.0 becomes last-lts.
             for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
                 const auto& dbName = tenantDbName.dbName();
@@ -746,7 +759,7 @@ private:
                                 ErrorCodes::CannotDowngrade,
                                 fmt::format(
                                     "Cannot downgrade the cluster when there are indexes that have "
-                                    "the 'disallowNewDuplicateKeys' field. Use listIndexes to find "
+                                    "the 'prepareUnique' field. Use listIndexes to find "
                                     "them and drop "
                                     "the indexes or use collMod to manually set it to false to "
                                     "remove the field "
@@ -754,7 +767,7 @@ private:
                                     "'{}' on collection: '{}'",
                                     indexEntry->descriptor()->indexName(),
                                     collection->ns().toString()),
-                                !indexEntry->descriptor()->disallowNewDuplicateKeys());
+                                !indexEntry->descriptor()->prepareUnique());
                         }
                         return true;
                     });

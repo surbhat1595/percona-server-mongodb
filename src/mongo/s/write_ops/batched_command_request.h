@@ -74,6 +74,8 @@ public:
 
     bool getBypassDocumentValidation() const;
 
+    bool hasEncryptionInformation() const;
+
     const auto& getInsertRequest() const {
         invariant(_insertReq);
         return *_insertReq;
@@ -137,6 +139,8 @@ public:
     }
 
     void setLegacyRuntimeConstants(LegacyRuntimeConstants runtimeConstants);
+
+    void unsetLegacyRuntimeConstants();
 
     bool hasLegacyRuntimeConstants() const;
 

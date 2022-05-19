@@ -70,7 +70,7 @@ public:
                      LogMode logMode,
                      int dbProfilingLevel,
                      Date_t deadline = Date_t::max(),
-                     const std::vector<NamespaceString>& secondaryNssVector = {});
+                     const std::vector<NamespaceStringOrUUID>& secondaryNssVector = {});
 
     /**
      * Records stats about the current operation via Top, if 'logMode' is 'kUpdateTop' or
@@ -321,6 +321,10 @@ private:
     boost::optional<AutoGetCollectionForReadLockFree> _autoGetLockFree;
 };
 
+/**
+ * Logic common to both AutoGetCollectionForReadCommand and AutoGetCollectionForReadCommandLockFree.
+ * Not intended for direct use.
+ */
 template <typename AutoGetCollectionForReadType>
 class AutoGetCollectionForReadCommandBase {
     AutoGetCollectionForReadCommandBase(const AutoGetCollectionForReadCommandBase&) = delete;
@@ -328,6 +332,14 @@ class AutoGetCollectionForReadCommandBase {
         delete;
 
 public:
+    AutoGetCollectionForReadCommandBase(
+        OperationContext* opCtx,
+        const NamespaceStringOrUUID& nsOrUUID,
+        AutoGetCollectionViewMode viewMode = AutoGetCollectionViewMode::kViewsForbidden,
+        Date_t deadline = Date_t::max(),
+        AutoStatsTracker::LogMode logMode = AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+        const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs = {});
+
     explicit operator bool() const {
         return static_cast<bool>(getCollection());
     }
@@ -357,14 +369,6 @@ public:
     }
 
 protected:
-    AutoGetCollectionForReadCommandBase(
-        OperationContext* opCtx,
-        const NamespaceStringOrUUID& nsOrUUID,
-        AutoGetCollectionViewMode viewMode = AutoGetCollectionViewMode::kViewsForbidden,
-        Date_t deadline = Date_t::max(),
-        AutoStatsTracker::LogMode logMode = AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-        const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs = {});
-
     AutoGetCollectionForReadType _autoCollForRead;
     AutoStatsTracker _statsTracker;
 };
@@ -394,8 +398,7 @@ public:
 /**
  * Same as AutoGetCollectionForReadCommand except no collection, database or RSTL lock is taken.
  */
-class AutoGetCollectionForReadCommandLockFree
-    : public AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadLockFree> {
+class AutoGetCollectionForReadCommandLockFree {
 public:
     AutoGetCollectionForReadCommandLockFree(
         OperationContext* opCtx,
@@ -403,9 +406,39 @@ public:
         AutoGetCollectionViewMode viewMode = AutoGetCollectionViewMode::kViewsForbidden,
         Date_t deadline = Date_t::max(),
         AutoStatsTracker::LogMode logMode = AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-        const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs = {})
-        : AutoGetCollectionForReadCommandBase(
-              opCtx, nsOrUUID, viewMode, deadline, logMode, secondaryNssOrUUIDs) {}
+        const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs = {});
+
+    explicit operator bool() const {
+        return static_cast<bool>(getCollection());
+    }
+
+    const Collection* operator->() const {
+        return getCollection().get();
+    }
+
+    const CollectionPtr& operator*() const {
+        return getCollection();
+    }
+
+    const CollectionPtr& getCollection() const {
+        return _autoCollForReadCommandBase->getCollection();
+    }
+
+    const ViewDefinition* getView() const {
+        return _autoCollForReadCommandBase->getView();
+    }
+
+    const NamespaceString& getNss() const {
+        return _autoCollForReadCommandBase->getNss();
+    }
+
+    bool isAnySecondaryNamespaceAViewOrSharded() const {
+        return _autoCollForReadCommandBase->isAnySecondaryNamespaceAViewOrSharded();
+    }
+
+private:
+    boost::optional<AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadLockFree>>
+        _autoCollForReadCommandBase;
 };
 
 /**
@@ -438,6 +471,7 @@ public:
     const CollectionPtr& getCollection() const;
     const ViewDefinition* getView() const;
     const NamespaceString& getNss() const;
+    bool isAnySecondaryNamespaceAViewOrSharded() const;
 
 private:
     boost::optional<AutoGetCollectionForReadCommand> _autoGet;

@@ -269,7 +269,9 @@ public:
         std::abort();
     }
 
-    Status updateCappedSize(OperationContext* opCtx, long long newCappedSize) {
+    Status updateCappedSize(OperationContext* opCtx,
+                            boost::optional<long long> newCappedSize,
+                            boost::optional<long long> newCappedMax) {
         std::abort();
     }
 
@@ -409,13 +411,13 @@ public:
         std::abort();
     }
 
-    void updateUniqueSetting(OperationContext* opCtx, StringData idxName) {
+    void updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) {
         std::abort();
     }
 
-    void updateDisallowNewDuplicateKeysSetting(OperationContext* opCtx,
-                                               StringData idxName,
-                                               bool disallowNewDuplicateKeys) {
+    void updatePrepareUniqueSetting(OperationContext* opCtx,
+                                    StringData idxName,
+                                    bool prepareUnique) {
         std::abort();
     }
 

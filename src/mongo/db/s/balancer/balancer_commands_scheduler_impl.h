@@ -113,6 +113,36 @@ private:
     boost::optional<ExternalClientInfo> _clientInfo;
 };
 
+class MoveRangeCommandInfo : public CommandInfo {
+public:
+    MoveRangeCommandInfo(const ShardsvrMoveRange& request,
+                         const WriteConcernOptions& writeConcern,
+                         boost::optional<ExternalClientInfo>&& clientInfo)
+        : CommandInfo(request.getFromShard(), request.getCommandParameter(), std::move(clientInfo)),
+          _request(request),
+          _wc(writeConcern) {}
+
+    const ShardsvrMoveRange& getMoveRangeRequest() {
+        return _request;
+    }
+
+    BSONObj serialise() const override {
+        BSONObjBuilder commandBuilder;
+        _request.serialize(BSON(WriteConcernOptions::kWriteConcernField << _wc.toBSON()),
+                           &commandBuilder);
+        appendCommandMetadataTo(&commandBuilder);
+        return commandBuilder.obj();
+    }
+
+    bool requiresDistributedLock() const override {
+        return true;
+    }
+
+private:
+    const ShardsvrMoveRange _request;
+    const WriteConcernOptions _wc;
+};
+
 /**
  * Set of command-specific subclasses of CommandInfo.
  */
@@ -399,21 +429,17 @@ struct CommandSubmissionParameters {
     const std::shared_ptr<CommandInfo> commandInfo;
 };
 
-
-using ExecutionContext = executor::TaskExecutor::CallbackHandle;
-
 /**
  * Helper data structure for storing the outcome of a Command submission.
  */
 struct CommandSubmissionResult {
-    CommandSubmissionResult(UUID id, bool acquiredDistLock, StatusWith<ExecutionContext>&& context)
-        : id(id), acquiredDistLock(acquiredDistLock), context(std::move(context)) {}
-    CommandSubmissionResult(CommandSubmissionResult&& rhs)
-        : id(rhs.id), acquiredDistLock(rhs.acquiredDistLock), context(std::move(rhs.context)) {}
+    CommandSubmissionResult(UUID id, bool acquiredDistLock, const Status& outcome)
+        : id(id), acquiredDistLock(acquiredDistLock), outcome(outcome) {}
+    CommandSubmissionResult(CommandSubmissionResult&& rhs) = default;
     CommandSubmissionResult(const CommandSubmissionResult& rhs) = delete;
     UUID id;
     bool acquiredDistLock;
-    StatusWith<ExecutionContext> context;
+    Status outcome;
 };
 
 /**
@@ -427,8 +453,7 @@ public:
           _completedOrAborted(false),
           _holdingDistLock(false),
           _commandInfo(std::move(commandInfo)),
-          _responsePromise{NonNullPromiseTag{}},
-          _executionContext(boost::none) {
+          _responsePromise{NonNullPromiseTag{}} {
         invariant(_commandInfo);
     }
 
@@ -437,8 +462,7 @@ public:
           _completedOrAborted(rhs._completedOrAborted),
           _holdingDistLock(rhs._holdingDistLock),
           _commandInfo(std::move(rhs._commandInfo)),
-          _responsePromise(std::move(rhs._responsePromise)),
-          _executionContext(std::move(rhs._executionContext)) {}
+          _responsePromise(std::move(rhs._responsePromise)) {}
 
     ~RequestData() = default;
 
@@ -458,19 +482,12 @@ public:
             // Keep the original outcome and continue the workflow.
             return Status::OK();
         }
-        auto submissionStatus = submissionResult.context.getStatus();
-        if (submissionStatus.isOK()) {
-            // store the execution context to be able to serve future cancel requests.
-            _executionContext = std::move(submissionResult.context.getValue());
-        } else {
+        const auto& submissionStatus = submissionResult.outcome;
+        if (!submissionStatus.isOK()) {
             // cascade the submission failure
             setOutcome(submissionStatus);
         }
         return submissionStatus;
-    }
-
-    const boost::optional<executor::TaskExecutor::CallbackHandle>& getExecutionContext() {
-        return _executionContext;
     }
 
     const CommandInfo& getCommandInfo() const {
@@ -512,8 +529,6 @@ private:
     std::shared_ptr<CommandInfo> _commandInfo;
 
     Promise<executor::RemoteCommandResponse> _responsePromise;
-
-    boost::optional<ExecutionContext> _executionContext;
 };
 
 /**
@@ -532,10 +547,12 @@ public:
     void stop() override;
 
     SemiFuture<void> requestMoveChunk(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      const ChunkType& chunk,
-                                      const ShardId& destination,
+                                      const MigrateInfo& migrateInfo,
                                       const MoveChunkSettings& commandSettings,
+                                      bool issuedByRemoteUser) override;
+
+    SemiFuture<void> requestMoveRange(OperationContext* opCtx,
+                                      ShardsvrMoveRange& request,
                                       bool issuedByRemoteUser) override;
 
     SemiFuture<void> requestMergeChunks(OperationContext* opCtx,
@@ -544,13 +561,13 @@ public:
                                         const ChunkRange& chunkRange,
                                         const ChunkVersion& version) override;
 
-    SemiFuture<SplitPoints> requestAutoSplitVector(OperationContext* opCtx,
-                                                   const NamespaceString& nss,
-                                                   const ShardId& shardId,
-                                                   const BSONObj& keyPattern,
-                                                   const BSONObj& minKey,
-                                                   const BSONObj& maxKey,
-                                                   int64_t maxChunkSizeBytes) override;
+    SemiFuture<AutoSplitVectorResponse> requestAutoSplitVector(OperationContext* opCtx,
+                                                               const NamespaceString& nss,
+                                                               const ShardId& shardId,
+                                                               const BSONObj& keyPattern,
+                                                               const BSONObj& minKey,
+                                                               const BSONObj& maxKey,
+                                                               int64_t maxChunkSizeBytes) override;
 
     SemiFuture<void> requestSplitChunk(OperationContext* opCtx,
                                        const NamespaceString& nss,
@@ -618,8 +635,9 @@ private:
 
     void _enqueueRequest(WithLock, RequestData&& request);
 
-    void _performDeferredCleanup(OperationContext* opCtx,
-                                 std::vector<RequestData>&& requestsHoldingResources);
+    void _performDeferredCleanup(
+        OperationContext* opCtx,
+        const stdx::unordered_map<UUID, RequestData, UUID::Hash>& requestsHoldingResources);
 
     CommandSubmissionResult _submit(OperationContext* opCtx,
                                     const CommandSubmissionParameters& data);

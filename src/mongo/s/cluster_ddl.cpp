@@ -66,7 +66,7 @@ AsyncRequestsSender::Response executeCommandAgainstDatabasePrimaryOrFirstShard(
         std::sort(shardIds.begin(), shardIds.end());
         shardId = shardIds[0];
     } else {
-        shardId = dbInfo.primaryId();
+        shardId = dbInfo->getPrimary();
     }
 
     auto responses =
@@ -83,7 +83,7 @@ AsyncRequestsSender::Response executeCommandAgainstDatabasePrimaryOrFirstShard(
 
 CachedDatabaseInfo createDatabase(OperationContext* opCtx,
                                   StringData dbName,
-                                  boost::optional<ShardId> suggestedPrimaryId) {
+                                  const boost::optional<ShardId>& suggestedPrimaryId) {
     auto catalogCache = Grid::get(opCtx)->catalogCache();
 
     auto dbStatus = catalogCache->getDatabase(opCtx, dbName);
@@ -92,7 +92,7 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
         ConfigsvrCreateDatabase request(dbName.toString());
         request.setDbName(NamespaceString::kAdminDb);
         if (suggestedPrimaryId)
-            request.setPrimaryShardId(StringData(suggestedPrimaryId->toString()));
+            request.setPrimaryShardId(*suggestedPrimaryId);
 
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto response = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
@@ -108,8 +108,7 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
 
         auto createDbResponse = ConfigsvrCreateDatabaseResponse::parse(
             IDLParserErrorContext("configsvrCreateDatabaseResponse"), response.response);
-        catalogCache->onStaleDatabaseVersion(
-            dbName, DatabaseVersion(createDbResponse.getDatabaseVersion()));
+        catalogCache->onStaleDatabaseVersion(dbName, createDbResponse.getDatabaseVersion());
 
         dbStatus = catalogCache->getDatabase(opCtx, dbName);
     }
@@ -119,8 +118,7 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
 
 void createCollection(OperationContext* opCtx, const ShardsvrCreateCollection& request) {
     const auto& nss = request.getNamespace();
-    auto catalogCache = Grid::get(opCtx)->catalogCache();
-    const auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.db()));
+    const auto dbInfo = createDatabase(opCtx, nss.db());
 
     auto cmdResponse = executeCommandAgainstDatabasePrimaryOrFirstShard(
         opCtx,
@@ -136,8 +134,9 @@ void createCollection(OperationContext* opCtx, const ShardsvrCreateCollection& r
     auto createCollResp = CreateCollectionResponse::parse(IDLParserErrorContext("createCollection"),
                                                           remoteResponse.data);
 
+    auto catalogCache = Grid::get(opCtx)->catalogCache();
     catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
-        nss, createCollResp.getCollectionVersion(), dbInfo.primaryId());
+        nss, createCollResp.getCollectionVersion(), dbInfo->getPrimary());
 }
 
 }  // namespace cluster

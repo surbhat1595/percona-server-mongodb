@@ -161,7 +161,7 @@ variables:
 - &jstestfuzz_config_vars
   is_jstestfuzz: true
   num_files: 15
-  num_tasks: 5
+  num_tasks: 5  # Upperbound by `max_sub_suites` specified through the variant with each task still running `num_files` files.
   resmoke_args: --help # resmoke_args needs to be overridden to specify one of the jstestfuzz suites
   resmoke_jobs_max: 1
   should_shuffle: false
@@ -353,7 +353,7 @@ variables:
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
   - enterprise-rhel-70-64-bit
-  - enterprise-rhel-70-64-bit-kitchen-sink
+#  - enterprise-rhel-70-64-bit-kitchen-sink
   - enterprise-rhel-70-64-bit-no-libunwind
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
@@ -1218,6 +1218,9 @@ functions:
   - *update_resmoke_jobs_expansions
   - *f_expansions_write
   - *configure_evergreen_api_credentials
+  - *determine_task_timeout
+  - *update_task_timeout_expansions
+  - *f_expansions_write
   - command: subprocess.exec
     params:
       binary: bash
@@ -1243,6 +1246,7 @@ functions:
 
   "run tests":
     - *f_expansions_write
+    - *configure_evergreen_api_credentials
     - *determine_task_timeout
     - *update_task_timeout_expansions
     - *f_expansions_write
@@ -1663,6 +1667,7 @@ functions:
       type: test
       params:
         binary: bash
+        redirect_standard_error_to_output: true
         args:
           - "./src/evergreen/selinux_run_test.sh"
         env:
@@ -2245,7 +2250,9 @@ tasks:
           - "./build/**.gcno"
           - "./etc/*san.suppressions"
           - "./etc/backports_required_for_multiversion_tests.yml"
+          - "./etc/evergreen_timeouts.yml"
           - "./etc/expansions.default.yml"
+          - "./etc/evergreen.yml"
           - "./etc/pip/**"
           - "./etc/repo_config.yaml"
           - "./etc/scons/**"
@@ -2470,31 +2477,31 @@ tasks:
         suite: unittests
 
 ## run_unittests with UndoDB live-record ##
-- name: run_unittests_with_recording
-  depends_on:
-    - name: compile_unittests_for_recorded_unittest
-  commands:
-    - *f_expansions_write
-    - func: "run diskstats"
-    - func: "f_expansions_write"
-    - func: "monitor process threads"
-    - func: "collect system resource info"
-    - command: subprocess.exec
-      params:
-        binary: bash
-        args:
-          - "./src/evergreen/undo_wiki_page.sh"
-    - command: attach.artifacts
-      params:
-        files:
-          - undo_wiki_page_location.json
-    - func: "run tests"
-      vars:
-        suite: unittests
-        record_with: --recordWith /opt/undodb5/bin/live-record
-        # Start fewer jobs since there's a constant amount of overhead of starting
-        # live-record for each job.
-        resmoke_jobs_factor: 0.3
+#- name: run_unittests_with_recording
+#  depends_on:
+#    - name: compile_unittests_for_recorded_unittest
+#  commands:
+#    - *f_expansions_write
+#    - func: "run diskstats"
+#    - func: "f_expansions_write"
+#    - func: "monitor process threads"
+#    - func: "collect system resource info"
+#    - command: subprocess.exec
+#      params:
+#        binary: bash
+#        args:
+#          - "./src/evergreen/undo_wiki_page.sh"
+#    - command: attach.artifacts
+#      params:
+#        files:
+#          - undo_wiki_page_location.json
+#    - func: "run tests"
+#      vars:
+#        suite: unittests
+#        record_with: --recordWith /opt/undodb5/bin/live-record
+#        # Start fewer jobs since there's a constant amount of overhead of starting
+#        # live-record for each job.
+#        resmoke_jobs_factor: 0.3
 
 
 ##compile_and_archive_libfuzzertests - build libfuzzertests ##
@@ -3211,18 +3218,6 @@ tasks:
   - func: "send benchmark results"
   - func: "analyze benchmark results"
 
-- <<: *benchmark_template
-  name: benchmarks_bsoncolumn
-  tags: ["benchmarks"]
-  commands:
-  - func: "do benchmark setup"
-  - func: "run tests"
-    vars:
-      suite: benchmarks_bsoncolumn
-      resmoke_jobs_max: 1
-  - func: "send benchmark results"
-  - func: "analyze benchmark results"
-
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
   tags: ["jepsen"]
@@ -3858,7 +3853,7 @@ tasks:
 ## jstestfuzz file copy based initial sync replica set ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_fcbis_gen
-  tags: ["jstestfuzz", "initsync", "require_npm", "random_name"]
+  tags: ["jstestfuzz", "initsync", "fcbis", "require_npm", "random_name"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4566,6 +4561,9 @@ tasks:
         - "src/evergreen/external_auth_pip.sh"
   - func: "run tests"
     vars:
+      # TODO SERVER-64323
+      # restore concurrency for this suite when the issue on windows is resolved.
+      resmoke_jobs_max: 1
       resmoke_args: --excludeWithAnyTags=requires_domain_controller
 
 - <<: *task_template
@@ -4879,7 +4877,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_fcbis_jscore_passthrough_gen
-  tags: ["replica_sets", "large"]
+  tags: ["replica_sets", "fcbis", "large"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -7703,7 +7701,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: .ocsp
   - name: .read_write_concern
-  - name: .replica_sets !.encrypt !.ignore_non_generated_replica_sets_jscore_passthrough
+  - name: .replica_sets !.encrypt !.ignore_non_generated_replica_sets_jscore_passthrough !.fcbis
   - name: replica_sets_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
@@ -8539,13 +8537,13 @@ buildvariants:
     distros:
       - rhel80-xlarge
 
-- <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
-  name: enterprise-rhel80-dynamic-v4gcc-cxx20-debug-pm-1328-experimental
-  display_name: "~ Shared Library Enterprise RHEL 8.0 v4 Toolchain GCC C++20 DEBUG + PM-1328"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
-  expansions:
-    <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-expansions
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic --variables-files=etc/scons/mongodbtoolchain_testing_gcc.vars --cxx-std=20 --experimental-optimization=* --experimental-runtime-hardening=* --disable-warnings-as-errors
+#- <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
+#  name: enterprise-rhel80-dynamic-v4gcc-cxx20-debug-pm-1328-experimental
+#  display_name: "~ Shared Library Enterprise RHEL 8.0 v4 Toolchain GCC C++20 DEBUG + PM-1328"
+#  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+#  expansions:
+#    <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-expansions
+#    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic --variables-files=etc/scons/mongodbtoolchain_testing_gcc.vars --cxx-std=20 --experimental-optimization=* --experimental-runtime-hardening=* --disable-warnings-as-errors
 
 - <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-dynamic-v4clang-cxx20-debug-pm-1328-experimental
@@ -9000,8 +8998,8 @@ buildvariants:
     - windows-vsCurrent-large
   - name: .read_only
   - name: .rollbackfuzzer
-  - name: .replica_sets !.large !.encrypt !.auth
-  - name: .replica_sets .large
+  - name: .replica_sets !.large !.encrypt !.auth !.fcbis
+  - name: .replica_sets .large !.fcbis
     distros:
     - windows-vsCurrent-large
   - name: .resharding_fuzzer
@@ -9633,7 +9631,8 @@ buildvariants:
   - name: .jscore .common !.decimal !.sharding
   - name: .logical_session_cache .one_sec
   - name: mqlrun
-  - name: replica_sets_auth_gen
+  # TODO(SERVER-64009): Re-enable replica_sets_auth_gen.
+  # - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: .csfle
@@ -9667,7 +9666,7 @@ buildvariants:
   - name: .csfle
 
 - name: enterprise-macos-arm64
-  display_name: "~ Enterprise macOS arm64 (--js-engine=none)"
+  display_name: "~ Enterprise macOS arm64"
   modules:
   - enterprise
   run_on:
@@ -9675,7 +9674,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=incompatible_with_macos
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: --ssl --js-engine=none -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
     resmoke_jobs_max: 6
     num_scons_link_jobs_available: 0.99
   tasks:
@@ -9872,6 +9871,8 @@ buildvariants:
     jstestfuzz_concurrent_num_files: 10
     target_resmoke_time: 10
     max_sub_suites: 5
+    idle_timeout_factor: 1.5
+    exec_timeout_factor: 1.5
     large_distro_name: rhel80-medium
     burn_in_tag_buildvariants: enterprise-rhel-80-64-bit-inmem linux-64-duroff enterprise-rhel-80-64-bit-multiversion
     num_scons_link_jobs_available: 0.99
@@ -10411,28 +10412,28 @@ buildvariants:
     - name: .multiversion !.future_git_tag_incompatible
     - name: .multiversion_future_git_tag
 
-- name: rhel-80-64-bit-nossl
-  display_name: "RHEL 8.0 Shared Library (No SSL)"
-  run_on:
-  - rhel80-small
-  cron: "0 12 * * *" # Every day starting at 12:00
-  expansions:
-    compile_flags: >-
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --ssl=off
-      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-      MONGO_DISTMOD=rhel80
-      --link-model=dynamic
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    scons_cache_scope: shared
-    build_mongoreplay: false
-    large_distro_name: rhel80-medium
-  tasks:
-  - name: compile_test_and_package_serial_TG
-    distros:
-    - rhel80-large
-  - name: jsCore
+#- name: rhel-80-64-bit-nossl
+#  display_name: "RHEL 8.0 Shared Library (No SSL)"
+#  run_on:
+#  - rhel80-small
+#  cron: "0 12 * * *" # Every day starting at 12:00
+#  expansions:
+#    compile_flags: >-
+#      -j$(grep -c ^processor /proc/cpuinfo)
+#      --ssl=off
+#      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+#      MONGO_DISTMOD=rhel80
+#      --link-model=dynamic
+#    multiversion_platform: rhel80
+#    multiversion_edition: enterprise
+#    scons_cache_scope: shared
+#    build_mongoreplay: false
+#    large_distro_name: rhel80-medium
+#  tasks:
+#  - name: compile_test_and_package_serial_TG
+#    distros:
+#    - rhel80-large
+#  - name: jsCore
 
 
 - &enterprise-rhel-70-64-bit-template
@@ -10662,18 +10663,18 @@ buildvariants:
   - name: generate_buildid_to_debug_symbols_mapping
 
 # This variant is to intentionally test uncommon features nightly
-- <<: *enterprise-rhel-70-64-bit-template
-  name: enterprise-rhel-70-64-bit-kitchen-sink
-  display_name: "~ Enterprise RHEL 7.0"
-  cron: "0 12 * * *" # Every day starting at 12:00
-  expansions:
-    <<: *enterprise-rhel-70-64-bit-expansions-template
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-  tasks:
-  - name: compile_test_and_package_serial_TG
-    distros:
-    - rhel70
-  - name: jsCore
+#- <<: *enterprise-rhel-70-64-bit-template
+#  name: enterprise-rhel-70-64-bit-kitchen-sink
+#  display_name: "~ Enterprise RHEL 7.0"
+#  cron: "0 12 * * *" # Every day starting at 12:00
+#  expansions:
+#    <<: *enterprise-rhel-70-64-bit-expansions-template
+#    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+#  tasks:
+#  - name: compile_test_and_package_serial_TG
+#    distros:
+#    - rhel70
+#  - name: jsCore
 
 - <<: *enterprise-rhel-70-64-bit-template
   name: hot_backups-rhel-70-64-bit
@@ -10796,7 +10797,7 @@ buildvariants:
       - ubuntu1804-xlarge
   - name: build_variant_gen
   - name: jsCore
-  - name: .aggregation
+  - name: .aggregation !.encrypt
   - name: replica_sets_jscore_passthrough
   - name: sharded_collections_jscore_passthrough
   - name: sharding_gen
@@ -11147,41 +11148,6 @@ buildvariants:
   - name: .publish
     distros:
     - rhel70-small
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: enterprise-rhel-72-s390x-all-feature-flags
-  display_name: Enterprise RHEL 7.2 s390x (all feature flags)
-  modules:
-  - enterprise
-  run_on:
-  - rhel72-zseries-test
-  cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
-  stepback: false
-  expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    release_buid: true
-    compile_flags: --ssl MONGO_DISTMOD=rhel72 -j3 --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: rhel72
-    repo_edition: enterprise
-    multiversion_platform: rhel72
-    multiversion_architecture: s390x
-    multiversion_edition: enterprise
-    # To force disable feature flags even on the all feature flags variant, please use this file:
-    # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
-    test_flags: >-
-        --runAllFeatureFlagTests
-        --excludeWithAnyTags=incompatible_with_shard_merge
-  tasks:
-  - name: compile_and_archive_dist_test_then_package_TG
-    distros:
-    - rhel72-zseries-build
-  - name: build_variant_gen
-  - name: jsCore
-  - name: replica_sets_jscore_passthrough
   - name: generate_buildid_to_debug_symbols_mapping
 
 ###########################################
@@ -12645,69 +12611,69 @@ buildvariants:
   - name: validate_commit_message
   - name: check_feature_flag_tags
 
-- name: live-record
-  display_name: "~ RHEL 8.0 Shared Library (with UndoDB live-record)"
-  cron: "0 12 * * *" # Every day starting at 12:00
-  stepback: false
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-medium
-  expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    has_packages: false
-    scons_cache_scope: shared
-    scons_cache_mode: all
-    target_resmoke_time: 10
-    max_sub_suites: 3
-    large_distro_name: rhel80-medium
-    num_scons_link_jobs_available: 0.99
-    record_with: --recordWith /opt/undodb5/bin/live-record
-    resmoke_jobs_factor: 0.3
-    exec_timeout_secs: 28800 # 8 hours
-    test_flags: --excludeWithAnyTags=requires_fast_memory,live_record_incompatible
-  tasks:
-  - name: compile_and_archive_dist_test_TG
-  - name: build_variant_gen
-#  - name: .aggfuzzer # Disabled for FCV 5.3
-  - name: .aggregation
-#  - name: audit
-#  - name: .auth !.multiversion !.non_live_record
-#  - name: .causally_consistent !.sharding
-#  - name: .change_streams
-#  - name: .misc_js !.non_live_record
-  - name: .concurrency !.ubsan !.no_txns !.debug_only !.stepdowns !.non_live_record !.large
-#  - name: .encrypt
-#  - name: initial_sync_fuzzer_gen
-  - name: .jscore .common
-#  - name: jsCore_minimum_batch_size
-  - name: jsCore_txns_large_txns_format
-#  - name: json_schema
-  - name: .jstestfuzz !.flow_control !.stepdowns !.causal
-#  - name: .multiversion_sanity_check
-#  - name: mqlrun
-#  - name: .multi_shard
-#  - name: .query_fuzzer
-#  - name: .read_write_concern
-#  - name: .replica_sets !.encrypt !.auth !.non_live_record
-#  - name: replica_sets_reconfig_jscore_passthrough_gen
-#  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough_gen
-#  - name: .read_only
-#  - name: .rollbackfuzzer
-  - name: sasl
-#  - name: search
-#  - name: search_auth
-#  - name: search_ssl
-#  - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-#  - name: .sharding .txns
-#  - name: .sharding .common !.non_live_record
-  - name: snmp
-#  - name: .updatefuzzer
+#- name: live-record
+#  display_name: "~ RHEL 8.0 Shared Library (with UndoDB live-record)"
+#  cron: "0 12 * * *" # Every day starting at 12:00
+#  stepback: false
+#  modules:
+#  - enterprise
+#  run_on:
+#  - rhel80-medium
+#  expansions:
+#    compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
+#    multiversion_platform: rhel80
+#    multiversion_edition: enterprise
+#    has_packages: false
+#    scons_cache_scope: shared
+#    scons_cache_mode: all
+#    target_resmoke_time: 10
+#    max_sub_suites: 3
+#    large_distro_name: rhel80-medium
+#    num_scons_link_jobs_available: 0.99
+#    record_with: --recordWith /opt/undodb5/bin/live-record
+#    resmoke_jobs_factor: 0.3
+#    exec_timeout_secs: 28800 # 8 hours
+#    test_flags: --excludeWithAnyTags=requires_fast_memory,live_record_incompatible
+#  tasks:
+#  - name: compile_and_archive_dist_test_TG
+#  - name: build_variant_gen
+##  - name: .aggfuzzer # Disabled for FCV 5.3
+#  - name: .aggregation
+##  - name: audit
+##  - name: .auth !.multiversion !.non_live_record
+##  - name: .causally_consistent !.sharding
+##  - name: .change_streams
+##  - name: .misc_js !.non_live_record
+#  - name: .concurrency !.ubsan !.no_txns !.debug_only !.stepdowns !.non_live_record !.large
+##  - name: .encrypt
+##  - name: initial_sync_fuzzer_gen
+#  - name: .jscore .common
+##  - name: jsCore_minimum_batch_size
+#  - name: jsCore_txns_large_txns_format
+##  - name: json_schema
+#  - name: .jstestfuzz !.flow_control !.stepdowns !.causal
+##  - name: .multiversion_sanity_check
+##  - name: mqlrun
+##  - name: .multi_shard
+##  - name: .query_fuzzer
+##  - name: .read_write_concern
+##  - name: .replica_sets !.encrypt !.auth !.non_live_record
+##  - name: replica_sets_reconfig_jscore_passthrough_gen
+##  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
+#  - name: retryable_writes_jscore_passthrough_gen
+#  - name: retryable_writes_jscore_stepdown_passthrough_gen
+##  - name: .read_only
+##  - name: .rollbackfuzzer
+#  - name: sasl
+##  - name: search
+##  - name: search_auth
+##  - name: search_ssl
+##  - name: session_jscore_passthrough
+#  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+##  - name: .sharding .txns
+##  - name: .sharding .common !.non_live_record
+#  - name: snmp
+##  - name: .updatefuzzer
 
 - name: windows-dynamic-visibility-test
   display_name: "~ Shared Library Windows (visibility test)"

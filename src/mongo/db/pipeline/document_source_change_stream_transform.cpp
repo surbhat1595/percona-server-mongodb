@@ -341,6 +341,24 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
                 operationType = DocumentSourceChangeStream::kCreateOpType;
                 nss = NamespaceString(nss.db(), nssField.getString());
                 operationDescription = Value(copyDocExceptFields(oField, {"create"_sd}));
+            } else if (auto nssField = oField.getField("createIndexes"); !nssField.missing()) {
+                operationType = DocumentSourceChangeStream::kCreateIndexesOpType;
+                nss = NamespaceString(nss.db(), nssField.getString());
+                // Wrap the index spec in an "indexes" array for consistency with commitIndexBuild.
+                auto indexSpec = Value(copyDocExceptFields(oField, {"createIndexes"_sd}));
+                operationDescription = Value(Document{{"indexes", std::vector<Value>{indexSpec}}});
+            } else if (auto nssField = oField.getField("commitIndexBuild"); !nssField.missing()) {
+                operationType = DocumentSourceChangeStream::kCreateIndexesOpType;
+                nss = NamespaceString(nss.db(), nssField.getString());
+                operationDescription = Value(Document{{"indexes", oField.getField("indexes")}});
+            } else if (auto nssField = oField.getField("dropIndexes"); !nssField.missing()) {
+                const auto o2Field = input[repl::OplogEntry::kObject2FieldName].getDocument();
+                operationType = DocumentSourceChangeStream::kDropIndexesOpType;
+                nss = NamespaceString(nss.db(), nssField.getString());
+                // Wrap the index spec in an "indexes" array for consistency with createIndexes
+                // and commitIndexBuild.
+                auto indexSpec = Value(copyDocExceptFields(o2Field, {"dropIndexes"_sd}));
+                operationDescription = Value(Document{{"indexes", std::vector<Value>{indexSpec}}});
             } else {
                 // All other commands will invalidate the stream.
                 operationType = DocumentSourceChangeStream::kInvalidateOpType;
@@ -351,6 +369,15 @@ Document DocumentSourceChangeStreamTransform::applyTransformation(const Document
             break;
         }
         case repl::OpTypeEnum::kNoop: {
+            // Check whether this is a shardCollection oplog entry.
+            if (!input.getNestedField("o2.shardCollection").missing()) {
+                const auto o2Field = input[repl::OplogEntry::kObject2FieldName].getDocument();
+                operationType = DocumentSourceChangeStream::kShardCollectionOpType;
+                operationDescription = Value(copyDocExceptFields(o2Field, {"shardCollection"_sd}));
+                break;
+            }
+
+            // Otherwise, o2.type determines the message type.
             auto o2Type = input.getNestedField("o2.type");
             tassert(5052200, "o2.type is missing from noop oplog event", !o2Type.missing());
 

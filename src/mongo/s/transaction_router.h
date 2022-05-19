@@ -269,8 +269,8 @@ public:
      * The first command in a transaction to target at least one shard must select a cluster time
      * timestamp before targeting, but may change the timestamp before contacting any shards to
      * allow optimizing the timestamp based on the targeted shards. If the first command encounters
-     * a retryable error, e.g. StaleShardVersion or SnapshotTooOld, the retry may also select a new
-     * timestamp. Once the first command has successfully completed, the timestamp cannot be
+     * a retryable error, e.g. "retargeting needed" or SnapshotTooOld, the retry may also select a
+     * new timestamp. Once the first command has successfully completed, the timestamp cannot be
      * changed.
      */
     class AtClusterTime {
@@ -368,13 +368,18 @@ public:
          * the previous transaction state.
          */
         void beginOrContinueTxn(OperationContext* opCtx,
-                                TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+                                TxnNumber txnNumber,
                                 TransactionActions action);
 
         /**
          * Updates transaction diagnostics when the transaction's session is checked in.
          */
         void stash(OperationContext* opCtx);
+
+        /**
+         * Validates transaction state is still compatible after a yield.
+         */
+        void unstash(OperationContext* opCtx);
 
         /**
          * Attaches the required transaction related fields for a request to be sent to the given
@@ -559,17 +564,17 @@ public:
         /**
          * Continues or restarts the currently active transaction.
          */
-        void _beginOrContinueActiveTxnNumber(OperationContext* opCtx,
-                                             TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-                                             TransactionActions action);
+        void _continueTxn(OperationContext* opCtx,
+                          TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+                          TransactionActions action);
 
         /**
          * Starts a new transaction or continues a transaction started by a different router to
          * recover the commit decision.
          */
-        void _beginNewTxnNumber(OperationContext* opCtx,
-                                TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-                                TransactionActions action);
+        void _beginTxn(OperationContext* opCtx,
+                       TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+                       TransactionActions action);
 
         /**
          * Internal method for committing a transaction. Should only throw on failure to send

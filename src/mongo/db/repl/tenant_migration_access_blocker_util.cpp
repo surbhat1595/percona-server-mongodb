@@ -308,14 +308,20 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
             return true;
         }
 
+        auto protocol = doc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations);
         auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(
             opCtx->getServiceContext(),
+            doc.getId(),
             doc.getTenantId().toString(),
-            doc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations),
+            protocol,
             doc.getRecipientConnectionString().toString());
 
-        TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
-            .add(doc.getTenantId(), mtab);
+        auto& registry = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext());
+        if (protocol == MigrationProtocolEnum::kMultitenantMigrations) {
+            registry.add(doc.getTenantId(), mtab);
+        } else {
+            registry.addDonorAccessBlocker(mtab);
+        }
 
         switch (doc.getState()) {
             case TenantMigrationDonorStateEnum::kAbortingIndexBuilds:
@@ -372,7 +378,6 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
         switch (doc.getState()) {
             case TenantMigrationRecipientStateEnum::kStarted:
             case TenantMigrationRecipientStateEnum::kLearnedFilenames:
-            case TenantMigrationRecipientStateEnum::kCopiedFiles:
                 invariant(!doc.getRejectReadsBeforeTimestamp());
                 break;
             case TenantMigrationRecipientStateEnum::kConsistent:
@@ -389,7 +394,7 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
 }
 
 template <typename MigrationConflictInfoType>
-Status _handleTenantMigrationConflict(OperationContext* opCtx, Status status) {
+Status _handleTenantMigrationConflict(OperationContext* opCtx, const Status& status) {
     auto migrationConflictInfo = status.extraInfo<MigrationConflictInfoType>();
     invariant(migrationConflictInfo);
     auto mtab = migrationConflictInfo->getTenantMigrationAccessBlocker();
@@ -400,7 +405,7 @@ Status _handleTenantMigrationConflict(OperationContext* opCtx, Status status) {
 }
 
 Status handleTenantMigrationConflict(OperationContext* opCtx, Status status) {
-    if (status.code() == ErrorCodes::NonRetryableTenantMigrationConflict) {
+    if (status == ErrorCodes::NonRetryableTenantMigrationConflict) {
         auto migrationStatus =
             _handleTenantMigrationConflict<NonRetryableTenantMigrationConflictInfo>(opCtx, status);
 

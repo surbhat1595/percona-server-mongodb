@@ -71,7 +71,6 @@ selector:
   - jstests/core/batch_write_command_update.js
   - jstests/core/bench_test1.js
   - jstests/core/bench_test2.js
-  - jstests/core/bench_test3.js
   - jstests/core/bindata_eq.js
   - jstests/core/bindata_indexonly.js
   - jstests/core/capped_update.js
@@ -369,7 +368,6 @@ selector:
   - jstests/core/remove3.js
   - jstests/core/remove6.js
   - jstests/core/remove7.js
-  - jstests/core/remove9.js
   - jstests/core/removea.js
   - jstests/core/removeb.js
   - jstests/core/removec.js
@@ -630,7 +628,6 @@ selector:
   - jstests/core/regex_verbs.js
   - jstests/core/regexb.js
   - jstests/core/regexc.js
-  - jstests/core/remove9.js
   - jstests/core/server7756.js
   - jstests/core/sortk.js
   - jstests/core/system_js_access.js

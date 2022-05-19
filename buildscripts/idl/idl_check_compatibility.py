@@ -118,6 +118,9 @@ ALLOW_ANY_TYPE_LIST: List[str] = [
     'aggregate-param-fromMongos',
     'aggregate-param-$_requestReshardingResumeToken',
     'aggregate-param-isMapReduceCommand',
+    'count-param-hint',
+    'count-param-limit',
+    'count-param-maxTimeMS',
     'find-param-filter',
     'find-param-projection',
     'find-param-sort',
@@ -166,9 +169,20 @@ IGNORE_UNSTABLE_LIST: List[str] = [
     # visible. This is part of the listIndexes output when executed against system.bucket.*
     # collections, which users should avoid doing.
     'listIndexes-reply-originalSpec',
+    # The 'vars' field was introduced to facilitate communication between mongot and mongod and is
+    # not user visible.
+    'find-reply-vars',
+    'aggregate-reply-vars',
+    # The 'cursor' field is now optional in a reply, as inter-node communication in aggregation
+    # can return one or more cursors. Multiple cursors are covered under the 'cursors' field.
+    'find-reply-cursor',
+    'aggregate-reply-cursor',
 ]
 
-SKIPPED_FILES = ["unittest.idl"]
+SKIPPED_FILES = [
+    "unittest.idl", "mozILocalization.idl", "mozILocaleService.idl", "mozIOSPreferences.idl",
+    "nsICollation.idl", "nsIStringBundle.idl", "nsIScriptableUConv.idl", "nsITextToSubURI.idl"
+]
 
 
 class FieldCompatibility:
@@ -326,13 +340,13 @@ def check_reply_field_type_recursive(ctxt: IDLCompatibilityContext,
     # If bson_serialization_type switches from 'any' to non-any type.
     if "any" in old_field_type.bson_serialization_type and "any" not in new_field_type.bson_serialization_type:
         ctxt.add_old_reply_field_bson_any_error(cmd_name, field_name, old_field_type.name,
-                                                old_field.idl_file_path)
+                                                new_field_type.name, old_field.idl_file_path)
         return
 
     # If bson_serialization_type switches from non-any to 'any' type.
     if "any" not in old_field_type.bson_serialization_type and "any" in new_field_type.bson_serialization_type:
         ctxt.add_new_reply_field_bson_any_error(cmd_name, field_name, old_field_type.name,
-                                                new_field.idl_file_path)
+                                                new_field_type.name, new_field.idl_file_path)
         return
 
     allow_name: str = cmd_name + "-reply-" + field_name
@@ -340,7 +354,7 @@ def check_reply_field_type_recursive(ctxt: IDLCompatibilityContext,
     if "any" in old_field_type.bson_serialization_type:
         # If 'any' is not explicitly allowed as the bson_serialization_type.
         if allow_name not in ALLOW_ANY_TYPE_LIST:
-            ctxt.add_reply_field_bson_any_not_allowed_error(
+            ctxt.add_old_reply_field_bson_any_not_allowed_error(
                 cmd_name, field_name, old_field_type.name, old_field.idl_file_path)
             return
 
@@ -499,8 +513,8 @@ def check_reply_field(ctxt: IDLCompatibilityContext, old_field: syntax.Field,
                                                 and old_field_type.name == "optionalBool")
     new_field_optional = new_field.optional or (new_field_type
                                                 and new_field_type.name == "optionalBool")
-    if not old_field.unstable:
-        field_name: str = cmd_name + "-reply-" + new_field.name
+    field_name: str = cmd_name + "-reply-" + new_field.name
+    if not old_field.unstable and field_name not in IGNORE_UNSTABLE_LIST:
         if new_field.unstable and field_name not in IGNORE_UNSTABLE_LIST:
             ctxt.add_new_reply_field_unstable_error(cmd_name, new_field.name, new_idl_file_path)
         if new_field_optional and not old_field_optional:
@@ -594,7 +608,7 @@ def check_reply_fields(ctxt: IDLCompatibilityContext, old_reply: syntax.Struct,
                 # If 'any' is not explicitly allowed as the bson_serialization_type.
                 any_allow = allow_name in ALLOW_ANY_TYPE_LIST or new_field_type.name == 'optionalBool'
                 if not any_allow:
-                    ctxt.add_reply_field_bson_any_not_allowed_error(
+                    ctxt.add_new_reply_field_bson_any_not_allowed_error(
                         cmd_name, new_field.name, new_field_type.name, new_idl_file_path)
 
 
@@ -630,20 +644,22 @@ def check_param_or_command_type_recursive(ctxt: IDLCompatibilityContext,
 
     # If bson_serialization_type switches from 'any' to non-any type.
     if "any" in old_type.bson_serialization_type and "any" not in new_type.bson_serialization_type:
-        ctxt.add_old_command_or_param_type_bson_any_error(
-            cmd_name, old_type.name, old_field.idl_file_path, param_name, is_command_parameter)
+        ctxt.add_old_command_or_param_type_bson_any_error(cmd_name, old_type.name, new_type.name,
+                                                          old_field.idl_file_path, param_name,
+                                                          is_command_parameter)
         return
 
     # If bson_serialization_type switches from non-any to 'any' type.
     if "any" not in old_type.bson_serialization_type and "any" in new_type.bson_serialization_type:
-        ctxt.add_new_command_or_param_type_bson_any_error(
-            cmd_name, new_type.name, new_field.idl_file_path, param_name, is_command_parameter)
+        ctxt.add_new_command_or_param_type_bson_any_error(cmd_name, old_type.name, new_type.name,
+                                                          new_field.idl_file_path, param_name,
+                                                          is_command_parameter)
         return
 
     if "any" in old_type.bson_serialization_type:
         # If 'any' is not explicitly allowed as the bson_serialization_type.
         if allow_name not in ALLOW_ANY_TYPE_LIST:
-            ctxt.add_command_or_param_type_bson_any_not_allowed_error(
+            ctxt.add_old_command_or_param_type_bson_any_not_allowed_error(
                 cmd_name, old_type.name, old_field.idl_file_path, param_name, is_command_parameter)
             return
 
@@ -894,7 +910,7 @@ def check_command_params_or_type_struct_fields(
                 # If 'any' is not explicitly allowed as the bson_serialization_type.
                 any_allow = any_allow_name in ALLOW_ANY_TYPE_LIST or new_field_type.name == 'optionalBool'
                 if not any_allow:
-                    ctxt.add_command_or_param_type_bson_any_not_allowed_error(
+                    ctxt.add_new_command_or_param_type_bson_any_not_allowed_error(
                         cmd_name, new_field_type.name, old_idl_file_path, new_field.name,
                         is_command_parameter)
 
@@ -1033,6 +1049,67 @@ def split_complex_checks(
     return checks, sorted(privileges, key=lambda x: len(x.action_type), reverse=True)
 
 
+def check_complex_checks(ctxt: IDLCompatibilityContext,
+                         old_complex_checks: List[syntax.AccessCheck],
+                         new_complex_checks: List[syntax.AccessCheck], cmd: syntax.Command,
+                         new_idl_file_path: str) -> None:
+    """Check the compatibility between complex access checks of the old and new command."""
+    cmd_name = cmd.command_name
+    if len(new_complex_checks) > len(old_complex_checks):
+        ctxt.add_new_additional_complex_access_check_error(cmd_name, new_idl_file_path)
+    else:
+        old_checks, old_privileges = split_complex_checks(old_complex_checks)
+        new_checks, new_privileges = split_complex_checks(new_complex_checks)
+        if not set(new_checks).issubset(old_checks):
+            ctxt.add_new_complex_checks_not_subset_error(cmd_name, new_idl_file_path)
+
+        if len(new_privileges) > len(old_privileges):
+            ctxt.add_new_complex_privileges_not_subset_error(cmd_name, new_idl_file_path)
+        else:
+            # Check that each new_privilege matches an old_privilege (the resource_pattern is
+            # equal and the action_types are a subset of the old action_types).
+            for new_privilege in new_privileges:
+                for old_privilege in old_privileges:
+                    if (new_privilege.resource_pattern == old_privilege.resource_pattern
+                            and set(new_privilege.action_type).issubset(old_privilege.action_type)):
+                        old_privileges.remove(old_privilege)
+                        break
+                else:
+                    ctxt.add_new_complex_privileges_not_subset_error(cmd_name, new_idl_file_path)
+
+
+def split_complex_checks_agg_stages(
+        complex_checks: List[syntax.AccessCheck]) -> Dict[str, List[syntax.AccessCheck]]:
+    """Split a list of AccessChecks into a map keyed by aggregation stage (defaults to None)."""
+    complex_checks_agg_stages: Dict[str, List[syntax.AccessCheck]] = dict()
+    for access_check in complex_checks:
+        agg_stage = None
+        if access_check.privilege is not None:
+            # x.privilege.agg_stage can still be None.
+            agg_stage = access_check.privilege.agg_stage
+        if agg_stage not in complex_checks_agg_stages:
+            complex_checks_agg_stages[agg_stage] = []
+        complex_checks_agg_stages[agg_stage].append(access_check)
+    return complex_checks_agg_stages
+
+
+def check_complex_checks_agg_stages(ctxt: IDLCompatibilityContext,
+                                    old_complex_checks: List[syntax.AccessCheck],
+                                    new_complex_checks: List[syntax.AccessCheck],
+                                    cmd: syntax.Command, new_idl_file_path: str) -> None:
+    """Check the compatibility between complex access checks of the old and new agggreation stages."""
+    new_complex_checks_agg_stages = split_complex_checks_agg_stages(new_complex_checks)
+    old_complex_checks_agg_stages = split_complex_checks_agg_stages(old_complex_checks)
+    for agg_stage in new_complex_checks_agg_stages:
+        # Aggregation stages are considered separate commands in the context of validating the
+        # Stable API. Therefore, it is okay to skip recently added aggregation stages that are
+        # are not present in the previous release.
+        if agg_stage not in old_complex_checks_agg_stages:
+            continue
+        check_complex_checks(ctxt, old_complex_checks_agg_stages[agg_stage],
+                             new_complex_checks_agg_stages[agg_stage], cmd, new_idl_file_path)
+
+
 def check_security_access_checks(ctxt: IDLCompatibilityContext,
                                  old_access_checks: syntax.AccessChecks,
                                  new_access_checks: syntax.AccessChecks, cmd: syntax.Command,
@@ -1067,30 +1144,8 @@ def check_security_access_checks(ctxt: IDLCompatibilityContext,
             old_complex_checks = old_access_checks.complex
             new_complex_checks = new_access_checks.complex
             if old_complex_checks is not None and new_complex_checks is not None:
-                if len(new_complex_checks) > len(old_complex_checks):
-                    ctxt.add_new_additional_complex_access_check_error(cmd_name, new_idl_file_path)
-                else:
-                    old_checks, old_privileges = split_complex_checks(old_complex_checks)
-                    new_checks, new_privileges = split_complex_checks(new_complex_checks)
-                    if not set(new_checks).issubset(old_checks):
-                        ctxt.add_new_complex_checks_not_subset_error(cmd_name, new_idl_file_path)
-
-                    if len(new_privileges) > len(old_privileges):
-                        ctxt.add_new_complex_privileges_not_subset_error(
-                            cmd_name, new_idl_file_path)
-                    else:
-                        # Check that each new_privilege matches an old_privilege (the resource_pattern is
-                        # equal and the action_types are a subset of the old action_types).
-                        for new_privilege in new_privileges:
-                            for old_privilege in old_privileges:
-                                if (new_privilege.resource_pattern == old_privilege.resource_pattern
-                                        and set(new_privilege.action_type).issubset(
-                                            old_privilege.action_type)):
-                                    old_privileges.remove(old_privilege)
-                                    break
-                            else:
-                                ctxt.add_new_complex_privileges_not_subset_error(
-                                    cmd_name, new_idl_file_path)
+                check_complex_checks_agg_stages(ctxt, old_complex_checks, new_complex_checks, cmd,
+                                                new_idl_file_path)
 
     elif new_access_checks is None and old_access_checks is not None:
         ctxt.add_removed_access_check_field_error(cmd_name, new_idl_file_path)

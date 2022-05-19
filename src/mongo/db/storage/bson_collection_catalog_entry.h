@@ -98,9 +98,9 @@ public:
 
         void updateHiddenSetting(bool hidden);
 
-        void updateUniqueSetting();
+        void updateUniqueSetting(bool unique);
 
-        void updateDisallowNewDuplicateKeysSetting(bool disallowNewDuplicateKeys);
+        void updatePrepareUniqueSetting(bool prepareUnique);
 
         StringData nameStringData() const {
             return spec["name"].valueStringDataSafe();

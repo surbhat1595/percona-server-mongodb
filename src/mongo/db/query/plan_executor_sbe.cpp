@@ -50,7 +50,6 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  std::unique_ptr<CanonicalQuery> cq,
                                  std::unique_ptr<optimizer::AbstractABTPrinter> optimizerData,
                                  sbe::CandidatePlans candidates,
-                                 const CollectionPtr& collection,
                                  bool returnOwnedBson,
                                  NamespaceString nss,
                                  bool isOpen,
@@ -110,6 +109,10 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
     } else {
         // Keep only rejected candidate plans.
         candidates.plans.erase(candidates.plans.begin() + candidates.winnerIdx);
+    }
+
+    if (_solution) {
+        _secondaryNssVector = _solution->getAllSecondaryNamespaces(_nss);
     }
 
     _planExplainer = plan_explainer_factory::make(_root.get(),
@@ -395,5 +398,4 @@ sbe::PlanState fetchNext(sbe::PlanStage* root,
     }
     return state;
 }
-
 }  // namespace mongo

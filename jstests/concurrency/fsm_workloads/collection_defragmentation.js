@@ -147,17 +147,9 @@ var $config = (function() {
                 configDB.chunks.aggregate([{$match: chunksJoinClause}, {$sample: {size: 1}}])
                     .toArray()[0];
             try {
-                const res = connCache.shards[randomChunk.shard][0].getDB("admin").runCommand({
-                    splitVector: randomColl.getFullName(),
-                    keyPattern: getCollectionShardKey(configDB, randomColl.getFullName()),
-                    min: randomChunk.min,
-                    max: randomChunk.max,
-                    force: true
-                });
-                assertAlways.commandWorked(res);
-                ChunkHelper.splitChunkAt(randomDB, randomColl.getName(), res.splitKeys[0]);
-                jsTest.log("Manual split chunk of chunk " + tojson(randomChunk) + " at " +
-                           tojson(res.splitKeys[0]));
+                assertAlways.commandWorked(
+                    db.adminCommand({split: randomColl.getFullName(), find: randomChunk.min}));
+                jsTest.log("Manual split chunk of chunk " + tojson(randomChunk));
             } catch (e) {
                 jsTest.log("Ignoring manual split chunk error: " + tojson(e));
             }
@@ -220,6 +212,23 @@ var $config = (function() {
             const dbName = dbPrefix + i;
             for (let j = 0; j < collCount; j++) {
                 const fullNs = dbName + "." + collPrefix + j;
+                // Wait for defragmentation to complete
+                defragmentationUtil.waitForEndOfDefragmentation(mongos, fullNs);
+                // Enable balancing and wait for balanced
+                assertAlways.commandWorked(mongos.getDB('config').collections.update(
+                    {_id: fullNs}, {$set: {"noBalance": false}}));
+                assertAlways.soon(function() {
+                    let res = mongos.adminCommand({balancerCollectionStatus: fullNs});
+                    assertAlways.commandWorked(res);
+                    return res.balancerCompliant;
+                });
+                // Begin defragmentation again
+                assertAlways.commandWorked(mongos.adminCommand({
+                    configureCollectionBalancing: fullNs,
+                    defragmentCollection: true,
+                    chunkSize: maxChunkSizeMB,
+                }));
+                // Wait for defragmentation to complete and check final state
                 defragmentationUtil.waitForEndOfDefragmentation(mongos, fullNs);
                 defragmentationUtil.checkPostDefragmentationState(
                     mongos, fullNs, maxChunkSizeMB, "key");

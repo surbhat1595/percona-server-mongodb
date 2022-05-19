@@ -510,6 +510,7 @@ const testCases = {
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isNotRunOnUserDatabase},
     _configsvrMoveChunk: {skip: isNotRunOnUserDatabase},  // Can be removed once 6.0 is last LTS
     _configsvrMovePrimary: {skip: isNotRunOnUserDatabase},
+    _configsvrMoveRange: {skip: isNotRunOnUserDatabase},
     _configsvrRefineCollectionShardKey: {skip: isNotRunOnUserDatabase},
     _configsvrRemoveShard: {skip: isNotRunOnUserDatabase},
     _configsvrRemoveShardFromZone: {skip: isNotRunOnUserDatabase},
@@ -892,6 +893,7 @@ const testCases = {
     reapLogicalSessionCacheNow: {skip: isNotRunOnUserDatabase},
     refreshLogicalSessionCacheNow: {skip: isNotRunOnUserDatabase},
     refreshSessions: {skip: isNotRunOnUserDatabase},
+    recipientVoteImportedFiles: {skip: isNotRunOnUserDatabase},
     renameCollection: {
         runAgainstAdminDb: true,
         explicitlyCreateCollection: true,
@@ -997,6 +999,7 @@ const testCases = {
     usersInfo: {skip: isNotRunOnUserDatabase},
     validate: {skip: isNotWriteCommand},
     voteCommitIndexBuild: {skip: isNotRunOnUserDatabase},
+    // TODO (SERVER-64296): Remove voteCommitMigrationProgress in 6.1.
     voteCommitMigrationProgress: {skip: isNotRunOnUserDatabase},
     waitForFailPoint: {skip: isNotRunOnUserDatabase},
     waitForOngoingChunkSplits: {skip: isNotRunOnUserDatabase},

@@ -37,6 +37,7 @@
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/database_sharding_state.h"
+#include "mongo/db/s/global_user_write_block_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
@@ -188,6 +189,19 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                                              const CancellationToken& token) noexcept {
     return ExecutorFuture<void>(**executor)
         .then([this, executor, token, anchor = shared_from_this()] {
+            auto opCtxHolder = cc().makeOperationContext();
+            auto* opCtx = opCtxHolder.get();
+            getForwardableOpMetadata().setOn(opCtx);
+
+            // Check if this coordinator is allowed to start according to the user-writes blocking
+            // critical section. If it is not the first execution, it means it had started already
+            // and we are recovering this coordinator. In this case, let it be completed even though
+            // new DDL operations may be prohibited now.
+            if (_firstExecution) {
+                GlobalUserWriteBlockState::get(opCtx)->checkShardedDDLAllowedToStart(opCtx, nss());
+            }
+        })
+        .then([this, executor, token, anchor = shared_from_this()] {
             return _acquireLockAsync(executor, token, nss().db());
         })
         .then([this, executor, token, anchor = shared_from_this()] {
@@ -196,8 +210,12 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                 auto* opCtx = opCtxHolder.get();
                 invariant(metadata().getDatabaseVersion());
 
-                OperationShardingState::get(opCtx).initializeClientRoutingVersions(
-                    nss(), boost::none /* ChunkVersion */, metadata().getDatabaseVersion());
+                ScopedSetShardRole scopedSetShardRole(
+                    opCtx,
+                    nss(),
+                    boost::none /* shardVersion */,
+                    metadata().getDatabaseVersion() /* databaseVersion */);
+
                 // Check under the dbLock if this is still the primary shard for the database
                 DatabaseShardingState::checkIsPrimaryShardForDb(opCtx, nss().db());
             };
@@ -226,7 +244,17 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
 
             hangBeforeRunningCoordinatorInstance.pauseWhileSet();
         })
-        .onError([this, anchor = shared_from_this()](const Status& status) {
+        .onError([this, token, anchor = shared_from_this()](const Status& status) {
+            // The construction of a DDL coordinator recovered from disk can only fail due to
+            // stepdown/shutdown.
+            dassert(!_recoveredFromDisk ||
+                    (token.isCanceled() &&
+                     (status.isA<ErrorCategory::CancellationError>() ||
+                      status.isA<ErrorCategory::NotPrimaryError>())));
+
+            // Ensure coordinator cleanup if the document has not been saved.
+            _completeOnError = !_recoveredFromDisk;
+
             static constexpr auto& errorMsg =
                 "Failed to complete construction of sharding DDL coordinator";
             LOGV2_ERROR(
@@ -277,20 +305,30 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             auto opCtxHolder = cc().makeOperationContext();
             auto* opCtx = opCtxHolder.get();
 
+            // If we are stepping down the token MUST be cancelled. Each implementation of the
+            // coordinator must retry remote stepping down errors, unless, we allow finalizing the
+            // coordinator in the presence of errors.
+            dassert(!(status.isA<ErrorCategory::NotPrimaryError>() ||
+                      status.isA<ErrorCategory::ShutdownError>()) ||
+                    token.isCanceled() || _completeOnError);
+
             auto completionStatus = status;
 
-            bool isSteppingDown = status.isA<ErrorCategory::NotPrimaryError>() ||
-                status.isA<ErrorCategory::ShutdownError>();
+            bool isSteppingDown = token.isCanceled();
 
-            // Release the coordinator only in case the node is not stepping down or in case of
-            // acceptable error
-            if (!isSteppingDown || (!status.isOK() && _completeOnError)) {
-                LOGV2(
-                    5565601, "Releasing sharding DDL coordinator", "coordinatorId"_attr = _coordId);
+            // Remove the ddl coordinator and release locks if the execution was successfull or if
+            // there was any error and we have the _completeOnError flag set or if we are not
+            // stepping down.
+            auto cleanup = [&]() {
+                return completionStatus.isOK() || _completeOnError || !isSteppingDown;
+            };
 
-                auto session = metadata().getSession();
-
+            if (cleanup()) {
                 try {
+                    LOGV2(5565601,
+                          "Releasing sharding DDL coordinator",
+                          "coordinatorId"_attr = _coordId);
+
                     // We need to execute this in another executor to ensure the remove work is
                     // done.
                     const auto docWasRemoved = _removeDocumentUntillSuccessOrStepdown(
@@ -304,6 +342,8 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                             Status::OK());
                     }
 
+                    auto session = metadata().getSession();
+
                     if (status.isOK() && session) {
                         // Return lsid to the SessionCache. If status is not OK, let the lsid be
                         // discarded.
@@ -312,6 +352,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     }
                 } catch (const DBException& ex) {
                     completionStatus = ex.toStatus();
+                    // Ensure the only possible error is that we're stepping down.
                     isSteppingDown = completionStatus.isA<ErrorCategory::NotPrimaryError>() ||
                         completionStatus.isA<ErrorCategory::ShutdownError>() ||
                         completionStatus.isA<ErrorCategory::CancellationError>();
@@ -319,7 +360,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                 }
             }
 
-            if (isSteppingDown) {
+            if (!cleanup()) {
                 LOGV2(5950000,
                       "Not releasing distributed locks because the node is stepping down or "
                       "shutting down",
@@ -328,7 +369,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             }
 
             while (!_scopedLocks.empty()) {
-                if (!isSteppingDown) {
+                if (cleanup()) {
                     // (SERVER-59500) Only release the remote locks in case of no stepdown/shutdown
                     const auto& resource = _scopedLocks.top().getNs();
                     DistLockManager::get(opCtx)->unlock(opCtx, resource);

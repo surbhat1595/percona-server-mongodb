@@ -34,7 +34,7 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/trial_period_utils.h"
-#include "mongo/db/query/multi_collection.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
 #include "mongo/db/query/shard_filterer_factory_interface.h"
@@ -49,6 +49,18 @@ std::unique_ptr<sbe::RuntimeEnvironment> makeRuntimeEnvironment(
     const CanonicalQuery& cq,
     OperationContext* opCtx,
     sbe::value::SlotIdGenerator* slotIdGenerator);
+
+/**
+ * This function prepares the SBE tree for execution, such as attaching the OperationContext,
+ * ensuring that the SBE tree is registered with the PlanYieldPolicySBE and populating the
+ * "RuntimeEnvironment".
+ */
+void prepareSlotBasedExecutableTree(OperationContext* opCtx,
+                                    sbe::PlanStage* root,
+                                    PlanStageData* data,
+                                    const CanonicalQuery& cq,
+                                    const MultipleCollectionAccessor& collections,
+                                    PlanYieldPolicySBE* yieldPolicy);
 
 class PlanStageReqs;
 
@@ -184,6 +196,14 @@ public:
         _isTailableCollScanResumeBranch = b;
     }
 
+    void setTargetNamespace(const NamespaceString& nss) {
+        _targetNamespace = nss;
+    }
+
+    const NamespaceString& getTargetNamespace() const {
+        return _targetNamespace;
+    }
+
     friend PlanStageSlots::PlanStageSlots(const PlanStageReqs& reqs,
                                           sbe::value::SlotIdGenerator* slotIdGenerator);
 
@@ -205,6 +225,12 @@ private:
     // collection scan, this flag indicates whether we're currently building an anchor or resume
     // branch. At all other times, this flag will be false.
     bool _isTailableCollScanResumeBranch{false};
+
+    // Tracks the current namespace that we're building a plan over. Given that the stage builder
+    // can build plans for multiple namespaces, a node in the tree that targets a namespace
+    // different from its parent node can set this value to notify any child nodes of the correct
+    // namespace.
+    NamespaceString _targetNamespace;
 };
 
 void PlanStageSlots::forEachSlot(const PlanStageReqs& reqs,
@@ -308,6 +334,7 @@ private:
         } else {
             debugInfo.reset();
         }
+        inputParamToSlotMap = other.inputParamToSlotMap;
     }
 };
 
@@ -325,11 +352,10 @@ public:
     static constexpr StringData kIndexKeyPattern = PlanStageSlots::kIndexKeyPattern;
 
     SlotBasedStageBuilder(OperationContext* opCtx,
-                          const MultiCollection& collections,
+                          const MultipleCollectionAccessor& collections,
                           const CanonicalQuery& cq,
                           const QuerySolution& solution,
-                          PlanYieldPolicySBE* yieldPolicy,
-                          ShardFiltererFactoryInterface* shardFilterer);
+                          PlanYieldPolicySBE* yieldPolicy);
 
     std::unique_ptr<sbe::PlanStage> build(const QuerySolutionNode* root) final;
 
@@ -398,17 +424,6 @@ private:
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildAndSorted(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
-    std::tuple<sbe::value::SlotId, sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>>
-    makeLoopJoinForFetch(std::unique_ptr<sbe::PlanStage> inputStage,
-                         sbe::value::SlotId recordIdSlot,
-                         sbe::value::SlotId snapshotIdSlot,
-                         sbe::value::SlotId indexIdSlot,
-                         sbe::value::SlotId indexKeySlot,
-                         sbe::value::SlotId indexKeyPatternSlot,
-                         StringMap<const IndexAccessMethod*> iamMap,
-                         PlanNodeId planNodeId,
-                         sbe::value::SlotVector slotsToForward = {});
-
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> makeUnionForTailableCollScan(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
@@ -436,11 +451,21 @@ private:
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildLookup(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
+    /**
+     * Returns a CollectionPtr corresponding to the collection that we are currently building a
+     * plan over. If no current namespace is configured, a CollectionPtr referencing the main
+     * collection tracked by '_collections' is returned.
+     */
+    const CollectionPtr& getCurrentCollection(const PlanStageReqs& reqs) const;
+
     sbe::value::SlotIdGenerator _slotIdGenerator;
     sbe::value::FrameIdGenerator _frameIdGenerator;
     sbe::value::SpoolIdGenerator _spoolIdGenerator;
 
-    const MultiCollection& _collections;
+    const MultipleCollectionAccessor& _collections;
+
+    // Indicates the main namespace that we're building a plan over.
+    NamespaceString _mainNss;
 
     PlanYieldPolicySBE* const _yieldPolicy{nullptr};
 
@@ -450,9 +475,6 @@ private:
 
     bool _buildHasStarted{false};
     bool _shouldProduceRecordIdSlot{true};
-
-    // A factory to construct shard filters.
-    ShardFiltererFactoryInterface* _shardFiltererFactory;
 
     // Common parameters to SBE stage builder functions.
     StageBuilderState _state;

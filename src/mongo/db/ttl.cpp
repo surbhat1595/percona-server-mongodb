@@ -37,6 +37,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
@@ -58,7 +59,6 @@
 #include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/db/ttl_gen.h"
-#include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/background.h"
@@ -76,6 +76,7 @@ const auto getTTLMonitor = ServiceContext::declareDecoration<std::unique_ptr<TTL
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(hangTTLMonitorWithLock);
+MONGO_FAIL_POINT_DEFINE(hangTTLMonitorBetweenPasses);
 
 Counter64 ttlPasses;
 Counter64 ttlDeletedDocuments;
@@ -180,6 +181,8 @@ private:
     void doTTLPass() {
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext* opCtx = opCtxPtr.get();
+
+        hangTTLMonitorBetweenPasses.pauseWhileSet(opCtx);
 
         // If part of replSet but not in a readable state (e.g. during initial sync), skip.
         if (repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==

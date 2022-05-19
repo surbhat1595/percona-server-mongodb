@@ -28,12 +28,7 @@
  */
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-#include "mongo/db/commands/feature_compatibility_version_parser.h"
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/pipeline/document_source_lookup.h"
-
-#include <memory>
 
 #include "mongo/base/init.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -56,10 +51,6 @@
 #include "mongo/util/fail_point.h"
 
 namespace mongo {
-
-using boost::intrusive_ptr;
-using std::vector;
-
 namespace {
 
 /**
@@ -287,7 +278,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceLookUp::clone() const {
     return make_intrusive<DocumentSourceLookUp>(*this);
 }
 
-void validateLookupCollectionlessPipeline(const vector<BSONObj>& pipeline) {
+void validateLookupCollectionlessPipeline(const std::vector<BSONObj>& pipeline) {
     uassert(ErrorCodes::FailedToParse,
             "$lookup stage without explicit collection must have a pipeline with $documents as "
             "first stage",
@@ -375,6 +366,29 @@ bool DocumentSourceLookUp::foreignShardedLookupAllowed() const {
     return feature_flags::gFeatureFlagShardedLookup.isEnabled(
                serverGlobalParams.featureCompatibility) &&
         !pExpCtx->opCtx->inMultiDocumentTransaction();
+}
+
+void DocumentSourceLookUp::determineSbeCompatibility() {
+    _sbeCompatible =
+        // This stage is SBE-compatible only if the context is compatible.
+        pExpCtx->sbeCompatible
+        // We currently only support lowering equi-join that uses localField/foreignField
+        // syntax.
+        && !_userPipeline && _localField &&
+        _foreignField
+        // SERVER-64423: disable lowering of $lookup with paths in local/foreign fields until
+        // SERVER-63690 is implemented (this check subsumes the one about numeric componets, but
+        // because it's temporary, we are keeping both for now).
+        && FieldRef(_localField->fullPath()).numParts() == 1 &&
+        FieldRef(_foreignField->fullPath()).numParts() == 1
+        // SBE doesn't support match-like paths with numeric components. (Note: "as" field is a
+        // project-like field and numbers in it are treated as literal names of fields rather
+        // than indexes into arrays, which is compatible with SBE.)
+        && !FieldRef(_localField->fullPath()).hasNumericPathComponents() &&
+        !FieldRef(_foreignField->fullPath()).hasNumericPathComponents()
+        // We currently don't lower $lookup against views ('_fromNs' does not correspond to a
+        // view).
+        && pExpCtx->getResolvedNamespace(_fromNs).pipeline.empty();
 }
 
 StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeState) const {
@@ -529,11 +543,15 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     // Resolve the 'let' variables to values per the given input document.
     resolveLetVariables(inputDoc, &_fromExpCtx->variables);
 
+    std::unique_ptr<MongoProcessInterface::ScopedExpectUnshardedCollection>
+        expectUnshardedCollectionInScope;
+
     const auto allowForeignShardedColl = foreignShardedLookupAllowed();
     if (!allowForeignShardedColl) {
         // Enforce that the foreign collection must be unsharded for lookup.
-        _fromExpCtx->mongoProcessInterface->setExpectedShardVersion(
-            _fromExpCtx->opCtx, _fromExpCtx->ns, ChunkVersion::UNSHARDED());
+        expectUnshardedCollectionInScope =
+            _fromExpCtx->mongoProcessInterface->expectUnshardedCollectionInScope(
+                _fromExpCtx->opCtx, _fromExpCtx->ns, boost::none);
     }
 
     // If we don't have a cache, build and return the pipeline immediately.
@@ -1146,7 +1164,7 @@ void DocumentSourceLookUp::reattachToOperationContext(OperationContext* opCtx) {
     }
 }
 
-intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
+boost::intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
     uassert(ErrorCodes::FailedToParse,
             "the $lookup specification must be an Object",
@@ -1221,16 +1239,17 @@ intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
     }
     uassert(ErrorCodes::FailedToParse, "must specify 'as' field for a $lookup", !as.empty());
 
+    boost::intrusive_ptr<DocumentSourceLookUp> lookupStage = nullptr;
     if (hasPipeline) {
         if (localField.empty() && foreignField.empty()) {
             // $lookup specified with only pipeline syntax.
-            return new DocumentSourceLookUp(std::move(fromNs),
-                                            std::move(as),
-                                            std::move(pipeline),
-                                            std::move(letVariables),
-                                            std::move(fromCollator),
-                                            boost::none,
-                                            pExpCtx);
+            lookupStage = new DocumentSourceLookUp(std::move(fromNs),
+                                                   std::move(as),
+                                                   std::move(pipeline),
+                                                   std::move(letVariables),
+                                                   std::move(fromCollator),
+                                                   boost::none,
+                                                   pExpCtx);
         } else {
             // $lookup specified with pipeline syntax and local/foreignField syntax.
             uassert(ErrorCodes::FailedToParse,
@@ -1238,14 +1257,14 @@ intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
                     "specified",
                     !localField.empty() && !foreignField.empty());
 
-            return new DocumentSourceLookUp(
-                std::move(fromNs),
-                std::move(as),
-                std::move(pipeline),
-                std::move(letVariables),
-                std::move(fromCollator),
-                std::pair(std::move(localField), std::move(foreignField)),
-                pExpCtx);
+            lookupStage =
+                new DocumentSourceLookUp(std::move(fromNs),
+                                         std::move(as),
+                                         std::move(pipeline),
+                                         std::move(letVariables),
+                                         std::move(fromCollator),
+                                         std::pair(std::move(localField), std::move(foreignField)),
+                                         pExpCtx);
         }
     } else {
         // $lookup specified with only local/foreignField syntax.
@@ -1257,18 +1276,15 @@ intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
                 "$lookup with a 'let' argument must also specify 'pipeline'",
                 !hasLet);
 
-        auto lookupStage = new DocumentSourceLookUp(std::move(fromNs),
-                                                    std::move(as),
-                                                    std::move(localField),
-                                                    std::move(foreignField),
-                                                    std::move(fromCollator),
-                                                    pExpCtx);
-
-        // $lookup stages with local/foreignField specified are eligible for pushdown into SBE if
-        // the context allows it.
-        lookupStage->_sbeCompatible = pExpCtx->sbeCompatible;
-        return lookupStage;
+        lookupStage = new DocumentSourceLookUp(std::move(fromNs),
+                                               std::move(as),
+                                               std::move(localField),
+                                               std::move(foreignField),
+                                               std::move(fromCollator),
+                                               pExpCtx);
     }
+    lookupStage->determineSbeCompatibility();
+    return lookupStage;
 }
 
 void DocumentSourceLookUp::addInvolvedCollections(

@@ -199,8 +199,6 @@ components:
     release_monitoring_id: 1748
     local_directory_path: src/third_party/unwind
     team_owner: "Service Architecture"
-    upgrade_suppression: TODO SERVER-61856
-    # Note: missing from README.third_party.md
 
   "Mozilla Firefox":
     homepage_url: https://www.mozilla.org/en-US/firefox/organizations/
@@ -349,5 +347,5 @@ components:
     homepage_url: http://www.zstd.net/
     open_hub_url: https://www.openhub.net/p/zstd
     release_monitoring_id: 12083
-    local_directory_path: src/third_party/zstandard-1.4.4
+    local_directory_path: src/third_party/zstandard
     team_owner: "Execution"

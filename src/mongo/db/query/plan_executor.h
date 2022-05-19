@@ -170,6 +170,11 @@ public:
     virtual const NamespaceString& nss() const = 0;
 
     /**
+     * Returns a vector of secondary namespaces that are relevant to this executor.
+     */
+    virtual const std::vector<NamespaceStringOrUUID>& getSecondaryNamespaces() const = 0;
+
+    /**
      * Return the OperationContext that the plan is currently executing within.
      */
     virtual OperationContext* getOpCtx() const = 0;
@@ -354,6 +359,13 @@ public:
      */
     virtual void enableSaveRecoveryUnitAcrossCommandsIfSupported() = 0;
     virtual bool isSaveRecoveryUnitAcrossCommandsEnabled() const = 0;
+
+    /**
+     * For queries that have multiple executors, this can be used to differentiate between them.
+     */
+    virtual boost::optional<StringData> getExecutorType() const {
+        return boost::none;
+    }
 };
 
 }  // namespace mongo

@@ -43,11 +43,12 @@
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_util.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 namespace mongo {
 namespace {
@@ -89,11 +90,11 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
                                                     bool enableSharding) {
     if (dbName == NamespaceString::kConfigDb) {
         return DatabaseType(
-            dbName.toString(), ShardId::kConfigServerId, true, DatabaseVersion::makeFixed());
+            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
 
     uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "Cannot manually create or shard database '" << dbName << "'",
+            str::stream() << "Cannot manually create database'" << dbName << "'",
             dbName != NamespaceString::kAdminDb && dbName != NamespaceString::kLocalDb);
 
     uassert(ErrorCodes::InvalidNamespace,
@@ -103,38 +104,55 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
     // Make sure to force update of any stale metadata
     ON_BLOCK_EXIT([&] { Grid::get(opCtx)->catalogCache()->purgeDatabase(dbName); });
 
+    auto& replClient = repl::ReplClientInfo::forClient(opCtx->getClient());
+
     DBDirectClient client(opCtx);
 
     boost::optional<DistLockManager::ScopedLock> dbLock;
 
-    // First perform an optimistic attempt to write the 'sharded' field to the database entry, in
-    // case this is the only thing, which is missing. If that doesn't succeed, go through the
+    const auto enableShardingOptional =
+        feature_flags::gEnableShardingOptional.isEnabled(serverGlobalParams.featureCompatibility);
+
+    const auto dbMatchFilter = [&] {
+        BSONObjBuilder filterBuilder;
+        filterBuilder.append(DatabaseType::kNameFieldName, dbName);
+        if (optPrimaryShard) {
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "invalid shard name: " << *optPrimaryShard,
+                    optPrimaryShard->isValid());
+            filterBuilder.append(DatabaseType::kPrimaryFieldName, optPrimaryShard->toString());
+        }
+        return filterBuilder.obj();
+    }();
+
+
+    // First perform an optimistic attempt to write the 'sharded' field to the database entry,
+    // in case this is the only thing, which is missing. If that doesn't succeed, go through the
     // expensive createDatabase flow.
     while (true) {
-        auto response = client.findAndModify([&] {
-            write_ops::FindAndModifyCommandRequest findAndModify(DatabaseType::ConfigNS);
-            findAndModify.setQuery([&] {
-                BSONObjBuilder queryFilterBuilder;
-                queryFilterBuilder.append(DatabaseType::name.name(), dbName);
-                if (optPrimaryShard) {
-                    uassert(ErrorCodes::BadValue,
-                            str::stream() << "invalid shard name: " << *optPrimaryShard,
-                            optPrimaryShard->isValid());
-                    queryFilterBuilder.append(DatabaseType::primary.name(),
-                                              optPrimaryShard->toString());
-                }
-                return queryFilterBuilder.obj();
+        if (!enableShardingOptional) {
+            auto response = client.findAndModify([&] {
+                write_ops::FindAndModifyCommandRequest findAndModify(
+                    NamespaceString::kConfigDatabasesNamespace);
+                findAndModify.setQuery(dbMatchFilter);
+                findAndModify.setUpdate(write_ops::UpdateModification::parseFromClassicUpdate(
+                    BSON("$set" << BSON(DatabaseType::kShardedFieldName << enableSharding))));
+                findAndModify.setUpsert(false);
+                findAndModify.setNew(true);
+                return findAndModify;
             }());
-            findAndModify.setUpdate(write_ops::UpdateModification::parseFromClassicUpdate(
-                BSON("$set" << BSON(DatabaseType::sharded(enableSharding)))));
-            findAndModify.setUpsert(false);
-            findAndModify.setNew(true);
-            return findAndModify;
-        }());
 
-        if (response.getLastErrorObject().getNumDocs()) {
-            uassert(528120, "Missing value in the response", response.getValue());
-            return uassertStatusOK(DatabaseType::fromBSON(*response.getValue()));
+            if (response.getLastErrorObject().getNumDocs()) {
+                uassert(528120, "Missing value in the response", response.getValue());
+                return DatabaseType::parse(IDLParserErrorContext("DatabaseType"),
+                                           *response.getValue());
+            }
+        } else {
+            auto dbObj = client.findOne(NamespaceString::kConfigDatabasesNamespace, dbMatchFilter);
+            if (!dbObj.isEmpty()) {
+                replClient.setLastOpToSystemLastOpTime(opCtx);
+                return DatabaseType::parse(IDLParserErrorContext("DatabaseType"), std::move(dbObj));
+            }
         }
 
         if (dbLock) {
@@ -150,19 +168,18 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
     // Expensive createDatabase code path
     const auto catalogClient = Grid::get(opCtx)->catalogClient();
     const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-    auto& replClient = repl::ReplClientInfo::forClient(opCtx->getClient());
 
     // Check if a database already exists with the same name (case sensitive), and if so, return the
     // existing entry.
     BSONObjBuilder queryBuilder;
-    queryBuilder.appendRegex(DatabaseType::name(),
+    queryBuilder.appendRegex(DatabaseType::kNameFieldName,
                              (std::string) "^" + pcrecpp::RE::QuoteMeta(dbName.toString()) + "$",
                              "i");
 
-    auto dbDoc = client.findOne(DatabaseType::ConfigNS, queryBuilder.obj());
+    auto dbDoc = client.findOne(NamespaceString::kConfigDatabasesNamespace, queryBuilder.obj());
     auto const [primaryShardPtr, database] = [&] {
         if (!dbDoc.isEmpty()) {
-            auto actualDb = uassertStatusOK(DatabaseType::fromBSON(dbDoc));
+            auto actualDb = DatabaseType::parse(IDLParserErrorContext("DatabaseType"), dbDoc);
 
             uassert(ErrorCodes::DatabaseDifferCase,
                     str::stream() << "can't have 2 databases that just differ on case "
@@ -197,10 +214,12 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
             const auto clusterTime = now.clusterTime().asTimestamp();
 
             // Pick a primary shard for the new database.
-            DatabaseType db(dbName.toString(),
-                            shardPtr->getId(),
-                            enableSharding,
-                            DatabaseVersion(UUID::gen(), clusterTime));
+            DatabaseType db(
+                dbName.toString(), shardPtr->getId(), DatabaseVersion(UUID::gen(), clusterTime));
+
+            if (!enableShardingOptional) {
+                db.setSharded(enableSharding);
+            }
 
             LOGV2(21938,
                   "Registering new database {db} in sharding catalog",
@@ -211,7 +230,7 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
             // when it receives the _flushDatabaseCacheUpdates.
             uassertStatusOK(
                 catalogClient->insertConfigDocument(opCtx,
-                                                    DatabaseType::ConfigNS,
+                                                    NamespaceString::kConfigDatabasesNamespace,
                                                     db.toBSON(),
                                                     ShardingCatalogClient::kMajorityWriteConcern));
 

@@ -64,9 +64,11 @@ void removeDatabaseMetadataFromConfig(OperationContext* opCtx,
     // ensures idempotency.
     const Status status = catalogClient->removeConfigDocuments(
         opCtx,
-        DatabaseType::ConfigNS,
-        BSON(DatabaseType::name(dbName.toString()) << DatabaseType::version() + "." +
-                 DatabaseVersion::kUuidFieldName << dbVersion.getUuid()),
+        NamespaceString::kConfigDatabasesNamespace,
+        BSON(DatabaseType::kNameFieldName
+             << dbName.toString()
+             << DatabaseType::kVersionFieldName + "." + DatabaseVersion::kUuidFieldName
+             << dbVersion.getUuid()),
         ShardingCatalogClient::kMajorityWriteConcern);
     uassertStatusOKWithContext(status,
                                str::stream()
@@ -192,9 +194,9 @@ void DropDatabaseCoordinator::_clearDatabaseInfoOnPrimary(OperationContext* opCt
 void DropDatabaseCoordinator::_clearDatabaseInfoOnSecondaries(OperationContext* opCtx) {
     Status signalStatus = shardmetadatautil::updateShardDatabasesEntry(
         opCtx,
-        BSON(ShardDatabaseType::name() << _dbName),
+        BSON(ShardDatabaseType::kNameFieldName << _dbName),
         BSONObj(),
-        BSON(ShardDatabaseType::enterCriticalSectionCounter() << 1),
+        BSON(ShardDatabaseType::kEnterCriticalSectionCounterFieldName << 1),
         false /*upsert*/);
     uassert(ErrorCodes::OperationFailed,
             str::stream() << "Failed to persist critical section signal for "
@@ -245,10 +247,10 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                         const auto db = catalogClient->getDatabase(
                             opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern);
                         if (_doc.getDatabaseVersion()->getUuid() != db.getVersion().getUuid()) {
-                            return;  // skip to _flushDatabaseCacheUpdates
+                            return;  // skip to FlushDatabaseCacheUpdates
                         }
                     } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                        return;  // skip to _flushDatabaseCacheUpdates
+                        return;  // skip to FlushDatabaseCacheUpdates
                     }
                 }
 
@@ -347,8 +349,8 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     std::remove(participants.begin(), participants.end(), primaryShardId),
                     participants.end());
                 // Send _flushDatabaseCacheUpdates to all shards
-                auto flushDbCacheUpdatesCmd =
-                    _flushDatabaseCacheUpdatesWithWriteConcern(_dbName.toString());
+                FlushDatabaseCacheUpdatesWithWriteConcern flushDbCacheUpdatesCmd(
+                    _dbName.toString());
                 flushDbCacheUpdatesCmd.setSyncFromConfig(true);
                 flushDbCacheUpdatesCmd.setDbName(_dbName);
 

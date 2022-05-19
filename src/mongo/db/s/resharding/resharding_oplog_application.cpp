@@ -52,6 +52,7 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 namespace mongo {
 namespace {
@@ -80,8 +81,10 @@ void runWithTransaction(OperationContext* opCtx,
     // the temporary resharding collection. We attach shard version IGNORED to the write operations
     // and leave it to ReshardingOplogBatchApplier::applyBatch() to retry on a StaleConfig exception
     // to allow the collection metadata information to be recovered.
-    auto& oss = OperationShardingState::get(asr.opCtx());
-    oss.initializeClientRoutingVersions(nss, ChunkVersion::IGNORED(), boost::none);
+    ScopedSetShardRole scopedSetShardRole(asr.opCtx(),
+                                          nss,
+                                          ChunkVersion::IGNORED() /* shardVersion */,
+                                          boost::none /* databaseVersion */);
 
     MongoDOperationContextSession ocs(asr.opCtx());
     auto txnParticipant = TransactionParticipant::get(asr.opCtx());
@@ -122,14 +125,16 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
     size_t myStashIdx,
     ShardId donorShardId,
     ChunkManager sourceChunkMgr,
-    ReshardingMetrics* metrics)
+    ReshardingMetrics* metrics,
+    ReshardingMetricsNew* metricsNew)
     : _outputNss(std::move(outputNss)),
       _allStashNss(std::move(allStashNss)),
       _myStashIdx(myStashIdx),
       _myStashNss(_allStashNss.at(_myStashIdx)),
       _donorShardId(std::move(donorShardId)),
       _sourceChunkMgr(std::move(sourceChunkMgr)),
-      _metrics(metrics) {}
+      _metrics(metrics),
+      _metricsNew(metricsNew) {}
 
 Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
                                                        const repl::OplogEntry& op) const {
@@ -169,14 +174,26 @@ Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
                 case repl::OpTypeEnum::kInsert:
                     _applyInsert_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
+                    if (feature_flags::gFeatureFlagShardingDataTransformMetrics
+                            .isEnabledAndIgnoreFCV()) {
+                        _metricsNew->onInsertApplied();
+                    }
                     break;
                 case repl::OpTypeEnum::kUpdate:
                     _applyUpdate_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
+                    if (feature_flags::gFeatureFlagShardingDataTransformMetrics
+                            .isEnabledAndIgnoreFCV()) {
+                        _metricsNew->onUpdateApplied();
+                    }
                     break;
                 case repl::OpTypeEnum::kDelete:
                     _applyDelete_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
+                    if (feature_flags::gFeatureFlagShardingDataTransformMetrics
+                            .isEnabledAndIgnoreFCV()) {
+                        _metricsNew->onDeleteApplied();
+                    }
                     break;
                 default:
                     MONGO_UNREACHABLE;

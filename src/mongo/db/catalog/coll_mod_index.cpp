@@ -128,8 +128,7 @@ void getKeysForIndex(OperationContext* opCtx,
 }
 
 /**
- * Adjusts unique setting on an index.
- * An index can be converted to unique but removing the uniqueness property is not allowed.
+ * Adjusts unique setting on an index to true.
  */
 void _processCollModIndexRequestUnique(OperationContext* opCtx,
                                        AutoGetCollection* autoColl,
@@ -145,34 +144,45 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
     if (mode && *mode == repl::OplogApplication::Mode::kApplyOpsCmd) {
         auto duplicateRecordsList = scanIndexForDuplicates(opCtx, collection, idx);
         if (!duplicateRecordsList.empty()) {
-            uassertStatusOK(buildConvertUniqueErrorStatus(
-                buildDuplicateViolations(opCtx, collection, duplicateRecordsList)));
+            uassertStatusOK(buildConvertUniqueErrorStatus(opCtx, collection, duplicateRecordsList));
         }
     }
 
     *newUnique = true;
-    autoColl->getWritableCollection(opCtx)->updateUniqueSetting(opCtx, idx->indexName());
-    // Resets 'disallowNewDuplicateKeys' to false after converting to unique index;
-    autoColl->getWritableCollection(opCtx)->updateDisallowNewDuplicateKeysSetting(
+    autoColl->getWritableCollection(opCtx)->updateUniqueSetting(opCtx, idx->indexName(), true);
+    // Resets 'prepareUnique' to false after converting to unique index;
+    autoColl->getWritableCollection(opCtx)->updatePrepareUniqueSetting(
         opCtx, idx->indexName(), false);
 }
 
 /**
- * Adjusts disallowNewDuplicateKeys setting on an index.
+ * Adjusts prepareUnique setting on an index.
  */
-void _processCollModIndexRequestDisallowNewDuplicateKeys(
-    OperationContext* opCtx,
-    AutoGetCollection* autoColl,
-    const IndexDescriptor* idx,
-    bool indexDisallowNewDuplicateKeys,
-    boost::optional<bool>* newDisallowNewDuplicateKeys,
-    boost::optional<bool>* oldDisallowNewDuplicateKeys) {
-    *newDisallowNewDuplicateKeys = indexDisallowNewDuplicateKeys;
-    *oldDisallowNewDuplicateKeys = idx->disallowNewDuplicateKeys();
-    if (*oldDisallowNewDuplicateKeys != *newDisallowNewDuplicateKeys) {
-        autoColl->getWritableCollection(opCtx)->updateDisallowNewDuplicateKeysSetting(
-            opCtx, idx->indexName(), indexDisallowNewDuplicateKeys);
+void _processCollModIndexRequestPrepareUnique(OperationContext* opCtx,
+                                              AutoGetCollection* autoColl,
+                                              const IndexDescriptor* idx,
+                                              bool indexPrepareUnique,
+                                              boost::optional<bool>* newPrepareUnique,
+                                              boost::optional<bool>* oldPrepareUnique) {
+    *newPrepareUnique = indexPrepareUnique;
+    *oldPrepareUnique = idx->prepareUnique();
+    if (*oldPrepareUnique != *newPrepareUnique) {
+        autoColl->getWritableCollection(opCtx)->updatePrepareUniqueSetting(
+            opCtx, idx->indexName(), indexPrepareUnique);
     }
+}
+
+/**
+ * Adjusts unique setting on an index to false.
+ */
+void _processCollModIndexRequestForceNonUnique(OperationContext* opCtx,
+                                               AutoGetCollection* autoColl,
+                                               const IndexDescriptor* idx,
+                                               boost::optional<bool>* newForceNonUnique) {
+    invariant(idx->unique(), str::stream() << "Index is already non-unique: " << idx->infoObj());
+
+    *newForceNonUnique = true;
+    autoColl->getWritableCollection(opCtx)->updateUniqueSetting(opCtx, idx->indexName(), false);
 }
 
 }  // namespace
@@ -187,11 +197,12 @@ void processCollModIndexRequest(OperationContext* opCtx,
     auto indexExpireAfterSeconds = collModIndexRequest.indexExpireAfterSeconds;
     auto indexHidden = collModIndexRequest.indexHidden;
     auto indexUnique = collModIndexRequest.indexUnique;
-    auto indexDisallowNewDuplicateKeys = collModIndexRequest.indexDisallowNewDuplicateKeys;
+    auto indexPrepareUnique = collModIndexRequest.indexPrepareUnique;
+    auto indexForceNonUnique = collModIndexRequest.indexForceNonUnique;
 
     // Return early if there are no index modifications requested.
-    if (!indexExpireAfterSeconds && !indexHidden && !indexUnique &&
-        !indexDisallowNewDuplicateKeys) {
+    if (!indexExpireAfterSeconds && !indexHidden && !indexUnique && !indexPrepareUnique &&
+        !indexForceNonUnique) {
         return;
     }
 
@@ -200,8 +211,9 @@ void processCollModIndexRequest(OperationContext* opCtx,
     boost::optional<bool> newHidden;
     boost::optional<bool> oldHidden;
     boost::optional<bool> newUnique;
-    boost::optional<bool> newDisallowNewDuplicateKeys;
-    boost::optional<bool> oldDisallowNewDuplicateKeys;
+    boost::optional<bool> newPrepareUnique;
+    boost::optional<bool> oldPrepareUnique;
+    boost::optional<bool> newForceNonUnique;
 
     // TTL Index
     if (indexExpireAfterSeconds) {
@@ -222,13 +234,14 @@ void processCollModIndexRequest(OperationContext* opCtx,
         _processCollModIndexRequestUnique(opCtx, autoColl, idx, mode, &newUnique);
     }
 
-    if (indexDisallowNewDuplicateKeys) {
-        _processCollModIndexRequestDisallowNewDuplicateKeys(opCtx,
-                                                            autoColl,
-                                                            idx,
-                                                            *indexDisallowNewDuplicateKeys,
-                                                            &newDisallowNewDuplicateKeys,
-                                                            &oldDisallowNewDuplicateKeys);
+    if (indexPrepareUnique) {
+        _processCollModIndexRequestPrepareUnique(
+            opCtx, autoColl, idx, *indexPrepareUnique, &newPrepareUnique, &oldPrepareUnique);
+    }
+
+    // User wants to convert an index back to be non-unique.
+    if (indexForceNonUnique) {
+        _processCollModIndexRequestForceNonUnique(opCtx, autoColl, idx, &newForceNonUnique);
     }
 
     *indexCollModInfo =
@@ -237,15 +250,16 @@ void processCollModIndexRequest(OperationContext* opCtx,
                          newHidden,
                          oldHidden,
                          newUnique,
-                         newDisallowNewDuplicateKeys,
-                         oldDisallowNewDuplicateKeys,
+                         newPrepareUnique,
+                         oldPrepareUnique,
+                         newForceNonUnique,
                          idx->indexName()};
 
     // This matches the default for IndexCatalog::refreshEntry().
     auto flags = CreateIndexEntryFlags::kIsReady;
 
     // Update data format version in storage engine metadata for index.
-    if (indexUnique) {
+    if (indexUnique || indexForceNonUnique) {
         flags = CreateIndexEntryFlags::kIsReady | CreateIndexEntryFlags::kUpdateMetadata;
     }
 
@@ -259,8 +273,9 @@ void processCollModIndexRequest(OperationContext* opCtx,
                                      oldHidden,
                                      newHidden,
                                      newUnique,
-                                     oldDisallowNewDuplicateKeys,
-                                     newDisallowNewDuplicateKeys,
+                                     oldPrepareUnique,
+                                     newPrepareUnique,
+                                     newForceNonUnique,
                                      result](boost::optional<Timestamp>) {
         // add the fields to BSONObjBuilder result
         if (oldExpireSecs) {
@@ -278,10 +293,14 @@ void processCollModIndexRequest(OperationContext* opCtx,
             invariant(*newUnique);
             result->appendBool("unique_new", true);
         }
-        if (newDisallowNewDuplicateKeys) {
-            invariant(oldDisallowNewDuplicateKeys);
-            result->append("disallowNewDuplicateKeys_old", *oldDisallowNewDuplicateKeys);
-            result->append("disallowNewDuplicateKeys_new", *newDisallowNewDuplicateKeys);
+        if (newPrepareUnique) {
+            invariant(oldPrepareUnique);
+            result->append("prepareUnique_old", *oldPrepareUnique);
+            result->append("prepareUnique_new", *newPrepareUnique);
+        }
+        if (newForceNonUnique) {
+            invariant(*newForceNonUnique);
+            result->appendBool("forceNonUnique_new", true);
         }
     });
 
@@ -323,7 +342,10 @@ std::list<std::set<RecordId>> scanIndexForDuplicates(
     for (auto indexEntry = indexCursor.seekForKeyString(opCtx, *firstKeyString); indexEntry;
          indexEntry = indexCursor.nextKeyString(opCtx)) {
         if (prevIndexEntry &&
-            indexEntry->keyString.compareWithoutRecordIdLong(prevIndexEntry->keyString) == 0) {
+            (indexEntry->loc.isLong()
+                 ? indexEntry->keyString.compareWithoutRecordIdLong(prevIndexEntry->keyString)
+                 : indexEntry->keyString.compareWithoutRecordIdStr(prevIndexEntry->keyString)) ==
+                0) {
             if (duplicateRecords.empty()) {
                 duplicateRecords.insert(prevIndexEntry->loc);
             }
@@ -346,23 +368,38 @@ std::list<std::set<RecordId>> scanIndexForDuplicates(
     return duplicateRecordsList;
 }
 
-BSONArray buildDuplicateViolations(OperationContext* opCtx,
-                                   const CollectionPtr& collection,
-                                   const std::list<std::set<RecordId>>& duplicateRecordsList) {
+Status buildConvertUniqueErrorStatus(OperationContext* opCtx,
+                                     const CollectionPtr& collection,
+                                     const std::list<std::set<RecordId>>& duplicateRecordsList) {
     BSONArrayBuilder duplicateViolations;
+    size_t violationsSize = 0;
+
     for (const auto& duplicateRecords : duplicateRecordsList) {
         BSONArrayBuilder currViolatingIds;
         for (const auto& recordId : duplicateRecords) {
             auto doc = collection->docFor(opCtx, recordId).value();
-            currViolatingIds.append(doc["_id"]);
+            auto id = doc["_id"];
+            violationsSize += id.size();
+
+            // Returns duplicate violations up to 8MB.
+            if (violationsSize > BSONObjMaxUserSize / 2) {
+                // Returns at least one violation.
+                if (duplicateViolations.arrSize() == 0 && currViolatingIds.arrSize() == 0) {
+                    currViolatingIds.append(id);
+                }
+                if (currViolatingIds.arrSize() > 0) {
+                    duplicateViolations.append(BSON("ids" << currViolatingIds.arr()));
+                }
+                return Status(
+                    CannotConvertIndexToUniqueInfo(duplicateViolations.arr()),
+                    "Cannot convert the index to unique. Too many conflicting documents were "
+                    "detected. Please resolve them and rerun collMod.");
+            }
+            currViolatingIds.append(id);
         }
         duplicateViolations.append(BSON("ids" << currViolatingIds.arr()));
     }
-    return duplicateViolations.arr();
-}
-
-Status buildConvertUniqueErrorStatus(const BSONArray& violations) {
-    return Status(CannotConvertIndexToUniqueInfo(violations),
+    return Status(CannotConvertIndexToUniqueInfo(duplicateViolations.arr()),
                   "Cannot convert the index to unique. Please resolve conflicting documents "
                   "before running collMod again.");
 }

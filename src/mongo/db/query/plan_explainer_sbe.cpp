@@ -169,6 +169,20 @@ void statsToBSON(const QuerySolutionNode* node,
             bob->append("textIndexVersion", tn->index.version);
             break;
         }
+        case STAGE_EQ_LOOKUP: {
+            auto eln = static_cast<const EqLookupNode*>(node);
+
+            bob->append("foreignCollection", eln->foreignCollection);
+            bob->append("localField", eln->joinFieldLocal);
+            bob->append("foreignField", eln->joinFieldForeign);
+            bob->append("asField", eln->joinField.fullPath());
+            bob->append("strategy", EqLookupNode::serializeLookupStrategy(eln->lookupStrategy));
+            if (eln->idxEntry) {
+                bob->append("indexName", eln->idxEntry->identifier.catalogName);
+                bob->append("indexKeyPattern", eln->idxEntry->keyPattern);
+            }
+            break;
+        }
         default:
             break;
     }

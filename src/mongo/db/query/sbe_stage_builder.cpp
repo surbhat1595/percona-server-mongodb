@@ -36,6 +36,7 @@
 #include <fmt/format.h>
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/column_scan.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
@@ -58,15 +59,20 @@
 #include "mongo/db/fts/fts_query_impl.h"
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index/fts_access_method.h"
+#include "mongo/db/pipeline/abt/field_map_builder.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_visitor.h"
+#include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/expression_walker.h"
+#include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/rewrites/path_lower.h"
 #include "mongo/db/query/sbe_stage_builder_accumulator.h"
 #include "mongo/db/query/sbe_stage_builder_coll_scan.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
 #include "mongo/db/query/sbe_stage_builder_filter.h"
 #include "mongo/db/query/sbe_stage_builder_index_scan.h"
 #include "mongo/db/query/sbe_stage_builder_projection.h"
+#include "mongo/db/query/shard_filterer_factory_impl.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/storage/execution_context.h"
@@ -376,14 +382,61 @@ std::unique_ptr<sbe::RuntimeEnvironment> makeRuntimeEnvironment(
             auto [tag, val] = makeValue(cq.getExpCtx()->variables.getValue(id));
             env->registerSlot(name, tag, val, true, slotIdGenerator);
         } else if (id == Variables::kSearchMetaId) {
-            // SEARCH_META never has a value at this point but can be set later and therefore must
-            // have a slot. The find layer is not responsible for setting this value.
-            auto [tag, val] = makeValue(cq.getExpCtx()->variables.getValue(id));
-            env->registerSlot(name, tag, val, true, slotIdGenerator);
+            // Normally, $search is responsible for setting a value for SEARCH_META, in which case
+            // we will bind the value to a slot above. However, in the event of a query that does
+            // not use $search, but references SEARCH_META, we need to bind a value of 'missing' to
+            // a slot so that the plan can run correctly.
+            env->registerSlot(name, sbe::value::TypeTags::Nothing, 0, false, slotIdGenerator);
         }
     }
 
     return env;
+}
+
+void prepareSlotBasedExecutableTree(OperationContext* opCtx,
+                                    sbe::PlanStage* root,
+                                    PlanStageData* data,
+                                    const CanonicalQuery& cq,
+                                    const MultipleCollectionAccessor& collections,
+                                    PlanYieldPolicySBE* yieldPolicy) {
+    tassert(6183502, "PlanStage cannot be null", root);
+    tassert(6142205, "PlanStageData cannot be null", data);
+    tassert(6142206, "yieldPolicy cannot be null", yieldPolicy);
+
+    root->attachToOperationContext(opCtx);
+    root->attachNewYieldPolicy(yieldPolicy);
+
+    // Call markShouldCollectTimingInfo() if appropriate.
+    auto expCtx = cq.getExpCtxRaw();
+    tassert(6142207, "No expression context", expCtx);
+    if (expCtx->explain || expCtx->mayDbProfile) {
+        root->markShouldCollectTimingInfo();
+    }
+
+    // Register this plan to yield according to the configured policy.
+    yieldPolicy->registerPlan(root);
+
+    root->prepare(data->ctx);
+
+    // Populate/renew "shardFilterer" if there exists a "shardFilterer" slot. The slot value should
+    // be set to Nothing in the plan cache to avoid extending the lifetime of the ownership filter.
+    if (auto shardFiltererSlot = data->env->getSlotIfExists("shardFilterer"_sd)) {
+        const auto& collection = collections.getMainCollection();
+        tassert(6108307,
+                "Setting shard filterer slot on un-sharded collection",
+                collection.isSharded());
+
+        auto shardFiltererFactory = std::make_unique<ShardFiltererFactoryImpl>(collection);
+        auto shardFilterer = shardFiltererFactory->makeShardFilterer(opCtx);
+        data->env->resetSlot(*shardFiltererSlot,
+                             sbe::value::TypeTags::shardFilterer,
+                             sbe::value::bitcastFrom<ShardFilterer*>(shardFilterer.release()),
+                             true);
+    }
+
+    // If the cached plan is parameterized, bind new values for the parameters into the runtime
+    // environment.
+    input_params::bind(cq, data->inputParamToSlotMap, data->env);
 }
 
 PlanStageSlots::PlanStageSlots(const PlanStageReqs& reqs,
@@ -470,148 +523,6 @@ const QuerySolutionNode* getLoneNodeByType(const QuerySolutionNode* root, StageT
     return result;
 }
 
-/**
- * Callback function that logs a message and uasserts if it detects a corrupt index key. An index
- * key is considered corrupt if it has no corresponding Record.
- */
-void indexKeyCorruptionCheckCallback(OperationContext* opCtx,
-                                     sbe::value::SlotAccessor* snapshotIdAccessor,
-                                     sbe::value::SlotAccessor* indexKeyAccessor,
-                                     sbe::value::SlotAccessor* indexKeyPatternAccessor,
-                                     const RecordId& rid,
-                                     const NamespaceString& nss) {
-    // Having a recordId but no record is only an issue when we are not ignoring prepare conflicts.
-    if (opCtx->recoveryUnit()->getPrepareConflictBehavior() == PrepareConflictBehavior::kEnforce) {
-        tassert(5113700, "Should have snapshot id accessor", snapshotIdAccessor);
-        auto currentSnapshotId = opCtx->recoveryUnit()->getSnapshotId();
-        auto [snapshotIdTag, snapshotIdVal] = snapshotIdAccessor->getViewOfValue();
-        const auto msgSnapshotIdTag = snapshotIdTag;
-        tassert(5113701,
-                str::stream() << "SnapshotId is of wrong type: " << msgSnapshotIdTag,
-                snapshotIdTag == sbe::value::TypeTags::NumberInt64);
-        auto snapshotId = sbe::value::bitcastTo<uint64_t>(snapshotIdVal);
-
-        // If we have a recordId but no corresponding record, this means that said record has been
-        // deleted. This can occur during yield, in which case the snapshot id would be incremented.
-        // If, on the other hand, the current snapshot id matches that of the recordId, this
-        // indicates an error as no yield could have taken place.
-        if (snapshotId == currentSnapshotId.toNumber()) {
-            tassert(5113703, "Should have index key accessor", indexKeyAccessor);
-            tassert(5113704, "Should have key pattern accessor", indexKeyPatternAccessor);
-
-            auto [ksTag, ksVal] = indexKeyAccessor->getViewOfValue();
-            auto [kpTag, kpVal] = indexKeyPatternAccessor->getViewOfValue();
-
-            const auto msgKsTag = ksTag;
-            tassert(5113706,
-                    str::stream() << "KeyString is of wrong type: " << msgKsTag,
-                    ksTag == sbe::value::TypeTags::ksValue);
-
-            const auto msgKpTag = kpTag;
-            tassert(5113707,
-                    str::stream() << "Index key pattern is of wrong type: " << msgKpTag,
-                    kpTag == sbe::value::TypeTags::bsonObject);
-
-            auto keyString = sbe::value::getKeyStringView(ksVal);
-            tassert(5113708, "KeyString does not exist", keyString);
-
-            BSONObj bsonKeyPattern(sbe::value::bitcastTo<const char*>(kpVal));
-            auto bsonKeyString = KeyString::toBson(*keyString, Ordering::make(bsonKeyPattern));
-            auto hydratedKey = IndexKeyEntry::rehydrateKey(bsonKeyPattern, bsonKeyString);
-
-            LOGV2_ERROR_OPTIONS(
-                5113709,
-                {logv2::UserAssertAfterLog(ErrorCodes::DataCorruptionDetected)},
-                "Erroneous index key found with reference to non-existent record id. Consider "
-                "dropping and then re-creating the index and then running the validate command "
-                "on the collection.",
-                "namespace"_attr = nss,
-                "recordId"_attr = rid,
-                "indexKeyData"_attr = hydratedKey);
-        }
-    }
-}
-
-/**
- * Callback function that returns true if a given index key is valid, false otherwise. An index key
- * is valid if either the snapshot id of the underlying index scan matches the current snapshot id,
- * or that the index keys are still part of the underlying index.
- */
-bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
-                                      StringMap<const IndexAccessMethod*> iamTable,
-                                      sbe::value::SlotAccessor* snapshotIdAccessor,
-                                      sbe::value::SlotAccessor* indexIdAccessor,
-                                      sbe::value::SlotAccessor* indexKeyAccessor,
-                                      const CollectionPtr& collection,
-                                      const Record& nextRecord) {
-    if (snapshotIdAccessor) {
-        auto currentSnapshotId = opCtx->recoveryUnit()->getSnapshotId();
-        auto [snapshotIdTag, snapshotIdVal] = snapshotIdAccessor->getViewOfValue();
-        const auto msgSnapshotIdTag = snapshotIdTag;
-        tassert(5290704,
-                str::stream() << "SnapshotId is of wrong type: " << msgSnapshotIdTag,
-                snapshotIdTag == sbe::value::TypeTags::NumberInt64);
-
-        auto snapshotId = sbe::value::bitcastTo<uint64_t>(snapshotIdVal);
-        if (currentSnapshotId.toNumber() != snapshotId) {
-            tassert(5290707, "Should have index key accessor", indexKeyAccessor);
-            tassert(5290714, "Should have index id accessor", indexIdAccessor);
-
-            auto [indexIdTag, indexIdVal] = indexIdAccessor->getViewOfValue();
-            auto [ksTag, ksVal] = indexKeyAccessor->getViewOfValue();
-
-            const auto msgIndexIdTag = indexIdTag;
-            tassert(5290708,
-                    str::stream() << "Index name is of wrong type: " << msgIndexIdTag,
-                    sbe::value::isString(indexIdTag));
-
-            const auto msgKsTag = ksTag;
-            tassert(5290710,
-                    str::stream() << "KeyString is of wrong type: " << msgKsTag,
-                    ksTag == sbe::value::TypeTags::ksValue);
-
-            auto keyString = sbe::value::getKeyStringView(ksVal);
-            auto indexId = sbe::value::getStringView(indexIdTag, indexIdVal);
-            tassert(5290712, "KeyString does not exist", keyString);
-
-            auto it = iamTable.find(indexId);
-            tassert(5290713,
-                    str::stream() << "IndexAccessMethod not found for index " << indexId,
-                    it != iamTable.end());
-
-            auto iam = it->second->asSortedData();
-            tassert(5290709,
-                    str::stream() << "Expected to find SortedDataIndexAccessMethod for index "
-                                  << indexId,
-                    iam);
-
-            auto& executionCtx = StorageExecutionContext::get(opCtx);
-            auto keys = executionCtx.keys();
-            SharedBufferFragmentBuilder pooledBuilder(
-                KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
-
-            // There's no need to compute the prefixes of the indexed fields that cause the
-            // index to be multikey when ensuring the keyData is still valid.
-            KeyStringSet* multikeyMetadataKeys = nullptr;
-            MultikeyPaths* multikeyPaths = nullptr;
-
-            iam->getKeys(opCtx,
-                         collection,
-                         pooledBuilder,
-                         nextRecord.data.toBson(),
-                         InsertDeleteOptions::ConstraintEnforcementMode::kEnforceConstraints,
-                         SortedDataIndexAccessMethod::GetKeysContext::kValidatingKeys,
-                         keys.get(),
-                         multikeyMetadataKeys,
-                         multikeyPaths,
-                         nextRecord.id);
-
-            return keys->count(*keyString);
-        }
-    }
-    return true;
-}
-
 std::unique_ptr<fts::FTSMatcher> makeFtsMatcher(OperationContext* opCtx,
                                                 const CollectionPtr& collection,
                                                 const std::string& indexName,
@@ -644,18 +555,17 @@ std::unique_ptr<fts::FTSMatcher> makeFtsMatcher(OperationContext* opCtx,
 }  // namespace
 
 SlotBasedStageBuilder::SlotBasedStageBuilder(OperationContext* opCtx,
-                                             const MultiCollection& collections,
+                                             const MultipleCollectionAccessor& collections,
                                              const CanonicalQuery& cq,
                                              const QuerySolution& solution,
-                                             PlanYieldPolicySBE* yieldPolicy,
-                                             ShardFiltererFactoryInterface* shardFiltererFactory)
+                                             PlanYieldPolicySBE* yieldPolicy)
     : StageBuilder(opCtx, cq, solution),
       _collections(collections),
+      _mainNss(cq.nss()),
       _yieldPolicy(yieldPolicy),
       _data(makeRuntimeEnvironment(_cq, _opCtx, &_slotIdGenerator)),
-      _shardFiltererFactory(shardFiltererFactory),
       _state(_opCtx,
-             _data.env,
+             &_data,
              _cq.getExpCtxRaw()->variables,
              &_slotIdGenerator,
              &_frameIdGenerator,
@@ -694,6 +604,11 @@ std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::build(const QuerySolution
     reqs.set(kResult);
     reqs.setIf(kRecordId, _shouldProduceRecordIdSlot);
 
+    // Set the target namespace to '_mainNss'. This is necessary as some QuerySolutionNodes that
+    // require a collection when stage building do not explicitly name which collection they are
+    // targeting.
+    reqs.setTargetNamespace(_mainNss);
+
     // Build the SBE plan stage tree.
     auto [stage, outputs] = build(root, reqs);
 
@@ -713,13 +628,11 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     invariant(!reqs.getIndexKeyBitset());
 
     auto csn = static_cast<const CollectionScanNode*>(root);
-
-    auto [stage, outputs] =
-        generateCollScan(_state,
-                         _collections.lookupCollection(NamespaceString{csn->name}),
-                         csn,
-                         _yieldPolicy,
-                         reqs.getIsTailableCollScanResumeBranch());
+    auto [stage, outputs] = generateCollScan(_state,
+                                             getCurrentCollection(reqs),
+                                             csn,
+                                             _yieldPolicy,
+                                             reqs.getIsTailableCollScanResumeBranch());
 
     if (reqs.has(kReturnKey)) {
         // Assign the 'returnKeySlot' to be the empty object.
@@ -835,7 +748,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     auto [stage, outputs] = generateIndexScan(_state,
-                                              _collections.getMainCollection(),
+                                              getCurrentCollection(reqs),
                                               ixn,
                                               indexKeyBitset,
                                               _yieldPolicy,
@@ -880,12 +793,36 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     return {std::move(stage), std::move(outputs)};
 }
+namespace {
+std::unique_ptr<sbe::EExpression> abtToExpr(optimizer::ABT& abt, optimizer::SlotVarMap& slotMap) {
+    auto env = optimizer::VariableEnvironment::build(abt);
 
+    optimizer::PrefixId prefixId;
+    // Convert paths into ABT expressions.
+    optimizer::EvalPathLowering pathLower{prefixId, env};
+    pathLower.optimize(abt);
+
+    // Run the constant folding to eliminate lambda applications as they are not directly
+    // supported by the SBE VM.
+    optimizer::ConstEval constEval{env};
+    constEval.optimize(abt);
+
+    // And finally convert to the SBE expression.
+    optimizer::SBEExpressionLowering exprLower{env, slotMap};
+    return exprLower.optimize(abt);
+}
+}  // namespace
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildColumnScan(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6312404,
+            "Unexpected index key bitset provided for column scan stage",
+            !reqs.getIndexKeyBitset());
 
     auto csn = static_cast<const ColumnIndexScanNode*>(root);
+    tassert(6312405,
+            "Unexpected filter provided for column scan stage. Expected 'filtersByPath' to be used "
+            "instead.",
+            !csn->filter);
 
     PlanStageSlots outputs;
 
@@ -900,73 +837,42 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     auto fieldSlotIds = _slotIdGenerator.generateMultiple(csn->fields.size());
-    auto internalSlotId = _slotIdGenerator.generate();
+    auto rowStoreSlot = _slotIdGenerator.generate();
     auto emptyExpr = sbe::makeE<sbe::EFunction>("newObj", sbe::EExpression::Vector{});
     std::vector<std::unique_ptr<sbe::EExpression>> pathExprs;
     for (size_t idx = 0; idx < csn->fields.size(); ++idx) {
         pathExprs.emplace_back(emptyExpr->clone());
     }
 
-    auto stage = std::make_unique<sbe::ColumnScanStage>(_collections.getMainCollection()->uuid(),
+    std::string rootStr = "rowStoreRoot";
+    optimizer::FieldMapBuilder builder(rootStr, true);
+    for (const std::string& field : csn->fields) {
+        builder.integrateFieldPath(FieldPath(field),
+                                   [](const bool isLastElement, optimizer::FieldMapEntry& entry) {
+                                       entry._hasLeadingObj = true;
+                                       entry._hasKeep = true;
+                                   });
+    }
+
+    // Generate expression that reconstructs the whole object (runs against the row store bson for
+    // now).
+    optimizer::SlotVarMap slotMap{};
+    slotMap[rootStr] = rowStoreSlot;
+    auto abt = builder.generateABT();
+    auto exprOut = abt ? abtToExpr(*abt, slotMap) : emptyExpr->clone();
+    auto stage = std::make_unique<sbe::ColumnScanStage>(getCurrentCollection(reqs)->uuid(),
                                                         csn->indexEntry.catalogName,
                                                         fieldSlotIds,
                                                         csn->fields,
                                                         recordSlot,
                                                         ridSlot,
-                                                        std::move(emptyExpr),
+                                                        std::move(exprOut),
                                                         std::move(pathExprs),
-                                                        internalSlotId,
+                                                        rowStoreSlot,
                                                         _yieldPolicy,
                                                         csn->nodeId());
 
     return {std::move(stage), std::move(outputs)};
-}
-
-std::tuple<sbe::value::SlotId, sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>>
-SlotBasedStageBuilder::makeLoopJoinForFetch(std::unique_ptr<sbe::PlanStage> inputStage,
-                                            sbe::value::SlotId seekKeySlot,
-                                            sbe::value::SlotId snapshotIdSlot,
-                                            sbe::value::SlotId indexIdSlot,
-                                            sbe::value::SlotId indexKeySlot,
-                                            sbe::value::SlotId indexKeyPatternSlot,
-                                            StringMap<const IndexAccessMethod*> iamMap,
-                                            PlanNodeId planNodeId,
-                                            sbe::value::SlotVector slotsToForward) {
-    auto resultSlot = _slotIdGenerator.generate();
-    auto recordIdSlot = _slotIdGenerator.generate();
-
-    using namespace std::placeholders;
-    sbe::ScanCallbacks callbacks(
-        indexKeyCorruptionCheckCallback,
-        std::bind(indexKeyConsistencyCheckCallback, _1, std::move(iamMap), _2, _3, _4, _5, _6));
-    // Scan the collection in the range [seekKeySlot, Inf).
-    auto scanStage = sbe::makeS<sbe::ScanStage>(_collections.getMainCollection()->uuid(),
-                                                resultSlot,
-                                                recordIdSlot,
-                                                snapshotIdSlot,
-                                                indexIdSlot,
-                                                indexKeySlot,
-                                                indexKeyPatternSlot,
-                                                boost::none,
-                                                std::vector<std::string>{},
-                                                sbe::makeSV(),
-                                                seekKeySlot,
-                                                true,
-                                                nullptr,
-                                                planNodeId,
-                                                std::move(callbacks));
-
-    // Get the recordIdSlot from the outer side (e.g., IXSCAN) and feed it to the inner side,
-    // limiting the result set to 1 row.
-    auto stage = sbe::makeS<sbe::LoopJoinStage>(
-        std::move(inputStage),
-        sbe::makeS<sbe::LimitSkipStage>(std::move(scanStage), 1, boost::none, planNodeId),
-        std::move(slotsToForward),
-        sbe::makeSV(seekKeySlot, snapshotIdSlot, indexIdSlot, indexKeySlot, indexKeyPatternSlot),
-        nullptr,
-        planNodeId);
-
-    return {resultSlot, recordIdSlot, std::move(stage)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildFetch(
@@ -1014,9 +920,11 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                              outputs.get(kIndexId),
                              outputs.get(kIndexKey),
                              outputs.get(kIndexKeyPattern),
+                             getCurrentCollection(reqs),
                              std::move(iamMap),
                              root->nodeId(),
-                             std::move(relevantSlots));
+                             std::move(relevantSlots),
+                             _slotIdGenerator);
 
     outputs.set(kResult, fetchResultSlot);
     outputs.set(kRecordId, fetchRecordIdSlot);
@@ -1871,9 +1779,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildTextMatch(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    const auto& mainColl = _collections.getMainCollection();
-    tassert(5432212, "no collection object", mainColl);
-    tassert(5432213, "index keys requsted for text match node", !reqs.getIndexKeyBitset());
+    auto textNode = static_cast<const TextMatchNode*>(root);
+    const auto& coll = getCurrentCollection(reqs);
+    tassert(5432212, "no collection object", coll);
+    tassert(5432213, "index keys requested for text match node", !reqs.getIndexKeyBitset());
     tassert(5432215,
             str::stream() << "text match node must have one child, but got "
                           << root->children.size(),
@@ -1883,15 +1792,13 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // assumption.
     tassert(5432216, "text match input must be fetched", root->children[0]->fetched());
 
-    auto textNode = static_cast<const TextMatchNode*>(root);
-
     auto childReqs = reqs.copy().set(kResult);
     auto [stage, outputs] = build(textNode->children[0], childReqs);
     tassert(5432217, "result slot is not produced by text match sub-plan", outputs.has(kResult));
 
     // Create an FTS 'matcher' to apply 'ftsQuery' to matching documents.
     auto matcher = makeFtsMatcher(
-        _opCtx, mainColl, textNode->index.identifier.catalogName, textNode->ftsQuery.get());
+        _opCtx, coll, textNode->index.identifier.catalogName, textNode->ftsQuery.get());
 
     // Build an 'ftsMatch' expression to match a document stored in the 'kResult' slot using the
     // 'matcher' instance.
@@ -2584,7 +2491,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto groupEvalStage = makeHashAgg(std::move(accProjEvalStage),
                                       dedupedGroupBySlots,
                                       std::move(accSlotToExprMap),
-                                      _state.env->getSlotIfExists("collator"_sd),
+                                      _state.data->env->getSlotIfExists("collator"_sd),
                                       _cq.getExpCtx()->allowDiskUse,
                                       nodeId);
 
@@ -2877,15 +2784,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // there are orphaned documents from aborted migrations. To check if the document is owned by
     // the shard, we need to own a 'ShardFilterer', and extract the document's shard key as a
     // BSONObj.
-    // TODO SERVER-61422: Should not construct the "ShardFilterer" here.
-    auto shardFilterer = _shardFiltererFactory->makeShardFilterer(_opCtx);
-    auto shardKeyPattern = shardFilterer->getKeyPattern().toBSON();
-    auto shardFiltererSlot =
-        _data.env->registerSlot("shardFilterer"_sd,
-                                sbe::value::TypeTags::shardFilterer,
-                                sbe::value::bitcastFrom<ShardFilterer*>(shardFilterer.release()),
-                                true,
-                                &_slotIdGenerator);
+    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern();
+    // We register the "shardFilterer" slot but not construct the ShardFilterer here is because once
+    // constructed the ShardFilterer will prevent orphaned documents from being deleted. We will
+    // construct the 'ShardFiltered' later while preparing the SBE tree for execution.
+    auto shardFiltererSlot = _data.env->registerSlot(
+        "shardFilterer"_sd, sbe::value::TypeTags::Nothing, 0, false, &_slotIdGenerator);
 
     // Determine if our child is an index scan and extract it's key pattern, or empty BSONObj if our
     // child is not an IXSCAN node.
@@ -2985,6 +2889,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         buildShardFilterGivenShardKeySlot(
             finalShardKeySlot, std::move(finalShardKeyObjStage), shardFiltererSlot, root->nodeId()),
         std::move(outputs)};
+}
+
+const CollectionPtr& SlotBasedStageBuilder::getCurrentCollection(const PlanStageReqs& reqs) const {
+    return _collections.lookupCollection(reqs.getTargetNamespace());
 }
 
 // Returns a non-null pointer to the root of a plan tree, or a non-OK status if the PlanStage tree

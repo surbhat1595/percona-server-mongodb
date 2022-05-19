@@ -509,10 +509,6 @@ public:
                 }
             }
 
-            // Check whether we are allowed to read from this node after acquiring our locks.
-            uassertStatusOK(replCoord->checkCanServeReadsFor(
-                opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
-
             // Fill out curop information.
             beginQueryOp(opCtx, nss, _request.body);
 
@@ -554,6 +550,10 @@ public:
                 return;
             }
 
+            // Check whether we are allowed to read from this node after acquiring our locks.
+            uassertStatusOK(replCoord->checkCanServeReadsFor(
+                opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
+
             const auto& collection = ctx->getCollection();
 
             if (cq->getFindCommandRequest().getReadOnce()) {
@@ -591,7 +591,8 @@ public:
                 const CursorId cursorId = 0;
                 endQueryOp(opCtx, collection, *exec, numResults, cursorId);
                 auto bodyBuilder = result->getBodyBuilder();
-                appendCursorResponseObject(cursorId, nss.ns(), BSONArray(), &bodyBuilder);
+                appendCursorResponseObject(
+                    cursorId, nss.ns(), BSONArray(), boost::none, &bodyBuilder);
                 return;
             }
 

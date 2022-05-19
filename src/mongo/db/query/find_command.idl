@@ -36,6 +36,7 @@ global:
     - "mongo/db/query/max_time_ms_parser.h"
 
 imports:
+    - "mongo/crypto/fle_field_schema.idl"
     - "mongo/db/auth/action_type.idl"
     - "mongo/db/auth/access_checks.idl"
     - "mongo/db/logical_session_id.idl"
@@ -242,5 +243,10 @@ commands:
       collectionUUID:
         description: "The expected UUID of the collection."
         type: uuid
+        optional: true
+        unstable: true
+      encryptionInformation:
+        description: "Encryption Information schema and other tokens for CRUD commands"
+        type: EncryptionInformation
         optional: true
         unstable: true

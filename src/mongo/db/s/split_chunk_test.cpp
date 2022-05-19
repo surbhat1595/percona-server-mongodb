@@ -44,7 +44,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/client/shard_registry.h"
@@ -83,7 +83,7 @@ public:
         _coll.setEpoch(_epoch);
         _coll.setUpdatedAt(Date_t::fromMillisSinceEpoch(ChunkVersion(1, 3, _epoch).toLong()));
         _coll.setKeyPattern(BSON("_id" << 1));
-        _coll.setUnique(false);
+        _coll.setUique(false);
         ASSERT_OK(_coll.validate());
 
         // Set up the shard

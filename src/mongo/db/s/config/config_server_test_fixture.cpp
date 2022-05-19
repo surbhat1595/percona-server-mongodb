@@ -62,7 +62,7 @@
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_version.h"
@@ -316,8 +316,10 @@ StatusWith<ShardType> ConfigServerTestFixture::getShardDoc(OperationContext* opC
 void ConfigServerTestFixture::setupCollection(const NamespaceString& nss,
                                               const KeyPattern& shardKey,
                                               const std::vector<ChunkType>& chunks) {
-    auto dbDoc = findOneOnConfigCollection(
-        operationContext(), DatabaseType::ConfigNS, BSON(DatabaseType::name(nss.db().toString())));
+    auto dbDoc =
+        findOneOnConfigCollection(operationContext(),
+                                  NamespaceString::kConfigDatabasesNamespace,
+                                  BSON(DatabaseType::kNameFieldName << nss.db().toString()));
     if (!dbDoc.isOK()) {
         // If the database is not setup, choose the first available shard as primary to implicitly
         // create the db
@@ -326,16 +328,15 @@ void ConfigServerTestFixture::setupCollection(const NamespaceString& nss,
         invariant(swShardDoc.isOK(),
                   "At least one shard should be setup when initializing a collection");
         auto shard = uassertStatusOK(ShardType::fromBSON(swShardDoc.getValue()));
-        setupDatabase(nss.db().toString(), ShardId(shard.getName()), true /* sharded */);
+        setupDatabase(nss.db().toString(), ShardId(shard.getName()));
     }
 
     CollectionType coll(nss,
                         chunks[0].getVersion().epoch(),
                         chunks[0].getVersion().getTimestamp(),
                         Date_t::now(),
-                        chunks[0].getCollectionUUID());
-    coll.setTimestamp(chunks.front().getVersion().getTimestamp());
-    coll.setKeyPattern(shardKey);
+                        chunks[0].getCollectionUUID(),
+                        shardKey);
     ASSERT_OK(
         insertToConfigCollection(operationContext(), CollectionType::ConfigNS, coll.toBSON()));
 
@@ -398,11 +399,10 @@ StatusWith<ChunkVersion> ConfigServerTestFixture::getCollectionVersion(Operation
 }
 
 void ConfigServerTestFixture::setupDatabase(const std::string& dbName,
-                                            const ShardId primaryShard,
-                                            const bool sharded) {
-    DatabaseType db(dbName, primaryShard, sharded, DatabaseVersion(UUID::gen(), Timestamp()));
+                                            const ShardId& primaryShard) {
+    DatabaseType db(dbName, primaryShard, DatabaseVersion(UUID::gen(), Timestamp()));
     ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    DatabaseType::ConfigNS,
+                                                    NamespaceString::kConfigDatabasesNamespace,
                                                     db.toBSON(),
                                                     ShardingCatalogClient::kMajorityWriteConcern));
 }

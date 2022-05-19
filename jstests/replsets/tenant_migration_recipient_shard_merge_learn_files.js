@@ -37,9 +37,7 @@ const tenantId = "testTenantId";
 const tenantDB = tenantMigrationTest.tenantDB(tenantId, "DB");
 const collName = "testColl";
 
-const donorRst = tenantMigrationTest.getDonorRst();
 const donorPrimary = tenantMigrationTest.getDonorPrimary();
-const donorSecondary = donorRst.getSecondary();
 
 // Do a majority write.
 tenantMigrationTest.insertDonorDB(tenantDB, collName);
@@ -47,7 +45,7 @@ tenantMigrationTest.insertDonorDB(tenantDB, collName);
 // Ensure our new collections appear in the backup cursor's checkpoint.
 assert.commandWorked(donorPrimary.adminCommand({fsync: 1}));
 
-const failpoint = "fpAfterRetrievingStartOpTimesMigrationRecipientInstance";
+const failpoint = "fpAfterStartingOplogApplierMigrationRecipientInstance";
 const waitInFailPoint = configureFailPoint(recipientPrimary, failpoint, {action: "hang"});
 
 // In order to prevent the copying of "testTenantId" databases via logical cloning from donor to
@@ -69,22 +67,23 @@ tenantMigrationTest.assertRecipientNodesInExpectedState(
     tenantMigrationTest.getRecipientRst().nodes,
     migrationUuid,
     kDummyTenantId,
-    TenantMigrationTest.RecipientState.kCopiedFiles,
+    TenantMigrationTest.RecipientState.kLearnedFilenames,
     TenantMigrationTest.RecipientAccessState.kReject);
 
 waitInFailPoint.off();
 
 TenantMigrationTest.assertCommitted(tenantMigrationTest.waitForMigrationToComplete(migrationOpts));
 
-// TODO SERVER-61144: Check on all recipient nodes that the collection documents got imported
-// successfully.
-// Use "countDocuments" to check actual docs, "count" to check sizeStorer data.
-assert.eq(donorPrimary.getDB(tenantDB)[collName].countDocuments({}),
-          recipientPrimary.getDB(tenantDB)[collName].countDocuments({}),
-          "countDocuments");
-assert.eq(donorPrimary.getDB(tenantDB)[collName].count(),
-          recipientPrimary.getDB(tenantDB)[collName].count(),
-          "count");
+const donorPrimaryCountDocumentsResult = donorPrimary.getDB(tenantDB)[collName].countDocuments({});
+const donorPrimaryCountResult = donorPrimary.getDB(tenantDB)[collName].count();
+
+tenantMigrationTest.getRecipientRst().nodes.forEach(node => {
+    // Use "countDocuments" to check actual docs, "count" to check sizeStorer data.
+    assert.eq(donorPrimaryCountDocumentsResult,
+              node.getDB(tenantDB)[collName].countDocuments({}),
+              "countDocuments");
+    assert.eq(donorPrimaryCountResult, node.getDB(tenantDB)[collName].count(), "count");
+});
 
 tenantMigrationTest.stop();
 })();

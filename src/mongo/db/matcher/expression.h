@@ -208,7 +208,7 @@ public:
 
     using Iterator = MatchExpressionIterator<false>;
     using ConstIterator = MatchExpressionIterator<true>;
-    using InputParamId = int64_t;
+    using InputParamId = int32_t;
 
     /**
      * Tracks the information needed to generate a document validation error for a
@@ -354,12 +354,19 @@ public:
      */
     virtual MatchExpression* getChild(size_t index) const = 0;
 
+
     /**
-     * For MatchExpression nodes that can participate in tree restructuring (like AND/OR), returns a
-     * non-const vector of MatchExpression* child nodes. If the MatchExpression does not
-     * participated in tree restructuring, returns boost::none.
-     * Do not use to traverse the MatchExpression tree. Use numChildren() and getChild(), which
-     * provide access to all nodes.
+     * Delegates to the specified child unique_ptr's reset() method in order to replace child
+     * expressions while traversing the tree.
+     */
+    virtual void resetChild(size_t index, MatchExpression* other) = 0;
+
+    /**
+     * For MatchExpression nodes that can participate in tree restructuring (like AND/OR),
+     * returns a non-const vector of MatchExpression* child nodes. If the MatchExpression does
+     * not participated in tree restructuring, returns boost::none. Do not use to traverse the
+     * MatchExpression tree. Use numChildren() and getChild(), which provide access to all
+     * nodes.
      */
     virtual std::vector<std::unique_ptr<MatchExpression>>* getChildVector() = 0;
 

@@ -117,9 +117,8 @@ protected:
                                 std::move(epoch),
                                 Timestamp(1, 2),
                                 lastUpdated,
-                                std::move(uuid));
-        collType.setKeyPattern(shardKey);
-        collType.setUnique(false);
+                                std::move(uuid),
+                                shardKey);
         if (reshardingFields)
             collType.setReshardingFields(std::move(reshardingFields.get()));
 
@@ -536,7 +535,7 @@ protected:
         // Create original collection's catalog entry as well as both config.chunks and config.tags
         // collections.
         {
-            setupDatabase("db", ShardId("shard0000"), true);
+            setupDatabase("db", ShardId("shard0000"));
             auto opCtx = operationContext();
             DBDirectClient client(opCtx);
 

@@ -52,14 +52,7 @@ function getIndexSpecByName(coll, indexName) {
     return indexes[0];
 }
 
-jsTestLog('Fail if db is not sharded.');
-assert.commandFailed(mongos.adminCommand({shardCollection: kDbName + '.foo', key: {_id: 1}}));
-
 assert.commandWorked(mongos.getDB(kDbName).foo.insert({a: 1, b: 1}));
-
-jsTestLog('Fail if db is not sharding enabled.');
-assert.commandFailed(mongos.adminCommand({shardCollection: kDbName + '.foo', key: {_id: 1}}));
-
 assert.commandWorked(mongos.adminCommand({enableSharding: kDbName}));
 
 jsTestLog('Verify wrong arguments errors.');
@@ -105,6 +98,12 @@ jsTestLog('Shard key can contain dotted path to embedded element.');
 assert.commandWorked(
     mongos.adminCommand({shardCollection: kDbName + '.shard_key_dotted_path', key: {'_id.a': 1}}));
 
+jsTestLog('Command should still verify index even if implicitlyCreateIndex is false.');
+assert.commandFailedWithCode(
+    mongos.adminCommand(
+        {shardCollection: kDbName + '.foo', key: {x: 1}, implicitlyCreateIndex: false}),
+    6373200);
+
 //
 // Test shardCollection's idempotency
 //
@@ -125,6 +124,29 @@ jsTestLog('Different "unique"');
 assert.commandFailed(
     mongos.adminCommand({shardCollection: kDbName + '.foo', key: {_id: 1}, unique: true}));
 
+assert.commandWorked(mongos.getDB(kDbName).dropDatabase());
+
+jsTestLog('Allow non-unique index if enforceUniquenessCheck is false');
+assert.commandWorked(mongos.getDB(kDbName).foo.createIndex({x: 1}));
+assert.commandWorked(mongos.adminCommand(
+    {shardCollection: kDbName + '.foo', key: {x: 1}, unique: true, enforceUniquenessCheck: false}));
+let collDoc = mongos.getDB('config').collections.findOne({_id: `${kDbName}.foo`});
+assert(collDoc);
+assert(collDoc.unique);
+assert.commandWorked(mongos.getDB(kDbName).dropDatabase());
+
+jsTestLog('mongosync unique key pattern use case');
+assert.commandWorked(mongos.getDB(kDbName).foo.createIndex({x: 1}));
+assert.commandWorked(mongos.adminCommand({
+    shardCollection: kDbName + '.foo',
+    key: {x: 1},
+    unique: true,
+    implicitlyCreateIndex: false,
+    enforceUniquenessCheck: false
+}));
+collDoc = mongos.getDB('config').collections.findOne({_id: `${kDbName}.foo`});
+assert(collDoc);
+assert(collDoc.unique);
 assert.commandWorked(mongos.getDB(kDbName).dropDatabase());
 
 jsTestLog('Shard empty collections no index required.');

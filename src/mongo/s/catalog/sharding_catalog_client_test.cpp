@@ -40,6 +40,7 @@
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/time_proof_service.h"
+#include "mongo/db/vector_clock.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -47,7 +48,7 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/chunk_version.h"
@@ -85,9 +86,12 @@ using ShardingCatalogClientTest = ShardingTestFixture;
 TEST_F(ShardingCatalogClientTest, GetCollectionExisting) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    CollectionType expectedColl(
-        NamespaceString("TestDB.TestNS"), OID::gen(), Timestamp(1, 1), Date_t::now(), UUID::gen());
-    expectedColl.setKeyPattern(BSON("KeyName" << 1));
+    CollectionType expectedColl(NamespaceString("TestDB.TestNS"),
+                                OID::gen(),
+                                Timestamp(1, 1),
+                                Date_t::now(),
+                                UUID::gen(),
+                                BSON("KeyName" << 1));
 
     const OpTime newOpTime(Timestamp(7, 6), 5);
 
@@ -111,7 +115,9 @@ TEST_F(ShardingCatalogClientTest, GetCollectionExisting) {
             ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
             ASSERT_EQ(query->getLimit().get(), 1);
 
-            checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+            checkReadConcern(request.cmdObj,
+                             VectorClock::kInitialComponentTime.asTimestamp(),
+                             repl::OpTime::kUninitializedTerm);
 
             ReplSetMetadata metadata(10,
                                      {newOpTime, Date_t() + Seconds(newOpTime.getSecs())},
@@ -159,7 +165,7 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseExisting) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
     DatabaseType expectedDb(
-        "bigdata", ShardId("shard0000"), true, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+        "bigdata", ShardId("shard0000"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     const OpTime newOpTime(Timestamp(7, 6), 5);
 
@@ -176,12 +182,15 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseExisting) {
         auto query = query_request_helper::makeFromFindCommandForTests(opMsg.body);
 
         ASSERT_EQ(query->getNamespaceOrUUID().nss().value_or(NamespaceString()),
-                  DatabaseType::ConfigNS);
-        ASSERT_BSONOBJ_EQ(query->getFilter(), BSON(DatabaseType::name(expectedDb.getName())));
+                  NamespaceString::kConfigDatabasesNamespace);
+        ASSERT_BSONOBJ_EQ(query->getFilter(),
+                          BSON(DatabaseType::kNameFieldName << expectedDb.getName()));
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
         ASSERT(!query->getLimit());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         ReplSetMetadata metadata(10,
                                  {newOpTime, Date_t() + Seconds(newOpTime.getSecs())},
@@ -207,7 +216,7 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseStaleSecondaryRetrySuccess) {
     configTargeter()->setFindHostReturnValue(firstHost);
 
     DatabaseType expectedDb(
-        "bigdata", ShardId("shard0000"), true, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+        "bigdata", ShardId("shard0000"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this, &expectedDb] {
         return catalogClient()->getDatabase(
@@ -312,7 +321,9 @@ TEST_F(ShardingCatalogClientTest, GetAllShardsValid) {
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
         ASSERT_FALSE(query->getLimit().is_initialized());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{s1.toBSON(), s2.toBSON(), s3.toBSON()};
     });
@@ -414,7 +425,9 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
             ASSERT_BSONOBJ_EQ(query->getSort(), BSON(ChunkType::lastmod() << -1));
             ASSERT_EQ(query->getLimit().get(), 1);
 
-            checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+            checkReadConcern(request.cmdObj,
+                             VectorClock::kInitialComponentTime.asTimestamp(),
+                             repl::OpTime::kUninitializedTerm);
 
             ReplSetMetadata metadata(10,
                                      {newOpTime, Date_t() + Seconds(newOpTime.getSecs())},
@@ -478,7 +491,9 @@ TEST_F(ShardingCatalogClientTest, GetChunksForUUIDNoSortNoLimit) {
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
         ASSERT_FALSE(query->getLimit().is_initialized());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{};
     });
@@ -765,20 +780,19 @@ TEST_F(ShardingCatalogClientTest, RunUserManagementWriteCommandNotWritablePrimar
 TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsNoDb) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    CollectionType coll1(
-        NamespaceString{"test.coll1"}, OID::gen(), Timestamp(1, 1), network()->now(), UUID::gen());
-    coll1.setKeyPattern(KeyPattern{BSON("_id" << 1)});
-    coll1.setUnique(false);
-
+    CollectionType coll1(NamespaceString{"test.coll1"},
+                         OID::gen(),
+                         Timestamp(1, 1),
+                         network()->now(),
+                         UUID::gen(),
+                         BSON("_id" << 1));
 
     CollectionType coll2(NamespaceString{"anotherdb.coll1"},
                          OID::gen(),
                          Timestamp(1, 1),
                          network()->now(),
-                         UUID::gen());
-    coll2.setKeyPattern(KeyPattern{BSON("_id" << 1)});
-    coll2.setUnique(false);
-
+                         UUID::gen(),
+                         BSON("_id" << 1));
 
     const OpTime newOpTime(Timestamp(7, 6), 5);
 
@@ -797,7 +811,9 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsNoDb) {
         ASSERT_BSONOBJ_EQ(query->getFilter(), BSONObj());
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         ReplSetMetadata metadata(10,
                                  {newOpTime, Date_t() + Seconds(newOpTime.getSecs())},
@@ -817,19 +833,25 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsNoDb) {
     ASSERT_EQ(2U, actualColls.size());
     ASSERT_BSONOBJ_EQ(coll1.toBSON(), actualColls[0].toBSON());
     ASSERT_BSONOBJ_EQ(coll2.toBSON(), actualColls[1].toBSON());
-}
+}  // namespace
 
 TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsWithDb) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    CollectionType coll1(
-        NamespaceString{"test.coll1"}, OID::gen(), Timestamp(1, 1), network()->now(), UUID::gen());
-    coll1.setKeyPattern(KeyPattern{BSON("_id" << 1)});
+    CollectionType coll1(NamespaceString{"test.coll1"},
+                         OID::gen(),
+                         Timestamp(1, 1),
+                         network()->now(),
+                         UUID::gen(),
+                         BSON("_id" << 1));
     coll1.setUnique(true);
 
-    CollectionType coll2(
-        NamespaceString{"test.coll2"}, OID::gen(), Timestamp(1, 1), network()->now(), UUID::gen());
-    coll2.setKeyPattern(KeyPattern{BSON("_id" << 1)});
+    CollectionType coll2(NamespaceString{"test.coll2"},
+                         OID::gen(),
+                         Timestamp(1, 1),
+                         network()->now(),
+                         UUID::gen(),
+                         BSON("_id" << 1));
     coll2.setUnique(false);
 
     auto future =
@@ -850,7 +872,9 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsValidResultsWithDb) {
             ASSERT_BSONOBJ_EQ(query->getFilter(), b.obj());
         }
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{coll1.toBSON(), coll2.toBSON()};
     });
@@ -868,9 +892,12 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsInvalidCollectionType) {
         ASSERT_THROWS(catalogClient()->getCollections(operationContext(), "test"), DBException);
     });
 
-    CollectionType validColl(
-        NamespaceString{"test.coll1"}, OID::gen(), Timestamp(1, 1), network()->now(), UUID::gen());
-    validColl.setKeyPattern(KeyPattern{BSON("_id" << 1)});
+    CollectionType validColl(NamespaceString{"test.coll1"},
+                             OID::gen(),
+                             Timestamp(1, 1),
+                             network()->now(),
+                             UUID::gen(),
+                             BSON("_id" << 1));
     validColl.setUnique(true);
 
     onFindCommand([this, validColl](const RemoteCommandRequest& request) {
@@ -888,7 +915,9 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsInvalidCollectionType) {
             ASSERT_BSONOBJ_EQ(query->getFilter(), b.obj());
         }
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{
             validColl.toBSON(),
@@ -902,10 +931,8 @@ TEST_F(ShardingCatalogClientTest, GetCollectionsInvalidCollectionType) {
 TEST_F(ShardingCatalogClientTest, GetDatabasesForShardValid) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    DatabaseType dbt1(
-        "db1", ShardId("shard0000"), false, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
-    DatabaseType dbt2(
-        "db2", ShardId("shard0000"), false, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType dbt1("db1", ShardId("shard0000"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType dbt2("db2", ShardId("shard0000"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this] {
         return assertGet(
@@ -920,12 +947,14 @@ TEST_F(ShardingCatalogClientTest, GetDatabasesForShardValid) {
         auto query = query_request_helper::makeFromFindCommandForTests(opMsg.body);
 
         ASSERT_EQ(query->getNamespaceOrUUID().nss().value_or(NamespaceString()),
-                  DatabaseType::ConfigNS);
+                  NamespaceString::kConfigDatabasesNamespace);
         ASSERT_BSONOBJ_EQ(query->getFilter(),
-                          BSON(DatabaseType::primary(dbt1.getPrimary().toString())));
+                          BSON(DatabaseType::kPrimaryFieldName << dbt1.getPrimary()));
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{dbt1.toBSON(), dbt2.toBSON()};
     });
@@ -947,11 +976,10 @@ TEST_F(ShardingCatalogClientTest, GetDatabasesForShardInvalidDoc) {
     });
 
     onFindCommand([](const RemoteCommandRequest& request) {
-        DatabaseType dbt1(
-            "db1", {"shard0000"}, false, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+        DatabaseType dbt1("db1", {"shard0000"}, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
         return vector<BSONObj>{
             dbt1.toBSON(),
-            BSON(DatabaseType::name() << 0)  // DatabaseType::name() should be a string
+            BSON(DatabaseType::kNameFieldName << 0)  // Database name should be a string
         };
     });
 
@@ -994,7 +1022,9 @@ TEST_F(ShardingCatalogClientTest, GetTagsForCollection) {
         ASSERT_BSONOBJ_EQ(query->getFilter(), BSON(TagsType::ns("TestDB.TestColl")));
         ASSERT_BSONOBJ_EQ(query->getSort(), BSON(TagsType::min() << 1));
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{tagA.toBSON(), tagB.toBSON()};
     });
@@ -1053,17 +1083,16 @@ TEST_F(ShardingCatalogClientTest, GetTagsForCollectionInvalidTag) {
 TEST_F(ShardingCatalogClientTest, UpdateDatabase) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
-    DatabaseType dbt(
-        "test", ShardId("shard0000"), true, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType dbt("test", ShardId("shard0000"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this, dbt] {
-        auto status =
-            catalogClient()->updateConfigDocument(operationContext(),
-                                                  DatabaseType::ConfigNS,
-                                                  BSON(DatabaseType::name(dbt.getName())),
-                                                  dbt.toBSON(),
-                                                  true,
-                                                  ShardingCatalogClient::kMajorityWriteConcern);
+        auto status = catalogClient()->updateConfigDocument(
+            operationContext(),
+            NamespaceString::kConfigDatabasesNamespace,
+            BSON(DatabaseType::kNameFieldName << dbt.getName()),
+            dbt.toBSON(),
+            true,
+            ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_OK(status);
     });
 
@@ -1075,7 +1104,7 @@ TEST_F(ShardingCatalogClientTest, UpdateDatabase) {
 
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(DatabaseType::ConfigNS, updateOp.getNamespace());
+        ASSERT_EQUALS(NamespaceString::kConfigDatabasesNamespace, updateOp.getNamespace());
 
         const auto& updates = updateOp.getUpdates();
         ASSERT_EQUALS(1U, updates.size());
@@ -1083,7 +1112,7 @@ TEST_F(ShardingCatalogClientTest, UpdateDatabase) {
         const auto& update = updates.front();
         ASSERT(update.getUpsert());
         ASSERT(!update.getMulti());
-        ASSERT_BSONOBJ_EQ(update.getQ(), BSON(DatabaseType::name(dbt.getName())));
+        ASSERT_BSONOBJ_EQ(update.getQ(), BSON(DatabaseType::kNameFieldName << dbt.getName()));
         ASSERT_BSONOBJ_EQ(update.getU().getUpdateReplacement(), dbt.toBSON());
 
         BatchedCommandResponse response;
@@ -1101,17 +1130,16 @@ TEST_F(ShardingCatalogClientTest, UpdateConfigDocumentNonRetryableError) {
     HostAndPort host1("TestHost1");
     configTargeter()->setFindHostReturnValue(host1);
 
-    DatabaseType dbt(
-        "test", ShardId("shard0001"), false, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+    DatabaseType dbt("test", ShardId("shard0001"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
     auto future = launchAsync([this, dbt] {
-        auto status =
-            catalogClient()->updateConfigDocument(operationContext(),
-                                                  DatabaseType::ConfigNS,
-                                                  BSON(DatabaseType::name(dbt.getName())),
-                                                  dbt.toBSON(),
-                                                  true,
-                                                  ShardingCatalogClient::kMajorityWriteConcern);
+        auto status = catalogClient()->updateConfigDocument(
+            operationContext(),
+            NamespaceString::kConfigDatabasesNamespace,
+            BSON(DatabaseType::kNameFieldName << dbt.getName()),
+            dbt.toBSON(),
+            true,
+            ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_EQ(ErrorCodes::Interrupted, status);
     });
 
@@ -1307,7 +1335,7 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandNetworkErrorSucceedsAtMaxRet
 
     onFindCommand([](const RemoteCommandRequest& request) {
         DatabaseType dbType(
-            "TestDB", ShardId("TestShard"), true, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+            "TestDB", ShardId("TestShard"), DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
 
         return vector<BSONObj>{dbType.toBSON()};
     });
@@ -1357,7 +1385,9 @@ TEST_F(ShardingCatalogClientTest, GetNewKeys) {
         ASSERT_BSONOBJ_EQ(BSON("expiresAt" << 1), query->getSort());
         ASSERT_FALSE(query->getLimit().is_initialized());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{key1.toBSON(), key2.toBSON()};
     });
@@ -1409,7 +1439,9 @@ TEST_F(ShardingCatalogClientTest, GetNewKeysWithEmptyCollection) {
         ASSERT_BSONOBJ_EQ(BSON("expiresAt" << 1), query->getSort());
         ASSERT_FALSE(query->getLimit().is_initialized());
 
-        checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
         return vector<BSONObj>{};
     });

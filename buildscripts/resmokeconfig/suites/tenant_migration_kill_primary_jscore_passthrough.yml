@@ -53,7 +53,6 @@ selector:
   - jstests/core/crud_api.js
   # These tests use benchRun which does not use runCommand.
   - jstests/core/bench_test1.js
-  - jstests/core/bench_test3.js
   - jstests/core/benchrun_pipeline_updates.js
   # This test uses exhaust which does not use runCommand.
   - jstests/core/exhaust.js
@@ -90,7 +89,6 @@ selector:
   - jstests/core/list_collections1.js
   - jstests/core/list_collections_filter.js
   - jstests/core/list_collections_no_views.js
-  - jstests/core/views/duplicate_ns.js
   - jstests/core/views/view_with_invalid_dbname.js
   - jstests/core/views/views_creation.js
   - jstests/core/views/invalid_system_views.js

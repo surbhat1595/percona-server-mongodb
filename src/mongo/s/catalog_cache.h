@@ -32,7 +32,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/type_collection_common_types_gen.h"
@@ -47,28 +47,7 @@ class ComparableDatabaseVersion;
 
 using DatabaseTypeCache = ReadThroughCache<std::string, DatabaseType, ComparableDatabaseVersion>;
 using DatabaseTypeValueHandle = DatabaseTypeCache::ValueHandle;
-
-/**
- * Constructed exclusively by the CatalogCache,
- * contains a reference to the cached information for the specified database.
- */
-class CachedDatabaseInfo {
-public:
-    DatabaseType getDatabaseType() const;
-
-    const ShardId& primaryId() const;
-
-    bool shardingEnabled() const;
-
-    DatabaseVersion databaseVersion() const;
-
-private:
-    friend class CatalogCache;
-
-    CachedDatabaseInfo(DatabaseTypeValueHandle&& dbt);
-
-    DatabaseTypeValueHandle _dbt;
-};
+using CachedDatabaseInfo = DatabaseTypeValueHandle;
 
 /**
  * This class wrap a DatabaseVersion object augmenting it with:
@@ -104,7 +83,7 @@ public:
      */
     ComparableDatabaseVersion() = default;
 
-    BSONObj toBSONForLogging() const;
+    std::string toString() const;
 
     bool operator==(const ComparableDatabaseVersion& other) const;
 

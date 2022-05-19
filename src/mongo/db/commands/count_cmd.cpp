@@ -68,6 +68,10 @@ class CmdCount : public BasicCommand {
 public:
     CmdCount() : BasicCommand("count") {}
 
+    const std::set<std::string>& apiVersions() const {
+        return kApiVersions1;
+    }
+
     std::string help() const override {
         return "count objects in collection";
     }
@@ -228,11 +232,6 @@ public:
 
         auto request = CountCommandRequest::parse(IDLParserErrorContext("count"), cmdObj);
 
-        // Check whether we are allowed to read from this node after acquiring our locks.
-        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        uassertStatusOK(replCoord->checkCanServeReadsFor(
-            opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
-
         if (ctx->getView()) {
             auto viewAggregation = countCommandAsAggregationCommand(request, nss);
 
@@ -247,6 +246,11 @@ public:
             uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(&result));
             return true;
         }
+
+        // Check whether we are allowed to read from this node after acquiring our locks.
+        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+        uassertStatusOK(replCoord->checkCanServeReadsFor(
+            opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
         const auto& collection = ctx->getCollection();
 

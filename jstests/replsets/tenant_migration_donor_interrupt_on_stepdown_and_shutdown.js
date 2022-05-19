@@ -40,6 +40,14 @@ function testDonorStartMigrationInterrupt(interruptFunc, verifyCmdResponseFunc) 
     const donorRst = tenantMigrationTest.getDonorRst();
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
 
+    if (TenantMigrationUtil.isShardMergeEnabled(donorPrimary.getDB("admin"))) {
+        // TODO SERVER-63390: Remove this conditional and ensure test(s) run
+        // successfully for shard merge.
+        jsTestLog("Skipping Shard Merge-incompatible test");
+        tenantMigrationTest.stop();
+        return;
+    }
+
     const migrationId = UUID();
     const migrationOpts = {
         migrationIdString: extractUUIDFromObject(migrationId),
@@ -74,6 +82,14 @@ function testDonorForgetMigrationInterrupt(interruptFunc, verifyCmdResponseFunc)
 
     const donorRst = tenantMigrationTest.getDonorRst();
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
+
+    if (TenantMigrationUtil.isShardMergeEnabled(donorPrimary.getDB("admin"))) {
+        // TODO SERVER-63390: Remove this conditional and ensure test(s) run
+        // successfully for shard merge.
+        jsTestLog("Skipping Shard Merge-incompatible test");
+        tenantMigrationTest.stop();
+        return;
+    }
 
     const migrationId = UUID();
     const migrationOpts = {
@@ -115,6 +131,14 @@ function testDonorAbortMigrationInterrupt(interruptFunc, verifyCmdResponseFunc, 
     const donorRst = tenantMigrationTest.getDonorRst();
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
 
+    if (TenantMigrationUtil.isShardMergeEnabled(donorPrimary.getDB("admin"))) {
+        // TODO SERVER-63390: Remove this conditional and ensure test(s) run
+        // successfully for shard merge.
+        jsTestLog("Skipping Shard Merge-incompatible test");
+        tenantMigrationTest.stop();
+        return;
+    }
+
     const migrationId = UUID();
     const migrationOpts = {
         migrationIdString: extractUUIDFromObject(migrationId),
@@ -154,7 +178,9 @@ function testDonorAbortMigrationInterrupt(interruptFunc, verifyCmdResponseFunc, 
  */
 function assertCmdSucceededOrInterruptedDueToStepDown(cmdThread) {
     const res = cmdThread.returnData();
-    assert(res.ok || ErrorCodes.isNotPrimaryError(res.code));
+    assert(res.ok || res.code === ErrorCodes.TenantMigrationCommitted ||
+               ErrorCodes.isNotPrimaryError(res.code),
+           res);
 }
 
 /**
@@ -163,8 +189,9 @@ function assertCmdSucceededOrInterruptedDueToStepDown(cmdThread) {
 function assertCmdSucceededOrInterruptedDueToShutDown(cmdThread) {
     const res = cmdThread.returnData();
     try {
-        assert(res.ok || ErrorCodes.isNotPrimaryError(res.code) ||
-               ErrorCodes.isShutdownError(res.code));
+        assert(res.ok || res.code === ErrorCodes.TenantMigrationCommitted ||
+                   ErrorCodes.isNotPrimaryError(res.code) || ErrorCodes.isShutdownError(res.code),
+               res);
     } catch (e) {
         if (isNetworkError(e)) {
             jsTestLog(`Ignoring network error due to node shutting down ${tojson(e)}`);

@@ -39,7 +39,7 @@ function makeShardSplitTest() {
         const donorPrimary = test.donor.getPrimary();
         const adminDB = donorPrimary.getDB("admin");
 
-        // TODO(SERVER-63091): remove this when we actually split recipients
+        // TODO(SERVER-64168): remove this when split is ready
         configureFailPoint(adminDB, "skipShardSplitWaitForSplitAcceptance");
 
         assert(TenantMigrationUtil.isShardSplitEnabled(adminDB));
@@ -79,7 +79,7 @@ function makeShardSplitTest() {
             6236600,
             `forgetShardSplit should reject when featureFlagShardSplit is disabled`);
 
-        // shut down replica sets
+        // shut down replica set
         test.stop();
     };
 }

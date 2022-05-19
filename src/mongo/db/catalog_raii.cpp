@@ -37,9 +37,10 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
-#include "mongo/db/views/view_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+MONGO_FAIL_POINT_DEFINE(hangBeforeAutoGetCollectionLockFreeShardedStateAccess);
 
 namespace mongo {
 namespace {
@@ -170,9 +171,6 @@ AutoGetDb::AutoGetDb(OperationContext* opCtx,
           auto databaseHolder = DatabaseHolder::get(opCtx);
           return databaseHolder->getDb(opCtx, tenantDbName);
       }()) {
-    // Locking multiple databases is only supported in intent read mode (MODE_IS).
-    invariant(secondaryDbNames.empty() || mode == MODE_IS);
-
     // Take the secondary dbs' database locks only: no global or RSTL, as they are already acquired
     // above. Note: no consistent ordering is when acquiring database locks because there are no
     // occasions where multiple strong locks are acquired to make ordering matter (deadlock
@@ -193,8 +191,6 @@ AutoGetDb::AutoGetDb(OperationContext* opCtx,
 }
 
 Database* AutoGetDb::ensureDbExists(OperationContext* opCtx) {
-    invariant(_secondaryDbLocks.empty());
-
     if (_db) {
         return _db;
     }
@@ -218,7 +214,6 @@ AutoGetCollection::AutoGetCollection(
     Date_t deadline,
     const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs) {
     invariant(!opCtx->isLockFreeReadsOp());
-    invariant(secondaryNssOrUUIDs.empty() || modeColl == MODE_IS);
 
     // Get a unique list of 'secondary' database names to pass into AutoGetDb below.
     std::set<StringData> secondaryDbNames;
@@ -296,17 +291,14 @@ AutoGetCollection::AutoGetCollection(
         return;
     }
 
-    if (_autoDb->getDb()) {
-        _view = ViewCatalog::get(opCtx)->lookup(opCtx, _resolvedNss);
-        uassert(ErrorCodes::CommandNotSupportedOnView,
-                str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
-                !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted ||
-                    !_view->timeseries());
-        uassert(ErrorCodes::CommandNotSupportedOnView,
-                str::stream() << "Namespace " << _resolvedNss.ns()
-                              << " is a view, not a collection",
-                !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted);
-    }
+    _view = catalog->lookupView(opCtx, _resolvedNss);
+    uassert(ErrorCodes::CommandNotSupportedOnView,
+            str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
+            !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted ||
+                !_view->timeseries());
+    uassert(ErrorCodes::CommandNotSupportedOnView,
+            str::stream() << "Namespace " << _resolvedNss.ns() << " is a view, not a collection",
+            !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted);
 }
 
 Collection* AutoGetCollection::getWritableCollection(OperationContext* opCtx,
@@ -377,6 +369,13 @@ AutoGetCollectionLockFree::AutoGetCollectionLockFree(OperationContext* opCtx,
         dss->checkDbVersion(opCtx, dssLock);
     }
 
+    hangBeforeAutoGetCollectionLockFreeShardedStateAccess.executeIf(
+        [&](auto&) { hangBeforeAutoGetCollectionLockFreeShardedStateAccess.pauseWhileSet(opCtx); },
+        [&](const BSONObj& data) {
+            return opCtx->getLogicalSessionId() &&
+                opCtx->getLogicalSessionId()->getId() == UUID::fromCDR(data["lsid"].uuid());
+        });
+
     if (_collection) {
         // Fetch and store the sharding collection description data needed for use during the
         // operation. The shardVersion will be checked later if the shard filtering metadata is
@@ -392,14 +391,7 @@ AutoGetCollectionLockFree::AutoGetCollectionLockFree(OperationContext* opCtx,
         return;
     }
 
-    // Returns nullptr for 'viewCatalog' if db does not exist.
-    const TenantDatabaseName tenantDbName(boost::none, _resolvedNss.db());
-    auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
-    if (!viewCatalog) {
-        return;
-    }
-
-    _view = viewCatalog->lookup(opCtx, _resolvedNss);
+    _view = catalog->lookupView(opCtx, _resolvedNss);
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
             !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted ||
@@ -407,6 +399,11 @@ AutoGetCollectionLockFree::AutoGetCollectionLockFree(OperationContext* opCtx,
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "Namespace " << _resolvedNss.ns() << " is a view, not a collection",
             !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted);
+    if (_view) {
+        // We are about to succeed setup as a view. No LockFree state was setup so do not mark the
+        // OperationContext as LFR.
+        _lockFreeReadsBlock.reset();
+    }
 }
 
 AutoGetCollectionMaybeLockFree::AutoGetCollectionMaybeLockFree(

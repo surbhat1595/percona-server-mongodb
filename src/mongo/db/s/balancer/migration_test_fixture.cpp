@@ -48,9 +48,11 @@ std::shared_ptr<RemoteCommandTargeterMock> MigrationTestFixture::shardTargeterMo
 }
 
 void MigrationTestFixture::setUpDatabase(const std::string& dbName, const ShardId primaryShard) {
-    DatabaseType db(dbName, primaryShard, true, DatabaseVersion(UUID::gen(), Timestamp()));
-    ASSERT_OK(catalogClient()->insertConfigDocument(
-        operationContext(), DatabaseType::ConfigNS, db.toBSON(), kMajorityWriteConcern));
+    DatabaseType db(dbName, primaryShard, DatabaseVersion(UUID::gen(), Timestamp()));
+    ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
+                                                    NamespaceString::kConfigDatabasesNamespace,
+                                                    db.toBSON(),
+                                                    kMajorityWriteConcern));
 }
 
 void MigrationTestFixture::setUpCollection(
@@ -58,9 +60,8 @@ void MigrationTestFixture::setUpCollection(
     const UUID& collUUID,
     const ChunkVersion& version,
     boost::optional<TypeCollectionTimeseriesFields> timeseriesFields) {
-    CollectionType coll(collName, version.epoch(), version.getTimestamp(), Date_t::now(), collUUID);
-    coll.setKeyPattern(kKeyPattern);
-    coll.setUnique(false);
+    CollectionType coll(
+        collName, version.epoch(), version.getTimestamp(), Date_t::now(), collUUID, kKeyPattern);
     coll.setTimeseriesFields(std::move(timeseriesFields));
     ASSERT_OK(catalogClient()->insertConfigDocument(
         operationContext(), CollectionType::ConfigNS, coll.toBSON(), kMajorityWriteConcern));

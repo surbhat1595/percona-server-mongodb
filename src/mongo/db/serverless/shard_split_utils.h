@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/client/sdam/topology_listener.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/serverless/shard_split_state_machine_gen.h"
 
@@ -86,6 +87,15 @@ Status insertStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& st
  */
 Status updateStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& stateDoc);
 
+
+/**
+ * Deletes a state documents in the database for a recipient if the state is blocking at startup.
+ *
+ * Returns 'NamespaceNotFound' if no matching namespace is found. Returns true if the doc was
+ * removed.
+ */
+StatusWith<bool> deleteStateDoc(OperationContext* opCtx, const UUID& shardSplitId);
+
 /**
  * Returns the state doc matching the document with shardSplitId from the disk if it
  * exists. Reads at "no" timestamp i.e, reading with the "latest" snapshot reflecting up to date
@@ -98,6 +108,38 @@ Status updateStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& st
  */
 StatusWith<ShardSplitDonorDocument> getStateDocument(OperationContext* opCtx,
                                                      const UUID& shardSplitId);
+
+/**
+ * Returns true if the state document should be removed for a shard split recipient which is based
+ * on having a local state doc in kBlocking state and having matching recipientSetName matching the
+ * config.replSetName.
+ */
+bool shouldRemoveStateDocumentOnRecipient(OperationContext* opCtx,
+                                          const ShardSplitDonorDocument& stateDocument);
+
+/**
+ * Listener that receives heartbeat events and fulfills a future once it sees the expected number
+ * of nodes in the recipient replica set to monitor.
+ */
+class RecipientAcceptSplitListener : public sdam::TopologyListener {
+public:
+    RecipientAcceptSplitListener(const ConnectionString& recipientConnectionString);
+
+    void onServerHeartbeatSucceededEvent(const HostAndPort& hostAndPort, BSONObj reply) final;
+
+    // Fulfilled when all nodes have accepted the split.
+    SharedSemiFuture<void> getFuture() const;
+
+private:
+    mutable Mutex _mutex =
+        MONGO_MAKE_LATCH("ShardSplitDonorService::getRecipientAcceptSplitFuture::_mutex");
+
+    AtomicWord<bool> _fulfilled{false};
+    const size_t _numberOfRecipient;
+    std::string _recipientSetName;
+    std::map<HostAndPort, std::string> _reportedSetNames;
+    SharedPromise<void> _promise;
+};
 
 }  // namespace serverless
 }  // namespace mongo

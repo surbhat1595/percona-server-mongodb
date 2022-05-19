@@ -283,6 +283,7 @@ env.Library(
         'replication_consistency_markers_idl',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/catalog_raii',
         '$BUILD_DIR/mongo/db/storage/journal_flusher',
     ],
@@ -297,6 +298,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/storage/journal_flusher',
         '$BUILD_DIR/mongo/db/storage/storage_control',
         '$BUILD_DIR/mongo/db/storage/storage_options',
@@ -1358,12 +1360,9 @@ env.Library(
     source=[
         'tenant_file_cloner.cpp',
         'tenant_file_importer_service.cpp',
-        'tenant_migration_recipient_coordinator.cpp',
         'tenant_migration_recipient_op_observer.cpp',
         'tenant_migration_recipient_service.cpp',
         'tenant_migration_shard_merge_util.cpp',
-        'vote_commit_migration_progress.cpp',
-        'vote_commit_migration_progress.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/fetcher',
@@ -1763,6 +1762,7 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/read_write_concern_defaults_mock',
+        '$BUILD_DIR/mongo/db/serverless/shard_split_utils',
         'isself',
         'repl_coordinator_impl',
         'repl_coordinator_test_fixture',

@@ -120,15 +120,17 @@ public:
         }
 
         root->attachToOperationContext(opCtx);
-        exec = uassertStatusOK(plan_executor_factory::make(opCtx,
-                                                           std::move(cq),
-                                                           nullptr,
-                                                           {std::move(root), std::move(data)},
-                                                           {},
-                                                           &CollectionPtr::null,
-                                                           false, /* returnOwnedBson */
-                                                           nss,
-                                                           nullptr));
+        root->prepare(data.ctx);
+        exec = uassertStatusOK(
+            plan_executor_factory::make(opCtx,
+                                        std::move(cq),
+                                        nullptr,
+                                        {std::move(root), std::move(data)},
+                                        {},
+                                        MultipleCollectionAccessor(CollectionPtr::null),
+                                        false, /* returnOwnedBson */
+                                        nss,
+                                        nullptr));
         for (long long objCount = 0; objCount < batchSize; objCount++) {
             BSONObj next;
             PlanExecutor::ExecState state = exec->getNext(&next, nullptr);
@@ -147,7 +149,7 @@ public:
         }
 
         if (exec->isEOF()) {
-            appendCursorResponseObject(0LL, nss.ns(), firstBatch.arr(), &result);
+            appendCursorResponseObject(0LL, nss.ns(), firstBatch.arr(), boost::none, &result);
             return true;
         }
 
@@ -166,7 +168,7 @@ public:
              {}});
 
         appendCursorResponseObject(
-            pinnedCursor.getCursor()->cursorid(), nss.ns(), firstBatch.arr(), &result);
+            pinnedCursor.getCursor()->cursorid(), nss.ns(), firstBatch.arr(), boost::none, &result);
 
         return true;
     }

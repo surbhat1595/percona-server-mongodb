@@ -201,6 +201,17 @@ Status processManualMigrationOutcome(OperationContext* opCtx,
     return outcome;
 }
 
+
+uint64_t getMaxChunkSizeBytes(OperationContext* opCtx, const CollectionType& coll) {
+    const auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
+    uassertStatusOK(balancerConfig->refreshAndCheck(opCtx));
+    return coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
+}
+
+const int64_t getMaxChunkSizeMB(OperationContext* opCtx, const CollectionType& coll) {
+    return getMaxChunkSizeBytes(opCtx, coll) / (1024 * 1024);
+};
+
 const auto _balancerDecoration = ServiceContext::declareDecoration<Balancer>();
 
 const ReplicaSetAwareServiceRegistry::Registerer<Balancer> _balancerRegisterer("Balancer");
@@ -328,14 +339,11 @@ Status Balancer::rebalanceSingleChunk(OperationContext* opCtx,
     auto maxChunkSize =
         coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
 
-    MoveChunkSettings settings(maxChunkSize,
-                               balancerConfig->getSecondaryThrottle(),
-                               balancerConfig->waitForDelete(),
-                               migrateInfo->forceJumbo);
+    MoveChunkSettings settings(
+        maxChunkSize, balancerConfig->getSecondaryThrottle(), balancerConfig->waitForDelete());
     auto response =
         _commandScheduler
-            ->requestMoveChunk(
-                opCtx, nss, chunk, migrateInfo->to, settings, true /* issuedByRemoteUser */)
+            ->requestMoveChunk(opCtx, *migrateInfo, settings, true /* issuedByRemoteUser */)
             .getNoThrow();
     return processManualMigrationOutcome(opCtx, chunk.getMin(), nss, migrateInfo->to, response);
 }
@@ -354,27 +362,53 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
 
     auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
         opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
-    auto maxChunkSize = coll.getMaxChunkSizeBytes().value_or(-1);
-    if (maxChunkSize <= 0) {
-        auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
-        Status refreshStatus = balancerConfig->refreshAndCheck(opCtx);
-        if (!refreshStatus.isOK()) {
-            return refreshStatus;
-        }
+    const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
 
-        maxChunkSize = balancerConfig->getMaxChunkSizeBytes();
-    }
-
-    MoveChunkSettings settings(maxChunkSize,
-                               secondaryThrottle,
-                               waitForDelete,
-                               forceJumbo ? MoveChunkRequest::ForceJumbo::kForceManual
-                                          : MoveChunkRequest::ForceJumbo::kDoNotForce);
-    auto response = _commandScheduler
-                        ->requestMoveChunk(
-                            opCtx, nss, chunk, newShardId, settings, true /* issuedByRemoteUser */)
-                        .getNoThrow();
+    MoveChunkSettings settings(maxChunkSize, secondaryThrottle, waitForDelete);
+    MigrateInfo migrateInfo(newShardId,
+                            nss,
+                            chunk,
+                            forceJumbo ? MoveChunkRequest::ForceJumbo::kForceManual
+                                       : MoveChunkRequest::ForceJumbo::kDoNotForce);
+    auto response =
+        _commandScheduler
+            ->requestMoveChunk(opCtx, migrateInfo, settings, true /* issuedByRemoteUser */)
+            .getNoThrow();
     return processManualMigrationOutcome(opCtx, chunk.getMin(), nss, newShardId, response);
+}
+
+Status Balancer::moveRange(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           const MoveRangeRequest& request,
+                           bool issuedByRemoteUser) {
+    auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
+        opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
+    const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
+
+    const auto chunk = [&]() {
+        const auto cm =
+            Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfo(opCtx, nss);
+        return cm.findIntersectingChunkWithSimpleCollation(request.getMin());
+    }();
+
+    // TODO SERVER-64148 handle `moveRange` with bound(s) not necessarily matching a chunk
+    bool validBounds = request.getMin().woCompare(chunk.getMin()) == 0 &&
+        request.getMax().woCompare(chunk.getMax()) == 0;
+    uassert(ErrorCodes::CommandFailed,
+            "No chunk found with the provided shard key bounds",
+            validBounds);
+
+    ShardsvrMoveRange shardSvrRequest(nss);
+    shardSvrRequest.setDbName(NamespaceString::kAdminDb);
+    shardSvrRequest.setMoveRangeRequest(request);
+    shardSvrRequest.setMaxChunkSizeBytes(maxChunkSize);
+    shardSvrRequest.setFromShard(chunk.getShardId());
+    shardSvrRequest.setEpoch(coll.getEpoch());
+
+    auto response = _commandScheduler->requestMoveRange(opCtx, shardSvrRequest, issuedByRemoteUser)
+                        .getNoThrow();
+    return processManualMigrationOutcome(
+        opCtx, chunk.getMin(), nss, shardSvrRequest.getToShard(), std::move(response));
 }
 
 void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
@@ -462,7 +496,7 @@ void Balancer::_consumeActionStreamLoop() {
                                                      splitVectorAction.maxChunkSizeBytes)
                             .thenRunOn(*executor)
                             .onCompletion([this, command = std::move(splitVectorAction)](
-                                              const StatusWith<std::vector<BSONObj>>&
+                                              const StatusWith<AutoSplitVectorResponse>&
                                                   swSplitPoints) {
                                 ThreadClient tc(
                                     "BalancerDefragmentationPolicy::acknowledgeSplitVectorResult",
@@ -871,12 +905,6 @@ int Balancer::_moveChunks(OperationContext* opCtx,
     std::vector<std::pair<const MigrateInfo&, SemiFuture<void>>> rebalanceMigrationsAndResponses,
         defragmentationMigrationsAndResponses;
     auto requestMigration = [&](const MigrateInfo& migrateInfo) -> SemiFuture<void> {
-        ChunkType chunk;
-        chunk.setMin(migrateInfo.minKey);
-        chunk.setMax(migrateInfo.maxKey);
-        chunk.setShard(migrateInfo.from);
-        chunk.setVersion(migrateInfo.version);
-
         auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
             opCtx, migrateInfo.nss, repl::ReadConcernLevel::kMajorityReadConcern);
         auto maxChunkSizeBytes =
@@ -884,10 +912,8 @@ int Balancer::_moveChunks(OperationContext* opCtx,
 
         MoveChunkSettings settings(maxChunkSizeBytes,
                                    balancerConfig->getSecondaryThrottle(),
-                                   balancerConfig->waitForDelete(),
-                                   migrateInfo.forceJumbo);
-        return _commandScheduler->requestMoveChunk(
-            opCtx, migrateInfo.nss, chunk, migrateInfo.to, settings);
+                                   balancerConfig->waitForDelete());
+        return _commandScheduler->requestMoveChunk(opCtx, migrateInfo, settings);
     };
 
     for (const auto& rebalanceOp : chunksToRebalance) {
@@ -966,17 +992,7 @@ BalancerCollectionStatusResponse Balancer::getBalancerStatusForNs(OperationConte
         uasserted(ErrorCodes::NamespaceNotSharded, "Collection unsharded or undefined");
     }
 
-    const auto maxChunkSizeMB = [&]() -> int64_t {
-        int64_t value = 0;
-        if (const auto& collOverride = coll.getMaxChunkSizeBytes(); collOverride.is_initialized()) {
-            value = *collOverride;
-        } else {
-            auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
-            uassertStatusOK(balancerConfig->refreshAndCheck(opCtx));
-            value = balancerConfig->getMaxChunkSizeBytes();
-        }
-        return value / (1024 * 1024);
-    }();
+    const auto maxChunkSizeMB = getMaxChunkSizeMB(opCtx, coll);
     BalancerCollectionStatusResponse response(maxChunkSizeMB, true /*balancerCompliant*/);
     auto setViolationOnResponse = [&response](const StringData& reason,
                                               const boost::optional<BSONObj>& details =
@@ -999,20 +1015,18 @@ BalancerCollectionStatusResponse Balancer::getBalancerStatusForNs(OperationConte
         return response;
     }
 
-    auto chunksToMove = uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(opCtx, ns));
-    if (chunksToMove.empty()) {
-        return response;
-    }
+    auto [_, reason] = uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(opCtx, ns));
 
-    const auto& migrationInfo = chunksToMove.front();
-    switch (migrationInfo.reason) {
-        case MigrateInfo::drain:
+    switch (reason) {
+        case MigrationReason::none:
+            break;
+        case MigrationReason::drain:
             setViolationOnResponse(kBalancerPolicyStatusDraining);
             break;
-        case MigrateInfo::zoneViolation:
+        case MigrationReason::zoneViolation:
             setViolationOnResponse(kBalancerPolicyStatusZoneViolation);
             break;
-        case MigrateInfo::chunksImbalance:
+        case MigrationReason::chunksImbalance:
             setViolationOnResponse(kBalancerPolicyStatusChunksImbalance);
             break;
     }

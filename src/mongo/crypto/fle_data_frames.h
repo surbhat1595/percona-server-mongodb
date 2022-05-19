@@ -30,9 +30,9 @@
 #pragma once
 
 #include "mongo/base/data_range.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/symmetric_crypto.h"
 #include "mongo/db/matcher/schema/encrypt_schema_gen.h"
-#include "mongo/shell/kms_gen.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -45,6 +45,28 @@ constexpr size_t kHmacOutSize = 32;
 inline StatusWith<size_t> aeadGetMaximumPlainTextLength(size_t cipherTextLen) {
     if (cipherTextLen > (crypto::aesCBCIVSize + kHmacOutSize)) {
         return cipherTextLen - crypto::aesCBCIVSize - kHmacOutSize;
+    }
+
+    return Status(ErrorCodes::BadValue, "Invalid cipher text length");
+}
+
+/**
+ * Returns the length of the plaintext output given the ciphertext length. Only for FLE2 AEAD.
+ */
+inline StatusWith<size_t> fle2AeadGetPlainTextLength(size_t cipherTextLen) {
+    if (cipherTextLen > (crypto::aesCTRIVSize + kHmacOutSize)) {
+        return cipherTextLen - crypto::aesCTRIVSize - kHmacOutSize;
+    }
+
+    return Status(ErrorCodes::BadValue, "Invalid cipher text length");
+}
+
+/**
+ * Returns the length of the plaintext output given the ciphertext length. Only for FLE2.
+ */
+inline StatusWith<size_t> fle2GetPlainTextLength(size_t cipherTextLen) {
+    if (cipherTextLen > (crypto::aesCTRIVSize)) {
+        return cipherTextLen - crypto::aesCTRIVSize;
     }
 
     return Status(ErrorCodes::BadValue, "Invalid cipher text length");

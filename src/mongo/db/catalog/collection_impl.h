@@ -343,7 +343,9 @@ public:
     void updateClusteredIndexTTLSetting(OperationContext* opCtx,
                                         boost::optional<int64_t> expireAfterSeconds) final;
 
-    Status updateCappedSize(OperationContext* opCtx, long long newCappedSize) final;
+    Status updateCappedSize(OperationContext* opCtx,
+                            boost::optional<long long> newCappedSize,
+                            boost::optional<long long> newCappedMax) final;
 
     //
     // Stats
@@ -441,11 +443,11 @@ public:
 
     void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) final;
 
-    void updateUniqueSetting(OperationContext* opCtx, StringData idxName) final;
+    void updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) final;
 
-    void updateDisallowNewDuplicateKeysSetting(OperationContext* opCtx,
-                                               StringData idxName,
-                                               bool disallowNewDuplicateKeys) final;
+    void updatePrepareUniqueSetting(OperationContext* opCtx,
+                                    StringData idxName,
+                                    bool prepareUnique) final;
 
     std::vector<std::string> removeInvalidIndexOptions(OperationContext* opCtx) final;
 
@@ -580,7 +582,6 @@ private:
 
         // Capped information.
         const bool _isCapped;
-        const long long _cappedMaxDocs;
 
         // For capped deletes performed on collections where '_needCappedLock' is false, the mutex
         // below protects '_cappedFirstRecord'. Otherwise, when '_needCappedLock' is true, the

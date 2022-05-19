@@ -32,6 +32,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/s/global_user_write_block_state.h"
+#include "mongo/db/write_block_bypass.h"
 
 namespace mongo {
 
@@ -48,19 +49,38 @@ GlobalUserWriteBlockState* GlobalUserWriteBlockState::get(OperationContext* opCt
 }
 
 void GlobalUserWriteBlockState::enableUserWriteBlocking(OperationContext* opCtx) {
-    invariant(opCtx->lockState()->isLockHeldForMode(resourceIdGlobal, MODE_X));
     _globalUserWritesBlocked = true;
 }
 
 void GlobalUserWriteBlockState::disableUserWriteBlocking(OperationContext* opCtx) {
-    invariant(opCtx->lockState()->isLockHeldForMode(resourceIdGlobal, MODE_X));
     _globalUserWritesBlocked = false;
 }
 
 void GlobalUserWriteBlockState::checkUserWritesAllowed(OperationContext* opCtx,
                                                        const NamespaceString& nss) const {
     invariant(opCtx->lockState()->isLocked());
-    uassert(ErrorCodes::OperationFailed, "User writes blocked", !_globalUserWritesBlocked);
+    uassert(ErrorCodes::OperationFailed,
+            "User writes blocked",
+            !_globalUserWritesBlocked || WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled() ||
+                nss.isOnInternalDb());
+}
+
+void GlobalUserWriteBlockState::enableUserShardedDDLBlocking(OperationContext* opCtx) {
+    invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+    _userShardedDDLBlocked.store(true);
+}
+
+void GlobalUserWriteBlockState::disableUserShardedDDLBlocking(OperationContext* opCtx) {
+    _userShardedDDLBlocked.store(false);
+}
+
+void GlobalUserWriteBlockState::checkShardedDDLAllowedToStart(OperationContext* opCtx,
+                                                              const NamespaceString& nss) const {
+    invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+    uassert(ErrorCodes::OperationFailed,
+            "User writes blocked",
+            !_userShardedDDLBlocked.load() ||
+                WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled() || nss.isOnInternalDb());
 }
 
 }  // namespace mongo

@@ -120,7 +120,7 @@ public:
 
     DatabaseType createDatabase(const UUID& uuid, const Timestamp& timestamp) {
         return DatabaseType(
-            kDbName.toString(), kShardList[0].getName(), true, DatabaseVersion(uuid, timestamp));
+            kDbName.toString(), kShardList[0].getName(), DatabaseVersion(uuid, timestamp));
     }
 
 protected:
@@ -142,12 +142,10 @@ TEST_F(DatabaseShardingStateTestWithMockedLoader, OnDbVersionMismatch) {
             return dss->getDbVersion(opCtx, dssLock);
         };
 
-        boost::optional<DatabaseVersion> activeDbVersion = getActiveDbVersion();
-
         _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(newDb);
-        ASSERT_OK(onDbVersionMismatchNoExcept(opCtx, kDbName, newDbVersion, activeDbVersion));
+        ASSERT_OK(onDbVersionMismatchNoExcept(opCtx, kDbName, newDbVersion));
 
-        activeDbVersion = getActiveDbVersion();
+        auto activeDbVersion = getActiveDbVersion();
         ASSERT_TRUE(activeDbVersion);
         if (expectRefresh) {
             ASSERT_EQUALS(newDbVersion.getTimestamp(), activeDbVersion->getTimestamp());

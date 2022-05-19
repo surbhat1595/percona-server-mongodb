@@ -778,6 +778,7 @@ void IndexBuildsCoordinator::abortDatabaseIndexBuilds(OperationContext* opCtx,
 }
 
 void IndexBuildsCoordinator::abortTenantIndexBuilds(OperationContext* opCtx,
+                                                    MigrationProtocolEnum protocol,
                                                     StringData tenantId,
                                                     const std::string& reason) {
     LOGV2(4886203,
@@ -787,7 +788,9 @@ void IndexBuildsCoordinator::abortTenantIndexBuilds(OperationContext* opCtx,
 
     auto builds = [&]() -> std::vector<std::shared_ptr<ReplIndexBuildState>> {
         auto indexBuildFilter = [=](const auto& replState) {
-            return repl::ClonerUtils::isDatabaseForTenant(replState.dbName, tenantId);
+            // Abort *all* index builds at the start of shard merge.
+            return protocol == MigrationProtocolEnum::kShardMerge ||
+                repl::ClonerUtils::isDatabaseForTenant(replState.dbName, tenantId);
         };
         return activeIndexBuilds.filterIndexBuilds(indexBuildFilter);
     }();
@@ -812,8 +815,7 @@ void IndexBuildsCoordinator::abortTenantIndexBuilds(OperationContext* opCtx,
     }
     for (const auto& replState : buildsWaitingToFinish) {
         LOGV2(6221600,
-              "Waiting on the index build to unregister before continuing the tenant "
-              " migration.",
+              "Waiting on the index build to unregister before continuing the tenant migration.",
               "tenantId"_attr = tenantId,
               "buildUUID"_attr = replState->buildUUID,
               "db"_attr = replState->dbName,
@@ -1132,8 +1134,11 @@ bool IndexBuildsCoordinator::abortIndexBuildByBuildUUID(OperationContext* opCtx,
             invariant(opCtx->lockState()->isRSTLLocked());
 
             // Override the 'signalAction' as this is an initial syncing node.
+            // Don't override it if it's a rollback abort which would be explictly requested
+            // by the initial sync code.
             auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-            if (replCoord->getMemberState().startup2()) {
+            if (replCoord->getMemberState().startup2() &&
+                IndexBuildAction::kRollbackAbort != signalAction) {
                 LOGV2_DEBUG(4665902,
                             1,
                             "Overriding abort 'signalAction' for initial sync",
@@ -1276,7 +1281,10 @@ void IndexBuildsCoordinator::_completeAbort(OperationContext* opCtx,
         }
         case IndexBuildAction::kRollbackAbort: {
             invariant(replState->protocol == IndexBuildProtocol::kTwoPhase);
-            invariant(replCoord->getMemberState().rollback());
+            // File copy based initial sync does a rollback-like operation, so we allow STARTUP2
+            // to abort as well as rollback.
+            invariant(replCoord->getMemberState().rollback() ||
+                      replCoord->getMemberState().startup2());
             // Defer cleanup until builder thread is joined.
             break;
         }
@@ -1501,6 +1509,10 @@ void IndexBuildsCoordinator::restartIndexBuildsForRecovery(
                                                                     IndexBuildProtocol::kTwoPhase,
                                                                     indexBuildOptions));
     }
+}
+
+bool IndexBuildsCoordinator::noIndexBuildInProgress() const {
+    return activeIndexBuilds.getActiveIndexBuilds() == 0;
 }
 
 int IndexBuildsCoordinator::numInProgForDb(StringData db) const {

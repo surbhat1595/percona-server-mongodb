@@ -33,7 +33,6 @@
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
-#include "mongo/db/repl/vote_commit_migration_progress_gen.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/stdx/mutex.h"
@@ -47,6 +46,7 @@ public:
     static constexpr StringData kTenantFileImporterServiceName = "TenantFileImporterService"_sd;
     static TenantFileImporterService* get(ServiceContext* serviceContext);
     TenantFileImporterService() = default;
+    void startMigration(const UUID& migrationId);
     void learnedFilename(const UUID& migrationId, const BSONObj& metadataDoc);
     void learnedAllFilenames(const UUID& migrationId);
     void reset();
@@ -79,7 +79,7 @@ private:
         _reset(lk);
     }
 
-    void _voteCommitMigrationProgress(MigrationProgressStepEnum step);
+    void _voteImportedFiles();
 
     void _reset(WithLock lk);
 
@@ -89,6 +89,64 @@ private:
     std::shared_ptr<executor::ScopedTaskExecutor> _scopedExecutor;
     boost::optional<UUID> _migrationId;
     Mutex _mutex = MONGO_MAKE_LATCH("TenantFileImporterService::_mutex");
-    bool _toldPrimaryAllFilesAreCopied;
+
+    class ImporterState {
+    public:
+        enum class State { kUninitialized, kCopyingFiles, kCopiedFiles, kImportedFiles };
+
+        void setState(State nextState) {
+            tassert(6114403,
+                    str::stream() << "current state: " << toString(_state)
+                                  << ", new state: " << toString(nextState),
+                    isValidTransition(nextState));
+            _state = nextState;
+        }
+
+        bool is(State state) const {
+            return _state == state;
+        }
+
+        StringData toString() const {
+            return toString(_state);
+        }
+
+    private:
+        static StringData toString(State value) {
+            switch (value) {
+                case State::kUninitialized:
+                    return "uninitialized";
+                case State::kCopyingFiles:
+                    return "copying files";
+                case State::kCopiedFiles:
+                    return "copied files";
+                case State::kImportedFiles:
+                    return "imported files";
+            }
+            MONGO_UNREACHABLE;
+            return StringData();
+        }
+
+        bool isValidTransition(State newState) {
+            if (_state == newState) {
+                return true;
+            }
+
+            switch (_state) {
+                case State::kUninitialized:
+                    return newState == State::kCopyingFiles;
+                case State::kCopyingFiles:
+                    return newState == State::kCopiedFiles || newState == State::kUninitialized;
+                case State::kCopiedFiles:
+                    return newState == State::kImportedFiles || newState == State::kUninitialized;
+                case State::kImportedFiles:
+                    return newState == State::kUninitialized;
+            }
+            MONGO_UNREACHABLE;
+        }
+
+        State _state = State::kUninitialized;
+    };
+
+    ImporterState _state;
 };
 }  // namespace mongo::repl

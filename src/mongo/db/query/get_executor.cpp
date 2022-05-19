@@ -62,6 +62,7 @@
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/canonical_query.h"
@@ -90,7 +91,6 @@
 #include "mongo/db/query/sbe_multi_planner.h"
 #include "mongo/db/query/sbe_sub_planner.h"
 #include "mongo/db/query/sbe_utils.h"
-#include "mongo/db/query/shard_filterer_factory_impl.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
@@ -281,6 +281,13 @@ void fillOutIndexEntries(OperationContext* opCtx,
                          CanonicalQuery* canonicalQuery,
                          const CollectionPtr& collection,
                          std::vector<IndexEntry>& entries) {
+    // TODO SERVER-63352: Eliminate this check once we support auto-parameterized index scan plans.
+    if (feature_flags::gFeatureFlagAutoParameterization.isEnabledAndIgnoreFCV()) {
+        // Indexed plans are not yet supported when auto-parameterization is enabled, so make it
+        // look to the planner like there are no indexes.
+        return;
+    }
+
     auto ii = collection->getIndexCatalog()->getIndexIterator(opCtx, false);
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();
@@ -381,7 +388,9 @@ void fillOutPlannerParams(OperationContext* opCtx,
 }
 
 std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsInformation(
-    OperationContext* opCtx, const MultiCollection& collections, CanonicalQuery* canonicalQuery) {
+    OperationContext* opCtx,
+    const MultipleCollectionAccessor& collections,
+    CanonicalQuery* canonicalQuery) {
     std::map<NamespaceString, SecondaryCollectionInfo> infoMap;
     bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
     auto fillOutSecondaryInfo = [&](const NamespaceString& nss,
@@ -390,7 +399,10 @@ std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsIn
         if (secondaryColl) {
             fillOutIndexEntries(
                 opCtx, apiStrict, canonicalQuery, secondaryColl, secondaryInfo.indexes);
-            secondaryInfo.approximateCollectionSizeBytes = secondaryColl.get()->dataSize(opCtx);
+            auto recordStore = secondaryColl->getRecordStore();
+            secondaryInfo.noOfRecords = recordStore->numRecords(opCtx);
+            secondaryInfo.approximateDataSizeBytes = recordStore->dataSize(opCtx);
+            secondaryInfo.storageSizeBytes = recordStore->storageSize(opCtx);
         } else {
             secondaryInfo.exists = false;
         }
@@ -410,7 +422,7 @@ std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsIn
 }
 
 void fillOutPlannerParams(OperationContext* opCtx,
-                          const MultiCollection& collections,
+                          const MultipleCollectionAccessor& collections,
                           CanonicalQuery* canonicalQuery,
                           QueryPlannerParams* plannerParams) {
     fillOutPlannerParams(opCtx, collections.getMainCollection(), canonicalQuery, plannerParams);
@@ -444,33 +456,6 @@ bool shouldWaitForOplogVisibility(OperationContext* opCtx,
     // batch that would never complete because it couldn't reacquire its own lock, the global lock
     // held by the waiting reader.
     return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(opCtx, "admin");
-}
-
-void prepareExecutionTree(OperationContext* opCtx,
-                          const CollectionPtr& collection,
-                          const CanonicalQuery& cq,
-                          stage_builder::PlanStageData* stageData) {
-    tassert(6183502, "PlanStageData should not be null", stageData);
-    // Populate/renew "shardFilterer" if there exists a "shardFilterer" slot. The slot value
-    // should have been reset to "Nothing" on caching.
-    //
-    // TODO SERVER-61422: Populate the "shardFilterer" when preparing SBE plan.
-    if (auto shardFiltererSlot = stageData->env->getSlotIfExists("shardFilterer"_sd)) {
-        tassert(6108307,
-                "Setting shard filterer slot on un-sharded collection",
-                collection.isSharded());
-
-        auto shardFiltererFactory = std::make_unique<ShardFiltererFactoryImpl>(collection);
-        auto shardFilterer = shardFiltererFactory->makeShardFilterer(opCtx);
-        stageData->env->resetSlot(*shardFiltererSlot,
-                                  sbe::value::TypeTags::shardFilterer,
-                                  sbe::value::bitcastFrom<ShardFilterer*>(shardFilterer.release()),
-                                  true);
-    }
-
-    // If the cached plan is parameterized, bind new values for the parameters into the runtime
-    // environment.
-    input_params::bind(cq, stageData->inputParamToSlotMap, stageData->env);
 }
 
 namespace {
@@ -983,7 +968,7 @@ public:
     using PrepareExecutionHelper::PrepareExecutionHelper;
 
     SlotBasedPrepareExecutionHelper(OperationContext* opCtx,
-                                    const MultiCollection& collections,
+                                    const MultipleCollectionAccessor& collections,
                                     CanonicalQuery* cq,
                                     PlanYieldPolicy* yieldPolicy,
                                     size_t plannerOptions)
@@ -996,9 +981,6 @@ public:
 
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> buildExecutableTree(
         const QuerySolution& solution) const final {
-        // TODO SERVER-62677 We don't pass '_collections' to the function below because at the
-        // moment, no pushdown is actually happening. This should be changed once the logic for
-        // pushdown is implemented.
         return stage_builder::buildSlotBasedExecutableTree(
             _opCtx, _collections, *_cq, solution, _yieldPolicy);
     }
@@ -1008,6 +990,15 @@ protected:
         const IndexDescriptor* descriptor, QueryPlannerParams* plannerParams) final {
         invariant(descriptor);
         invariant(plannerParams);
+
+        // Auto-parameterization currently only works for collection scan plans, but idhack plans
+        // use the _id index. Therefore, we inhibit idhack when auto-parametrization is enabled.
+        //
+        // TODO SERVER-64237: Eliminate this check once we support auto-parameterized ID hack
+        // plans.
+        if (feature_flags::gFeatureFlagAutoParameterization.isEnabledAndIgnoreFCV()) {
+            return nullptr;
+        }
 
         tassert(5536100,
                 "SBE cannot handle query with metadata",
@@ -1019,10 +1010,9 @@ protected:
         }
 
         invariant(descriptor->getEntry());
-        const auto& mainColl = _collections.getMainCollection();
         std::unique_ptr<QuerySolutionNode> root = [&]() {
-            auto ixScan = std::make_unique<IndexScanNode>(
-                indexEntryFromIndexCatalogEntry(_opCtx, mainColl, *descriptor->getEntry(), _cq));
+            auto ixScan = std::make_unique<IndexScanNode>(indexEntryFromIndexCatalogEntry(
+                _opCtx, _collections.getMainCollection(), *descriptor->getEntry(), _cq));
 
             const auto bsonKey =
                 IndexBoundsBuilder::objFromElement(_cq->getQueryObj()["_id"], _cq->getCollator());
@@ -1094,22 +1084,6 @@ protected:
         auto stageData = std::move(cachedPlan->planStageData);
         stageData.debugInfo = std::move(cacheEntry->debugInfo);
 
-        root->attachToOperationContext(_opCtx);
-        root->attachNewYieldPolicy(_yieldPolicy);
-
-        auto expCtx = _cq->getExpCtxRaw();
-        tassert(5968200, "No expression context", expCtx);
-        if (expCtx->explain || expCtx->mayDbProfile) {
-            root->markShouldCollectTimingInfo();
-        }
-
-        // Register this plan to yield according to the configured policy.
-        auto sbeYieldPolicy = dynamic_cast<PlanYieldPolicySBE*>(_yieldPolicy);
-        invariant(sbeYieldPolicy);
-        sbeYieldPolicy->registerPlan(root.get());
-
-        prepareExecutionTree(_opCtx, _collections.getMainCollection(), *_cq, &stageData);
-
         auto result = makeResult();
         result->setDecisionWorks(cacheEntry->decisionWorks);
         result->setRecoveredPinnedCacheEntry(cacheEntry->isPinned());
@@ -1179,7 +1153,7 @@ protected:
     }
 
 private:
-    const MultiCollection& _collections;
+    const MultipleCollectionAccessor& _collections;
 };
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getClassicExecutor(
@@ -1222,7 +1196,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getClassicExecu
  */
 std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     OperationContext* opCtx,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     CanonicalQuery* canonicalQuery,
     size_t numSolutions,
     boost::optional<size_t> decisionWorks,
@@ -1293,7 +1267,7 @@ std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExecutor(
     OperationContext* opCtx,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> cq,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy requestedYieldPolicy,
@@ -1338,7 +1312,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
         return plan_executor_factory::make(opCtx,
                                            std::move(cq),
                                            std::move(candidates),
-                                           mainColl,
+                                           collections,
                                            plannerOptions,
                                            std::move(nss),
                                            std::move(yieldPolicy));
@@ -1354,17 +1328,23 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
             fillOutSecondaryCollectionsInformation(opCtx, collections, cq.get()));
         roots[0] = helper.buildExecutableTree(*(solutions[0]));
     }
-    if (!planningResult->recoveredPinnedCacheEntry()) {
-        auto&& [root, data] = roots[0];
-        plan_cache_util::updatePlanCache(
-            opCtx, collections.getMainCollection(), *cq, *solutions[0], *root, data);
-    }
+    auto&& [root, data] = roots[0];
+    // TODO SERVER-64315: re-enable caching of single solution plans
+    // if (!planningResult->recoveredPinnedCacheEntry()) {
+    //    plan_cache_util::updatePlanCache(
+    //        opCtx, collections.getMainCollection(), *cq, *solutions[0], *root, data);
+    // }
+
+    // Prepare the SBE tree for execution.
+    stage_builder::prepareSlotBasedExecutableTree(
+        opCtx, root.get(), &data, *cq, collections, yieldPolicy.get());
+
     return plan_executor_factory::make(opCtx,
                                        std::move(cq),
                                        std::move(solutions[0]),
                                        std::move(roots[0]),
                                        {},
-                                       mainColl,
+                                       collections,
                                        plannerOptions,
                                        std::move(nss),
                                        std::move(yieldPolicy));
@@ -1373,7 +1353,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     OperationContext* opCtx,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
@@ -1399,7 +1379,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions) {
-    MultiCollection multi{collection};
+    MultipleCollectionAccessor multi{collection};
     return getExecutor(opCtx,
                        multi,
                        std::move(canonicalQuery),
@@ -1414,7 +1394,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     OperationContext* opCtx,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     bool permitYield,
@@ -1442,7 +1422,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     bool permitYield,
     size_t plannerOptions) {
-    MultiCollection multi{*coll};
+    MultipleCollectionAccessor multi{*coll};
     return getExecutorFind(opCtx,
                            multi,
                            std::move(canonicalQuery),
@@ -1653,8 +1633,20 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     invariant(root);
 
     deleteStageParams->canonicalQuery = cq.get();
-    root = std::make_unique<DeleteStage>(
-        cq->getExpCtxRaw(), std::move(deleteStageParams), ws.get(), collection, root.release());
+
+    if (MONGO_unlikely(gInternalBatchUserMultiDeletesForTest.load() &&
+                       nss.ns() == "__internalBatchedDeletesTesting.Collection0")) {
+        root =
+            std::make_unique<BatchedDeleteStage>(cq->getExpCtxRaw(),
+                                                 std::move(deleteStageParams),
+                                                 std::make_unique<BatchedDeleteStageBatchParams>(),
+                                                 ws.get(),
+                                                 collection,
+                                                 root.release());
+    } else {
+        root = std::make_unique<DeleteStage>(
+            cq->getExpCtxRaw(), std::move(deleteStageParams), ws.get(), collection, root.release());
+    }
 
     if (projection) {
         root = std::make_unique<ProjectionStageDefault>(

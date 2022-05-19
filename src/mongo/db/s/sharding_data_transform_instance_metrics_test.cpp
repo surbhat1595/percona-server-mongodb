@@ -44,17 +44,42 @@ public:
     InstanceMetricsWithObserverMock(int64_t startTime,
                                     int64_t timeRemaining,
                                     ShardingDataTransformCumulativeMetrics* cumulativeMetrics)
-        : _impl{cumulativeMetrics, std::make_unique<ObserverMock>(startTime, timeRemaining)} {}
+        : _impl{UUID::gen(),
+                NamespaceString("test.source"),
+                ShardingDataTransformInstanceMetrics::Role::kDonor,
+                BSON("command"
+                     << "test"),
+                cumulativeMetrics,
+                std::make_unique<ObserverMock>(startTime, timeRemaining)} {}
+
 
 private:
     ShardingDataTransformInstanceMetrics _impl;
 };
 
-class ShardingDataTransformInstanceMetricsTest : public ShardingDataTransformMetricsTestFixture {};
+class ShardingDataTransformInstanceMetricsTest : public ShardingDataTransformMetricsTestFixture {
+public:
+    std::unique_ptr<ShardingDataTransformInstanceMetrics> createInstanceMetrics(
+        UUID instanceId = UUID::gen(), Role role = Role::kDonor) {
+        return std::make_unique<ShardingDataTransformInstanceMetrics>(
+            instanceId, kTestCommand, kTestNamespace, role, &_cumulativeMetrics);
+    }
+
+    std::unique_ptr<ShardingDataTransformInstanceMetrics> createInstanceMetrics(
+        std::unique_ptr<ObserverMock> mock) {
+        return std::make_unique<ShardingDataTransformInstanceMetrics>(
+            UUID::gen(),
+            kTestNamespace,
+            ShardingDataTransformInstanceMetrics::Role::kDonor,
+            kTestCommand,
+            &_cumulativeMetrics,
+            std::move(mock));
+    }
+};
 
 TEST_F(ShardingDataTransformInstanceMetricsTest, RegisterAndDeregisterMetrics) {
     for (auto i = 0; i < 100; i++) {
-        ShardingDataTransformInstanceMetrics metrics(&_cumulativeMetrics);
+        auto metrics = createInstanceMetrics();
         ASSERT_EQ(_cumulativeMetrics.getObservedMetricsCount(), 1);
     }
     ASSERT_EQ(_cumulativeMetrics.getObservedMetricsCount(), 0);
@@ -64,19 +89,11 @@ TEST_F(ShardingDataTransformInstanceMetricsTest, RegisterAndDeregisterMetricsAtO
     {
         std::vector<std::unique_ptr<ShardingDataTransformInstanceMetrics>> registered;
         for (auto i = 0; i < 100; i++) {
-            registered.emplace_back(
-                std::make_unique<ShardingDataTransformInstanceMetrics>(&_cumulativeMetrics));
+            registered.emplace_back(createInstanceMetrics());
             ASSERT_EQ(_cumulativeMetrics.getObservedMetricsCount(), registered.size());
         }
     }
     ASSERT_EQ(_cumulativeMetrics.getObservedMetricsCount(), 0);
-}
-
-TEST_F(ShardingDataTransformInstanceMetricsTest, UsesObserverToReportTimeEstimate) {
-    constexpr auto kExpectedTimeLeft = 1000;
-    ShardingDataTransformInstanceMetrics metrics{
-        &_cumulativeMetrics, std::make_unique<ObserverMock>(0, kExpectedTimeLeft)};
-    ASSERT_EQ(metrics.getRemainingTimeMillis(), kExpectedTimeLeft);
 }
 
 TEST_F(ShardingDataTransformInstanceMetricsTest, RandomOperations) {
@@ -85,6 +102,83 @@ TEST_F(ShardingDataTransformInstanceMetricsTest, RandomOperations) {
 
 TEST_F(ShardingDataTransformInstanceMetricsTest, RandomOperationsMultithreaded) {
     doRandomOperationsMultithreadedTest<InstanceMetricsWithObserverMock>();
+}
+
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, ReportForCurrentOpShouldHaveGenericDescription) {
+
+
+    std::vector<Role> roles{Role::kCoordinator, Role::kDonor, Role::kRecipient};
+
+    std::for_each(roles.begin(), roles.end(), [&](auto role) {
+        auto instanceId = UUID::gen();
+        auto metrics = createInstanceMetrics(instanceId, role);
+        auto report = metrics->reportForCurrentOp();
+        ASSERT_EQ(report.getStringField("desc").toString(),
+                  fmt::format("ShardingDataTransformMetrics{}Service {}",
+                              ShardingDataTransformMetrics::getRoleName(role),
+                              instanceId.toString()));
+    });
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, GetRoleNameShouldReturnCorrectName) {
+    std::vector<std::pair<Role, std::string>> roles{
+        {Role::kCoordinator, "Coordinator"},
+        {Role::kDonor, "Donor"},
+        {Role::kRecipient, "Recipient"},
+    };
+
+    std::for_each(roles.begin(), roles.end(), [&](auto role) {
+        ASSERT_EQ(ShardingDataTransformMetrics::getRoleName(role.first), role.second);
+    });
+}
+
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, OnInsertAppliedShouldIncrementInsertsApplied) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("insertsApplied"), 0);
+    metrics->onInsertApplied();
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("insertsApplied"), 1);
+}
+
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, OnUpdateAppliedShouldIncrementUpdatesApplied) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("updatesApplied"), 0);
+    metrics->onUpdateApplied();
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("updatesApplied"), 1);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, OnDeleteAppliedShouldIncrementDeletesApplied) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("deletesApplied"), 0);
+    metrics->onDeleteApplied();
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("deletesApplied"), 1);
+}
+
+
+TEST_F(ShardingDataTransformInstanceMetricsTest,
+       OnOplogsEntriesAppliedShouldIncrementOplogsEntriesApplied) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("oplogEntriesApplied"), 0);
+    metrics->onOplogEntriesApplied(100);
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("oplogEntriesApplied"), 100);
 }
 
 }  // namespace

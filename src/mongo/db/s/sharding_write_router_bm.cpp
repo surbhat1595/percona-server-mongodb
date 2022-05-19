@@ -27,35 +27,31 @@
  *    it in the license file.
  */
 
-#include "mongo/db/keypattern.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/s/collection_sharding_state_factory_shard.h"
-#include "mongo/db/service_context.h"
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/concurrency/locker_noop_client_observer.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/catalog_cache_loader_mock.h"
-#include "mongo/s/catalog_cache_mock.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/processinfo.h"
-#include "mongo/util/uuid.h"
 #include <benchmark/benchmark.h>
-
-#include "mongo/base/init.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/sharding_state.h"
-#include "mongo/db/s/sharding_write_router.h"
-#include "mongo/platform/random.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 #include <cstdint>
 #include <utility>
 #include <vector>
 
+#include "mongo/db/concurrency/locker_noop_client_observer.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/s/collection_metadata.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
+#include "mongo/db/s/collection_sharding_state_factory_shard.h"
+#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/sharding_state.h"
+#include "mongo/db/s/sharding_write_router.h"
+#include "mongo/db/service_context.h"
+#include "mongo/platform/random.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/catalog_cache_loader_mock.h"
+#include "mongo/s/catalog_cache_mock.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace {
@@ -117,7 +113,7 @@ std::pair<std::vector<mongo::ChunkType>, mongo::ChunkManager> createChunks(
     reshardingFields.setDonorFields(TypeCollectionDonorFields{tempNss, reshardKeyPattern, shards});
 
     ChunkManager cm(shards[0],
-                    DatabaseVersion(UUID::gen(), Timestamp()),
+                    DatabaseVersion(UUID::gen(), Timestamp(1, 0)),
                     makeStandaloneRoutingTableHistory(
                         RoutingTableHistory::makeNew(kNss,
                                                      collIdentifier,
@@ -145,21 +141,17 @@ std::unique_ptr<CatalogCacheMock> createCatalogCacheMock(OperationContext* opCtx
 
     const auto [chunks, chunkManager] = createChunks(nShards, nChunks, shards);
 
-    // Necessary to make usages of 'CollectionShardingState::get(opCtx, nss);' work
+    ShardingState::get(opCtx->getServiceContext())->setInitialized(originatorShard, clusterId);
+
     CollectionShardingStateFactory::set(
         opCtx->getServiceContext(),
         std::make_unique<CollectionShardingStateFactoryShard>(opCtx->getServiceContext()));
 
-    // necessary to make ShardingState::get(_serviceContext)->enabled() return true
-    ShardingState::get(opCtx->getServiceContext())->setInitialized(originatorShard, clusterId);
-
-    BSONObjBuilder builder;
-    chunkManager.getVersion(originatorShard)
-        .serializeToBSON(ChunkVersion::kShardVersionField, &builder);
-    // necessary to set the _shardVersions and _databaseVersions to true. Which is needed to get
-    // `getCollectionDescription` to work
-    OperationShardingState::get(opCtx).initializeClientRoutingVersionsFromCommand(kNss,
-                                                                                  builder.obj());
+    OperationShardingState::setShardRole(
+        opCtx,
+        kNss,
+        chunkManager.getVersion(originatorShard) /* shardVersion */,
+        boost::none /* databaseVersion */);
 
     // Configuring the filtering metadata such that calls to getCollectionDescription return what we
     // want. Specifically the reshardingFields are what we use. Its specified by the chunkManager.

@@ -37,11 +37,11 @@ namespace cluster {
 
 /**
  * Creates (or ensures that it is created) a database `dbName`, with `suggestedPrimaryId` as the
- * primary node and the `shardingEnabled` field set to true.
+ * primary node.
  */
 CachedDatabaseInfo createDatabase(OperationContext* opCtx,
                                   StringData dbName,
-                                  boost::optional<ShardId> suggestedPrimaryId = boost::none);
+                                  const boost::optional<ShardId>& suggestedPrimaryId = boost::none);
 
 /**
  * Creates the specified sharded collection.

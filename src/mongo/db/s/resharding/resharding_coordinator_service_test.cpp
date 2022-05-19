@@ -342,9 +342,8 @@ public:
                                 std::move(epoch),
                                 Timestamp(1, 2),
                                 lastUpdated,
-                                std::move(uuid));
-        collType.setKeyPattern(shardKey);
-        collType.setUnique(false);
+                                std::move(uuid),
+                                shardKey);
         if (reshardingFields)
             collType.setReshardingFields(std::move(reshardingFields.get()));
 
@@ -382,9 +381,8 @@ public:
 
         DatabaseType dbDoc(coordinatorDoc.getSourceNss().db().toString(),
                            coordinatorDoc.getDonorShards().front().getId(),
-                           true,
                            DatabaseVersion{UUID::gen(), Timestamp(1, 1)});
-        client.insert(DatabaseType::ConfigNS.ns(), dbDoc.toBSON());
+        client.insert(NamespaceString::kConfigDatabasesNamespace.ns(), dbDoc.toBSON());
 
         return coordinatorDoc;
     }

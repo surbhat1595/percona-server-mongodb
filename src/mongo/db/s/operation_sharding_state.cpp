@@ -27,9 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/operation_sharding_state.h"
+
+#include "mongo/db/s/sharding_api_d_params_gen.h"
 
 namespace mongo {
 namespace {
@@ -37,14 +37,6 @@ namespace {
 const OperationContext::Decoration<OperationShardingState> shardingMetadataDecoration =
     OperationContext::declareDecoration<OperationShardingState>();
 
-// Max time to wait for the migration critical section to complete
-const Milliseconds kMaxWaitForMigrationCriticalSection = Minutes(5);
-
-// Max time to wait for the movePrimary critical section to complete
-const Milliseconds kMaxWaitForMovePrimaryCriticalSection = Minutes(5);
-
-// The name of the field in which the client attaches its database version.
-constexpr auto kDbVersionField = "databaseVersion"_sd;
 }  // namespace
 
 OperationShardingState::OperationShardingState() = default;
@@ -62,54 +54,36 @@ bool OperationShardingState::isOperationVersioned(OperationContext* opCtx) {
     return !oss._shardVersions.empty();
 }
 
-void OperationShardingState::initializeClientRoutingVersionsFromCommand(NamespaceString nss,
-                                                                        const BSONObj& cmdObj) {
-    boost::optional<ChunkVersion> shardVersion;
-    boost::optional<DatabaseVersion> dbVersion;
-    const auto shardVersionElem = cmdObj.getField(ChunkVersion::kShardVersionField);
-    if (!shardVersionElem.eoo()) {
-        shardVersion = ChunkVersion::fromBSONPositionalOrNewerFormat(shardVersionElem);
-    }
+void OperationShardingState::setShardRole(OperationContext* opCtx,
+                                          const NamespaceString& nss,
+                                          const boost::optional<ChunkVersion>& shardVersion,
+                                          const boost::optional<DatabaseVersion>& databaseVersion) {
+    auto& oss = OperationShardingState::get(opCtx);
 
-    const auto dbVersionElem = cmdObj.getField(kDbVersionField);
-    if (!dbVersionElem.eoo()) {
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "expected databaseVersion element to be an object, got "
-                              << dbVersionElem,
-                dbVersionElem.type() == BSONType::Object);
-
-        dbVersion = DatabaseVersion(dbVersionElem.Obj());
-    }
-
-    initializeClientRoutingVersions(nss, shardVersion, dbVersion);
-}
-
-void OperationShardingState::initializeClientRoutingVersions(
-    NamespaceString nss,
-    const boost::optional<ChunkVersion>& shardVersion,
-    const boost::optional<DatabaseVersion>& dbVersion) {
     if (shardVersion) {
-        // Changing the shardVersion expected for a namespace is not safe to happen in the
-        // middle of execution, but for the cases where operation is retried on the same
-        // OperationContext it can be set twice to the same value.
-        if (_shardVersionsChecked.contains(nss.ns())) {
-            invariant(_shardVersions[nss.ns()] == *shardVersion,
-                      str::stream()
-                          << "Trying to set " << shardVersion->toString() << " for " << nss.ns()
-                          << " but it already has " << _shardVersions[nss.ns()].toString());
-        } else {
-            _shardVersions.emplace(nss.ns(), *shardVersion);
+        auto emplaceResult = oss._shardVersions.try_emplace(nss.ns(), *shardVersion);
+        auto& tracker = emplaceResult.first->second;
+        if (!emplaceResult.second) {
+            uassert(640570,
+                    str::stream() << "Illegal attempt to change the expected shard version for "
+                                  << nss << " from " << tracker.v << " to " << *shardVersion,
+                    tracker.v == *shardVersion);
         }
+        invariant(++tracker.recursion > 0);
     }
-    if (dbVersion) {
-        const auto [_, inserted] = _databaseVersions.emplace(nss.db(), *dbVersion);
-        invariant(inserted);
-    }
-}
 
-void OperationShardingState::unsetExpectedDbVersion_Only_For_Aggregation_Local_Reads(
-    const StringData& dbName) {
-    _databaseVersions.erase(dbName);
+    if (databaseVersion) {
+        auto emplaceResult = oss._databaseVersions.try_emplace(nss.db(), *databaseVersion);
+        auto& tracker = emplaceResult.first->second;
+        if (!emplaceResult.second) {
+            uassert(640571,
+                    str::stream() << "Illegal attempt to change the expected database version for "
+                                  << nss.db() << " from " << tracker.v << " to "
+                                  << *databaseVersion,
+                    tracker.v == *databaseVersion);
+        }
+        invariant(++tracker.recursion > 0);
+    }
 }
 
 bool OperationShardingState::hasShardVersion(const NamespaceString& nss) const {
@@ -117,12 +91,10 @@ bool OperationShardingState::hasShardVersion(const NamespaceString& nss) const {
 }
 
 boost::optional<ChunkVersion> OperationShardingState::getShardVersion(const NamespaceString& nss) {
-    _shardVersionsChecked.insert(nss.ns());
     const auto it = _shardVersions.find(nss.ns());
     if (it != _shardVersions.end()) {
-        return it->second;
+        return it->second.v;
     }
-
     return boost::none;
 }
 
@@ -130,63 +102,44 @@ bool OperationShardingState::hasDbVersion() const {
     return !_databaseVersions.empty();
 }
 
-boost::optional<DatabaseVersion> OperationShardingState::getDbVersion(
-    const StringData dbName) const {
+boost::optional<DatabaseVersion> OperationShardingState::getDbVersion(StringData dbName) const {
     const auto it = _databaseVersions.find(dbName);
-    if (it == _databaseVersions.end()) {
-        return boost::none;
+    if (it != _databaseVersions.end()) {
+        return it->second.v;
     }
-    return it->second;
+    return boost::none;
 }
 
-bool OperationShardingState::waitForMigrationCriticalSectionSignal(OperationContext* opCtx) {
+Status OperationShardingState::waitForCriticalSectionToComplete(
+    OperationContext* opCtx, SharedSemiFuture<void> critSecSignal) noexcept {
     // Must not block while holding a lock
     invariant(!opCtx->lockState()->isLocked());
 
-    if (_migrationCriticalSectionSignal) {
-        auto deadline = opCtx->getServiceContext()->getFastClockSource()->now() +
-            std::min(opCtx->getRemainingMaxTimeMillis(), kMaxWaitForMigrationCriticalSection);
-
-        opCtx->runWithDeadline(deadline, ErrorCodes::ExceededTimeLimit, [&] {
-            _migrationCriticalSectionSignal->wait(opCtx);
-        });
-
-        _migrationCriticalSectionSignal = boost::none;
-        return true;
+    // If we are in a transaction, limit the time we can wait behind the critical section. This is
+    // needed in order to prevent distributed deadlocks in situations where a DDL operation needs to
+    // acquire the critical section on several shards.
+    //
+    // In such cases, shard running a transaction could be waiting for the critical section to be
+    // exited, while on another shard the transaction has already executed some statement and
+    // stashed locks which prevent the critical section from being acquired in that node. Limiting
+    // the wait behind the critical section will ensure that the transaction will eventually get
+    // aborted.
+    if (opCtx->inMultiDocumentTransaction()) {
+        try {
+            opCtx->runWithDeadline(
+                opCtx->getServiceContext()->getFastClockSource()->now() +
+                    Milliseconds(metadataRefreshInTransactionMaxWaitBehindCritSecMS.load()),
+                ErrorCodes::ExceededTimeLimit,
+                [&] { critSecSignal.wait(opCtx); });
+            return Status::OK();
+        } catch (const DBException& ex) {
+            // This is a best-effort attempt to wait for the critical section to complete, so no
+            // need to handle any exceptions
+            return ex.toStatus();
+        }
+    } else {
+        return critSecSignal.waitNoThrow(opCtx);
     }
-
-    return false;
-}
-
-void OperationShardingState::setMigrationCriticalSectionSignal(
-    boost::optional<SharedSemiFuture<void>> critSecSignal) {
-    invariant(critSecSignal);
-    _migrationCriticalSectionSignal = std::move(critSecSignal);
-}
-
-bool OperationShardingState::waitForMovePrimaryCriticalSectionSignal(OperationContext* opCtx) {
-    // Must not block while holding a lock
-    invariant(!opCtx->lockState()->isLocked());
-
-    if (_movePrimaryCriticalSectionSignal) {
-        auto deadline = opCtx->getServiceContext()->getFastClockSource()->now() +
-            std::min(opCtx->getRemainingMaxTimeMillis(), kMaxWaitForMovePrimaryCriticalSection);
-
-        opCtx->runWithDeadline(deadline, ErrorCodes::ExceededTimeLimit, [&] {
-            _movePrimaryCriticalSectionSignal->wait(opCtx);
-        });
-
-        _movePrimaryCriticalSectionSignal = boost::none;
-        return true;
-    }
-
-    return false;
-}
-
-void OperationShardingState::setMovePrimaryCriticalSectionSignal(
-    boost::optional<SharedSemiFuture<void>> critSecSignal) {
-    invariant(critSecSignal);
-    _movePrimaryCriticalSectionSignal = std::move(critSecSignal);
 }
 
 void OperationShardingState::setShardingOperationFailedStatus(const Status& status) {
@@ -218,6 +171,39 @@ ScopedAllowImplicitCollectionCreate_UNSAFE::~ScopedAllowImplicitCollectionCreate
     auto& oss = get(_opCtx);
     invariant(oss._allowCollectionCreation);
     oss._allowCollectionCreation = false;
+}
+
+ScopedSetShardRole::ScopedSetShardRole(OperationContext* opCtx,
+                                       NamespaceString nss,
+                                       boost::optional<ChunkVersion> shardVersion,
+                                       boost::optional<DatabaseVersion> databaseVersion)
+    : _opCtx(opCtx),
+      _nss(std::move(nss)),
+      _shardVersion(std::move(shardVersion)),
+      _databaseVersion(std::move(databaseVersion)) {
+    OperationShardingState::setShardRole(_opCtx, _nss, _shardVersion, _databaseVersion);
+}
+
+ScopedSetShardRole::~ScopedSetShardRole() {
+    auto& oss = OperationShardingState::get(_opCtx);
+
+    if (_shardVersion) {
+        auto it = oss._shardVersions.find(_nss.ns());
+        invariant(it != oss._shardVersions.end());
+        auto& tracker = it->second;
+        invariant(--tracker.recursion >= 0);
+        if (tracker.recursion == 0)
+            oss._shardVersions.erase(it);
+    }
+
+    if (_databaseVersion) {
+        auto it = oss._databaseVersions.find(_nss.db());
+        invariant(it != oss._databaseVersions.end());
+        auto& tracker = it->second;
+        invariant(--tracker.recursion >= 0);
+        if (tracker.recursion == 0)
+            oss._databaseVersions.erase(it);
+    }
 }
 
 }  // namespace mongo

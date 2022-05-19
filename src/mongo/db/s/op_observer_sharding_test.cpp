@@ -44,14 +44,12 @@ const NamespaceString kTestNss("TestDB", "TestColl");
 
 void setCollectionFilteringMetadata(OperationContext* opCtx, CollectionMetadata metadata) {
     AutoGetCollection autoColl(opCtx, kTestNss, MODE_X);
-    const auto version = metadata.getShardVersion();
+    const auto shardVersion = metadata.getShardVersion();
     CollectionShardingRuntime::get(opCtx, kTestNss)
         ->setFilteringMetadata(opCtx, std::move(metadata));
 
-    BSONObjBuilder builder;
-    version.serializeToBSON(ChunkVersion::kShardVersionField, &builder);
-    auto& oss = OperationShardingState::get(opCtx);
-    oss.initializeClientRoutingVersionsFromCommand(kTestNss, builder.obj());
+    OperationShardingState::setShardRole(
+        opCtx, kTestNss, shardVersion, boost::none /* databaseVersion */);
 }
 
 class DocumentKeyStateTest : public ShardServerTestFixture {

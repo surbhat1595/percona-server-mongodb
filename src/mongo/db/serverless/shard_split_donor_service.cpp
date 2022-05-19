@@ -43,8 +43,10 @@
 #include "mongo/executor/cancelable_executor.h"
 #include "mongo/executor/connection_pool.h"
 #include "mongo/executor/network_interface_factory.h"
+#include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future_util.h"
 #include "mongo/util/time_support.h"
@@ -107,89 +109,65 @@ void checkForTokenInterrupt(const CancellationToken& token) {
 MONGO_FAIL_POINT_DEFINE(pauseShardSplitBeforeBlocking);
 MONGO_FAIL_POINT_DEFINE(pauseShardSplitAfterBlocking);
 MONGO_FAIL_POINT_DEFINE(skipShardSplitWaitForSplitAcceptance);
+MONGO_FAIL_POINT_DEFINE(pauseShardSplitBeforeRecipientCleanup);
 
 const std::string kTTLIndexName = "ShardSplitDonorTTLIndex";
 
 }  // namespace
 
 namespace detail {
-std::function<bool(const std::vector<sdam::ServerDescriptionPtr>&)>
-makeRecipientAcceptSplitPredicate(const ConnectionString& recipientConnectionString) {
-    return [recipientConnectionString](const std::vector<sdam::ServerDescriptionPtr>& servers) {
-        auto recipientNodeCount =
-            static_cast<uint32_t>(recipientConnectionString.getServers().size());
-        auto nodesReportingRecipientSetName =
-            std::count_if(servers.begin(), servers.end(), [&](const auto& server) {
-                return server->getSetName() &&
-                    *(server->getSetName()) == recipientConnectionString.getSetName();
-            });
 
-        return nodesReportingRecipientSetName == recipientNodeCount;
-    };
-}
-
-SemiFuture<void> makeRecipientAcceptSplitFuture(ExecutorPtr executor,
-                                                const CancellationToken& token,
-                                                const StringData& recipientTagName,
-                                                const StringData& recipientSetName) {
-    class RecipientAcceptSplitListener : public sdam::TopologyListener {
-    public:
-        RecipientAcceptSplitListener(const ConnectionString& recipientConnectionString)
-            : _predicate(makeRecipientAcceptSplitPredicate(recipientConnectionString)) {}
-        void onTopologyDescriptionChangedEvent(TopologyDescriptionPtr previousDescription,
-                                               TopologyDescriptionPtr newDescription) final {
-            stdx::lock_guard<Latch> lg(_mutex);
-            if (_fulfilled) {
-                return;
-            }
-
-            if (_predicate(newDescription->getServers())) {
-                _fulfilled = true;
-                _promise.emplaceValue();
-            }
-        }
-
-        // Fulfilled when all nodes have accepted the split.
-        SharedSemiFuture<void> getFuture() const {
-            return _promise.getFuture();
-        }
-
-    private:
-        bool _fulfilled = false;
-        std::function<bool(const std::vector<sdam::ServerDescriptionPtr>&)> _predicate;
-        SharedPromise<void> _promise;
-        mutable Mutex _mutex =
-            MONGO_MAKE_LATCH("ShardSplitDonorService::getRecipientAcceptSplitFuture::_mutex");
-    };
+SemiFuture<void> makeRecipientAcceptSplitFuture(
+    std::shared_ptr<executor::TaskExecutor> taskExecutor,
+    const CancellationToken& token,
+    const StringData& recipientTagName,
+    const StringData& recipientSetName) {
 
     auto replCoord = repl::ReplicationCoordinator::get(cc().getServiceContext());
     invariant(replCoord);
     auto recipientConnectionString = serverless::makeRecipientConnectionString(
         replCoord->getConfig(), recipientTagName, recipientSetName);
-    auto monitor = ReplicaSetMonitor::createIfNeeded(MongoURI{recipientConnectionString});
-    invariant(monitor);
 
-    // Only StreamableReplicaSetMonitor derives ReplicaSetMonitor.  Therefore static cast is
-    // possible
-    auto streamableMonitor = checked_pointer_cast<StreamableReplicaSetMonitor>(monitor);
+    // build a vector of single server discovery monitors to listen for heartbeats
+    auto eventsPublisher = std::make_shared<sdam::TopologyEventsPublisher>(taskExecutor);
 
-    auto listener = std::make_shared<RecipientAcceptSplitListener>(recipientConnectionString);
-    streamableMonitor->getEventsPublisher()->registerListener(listener);
+    auto listener = std::make_shared<mongo::serverless::RecipientAcceptSplitListener>(
+        recipientConnectionString);
+    eventsPublisher->registerListener(listener);
+
+    auto managerStats = std::make_shared<ReplicaSetMonitorManagerStats>();
+    auto stats = std::make_shared<ReplicaSetMonitorStats>(managerStats);
+    auto recipientNodes = recipientConnectionString.getServers();
+
+    std::vector<SingleServerDiscoveryMonitorPtr> monitors;
+    for (const auto& server : recipientNodes) {
+        SdamConfiguration sdamConfiguration(std::vector<HostAndPort>{server});
+        auto connectionString = ConnectionString::forStandalones(std::vector<HostAndPort>{server});
+
+        monitors.push_back(
+            std::make_shared<SingleServerDiscoveryMonitor>(MongoURI{connectionString},
+                                                           server,
+                                                           boost::none,
+                                                           sdamConfiguration,
+                                                           eventsPublisher,
+                                                           taskExecutor,
+                                                           stats));
+        monitors.back()->init();
+    }
 
     LOGV2(6142508,
           "Monitoring recipient nodes for split acceptance.",
           "recipientConnectionString"_attr = recipientConnectionString);
 
     return future_util::withCancellation(listener->getFuture(), token)
-        .thenRunOn(executor)
+        .thenRunOn(taskExecutor)
         // Preserve lifetime of listener and monitor until the future is fulfilled and remove the
         // listener.
-        .onCompletion([listener, monitor = streamableMonitor](Status s) {
-            monitor->getEventsPublisher()->removeListener(listener);
-            return s;
-        })
+        .onCompletion([monitors = std::move(monitors), listener, eventsPublisher, taskExecutor](
+                          Status s) { return s; })
         .semi();
 }
+
 }  // namespace detail
 
 ThreadPool::Limits ShardSplitDonorService::getThreadPoolLimits() const {
@@ -231,6 +209,9 @@ ExecutorFuture<void> ShardSplitDonorService::_createStateDocumentTTLIndex(
 
 ExecutorFuture<void> ShardSplitDonorService::_rebuildService(
     std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token) {
+    if (!repl::feature_flags::gShardSplit.isEnabled(serverGlobalParams.featureCompatibility)) {
+        return ExecutorFuture(**executor);
+    }
     return _createStateDocumentTTLIndex(executor, token);
 }
 
@@ -290,7 +271,6 @@ Status ShardSplitDonorService::DonorStateMachine::checkIfOptionsConflict(
 
 SemiFuture<void> ShardSplitDonorService::DonorStateMachine::run(
     ScopedTaskExecutorPtr executor, const CancellationToken& primaryToken) noexcept {
-
     auto abortToken = [&]() {
         stdx::lock_guard<Latch> lg(_mutex);
         _abortSource = CancellationSource(primaryToken);
@@ -303,6 +283,40 @@ SemiFuture<void> ShardSplitDonorService::DonorStateMachine::run(
 
     _markKilledExecutor->startup();
     _cancelableOpCtxFactory.emplace(primaryToken, _markKilledExecutor);
+
+    pauseShardSplitBeforeRecipientCleanup.pauseWhileSet();
+
+    const bool shouldRemoveStateDocumentOnRecipient = [&]() {
+        auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+        stdx::lock_guard<Latch> lg(_mutex);
+        return serverless::shouldRemoveStateDocumentOnRecipient(opCtx.get(), _stateDoc);
+    }();
+
+    if (shouldRemoveStateDocumentOnRecipient) {
+        LOGV2(6309000,
+              "Cancelling and cleaning up shard split operation on recipient in blocking state.",
+              "id"_attr = _migrationId);
+        _decisionPromise.setWith([&] {
+            return ExecutorFuture(**executor)
+                .then([this, executor, primaryToken, anchor = shared_from_this()] {
+                    return _cleanRecipientStateDoc(executor, primaryToken);
+                })
+                .then([this, executor, migrationId = _migrationId]() {
+                    LOGV2(6236607,
+                          "Cleanup stale shard split operation on recipient.",
+                          "migrationId"_attr = migrationId);
+                    return DurableState{ShardSplitDonorStateEnum::kCommitted};
+                })
+                .unsafeToInlineFuture();
+        });
+
+        _completionPromise.setWith([&] {
+            return _decisionPromise.getFuture().semi().ignoreValue().unsafeToInlineFuture();
+        });
+
+        return _completionPromise.getFuture().semi();
+    }
+
     _initiateTimeout(executor, abortToken);
 
     LOGV2(6086506,
@@ -322,12 +336,21 @@ SemiFuture<void> ShardSplitDonorService::DonorStateMachine::run(
             .then([this, executor, abortToken] {
                 checkForTokenInterrupt(abortToken);
                 _cancelableOpCtxFactory.emplace(abortToken, _markKilledExecutor);
-                _createReplicaSetMonitor(executor, abortToken);
+                _createReplicaSetMonitor(abortToken);
                 return _enterBlockingState(executor, abortToken);
             })
-            .then([this] { pauseShardSplitAfterBlocking.pauseWhileSet(); })
+            .then([this, abortToken] {
+                if (MONGO_unlikely(pauseShardSplitAfterBlocking.shouldFail())) {
+                    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+                    pauseShardSplitAfterBlocking.pauseWhileSetAndNotCanceled(opCtx.get(),
+                                                                             abortToken);
+                }
+            })
             .then([this, executor, abortToken] {
                 return _waitForRecipientToReachBlockTimestamp(executor, abortToken);
+            })
+            .then([this, executor, abortToken] {
+                return _applySplitConfigToDonor(executor, abortToken);
             })
             .then([this, executor, abortToken] {
                 return _waitForRecipientToAcceptSplit(executor, abortToken);
@@ -427,6 +450,64 @@ ShardSplitDonorService::DonorStateMachine::_waitForRecipientToReachBlockTimestam
         auto replCoord = repl::ReplicationCoordinator::get(cc().getServiceContext());
         uassertStatusOK(replCoord->awaitReplication(opCtx.get(), blockOpTime, writeConcern).status);
     });
+}
+
+ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_applySplitConfigToDonor(
+    const ScopedTaskExecutorPtr& executor, const CancellationToken& token) {
+    checkForTokenInterrupt(token);
+
+    {
+        stdx::lock_guard<Latch> lg(_mutex);
+        if (_stateDoc.getState() >= ShardSplitDonorStateEnum::kCommitted) {
+            return ExecutorFuture(**executor);
+        }
+    }
+
+
+    auto replCoord = repl::ReplicationCoordinator::get(cc().getServiceContext());
+    invariant(replCoord);
+
+    LOGV2(6309100,
+          "Generating and applying a split config",
+          "id"_attr = _migrationId,
+          "conf"_attr = replCoord->getConfig());
+
+    return AsyncTry([this] {
+               auto opCtxHolder = _cancelableOpCtxFactory->makeOperationContext(&cc());
+
+               auto newConfig = [&]() {
+                   stdx::lock_guard<Latch> lg(_mutex);
+                   auto setName = _stateDoc.getRecipientSetName();
+                   invariant(setName);
+                   auto tagName = _stateDoc.getRecipientTagName();
+                   invariant(tagName);
+
+                   auto replCoord = repl::ReplicationCoordinator::get(cc().getServiceContext());
+                   invariant(replCoord);
+
+                   return serverless::makeSplitConfig(
+                       replCoord->getConfig(), setName->toString(), tagName->toString());
+               }();
+
+               DBDirectClient client(opCtxHolder.get());
+
+               BSONObj result;
+               const bool returnValue =
+                   client.runCommand(NamespaceString::kAdminDb.toString(),
+                                     BSON("replSetReconfig" << newConfig.toBSON()),
+                                     result);
+               uassert(
+                   ErrorCodes::BadValue, "Invalid return value for replSetReconfig", returnValue);
+               uassertStatusOK(getStatusFromCommandResult(result));
+           })
+        .until([](Status status) { return status.isOK(); })
+        .withBackoffBetweenIterations(kExponentialBackoff)
+        .on(**executor, token)
+        .then([this] {
+            LOGV2(6309101,
+                  "Split config has been generated and committed.",
+                  "id"_attr = _migrationId);
+        });
 }
 
 ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_waitForRecipientToAcceptSplit(
@@ -641,7 +722,14 @@ void ShardSplitDonorService::DonorStateMachine::_initiateTimeout(
 }
 
 void ShardSplitDonorService::DonorStateMachine::_createReplicaSetMonitor(
-    const ScopedTaskExecutorPtr& executor, const CancellationToken& abortToken) {
+    const CancellationToken& abortToken) {
+    {
+        stdx::lock_guard<Latch> lg(_mutex);
+        if (_stateDoc.getState() > ShardSplitDonorStateEnum::kBlocking) {
+            return;
+        }
+    }
+
     auto future = [&]() {
         stdx::lock_guard<Latch> lg(_mutex);
         if (MONGO_unlikely(skipShardSplitWaitForSplitAcceptance.shouldFail())) {  // Test-only.
@@ -654,7 +742,10 @@ void ShardSplitDonorService::DonorStateMachine::_createReplicaSetMonitor(
         invariant(recipientSetName);
 
         return detail::makeRecipientAcceptSplitFuture(
-            **executor, abortToken, *recipientTagName, *recipientSetName);
+            _shardSplitService->getInstanceCleanupExecutor(),
+            abortToken,
+            *recipientTagName,
+            *recipientSetName);
     }();
 
     _recipientAcceptedSplit.setFrom(std::move(future).unsafeToInlineFuture());
@@ -768,6 +859,25 @@ ShardSplitDonorService::DonorStateMachine::_waitForForgetCmdThenMarkGarbageColle
         .then([this, self = shared_from_this(), executor, token](repl::OpTime opTime) {
             return _waitForMajorityWriteConcern(executor, std::move(opTime), token);
         });
+}
+
+ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_cleanRecipientStateDoc(
+    const ScopedTaskExecutorPtr& executor, const CancellationToken& token) {
+
+    return AsyncTry([this, self = shared_from_this()] {
+               auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+               auto deleted =
+                   uassertStatusOK(serverless::deleteStateDoc(opCtx.get(), _migrationId));
+               uassert(ErrorCodes::ConflictingOperationInProgress,
+                       str::stream()
+                           << "Did not find active shard split with migration id " << _migrationId,
+                       deleted);
+               return repl::ReplClientInfo::forClient(opCtx.get()->getClient()).getLastOp();
+           })
+        .until([](StatusWith<repl::OpTime> swOpTime) { return swOpTime.getStatus().isOK(); })
+        .withBackoffBetweenIterations(kExponentialBackoff)
+        .on(**executor, token)
+        .ignoreValue();
 }
 
 }  // namespace mongo

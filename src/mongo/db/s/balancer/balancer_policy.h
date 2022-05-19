@@ -38,6 +38,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/balancer/cluster_statistics.h"
 #include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/request_types/auto_split_vector_gen.h"
 #include "mongo/s/request_types/move_chunk_request.h"
 #include "mongo/s/shard_id.h"
 
@@ -55,13 +56,19 @@ struct ZoneRange {
 };
 
 struct MigrateInfo {
-    enum MigrationReason { drain, zoneViolation, chunksImbalance };
-
     MigrateInfo(const ShardId& a_to,
                 const NamespaceString& a_nss,
                 const ChunkType& a_chunk,
-                MoveChunkRequest::ForceJumbo a_forceJumbo,
-                MigrationReason a_reason);
+                MoveChunkRequest::ForceJumbo a_forceJumbo);
+
+    MigrateInfo(const ShardId& a_to,
+                const ShardId& a_from,
+                const NamespaceString& a_nss,
+                const UUID& a_uuid,
+                const BSONObj& a_min,
+                const BSONObj& a_max,
+                const ChunkVersion& a_version,
+                MoveChunkRequest::ForceJumbo a_forceJumbo);
 
     std::string getName() const;
 
@@ -77,10 +84,13 @@ struct MigrateInfo {
     BSONObj maxKey;
     ChunkVersion version;
     MoveChunkRequest::ForceJumbo forceJumbo;
-    MigrationReason reason;
 };
 
+enum MigrationReason { none, drain, zoneViolation, chunksImbalance };
+
 typedef std::vector<MigrateInfo> MigrateInfoVector;
+
+typedef std::pair<MigrateInfoVector, MigrationReason> MigrateInfosWithReason;
 
 typedef std::vector<BSONObj> SplitPoints;
 
@@ -195,7 +205,7 @@ typedef stdx::variant<MergeInfo,
                       EndOfActionStream>
     DefragmentationAction;
 
-typedef stdx::variant<Status, StatusWith<SplitPoints>, StatusWith<DataSizeResponse>>
+typedef stdx::variant<Status, StatusWith<AutoSplitVectorResponse>, StatusWith<DataSizeResponse>>
     DefragmentationActionResponse;
 
 typedef std::vector<ClusterStatistics::ShardStatistics> ShardStatisticsVector;
@@ -374,10 +384,10 @@ public:
      * used for migrations. Used so we don't return multiple conflicting migrations for the same
      * shard.
      */
-    static std::vector<MigrateInfo> balance(const ShardStatisticsVector& shardStats,
-                                            const DistributionStatus& distribution,
-                                            stdx::unordered_set<ShardId>* usedShards,
-                                            bool forceJumbo);
+    static MigrateInfosWithReason balance(const ShardStatisticsVector& shardStats,
+                                          const DistributionStatus& distribution,
+                                          stdx::unordered_set<ShardId>* usedShards,
+                                          bool forceJumbo);
 
     /**
      * Using the specified distribution information, returns a suggested better location for the

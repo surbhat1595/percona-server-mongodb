@@ -64,6 +64,8 @@ enum class FieldAvailability {
     kFullyProvided,
 };
 
+std::ostream& operator<<(std::ostream& os, FieldAvailability value);
+
 /**
  * Represents the set of sort orders satisfied by the data returned from a particular
  * QuerySolutionNode.
@@ -108,6 +110,10 @@ private:
     // collations fields since they can contribute to the sort order.
     std::set<std::string> _ignoredFields;
 };
+
+std::ostream& operator<<(std::ostream& os, const ProvidedSortSet& value);
+bool operator==(const ProvidedSortSet& lhs, const ProvidedSortSet& rhs);
+bool operator!=(const ProvidedSortSet& lhs, const ProvidedSortSet& rhs);
 
 /**
  * An empty ProvidedSortSet that can be used in QSNs that have no children and don't derive from
@@ -384,6 +390,13 @@ public:
      */
     std::unique_ptr<QuerySolutionNode> extractRoot();
 
+    /**
+     * Returns a vector containing all of the secondary namespaces referenced by this tree, except
+     * for 'mainNss'. This vector is used to track which secondary namespaces we should acquire
+     * locks for. Note that the namespaces are returned in sorted order.
+     */
+    std::vector<NamespaceStringOrUUID> getAllSecondaryNamespaces(const NamespaceString& mainNss);
+
     // There are two known scenarios in which a query solution might potentially block:
     //
     // Sort stage:
@@ -517,6 +530,7 @@ struct ColumnIndexScanNode : public QuerySolutionNode {
 
     ColumnIndexEntry indexEntry;
 
+    StringMap<std::unique_ptr<MatchExpression>> filtersByPath;
     std::vector<std::string> fields;
 };
 
@@ -1395,11 +1409,24 @@ struct EqLookupNode : public QuerySolutionNode {
         kNestedLoopJoin,
     };
 
+    static StringData serializeLookupStrategy(LookupStrategy strategy) {
+        switch (strategy) {
+            case EqLookupNode::LookupStrategy::kHashJoin:
+                return "HashJoin";
+            case EqLookupNode::LookupStrategy::kIndexedLoopJoin:
+                return "IndexedLoopJoin";
+            case EqLookupNode::LookupStrategy::kNestedLoopJoin:
+                return "NestedLoopJoin";
+            default:
+                uasserted(6357204, "Unknown $lookup strategy type");
+        }
+    }
+
     EqLookupNode(std::unique_ptr<QuerySolutionNode> child,
                  const std::string& foreignCollection,
                  const std::string& joinFieldLocal,
                  const std::string& joinFieldForeign,
-                 const std::string& joinField)
+                 const FieldPath& joinField)
         : QuerySolutionNode(std::move(child)),
           foreignCollection(foreignCollection),
           joinFieldLocal(joinFieldLocal),
@@ -1458,7 +1485,7 @@ struct EqLookupNode : public QuerySolutionNode {
      * The field stores the array of all matched foreign (inner) documents.
      * If the field already exists in the local (outer) document, the field will be overwritten.
      */
-    std::string joinField;
+    FieldPath joinField;
 
     /**
      * The algorithm that will be used to execute this 'EqLookupNode'. Defaults to nested loop join

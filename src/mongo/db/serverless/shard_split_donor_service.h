@@ -41,13 +41,14 @@ namespace mongo {
 using ScopedTaskExecutorPtr = std::shared_ptr<executor::ScopedTaskExecutor>;
 
 namespace detail {
-std::function<bool(const std::vector<sdam::ServerDescriptionPtr>&)>
-makeRecipientAcceptSplitPredicate(const ConnectionString& recipientConnectionString);
 
-SemiFuture<void> makeRecipientAcceptSplitFuture(ExecutorPtr executor,
-                                                const CancellationToken& token,
-                                                const StringData& recipientTagName,
-                                                const StringData& recipientSetName);
+SemiFuture<void> makeRecipientAcceptSplitFuture(
+    ExecutorPtr executor,
+    std::shared_ptr<executor::TaskExecutor> taskExecutor,
+    const CancellationToken& token,
+    const StringData& recipientTagName,
+    const StringData& recipientSetName);
+
 };  // namespace detail
 
 class ShardSplitDonorService final : public repl::PrimaryOnlyService {
@@ -161,6 +162,9 @@ private:
     ExecutorFuture<void> _waitForRecipientToReachBlockTimestamp(
         const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
 
+    ExecutorFuture<void> _applySplitConfigToDonor(const ScopedTaskExecutorPtr& executor,
+                                                  const CancellationToken& token);
+
     ExecutorFuture<void> _waitForRecipientToAcceptSplit(const ScopedTaskExecutorPtr& executor,
                                                         const CancellationToken& token);
 
@@ -179,8 +183,7 @@ private:
     void _initiateTimeout(const ScopedTaskExecutorPtr& executor,
                           const CancellationToken& abortToken);
 
-    void _createReplicaSetMonitor(const ScopedTaskExecutorPtr& executor,
-                                  const CancellationToken& abortToken);
+    void _createReplicaSetMonitor(const CancellationToken& abortToken);
 
     ExecutorFuture<DurableState> _handleErrorOrEnterAbortedState(
         StatusWith<DurableState> durableState,
@@ -193,6 +196,13 @@ private:
 
     ExecutorFuture<void> _waitForForgetCmdThenMarkGarbageCollectible(
         const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
+
+    /*
+     * We need to call this method when we find out the replica set name is the same as the state
+     * doc recipient set name and the current state doc state is blocking.
+     */
+    ExecutorFuture<void> _cleanRecipientStateDoc(const ScopedTaskExecutorPtr& executor,
+                                                 const CancellationToken& token);
 
 private:
     const NamespaceString _stateDocumentsNS = NamespaceString::kTenantSplitDonorsNamespace;

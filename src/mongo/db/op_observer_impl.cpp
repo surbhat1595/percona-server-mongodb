@@ -1029,9 +1029,9 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
                 auto oldHidden = indexInfo->oldHidden.get();
                 o2Builder.append("hidden_old", oldHidden);
             }
-            if (indexInfo->oldDisallowNewDuplicateKeys) {
-                auto oldDisallowNewDuplicateKeys = indexInfo->oldDisallowNewDuplicateKeys.get();
-                o2Builder.append("disallowNewDuplicates_old", oldDisallowNewDuplicateKeys);
+            if (indexInfo->oldPrepareUnique) {
+                auto oldPrepareUnique = indexInfo->oldPrepareUnique.get();
+                o2Builder.append("prepareUnique_old", oldPrepareUnique);
             }
         }
 
@@ -1506,11 +1506,14 @@ int logOplogEntriesForTransaction(
         ++currOplogSlot;
 
         MutableOplogEntry imageEntry;
+        imageEntry.setSessionId(*opCtx->getLogicalSessionId());
+        imageEntry.setTxnNumber(*opCtx->getTxnNumber());
         imageEntry.setOpType(repl::OpTypeEnum::kNoop);
         imageEntry.setObject(imageDoc);
         imageEntry.setNss(statement.getNss());
         imageEntry.setUuid(statement.getUuid());
         imageEntry.setOpTime(slot);
+        imageEntry.setDestinedRecipient(statement.getDestinedRecipient());
 
         return logOperation(opCtx, &imageEntry);
     };

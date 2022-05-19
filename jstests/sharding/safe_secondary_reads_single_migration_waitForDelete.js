@@ -63,11 +63,13 @@ let testCases = {
     _configsvrMoveChunk: {skip: "primary only"},
     _configsvrMovePrimary:
         {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
+    _configsvrMoveRange: {skip: "primary only"},
     _configsvrRemoveChunks: {skip: "primary only"},
     _configsvrRemoveShardFromZone: {skip: "primary only"},
     _configsvrRemoveTags: {skip: "primary only"},
     _configsvrReshardCollection: {skip: "primary only"},
     _configsvrSetAllowMigrations: {skip: "primary only"},
+    _configsvrSetClusterParameter: {skip: "primary only"},
     _configsvrSetUserWriteBlockMode: {skip: "primary only"},
     _configsvrShardCollection:
         {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
@@ -83,6 +85,7 @@ let testCases = {
     _mergeAuthzCollections: {skip: "primary only"},
     _migrateClone: {skip: "primary only"},
     _shardsvrMovePrimary: {skip: "primary only"},
+    _shardsvrMoveRange: {skip: "primary only"},
     _recvChunkAbort: {skip: "primary only"},
     _recvChunkCommit: {skip: "primary only"},
     _recvChunkReleaseCritSec: {skip: "primary only"},
@@ -269,6 +272,7 @@ let testCases = {
     mergeChunks: {skip: "primary only"},
     moveChunk: {skip: "primary only"},
     movePrimary: {skip: "primary only"},
+    moveRange: {skip: "primary only"},
     multicast: {skip: "does not return user data"},
     netstat: {skip: "does not return user data"},
     ping: {skip: "does not return user data"},
@@ -337,6 +341,7 @@ let testCases = {
     stopRecordingTraffic: {skip: "does not return user data"},
     testDeprecation: {skip: "does not return user data"},
     testDeprecationInVersion2: {skip: "does not return user data"},
+    testInternalTransactions: {skip: "primary only"},
     testRemoval: {skip: "does not return user data"},
     testVersions1And2: {skip: "does not return user data"},
     testVersion2: {skip: "does not return user data"},

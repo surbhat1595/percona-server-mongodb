@@ -34,8 +34,6 @@
 #include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_router.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/write_error_detail.h"
 #include "mongo/s/write_ops/write_op.h"
 #include "mongo/unittest/unittest.h"
 
@@ -411,9 +409,7 @@ TEST_F(WriteOpTransactionTest, TargetMultiAllShardsAndErrorSingleChildOp) {
     _opCtx->setTxnNumber(kTxnNumber);
 
     auto txnRouter = TransactionRouter::get(_opCtx);
-    txnRouter.beginOrContinueTxn(_opCtx,
-                                 TxnNumberAndRetryCounter(kTxnNumber, 0),
-                                 TransactionRouter::TransactionActions::kStart);
+    txnRouter.beginOrContinueTxn(_opCtx, kTxnNumber, TransactionRouter::TransactionActions::kStart);
 
     // Do multi-target write op
     WriteOp writeOp(BatchItemRef(&request, 0), true);

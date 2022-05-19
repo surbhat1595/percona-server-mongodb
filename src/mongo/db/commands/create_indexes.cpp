@@ -35,10 +35,11 @@
 #include <vector>
 
 #include "mongo/base/string_data.h"
-#include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
@@ -66,7 +67,6 @@
 #include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_commands_conversion_helper.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/views/view_catalog.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -243,23 +243,18 @@ void checkEncryptedFieldIndexRestrictions(OperationContext* opCtx,
         // Do not allow unique indexes on encrypted fields, or prefixes of encrypted fields.
         auto keyObject = index[IndexDescriptor::kKeyPatternFieldName].Obj();
         for (const auto& keyElement : keyObject) {
-
-            FieldRef keyFieldRef(keyElement.fieldNameStringData());
-
-            for (const auto& encryptedFieldRef : encryptedFieldRefs) {
-                auto common = keyFieldRef.commonPrefixSize(encryptedFieldRef);
-                uassert(
-                    6346502,
+            auto match = findMatchingEncryptedField(FieldRef(keyElement.fieldNameStringData()),
+                                                    encryptedFieldRefs);
+            uassert(6346502,
                     str::stream()
                         << "Unique indexes are not allowed on, or a prefix of, the encrypted field "
-                        << encryptedFieldRef.dottedField(),
-                    common != keyFieldRef.numParts());
-                uassert(6346503,
-                        str::stream() << "Unique indexes are not allowed on keys whose prefix is "
-                                         "the encrypted field "
-                                      << encryptedFieldRef.dottedField(),
-                        common != encryptedFieldRef.numParts());
-            }
+                        << match->encryptedField.dottedField(),
+                    !match || !match->keyIsPrefixOrEqual);
+            uassert(6346503,
+                    str::stream() << "Unique indexes are not allowed on keys whose prefix is "
+                                     "the encrypted field "
+                                  << match->encryptedField.dottedField(),
+                    !match || match->keyIsPrefixOrEqual);
         }
     }
 }
@@ -379,12 +374,9 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
     bool createCollImplicitly) {
     WriteUnitOfWork wunit(opCtx);
 
-    const TenantDatabaseName tenantDbName(boost::none, ns.db());
-    auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto db = databaseHolder->getDb(opCtx, tenantDbName);
     uassert(ErrorCodes::CommandNotSupportedOnView,
             "Cannot create indexes on a view",
-            !db || !ViewCatalog::get(opCtx)->lookup(opCtx, ns));
+            !CollectionCatalog::get(opCtx)->lookupView(opCtx, ns));
 
     if (createCollImplicitly) {
         for (const auto& spec : specs) {

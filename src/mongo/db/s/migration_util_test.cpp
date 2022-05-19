@@ -339,6 +339,24 @@ TEST_F(MigrationUtilsTest, TestInvalidUUID) {
     ASSERT_FALSE(migrationutil::checkForConflictingDeletions(opCtx, range, wrongUuid));
 }
 
+TEST_F(MigrationUtilsTest, TestUpdateNumberOfOrphans) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    auto rangeDeletionDoc = createDeletionTask(opCtx, kTestNss, uuid, 0, 10);
+    store.add(opCtx, rangeDeletionDoc);
+
+    auto rangeDeletionQuery = BSON("_id" << rangeDeletionDoc.getId());
+
+    migrationutil::persistUpdatedNumOrphans(opCtx, rangeDeletionQuery, 5);
+    rangeDeletionDoc.setNumOrphanDocs(5);
+    ASSERT_EQ(store.count(opCtx, rangeDeletionDoc.toBSON().removeField("timestamp")), 1);
+
+    migrationutil::persistUpdatedNumOrphans(opCtx, rangeDeletionQuery, -5);
+    rangeDeletionDoc.setNumOrphanDocs(0);
+    ASSERT_EQ(store.count(opCtx, rangeDeletionDoc.toBSON().removeField("timestamp")), 1);
+}
+
 /**
  * Fixture that uses a mocked CatalogCacheLoader and CatalogClient to allow metadata refreshes
  * without using the mock network.
@@ -350,11 +368,8 @@ public:
     const UUID kDefaultUUID = UUID::gen();
     const OID kEpoch = OID::gen();
     const Timestamp kDefaultTimestamp = Timestamp(2, 0);
-    const DatabaseType kDefaultDatabaseType =
-        DatabaseType(kTestNss.db().toString(),
-                     ShardId("0"),
-                     true,
-                     DatabaseVersion(kDefaultUUID, kDefaultTimestamp));
+    const DatabaseType kDefaultDatabaseType = DatabaseType(
+        kTestNss.db().toString(), ShardId("0"), DatabaseVersion(kDefaultUUID, kDefaultTimestamp));
     const std::vector<ShardType> kShardList = {ShardType("0", "Host0:12345"),
                                                ShardType("1", "Host1:12345")};
 
@@ -443,8 +458,8 @@ public:
     }
 
     CollectionType makeCollectionType(UUID uuid, OID epoch, Timestamp timestamp) {
-        CollectionType coll(kTestNss, epoch, timestamp, Date_t::now(), uuid);
-        coll.setKeyPattern(kShardKeyPattern.getKeyPattern());
+        CollectionType coll(
+            kTestNss, epoch, timestamp, Date_t::now(), uuid, kShardKeyPattern.getKeyPattern());
         coll.setUnique(true);
         return coll;
     }
@@ -626,47 +641,6 @@ TEST_F(SubmitRangeDeletionTaskTest,
     _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(kDefaultDatabaseType);
     _mockCatalogCacheLoader->setCollectionRefreshReturnValue(
         Status(ErrorCodes::NamespaceNotFound, "dummy errmsg"));
-    forceShardFilteringMetadataRefresh(opCtx, kTestNss);
-
-    auto collectionUUID = createCollectionAndGetUUID(kTestNss);
-    auto deletionTask = createDeletionTask(opCtx, kTestNss, collectionUUID, 0, 10, _myShardName);
-
-    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-
-    store.add(opCtx, deletionTask);
-    ASSERT_EQ(store.count(opCtx), 1);
-    migrationutil::markAsReadyRangeDeletionTaskLocally(opCtx, deletionTask.getId());
-
-    // Make the refresh triggered by submitting the task return a UUID that matches the task's UUID.
-    auto matchingColl = makeCollectionType(collectionUUID, kEpoch, kDefaultTimestamp);
-    _mockCatalogCacheLoader->setCollectionRefreshReturnValue(matchingColl);
-    _mockCatalogCacheLoader->setChunkRefreshReturnValue(
-        makeChangedChunks(ChunkVersion(10, 0, kEpoch, kDefaultTimestamp)));
-    _mockCatalogClient->setCollections({matchingColl});
-
-    auto metadata = makeShardedMetadata(opCtx, collectionUUID);
-    csr().setFilteringMetadata(opCtx, metadata);
-
-    // The task should have been submitted successfully.
-    auto cleanupCompleteFuture = migrationutil::submitRangeDeletionTask(opCtx, deletionTask);
-    cleanupCompleteFuture.get(opCtx);
-}
-
-TEST_F(SubmitRangeDeletionTaskTest,
-       SucceedsIfFilteringMetadataUUIDInitiallyDifferentFromTaskUUIDButMatchesAfterRefresh) {
-    auto opCtx = operationContext();
-
-    // Force a metadata refresh with an arbitrary UUID so that the node's filtering metadata is
-    // stale when the task is submitted.
-    const auto staleUUID = UUID::gen();
-    const auto staleEpoch = OID::gen();
-    const auto staleTimestamp = Timestamp(1, 0);
-    auto staleColl = makeCollectionType(staleUUID, staleEpoch, staleTimestamp);
-    _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(kDefaultDatabaseType);
-    _mockCatalogCacheLoader->setCollectionRefreshReturnValue(staleColl);
-    _mockCatalogCacheLoader->setChunkRefreshReturnValue(
-        makeChangedChunks(ChunkVersion(1, 0, staleEpoch, staleTimestamp)));
-    _mockCatalogClient->setCollections({staleColl});
     forceShardFilteringMetadataRefresh(opCtx, kTestNss);
 
     auto collectionUUID = createCollectionAndGetUUID(kTestNss);

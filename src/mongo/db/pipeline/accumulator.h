@@ -276,6 +276,7 @@ public:
 
 private:
     BSONType totalType = NumberInt;
+    BSONType nonDecimalTotalType = NumberInt;
     DoubleDoubleSummation nonDecimalTotal;
     Decimal128 decimalTotal;
 };
@@ -381,7 +382,8 @@ private:
      */
     Decimal128 _getDecimalTotal() const;
 
-    bool _isDecimal;
+    BSONType _totalType = NumberInt;
+    BSONType _nonDecimalTotalType = NumberInt;
     DoubleDoubleSummation _nonDecimalTotal;
     Decimal128 _decimalTotal;
     long long _count;

@@ -29,8 +29,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/collection_sharding_runtime.h"
 
 #include "mongo/base/checked_cast.h"
@@ -136,8 +134,8 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
     uassert(
         StaleConfigInfo(_nss,
-                        ChunkVersion::UNSHARDED(),
-                        boost::none,
+                        ChunkVersion::IGNORED() /* receivedVersion */,
+                        boost::none /* wantedVersion */,
                         ShardingState::get(_serviceContext)->shardId()),
         str::stream() << "sharding status of collection " << _nss.ns()
                       << " is not currently available for description and needs to be recovered "
@@ -239,11 +237,11 @@ void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) 
 }
 
 SharedSemiFuture<void> CollectionShardingRuntime::cleanUpRange(ChunkRange const& range,
-                                                               boost::optional<UUID> migrationId,
+                                                               const UUID& migrationId,
                                                                CleanWhen when) {
     stdx::lock_guard lk(_metadataManagerLock);
     invariant(_metadataType == MetadataType::kSharded);
-    return _metadataManager->cleanUpRange(range, std::move(migrationId), when == kDelayed);
+    return _metadataManager->cleanUpRange(range, migrationId, when == kDelayed);
 }
 
 Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
@@ -347,30 +345,30 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     auto csrLock = CSRLock::lockShared(opCtx, this);
 
     auto optCurrentMetadata = _getCurrentMetadataIfKnown(atClusterTime);
-
-    uassert(StaleConfigInfo(
-                _nss, receivedShardVersion, boost::none, ShardingState::get(opCtx)->shardId()),
+    uassert(StaleConfigInfo(_nss,
+                            receivedShardVersion,
+                            boost::none /* wantedVersion */,
+                            ShardingState::get(opCtx)->shardId()),
             str::stream() << "sharding status of collection " << _nss.ns()
                           << " is not currently known and needs to be recovered",
             optCurrentMetadata);
 
     const auto& currentMetadata = optCurrentMetadata->get();
 
-    auto wantedShardVersion = currentMetadata.getShardVersion();
-
     {
         auto criticalSectionSignal = _critSec.getSignal(
             opCtx->lockState()->isWriteLocked() ? ShardingMigrationCriticalSection::kWrite
                                                 : ShardingMigrationCriticalSection::kRead);
-
         uassert(StaleConfigInfo(_nss,
                                 receivedShardVersion,
-                                wantedShardVersion,
+                                boost::none /* wantedVersion */,
                                 ShardingState::get(opCtx)->shardId(),
                                 std::move(criticalSectionSignal)),
                 str::stream() << "migration commit in progress for " << _nss.ns(),
                 !criticalSectionSignal);
     }
+
+    auto wantedShardVersion = currentMetadata.getShardVersion();
 
     if (wantedShardVersion.isWriteCompatibleWith(receivedShardVersion) ||
         ChunkVersion::isIgnoredVersion(receivedShardVersion))

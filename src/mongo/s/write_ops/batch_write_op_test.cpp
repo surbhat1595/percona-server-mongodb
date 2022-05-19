@@ -36,7 +36,6 @@
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/write_error_detail.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -1614,9 +1613,8 @@ public:
         _scopedSession.emplace(operationContext());
 
         auto txnRouter = TransactionRouter::get(operationContext());
-        txnRouter.beginOrContinueTxn(operationContext(),
-                                     TxnNumberAndRetryCounter(kTxnNumber, 0),
-                                     TransactionRouter::TransactionActions::kStart);
+        txnRouter.beginOrContinueTxn(
+            operationContext(), kTxnNumber, TransactionRouter::TransactionActions::kStart);
     }
 
     void tearDown() override {

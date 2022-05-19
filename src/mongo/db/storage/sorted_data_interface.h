@@ -363,6 +363,18 @@ public:
          * retaining valid and positioned cursors across commands.
          */
         virtual void setSaveStorageCursorOnDetachFromOperationContext(bool) = 0;
+
+        /**
+         * Returns true if the record id can be extracted from the unique index key string.
+         *
+         * Unique indexes created prior to 4.2 may contain key strings that do not have
+         * an embedded record id. We will have to look up the record for this key in the index
+         * to obtain the record id.
+         *
+         * This is used primarily during validation to identify unique indexes with keys in the
+         * old format due to rolling upgrades.
+         */
+        virtual bool isRecordIdAtEndOfKeyString() const = 0;
     };
 
     /**
@@ -378,6 +390,18 @@ public:
     //
 
     virtual Status initAsEmpty(OperationContext* opCtx) = 0;
+
+    /**
+     * Insert an entry into the index with the specified KeyString, without a RecordId
+     * appended to the end.
+     *
+     * This generates index entries consistent with index keys created in the server prior to 4.2.
+     *
+     * For testing only.
+     */
+    virtual void insertWithRecordIdInValue_forTest(OperationContext* opCtx,
+                                                   const KeyString::Value& keyString,
+                                                   RecordId rid) = 0;
 
 protected:
     const KeyString::Version _keyStringVersion;

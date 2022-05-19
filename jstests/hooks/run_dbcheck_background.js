@@ -14,6 +14,10 @@ if (typeof db === 'undefined') {
 
 TestData = TestData || {};
 
+// Disable implicit sessions so FSM workloads that kill random sessions won't interrupt the
+// operations in this test that aren't resilient to interruptions.
+TestData.disableImplicitSessions = true;
+
 const conn = db.getMongo();
 const topology = DiscoverTopology.findConnectedNodes(conn);
 
@@ -79,7 +83,8 @@ function runBackgroundDbCheck(hosts) {
         }
 
         const dbCheckCompleted = (db) => {
-            return db.currentOp().inprog.filter(x => x["desc"] == "dbCheck")[0] === undefined;
+            return db.currentOp({$all: true}).inprog.filter(x => x["desc"] === "dbCheck")[0] ===
+                undefined;
         };
 
         assert.soon(() => dbCheckCompleted(adminDb),

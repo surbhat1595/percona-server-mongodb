@@ -30,7 +30,7 @@ test.addRecipientNodes();
 
 const donorPrimary = test.donor.getPrimary();
 const adminDb = donorPrimary.getDB("admin");
-const tenantIds = ["test_tenant_1", "test_tenant_2"];
+const tenantIds = ["tenant1", "tenant2"];
 
 // Stop replication on recipient nodes, and write a lot of data to the set
 test.recipientNodes.forEach(node => stopServerReplication(node));
@@ -41,7 +41,7 @@ for (let i = 0; i < 2000; i++) {
 }
 assert.commandWorked(bulk.execute());
 
-// TODO(SERVER-63091): remove this when we actually split recipients
+// TODO(SERVER-64168): remove this when split is ready
 configureFailPoint(adminDb, "skipShardSplitWaitForSplitAcceptance");
 
 jsTestLog("Running commitShardSplit command");

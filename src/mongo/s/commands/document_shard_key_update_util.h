@@ -35,6 +35,7 @@
 
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/transaction_api.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/s/transaction_router.h"
 
@@ -65,14 +66,32 @@ static constexpr StringData kNonDuplicateKeyErrorContext =
     "transaction failed."_sd;
 
 /**
+ * TODO SERVER-62375: Remove this function.
+ *
  * Coordinating method and external point of entry for updating a document's shard key. This method
  * creates the necessary extra operations. It will then run each operation using the ClusterWriter.
  * If any statement throws, an exception will leave this method, and must be handled by external
  * callers.
  */
-bool updateShardKeyForDocument(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               const WouldChangeOwningShardInfo& documentKeyChangeInfo);
+bool updateShardKeyForDocumentLegacy(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const WouldChangeOwningShardInfo& documentKeyChangeInfo);
+
+/**
+ * Coordinating method and external point of entry for updating a document's shard key. This method
+ * creates the necessary extra operations. It will then run each operation using the given
+ * transaction client. If any statement throws, an exception will leave this method, and must be
+ * handled by external callers.
+ *
+ * Returns an error on any error returned by a command. If the original update was sent with
+ * {upsert: false}, returns whether or not we deleted the original doc and inserted the new one
+ * sucessfully. If the original update was sent with {upsert: true}, returns whether or not we
+ * inserted the new doc successfully.
+ */
+SemiFuture<bool> updateShardKeyForDocument(const txn_api::TransactionClient& txnClient,
+                                           ExecutorPtr txnExec,
+                                           const NamespaceString& nss,
+                                           const WouldChangeOwningShardInfo& changeInfo);
 
 /**
  * Starts a transaction on this session. This method is called when WouldChangeOwningShard is thrown

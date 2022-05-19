@@ -64,13 +64,59 @@
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
-#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 
 
 namespace mongo {
+
+class MockReplReconfigCommandInvocation : public CommandInvocation {
+public:
+    MockReplReconfigCommandInvocation(const Command* command) : CommandInvocation(command) {}
+    void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) final {
+        result->setCommandReply(BSON("ok" << 1));
+    }
+
+    NamespaceString ns() const final {
+        return NamespaceString::kSystemReplSetNamespace;
+    }
+
+    bool supportsWriteConcern() const final {
+        return true;
+    }
+
+private:
+    void doCheckAuthorization(OperationContext* opCtx) const final {}
+};
+
+class MockReplReconfigCommand : public Command {
+public:
+    MockReplReconfigCommand() : Command("replSetReconfig") {}
+
+    std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
+                                             const OpMsgRequest& request) final {
+        stdx::lock_guard<Latch> lg(_mutex);
+        _hasBeenCalled = true;
+        _msg = request.body;
+        return std::make_unique<MockReplReconfigCommandInvocation>(this);
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext* context) const final {
+        return AllowedOnSecondary::kNever;
+    }
+
+    BSONObj getLatestConfig() {
+        stdx::lock_guard<Latch> lg(_mutex);
+        ASSERT_TRUE(_hasBeenCalled);
+        return _msg;
+    }
+
+private:
+    mutable Mutex _mutex = MONGO_MAKE_LATCH("MockReplReconfigCommand::_mutex");
+    bool _hasBeenCalled{false};
+    BSONObj _msg;
+} mockReplSetReconfigCmd;
 
 namespace {
 sdam::TopologyDescriptionPtr makeRecipientTopologyDescription(const MockReplicaSet& set) {
@@ -175,6 +221,8 @@ protected:
     UUID _uuid = UUID::gen();
     MockReplicaSet _replSet{
         "donorSetForTest", 3, true /* hasPrimary */, false /* dollarPrefixHosts */};
+    MockReplicaSet _recipientSet{
+        "recipientSetForTest", 3, true /* hasPrimary */, false /* dollarPrefixHosts */};
     const NamespaceString _nss{"testDB2", "testColl2"};
     std::vector<std::string> _tenantIds = {"tenant1", "tenantAB"};
     StreamableReplicaSetMonitorForTesting _rsmMonitor;
@@ -183,10 +231,12 @@ protected:
 };
 
 TEST_F(ShardSplitDonorServiceTest, BasicShardSplitDonorServiceInstanceCreation) {
+    FailPointEnableBlock fp("skipShardSplitWaitForSplitAcceptance");
+
     auto opCtx = makeOperationContext();
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _replSet.getHosts());
+        getServiceContext(), _recipientTagName, _replSet.getHosts(), _recipientSet.getHosts());
 
     // Create and start the instance.
     auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
@@ -215,6 +265,11 @@ TEST_F(ShardSplitDonorServiceTest, BasicShardSplitDonorServiceInstanceCreation) 
 
     decisionFuture.wait();
 
+    BSONObj splitConfigBson = mockReplSetReconfigCmd.getLatestConfig();
+    ASSERT_TRUE(splitConfigBson.hasField("replSetReconfig"));
+    auto splitConfig = repl::ReplSetConfig::parse(splitConfigBson["replSetReconfig"].Obj());
+    ASSERT(splitConfig.isSplitConfig());
+
     auto result = decisionFuture.get();
     ASSERT(!result.abortReason);
     ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kCommitted);
@@ -226,11 +281,14 @@ TEST_F(ShardSplitDonorServiceTest, BasicShardSplitDonorServiceInstanceCreation) 
 }
 
 TEST_F(ShardSplitDonorServiceTest, ShardSplitDonorServiceTimeout) {
+    FailPointEnableBlock fp("pauseShardSplitAfterBlocking");
+    FailPointEnableBlock fp2("skipShardSplitWaitForSplitAcceptance");
+
     auto opCtx = makeOperationContext();
     auto serviceContext = getServiceContext();
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        serviceContext, _recipientTagName, _replSet.getHosts());
+        serviceContext, _recipientTagName, _replSet.getHosts(), _recipientSet.getHosts());
 
     auto stateDocument = defaultStateDocument();
 
@@ -263,7 +321,8 @@ TEST_F(ShardSplitDonorServiceTest, CreateInstanceInAbortState) {
 
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
 
-    auto stateDocument = defaultStateDocument();
+    auto stateDocument = ShardSplitDonorDocument::parse(
+        {"donor.document"}, BSON("_id" << _uuid << "tenantIds" << _tenantIds));
     stateDocument.setState(ShardSplitDonorStateEnum::kAborted);
 
     auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
@@ -289,7 +348,7 @@ TEST_F(ShardSplitDonorServiceTest, CreateInstanceThenAbort) {
 
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        serviceContext, _recipientTagName, _replSet.getHosts());
+        serviceContext, _recipientTagName, _replSet.getHosts(), _recipientSet.getHosts());
 
     std::shared_ptr<ShardSplitDonorService::DonorStateMachine> serviceInstance;
     {
@@ -322,7 +381,7 @@ TEST_F(ShardSplitDonorServiceTest, StepDownTest) {
     auto opCtx = makeOperationContext();
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _replSet.getHosts());
+        getServiceContext(), _recipientTagName, _replSet.getHosts(), _recipientSet.getHosts());
 
     std::shared_ptr<ShardSplitDonorService::DonorStateMachine> serviceInstance;
 
@@ -348,111 +407,30 @@ TEST_F(ShardSplitDonorServiceTest, StepDownTest) {
     ASSERT_FALSE(serviceInstance->isGarbageCollectable());
 }
 
-// TODO(SERVER-62363) : Remove this test once the ticket is completed.
-DEATH_TEST_F(ShardSplitDonorServiceTest, StartWithExpireAtAlreadySet, "invariant") {
-    auto opCtx = makeOperationContext();
-
-    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
-
-    auto stateDocument = defaultStateDocument();
-    stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
-
-    auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
-        opCtx.get(), _service, stateDocument.toBSON());
-
-    ASSERT(serviceInstance.get());
-
-    // this triggers an invariant updateResult.numDocsModified == 1 in _updateStateDocument when
-    // going in the _handleErrorOrEnterAbortedState.
-    auto result = serviceInstance->decisionFuture().get(opCtx.get());
-}
-
-TEST_F(ShardSplitDonorServiceTest, StepUpWithkCommitted) {
+TEST_F(ShardSplitDonorServiceTest, DeleteStateDocMarkedGarbageCollectable) {
     auto opCtx = makeOperationContext();
 
     test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _replSet.getHosts());
+        getServiceContext(), _recipientTagName, _replSet.getHosts(), _recipientSet.getHosts());
 
-    auto nss = NamespaceString::kTenantSplitDonorsNamespace;
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kUninitialized);
+    boost::optional<mongo::Date_t> expireAt = getServiceContext()->getFastClockSource()->now() +
+        Milliseconds{repl::shardSplitGarbageCollectionDelayMS.load()};
+    stateDocument.setExpireAt(expireAt);
 
     // insert the document for the first time.
     ASSERT_OK(serverless::insertStateDoc(opCtx.get(), stateDocument));
 
-    {
-        // update to kCommitted
-        stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
-        boost::optional<mongo::Date_t> expireAt = getServiceContext()->getFastClockSource()->now() +
-            Milliseconds{repl::shardSplitGarbageCollectionDelayMS.load()};
-        stateDocument.setExpireAt(expireAt);
-        stateDocument.setBlockTimestamp(Timestamp(1, 1));
-        stateDocument.setCommitOrAbortOpTime(repl::OpTime(Timestamp(1, 1), 1));
+    // deletes a document that was marked as garbage collectable and succeeds.
+    StatusWith<bool> deleted = serverless::deleteStateDoc(opCtx.get(), stateDocument.getId());
 
-        ASSERT_OK(serverless::updateStateDoc(opCtx.get(), stateDocument));
+    ASSERT_OK(deleted.getStatus());
+    ASSERT_TRUE(deleted.getValue());
 
-        auto foundStateDoc = uassertStatusOK(serverless::getStateDocument(opCtx.get(), _uuid));
-        invariant(foundStateDoc.getExpireAt());
-        ASSERT_EQ(*foundStateDoc.getExpireAt(), *expireAt);
-    }
-
-    auto serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
-        opCtx.get(), _service, stateDocument.toBSON());
-    ASSERT(serviceInstance.get());
-
-    auto result = serviceInstance->decisionFuture().get();
-    ASSERT(!result.abortReason);
-    ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kCommitted);
-
-    // we don't need to call tryForget since expireAt is already set the completionPromise will
-    // complete.
-    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
-    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
-}
-
-TEST_F(ShardSplitDonorServiceTest, TimeoutAbortsAwaitReplication) {
-    auto opCtx = makeOperationContext();
-    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
-    test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _replSet.getHosts());
-
-    RAIIServerParameterControllerForTest controller{"shardSplitTimeoutMS", 200};
-
-    AtomicWord<bool> sleptForWaitingForBlockTimestamp{false};
-    std::shared_ptr<ShardSplitDonorService::DonorStateMachine> serviceInstance;
-    {
-        FailPointEnableBlock fp("pauseShardSplitAfterBlocking");
-        serviceInstance = ShardSplitDonorService::DonorStateMachine::getOrCreate(
-            opCtx.get(), _service, defaultStateDocument().toBSON());
-        ASSERT(serviceInstance.get());
-
-        fp->waitForTimesEntered(fp.initialTimesEntered() + 1);
-
-        auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
-            repl::ReplicationCoordinator::get(cc().getServiceContext()));
-        replCoord->setAwaitReplicationReturnValueFunction(
-            [&sleptForWaitingForBlockTimestamp](OperationContext* opCtx, const repl::OpTime&) {
-                bool alreadySlept = false;
-                if (sleptForWaitingForBlockTimestamp.compareAndSwap(&alreadySlept, true)) {
-                    opCtx->sleepFor(Hours{1});
-                }
-
-                return repl::ReplicationCoordinator::StatusAndDuration(Status::OK(),
-                                                                       Milliseconds(0));
-            });
-    }
-
-    uassertStatusOK(serviceInstance->decisionFuture().getNoThrow());
-    auto result = serviceInstance->decisionFuture().get(opCtx.get());
-    ASSERT(result.abortReason);
-    ASSERT_EQ(result.abortReason->code(), ErrorCodes::ExceededTimeLimit);
-
-    fastForwardCommittedSnapshotOpTime(serviceInstance, getServiceContext(), opCtx.get(), _uuid);
-    serviceInstance->tryForget();
-
-    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
-    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
+    ASSERT_EQ(serverless::getStateDocument(opCtx.get(), _uuid).getStatus().code(),
+              ErrorCodes::NoMatchingDocument);
 }
 
 class SplitReplicaSetObserverTest : public ServiceContextTest {
@@ -480,6 +458,8 @@ public:
 protected:
     MockReplicaSet _validRepl{
         "replInScope", 3, true /* hasPrimary */, false /* dollarPrefixHosts */};
+    MockReplicaSet _recipientSet{
+        "recipientReplSet", 3, true /* hasPrimary */, false /* dollarPrefixHosts */};
     MockReplicaSet _invalidRepl{
         "replNotInScope", 3, true /* hasPrimary */, false /* dollarPrefixHosts */};
 
@@ -491,75 +471,217 @@ protected:
     std::string _recipientSetName{_validRepl.getURI().getSetName()};
 };
 
-TEST_F(SplitReplicaSetObserverTest, SupportsCancellation) {
-    test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _validRepl.getHosts());
+TEST_F(SplitReplicaSetObserverTest, FutureReady) {
+    auto listener =
+        mongo::serverless::RecipientAcceptSplitListener(_validRepl.getURI().connectionString());
 
-    CancellationSource source;
-    auto future = detail::makeRecipientAcceptSplitFuture(
-        _executor, source.token(), _recipientTagName, _recipientSetName);
+    for (const auto& host : _validRepl.getHosts()) {
+        ASSERT_FALSE(listener.getFuture().isReady());
+        listener.onServerHeartbeatSucceededEvent(host, BSON("setName" << _validRepl.getSetName()));
+    }
 
-    ASSERT_FALSE(future.isReady());
-    source.cancel();
-
-    ASSERT_EQ(future.getNoThrow().code(), ErrorCodes::CallbackCanceled);
+    ASSERT_TRUE(listener.getFuture().isReady());
 }
 
-TEST_F(SplitReplicaSetObserverTest, GetRecipientAcceptSplitFutureTest) {
-    test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _validRepl.getHosts());
+TEST_F(SplitReplicaSetObserverTest, FutureReadyNameChange) {
+    auto listener =
+        mongo::serverless::RecipientAcceptSplitListener(_validRepl.getURI().connectionString());
 
-    CancellationSource source;
-    auto future = detail::makeRecipientAcceptSplitFuture(
-        _executor, source.token(), _recipientTagName, _recipientSetName);
+    for (const auto& host : _validRepl.getHosts()) {
+        listener.onServerHeartbeatSucceededEvent(host,
+                                                 BSON("setName"
+                                                      << "donorSetName"));
+    }
 
-    std::shared_ptr<TopologyDescription> topologyDescriptionOld =
-        std::make_shared<sdam::TopologyDescription>(sdam::SdamConfiguration());
-    std::shared_ptr<TopologyDescription> topologyDescriptionNew =
-        makeRecipientTopologyDescription(_validRepl);
+    ASSERT_FALSE(listener.getFuture().isReady());
 
-    _publisher->onTopologyDescriptionChangedEvent(topologyDescriptionOld, topologyDescriptionNew);
+    for (const auto& host : _validRepl.getHosts()) {
+        listener.onServerHeartbeatSucceededEvent(host, BSON("setName" << _validRepl.getSetName()));
+    }
 
-    future.wait();
+    ASSERT_TRUE(listener.getFuture().isReady());
 }
 
 TEST_F(SplitReplicaSetObserverTest, FutureNotReadyMissingNodes) {
-    auto predicate =
-        detail::makeRecipientAcceptSplitPredicate(_validRepl.getURI().connectionString());
+    auto listener =
+        mongo::serverless::RecipientAcceptSplitListener(_validRepl.getURI().connectionString());
 
-    std::shared_ptr<TopologyDescription> topologyDescriptionNew =
-        makeRecipientTopologyDescription(_validRepl);
-    topologyDescriptionNew->removeServerDescription(_validRepl.getHosts()[0]);
+    for (size_t i = 0; i < _validRepl.getHosts().size() - 1; ++i) {
+        listener.onServerHeartbeatSucceededEvent(_validRepl.getHosts()[i],
+                                                 BSON("setName" << _validRepl.getSetName()));
+    }
 
-    ASSERT_FALSE(predicate(topologyDescriptionNew->getServers()));
+    ASSERT_FALSE(listener.getFuture().isReady());
+}
+
+TEST_F(SplitReplicaSetObserverTest, FutureNotReadyNoSetName) {
+    auto listener =
+        mongo::serverless::RecipientAcceptSplitListener(_validRepl.getURI().connectionString());
+
+    for (size_t i = 0; i < _validRepl.getHosts().size() - 1; ++i) {
+        listener.onServerHeartbeatSucceededEvent(_validRepl.getHosts()[i], BSONObj());
+    }
+
+    ASSERT_FALSE(listener.getFuture().isReady());
 }
 
 TEST_F(SplitReplicaSetObserverTest, FutureNotReadyWrongSet) {
-    auto predicate =
-        detail::makeRecipientAcceptSplitPredicate(_validRepl.getURI().connectionString());
+    auto listener =
+        mongo::serverless::RecipientAcceptSplitListener(_validRepl.getURI().connectionString());
 
-    std::shared_ptr<TopologyDescription> topologyDescriptionNew =
-        makeRecipientTopologyDescription(_invalidRepl);
+    for (const auto& host : _validRepl.getHosts()) {
+        listener.onServerHeartbeatSucceededEvent(host,
+                                                 BSON("setName"
+                                                      << "wrongSetName"));
+    }
 
-    ASSERT_FALSE(predicate(topologyDescriptionNew->getServers()));
+    ASSERT_FALSE(listener.getFuture().isReady());
 }
 
-TEST_F(SplitReplicaSetObserverTest, ExecutorCanceled) {
+class ShardSplitPersistenceTest : public ShardSplitDonorServiceTest {
+public:
+    void setUpPersistence(OperationContext* opCtx) override {
+
+        // We need to allow writes during the test's setup.
+        auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
+            repl::ReplicationCoordinator::get(opCtx->getServiceContext()));
+        replCoord->alwaysAllowWrites(true);
+
+        replCoord->setGetConfigReturnValue(initialDonorConfig());
+
+        _recStateDoc = initialStateDocument();
+        uassertStatusOK(serverless::insertStateDoc(opCtx, _recStateDoc));
+
+        _pauseBeforeRecipientCleanupFp =
+            std::make_unique<FailPointEnableBlock>("pauseShardSplitBeforeRecipientCleanup");
+
+        _initialTimesEntered = _pauseBeforeRecipientCleanupFp->initialTimesEntered();
+    }
+
+    virtual repl::ReplSetConfig initialDonorConfig() = 0;
+
+    virtual ShardSplitDonorDocument initialStateDocument() = 0;
+
+protected:
+    ShardSplitDonorDocument _recStateDoc;
+    std::unique_ptr<FailPointEnableBlock> _pauseBeforeRecipientCleanupFp;
+    FailPoint::EntryCountT _initialTimesEntered;
+};
+class ShardSplitRecipientCleanupTest : public ShardSplitPersistenceTest {
+public:
+    repl::ReplSetConfig initialDonorConfig() override {
+        BSONArrayBuilder members;
+        members.append(BSON("_id" << 1 << "host"
+                                  << "node1"
+                                  << "tags" << BSON("recipientTagName" << UUID::gen().toString())));
+
+        return repl::ReplSetConfig::parse(BSON("_id" << _recipientSetName << "version" << 1
+                                                     << "protocolVersion" << 1 << "members"
+                                                     << members.arr()));
+    }
+
+    ShardSplitDonorDocument initialStateDocument() override {
+
+        auto stateDocument = defaultStateDocument();
+        stateDocument.setBlockTimestamp(Timestamp(1, 1));
+        stateDocument.setState(ShardSplitDonorStateEnum::kBlocking);
+
+        return stateDocument;
+    }
+};
+
+TEST_F(ShardSplitRecipientCleanupTest, ShardSplitRecipientCleanup) {
+    auto opCtx = makeOperationContext();
+    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
+
+    ASSERT_OK(serverless::getStateDocument(opCtx.get(), _uuid).getStatus());
+
+    auto decisionFuture = [&]() {
+        ASSERT(_pauseBeforeRecipientCleanupFp);
+        (*(_pauseBeforeRecipientCleanupFp.get()))->waitForTimesEntered(_initialTimesEntered + 1);
+
+        auto splitService = repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext())
+                                ->lookupServiceByName(ShardSplitDonorService::kServiceName);
+        auto optionalDonor = ShardSplitDonorService::DonorStateMachine::lookup(
+            opCtx.get(), splitService, BSON("_id" << _uuid));
+
+        ASSERT_TRUE(optionalDonor);
+        auto serviceInstance = optionalDonor.get();
+        ASSERT(serviceInstance.get());
+
+        _pauseBeforeRecipientCleanupFp.reset();
+
+        return serviceInstance->decisionFuture();
+    }();
+
+    auto result = decisionFuture.get();
+
+    // We set the promise before the future chain. Cleanup will return kCommitted as a result.
+    ASSERT(!result.abortReason);
+    ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kCommitted);
+
+    // deleted the local state doc so this should return NoMatchingDocument
+    ASSERT_EQ(serverless::getStateDocument(opCtx.get(), _uuid).getStatus().code(),
+              ErrorCodes::NoMatchingDocument);
+}
+
+class ShardSplitStepUpWithCommitted : public ShardSplitPersistenceTest {
+    repl::ReplSetConfig initialDonorConfig() override {
+        return _replSet.getReplConfig();
+    }
+
+    ShardSplitDonorDocument initialStateDocument() override {
+
+        auto stateDocument = defaultStateDocument();
+
+        stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
+        _expireAt = getServiceContext()->getFastClockSource()->now() +
+            Milliseconds{repl::shardSplitGarbageCollectionDelayMS.load()};
+        stateDocument.setExpireAt(_expireAt);
+        stateDocument.setBlockTimestamp(Timestamp(1, 1));
+        stateDocument.setCommitOrAbortOpTime(repl::OpTime(Timestamp(1, 1), 1));
+
+        return stateDocument;
+    }
+
+protected:
+    boost::optional<mongo::Date_t> _expireAt;
+};
+
+TEST_F(ShardSplitStepUpWithCommitted, StepUpWithkCommitted) {
+    auto opCtx = makeOperationContext();
+
+    test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, opCtx.get());
     test::shard_split::reconfigToAddRecipientNodes(
-        getServiceContext(), _recipientTagName, _validRepl.getHosts());
+        getServiceContext(), _recipientTagName, _replSet.getHosts(), _recipientSet.getHosts());
 
-    CancellationSource source;
-    auto future = detail::makeRecipientAcceptSplitFuture(
-        _executor, source.token(), _recipientTagName, _recipientSetName);
+    auto foundStateDoc = uassertStatusOK(serverless::getStateDocument(opCtx.get(), _uuid));
+    invariant(foundStateDoc.getExpireAt());
+    ASSERT_EQ(*foundStateDoc.getExpireAt(), *_expireAt);
 
-    _executor->shutdown();
-    _executor->join();
+    ASSERT(_pauseBeforeRecipientCleanupFp);
+    _pauseBeforeRecipientCleanupFp.get()->failPoint()->waitForTimesEntered(_initialTimesEntered +
+                                                                           1);
 
-    ASSERT_FALSE(future.isReady());
+    auto splitService = repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext())
+                            ->lookupServiceByName(ShardSplitDonorService::kServiceName);
+    auto optionalInstance = ShardSplitDonorService::DonorStateMachine::lookup(
+        opCtx.get(), splitService, BSON("_id" << _uuid));
 
-    // Ensure the test does not hang.
-    source.cancel();
-    ASSERT_EQ(future.getNoThrow().code(), ErrorCodes::ShutdownInProgress);
+    ASSERT(optionalInstance);
+    _pauseBeforeRecipientCleanupFp.reset();
+
+    auto serviceInstance = optionalInstance->get();
+
+
+    auto result = serviceInstance->decisionFuture().get();
+    ASSERT(!result.abortReason);
+    ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kCommitted);
+
+    // we don't need to call tryForget since expireAt is already set the completionPromise will
+    // complete.
+    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 }
 
 }  // namespace mongo

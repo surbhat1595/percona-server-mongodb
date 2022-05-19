@@ -33,7 +33,6 @@
 #include <cstdint>
 
 #include "mongo/crypto/fle_data_frames.h"
-#include "mongo/shell/kms_gen.h"
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/status.h"
@@ -47,12 +46,23 @@ namespace crypto {
  */
 
 constexpr size_t kFieldLevelEncryptionKeySize = 96;
+constexpr size_t kFieldLevelEncryption2KeySize = 64;
 constexpr size_t kAeadAesHmacKeySize = 64;
 
 /**
  * Returns the length of the ciphertext output given the plaintext length. Only for AEAD.
  */
 size_t aeadCipherOutputLength(size_t plainTextLen);
+
+/**
+ * Returns the length of the ciphertext output given the plaintext length. Only for FLE2 AEAD.
+ */
+size_t fle2AeadCipherOutputLength(size_t plainTextLen);
+
+/**
+ * Returns the length of the ciphertext output given the plaintext length. Only for FLE2.
+ */
+size_t fle2CipherOutputLength(size_t plainTextLen);
 
 /**
  * Encrypts a dataframe object following the AEAD_AES_256_CBC_HMAC_SHA_512 encryption
@@ -83,12 +93,41 @@ Status aeadEncryptWithIV(ConstDataRange key,
                          DataRange out);
 
 /**
+ * Internal call for FLE2 aeadEncryption algorithm.
+ * Note: parameter "iv" is not required and only used for unit testing
+ */
+Status fle2AeadEncrypt(ConstDataRange key,
+                       ConstDataRange in,
+                       ConstDataRange iv,
+                       ConstDataRange associatedData,
+                       DataRange out);
+
+/**
+ * Internal call for FLE2 encryption algorithm.
+ * Note: parameter "iv" is not required and only used for unit testing
+ */
+Status fle2Encrypt(ConstDataRange key, ConstDataRange in, ConstDataRange iv, DataRange out);
+
+/**
  * Internal call for the aeadDecryption algorithm. Only used for testing.
  */
 StatusWith<std::size_t> aeadDecrypt(const SymmetricKey& key,
                                     ConstDataRange ciphertext,
                                     ConstDataRange associatedData,
                                     DataRange out);
+
+/**
+ * Internal call for FLE2 aeadDecryption algorithm.
+ */
+StatusWith<std::size_t> fle2AeadDecrypt(ConstDataRange key,
+                                        ConstDataRange in,
+                                        ConstDataRange associatedData,
+                                        DataRange out);
+
+/**
+ * Internal call for FLE2 decryption algorithm.
+ */
+StatusWith<std::size_t> fle2Decrypt(ConstDataRange key, ConstDataRange in, DataRange out);
 
 /**
  * Decrypts the cipherText using AEAD_AES_256_CBC_HMAC_SHA_512 decryption. Writes output

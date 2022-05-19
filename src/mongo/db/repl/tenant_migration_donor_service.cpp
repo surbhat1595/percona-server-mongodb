@@ -87,7 +87,7 @@ const int kMaxRecipientKeyDocsFindAttempts = 10;
 
 bool shouldStopSendingRecipientForgetMigrationCommand(Status status) {
     return status.isOK() ||
-        !(ErrorCodes::isRetriableError(status) ||
+        !(ErrorCodes::isRetriableError(status) || ErrorCodes::isNetworkTimeoutError(status) ||
           // Returned if findHost() is unable to target the recipient in 15 seconds, which may
           // happen after a failover.
           status == ErrorCodes::FailedToSatisfyReadPreference ||
@@ -95,18 +95,23 @@ bool shouldStopSendingRecipientForgetMigrationCommand(Status status) {
 }
 
 bool shouldStopSendingRecipientSyncDataCommand(Status status, MigrationProtocolEnum protocol) {
-    auto isRetriable =
-        ErrorCodes::isRetriableError(status) && protocol != MigrationProtocolEnum::kShardMerge;
-    return status.isOK() ||
-        !(isRetriable ||
-          // Returned if findHost() is unable to target the recipient in 15 seconds, which may
-          // happen after a failover.
-          status == ErrorCodes::FailedToSatisfyReadPreference);
+    if (status.isOK() || protocol == MigrationProtocolEnum::kShardMerge) {
+        return true;
+    }
+
+    return !(ErrorCodes::isRetriableError(status) || ErrorCodes::isNetworkTimeoutError(status) ||
+             // Returned if findHost() is unable to target the recipient in 15 seconds, which may
+             // happen after a failover.
+             status == ErrorCodes::FailedToSatisfyReadPreference);
 }
 
 bool shouldStopFetchingRecipientClusterTimeKeyDocs(Status status) {
     return status.isOK() ||
-        !(ErrorCodes::isRetriableError(status) || ErrorCodes::isInterruption(status));
+        !(ErrorCodes::isRetriableError(status) || ErrorCodes::isInterruption(status) ||
+          ErrorCodes::isNetworkTimeoutError(status) ||
+          // Returned if findHost() is unable to target the recipient in 15 seconds, which may
+          // happen after a failover.
+          status == ErrorCodes::FailedToSatisfyReadPreference);
 }
 
 void checkForTokenInterrupt(const CancellationToken& token) {
@@ -930,7 +935,7 @@ SemiFuture<void> TenantMigrationDonorService::Instance::run(
         })
         .then([this, self = shared_from_this(), executor, recipientTargeterRS, abortToken] {
             LOGV2(6104905,
-                  "Waiting for receipient to reach the block timestamp.",
+                  "Waiting for recipient to reach the block timestamp.",
                   "migrationId"_attr = _migrationUuid,
                   "tenantId"_attr = _tenantId);
             return _waitForRecipientToReachBlockTimestampAndEnterCommittedState(
@@ -1023,7 +1028,8 @@ void TenantMigrationDonorService::Instance::_abortIndexBuilds(const Cancellation
         auto opCtxHolder = cc().makeOperationContext();
         auto* opCtx = opCtxHolder.get();
         auto* indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx);
-        indexBuildsCoordinator->abortTenantIndexBuilds(opCtx, _tenantId, "tenant migration");
+        indexBuildsCoordinator->abortTenantIndexBuilds(
+            opCtx, _protocol, _tenantId, "tenant migration");
     }
 }
 

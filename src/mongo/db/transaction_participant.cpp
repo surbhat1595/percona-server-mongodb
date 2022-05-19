@@ -208,9 +208,9 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
     }
 
     if (auto state = result.lastTxnRecord->getState()) {
-        if (!isInternalSessionForRetryableWrite(lsid) || state == DurableTxnStateEnum::kAborted) {
+        if (!isInternalSessionForRetryableWrite(lsid) || state != DurableTxnStateEnum::kCommitted) {
             // When state is given, it must be a transaction, so we don't need to traverse the
-            // history if it is not a transaction for retryable writes.
+            // history if it is not a committed transaction for retryable writes.
             return result;
         }
     }
@@ -219,6 +219,8 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
         return result;
     }
 
+    // Helper for registering statement ids of an oplog entry for a retryable write or a retryable
+    // internal transaction.
     auto insertStmtIdsForOplogEntry = [&](const repl::OplogEntry& entry) {
         for (auto stmtId : entry.getStatementIds()) {
             uassert(5875604,
@@ -246,8 +248,6 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
         try {
             const auto entry = it.next(opCtx);
 
-            // Each entry should correspond to a retryable write or a FCV4.0 format transaction.
-            // These oplog entries must have statementIds.
             auto stmtIds = entry.getStatementIds();
 
             if (isInternalSessionForRetryableWrite(lsid)) {
@@ -271,6 +271,7 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                     MONGO_UNREACHABLE;
                 }
             } else {
+                // Oplog entries for retryable writes are expected to have a statement id.
                 invariant(!stmtIds.empty());
 
                 if (stmtIds.front() == kIncompleteHistoryStmtId) {
@@ -283,11 +284,14 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                     continue;
                 }
 
+                // TODO (SERVER-64172): Remove leftover upgrade/downgrade code from 4.2 in
+                // fetchActiveTransactionHistory.
                 if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps &&
                     !entry.shouldPrepare() && !entry.isPartialTransaction()) {
                     result.lastTxnRecord->setState(DurableTxnStateEnum::kCommitted);
                     return result;
                 }
+
                 insertStmtIdsForOplogEntry(entry);
             }
         } catch (const DBException& ex) {
@@ -710,6 +714,16 @@ void TransactionParticipant::Participant::_beginOrContinueRetryableWrite(
         retryableWriteTxnParticipantCatalog.addParticipant(*this);
     } else {
         // Retrying a retryable write.
+
+        // If this retryable write's transaction id has been converted to a transaction, and that
+        // transaction is in prepare, wait for it to exit prepare before throwing
+        // IncompleteTransactionHistory so the error response's operationTime is inclusive of the
+        // transaction's 2PC decision, guaranteeing causally consistent sessions will always read
+        // the transaction's writes.
+        uassert(ErrorCodes::PreparedTransactionInProgress,
+                "Retryable write that has been converted to a transaction is in prepare",
+                !o().txnState.isInSet(TransactionState::kPrepared));
+
         uassert(ErrorCodes::IncompleteTransactionHistory,
                 "Cannot retry a retryable write that has been converted into a transaction",
                 o().txnState.isInRetryableWriteMode());

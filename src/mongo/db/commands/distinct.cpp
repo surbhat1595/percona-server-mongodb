@@ -208,6 +208,14 @@ public:
                 "Please see http://dochub.mongodb.org/core/transaction-distinct for a recommended "
                 "alternative.",
                 !opCtx->inMultiDocumentTransaction() || !ctx->getCollection().isSharded());
+
+            // Similarly, we ban readConcern level snapshot for sharded collections.
+            uassert(
+                ErrorCodes::InvalidOptions,
+                "Cannot run 'distinct' on a sharded collection with readConcern level 'snapshot'",
+                repl::ReadConcernArgs::get(opCtx).getLevel() !=
+                        repl::ReadConcernLevel::kSnapshotReadConcern ||
+                    !ctx->getCollection().isSharded());
         }
 
         const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
@@ -215,11 +223,6 @@ public:
             ctx->getCollection() ? ctx->getCollection()->getDefaultCollator() : nullptr;
         auto parsedDistinct = uassertStatusOK(
             ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, false, defaultCollation));
-
-        // Check whether we are allowed to read from this node after acquiring our locks.
-        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        uassertStatusOK(replCoord->checkCanServeReadsFor(
-            opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
         if (ctx->getView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
@@ -233,6 +236,11 @@ public:
             uassertStatusOK(ViewResponseFormatter(aggResult).appendAsDistinctResponse(&result));
             return true;
         }
+
+        // Check whether we are allowed to read from this node after acquiring our locks.
+        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+        uassertStatusOK(replCoord->checkCanServeReadsFor(
+            opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
         const auto& collection = ctx->getCollection();
 

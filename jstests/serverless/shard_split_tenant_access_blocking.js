@@ -22,7 +22,7 @@ test.addRecipientNodes();
 
 const donorPrimary = test.donor.getPrimary();
 const migrationId = UUID();
-const tenantIds = ["test_tenant_1", "test_tenant_2"];
+const tenantIds = ["tenant1", "tenant2"];
 const maxTimeMS = 1 * 2000;  // 2 seconds
 
 jsTestLog("Asserting no state document exist before command");
@@ -40,7 +40,7 @@ tenantIds.forEach(id => {
 const adminDb = donorPrimary.getDB("admin");
 const blockingFailPoint = configureFailPoint(adminDb, "pauseShardSplitAfterBlocking");
 
-// TODO(SERVER-63091): remove this when we actually split recipients
+// TODO(SERVER-64168): remove this when split is ready
 configureFailPoint(adminDb, "skipShardSplitWaitForSplitAcceptance");
 
 jsTestLog("Running commitShardSplit command");

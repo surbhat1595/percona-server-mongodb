@@ -35,7 +35,7 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/catalog_cache_test_fixture.h"
 #include "mongo/s/database_version.h"
@@ -60,7 +60,7 @@ protected:
     void expectGetDatabase() {
         expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
             DatabaseType db(
-                kNss.db().toString(), {"0"}, true, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+                kNss.db().toString(), {"0"}, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
             return std::vector<BSONObj>{db.toBSON()};
         }());
     }
@@ -99,10 +99,7 @@ protected:
     CollectionType getDefaultCollectionType(OID epoch,
                                             Timestamp timestamp,
                                             const ShardKeyPattern& shardKeyPattern) {
-        CollectionType collType(kNss, epoch, timestamp, Date_t::now(), UUID::gen());
-        collType.setKeyPattern(shardKeyPattern.toBSON());
-        collType.setUnique(false);
-        return collType;
+        return {kNss, epoch, timestamp, Date_t::now(), UUID::gen(), shardKeyPattern.toBSON()};
     }
 };
 
@@ -205,7 +202,8 @@ TEST_F(CatalogCacheRefreshTest, DatabaseBSONCorrupted) {
         FAIL(str::stream() << "Returning corrupted database entry did not fail and returned "
                            << cm.toString());
     } catch (const DBException& ex) {
-        ASSERT_EQ(ErrorCodes::NoSuchKey, ex.code());
+        constexpr int kParseError = 40414;
+        ASSERT_EQ(ErrorCodes::Error(kParseError), ex.code());
     }
 }
 

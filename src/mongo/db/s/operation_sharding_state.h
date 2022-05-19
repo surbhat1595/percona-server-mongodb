@@ -41,6 +41,28 @@
 namespace mongo {
 
 /**
+ * Marks the opCtx during scope in which it has been instantiated as running in the shard role for
+ * the specified collection. This indicates to the underlying storage system that the caller has
+ * performed 'routing', in the sense that it is aware of what data is located on this node.
+ */
+class ScopedSetShardRole {
+public:
+    ScopedSetShardRole(OperationContext* opCtx,
+                       NamespaceString nss,
+                       boost::optional<ChunkVersion> shardVersion,
+                       boost::optional<DatabaseVersion> databaseVersion);
+    ~ScopedSetShardRole();
+
+private:
+    OperationContext* const _opCtx;
+
+    NamespaceString _nss;
+
+    boost::optional<ChunkVersion> _shardVersion;
+    boost::optional<DatabaseVersion> _databaseVersion;
+};
+
+/**
  * A decoration on OperationContext representing per-operation shard version metadata sent to mongod
  * from mongos as a command parameter.
  *
@@ -86,34 +108,13 @@ public:
     };
 
     /**
-     * Parses shardVersion and databaseVersion from 'cmdObj' and stores the results in this object
-     * along with the given namespace that is associated with the versions. Does nothing if no
-     * shardVersion or databaseVersion is attached to the command.
-     *
-     * Expects 'cmdObj' to have format
-     * { ...,
-     *   shardVersion: [<version>, <epoch>],
-     *   databaseVersion: { uuid: <UUID>, version: <int> },
-     * ...}
-     *
-     * This initialization may only be performed once for the lifetime of the object, which
-     * coincides with the lifetime of the client's request.
+     * Same semantics as ScopedSetShardRole above, but the role remains set for the lifetime of the
+     * opCtx.
      */
-    void initializeClientRoutingVersionsFromCommand(NamespaceString nss, const BSONObj& cmdObj);
-
-    /**
-     * Stores the given shardVersion and databaseVersion for the given namespace. Note: The shard
-     * version for the given namespace stored in the OperationShardingState can be overwritten if it
-     * has not been checked yet.
-     */
-    void initializeClientRoutingVersions(NamespaceString nss,
-                                         const boost::optional<ChunkVersion>& shardVersion,
-                                         const boost::optional<DatabaseVersion>& dbVersion);
-
-    /**
-     * Removes the databaseVersion stored for the given namespace.
-     */
-    void unsetExpectedDbVersion_Only_For_Aggregation_Local_Reads(const StringData& dbName);
+    static void setShardRole(OperationContext* opCtx,
+                             const NamespaceString& nss,
+                             const boost::optional<ChunkVersion>& shardVersion,
+                             const boost::optional<DatabaseVersion>& dbVersion);
 
     /**
      * Returns whether or not there is a shard version for the namespace associated with this
@@ -140,37 +141,15 @@ public:
     boost::optional<DatabaseVersion> getDbVersion(StringData dbName) const;
 
     /**
-     * This call is a no op if there isn't a currently active migration critical section. Otherwise
-     * it will wait for the critical section to complete up to the remaining operation time.
+     * This method implements a best-effort attempt to wait for the critical section to complete
+     * before returning to the router at the previous step in order to prevent it from busy spinning
+     * while the critical section is in progress.
      *
-     * Returns true if the call actually waited because of migration critical section (regardless if
-     * whether it timed out or not), false if there was no active migration critical section.
+     * All waits for migration critical section should go through this code path, because it also
+     * accounts for transactions and locking.
      */
-    bool waitForMigrationCriticalSectionSignal(OperationContext* opCtx);
-
-    /**
-     * Setting this value indicates that when the version check failed, there was an active
-     * migration for the namespace and that it would be prudent to wait for the critical section to
-     * complete before retrying so the router doesn't make wasteful requests.
-     */
-    void setMigrationCriticalSectionSignal(boost::optional<SharedSemiFuture<void>> critSecSignal);
-
-    /**
-     * This call is a no op if there isn't a currently active movePrimary critical section.
-     * Otherwise it will wait for the critical section to complete up to the remaining operation
-     * time.
-     *
-     * Returns true if the call actually waited because of movePrimary critical section (regardless
-     * whether it timed out or not), false if there was no active movePrimary critical section.
-     */
-    bool waitForMovePrimaryCriticalSectionSignal(OperationContext* opCtx);
-
-    /**
-     * Setting this value indicates that when the version check failed, there was an active
-     * movePrimary for the namespace and that it would be prudent to wait for the critical section
-     * to complete before retrying so the router doesn't make wasteful requests.
-     */
-    void setMovePrimaryCriticalSectionSignal(boost::optional<SharedSemiFuture<void>> critSecSignal);
+    static Status waitForCriticalSectionToComplete(OperationContext* opCtx,
+                                                   SharedSemiFuture<void> critSecSignal) noexcept;
 
     /**
      * Stores the failed status in _shardingOperationFailedStatus.
@@ -189,28 +168,31 @@ public:
     boost::optional<Status> resetShardingOperationFailedStatus();
 
 private:
+    friend class ScopedSetShardRole;
     friend class ShardServerOpObserver;  // For access to _allowCollectionCreation below
 
     // Specifies whether the request is allowed to create database/collection implicitly
     bool _allowCollectionCreation{false};
 
-    // The OperationShardingState class supports storing shardVersions for multiple namespaces (and
-    // databaseVersions for multiple databases), even though client code has not been written yet to
-    // *send* multiple shardVersions or databaseVersions.
-    StringMap<ChunkVersion> _shardVersions;
-    StringMap<DatabaseVersion> _databaseVersions;
+    // Stores the shard version expected for each collection that will be accessed
+    struct ShardVersionTracker {
+        ShardVersionTracker(ChunkVersion v) : v(v) {}
+        ShardVersionTracker(ShardVersionTracker&&) = default;
+        ShardVersionTracker(const ShardVersionTracker&) = delete;
+        ChunkVersion v;
+        int recursion{0};
+    };
+    StringMap<ShardVersionTracker> _shardVersions;
 
-    // Stores shards that have undergone a version check.
-    StringSet _shardVersionsChecked;
-
-    // This value will only be non-null if version check during the operation execution failed due
-    // to stale version and there was a migration for that namespace, which was in critical section.
-    boost::optional<SharedSemiFuture<void>> _migrationCriticalSectionSignal;
-
-    // This value will only be non-null if version check during the operation execution failed due
-    // to stale version and there was a movePrimary for that namespace, which was in critical
-    // section.
-    boost::optional<SharedSemiFuture<void>> _movePrimaryCriticalSectionSignal;
+    // Stores the database version expected for each database that will be accessed
+    struct DatabaseVersionTracker {
+        DatabaseVersionTracker(DatabaseVersion v) : v(v) {}
+        DatabaseVersionTracker(DatabaseVersionTracker&&) = default;
+        DatabaseVersionTracker(const DatabaseVersionTracker&) = delete;
+        DatabaseVersion v;
+        int recursion{0};
+    };
+    StringMap<DatabaseVersionTracker> _databaseVersions;
 
     // This value can only be set when a rerouting exception occurs during a write operation, and
     // must be handled before this object gets destructed.

@@ -37,18 +37,25 @@
 #include <vector>
 
 #include "mongo/base/data_range.h"
+#include "mongo/base/secure_allocator.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/crypto/aead_encryption.h"
+#include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/crypto/symmetric_crypto.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/util/uuid.h"
-
 
 namespace mongo {
 
+constexpr auto kSafeContent = "__safeContent__";
+
 using PrfBlock = std::array<std::uint8_t, 32>;
-using KeyMaterial = std::array<std::uint8_t, 32>;
+using KeyMaterial = SecureVector<std::uint8_t>;
 
 // u = [1, max parallel clients)
 using FLEContentionFactor = std::uint64_t;
@@ -73,10 +80,17 @@ template <FLEKeyType KeyT>
 struct FLEKey {
     FLEKey() = default;
 
-    FLEKey(KeyMaterial dataIn) : data(std::move(dataIn)) {}
+    FLEKey(KeyMaterial dataIn) : data(std::move(dataIn)) {
+        // This is not a mistake; same keys will be used in FLE2 as in FLE1
+        uassert(6364500,
+                str::stream() << "Length of KeyMaterial is expected to be "
+                              << crypto::kFieldLevelEncryptionKeySize << " bytes, found "
+                              << data->size(),
+                data->size() == crypto::kFieldLevelEncryptionKeySize);
+    }
 
     ConstDataRange toCDR() const {
-        return ConstDataRange(data.data(), data.data() + data.size());
+        return ConstDataRange(data->data(), data->data() + data->size());
     }
 
     // Actual type of the key
@@ -406,7 +420,7 @@ public:
 
 struct ESCNullDocument {
     // Id is not included as it is HMAC generated and cannot be reversed
-    uint64_t pos;
+    uint64_t position;
     uint64_t count;
 };
 
@@ -493,9 +507,9 @@ public:
     /**
      * Search for the highest document id for a given field/value pair based on the token.
      */
-    static uint64_t emuBinary(FLEStateCollectionReader* reader,
-                              ESCTwiceDerivedTagToken tagToken,
-                              ESCTwiceDerivedValueToken valueToken);
+    static boost::optional<uint64_t> emuBinary(FLEStateCollectionReader* reader,
+                                               ESCTwiceDerivedTagToken tagToken,
+                                               ESCTwiceDerivedValueToken valueToken);
 };
 
 
@@ -575,7 +589,7 @@ enum class ECCValueType : uint64_t {
 
 struct ECCNullDocument {
     // Id is not included as it HMAC generated and cannot be reversed
-    uint64_t pos;
+    uint64_t position;
 };
 
 
@@ -630,20 +644,20 @@ public:
      * Decrypt the null document.
      */
     static StatusWith<ECCNullDocument> decryptNullDocument(ECCTwiceDerivedValueToken valueToken,
-                                                           BSONObj& doc);
+                                                           const BSONObj& doc);
 
     /**
      * Decrypt a regular document.
      */
     static StatusWith<ECCDocument> decryptDocument(ECCTwiceDerivedValueToken valueToken,
-                                                   BSONObj& doc);
+                                                   const BSONObj& doc);
 
     /**
      * Search for the highest document id for a given field/value pair based on the token.
      */
-    static uint64_t emuBinary(FLEStateCollectionReader* reader,
-                              ECCTwiceDerivedTagToken tagToken,
-                              ECCTwiceDerivedValueToken valueToken);
+    static boost::optional<uint64_t> emuBinary(FLEStateCollectionReader* reader,
+                                               ECCTwiceDerivedTagToken tagToken,
+                                               ECCTwiceDerivedValueToken valueToken);
 };
 
 /**
@@ -656,20 +670,20 @@ class FLEKeyVault {
 public:
     virtual ~FLEKeyVault();
 
-    FLEUserKeyAndId getUserKeyById(UUID uuid) {
+    FLEUserKeyAndId getUserKeyById(const UUID& uuid) {
         return getKeyById<FLEKeyType::User>(uuid);
     }
 
-    FLEIndexKeyAndId getIndexKeyById(UUID uuid) {
+    FLEIndexKeyAndId getIndexKeyById(const UUID& uuid) {
         return getKeyById<FLEKeyType::Index>(uuid);
     }
 
 protected:
-    virtual KeyMaterial getKey(UUID uuid) = 0;
+    virtual KeyMaterial getKey(const UUID& uuid) = 0;
 
 private:
     template <FLEKeyType KeyT>
-    FLEKeyAndId<KeyT> getKeyById(UUID uuid) {
+    FLEKeyAndId<KeyT> getKeyById(const UUID& uuid) {
         auto keyMaterial = getKey(uuid);
         return FLEKeyAndId<KeyT>(keyMaterial, uuid);
     }
@@ -687,6 +701,18 @@ public:
                                         FLEIndexKeyAndId indexKey,
                                         FLEUserKeyAndId userKey,
                                         FLECounter counter);
+
+
+    /**
+     * Explicit decrypt a single value into type and value
+     *
+     * Supports decrypting FLE2IndexedEqualityEncryptedValue
+     */
+    static std::pair<BSONType, std::vector<uint8_t>> decrypt(ConstDataRange cdr,
+                                                             FLEKeyVault* keyVault);
+
+    static std::pair<BSONType, std::vector<uint8_t>> decrypt(BSONElement element,
+                                                             FLEKeyVault* keyVault);
 
     /**
      * Generates a client-side payload that is sent to the server.
@@ -706,6 +732,39 @@ public:
      */
     static BSONObj generateInsertOrUpdateFromPlaceholders(const BSONObj& obj,
                                                           FLEKeyVault* keyVault);
+
+
+    /**
+     * For every encrypted field path in the EncryptedFieldConfig, this generates
+     * a compaction token derived from the field's index key, which is retrieved from
+     * the supplied FLEKeyVault using the field's key ID.
+     *
+     * Returns a BSON object mapping the encrypted field path to its compaction token,
+     * which is a general BinData value.
+     */
+    static BSONObj generateCompactionTokens(const EncryptedFieldConfig& cfg, FLEKeyVault* keyVault);
+
+    /**
+     * Decrypts a document. Only supports FLE2.
+     */
+    static BSONObj decryptDocument(BSONObj& doc, FLEKeyVault* keyVault);
+
+    /**
+     * Validate the tags array exists and is of the right type.
+     */
+    static void validateTagsArray(const BSONObj& doc);
+
+    /**
+     * Validate document
+     *
+     * Checks performed
+     * 1. Fields, if present, are indexed the way specified
+     * 2. All fields can be decrypted successfully
+     * 3. There is a tag for each field and no extra tags
+     */
+    static void validateDocument(const BSONObj& doc,
+                                 const EncryptedFieldConfig& efc,
+                                 FLEKeyVault* keyVault);
 };
 
 /*
@@ -715,8 +774,8 @@ public:
  * ECCDerivedFromDataTokenAndContentionFactorToken)
  *
  * struct {
- *    uint8_t[64] esc;
- *    uint8_t[64] ecc;
+ *    uint8_t[32] esc;
+ *    uint8_t[32] ecc;
  * }
  */
 struct EncryptedStateCollectionTokens {
@@ -758,12 +817,216 @@ struct ECOCCompactionDocument {
  * Note:
  * - ECOC is a set of documents, they are unordered
  */
-class ECOCollection {
+class ECOCCollection {
 public:
     static BSONObj generateDocument(StringData fieldName, ConstDataRange payload);
 
-    static ECOCCompactionDocument parseAndDecrypt(BSONObj& doc, ECOCToken token);
+    static ECOCCompactionDocument parseAndDecrypt(const BSONObj& doc, ECOCToken token);
 };
 
+
+/**
+ * Class to read/write FLE2 Equality Indexed Encrypted Values
+ *
+ * Fields are encrypted with the following:
+ *
+ * struct {
+ *   uint8_t fle_blob_subtype = 7;
+ *   uint8_t key_uuid[16];
+ *   uint8  original_bson_type;
+ *   ciphertext[ciphertext_length];
+ * }
+ *
+ * Encrypt(ServerDataEncryptionLevel1Token, Struct(K_KeyId, v, count, d, s, c))
+ *
+ * struct {
+ *   uint8_t[length] cipherText; // UserKeyId + Encrypt(K_KeyId, value),
+ *   uint64_t counter;
+ *   uint8_t[32] edc;  // EDCDerivedFromDataTokenAndContentionFactorToken
+ *   uint8_t[32] esc;  // ESCDerivedFromDataTokenAndContentionFactorToken
+ *   uint8_t[32] ecc;  // ECCDerivedFromDataTokenAndContentionFactorToken
+ *}
+ */
+struct FLE2IndexedEqualityEncryptedValue {
+    FLE2IndexedEqualityEncryptedValue(FLE2InsertUpdatePayload payload, uint64_t counter);
+
+    FLE2IndexedEqualityEncryptedValue(EDCDerivedFromDataTokenAndContentionFactorToken edcParam,
+                                      ESCDerivedFromDataTokenAndContentionFactorToken escParam,
+                                      ECCDerivedFromDataTokenAndContentionFactorToken eccParam,
+                                      uint64_t countParam,
+                                      BSONType typeParam,
+                                      UUID indexKeyIdParam,
+                                      std::vector<uint8_t> serializedServerValueParam);
+
+    static StatusWith<FLE2IndexedEqualityEncryptedValue> decryptAndParse(
+        ServerDataEncryptionLevel1Token token, ConstDataRange serializedServerValue);
+
+    /**
+     * Read the key id from the payload.
+     */
+    static StatusWith<UUID> readKeyId(ConstDataRange serializedServerValue);
+
+    StatusWith<std::vector<uint8_t>> serialize(ServerDataEncryptionLevel1Token token);
+
+    EDCDerivedFromDataTokenAndContentionFactorToken edc;
+    ESCDerivedFromDataTokenAndContentionFactorToken esc;
+    ECCDerivedFromDataTokenAndContentionFactorToken ecc;
+    uint64_t count;
+    BSONType bsonType;
+    UUID indexKeyId;
+    std::vector<uint8_t> clientEncryptedValue;
+};
+
+
+struct EDCServerPayloadInfo {
+    ESCDerivedFromDataTokenAndContentionFactorToken getESCToken() const;
+
+    FLE2InsertUpdatePayload payload;
+    std::string fieldPathName;
+    uint64_t count;
+};
+
+struct EDCIndexedFields {
+    ConstDataRange value;
+
+    std::string fieldPathName;
+};
+
+inline bool operator<(const EDCIndexedFields& left, const EDCIndexedFields& right) {
+    if (left.fieldPathName == right.fieldPathName) {
+        if (left.value.length() != right.value.length()) {
+            return left.value.length() < right.value.length();
+        }
+
+        if (left.value.length() == 0 && right.value.length() == 0) {
+            return false;
+        }
+
+        return memcmp(left.value.data(), right.value.data(), left.value.length()) < 0;
+    }
+    return left.fieldPathName < right.fieldPathName;
+}
+
+struct FLEDeleteToken {
+    ECOCToken ecocToken;
+    ServerDataEncryptionLevel1Token serverEncryptionToken;
+};
+
+/**
+ * Manipulates the EDC collection.
+ *
+ * To finalize a document for insertion
+ *
+ * 1. Get all the encrypted fields that need counters via getEncryptedFieldInfo()
+ * 2. Choose counters
+ * 3. Finalize the insertion with finalizeForInsert().
+ */
+class EDCServerCollection {
+public:
+    /**
+     * Get information about all FLE2InsertUpdatePayload payloads
+     */
+    static std::vector<EDCServerPayloadInfo> getEncryptedFieldInfo(BSONObj& obj);
+
+    /**
+     * Generate a search tag
+     *
+     * HMAC(EDCTwiceDerivedToken, count)
+     */
+    static PrfBlock generateTag(EDCTwiceDerivedToken edcTwiceDerived, FLECounter count);
+    static PrfBlock generateTag(const EDCServerPayloadInfo& payload);
+    static PrfBlock generateTag(const FLE2IndexedEqualityEncryptedValue& indexedValue);
+
+    /**
+     * Consumes a payload from a MongoDB client for insert.
+     *
+     * Converts FLE2InsertUpdatePayload to a final insert payload and updates __safeContent__ with
+     * new tags.
+     */
+    static BSONObj finalizeForInsert(const BSONObj& doc,
+                                     const std::vector<EDCServerPayloadInfo>& serverPayload);
+
+    /**
+     * Consumes a payload from a MongoDB client for update, modifier update style.
+     *
+     * Converts any FLE2InsertUpdatePayload found to the final insert payload. Adds or updates the
+     * the existing $push to add __safeContent__ tags.
+     */
+    static BSONObj finalizeForUpdate(const BSONObj& doc,
+                                     const std::vector<EDCServerPayloadInfo>& serverPayload);
+
+    /**
+     * Generate an update modifier document with $pull to remove stale tags.
+     *
+     * Generates:
+     *
+     * { $pull : {__safeContent__ : {$in : [tag..] } } }
+     */
+    static BSONObj generateUpdateToRemoveTags(const std::vector<EDCIndexedFields>& removedFields,
+                                              const StringMap<FLEDeleteToken>& tokenMap);
+
+    /**
+     * Get a list of encrypted, indexed fields.
+     */
+    static std::vector<EDCIndexedFields> getEncryptedIndexedFields(BSONObj& obj);
+
+    /**
+     * Get a list of tags to remove and add.
+     *
+     * An update is performed in two steps:
+     * 1. Perform the update of the encrypted fields
+     *    - After step 1, the updated fields are correct, new tags have been added to
+     *    __safeContent__ but the __safeContent__ still contains stale tags.
+     * 2. Remove the old tags
+     *
+     * To do step 2, we need a list of removed tags. To do this we get a list of indexed encrypted
+     * fields in both and subtract the fields in the newDocument from originalDocument. The
+     * remaining fields are the ones we need to remove.
+     */
+    static std::vector<EDCIndexedFields> getRemovedTags(
+        std::vector<EDCIndexedFields>& originalDocument,
+        std::vector<EDCIndexedFields>& newDocument);
+};
+
+
+class EncryptionInformationHelpers {
+public:
+    /**
+     * Serialize EncryptedFieldConfig to a EncryptionInformation with
+     * EncryptionInformation.schema = { nss: EncryptedFieldConfig}
+     */
+    static BSONObj encryptionInformationSerialize(const NamespaceString& nss,
+                                                  const EncryptedFieldConfig& ef);
+    static BSONObj encryptionInformationSerialize(const NamespaceString& nss,
+                                                  const BSONObj& encryptedFields);
+
+    /**
+     * Serialize EncryptionInformation with EncryptionInformation.schema and a map of delete tokens
+     * for each field in EncryptedFieldConfig.
+     */
+    static BSONObj encryptionInformationSerializeForDelete(const NamespaceString& nss,
+                                                           const EncryptedFieldConfig& ef,
+                                                           FLEKeyVault* keyVault);
+
+    /**
+     * Get a schema from EncryptionInformation and ensure the esc/ecc/ecoc are setup correctly.
+     */
+    static EncryptedFieldConfig getAndValidateSchema(const NamespaceString& nss,
+                                                     const EncryptionInformation& ei);
+
+    /**
+     * Get a set of delete tokens for a given nss from EncryptionInformation.
+     */
+    static StringMap<FLEDeleteToken> getDeleteTokens(const NamespaceString& nss,
+                                                     const EncryptionInformation& ei);
+};
+
+/**
+ * Split a ConstDataRange into a byte for EncryptedBinDataType and a ConstDataRange for the trailing
+ * bytes
+ *
+ * Verifies that EncryptedBinDataType is valid.
+ */
+std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedConstDataRange(ConstDataRange cdr);
 
 }  // namespace mongo

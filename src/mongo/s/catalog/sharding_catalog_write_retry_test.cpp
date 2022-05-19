@@ -48,7 +48,6 @@
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -76,7 +75,7 @@ const HostAndPort kTestHosts[] = {
     HostAndPort("TestHost1:12345"), HostAndPort("TestHost2:12345"), HostAndPort("TestHost3:12345")};
 
 Status getMockDuplicateKeyError() {
-    return {DuplicateKeyErrorInfo(BSON("mock" << 1), BSON("" << 1), BSONObj{}),
+    return {DuplicateKeyErrorInfo(BSON("mock" << 1), BSON("" << 1), BSONObj{}, stdx::monostate{}),
             "Mock duplicate key error"};
 }
 
@@ -407,9 +406,12 @@ TEST_F(UpdateRetryTest, NotWritablePrimaryOnceSuccessAfterRetry) {
     HostAndPort host2("TestHost2");
     configTargeter()->setFindHostReturnValue(host1);
 
-    CollectionType collection(
-        NamespaceString("db.coll"), OID::gen(), Timestamp(1, 1), network()->now(), UUID::gen());
-    collection.setKeyPattern(KeyPattern(BSON("_id" << 1)));
+    CollectionType collection(NamespaceString("db.coll"),
+                              OID::gen(),
+                              Timestamp(1, 1),
+                              network()->now(),
+                              UUID::gen(),
+                              BSON("_id" << 1));
 
     BSONObj objToUpdate = BSON("_id" << 1 << "Value"
                                      << "TestValue");

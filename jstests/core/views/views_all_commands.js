@@ -104,6 +104,7 @@ let viewsCommandTests = {
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
     _configsvrMoveChunk: {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrMovePrimary: {skip: isAnInternalCommand},
+    _configsvrMoveRange: {skip: isAnInternalCommand},
     _configsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrRenameCollection: {skip: isAnInternalCommand},
     _configsvrRenameCollectionMetadata: {skip: isAnInternalCommand},
@@ -113,7 +114,9 @@ let viewsCommandTests = {
     _configsvrRemoveTags: {skip: isAnInternalCommand},
     _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
+    _configsvrRunRestore: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
+    _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
     _configsvrShardCollection:
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
@@ -149,6 +152,13 @@ let viewsCommandTests = {
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isAnInternalCommand},
+    _shardsvrMoveRange: {
+        command: {_shardsvrMoveRange: "test.view"},
+        skipStandalone: true,
+        isAdminCommand: true,
+        expectFailure: true,
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+    },
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrRenameCollection: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
@@ -156,6 +166,7 @@ let viewsCommandTests = {
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
+    _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
     _shardsvrShardCollection:
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _shardsvrCollMod: {skip: isAnInternalCommand},
@@ -474,6 +485,7 @@ let viewsCommandTests = {
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
     },
     movePrimary: {skip: "Tested in sharding/movePrimary1.js"},
+    moveRange: {skip: isUnrelated},
     multicast: {skip: isUnrelated},
     netstat: {skip: isAnInternalCommand},
     pinHistoryReplicated: {skip: isAnInternalCommand},
@@ -489,6 +501,7 @@ let viewsCommandTests = {
     reapLogicalSessionCacheNow: {skip: isAnInternalCommand},
     recipientForgetMigration: {skip: isUnrelated},
     recipientSyncData: {skip: isUnrelated},
+    recipientVoteImportedFiles: {skip: isAnInternalCommand},
     refreshSessions: {skip: isUnrelated},
     reIndex: {
         command: {reIndex: "view"},
@@ -636,6 +649,7 @@ let viewsCommandTests = {
     stopRecordingTraffic: {skip: isUnrelated},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
+    testInternalTransactions: {skip: isAnInternalCommand},
     testRemoval: {skip: isAnInternalCommand},
     testReshardCloneCollection: {skip: isAnInternalCommand},
     testVersion2: {skip: isAnInternalCommand},
@@ -664,7 +678,7 @@ let viewsCommandTests = {
     waitForOngoingChunkSplits: {skip: isUnrelated},
     voteCommitImportCollection: {skip: isUnrelated},
     voteCommitIndexBuild: {skip: isUnrelated},
-    voteCommitMigrationProgress: {skip: isUnrelated},
+    voteCommitMigrationProgress: {skip: isUnrelated},  // TODO (SERVER-64296): Remove in 6.1.
     voteCommitTransaction: {skip: isUnrelated},
     voteAbortTransaction: {skip: isUnrelated},
     waitForFailPoint: {skip: isUnrelated},

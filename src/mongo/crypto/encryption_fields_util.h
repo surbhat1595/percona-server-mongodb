@@ -28,9 +28,13 @@
  */
 #pragma once
 
+#include <boost/optional.hpp>
+
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/db/field_ref.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -77,5 +81,13 @@ inline bool isFLE2EqualityIndexedSupportedType(BSONType type) {
 inline bool isFLE2UnindexedSupportedType(BSONType type) {
     return isFLE2EqualityIndexedSupportedType(type);
 }
+
+struct EncryptedFieldMatchResult {
+    FieldRef encryptedField;
+    bool keyIsPrefixOrEqual;
+};
+
+boost::optional<EncryptedFieldMatchResult> findMatchingEncryptedField(
+    const FieldRef& key, const std::vector<FieldRef>& encryptedFields);
 
 }  // namespace mongo

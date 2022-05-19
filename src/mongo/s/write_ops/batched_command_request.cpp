@@ -95,6 +95,11 @@ const NamespaceString& BatchedCommandRequest::getNS() const {
     return _visit([](auto&& op) -> decltype(auto) { return op.getNamespace(); });
 }
 
+bool BatchedCommandRequest::hasEncryptionInformation() const {
+    return _visit(
+        [](auto&& op) -> decltype(auto) { return op.getEncryptionInformation().has_value(); });
+}
+
 std::size_t BatchedCommandRequest::sizeWriteOps() const {
     struct Visitor {
         auto operator()(const write_ops::InsertCommandRequest& op) const {
@@ -128,6 +133,13 @@ void BatchedCommandRequest::setLegacyRuntimeConstants(LegacyRuntimeConstants run
                                     [&](write_ops::DeleteCommandRequest& op) {
                                         op.setLegacyRuntimeConstants(std::move(runtimeConstants));
                                     }});
+}
+
+void BatchedCommandRequest::unsetLegacyRuntimeConstants() {
+    _visit(visit_helper::Overloaded{
+        [](write_ops::InsertCommandRequest&) {},
+        [&](write_ops::UpdateCommandRequest& op) { op.setLegacyRuntimeConstants(boost::none); },
+        [&](write_ops::DeleteCommandRequest& op) { op.setLegacyRuntimeConstants(boost::none); }});
 }
 
 const boost::optional<LegacyRuntimeConstants>& BatchedCommandRequest::getLegacyRuntimeConstants()

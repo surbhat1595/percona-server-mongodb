@@ -62,6 +62,7 @@
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future_util.h"
 
@@ -73,6 +74,7 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::kWriteConcernTimeoutSharding);
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeDoingDeletion);
+MONGO_FAIL_POINT_DEFINE(hangAfterDoingDeletion);
 MONGO_FAIL_POINT_DEFINE(suspendRangeDeletion);
 MONGO_FAIL_POINT_DEFINE(throwWriteConflictExceptionInDeleteRange);
 MONGO_FAIL_POINT_DEFINE(throwInternalErrorInDeleteRange);
@@ -292,7 +294,7 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                                           const UUID& collectionUuid,
                                           const BSONObj& keyPattern,
                                           const ChunkRange& range,
-                                          const boost::optional<UUID>& migrationId,
+                                          const UUID& migrationId,
                                           int numDocsToRemovePerBatch,
                                           Milliseconds delayBetweenBatches) {
     return AsyncTry([=] {
@@ -306,9 +308,7 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                                    "numDocsToRemovePerBatch"_attr = numDocsToRemovePerBatch,
                                    "delayBetweenBatches"_attr = delayBetweenBatches);
 
-                       if (migrationId) {
-                           ensureRangeDeletionTaskStillExists(opCtx, *migrationId);
-                       }
+                       ensureRangeDeletionTaskStillExists(opCtx, migrationId);
 
                        AutoGetCollection collection(opCtx, nss, MODE_IX);
 
@@ -326,6 +326,13 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                                                                          keyPattern,
                                                                          range,
                                                                          numDocsToRemovePerBatch));
+                       migrationutil::persistUpdatedNumOrphans(
+                           opCtx, BSON("_id" << migrationId), -numDeleted);
+
+                       if (MONGO_unlikely(hangAfterDoingDeletion.shouldFail())) {
+                           hangAfterDoingDeletion.pauseWhileSet(opCtx);
+                       }
+
                        LOGV2_DEBUG(
                            23769,
                            1,
@@ -498,7 +505,7 @@ SharedSemiFuture<void> removeDocumentsInRange(
     const UUID& collectionUuid,
     const BSONObj& keyPattern,
     const ChunkRange& range,
-    boost::optional<UUID> migrationId,
+    const UUID& migrationId,
     int numDocsToRemovePerBatch,
     Seconds delayForActiveQueriesOnSecondariesToComplete) {
     return std::move(waitForActiveQueriesToComplete)
@@ -578,16 +585,15 @@ SharedSemiFuture<void> removeDocumentsInRange(
                 return Status::OK();
             }
 
-            if (!migrationId ||
-                (!s.isOK() &&
-                 s.code() !=
-                     ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist)) {
+            if (!s.isOK() &&
+                s.code() !=
+                    ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist) {
                 // Propagate any errors to callers waiting on the result.
                 return s;
             }
 
             try {
-                removePersistentRangeDeletionTask(nss, std::move(*migrationId));
+                removePersistentRangeDeletionTask(nss, migrationId);
             } catch (const DBException& e) {
                 LOGV2_ERROR(23770,
                             "Failed to delete range deletion task for range {range} in collection "
@@ -613,6 +619,81 @@ SharedSemiFuture<void> removeDocumentsInRange(
         })
         .semi()
         .share();
+}
+
+void setOrphanCountersOnRangeDeletionTasks(OperationContext* opCtx) {
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    auto setNumOrphansOnTask = [opCtx, &store](const RangeDeletionTask& deletionTask,
+                                               int64_t numOrphans) {
+        store.update(opCtx,
+                     BSON(RangeDeletionTask::kIdFieldName << deletionTask.getId()),
+                     BSON("$set" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName << numOrphans)),
+                     ShardingCatalogClient::kLocalWriteConcern);
+    };
+
+    store.forEach(
+        opCtx,
+        BSONObj(),
+        [opCtx, &store, &setNumOrphansOnTask](const RangeDeletionTask& deletionTask) {
+            AutoGetCollection collection(opCtx, deletionTask.getNss(), MODE_IX);
+            if (!collection || collection->uuid() != deletionTask.getCollectionUuid()) {
+                // The deletion task is referring to a collection that has been dropped
+                setNumOrphansOnTask(deletionTask, 0);
+                return true;
+            }
+
+            KeyPattern keyPattern;
+            uassertStatusOK(deletionTask.getRange().extractKeyPattern(&keyPattern));
+            auto catalog = collection->getIndexCatalog();
+            auto shardKeyIdx = catalog->findShardKeyPrefixedIndex(
+                opCtx, *collection, keyPattern.toBSON(), /*requireSingleKey=*/false);
+
+            uassert(ErrorCodes::IndexNotFound,
+                    str::stream() << "couldn't find index over shard key " << keyPattern.toBSON()
+                                  << " for collection " << deletionTask.getNss()
+                                  << " (uuid: " << deletionTask.getCollectionUuid() << ")",
+                    shardKeyIdx);
+
+            const auto& range = deletionTask.getRange();
+            auto forwardIdxScanner =
+                InternalPlanner::shardKeyIndexScan(opCtx,
+                                                   &(*collection),
+                                                   *shardKeyIdx,
+                                                   range.getMin(),
+                                                   range.getMax(),
+                                                   BoundInclusion::kIncludeStartKeyOnly,
+                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                   InternalPlanner::FORWARD);
+            int64_t numOrphansInRange = 0;
+            BSONObj indexEntry;
+            while (forwardIdxScanner->getNext(&indexEntry, nullptr) != PlanExecutor::IS_EOF) {
+                ++numOrphansInRange;
+            }
+
+            setNumOrphansOnTask(deletionTask, numOrphansInRange);
+            return true;
+        });
+
+    auto replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());
+    replClientInfo.setLastOpToSystemLastOpTime(opCtx);
+    WriteConcernResult ignoreResult;
+    uassertStatusOK(waitForWriteConcern(opCtx,
+                                        replClientInfo.getLastOp(),
+                                        WriteConcerns::kMajorityWriteConcernNoTimeout,
+                                        &ignoreResult));
+}
+
+void clearOrphanCountersFromRangeDeletionTasks(OperationContext* opCtx) {
+    BSONObj allDocsQuery;
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    try {
+        store.update(opCtx,
+                     allDocsQuery,
+                     BSON("$unset" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName << "")),
+                     WriteConcerns::kMajorityWriteConcernNoTimeout);
+    } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
+        // There may be no range deletion tasks, so it is possible no document is updated
+    }
 }
 
 }  // namespace mongo

@@ -49,12 +49,13 @@ void setEncryptedDBClientCallback(EncryptedDBClientCallback* callback);
  * info type with common code and differentiate with varying constructors.
  */
 struct MongoBase : public BaseInfo {
-    static void finalize(js::FreeOp* fop, JSObject* obj);
+    static void finalize(JSFreeOp* fop, JSObject* obj);
     static void trace(JSTracer* trc, JSObject* obj);
 
     struct Functions {
         MONGO_DECLARE_JS_FUNCTION(auth);
         MONGO_DECLARE_JS_FUNCTION(close);
+        MONGO_DECLARE_JS_FUNCTION(compact);
         MONGO_DECLARE_JS_FUNCTION(cursorHandleFromId);
         MONGO_DECLARE_JS_FUNCTION(find);
         MONGO_DECLARE_JS_FUNCTION(generateDataKey);
@@ -77,7 +78,7 @@ struct MongoBase : public BaseInfo {
         MONGO_DECLARE_JS_FUNCTION(_startSession);
     };
 
-    static const JSFunctionSpec methods[27];
+    static const JSFunctionSpec methods[21];
 
     static const char* const className;
     static const unsigned classFlags = JSCLASS_HAS_PRIVATE;
@@ -104,6 +105,7 @@ public:
     virtual void getDataKeyCollection(JSContext* cx, JS::CallArgs args) = 0;
     virtual void encrypt(MozJSImplScope* scope, JSContext* cx, JS::CallArgs args) = 0;
     virtual void decrypt(MozJSImplScope* scope, JSContext* cx, JS::CallArgs args) = 0;
+    virtual void compact(JSContext* cx, JS::CallArgs args) = 0;
     virtual void trace(JSTracer* trc) = 0;
 };
 

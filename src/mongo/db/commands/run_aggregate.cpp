@@ -61,6 +61,7 @@
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/cursor_response.h"
@@ -81,7 +82,7 @@
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/views/view.h"
-#include "mongo/db/views/view_catalog.h"
+#include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/string_map.h"
@@ -140,8 +141,11 @@ bool handleCursorCommand(OperationContext* opCtx,
             invariant(cursors[idx]);
 
             BSONObjBuilder cursorResult;
-            appendCursorResponseObject(
-                cursors[idx]->cursorid(), nsForCursor.ns(), BSONArray(), &cursorResult);
+            appendCursorResponseObject(cursors[idx]->cursorid(),
+                                       nsForCursor.ns(),
+                                       BSONArray(),
+                                       cursors[idx]->getExecutor()->getExecutorType(),
+                                       &cursorResult);
             cursorResult.appendBool("ok", 1);
 
             cursorsBuilder.append(cursorResult.obj());
@@ -291,13 +295,12 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
         return {StringMap<ExpressionContext::ResolvedNamespace>()};
     }
 
-    // Acquire a single const view of the database's ViewCatalog (if it exists) and use it for all
-    // view definition resolutions that follow. This prevents the view definitions cached in
-    // 'resolvedNamespaces' from changing relative to those in the acquired ViewCatalog. The
-    // resolution of the view definitions below might lead into an endless cycle if any are allowed
-    // to change.
-    const TenantDatabaseName tenantDbName(boost::none, request.getNamespace().db());
-    auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
+    // Acquire a single const view of the CollectionCatalog and use it for all view and collection
+    // lookups and view definition resolutions that follow. This prevents the view definitions
+    // cached in 'resolvedNamespaces' from changing relative to those in the acquired ViewCatalog.
+    // The resolution of the view definitions below might lead into an endless cycle if any are
+    // allowed to change.
+    auto catalog = CollectionCatalog::get(opCtx);
 
     std::deque<NamespaceString> involvedNamespacesQueue(pipelineInvolvedNamespaces.begin(),
                                                         pipelineInvolvedNamespaces.end());
@@ -312,9 +315,8 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
         }
 
         // If 'ns' refers to a view namespace, then we resolve its definition.
-        auto resolveViewDefinition = [&](const NamespaceString& ns,
-                                         std::shared_ptr<const ViewCatalog> vcp) -> Status {
-            auto resolvedView = vcp->resolveView(opCtx, ns, boost::none);
+        auto resolveViewDefinition = [&](const NamespaceString& ns) -> Status {
+            auto resolvedView = view_catalog_helpers::resolveView(opCtx, catalog, ns, boost::none);
             if (!resolvedView.isOK()) {
                 return resolvedView.getStatus().withContext(
                     str::stream() << "Failed to resolve view '" << involvedNs.ns());
@@ -322,7 +324,7 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
 
             auto&& underlyingNs = resolvedView.getValue().getNamespace();
             // Attempt to acquire UUID of the underlying collection using lock free method.
-            auto uuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, underlyingNs);
+            auto uuid = catalog->lookupUUIDByNSS(opCtx, underlyingNs);
             resolvedNamespaces[ns.coll()] = {
                 underlyingNs, resolvedView.getValue().getPipeline(), uuid};
 
@@ -348,14 +350,7 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                 // require a lookup stage involving a view on the 'local' database.
                 // If the involved namespace is 'local.system.tenantMigration.oplogView', resolve
                 // its view definition.
-                const TenantDatabaseName involvedTenantDbName(boost::none, involvedNs.db());
-                auto involvedDbViewCatalog =
-                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, involvedTenantDbName);
-
-                // It is safe to assume that the ViewCatalog for the `local` database always
-                // exists because replica sets forbid dropping the oplog and the `local` database.
-                invariant(involvedDbViewCatalog);
-                auto status = resolveViewDefinition(involvedNs, involvedDbViewCatalog);
+                auto status = resolveViewDefinition(involvedNs);
                 if (!status.isOK()) {
                     return status;
                 }
@@ -367,8 +362,8 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                 // that the inverse scenario (mistaking a view for a collection) is not an issue
                 // because $merge/$out cannot target a view.
                 auto nssToCheck = NamespaceString(request.getNamespace().db(), involvedNs.coll());
-                if (viewCatalog && viewCatalog->lookup(opCtx, nssToCheck)) {
-                    auto status = resolveViewDefinition(nssToCheck, viewCatalog);
+                if (catalog->lookupView(opCtx, nssToCheck)) {
+                    auto status = resolveViewDefinition(nssToCheck);
                     if (!status.isOK()) {
                         return status;
                     }
@@ -376,18 +371,14 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                     resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}};
                 }
             }
-        } else if (!viewCatalog ||
-                   CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, involvedNs)) {
+        } else if (catalog->lookupCollectionByNamespace(opCtx, involvedNs)) {
             // Attempt to acquire UUID of the collection using lock free method.
-            auto uuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, involvedNs);
-            // If the aggregation database exists and 'involvedNs' refers to a collection namespace,
-            // then we resolve it as an empty pipeline in order to read directly from the underlying
-            // collection. If the database doesn't exist, then we still resolve it as an empty
-            // pipeline because 'involvedNs' doesn't refer to a view namespace in our consistent
-            // snapshot of the view catalog.
+            auto uuid = catalog->lookupUUIDByNSS(opCtx, involvedNs);
+            // If 'involvedNs' refers to a collection namespace, then we resolve it as an empty
+            // pipeline in order to read directly from the underlying collection.
             resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}, uuid};
-        } else if (viewCatalog->lookup(opCtx, involvedNs)) {
-            auto status = resolveViewDefinition(involvedNs, viewCatalog);
+        } else if (catalog->lookupView(opCtx, involvedNs)) {
+            auto status = resolveViewDefinition(involvedNs);
             if (!status.isOK()) {
                 return status;
             }
@@ -409,18 +400,13 @@ Status collatorCompatibleWithPipeline(OperationContext* opCtx,
                                       StringData dbName,
                                       const CollatorInterface* collator,
                                       const LiteParsedPipeline& liteParsedPipeline) {
-    const TenantDatabaseName tenantDbName(boost::none, dbName);
-    auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
-    if (!viewCatalog) {
-        return Status::OK();
-    }
     auto catalog = CollectionCatalog::get(opCtx);
     for (auto&& potentialViewNs : liteParsedPipeline.getInvolvedNamespaces()) {
         if (catalog->lookupCollectionByNamespace(opCtx, potentialViewNs)) {
             continue;
         }
 
-        auto view = viewCatalog->lookup(opCtx, potentialViewNs);
+        auto view = catalog->lookupView(opCtx, potentialViewNs);
         if (!view) {
             continue;
         }
@@ -448,8 +434,8 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
                               uuid,
                               CurOp::get(opCtx)->dbProfileLevel() > 0);
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
-    expCtx->inMultiDocumentTransaction = opCtx->inMultiDocumentTransaction();
     expCtx->collationMatchesDefault = collationMatchesDefault;
+    expCtx->forPerShardCursor = request.getPassthroughToShard().has_value();
 
     return expCtx;
 }
@@ -531,6 +517,35 @@ std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createExchangePipelinesI
 }
 
 /**
+ * Creates additional pipelines if needed to serve the aggregation. This includes additional
+ * pipelines for exchange optimization and search commands that generate metadata. Returns
+ * a vector of all pipelines needed for the query, including the original one.
+ *
+ * Takes ownership of the original, passed in, pipeline.
+ */
+std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createAdditionalPipelinesIfNeeded(
+    OperationContext* opCtx,
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    const AggregateCommandRequest& request,
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+    boost::optional<UUID> collUUID) {
+
+    std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> pipelines;
+    // Exchange is not allowed to be specified if there is a $search stage.
+    if (auto metadataPipe = getSearchHelpers(opCtx->getServiceContext())
+                                ->generateMetadataPipelineForSearch(
+                                    opCtx, expCtx, request, pipeline.get(), collUUID)) {
+        pipelines.push_back(std::move(pipeline));
+        pipelines.push_back(std::move(metadataPipe));
+    } else {
+        // Takes ownership of 'pipeline'.
+        pipelines =
+            createExchangePipelinesIfNeeded(opCtx, expCtx, request, std::move(pipeline), collUUID);
+    }
+    return pipelines;
+}
+
+/**
  * Performs validations related to API versioning and time-series stages.
  * Throws UserAssertion if any of the validations fails
  *     - validation of API versioning on each stage on the pipeline
@@ -548,7 +563,7 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
     const LiteParsedPipeline& liteParsedPipeline,
     const NamespaceString& nss,
-    const MultiCollection& collections,
+    const MultipleCollectionAccessor& collections,
     const AggregateCommandRequest& request,
     CurOp* curOp,
     const std::function<void(void)>& resetContextFn) {
@@ -582,13 +597,16 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         // Mark that this query uses DocumentSource.
         curOp->debug().documentSourceUsed = true;
 
+        getSearchHelpers(expCtx->opCtx->getServiceContext())
+            ->injectSearchShardFiltererIfNeeded(pipeline.get());
+
         // Complete creation of the initial $cursor stage, if needed.
         PipelineD::attachInnerQueryExecutorToPipeline(collections,
                                                       attachExecutorCallback.first,
                                                       std::move(attachExecutorCallback.second),
                                                       pipeline.get());
 
-        auto pipelines = createExchangePipelinesIfNeeded(
+        auto pipelines = createAdditionalPipelinesIfNeeded(
             expCtx->opCtx, expCtx, request, std::move(pipeline), expCtx->uuid);
         for (auto&& pipelineIt : pipelines) {
             // There are separate ExpressionContexts for each exchange pipeline, so make sure to
@@ -636,12 +654,14 @@ Status runAggregate(OperationContext* opCtx,
 
     // For operations on views, this will be the underlying namespace.
     NamespaceString nss = request.getNamespace();
-    stdx::unordered_set<NamespaceString> secondaryExecNssList;
 
     // Determine if this aggregation has foreign collections that the execution subsystem needs
     // to be aware of.
-    if (internalEnableMultipleAutoGetCollections.load()) {
-        liteParsedPipeline.getForeignExecutionNamespaces(secondaryExecNssList);
+    std::vector<NamespaceStringOrUUID> secondaryExecNssList;
+
+    // Taking locks over multiple collections is not supported outside of $lookup pushdown.
+    if (feature_flags::gFeatureFlagSBELookupPushdown.isEnabledAndIgnoreFCV()) {
+        secondaryExecNssList = liteParsedPipeline.getForeignExecutionNamespaces();
     }
 
     // The collation to use for this aggregation. boost::optional to distinguish between the case
@@ -656,36 +676,31 @@ Status runAggregate(OperationContext* opCtx,
     // connection is out of date. If the namespace is a view, the lock will be released before
     // re-running the expanded aggregation.
     boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
-
-    // Vector of AutoGets for secondary collections. At the moment, this is internal to testing
-    // only because eventually, this will be replaced by 'AutoGetCollectionMulti'.
-    // TODO SERVER-62798: Replace this and the above AutoGet with 'AutoGetCollectionMulti'.
-    std::vector<std::unique_ptr<AutoGetCollectionForReadCommandMaybeLockFree>> secondaryCtx;
-    MultiCollection collections;
+    MultipleCollectionAccessor collections;
 
     auto initContext = [&](AutoGetCollectionViewMode m) -> void {
-        ctx.emplace(opCtx, nss, m);
-        for (const auto& ns : secondaryExecNssList) {
-            // Avoid locking the main namespace multiple times (we can't lock a secondary
-            // namespace multiple times because 'secondaryExecNssList is a set already). This
-            // emulates the behavior of 'AutoGetCollectionMulti'.
-            if (ns != nss) {
-                secondaryCtx.emplace_back(
-                    std::make_unique<AutoGetCollectionForReadCommandMaybeLockFree>(opCtx, ns, m));
-            }
-        }
-        collections = MultiCollection(ctx, secondaryCtx);
+        ctx.emplace(opCtx,
+                    nss,
+                    m,
+                    Date_t::max(),
+                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                    secondaryExecNssList);
+        collections = MultipleCollectionAccessor(opCtx,
+                                                 &ctx->getCollection(),
+                                                 ctx->getNss(),
+                                                 ctx->isAnySecondaryNamespaceAViewOrSharded(),
+                                                 secondaryExecNssList);
     };
 
     auto resetContext = [&]() -> void {
         ctx.reset();
-        secondaryCtx.clear();
         collections.clear();
     };
 
     std::vector<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
     boost::intrusive_ptr<ExpressionContext> expCtx;
     auto curOp = CurOp::get(opCtx);
+    auto catalog = CollectionCatalog::get(opCtx);
 
     {
         // If we are in a transaction, check whether the parsed pipeline supports being in
@@ -718,19 +733,15 @@ Status runAggregate(OperationContext* opCtx,
             // a stream on an entire db or across the cluster.
             const TenantDatabaseName origTenantDbName(boost::none, origNss.db());
             if (!origNss.isCollectionlessAggregateNS()) {
-                auto viewCatalog =
-                    DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, origTenantDbName);
-                if (viewCatalog) {
-                    auto view = viewCatalog->lookup(opCtx, origNss);
-                    uassert(ErrorCodes::CommandNotSupportedOnView,
-                            str::stream()
-                                << "Namespace " << origNss.ns() << " is a timeseries collection",
-                            !view || !view->timeseries());
-                    uassert(ErrorCodes::CommandNotSupportedOnView,
-                            str::stream()
-                                << "Namespace " << origNss.ns() << " is a view, not a collection",
-                            !view);
-                }
+                auto view = catalog->lookupView(opCtx, origNss);
+                uassert(ErrorCodes::CommandNotSupportedOnView,
+                        str::stream()
+                            << "Namespace " << origNss.ns() << " is a timeseries collection",
+                        !view || !view->timeseries());
+                uassert(ErrorCodes::CommandNotSupportedOnView,
+                        str::stream()
+                            << "Namespace " << origNss.ns() << " is a view, not a collection",
+                        !view);
             }
 
             // If the user specified an explicit collation, adopt it; otherwise, use the simple
@@ -759,10 +770,9 @@ Status runAggregate(OperationContext* opCtx,
                 opCtx, request.getCollation().get_value_or(BSONObj()), nullptr);
             collatorToUse.emplace(std::move(collator));
             collatorToUseMatchesDefault = match;
-            tassert(6235101, "A collection-less aggregate should not take any locks", !ctx);
-            tassert(6235102,
-                    "A collection-less aggregate should not take any secondary locks",
-                    secondaryCtx.empty());
+            tassert(6235101,
+                    "A collection-less aggregate should not take any locks",
+                    ctx == boost::none);
         } else {
             // This is a regular aggregation. Lock the collection or view.
             initContext(AutoGetCollectionViewMode::kViewsPermitted);
@@ -816,24 +826,18 @@ Status runAggregate(OperationContext* opCtx,
             auto timeSeriesCollator =
                 ctx->getView()->timeseries() ? request.getCollation() : boost::none;
 
-            // Check that the database/view catalog still exist, in case this is a lock-free
-            // operation. It's possible for a view to disappear after we release locks below, so
-            // it's safe to quit early if the view disappears while running lock-free.
-            const TenantDatabaseName tenantDbName(boost::none, nss.db());
-            auto viewCatalog = DatabaseHolder::get(opCtx)->getViewCatalog(opCtx, tenantDbName);
-            uassert(ErrorCodes::NamespaceNotFound,
-                    str::stream() << "Namespace '" << nss << "' no longer exists",
-                    viewCatalog);
-            auto resolvedView =
-                uassertStatusOK(viewCatalog->resolveView(opCtx, nss, timeSeriesCollator));
+            auto resolvedView = uassertStatusOK(
+                view_catalog_helpers::resolveView(opCtx, catalog, nss, timeSeriesCollator));
 
             // With the view & collation resolved, we can relinquish locks.
             resetContext();
 
             // Set this operation's shard version for the underlying collection to unsharded.
             // This is prerequisite for future shard versioning checks.
-            OperationShardingState::get(opCtx).initializeClientRoutingVersions(
-                resolvedView.getNamespace(), ChunkVersion::UNSHARDED(), boost::none);
+            ScopedSetShardRole scopedSetShardRole(opCtx,
+                                                  resolvedView.getNamespace(),
+                                                  ChunkVersion::UNSHARDED() /* shardVersion */,
+                                                  boost::none /* databaseVersion */);
 
             bool collectionIsSharded = [opCtx, &resolvedView]() {
                 AutoGetCollection autoColl(opCtx,

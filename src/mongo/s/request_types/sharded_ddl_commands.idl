@@ -33,12 +33,13 @@ global:
 
 imports:
     - "mongo/db/commands/rename_collection.idl"
+    - "mongo/db/commands/set_user_write_block_mode.idl"
     - "mongo/db/drop_database.idl"
     - "mongo/db/keypattern.idl"
     - "mongo/db/coll_mod.idl"
     - "mongo/idl/basic_types.idl"
     - "mongo/s/chunk_version.idl"
-    - "mongo/s/database_version.idl"
+    - "mongo/s/sharding_types.idl"
     - "mongo/s/resharding/common_types.idl"
     - "mongo/db/timeseries/timeseries.idl"
 
@@ -50,6 +51,20 @@ types:
         serializer: "mongo::CollectionType::toBSON"
         deserializer: "mongo::CollectionType"
 
+enums:
+    ShardsvrSetUserWriteBlockModePhase:
+        description: "Phase for the _shardsvrSetUserWriteBlockMode command."
+        type: string
+        values:
+            # When enabling user write blocking, kPrepare means the shard will start blocking
+            # sharded DDL operations. When disabling user write blocking, kPrepare means the shard
+            # will to start accepting user writes again.
+            kPrepare: "prepare"
+            # When enabling user write blocking, kComplete means the shard will start blocking
+            # user writes. When disabling user write blocking, kComplete means the shard
+            # will to start accepting sharded DDL operations again.
+            kComplete: "complete"
+
 structs:
 
     ConfigsvrCreateDatabaseResponse:
@@ -57,7 +72,7 @@ structs:
         strict: false
         fields:
             databaseVersion:
-                type: DatabaseVersionBase
+                type: database_version
                 description: "The version of the newly-created or already existing database"
                 optional: false
 
@@ -139,6 +154,17 @@ structs:
                 type: uuid
                 description: "The expected UUID of the collection."
                 optional: true
+            implicitlyCreateIndex:
+                description: "Creates an index on the shard key pattern if the collection is empty."
+                type: bool
+                default: true
+            enforceUniquenessCheck:
+                description: >-
+                    Controls whether this command verifies that any unique indexes are prefixed by
+                    the shard key pattern if unique is true. If true then it will verify and if
+                    false then it won't.
+                type: bool
+                default: true
 
     CreateCollectionResponse:
         description: "Response of the create collection command"
@@ -212,6 +238,24 @@ structs:
 
 commands:
 
+    clusterCreateDatabase:
+        description: "The public enableSharding command on mongos."
+        command_name: enableSharding
+        command_alias: enablesharding
+        cpp_name: ClusterCreateDatabase
+        strict: false
+        namespace: type
+        type: string
+        api_version: ""
+        reply_type: OkReply
+        fields:
+            primaryShard:
+                type: shard_id
+                description: "If set, indicates to the system which shard should be used as the
+                              primary for the database (if not already created). Otherwise, the
+                              system will use the balancer in order to select a primary."
+                optional: true
+    
     _shardsvrCreateCollection:
         command_name: _shardsvrCreateCollection
         cpp_name: ShardsvrCreateCollection
@@ -348,11 +392,12 @@ commands:
         strict: false
         fields:
             primaryShardId:
-                type: string
+                type: shard_id
                 description: "If set, indicates to the system which shard should be used as the
                               primary for the database (if not already created). Otherwise, the
                               system will use the balancer in order to select a primary."
                 optional: true
+            # TODO SERVER-63983: remove the following field when 6.0 becomes lastLTS
             enableSharding:
                 type: bool
                 description: "May only be set to 'true'. If set, indicates to the config server that
@@ -373,7 +418,34 @@ commands:
         command_name: _configsvrSetUserWriteBlockMode
         cpp_name: ConfigsvrSetUserWriteBlockMode
         description: "internal _configsvrSetUserWriteBlockMode command"
-        namespace: type
+        namespace: ignored
         api_version: ""
-        type: bool
+        strict: false
+        chained_structs:
+            SetUserWriteBlockModeRequest: SetUserWriteBlockModeRequest
+
+    _shardsvrSetUserWriteBlockMode:
+        command_name: _shardsvrSetUserWriteBlockMode
+        cpp_name: ShardsvrSetUserWriteBlockMode
+        description: "internal _shardsvrSetUserWriteBlockMode command"
+        namespace: ignored
+        api_version: ""
+        strict: false
+        chained_structs:
+            SetUserWriteBlockModeRequest: SetUserWriteBlockModeRequest
+        fields:
+            phase:
+                type: ShardsvrSetUserWriteBlockModePhase
+                description: "Determines the phase of the blocking/unblocking procedure to be
+                              executed."
+
+    _configsvrSetClusterParameter:
+        command_name: _configsvrSetClusterParameter
+        cpp_name: ConfigsvrSetClusterParameter
+        description: "Internal command sent to the config server to start a coordinator and set the
+                      cluster parameter."
+        # TODO SERVER-63870: use replica set command parameters.
+        namespace: type
+        type: object
+        api_version: ""
         strict: false

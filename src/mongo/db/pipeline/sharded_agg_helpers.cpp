@@ -26,11 +26,10 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-#include "mongo/platform/basic.h"
-
-#include "sharded_agg_helpers.h"
+#include "mongo/db/pipeline/sharded_agg_helpers.h"
 
 #include "mongo/db/curop.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -53,20 +52,20 @@
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/cluster_query_knobs_gen.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/query/establish_cursors.h"
+#include "mongo/s/router.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/visit_helper.h"
 
-namespace mongo::sharded_agg_helpers {
+namespace mongo {
+namespace sharded_agg_helpers {
+namespace {
 
 MONGO_FAIL_POINT_DEFINE(shardedAggregateHangBeforeEstablishingShardCursors);
-
-namespace {
 
 /**
  * Given a document representing an aggregation command such as
@@ -613,7 +612,6 @@ void abandonCacheIfSentToShards(Pipeline* shardsPipeline) {
     }
 }
 
-
 }  // namespace
 
 std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
@@ -816,11 +814,22 @@ BSONObj createPassthroughCommandForShard(
     boost::optional<ExplainOptions::Verbosity> explainVerbosity,
     Pipeline* pipeline,
     BSONObj collationObj,
-    boost::optional<BSONObj> readConcern) {
+    boost::optional<BSONObj> readConcern,
+    boost::optional<int> overrideBatchSize) {
     // Create the command for the shards.
     MutableDocument targetedCmd(serializedCommand);
     if (pipeline) {
         targetedCmd[AggregateCommandRequest::kPipelineFieldName] = Value(pipeline->serialize());
+    }
+
+    if (overrideBatchSize.has_value()) {
+        if (serializedCommand[AggregateCommandRequest::kCursorFieldName].missing()) {
+            targetedCmd[AggregateCommandRequest::kCursorFieldName] =
+                Value(DOC(SimpleCursorOptions::kBatchSizeFieldName << Value(*overrideBatchSize)));
+        } else {
+            targetedCmd[AggregateCommandRequest::kCursorFieldName]
+                       [SimpleCursorOptions::kBatchSizeFieldName] = Value(*overrideBatchSize);
+        }
     }
 
     auto shardCommand = genericTransformForShards(std::move(targetedCmd),
@@ -963,7 +972,15 @@ DispatchShardPipelineResults dispatchShardPipeline(
                     "needsPrimaryShardMerge"_attr = needsPrimaryShardMerge);
         splitPipelines = splitPipeline(std::move(pipeline));
 
-        exchangeSpec = checkIfEligibleForExchange(opCtx, splitPipelines->mergePipeline.get());
+        // If the first stage of the pipeline is a $search stage, exchange optimization isn't
+        // possible.
+        // TODO SERVER-62537 Investigate relaxing this restriction.
+        if (!splitPipelines || !splitPipelines->shardsPipeline ||
+            !splitPipelines->shardsPipeline->peekFront() ||
+            splitPipelines->shardsPipeline->peekFront()->getSourceName() !=
+                "$_internalSearchMongotRemote"_sd) {
+            exchangeSpec = checkIfEligibleForExchange(opCtx, splitPipelines->mergePipeline.get());
+        }
     }
 
     // Generate the command object for the targeted shards.
@@ -979,7 +996,8 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                                            expCtx->explain,
                                                            pipeline.get(),
                                                            expCtx->getCollatorBSON(),
-                                                           std::move(readConcern)));
+                                                           std::move(readConcern),
+                                                           boost::none));
 
     // A $changeStream pipeline must run on all shards, and will also open an extra cursor on the
     // config server in order to monitor for new shards. To guarantee that we do not miss any
@@ -1329,39 +1347,30 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
                 ns == NamespaceString::kChangeStreamPreImagesNamespace);
     };
 
-    auto catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
-    return shardVersionRetry(
-        expCtx->opCtx, catalogCache, expCtx->ns, "targeting pipeline to attach cursors"_sd, [&]() {
-            auto pipelineToTarget = pipeline->clone();
-            if (shardTargetingPolicy == ShardTargetingPolicy::kNotAllowed ||
-                shouldAlwaysAttachLocalCursorForNamespace(expCtx->ns)) {
-                return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
-                    pipelineToTarget.release());
-            }
+    if (shardTargetingPolicy == ShardTargetingPolicy::kNotAllowed ||
+        shouldAlwaysAttachLocalCursorForNamespace(expCtx->ns)) {
+        auto pipelineToTarget = pipeline->clone();
 
-            auto cm = catalogCache->getCollectionRoutingInfo(expCtx->opCtx, expCtx->ns);
-            if (cm.isOK() && !cm.getValue().isSharded()) {
+        return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
+            pipelineToTarget.release());
+    }
+
+    sharding::router::CollectionRouter router(expCtx->opCtx->getServiceContext(), expCtx->ns);
+    return router.route(
+        expCtx->opCtx,
+        "targeting pipeline to attach cursors"_sd,
+        [&](OperationContext* opCtx, const ChunkManager& cm) {
+            auto pipelineToTarget = pipeline->clone();
+
+            if (!cm.isSharded()) {
                 // If the collection is unsharded and we are on the primary, we should be able to
                 // do a local read. The primary may be moved right after the primary shard check,
                 // but the local read path will do a db version check before it establishes a cursor
                 // to catch this case and ensure we fail to read locally.
-                auto setDbVersion = false;
                 try {
-                    expCtx->mongoProcessInterface->setExpectedShardVersion(
-                        expCtx->opCtx, expCtx->ns, ChunkVersion::UNSHARDED());
-                    setDbVersion = expCtx->mongoProcessInterface->setExpectedDbVersion(
-                        expCtx->opCtx, expCtx->ns, cm.getValue().dbVersion());
-
-                    // During 'attachCursorSourceToPipelineForLocalRead', the expected db version
-                    // must be set. Whether or not that call is succesful, to avoid affecting later
-                    // operations on this db, we should unset the expected db version on the opCtx,
-                    // if we set it above.
-                    ScopeGuard dbVersionUnsetter([&]() {
-                        if (setDbVersion) {
-                            expCtx->mongoProcessInterface->unsetExpectedDbVersion(expCtx->opCtx,
-                                                                                  expCtx->ns);
-                        }
-                    });
+                    auto expectUnshardedCollection(
+                        expCtx->mongoProcessInterface->expectUnshardedCollectionInScope(
+                            expCtx->opCtx, expCtx->ns, cm.dbVersion()));
 
                     expCtx->mongoProcessInterface->checkOnPrimaryShardForDb(expCtx->opCtx,
                                                                             expCtx->ns);
@@ -1403,4 +1412,5 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
         });
 }
 
-}  // namespace mongo::sharded_agg_helpers
+}  // namespace sharded_agg_helpers
+}  // namespace mongo

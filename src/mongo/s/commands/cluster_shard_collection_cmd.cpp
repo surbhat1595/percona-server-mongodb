@@ -61,9 +61,7 @@ public:
     }
 
     std::string help() const override {
-        return "Shard a collection. Requires key. Optional unique."
-               " Sharding must already be enabled for the database.\n"
-               "   { enablesharding : \"<dbname>\" }\n";
+        return "Shard a collection. Requires key. Optional unique.";
     }
 
     Status checkAuthForCommand(Client* client,
@@ -104,6 +102,8 @@ public:
         requestParamsObj.setCollation(shardCollRequest.getCollation());
         requestParamsObj.setTimeseries(shardCollRequest.getTimeseries());
         requestParamsObj.setCollectionUUID(shardCollRequest.getCollectionUUID());
+        requestParamsObj.setImplicitlyCreateIndex(shardCollRequest.getImplicitlyCreateIndex());
+        requestParamsObj.setEnforceUniquenessCheck(shardCollRequest.getEnforceUniquenessCheck());
         shardsvrCollRequest.setCreateCollectionRequest(std::move(requestParamsObj));
         shardsvrCollRequest.setDbName(nss.db());
 

@@ -163,6 +163,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/multitenancy_params',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_pipeline',
+        '$BUILD_DIR/mongo/db/pipeline/document_source_internal_apply_oplog_update',
         '$BUILD_DIR/mongo/db/pipeline/pipeline',
         '$BUILD_DIR/mongo/db/repl/isself',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
@@ -233,7 +234,9 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+        '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
         '$BUILD_DIR/mongo/db/catalog_raii',
         '$BUILD_DIR/mongo/db/commands',
     ]
@@ -327,6 +330,17 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='set_cluster_parameter_idl',
+    source=[
+        'set_cluster_parameter.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/idl/cluster_server_parameter',
+    ],
+)
+
 # Commands that are present in both mongod and embedded
 env.Library(
     target="standalone",
@@ -368,6 +382,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
         '$BUILD_DIR/mongo/db/api_parameters',
         '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
         '$BUILD_DIR/mongo/db/catalog/collection_query_info',
@@ -407,6 +422,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_stats',
         '$BUILD_DIR/mongo/db/transaction',
+        '$BUILD_DIR/mongo/db/views/view_catalog_helpers',
         '$BUILD_DIR/mongo/db/views/views_mongod',
         '$BUILD_DIR/mongo/executor/async_request_executor',
         '$BUILD_DIR/mongo/idl/feature_flag',
@@ -455,6 +471,20 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/commit_quorum_options',
         '$BUILD_DIR/mongo/db/rw_concern_d',
         '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
+    target='set_user_write_block_mode_command',
+    source=[
+        'set_user_write_block_mode_command.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/rw_concern_d',
+        '$BUILD_DIR/mongo/db/s/user_writes_recoverable_critical_section',
+        'set_user_write_block_mode_idl',
     ],
 )
 
@@ -524,7 +554,6 @@ env.Library(
         'rwc_defaults_commands.cpp',
         "set_feature_compatibility_version_command.cpp",
         "set_index_commit_quorum_command.cpp",
-        'set_user_write_block_mode_command.cpp',
         "shutdown_d.cpp",
         "snapshot_management.cpp",
         "tenant_migration_donor_cmds.cpp",
@@ -592,9 +621,9 @@ env.Library(
         'rwc_defaults_commands',
         'server_status',
         'servers',
+        'set_cluster_parameter_idl',
         'set_feature_compatibility_version_idl',
         'set_index_commit_quorum_idl',
-        'set_user_write_block_mode_idl',
         'shell_protocol',
         'shutdown_idl',
         'standalone',

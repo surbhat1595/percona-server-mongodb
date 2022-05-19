@@ -33,7 +33,7 @@
 
 #include <boost/optional/optional_io.hpp>
 
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
 #include "mongo/s/sharding_router_test_fixture.h"
@@ -161,11 +161,12 @@ protected:
     }
 
     CollectionType makeCollectionType(const ChunkVersion& collVersion) {
-        CollectionType coll(
-            kNss, collVersion.epoch(), collVersion.getTimestamp(), Date_t::now(), kUUID);
-        coll.setKeyPattern(kShardKeyPattern.getKeyPattern());
-        coll.setUnique(false);
-        return coll;
+        return {kNss,
+                collVersion.epoch(),
+                collVersion.getTimestamp(),
+                Date_t::now(),
+                kUUID,
+                kShardKeyPattern.getKeyPattern()};
     }
 
     const NamespaceString kNss{"catalgoCacheTestDB.foo"};
@@ -183,48 +184,43 @@ protected:
 TEST_F(CatalogCacheTest, GetDatabase) {
     const auto dbName = "testDB";
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
-    _catalogCacheLoader->setDatabaseRefreshReturnValue(
-        DatabaseType(dbName, kShards[0], true, dbVersion));
+    _catalogCacheLoader->setDatabaseRefreshReturnValue(DatabaseType(dbName, kShards[0], dbVersion));
 
     const auto swDatabase = _catalogCache->getDatabase(operationContext(), dbName);
 
     ASSERT_OK(swDatabase.getStatus());
     const auto cachedDb = swDatabase.getValue();
-    ASSERT_TRUE(cachedDb.shardingEnabled());
-    ASSERT_EQ(cachedDb.primaryId(), kShards[0]);
-    ASSERT_EQ(cachedDb.databaseVersion().getUuid(), dbVersion.getUuid());
-    ASSERT_EQ(cachedDb.databaseVersion().getLastMod(), dbVersion.getLastMod());
+    ASSERT_EQ(cachedDb->getPrimary(), kShards[0]);
+    ASSERT_EQ(cachedDb->getVersion().getUuid(), dbVersion.getUuid());
+    ASSERT_EQ(cachedDb->getVersion().getLastMod(), dbVersion.getLastMod());
 }
 
 TEST_F(CatalogCacheTest, GetCachedDatabase) {
     const auto dbName = "testDB";
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
-    loadDatabases({DatabaseType(dbName, kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(dbName, kShards[0], dbVersion)});
 
     const auto swDatabase = _catalogCache->getDatabase(operationContext(), dbName);
 
     ASSERT_OK(swDatabase.getStatus());
     const auto cachedDb = swDatabase.getValue();
-    ASSERT_TRUE(cachedDb.shardingEnabled());
-    ASSERT_EQ(cachedDb.primaryId(), kShards[0]);
-    ASSERT_EQ(cachedDb.databaseVersion().getUuid(), dbVersion.getUuid());
-    ASSERT_EQ(cachedDb.databaseVersion().getLastMod(), dbVersion.getLastMod());
+    ASSERT_EQ(cachedDb->getPrimary(), kShards[0]);
+    ASSERT_EQ(cachedDb->getVersion().getUuid(), dbVersion.getUuid());
+    ASSERT_EQ(cachedDb->getVersion().getLastMod(), dbVersion.getLastMod());
 }
 
 TEST_F(CatalogCacheTest, GetDatabaseDrop) {
     const auto dbName = "testDB";
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
 
-    _catalogCacheLoader->setDatabaseRefreshReturnValue(
-        DatabaseType(dbName, kShards[0], true, dbVersion));
+    _catalogCacheLoader->setDatabaseRefreshReturnValue(DatabaseType(dbName, kShards[0], dbVersion));
 
     // The CatalogCache doesn't have any valid info about this DB and finds a new DatabaseType
     auto swDatabase = _catalogCache->getDatabase(operationContext(), dbName);
     ASSERT_OK(swDatabase.getStatus());
     const auto cachedDb = swDatabase.getValue();
-    ASSERT_TRUE(cachedDb.shardingEnabled());
-    ASSERT_EQ(cachedDb.databaseVersion().getUuid(), dbVersion.getUuid());
-    ASSERT_EQ(cachedDb.databaseVersion().getLastMod(), dbVersion.getLastMod());
+    ASSERT_EQ(cachedDb->getVersion().getUuid(), dbVersion.getUuid());
+    ASSERT_EQ(cachedDb->getVersion().getLastMod(), dbVersion.getLastMod());
 
     // Advancing the timeInStore, e.g. because of a movePrimary
     _catalogCache->onStaleDatabaseVersion(dbName, dbVersion.makeUpdated());
@@ -242,22 +238,21 @@ TEST_F(CatalogCacheTest, GetDatabaseDrop) {
 TEST_F(CatalogCacheTest, InvalidateSingleDbOnShardRemoval) {
     const auto dbName = "testDB";
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
-    loadDatabases({DatabaseType(dbName, kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(dbName, kShards[0], dbVersion)});
 
     _catalogCache->invalidateEntriesThatReferenceShard(kShards[0]);
-    _catalogCacheLoader->setDatabaseRefreshReturnValue(
-        DatabaseType(dbName, kShards[1], true, dbVersion));
+    _catalogCacheLoader->setDatabaseRefreshReturnValue(DatabaseType(dbName, kShards[1], dbVersion));
     const auto swDatabase = _catalogCache->getDatabase(operationContext(), dbName);
 
     ASSERT_OK(swDatabase.getStatus());
     auto cachedDb = swDatabase.getValue();
-    ASSERT_EQ(cachedDb.primaryId(), kShards[1]);
+    ASSERT_EQ(cachedDb->getPrimary(), kShards[1]);
 }
 
 TEST_F(CatalogCacheTest, OnStaleDatabaseVersionNoVersion) {
     // onStaleDatabaseVesrsion must invalidate the database entry if invoked with no version
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], dbVersion)});
 
     _catalogCache->onStaleDatabaseVersion(kNss.db(), boost::none);
 
@@ -269,7 +264,7 @@ TEST_F(CatalogCacheTest, OnStaleShardVersionWithSameVersion) {
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
     const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), Timestamp(1, 1));
 
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], dbVersion)});
     loadCollection(cachedCollVersion);
     _catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         kNss, cachedCollVersion, kShards[0]);
@@ -280,7 +275,7 @@ TEST_F(CatalogCacheTest, OnStaleShardVersionWithNoVersion) {
     const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
     const auto cachedCollVersion = ChunkVersion(1, 0, OID::gen(), Timestamp(1, 1));
 
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], dbVersion)});
     loadCollection(cachedCollVersion);
     _catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         kNss, boost::none, kShards[0]);
@@ -295,7 +290,7 @@ TEST_F(CatalogCacheTest, OnStaleShardVersionWithGraterVersion) {
     const auto wantedCollVersion =
         ChunkVersion(2, 0, cachedCollVersion.epoch(), cachedCollVersion.getTimestamp());
 
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], dbVersion)});
     loadCollection(cachedCollVersion);
     _catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         kNss, wantedCollVersion, kShards[0]);
@@ -309,7 +304,7 @@ TEST_F(CatalogCacheTest, TimeseriesFieldsAreProperlyPropagatedOnCC) {
     const auto epoch = OID::gen();
     const auto version = ChunkVersion(1, 0, epoch, Timestamp(42));
 
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], dbVersion)});
 
     auto coll = makeCollectionType(version);
     auto chunks = makeChunks(version);
@@ -365,7 +360,7 @@ TEST_F(CatalogCacheTest, LookupCollectionWithInvalidOptions) {
     const auto epoch = OID::gen();
     const auto version = ChunkVersion(1, 0, epoch, Timestamp(42));
 
-    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], true, dbVersion)});
+    loadDatabases({DatabaseType(kNss.db().toString(), kShards[0], dbVersion)});
 
     auto coll = makeCollectionType(version);
 

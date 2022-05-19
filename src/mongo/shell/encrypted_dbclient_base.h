@@ -35,6 +35,7 @@
 #include "mongo/client/dbclient_base.h"
 #include "mongo/config.h"
 #include "mongo/crypto/aead_encryption.h"
+#include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/symmetric_crypto.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
@@ -78,7 +79,9 @@ constexpr std::array<StringData, 11> kEncryptedCommands = {"aggregate"_sd,
                                                            "insert"_sd,
                                                            "update"_sd};
 
-class EncryptedDBClientBase : public DBClientBase, public mozjs::EncryptionCallbacks {
+class EncryptedDBClientBase : public DBClientBase,
+                              public mozjs::EncryptionCallbacks,
+                              public FLEKeyVault {
 public:
     using DBClientBase::find;
     using DBClientBase::query_DEPRECATED;
@@ -115,6 +118,9 @@ public:
     using EncryptionCallbacks::decrypt;
     void decrypt(mozjs::MozJSImplScope* scope, JSContext* cx, JS::CallArgs args) final;
 
+    using EncryptionCallbacks::compact;
+    void compact(JSContext* cx, JS::CallArgs args) final;
+
     using EncryptionCallbacks::trace;
     void trace(JSTracer* trc) final;
 
@@ -150,9 +156,21 @@ public:
     bool isTLS() final;
 #endif
 
+    KeyMaterial getKey(const UUID& uuid) final;
+
 protected:
-    std::pair<rpc::UniqueReply, DBClientBase*> processResponse(rpc::UniqueReply result,
-                                                               StringData databaseName);
+    BSONObj _decryptResponsePayload(BSONObj& reply, StringData databaseName, bool isFLE2);
+
+    std::pair<rpc::UniqueReply, DBClientBase*> processResponseFLE1(rpc::UniqueReply result,
+                                                                   StringData databaseName);
+
+    std::pair<rpc::UniqueReply, DBClientBase*> processResponseFLE2(rpc::UniqueReply result,
+                                                                   StringData databaseName);
+
+    std::pair<rpc::UniqueReply, DBClientBase*> prepareReply(rpc::UniqueReply result,
+                                                            StringData databaseName,
+                                                            BSONObj decryptedDoc);
+
 
     BSONObj encryptDecryptCommand(const BSONObj& object, bool encrypt, StringData databaseName);
 
@@ -184,6 +202,9 @@ private:
                                        BinDataType type);
 
     std::shared_ptr<SymmetricKey> getDataKeyFromDisk(const UUID& uuid);
+    SecureVector<uint8_t> getKeyMaterialFromDisk(const UUID& uuid);
+
+    boost::optional<EncryptedFieldConfig> getEncryptedFieldConfig(const NamespaceString& nss);
 
 protected:
     std::unique_ptr<DBClientBase> _conn;

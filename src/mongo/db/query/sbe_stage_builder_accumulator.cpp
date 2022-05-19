@@ -30,9 +30,11 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_for_window_functions.h"
 #include "mongo/db/pipeline/accumulator_js_reduce.h"
+#include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/sbe_stage_builder_accumulator.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
@@ -59,7 +61,7 @@ std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumu
     EvalStage inputStage,
     PlanNodeId planNodeId) {
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
-    auto collatorSlot = state.env->getSlotIfExists("collator"_sd);
+    auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
     if (collatorSlot) {
         aggs.push_back(makeFunction("collMin"_sd,
                                     sbe::makeE<sbe::EVariable>(*collatorSlot),
@@ -93,7 +95,7 @@ std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumu
     EvalStage inputStage,
     PlanNodeId planNodeId) {
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
-    auto collatorSlot = state.env->getSlotIfExists("collator"_sd);
+    auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
     if (collatorSlot) {
         aggs.push_back(makeFunction("collMax"_sd,
                                     sbe::makeE<sbe::EVariable>(*collatorSlot),
@@ -183,10 +185,12 @@ std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeAvg(
         // To support the sharding behavior, the mongos splits $group into two separate $group
         // stages one at the mongos-side and the other at the shard-side. This stage builder builds
         // the shard-side plan. The shard-side $avg accumulator is responsible to return the partial
-        // avg in the form of {subTotal: val1, count: val2} when the type of sum is decimal or
-        // {subTotal: val1, count: val2, subTotalError: val3} when the type of sum is non-decimal.
+        // avg in the form of {subTotal: val1, count: val2, ps: array_val} when the type of sum is
+        // decimal or {subTotal: val1, count: val2, subTotalError: val3, ps: array_val} when the
+        // type of sum is non-decimal.
         auto sumResult = makeVariable(aggSlots[0]);
         auto countResult = makeVariable(aggSlots[1]);
+        auto partialSumExpr = makeFunction("doubleDoublePartialSumFinalize", sumResult->clone());
 
         // Existence of 'kDecimalTotal' element in the sum result means the type of sum result is
         // decimal.
@@ -195,31 +199,34 @@ std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeAvg(
             makeFunction("getElement",
                          sumResult->clone(),
                          makeConstant(sbe::value::TypeTags::NumberInt32,
-                                      static_cast<int>(sbe::vm::AggSumValueElems::kDecimalTotal))));
-        // Returns {subTotal: val1, count: val2} if the type of the sum result is decimal.
+                                      static_cast<int>(AggSumValueElems::kDecimalTotal))));
+        // Returns {subTotal: val1, count: val2, ps: array_val} if the type of the sum result is
+        // decimal.
+        // TODO SERVER-64227 Remove 'subTotal' and 'subTotalError' fields when we branch for 6.1
+        // because all nodes in a sharded cluster would use the new data format.
         auto thenExpr = makeNewObjFunction(
             FieldPair{"subTotal"_sd,
                       // 'doubleDoubleSumFinalize' returns the sum, adding decimal
                       // sum and non-decimal sum.
                       makeFunction("doubleDoubleSumFinalize", sumResult->clone())},
-            FieldPair{"count"_sd, countResult->clone()});
-        // Returns {subTotal: val1, count: val2: subTotalError: val3} otherwise.
-        auto elseExpr = makeNewObjFunction(
-            FieldPair{
-                "subTotal"_sd,
-                makeFunction("getElement",
-                             sumResult->clone(),
-                             makeConstant(sbe::value::TypeTags::NumberInt32,
-                                          static_cast<int>(
-                                              sbe::vm::AggSumValueElems::kNonDecimalTotalSum)))},
             FieldPair{"count"_sd, countResult->clone()},
-            FieldPair{"subTotalError"_sd,
+            FieldPair{"ps"_sd, partialSumExpr->clone()});
+        // Returns {subTotal: val1, count: val2: subTotalError: val3, ps: array_val} otherwise.
+        auto elseExpr = makeNewObjFunction(
+            FieldPair{"subTotal"_sd,
                       makeFunction(
                           "getElement",
                           sumResult->clone(),
                           makeConstant(sbe::value::TypeTags::NumberInt32,
-                                       static_cast<int>(
-                                           sbe::vm::AggSumValueElems::kNonDecimalTotalAddend)))});
+                                       static_cast<int>(AggSumValueElems::kNonDecimalTotalSum)))},
+            FieldPair{"count"_sd, countResult->clone()},
+            FieldPair{"subTotalError"_sd,
+                      makeFunction("getElement",
+                                   sumResult->clone(),
+                                   makeConstant(sbe::value::TypeTags::NumberInt32,
+                                                static_cast<int>(
+                                                    AggSumValueElems::kNonDecimalTotalAddend)))},
+            FieldPair{"ps"_sd, partialSumExpr->clone()});
         auto partialAvgFinalize =
             sbe::makeE<sbe::EIf>(std::move(ifCondExpr), std::move(thenExpr), std::move(elseExpr));
 
@@ -263,6 +270,32 @@ std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeSum(
             sumSlots.size() == 1);
 
     if (state.needsMerge) {
+        // Serialize the full state of the partial sum result to avoid incorrect results for certain
+        // data set which are composed of 'NumberDecimal' values which cancel each other when being
+        // summed and other numeric type values which contribute mostly to sum result and a partial
+        // sum of some of 'NumberDecimal' values and other numeric type values happen to lose
+        // precision because 'NumberDecimal' can't represent the partial sum precisely, or the other
+        // way around.
+        //
+        // For example, [{n: 1e+34}, {n: NumberDecimal("0,1")}, {n: NumberDecimal("0.11")}, {n:
+        // -1e+34}].
+        //
+        // More fundamentally, addition is neither commutative nor associative on computer. So, it's
+        // desirable to keep the full state of the partial sum along the way to maintain the result
+        // as close to the real truth as possible until all additions are done.
+        //
+        // This requires changing over-the-wire data format from a shard-side to a merge-side and is
+        // incompatible change and is gated with FCV until 5.0 LTS will reach the end of support.
+        //
+        // TODO SERVER-64227: Remove FCV gating which is unnecessary when we branch for 6.1.
+        auto&& fcv = serverGlobalParams.featureCompatibility;
+        auto canUseNewPartialResultFormat = fcv.isVersionInitialized() &&
+            fcv.isGreaterThanOrEqualTo(multiversion::FeatureCompatibilityVersion::kVersion_6_0);
+        if (canUseNewPartialResultFormat) {
+            return {makeFunction("doubleDoublePartialSumFinalize", makeVariable(sumSlots[0])),
+                    std::move(inputStage)};
+        }
+
         // To support the sharding behavior, the mongos splits $group into two separate $group
         // stages one at the mongos-side and the other at the shard-side. The shard-side $sum
         // accumulator is responsible to return the partial sum which is mostly same format to the
@@ -270,6 +303,9 @@ std::pair<std::unique_ptr<sbe::EExpression>, EvalStage> buildFinalizeSum(
         // sub-document {subTotal: val1, subTotalError: val2}. The builtin function for $sum
         // ('builtinDoubleDoubleSumFinalize()') returns an 'Array' when there's an overflow. So,
         // only when the return value is 'Array'-typed, we compose the sub-document.
+        //
+        // TODO SERVER-64227: Remove all following statements and
+        // 'doubleDoubleMergeSumFinalize'-related functions when we branch for 6.1.
         auto sumFinalize = makeFunction("doubleDoubleMergeSumFinalize", makeVariable(sumSlots[0]));
 
         auto partialSumFinalize = makeLocalBind(
@@ -309,7 +345,7 @@ std::pair<std::vector<std::unique_ptr<sbe::EExpression>>, EvalStage> buildAccumu
     EvalStage inputStage,
     PlanNodeId planNodeId) {
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
-    auto collatorSlot = state.env->getSlotIfExists("collator"_sd);
+    auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
     if (collatorSlot) {
         aggs.push_back(makeFunction(
             "collAddToSet"_sd, sbe::makeE<sbe::EVariable>(*collatorSlot), std::move(arg)));

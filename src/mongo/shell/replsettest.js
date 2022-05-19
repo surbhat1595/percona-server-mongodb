@@ -187,7 +187,7 @@ var ReplSetTest = function(opts) {
      * assume that it already has the correct privileges. It is up to the caller of this function to
      * ensure that the connection is appropriately authenticated.
      */
-    function asCluster(conn, fn, keyFileParam = self.keyFile) {
+    function asCluster(conn, fn, keyFileParam = undefined) {
         let connArray = conn;
         if (conn.length == null)
             connArray = [conn];
@@ -202,6 +202,7 @@ var ReplSetTest = function(opts) {
         const authMode = connOptions.clusterAuthMode || connArray[0].clusterAuthMode ||
             jsTest.options().clusterAuthMode;
 
+        keyFileParam = keyFileParam || connOptions.keyFile || self.keyFile;
         let needsAuth = (keyFileParam || authMode === "x509" || authMode === "sendX509" ||
                          authMode === "sendKeyFile") &&
             unauthenticatedConns.length > 0;
@@ -356,12 +357,22 @@ var ReplSetTest = function(opts) {
                 if (!conn)
                     return false;
 
+                if (reconnectNode instanceof Function) {
+                    // Allow caller to perform tasks on reconnect.
+                    reconnectNode(conn);
+                }
+
                 asCluster(conn, function() {
                     status = conn.getDB('admin').runCommand({replSetGetStatus: 1});
                 });
             } catch (ex) {
                 print("ReplSetTest waitForIndicator could not get status: " + tojson(ex));
                 return false;
+            }
+
+            if (status.code == ErrorCodes.Unauthorized) {
+                // If we're not authorized already, then we never will be.
+                assert.commandWorked(status);  // throws
             }
 
             var printStatus = false;
@@ -2739,9 +2750,14 @@ var ReplSetTest = function(opts) {
             oplogSize: this.oplogSize,
             keyFile: this.keyFile,
             port: _useBridge ? _unbridgedPorts[n] : this.ports[n],
-            replSet: this.useSeedList ? this.getURL() : this.name,
             dbpath: "$set-$node"
         };
+
+        if (this.serverless == null) {
+            defaults.replSet = this.useSeedList ? this.getURL() : this.name;
+        } else {
+            defaults.serverless = true;
+        }
 
         if (options && options.binVersion &&
             jsTest.options().useRandomBinVersionsWithinReplicaSet) {
@@ -3200,6 +3216,7 @@ var ReplSetTest = function(opts) {
         self.name = opts.name || jsTest.name();
         print('Starting new replica set ' + self.name);
 
+        self.serverless = opts.serverless;
         self.useHostName = opts.useHostName == undefined ? true : opts.useHostName;
         self.host = self.useHostName ? (opts.host || getHostName()) : 'localhost';
         self.oplogSize = opts.oplogSize || 40;
@@ -3332,10 +3349,11 @@ var ReplSetTest = function(opts) {
      * Constructor, which instantiates the ReplSetTest object from existing nodes.
      */
     function _constructFromExistingNodes(
-        {name, nodeHosts, nodeOptions, keyFile, host, waitForKeys}) {
+        {name, serverless, nodeHosts, nodeOptions, keyFile, host, waitForKeys}) {
         print('Recreating replica set from existing nodes ' + tojson(nodeHosts));
 
         self.name = name;
+        self.serverless = serverless;
         self.ports = nodeHosts.map(node => node.split(':')[1]);
         self.nodes = nodeHosts.map((node) => {
             const conn = Mongo(node);

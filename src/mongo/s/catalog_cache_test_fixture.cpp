@@ -41,7 +41,7 @@
 #include "mongo/db/query/collation/collator_factory_mock.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/database_version.h"
@@ -132,16 +132,16 @@ ChunkManager CatalogCacheTestFixture::makeChunkManager(
     boost::optional<ReshardingFields> reshardingFields) {
     ChunkVersion version(1, 0, OID::gen(), Timestamp(42) /* timestamp */);
 
-    const BSONObj databaseBSON = [&]() {
-        DatabaseType db(
-            nss.db().toString(), {"0"}, true, DatabaseVersion(UUID::gen(), Timestamp()));
-        return db.toBSON();
-    }();
+    DatabaseType db(nss.db().toString(), {"0"}, DatabaseVersion(UUID::gen(), Timestamp()));
 
     const auto uuid = UUID::gen();
     const BSONObj collectionBSON = [&]() {
-        CollectionType coll(nss, version.epoch(), version.getTimestamp(), Date_t::now(), uuid);
-        coll.setKeyPattern(shardKeyPattern.getKeyPattern());
+        CollectionType coll(nss,
+                            version.epoch(),
+                            version.getTimestamp(),
+                            Date_t::now(),
+                            uuid,
+                            shardKeyPattern.getKeyPattern());
         coll.setUnique(unique);
 
         if (defaultCollator) {
@@ -181,7 +181,7 @@ ChunkManager CatalogCacheTestFixture::makeChunkManager(
 
     auto future = scheduleRoutingInfoUnforcedRefresh(nss);
 
-    expectFindSendBSONObjVector(kConfigHostAndPort, {databaseBSON});
+    expectFindSendBSONObjVector(kConfigHostAndPort, {db.toBSON()});
     expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
         std::vector<BSONObj> aggResult{collectionBSON};
         std::transform(initialChunks.begin(),
@@ -196,8 +196,7 @@ ChunkManager CatalogCacheTestFixture::makeChunkManager(
 
 void CatalogCacheTestFixture::expectGetDatabase(NamespaceString nss, std::string shardId) {
     expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
-        DatabaseType db(
-            nss.db().toString(), {shardId}, true, DatabaseVersion(UUID::gen(), Timestamp()));
+        DatabaseType db(nss.db().toString(), {shardId}, DatabaseVersion(UUID::gen(), Timestamp()));
         return std::vector<BSONObj>{db.toBSON()};
     }());
 }
@@ -208,9 +207,8 @@ void CatalogCacheTestFixture::expectGetCollection(NamespaceString nss,
                                                   UUID uuid,
                                                   const ShardKeyPattern& shardKeyPattern) {
     expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
-        CollectionType collType(nss, epoch, timestamp, Date_t::now(), uuid);
-        collType.setKeyPattern(shardKeyPattern.toBSON());
-        collType.setUnique(false);
+        CollectionType collType(
+            nss, epoch, timestamp, Date_t::now(), uuid, shardKeyPattern.toBSON());
         return std::vector<BSONObj>{collType.toBSON()};
     }());
 }
@@ -223,9 +221,8 @@ void CatalogCacheTestFixture::expectCollectionAndChunksAggregation(
     const ShardKeyPattern& shardKeyPattern,
     const std::vector<ChunkType>& chunks) {
     expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
-        CollectionType collType(nss, epoch, timestamp, Date_t::now(), uuid);
-        collType.setKeyPattern(shardKeyPattern.toBSON());
-        collType.setUnique(false);
+        CollectionType collType(
+            nss, epoch, timestamp, Date_t::now(), uuid, shardKeyPattern.toBSON());
 
         std::vector<BSONObj> aggResult{collType.toBSON()};
         std::transform(chunks.begin(),
@@ -270,9 +267,8 @@ ChunkManager CatalogCacheTestFixture::loadRoutingTableWithTwoChunksAndTwoShardsI
         }
     }
     expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
-        CollectionType collType(nss, epoch, timestamp, Date_t::now(), uuid);
-        collType.setKeyPattern(shardKeyPattern.toBSON());
-        collType.setUnique(false);
+        CollectionType collType(
+            nss, epoch, timestamp, Date_t::now(), uuid, shardKeyPattern.toBSON());
 
         ChunkVersion version(1, 0, epoch, timestamp);
 

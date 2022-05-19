@@ -373,7 +373,7 @@ error_codes:
     - {code: 312,name: OperationIsKilledAndDelisted,categories: [CancellationError,InternalOnly]}
 
     - {code: 313,name: ResumableRangeDeleterDisabled}
-    - {code: 314,name: ObjectIsBusy}
+    - {code: 314,name: ObjectIsBusy, categories: [CursorInvalidatedError]}
 
 
     - {code: 315,name: TooStaleToSyncFromSource,categories: [InternalOnly]}
@@ -455,7 +455,7 @@ error_codes:
 
     - {code: 357, name: InvalidBSONType}
 
-    - {code: 358, name: InternalTransactionNotSupported}
+    - {code: 358, name: InternalTransactionNotSupported, categories: [RetriableError]}
 
     - {code: 359, name: CannotConvertIndexToUnique, extra: CannotConvertIndexToUniqueInfo}
 
@@ -470,6 +470,11 @@ error_codes:
     - {code: 364, name: TxnRetryCounterNotSupported}
 
     - {code: 365, name: TemporarilyUnavailable}
+
+    - {code: 366, name: WouldChangeOwningShardDeletedNoDocument}
+
+    - {code: 367, name: FLECompactionPlaceholder}
+    - {code: 368, name: FLEStateCollectionContention}
 
     # Error codes 4000-8999 are reserved.
 

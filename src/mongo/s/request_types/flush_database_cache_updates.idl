@@ -38,6 +38,7 @@ commands:
     _flushDatabaseCacheUpdates:
         description: "An internal command to wait for the last routing table cache refresh for a particular database to be persisted to disk"
         command_name: _flushDatabaseCacheUpdates
+        cpp_name: FlushDatabaseCacheUpdates
         strict: true
         namespace: type
         api_version: ""
@@ -51,6 +52,7 @@ commands:
     _flushDatabaseCacheUpdatesWithWriteConcern:
         description: "The same behavior as _flushDatabaseCacheUpdates but accepts writeConcern"
         command_name: _flushDatabaseCacheUpdatesWithWriteConcern
+        cpp_name: FlushDatabaseCacheUpdatesWithWriteConcern
         strict: true
         namespace: type
         api_version: ""

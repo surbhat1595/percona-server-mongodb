@@ -125,11 +125,10 @@ protected:
         _manager = std::make_shared<MetadataManager>(
             getServiceContext(), kNss, executor(), CollectionMetadata(cm, ShardId("0")));
 
-        const auto version = cm.getVersion(ShardId("0"));
-        BSONObjBuilder builder;
-        version.serializeToBSON(ChunkVersion::kShardVersionField, &builder);
-        auto& oss = OperationShardingState::get(operationContext());
-        oss.initializeClientRoutingVersionsFromCommand(kNss, builder.obj());
+        OperationShardingState::setShardRole(operationContext(),
+                                             kNss,
+                                             cm.getVersion(ShardId("0")) /* shardVersion */,
+                                             boost::none /* databaseVersion */);
     }
 
     std::shared_ptr<MetadataManager> _manager;

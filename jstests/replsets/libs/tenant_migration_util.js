@@ -209,6 +209,8 @@ var TenantMigrationUtil = (function() {
                         primary = rst.getPrimary();
                         return false;
                     }
+                    const cmdName = Object.keys(localCmdObj)[0];
+                    jsTestLog(`Error from ${cmdName}: ${tojson(res)}`);
                     return true;
                 }
 
@@ -218,8 +220,12 @@ var TenantMigrationUtil = (function() {
                 return true;
             } catch (e) {
                 if (retryOnRetryableErrors && isNetworkError(e)) {
+                    jsTestLog(`runTenantMigrationCommand retryable error. Command: ${
+                        tojson(localCmdObj)}, reply: ${tojson(res)}`);
                     return false;
                 }
+                jsTestLog(`runTenantMigrationCommand fatal error. Command: ${
+                    tojson(localCmdObj)}, reply: ${tojson(res)}`);
                 throw e;
             }
         });

@@ -59,7 +59,7 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_config_version.h"
-#include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/client/shard.h"
@@ -331,14 +331,22 @@ DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
             NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
 
     // The admin database is always hosted on the config server.
-    if (dbName == NamespaceString::kAdminDb)
-        return DatabaseType(
-            dbName.toString(), ShardId::kConfigServerId, false, DatabaseVersion::makeFixed());
+    if (dbName == NamespaceString::kAdminDb) {
+        DatabaseType adminDb{
+            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed()};
+        // TODO SERVER-63983: do not set sharded flag once 6.0 becomes lastLTS
+        adminDb.setSharded(true);
+        return adminDb;
+    }
 
     // The config database's primary shard is always config, and it is always sharded.
-    if (dbName == NamespaceString::kConfigDb)
-        return DatabaseType(
-            dbName.toString(), ShardId::kConfigServerId, true, DatabaseVersion::makeFixed());
+    if (dbName == NamespaceString::kConfigDb) {
+        DatabaseType configDb{
+            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed()};
+        // TODO SERVER-63983: do not set sharded flag once 6.0 becomes lastLTS
+        configDb.setSharded(true);
+        return configDb;
+    }
 
     auto result =
         _fetchDatabaseMetadata(opCtx, dbName.toString(), kConfigReadSelector, readConcernLevel);
@@ -361,7 +369,7 @@ std::vector<DatabaseType> ShardingCatalogClientImpl::getAllDBs(OperationContext*
     auto dbs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
                                                        kConfigReadSelector,
                                                        readConcern,
-                                                       DatabaseType::ConfigNS,
+                                                       NamespaceString::kConfigDatabasesNamespace,
                                                        BSONObj(),
                                                        BSONObj(),
                                                        boost::none))
@@ -370,12 +378,7 @@ std::vector<DatabaseType> ShardingCatalogClientImpl::getAllDBs(OperationContext*
     std::vector<DatabaseType> databases;
     databases.reserve(dbs.size());
     for (const BSONObj& doc : dbs) {
-        auto db = uassertStatusOKWithContext(
-            DatabaseType::fromBSON(doc), stream() << "Failed to parse database document " << doc);
-        uassertStatusOKWithContext(db.validate(),
-                                   stream() << "Failed to validate database document " << doc);
-
-        databases.emplace_back(std::move(db));
+        databases.emplace_back(DatabaseType::parse(IDLParserErrorContext("DatabaseType"), doc));
     }
 
     return databases;
@@ -391,8 +394,8 @@ StatusWith<repl::OpTimeWith<DatabaseType>> ShardingCatalogClientImpl::_fetchData
     auto findStatus = _exhaustiveFindOnConfig(opCtx,
                                               readPref,
                                               readConcernLevel,
-                                              DatabaseType::ConfigNS,
-                                              BSON(DatabaseType::name(dbName)),
+                                              NamespaceString::kConfigDatabasesNamespace,
+                                              BSON(DatabaseType::kNameFieldName << dbName),
                                               BSONObj(),
                                               boost::none);
     if (!findStatus.isOK()) {
@@ -406,12 +409,13 @@ StatusWith<repl::OpTimeWith<DatabaseType>> ShardingCatalogClientImpl::_fetchData
 
     invariant(docsWithOpTime.value.size() == 1);
 
-    auto parseStatus = DatabaseType::fromBSON(docsWithOpTime.value.front());
-    if (!parseStatus.isOK()) {
-        return parseStatus.getStatus();
+    try {
+        auto db = DatabaseType::parse(IDLParserErrorContext("DatabaseType"),
+                                      docsWithOpTime.value.front());
+        return repl::OpTimeWith<DatabaseType>(db, docsWithOpTime.opTime);
+    } catch (const DBException& e) {
+        return e.toStatus("Failed to parse DatabaseType");
     }
-
-    return repl::OpTimeWith<DatabaseType>(parseStatus.getValue(), docsWithOpTime.opTime);
 }
 
 CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
@@ -559,13 +563,14 @@ StatusWith<VersionType> ShardingCatalogClientImpl::getConfigVersion(
 
 StatusWith<std::vector<std::string>> ShardingCatalogClientImpl::getDatabasesForShard(
     OperationContext* opCtx, const ShardId& shardId) {
-    auto findStatus = _exhaustiveFindOnConfig(opCtx,
-                                              kConfigReadSelector,
-                                              repl::ReadConcernLevel::kMajorityReadConcern,
-                                              DatabaseType::ConfigNS,
-                                              BSON(DatabaseType::primary(shardId.toString())),
-                                              BSONObj(),
-                                              boost::none);  // no limit
+    auto findStatus =
+        _exhaustiveFindOnConfig(opCtx,
+                                kConfigReadSelector,
+                                repl::ReadConcernLevel::kMajorityReadConcern,
+                                NamespaceString::kConfigDatabasesNamespace,
+                                BSON(DatabaseType::kPrimaryFieldName << shardId.toString()),
+                                BSONObj(),
+                                boost::none);  // no limit
     if (!findStatus.isOK()) {
         return findStatus.getStatus();
     }
@@ -575,7 +580,7 @@ StatusWith<std::vector<std::string>> ShardingCatalogClientImpl::getDatabasesForS
     dbs.reserve(values.size());
     for (const BSONObj& obj : values) {
         string dbName;
-        Status status = bsonExtractStringField(obj, DatabaseType::name(), &dbName);
+        Status status = bsonExtractStringField(obj, DatabaseType::kNameFieldName, &dbName);
         if (!status.isOK()) {
             return status;
         }

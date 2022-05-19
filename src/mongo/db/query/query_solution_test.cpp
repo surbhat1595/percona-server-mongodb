@@ -43,6 +43,49 @@
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
 
+namespace mongo {
+
+/**
+ * Output stream operator for FieldAvailability values is required by ASSERT_ macros in tests.
+ */
+std::ostream& operator<<(std::ostream& os, FieldAvailability value) {
+    switch (value) {
+        case FieldAvailability::kNotProvided:
+            return os << "NotProvided";
+        case FieldAvailability::kHashedValueProvided:
+            return os << "HashedValueProvided";
+        case FieldAvailability::kFullyProvided:
+            return os << "FullyProvided";
+    }
+    MONGO_UNREACHABLE;
+}
+
+/**
+ * Output stream operator for ProvidedSortSet instances is required by ASSERT_ macros in tests.
+ */
+std::ostream& operator<<(std::ostream& os, const ProvidedSortSet& value) {
+    return os << value.debugString();
+}
+
+/**
+ * Equality operator for ProvidedSortSet instances is required by ASSERT_EQ macros in tests.
+ * This operator uses 'BSONObj::woCompare()' method for comparing base sort patterns.
+ */
+bool operator==(const ProvidedSortSet& lhs, const ProvidedSortSet& rhs) {
+    return (lhs.getIgnoredFields() == rhs.getIgnoredFields() &&
+            lhs.getBaseSortPattern().woCompare(rhs.getBaseSortPattern()) == 0);
+}
+
+/**
+ * Non-equality operator for ProvidedSortSet instances is required by ASSERT_NE macros in tests.
+ * This operator uses 'BSONObj::woCompare()' method for comparing base sort patterns.
+ */
+bool operator!=(const ProvidedSortSet& lhs, const ProvidedSortSet& rhs) {
+    return !(lhs == rhs);
+}
+
+}  // namespace mongo
+
 namespace {
 
 using namespace mongo;
@@ -65,6 +108,18 @@ IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
             nullptr};
 }
 
+void assertNamespaceVectorsAreEqual(const std::vector<NamespaceStringOrUUID>& secondaryNssVector,
+                                    const std::vector<NamespaceStringOrUUID>& expectedNssVector) {
+    ASSERT_EQ(secondaryNssVector.size(), expectedNssVector.size());
+    for (size_t i = 0; i < secondaryNssVector.size(); ++i) {
+        auto secondary = secondaryNssVector[i].nss();
+        auto expected = expectedNssVector[i].nss();
+        ASSERT(secondary != boost::none);
+        ASSERT(expected != boost::none);
+        ASSERT_EQ(*secondary, *expected);
+    }
+}
+
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Min: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Max: {a: 1, b: 1, c: 1, d: 1, e: 1}
@@ -77,9 +132,7 @@ TEST(QuerySolutionTest, SimpleRangeAllEqual) {
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT(node.providedSorts().getIgnoredFields() ==
-           std::set<std::string>({"a", "b", "c", "d", "e"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), ProvidedSortSet(BSONObj(), {"a", "b", "c", "d", "e"}));
 
     ASSERT(node.providedSorts().contains(
         BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1)));
@@ -104,9 +157,8 @@ TEST(QuerySolutionTest, SimpleRangeNoneEqual) {
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT_EQUALS(node.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(),
-                      BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1));
+    ASSERT_EQ(node.providedSorts(),
+              ProvidedSortSet(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1), {}));
     ASSERT(node.providedSorts().contains(
         BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1)));
     ASSERT(node.providedSorts().contains(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1)));
@@ -128,9 +180,8 @@ TEST(QuerySolutionTest, SimpleRangeSomeEqual) {
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT(node.providedSorts().getIgnoredFields() == std::set<std::string>({"a", "b"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(),
-                      BSON("c" << 1 << "d" << 1 << "e" << 1));
+    ASSERT_EQ(node.providedSorts(),
+              ProvidedSortSet(BSON("c" << 1 << "d" << 1 << "e" << 1), {"a", "b"}));
 
     ASSERT(node.providedSorts().contains(
         BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1)));
@@ -178,9 +229,7 @@ TEST(QuerySolutionTest, IntervalListAllPoints) {
     node.computeProperties();
 
     // Expected internal state of 'ProvidedSortSet'.
-    ASSERT(node.providedSorts().getIgnoredFields() ==
-           std::set<std::string>({"a", "b", "c", "d", "e"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), ProvidedSortSet(BSONObj(), {"a", "b", "c", "d", "e"}));
 
     // Expected sort orders.
     ASSERT(node.providedSorts().contains(
@@ -243,9 +292,8 @@ TEST(QuerySolutionTest, IntervalListNoPoints) {
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT_EQUALS(node.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(),
-                      BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1));
+    ASSERT_EQ(node.providedSorts(),
+              ProvidedSortSet(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1), {}));
 
     ASSERT(node.providedSorts().contains(
         BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1)));
@@ -292,9 +340,8 @@ TEST(QuerySolutionTest, IntervalListSomePoints) {
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT(node.providedSorts().getIgnoredFields() == std::set<std::string>({"a", "b"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(),
-                      BSON("c" << 1 << "d" << 1 << "e" << 1));
+    ASSERT_EQ(node.providedSorts(),
+              ProvidedSortSet(BSON("c" << 1 << "d" << 1 << "e" << 1), {"a", "b"}));
 
     ASSERT(node.providedSorts().contains(
         BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1)));
@@ -497,8 +544,7 @@ TEST(QuerySolutionTest, IndexScanNodeRemovesNonMatchingCollatedFieldsFromSortsOn
     node.computeProperties();
 
     auto sorts = node.providedSorts();
-    ASSERT_EQUALS(sorts.getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSON("a" << 1));
+    ASSERT_EQ(sorts, ProvidedSortSet(BSON("a" << 1), {}));
     ASSERT_TRUE(sorts.contains(BSON("a" << 1)));
 }
 
@@ -515,8 +561,7 @@ TEST(QuerySolutionTest, IndexScanNodeGetFieldsWithStringBoundsCorrectlyHandlesEn
     node.computeProperties();
 
     auto sorts = node.providedSorts();
-    ASSERT(sorts.getIgnoredFields() == std::set<std::string>({"a"}));
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSON("b" << 1));
+    ASSERT_EQ(sorts, ProvidedSortSet(BSON("b" << 1), {"a"}));
 
     ASSERT_TRUE(sorts.contains(BSON("a" << 1)));
     ASSERT_TRUE(sorts.contains(BSON("a" << 1 << "b" << 1)));
@@ -526,8 +571,7 @@ TEST(QuerySolutionTest, IndexScanNodeGetFieldsWithStringBoundsCorrectlyHandlesEn
     node.computeProperties();
 
     sorts = node.providedSorts();
-    ASSERT(sorts.getIgnoredFields() == std::set<std::string>({"a"}));
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a"}));
 
     ASSERT_TRUE(sorts.contains(BSON("a" << 1)));
     ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b" << 1)));
@@ -550,8 +594,7 @@ TEST(QuerySolutionTest, IndexScanNodeRemovesCollatedFieldsFromSortsIfCollationDi
     node.computeProperties();
 
     auto sorts = node.providedSorts();
-    ASSERT_EQUALS(sorts.getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(sorts, kEmptySet);
     ASSERT_FALSE(sorts.contains(BSON("a" << 1)));
 }
 
@@ -568,8 +611,7 @@ TEST(QuerySolutionTest, IndexScanNodeDoesNotRemoveCollatedFieldsFromSortsIfColla
     node.computeProperties();
 
     auto sorts = node.providedSorts();
-    ASSERT_EQUALS(sorts.getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSON("a" << 1));
+    ASSERT_EQ(sorts, ProvidedSortSet(BSON("a" << 1), {}));
 
     ASSERT_TRUE(sorts.contains(BSON("a" << 1)));
 }
@@ -617,8 +659,7 @@ TEST(QuerySolutionTest, CompoundIndexWithNonMatchingCollationFiltersAllSortsWith
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT(node.providedSorts().getIgnoredFields() == std::set<std::string>({"a"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSON("c" << 1));
+    ASSERT_EQ(node.providedSorts(), ProvidedSortSet(BSON("c" << 1), {"a"}));
 
     ASSERT(node.providedSorts().contains(BSON("a" << 1)));
     ASSERT_FALSE(node.providedSorts().contains(BSON("a" << 1 << "b" << 1)));
@@ -643,9 +684,7 @@ TEST(QuerySolutionTest, IndexScanNodeWithNonMatchingCollationFiltersObjectField)
 
     node.computeProperties();
 
-    auto sorts = node.providedSorts();
-    ASSERT_EQUALS(sorts.getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 }
 
 // Index: {a : 1}
@@ -664,9 +703,7 @@ TEST(QuerySolutionTest, IndexScanNodeWithNonMatchingCollationFiltersArrayField) 
 
     node.computeProperties();
 
-    auto sorts = node.providedSorts();
-    ASSERT_EQUALS(sorts.getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(sorts.getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 }
 
 TEST(QuerySolutionTest, WithNonMatchingCollatorAndNoEqualityPrefixSortsAreNotDuplicated) {
@@ -692,8 +729,7 @@ TEST(QuerySolutionTest, WithNonMatchingCollatorAndNoEqualityPrefixSortsAreNotDup
     node.computeProperties();
 
     // Expected sort orders
-    ASSERT_EQUALS(node.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSON("a" << 1));
+    ASSERT_EQ(node.providedSorts(), ProvidedSortSet(BSON("a" << 1), {}));
     ASSERT(node.providedSorts().contains(BSON("a" << 1)));
 }
 
@@ -795,8 +831,7 @@ TEST(QuerySolutionTest, InclusionProjectionPreservesSort) {
         std::move(node), *matchExprAndProjection.first, matchExprAndProjection.second};
     proj.computeProperties();
 
-    ASSERT_EQ(proj.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(proj.providedSorts().getBaseSortPattern(), BSON("a" << 1));
+    ASSERT_EQ(proj.providedSorts(), ProvidedSortSet(BSON("a" << 1), {}));
     ASSERT(proj.providedSorts().contains(BSON("a" << 1)));
 }
 
@@ -813,8 +848,7 @@ TEST(QuerySolutionTest, ExclusionProjectionDoesNotPreserveSort) {
         std::move(node), *matchExprAndProjection.first, matchExprAndProjection.second};
     proj.computeProperties();
 
-    ASSERT_EQ(proj.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(proj.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(proj.providedSorts(), kEmptySet);
     ASSERT(!proj.providedSorts().contains(BSON("a" << 1)));
 }
 
@@ -830,8 +864,7 @@ TEST(QuerySolutionTest, InclusionProjectionTruncatesSort) {
         std::move(node), *matchExprAndProjection.first, matchExprAndProjection.second};
     proj.computeProperties();
 
-    ASSERT_EQ(proj.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(proj.providedSorts().getBaseSortPattern(), BSON("a" << 1));
+    ASSERT_EQ(proj.providedSorts(), ProvidedSortSet(BSON("a" << 1), {}));
     ASSERT(proj.providedSorts().contains(BSON("a" << 1)));
 }
 
@@ -847,8 +880,7 @@ TEST(QuerySolutionTest, ExclusionProjectionTruncatesSort) {
         std::move(node), *matchExprAndProjection.first, matchExprAndProjection.second};
     proj.computeProperties();
 
-    ASSERT_EQ(proj.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(proj.providedSorts().getBaseSortPattern(), BSON("a" << 1));
+    ASSERT_EQ(proj.providedSorts(), ProvidedSortSet(BSON("a" << 1), {}));
     ASSERT(proj.providedSorts().contains(BSON("a" << 1)));
     ASSERT_FALSE(proj.providedSorts().contains(BSON("a" << 1 << "b" << 1)));
 }
@@ -938,8 +970,7 @@ TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotProvideAnySorts) 
     }
 
     node.computeProperties();
-    ASSERT(node.providedSorts().getIgnoredFields().empty());
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 }
 
 // Index: {a: 1, b: 1, 'c.z': 1, d: 1, e: 1}
@@ -958,8 +989,7 @@ TEST(QuerySolutionTest, SimpleRangeWithEqualIgnoresFieldWithMultikeyComponent) {
 
     node.computeProperties();
 
-    ASSERT(node.providedSorts().getIgnoredFields() == std::set<std::string>({"a", "d"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSON("e" << 1));
+    ASSERT_EQ(node.providedSorts(), ProvidedSortSet(BSON("e" << 1), {"a", "d"}));
 
     ASSERT(node.providedSorts().contains(BSON("a" << 1)));
     ASSERT(node.providedSorts().contains(BSON("d" << 1 << "e" << 1)));
@@ -1013,8 +1043,7 @@ TEST(QuerySolutionTest, NonSimpleRangeAllEqualExcludesFieldWithMultikeyComponent
     }
 
     node.computeProperties();
-    ASSERT(node.providedSorts().getIgnoredFields() == std::set<std::string>({"a", "b", "d", "e"}));
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), ProvidedSortSet(BSONObj(), {"a", "b", "d", "e"}));
 
     ASSERT(node.providedSorts().contains(BSON("a" << 1 << "b" << 1)));
     ASSERT(node.providedSorts().contains(BSON("a" << 1)));
@@ -1043,8 +1072,7 @@ TEST(QuerySolutionTest, SharedPrefixMultikeyNonMinMaxBoundsDoesNotProvideAnySort
     }
 
     node.computeProperties();
-    ASSERT_EQUALS(node.providedSorts().getIgnoredFields().size(), 0U);
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 }
 
 TEST(QuerySolutionTest, NodeIdsAssignedInPostOrderFashionStartingFromOne) {
@@ -1091,10 +1119,9 @@ TEST(QuerySolutionTest, GroupNodeWithIndexScan) {
 
     ASSERT_EQ(node.fetched(), true);
     ASSERT_EQ(node.sortedByDiskLoc(), false);
-    ASSERT_TRUE(node.providedSorts().getIgnoredFields().empty());
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 
-    ASSERT_TRUE(node.getFieldAvailability("any_field") == FieldAvailability::kNotProvided);
+    ASSERT_EQ(node.getFieldAvailability("any_field"), FieldAvailability::kNotProvided);
 }
 
 TEST(QuerySolutionTest, EqLookupNodeWithIndexScan) {
@@ -1112,12 +1139,11 @@ TEST(QuerySolutionTest, EqLookupNodeWithIndexScan) {
     ASSERT_EQ(node.sortedByDiskLoc(), child->sortedByDiskLoc());
 
     // Expected empty sort order, as the EqLookupNode order inferrence is not supported yet.
-    ASSERT_TRUE(node.providedSorts().getIgnoredFields().empty());
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 
-    ASSERT_TRUE(node.getFieldAvailability("as") == FieldAvailability::kNotProvided);
-    ASSERT_TRUE(node.getFieldAvailability("a") == child->getFieldAvailability("a"));
-    ASSERT_TRUE(node.getFieldAvailability("b") == child->getFieldAvailability("b"));
+    ASSERT_EQ(node.getFieldAvailability("as"), FieldAvailability::kNotProvided);
+    ASSERT_EQ(node.getFieldAvailability("a"), child->getFieldAvailability("a"));
+    ASSERT_EQ(node.getFieldAvailability("b"), child->getFieldAvailability("b"));
 }
 
 TEST(QuerySolutionTest, EqLookupNodeWithIndexScanFieldOverwrite) {
@@ -1136,13 +1162,130 @@ TEST(QuerySolutionTest, EqLookupNodeWithIndexScanFieldOverwrite) {
 
     auto child = node.children[0];
     // Expected empty sort order, as the EqLookupNode order inferrence is not supported yet.
-    ASSERT_TRUE(node.providedSorts().getIgnoredFields().empty());
-    ASSERT_BSONOBJ_EQ(node.providedSorts().getBaseSortPattern(), BSONObj());
+    ASSERT_EQ(node.providedSorts(), kEmptySet);
 
-    ASSERT_TRUE(node.getFieldAvailability("a") == child->getFieldAvailability("a"));
-    ASSERT_TRUE(node.getFieldAvailability("b") == FieldAvailability::kNotProvided);
-    ASSERT_TRUE(node.getFieldAvailability("c") == child->getFieldAvailability("c"));
-    ASSERT_TRUE(node.getFieldAvailability("other") == child->getFieldAvailability("other"));
+    ASSERT_EQ(node.getFieldAvailability("a"), child->getFieldAvailability("a"));
+    ASSERT_EQ(node.getFieldAvailability("b"), FieldAvailability::kNotProvided);
+    ASSERT_EQ(node.getFieldAvailability("c"), child->getFieldAvailability("c"));
+    ASSERT_EQ(node.getFieldAvailability("other"), child->getFieldAvailability("other"));
 }
 
+TEST(QuerySolutionTest, ProvidedSortSetOutputStreamOperator) {
+    ProvidedSortSet ex1;
+    std::stringstream ex1_stream;
+    ex1_stream << ex1;
+    ASSERT_EQ(ex1_stream.str(), "baseSortPattern: {}, ignoredFields: []");
+
+    ProvidedSortSet ex2(BSONObj(), {"b", "a"});
+    std::stringstream ex2_stream;
+    ex2_stream << ex2;
+    ASSERT_EQ(ex2_stream.str(), "baseSortPattern: {}, ignoredFields: [a, b]");
+
+    ProvidedSortSet ex3(BSON("b" << 1 << "a" << 1), {});
+    std::stringstream ex3_stream;
+    ex3_stream << ex3;
+    ASSERT_EQ(ex3_stream.str(), "baseSortPattern: { b: 1, a: 1 }, ignoredFields: []");
+
+    ProvidedSortSet ex4(BSON("a" << 1 << "b" << 1), {"c", "d"});
+    std::stringstream ex4_stream;
+    ex4_stream << ex4;
+    ASSERT_EQ(ex4_stream.str(), "baseSortPattern: { a: 1, b: 1 }, ignoredFields: [c, d]");
+}
+
+TEST(QuerySolutionTest, ProvidedSortSetEqualityOperators) {
+    ProvidedSortSet ex1(BSON("a" << 1 << "b" << 1), {"c", "d"});
+    ProvidedSortSet ex2(BSON("b" << 1 << "a" << 1), {"c", "d"});
+    ProvidedSortSet ex3(BSON("a" << 1 << "b" << 1), {"d", "c"});
+    ProvidedSortSet ex4(BSON("a" << 1 << "b" << 1), {"c", "d", "e"});
+    ProvidedSortSet ex5(BSON("a" << 1 << "b" << 1 << "c" << 1), {"d", "c"});
+
+    ASSERT_EQ(ex1, ex1);
+    ASSERT_NE(ex1, ex2);
+    ASSERT_EQ(ex1, ex3);
+    ASSERT_NE(ex1, ex4);
+    ASSERT_NE(ex1, ex5);
+}
+
+TEST(QuerySolutionTest, FieldAvailabilityOutputStreamOperator) {
+    std::stringstream ex1;
+    ex1 << FieldAvailability::kNotProvided;
+    ASSERT_EQ(ex1.str(), "NotProvided");
+
+    std::stringstream ex2;
+    ex2 << FieldAvailability::kFullyProvided;
+    ASSERT_EQ(ex2.str(), "FullyProvided");
+
+    std::stringstream ex3;
+    ex3 << FieldAvailability::kHashedValueProvided;
+    ASSERT_EQ(ex3.str(), "HashedValueProvided");
+}
+
+TEST(QuerySolutionTest, GetSecondaryNamespaceVectorOverSingleEqLookupNode) {
+    auto scanNode = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    const NamespaceString mainNss("db.main");
+    const auto foreignColl = "db.col";
+    auto root =
+        std::make_unique<EqLookupNode>(std::move(scanNode), foreignColl, "local", "remote", "b");
+
+    QuerySolution qs;
+    qs.setRoot(std::move(root));
+
+    // The output vector should only contain 'foreignColl'.
+    std::vector<NamespaceStringOrUUID> expectedNssVector{NamespaceString(foreignColl)};
+    assertNamespaceVectorsAreEqual(qs.getAllSecondaryNamespaces(mainNss), expectedNssVector);
+}
+
+TEST(QuerySolutionTest, GetSecondaryNamespaceVectorDeduplicatesMainNss) {
+    auto scanNode = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    const NamespaceString mainNss("db.main");
+    auto root = std::make_unique<EqLookupNode>(
+        std::move(scanNode), mainNss.toString(), "local", "remote", "b");
+
+    QuerySolution qs;
+    qs.setRoot(std::move(root));
+
+    // There should be no secondary namespaces as 'mainNss' is ignored in
+    // 'getAllSecondaryNamespaces'.
+    std::vector<NamespaceStringOrUUID> expectedNssVector{};
+    assertNamespaceVectorsAreEqual(qs.getAllSecondaryNamespaces(mainNss), expectedNssVector);
+}
+
+TEST(QuerySolutionTest, GetSecondaryNamespaceVectorOverNestedEqLookupNodes) {
+    auto scanNode = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    const NamespaceString mainNss("db.main");
+    const auto foreignCollOne = "db.col";
+    const auto foreignCollTwo = "db.foo";
+    auto childEqLookupNode =
+        std::make_unique<EqLookupNode>(std::move(scanNode), foreignCollOne, "local", "remote", "b");
+    auto parentEqLookupNode = std::make_unique<EqLookupNode>(
+        std::move(childEqLookupNode), foreignCollTwo, "local", "remote", "b");
+
+    QuerySolution qs;
+    qs.setRoot(std::move(parentEqLookupNode));
+
+    // The foreign collections are unique, so our output vector should contain both of them. Note
+    // that because 'getAllSecondaryNamespaces' uses a set internally, these namespaces are
+    // expected to be in sorted order in the output vector.
+    std::vector<NamespaceStringOrUUID> expectedNssVector{NamespaceString(foreignCollOne),
+                                                         NamespaceString(foreignCollTwo)};
+    assertNamespaceVectorsAreEqual(qs.getAllSecondaryNamespaces(mainNss), expectedNssVector);
+}
+
+TEST(QuerySolutionTest, GetSecondaryNamespaceVectorDeduplicatesNestedEqLookupNodes) {
+    auto scanNode = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    const NamespaceString mainNss("db.main");
+    const auto foreignColl = "db.col";
+    auto childEqLookupNode =
+        std::make_unique<EqLookupNode>(std::move(scanNode), foreignColl, "local", "remote", "b");
+    auto parentEqLookupNode = std::make_unique<EqLookupNode>(
+        std::move(childEqLookupNode), foreignColl, "local", "remote", "b");
+
+    QuerySolution qs;
+    qs.setRoot(std::move(parentEqLookupNode));
+
+    // Both nodes reference the same foreign collection. Therefore, our output vector should contain
+    // a single copy of that namespace.
+    std::vector<NamespaceStringOrUUID> expectedNssVector{NamespaceString(foreignColl)};
+    assertNamespaceVectorsAreEqual(qs.getAllSecondaryNamespaces(mainNss), expectedNssVector);
+}
 }  // namespace

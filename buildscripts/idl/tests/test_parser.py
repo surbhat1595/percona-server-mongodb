@@ -286,6 +286,7 @@ class TestParser(testcase.IDLTestcase):
                 immutable: true
                 inline_chained_structs: true
                 generate_comparison_operators: true
+                cpp_validator_func: funcName
                 fields:
                     foo: bar
             """))
@@ -300,6 +301,7 @@ class TestParser(testcase.IDLTestcase):
                 immutable: false
                 inline_chained_structs: false
                 generate_comparison_operators: false
+                cpp_validator_func: funcName
                 fields:
                     foo: bar
             """))
@@ -1772,6 +1774,10 @@ class TestParser(testcase.IDLTestcase):
                         - privilege:
                             resource_pattern: foo
                             action_type: foo
+                        - privilege:
+                            agg_stage: bar
+                            resource_pattern: bar
+                            action_type: bar
                         - check: is_authenticated
                 fields:
                     foo: bar

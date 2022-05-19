@@ -43,6 +43,12 @@ namespace mongo {
  */
 class DatabaseVersion : public DatabaseVersionBase {
 public:
+    /**
+     * The name for the database version information field, which shard-aware commands should
+     * include if they want to convey database version.
+     */
+    static constexpr StringData kDatabaseVersionField = "databaseVersion"_sd;
+
     using DatabaseVersionBase::getTimestamp;
 
     DatabaseVersion() = default;
@@ -101,6 +107,16 @@ public:
     UUID getUuid() const {
         return *DatabaseVersionBase::getUuid();
     }
+
+    std::string toString() const;
 };
+
+inline std::ostream& operator<<(std::ostream& s, const DatabaseVersion& v) {
+    return s << v.toString();
+}
+
+inline StringBuilder& operator<<(StringBuilder& s, const DatabaseVersion& v) {
+    return s << v.toString();
+}
 
 }  // namespace mongo

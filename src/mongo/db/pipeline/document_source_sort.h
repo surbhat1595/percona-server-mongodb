@@ -196,19 +196,39 @@ private:
 
     boost::optional<SortKeyGenerator> _sortKeyGen;
 
+    struct SortableDate {
+        Date_t date;
+
+        struct SorterDeserializeSettings {};  // unused
+        void serializeForSorter(BufBuilder& buf) const {
+            buf.appendNum(date.toMillisSinceEpoch());
+        }
+        static SortableDate deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
+            return {Date_t::fromMillisSinceEpoch(buf.read<LittleEndian<long long>>().value)};
+        }
+        int memUsageForSorter() const {
+            return sizeof(SortableDate);
+        }
+    };
+
     struct BoundMaker {
         Seconds bound;
 
-        Date_t operator()(Date_t key) {
-            return key - bound;
+        SortableDate operator()(SortableDate key) {
+            return {key.date - bound};
         }
     };
     struct Comp {
-        int operator()(Date_t x, Date_t y) const {
-            return x.toMillisSinceEpoch() - y.toMillisSinceEpoch();
+        int operator()(SortableDate x, SortableDate y) const {
+            // compare(x, y) op 0 means x op y, for any comparator 'op'.
+            if (x.date.toMillisSinceEpoch() < y.date.toMillisSinceEpoch())
+                return -1;
+            if (x.date.toMillisSinceEpoch() > y.date.toMillisSinceEpoch())
+                return 1;
+            return 0;
         }
     };
-    using TimeSorter = BoundedSorter<Date_t, Document, Comp, BoundMaker>;
+    using TimeSorter = BoundedSorter<SortableDate, Document, Comp, BoundMaker>;
     std::unique_ptr<TimeSorter> _timeSorter;
 };
 

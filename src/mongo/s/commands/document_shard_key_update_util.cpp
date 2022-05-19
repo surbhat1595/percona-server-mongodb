@@ -110,7 +110,6 @@ write_ops::DeleteCommandRequest createShardKeyDeleteOp(const NamespaceString& ns
         entry.setMulti(false);
         return entry;
     }()});
-    deleteOp.getWriteCommandRequestBase().setStmtId(1);
 
     return deleteOp;
 }
@@ -122,7 +121,6 @@ write_ops::InsertCommandRequest createShardKeyInsertOp(const NamespaceString& ns
                                                        const BSONObj& updatePostImage) {
     write_ops::InsertCommandRequest insertOp(nss);
     insertOp.setDocuments({updatePostImage});
-    insertOp.getWriteCommandRequestBase().setStmtId(2);
     return insertOp;
 }
 
@@ -130,9 +128,9 @@ write_ops::InsertCommandRequest createShardKeyInsertOp(const NamespaceString& ns
 
 namespace documentShardKeyUpdateUtil {
 
-bool updateShardKeyForDocument(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               const WouldChangeOwningShardInfo& documentKeyChangeInfo) {
+bool updateShardKeyForDocumentLegacy(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const WouldChangeOwningShardInfo& documentKeyChangeInfo) {
     auto updatePreImage = documentKeyChangeInfo.getPreImage().getOwned();
     auto updatePostImage = documentKeyChangeInfo.getPostImage().getOwned();
 
@@ -150,9 +148,7 @@ void startTransactionForShardKeyUpdate(OperationContext* opCtx) {
     auto txnNumber = opCtx->getTxnNumber();
     invariant(txnNumber);
 
-    txnRouter.beginOrContinueTxn(opCtx,
-                                 TxnNumberAndRetryCounter(*txnNumber, 0),
-                                 TransactionRouter::TransactionActions::kStart);
+    txnRouter.beginOrContinueTxn(opCtx, *txnNumber, TransactionRouter::TransactionActions::kStart);
 }
 
 BSONObj commitShardKeyUpdateTransaction(OperationContext* opCtx) {
@@ -170,6 +166,71 @@ BSONObj constructShardKeyDeleteCmdObj(const NamespaceString& nss, const BSONObj&
 BSONObj constructShardKeyInsertCmdObj(const NamespaceString& nss, const BSONObj& updatePostImage) {
     auto insertOp = createShardKeyInsertOp(nss, updatePostImage);
     return insertOp.toBSON({});
+}
+
+SemiFuture<bool> updateShardKeyForDocument(const txn_api::TransactionClient& txnClient,
+                                           ExecutorPtr txnExec,
+                                           const NamespaceString& nss,
+                                           const WouldChangeOwningShardInfo& changeInfo) {
+    auto deleteCmdObj = documentShardKeyUpdateUtil::constructShardKeyDeleteCmdObj(
+        nss, changeInfo.getPreImage().getOwned());
+    auto deleteOpMsg = OpMsgRequest::fromDBAndBody(nss.db(), std::move(deleteCmdObj));
+    auto deleteRequest = BatchedCommandRequest::parseDelete(std::move(deleteOpMsg));
+
+    // Retry history for this delete isn't necessary, but it can be part of a retryable transaction,
+    // so send it with the uninitialized sentinel statement id to opt out of storing history.
+    return txnClient.runCRUDOp(deleteRequest, {kUninitializedStmtId})
+        .thenRunOn(txnExec)
+        .then([&txnClient, &nss, &changeInfo](
+                  auto deleteResponse) -> SemiFuture<BatchedCommandResponse> {
+            uassertStatusOK(deleteResponse.toStatus());
+
+            // If shouldUpsert is true, this means the original command specified {upsert:
+            // true} and did not match any docs, so we should not match any when doing
+            // this delete. If shouldUpsert is false and we do not delete any document,
+            // this is essentially equivalent to not matching a doc and we should not
+            // insert.
+            if (changeInfo.getShouldUpsert()) {
+                uassert(ErrorCodes::ConflictingOperationInProgress,
+                        "Delete matched a document when it should not have.",
+                        deleteResponse.getN() == 0);
+            } else if (deleteResponse.getN() != 1) {
+                iassert(Status(ErrorCodes::WouldChangeOwningShardDeletedNoDocument,
+                               "When handling WouldChangeOwningShard error, the delete matched no "
+                               "documents and should not upsert"));
+            }
+
+            if (MONGO_unlikely(hangBeforeInsertOnUpdateShardKey.shouldFail())) {
+                LOGV2(5918602, "Hit hangBeforeInsertOnUpdateShardKey failpoint");
+                hangBeforeInsertOnUpdateShardKey.pauseWhileSet();
+            }
+
+            auto insertCmdObj = documentShardKeyUpdateUtil::constructShardKeyInsertCmdObj(
+                nss, changeInfo.getPostImage().getOwned());
+            auto insertOpMsg = OpMsgRequest::fromDBAndBody(nss.db(), std::move(insertCmdObj));
+            auto insertRequest = BatchedCommandRequest::parseInsert(std::move(insertOpMsg));
+
+            // Same as for the insert, retry history isn't necessary so opt out with a sentinel
+            // stmtId.
+            return txnClient.runCRUDOp(insertRequest, {kUninitializedStmtId});
+        })
+        .thenRunOn(txnExec)
+        .then([&nss](auto insertResponse) {
+            uassertStatusOK(insertResponse.toStatus());
+
+            uassert(ErrorCodes::NamespaceNotFound,
+                    "Document not successfully inserted while changing shard key for namespace " +
+                        nss.ns(),
+                    insertResponse.getN() == 1);
+
+            return true;
+        })
+        .onError<ErrorCodes::WouldChangeOwningShardDeletedNoDocument>([](Status status) {
+            // We failed to delete a document and were not configured to upsert, so the insert
+            // was never sent. Propagate that failure by returning false.
+            return false;
+        })
+        .semi();
 }
 
 }  // namespace documentShardKeyUpdateUtil

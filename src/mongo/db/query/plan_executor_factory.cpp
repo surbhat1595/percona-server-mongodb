@@ -123,11 +123,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<QuerySolution> solution,
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> root,
     std::unique_ptr<optimizer::AbstractABTPrinter> optimizerData,
-    const CollectionPtr* collection,
+    const MultipleCollectionAccessor& collections,
     size_t plannerOptions,
     NamespaceString nss,
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy) {
-    dassert(collection);
     auto&& [rootStage, data] = root;
 
     LOGV2_DEBUG(4822860,
@@ -136,8 +135,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                 "slots"_attr = data.debugString(),
                 "stages"_attr = sbe::DebugPrinter{}.print(*rootStage));
 
-    rootStage->prepare(data.ctx);
-
     return {{new PlanExecutorSBE(
                  opCtx,
                  std::move(cq),
@@ -145,7 +142,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                  {makeVector<sbe::plan_ranker::CandidatePlan>(sbe::plan_ranker::CandidatePlan{
                       std::move(solution), std::move(rootStage), std::move(data)}),
                   0},
-                 *collection,
                  plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA,
                  std::move(nss),
                  false,
@@ -157,11 +153,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     OperationContext* opCtx,
     std::unique_ptr<CanonicalQuery> cq,
     sbe::CandidatePlans candidates,
-    const CollectionPtr* collection,
+    const MultipleCollectionAccessor& collections,
     size_t plannerOptions,
     NamespaceString nss,
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy) {
-    dassert(collection);
 
     LOGV2_DEBUG(4822861,
                 5,
@@ -173,7 +168,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                                  std::move(cq),
                                  {},
                                  std::move(candidates),
-                                 *collection,
                                  plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA,
                                  std::move(nss),
                                  true,

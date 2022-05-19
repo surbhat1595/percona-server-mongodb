@@ -33,6 +33,7 @@
 
 #include "mongo/base/secure_allocator.h"
 
+#include <fmt/format.h>
 #include <memory>
 
 #ifdef _WIN32
@@ -51,11 +52,17 @@
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/secure_zero_memory.h"
+#include "mongo/util/static_immortal.h"
 #include "mongo/util/text.h"
 
-namespace mongo {
+namespace mongo::secure_allocator_details {
 
 namespace {
+
+std::string fmtError(StringData prefix) {
+    auto ec = lastSystemError();
+    return format(FMT_STRING("{}: {}"), prefix, errorMessage(ec));
+}
 
 /**
  * NOTE(jcarey): Why not new/delete?
@@ -73,7 +80,7 @@ namespace {
 void EnablePrivilege(const wchar_t* name) {
     LUID luid;
     if (!LookupPrivilegeValueW(nullptr, name, &luid)) {
-        auto str = errnoWithPrefix("Failed to LookupPrivilegeValue");
+        auto str = fmtError("Failed to LookupPrivilegeValue");
         LOGV2_WARNING(23704, "{str}", "str"_attr = str);
         return;
     }
@@ -81,7 +88,7 @@ void EnablePrivilege(const wchar_t* name) {
     // Get the access token for the current process.
     HANDLE accessToken;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &accessToken)) {
-        auto str = errnoWithPrefix("Failed to OpenProcessToken");
+        auto str = fmtError("Failed to OpenProcessToken");
         LOGV2_WARNING(23705, "{str}", "str"_attr = str);
         return;
     }
@@ -96,7 +103,7 @@ void EnablePrivilege(const wchar_t* name) {
 
     if (!AdjustTokenPrivileges(
             accessToken, false, &privileges, sizeof(privileges), nullptr, nullptr)) {
-        auto str = errnoWithPrefix("Failed to AdjustTokenPrivileges");
+        auto str = fmtError("Failed to AdjustTokenPrivileges");
         LOGV2_WARNING(23706, "{str}", "str"_attr = str);
     }
 
@@ -132,7 +139,7 @@ void growWorkingSize(std::size_t bytes) {
     stdx::lock_guard<stdx::mutex> lock(workingSizeMutex);
 
     if (!GetProcessWorkingSetSize(GetCurrentProcess(), &minWorkingSetSize, &maxWorkingSetSize)) {
-        auto str = errnoWithPrefix("Failed to GetProcessWorkingSetSize");
+        auto str = fmtError("Failed to GetProcessWorkingSetSize");
         LOGV2_FATAL(40285, "{str}", "str"_attr = str);
     }
 
@@ -146,7 +153,7 @@ void growWorkingSize(std::size_t bytes) {
                                     maxWorkingSetSize,
                                     QUOTA_LIMITS_HARDWS_MIN_ENABLE |
                                         QUOTA_LIMITS_HARDWS_MAX_DISABLE)) {
-        auto str = errnoWithPrefix("Failed to SetProcessWorkingSetSizeEx");
+        auto str = fmtError("Failed to SetProcessWorkingSetSizeEx");
         LOGV2_FATAL(40286, "{str}", "str"_attr = str);
     }
 }
@@ -165,7 +172,7 @@ void* systemAllocate(std::size_t bytes) {
     auto ptr = VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (!ptr) {
-        auto str = errnoWithPrefix("Failed to VirtualAlloc");
+        auto str = fmtError("Failed to VirtualAlloc");
         LOGV2_FATAL(28835, "{str}", "str"_attr = str);
     }
 
@@ -181,7 +188,7 @@ void* systemAllocate(std::size_t bytes) {
             }
         }
 
-        auto str = errnoWithPrefix("Failed to VirtualLock");
+        auto str = fmtError("Failed to VirtualLock");
         LOGV2_FATAL(28828, "{str}", "str"_attr = str);
     }
 
@@ -190,14 +197,14 @@ void* systemAllocate(std::size_t bytes) {
 
 void systemDeallocate(void* ptr, std::size_t bytes) {
     if (VirtualUnlock(ptr, bytes) == 0) {
-        auto str = errnoWithPrefix("Failed to VirtualUnlock");
+        auto str = fmtError("Failed to VirtualUnlock");
         LOGV2_FATAL(28829, "{str}", "str"_attr = str);
     }
 
     // VirtualFree needs to take 0 as the size parameter for MEM_RELEASE
     // (that's how the api works).
     if (VirtualFree(ptr, 0, MEM_RELEASE) == 0) {
-        auto str = errnoWithPrefix("Failed to VirtualFree");
+        auto str = fmtError("Failed to VirtualFree");
         LOGV2_FATAL(28830, "{str}", "str"_attr = str);
     }
 }
@@ -236,14 +243,14 @@ void* systemAllocate(std::size_t bytes) {
         mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MONGO_MAP_ANONYMOUS, -1, 0);
 
     if (!ptr) {
-        auto str = errnoWithPrefix("Failed to mmap");
+        auto str = fmtError("Failed to mmap");
         LOGV2_FATAL(23714, "{str}", "str"_attr = str);
         fassertFailed(28831);
     }
 
     if (mlock(ptr, bytes) != 0) {
         const int err = errno;
-        auto str = errnoWithPrefix(
+        auto str = fmtError(
             "Failed to mlock: Cannot allocate locked memory. For more details see: "
             "https://dochub.mongodb.org/core/cannot-allocate-locked-memory");
         LOGV2_FATAL(23715, "{str}", "str"_attr = str, "errno"_attr = err);
@@ -266,16 +273,17 @@ void systemDeallocate(void* ptr, std::size_t bytes) {
 #endif
 
     if (munlock(ptr, bytes) != 0) {
+        auto str = fmtError("Failed to munlock");
         LOGV2_FATAL(28833,
                     "{errnoWithPrefix_Failed_to_munlock}",
-                    "errnoWithPrefix_Failed_to_munlock"_attr =
-                        errnoWithPrefix("Failed to munlock"));
+                    "errnoWithPrefix_Failed_to_munlock"_attr = str);
     }
 
     if (munmap(ptr, bytes) != 0) {
+        auto str = fmtError("Failed to munmap");
         LOGV2_FATAL(28834,
                     "{errnoWithPrefix_Failed_to_munmap}",
-                    "errnoWithPrefix_Failed_to_munmap"_attr = errnoWithPrefix("Failed to munmap"));
+                    "errnoWithPrefix_Failed_to_munmap"_attr = str);
     }
 }
 
@@ -329,12 +337,30 @@ private:
     std::size_t _remaining;  // Remaining bytes
 };
 
-// See secure_allocator_details::allocate for a more detailed comment on what these are used for
-stdx::mutex allocatorMutex;  // Protects the values below
-stdx::unordered_map<void*, std::shared_ptr<Allocation>> secureTable;
-std::shared_ptr<Allocation> lastAllocation = nullptr;
 
-}  // namespace
+/**
+ * To save on allocations, we try to serve multiple requests out of the same
+ * mlocked page where possible. We do this by invoking the system allocator in
+ * multiples of a full page, and keep the last page around, giving out pointers
+ * from that page if its possible to do so.  We also keep an unordered_map of
+ * all the allocations we've handed out, which hold shared_ptrs that get rid of
+ * pages when we're not using them anymore.
+ */
+class GlobalSecureAllocator {
+public:
+    void* allocate(std::size_t bytes, std::size_t alignOf);
+
+    /**
+     * Deallocates a secure allocation.
+     * We zero memory before derefing the associated allocation.
+     */
+    void deallocate(void* ptr, std::size_t bytes);
+
+private:
+    stdx::mutex allocatorMutex;  // NOLINT
+    stdx::unordered_map<void*, std::shared_ptr<Allocation>> secureTable;
+    std::shared_ptr<Allocation> lastAllocation;
+};
 
 MONGO_INITIALIZER_GENERAL(SecureAllocator, (), ())
 (InitializerContext* context) {
@@ -344,16 +370,7 @@ MONGO_INITIALIZER_GENERAL(SecureAllocator, (), ())
 #endif
 }
 
-namespace secure_allocator_details {
-
-/**
- * To save on allocations, we try to serve multiple requests out of the same mlocked page where
- * possible.  We do this by invoking the system allocator in multiples of a full page, and keep the
- * last page around, giving out pointers from that page if its possible to do so.  We also keep an
- * unordered_map of all the allocations we've handed out, which hold shared_ptrs that get rid of
- * pages when we're not using them anymore.
- */
-void* allocate(std::size_t bytes, std::size_t alignOf) {
+void* GlobalSecureAllocator::allocate(std::size_t bytes, std::size_t alignOf) {
     stdx::lock_guard<stdx::mutex> lk(allocatorMutex);
 
     if (lastAllocation) {
@@ -371,12 +388,7 @@ void* allocate(std::size_t bytes, std::size_t alignOf) {
     return out;
 }
 
-/**
- * Deallocates a secure allocation.
- *
- * We zero memory before derefing the associated allocation.
- */
-void deallocate(void* ptr, std::size_t bytes) {
+void GlobalSecureAllocator::deallocate(void* ptr, std::size_t bytes) {
     secureZeroMemory(ptr, bytes);
 
     stdx::lock_guard<stdx::mutex> lk(allocatorMutex);
@@ -384,8 +396,19 @@ void deallocate(void* ptr, std::size_t bytes) {
     secureTable.erase(ptr);
 }
 
-}  // namespace secure_allocator_details
+GlobalSecureAllocator& gSecureAllocator() {
+    static StaticImmortal<GlobalSecureAllocator> obj;
+    return *obj;
+}
 
-constexpr StringData SecureAllocatorAuthDomainTrait::DomainType;
+}  // namespace
 
-}  // namespace mongo
+void* allocate(std::size_t bytes, std::size_t alignOf) {
+    return gSecureAllocator().allocate(bytes, alignOf);
+}
+
+void deallocate(void* ptr, std::size_t bytes) {
+    return gSecureAllocator().deallocate(ptr, bytes);
+}
+
+}  // namespace mongo::secure_allocator_details

@@ -1038,6 +1038,10 @@ public:
         _saveStorageCursorOnDetachFromOperationContext = saveCursor;
     }
 
+    bool isRecordIdAtEndOfKeyString() const override {
+        return true;
+    }
+
 protected:
     // Called after _key has been filled in, ie a new key to be processed has been fetched.
     // Must not throw WriteConflictException, throwing a WriteConflictException will retry the
@@ -1402,6 +1406,11 @@ public:
         }
     }
 
+    bool isRecordIdAtEndOfKeyString() const override {
+        return _key.getSize() !=
+            KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _idx.getOrdering(), _typeBits);
+    }
+
 private:
     // Called after _key has been filled in, ie a new key to be processed has been fetched.
     // Must not throw WriteConflictException, throwing a WriteConflictException will retry the
@@ -1533,6 +1542,33 @@ bool WiredTigerIndexUnique::isDup(OperationContext* opCtx,
     MONGO_UNREACHABLE;
 }
 
+void WiredTigerIndexUnique::insertWithRecordIdInValue_forTest(OperationContext* opCtx,
+                                                              const KeyString::Value& keyString,
+                                                              RecordId rid) {
+    WiredTigerCursor curwrap(_uri, _tableId, false, opCtx);
+    curwrap.assertInActiveTxn();
+    WT_CURSOR* c = curwrap.get();
+
+    // Now create the table key/value, the actual data record.
+    WiredTigerItem keyItem(keyString.getBuffer(), keyString.getSize());
+
+    BufBuilder bufBuilder;
+    KeyString::Builder valueBuilder(keyString.getVersion(), rid);
+    valueBuilder.appendTypeBits(keyString.getTypeBits());
+
+    WiredTigerItem valueItem(valueBuilder.getBuffer(), valueBuilder.getSize());
+    setKey(c, keyItem.Get());
+    c->set_value(c, valueItem.Get());
+    int ret = WT_OP_CHECK(wiredTigerCursorInsert(opCtx, c));
+
+    invariantWTOK(
+        ret,
+        c->session,
+        fmt::format("WiredTigerIndexUnique::insertWithRecordIdInValue_forTest: {}; uri: {}",
+                    _indexName,
+                    _uri));
+}
+
 WiredTigerIdIndex::WiredTigerIdIndex(OperationContext* ctx,
                                      const std::string& uri,
                                      StringData ident,
@@ -1582,9 +1618,22 @@ StatusWith<bool> WiredTigerIdIndex::_insert(OperationContext* opCtx,
         });
     }
 
+    DuplicateKeyErrorInfo::FoundValue foundValueRecordId;
+    if (TestingProctor::instance().isEnabled()) {
+        WT_ITEM foundValue;
+        invariantWTOK(c->get_value(c, &foundValue), c->session);
+
+        BufReader reader(foundValue.data, foundValue.size);
+        foundValueRecordId = KeyString::decodeRecordIdLong(&reader);
+    }
+
     auto key = KeyString::toBson(keyString, _ordering);
-    return buildDupKeyErrorStatus(
-        key, _desc->getEntry()->getNSSFromCatalog(opCtx), _indexName, _keyPattern, _collation);
+    return buildDupKeyErrorStatus(key,
+                                  _desc->getEntry()->getNSSFromCatalog(opCtx),
+                                  _indexName,
+                                  _keyPattern,
+                                  _collation,
+                                  std::move(foundValueRecordId));
 }
 
 StatusWith<bool> WiredTigerIndexUnique::_insert(OperationContext* opCtx,

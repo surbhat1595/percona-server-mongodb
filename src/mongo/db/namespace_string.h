@@ -68,6 +68,9 @@ public:
     // Namespace for the sharding config database
     static constexpr StringData kConfigDb = "config"_sd;
 
+    // The $external database used by X.509, LDAP, etc...
+    static constexpr StringData kExternalDb = "$external"_sd;
+
     // Name for the system views collection
     static constexpr StringData kSystemDotViewsCollectionName = "system.views"_sd;
 
@@ -101,6 +104,9 @@ public:
 
     // Namespace for storing the logical sessions information
     static const NamespaceString kLogicalSessionsNamespace;
+
+    // Namespace for storing databases information
+    static const NamespaceString kConfigDatabasesNamespace;
 
     // Namespace for storing the transaction information for each session
     static const NamespaceString kSessionTransactionsTableNamespace;
@@ -200,6 +206,12 @@ public:
 
     // Namespace used for persisting ConfigsvrCoordinator state documents.
     static const NamespaceString kConfigsvrCoordinatorsNamespace;
+
+    // Namespace for storing user write blocking critical section documents
+    static const NamespaceString kUserWritesCriticalSectionsNamespace;
+
+    // Namespace used during the recovery procedure for the config server.
+    static const NamespaceString kConfigsvrRestoreNamespace;
 
     /**
      * Constructs an empty NamespaceString.
@@ -440,6 +452,9 @@ public:
         return coll().startsWith("$cmd."_sd);
     }
 
+    /**
+     * NOTE an aggregate could still refer to another collection using a stage like $out.
+     */
     bool isCollectionlessAggregateNS() const;
     bool isListCollectionsCursorNS() const;
 

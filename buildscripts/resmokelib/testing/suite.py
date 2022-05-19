@@ -59,7 +59,7 @@ def synchronized(method):
     return synced
 
 
-class Suite(object):  # pylint: disable=too-many-instance-attributes
+class Suite(object):  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """A suite of tests of a particular kind (e.g. C++ unit tests, dbtests, jstests)."""
 
     def __init__(self, suite_name, suite_config, suite_options=_config.SuiteOptions.ALL_INHERITED):
@@ -86,6 +86,10 @@ class Suite(object):  # pylint: disable=too-many-instance-attributes
         # We keep a reference to the TestReports from the currently running jobs so that we can
         # report intermediate results.
         self._partial_reports = None
+
+    def get_config(self):
+        """Return the configuration of this suite."""
+        return self._suite_config
 
     def __repr__(self):
         """Create a string representation of object for debugging."""
@@ -171,6 +175,24 @@ class Suite(object):  # pylint: disable=too-many-instance-attributes
         if self.options.num_repeat_tests:
             return self.options.num_repeat_tests
         return 1
+
+    def get_num_jobs_to_start(self) -> int:
+        """
+        Determine the number of jobs to start.
+
+        :return: Number of jobs to start.
+        """
+        num_jobs_to_start = self.options.num_jobs
+        num_tests = self._get_num_test_runs()
+
+        if num_tests < num_jobs_to_start:
+            num_jobs_to_start = num_tests
+
+        return num_jobs_to_start
+
+    def _get_num_test_runs(self) -> int:
+        """Return the number of total test runs."""
+        return len(self.tests) * self.options.num_repeat_tests
 
     @property
     def options(self):
@@ -379,3 +401,16 @@ class Suite(object):  # pylint: disable=too-many-instance-attributes
 
         logger.info("=" * 80)
         logger.info("\n".join(sb))
+
+    def make_test_case_names_list(self):
+        """
+        Create a list of all the names of the tests.
+
+        :return: List of names of testcases.
+        """
+
+        test_case_names = []
+        for _ in range(self.get_num_times_to_repeat_tests()):
+            for test_name in self.tests:
+                test_case_names.append(test_name)
+        return test_case_names

@@ -41,6 +41,7 @@
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/javascript_execution.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
@@ -289,6 +290,15 @@ public:
     };
 
     /**
+     * Returns true if there are no namespaces in the query other than the namespace the query was
+     * issued against. eg if there is no $out, $lookup ect. If namespaces have not yet been resolved
+     * then it will also return false.
+     */
+    bool noForeignNamespaces() const {
+        return _resolvedNamespaces.empty();
+    }
+
+    /**
      * Convenience call that returns true if the tailableMode indicates a tailable and awaitData
      * query.
      */
@@ -377,9 +387,9 @@ public:
     bool fromMongos = false;
     bool needsMerge = false;
     bool inMongos = false;
+    bool forPerShardCursor = false;
     bool allowDiskUse = false;
     bool bypassDocumentValidation = false;
-    bool inMultiDocumentTransaction = false;
     bool hasWhereClause = false;
 
     NamespaceString ns;
@@ -450,6 +460,9 @@ public:
 
     // When non-empty, contains the unmodified user provided aggregation command.
     BSONObj originalAggregateCommand;
+
+    // If present, the spec associated with the current change stream pipeline.
+    boost::optional<DocumentSourceChangeStreamSpec> changeStreamSpec;
 
     // True if the expression context is the original one for a given pipeline.
     // False if another context is created for the same pipeline. Used to disable duplicate

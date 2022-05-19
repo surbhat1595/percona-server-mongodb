@@ -35,7 +35,6 @@
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 
@@ -194,11 +193,12 @@ ShardServerCatalogCacheLoaderTest::makeCombinedOriginalFiveChunksAndThreeNewChun
 
 CollectionType ShardServerCatalogCacheLoaderTest::makeCollectionType(
     const ChunkVersion& collVersion) {
-    CollectionType coll(
-        kNss, collVersion.epoch(), collVersion.getTimestamp(), Date_t::now(), UUID::gen());
-    coll.setKeyPattern(kKeyPattern);
-    coll.setUnique(false);
-    return coll;
+    return {kNss,
+            collVersion.epoch(),
+            collVersion.getTimestamp(),
+            Date_t::now(),
+            UUID::gen(),
+            kKeyPattern};
 }
 
 std::pair<CollectionType, vector<ChunkType>>

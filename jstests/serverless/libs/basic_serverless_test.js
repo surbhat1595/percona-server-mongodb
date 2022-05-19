@@ -1,6 +1,6 @@
 class BasicServerlessTest {
     constructor({recipientTagName, recipientSetName, nodeOptions}) {
-        this.donor = new ReplSetTest({name: "donor", nodes: 3, nodeOptions});
+        this.donor = new ReplSetTest({name: "donor", nodes: 3, serverless: true, nodeOptions});
         this.donor.startSet();
         this.donor.initiate();
 
@@ -10,6 +10,7 @@ class BasicServerlessTest {
     }
 
     stop() {
+        this.removeAndStopRecipientNodes();
         // If we validate, it will try to list all collections and the migrated collections will
         // return a TenantMigrationCommitted error.
         this.donor.stopSet(undefined /* signal */, false /* forRestart */, {skipValidation: 1});
@@ -51,6 +52,18 @@ class BasicServerlessTest {
 
         assert.commandWorked(admin.runCommand({replSetReconfig: config}));
         this.recipientNodes.forEach(node => donor.waitForState(node, ReplSetTest.State.SECONDARY));
+    }
+
+    removeAndStopRecipientNodes() {
+        print("Removing and stopping recipient nodes");
+        this.recipientNodes.forEach(node => this.donor.remove(node));
+    }
+
+    /**
+     * Crafts a tenant database name.
+     */
+    tenantDB(tenantId, dbName) {
+        return `${tenantId}_${dbName}`;
     }
 }
 

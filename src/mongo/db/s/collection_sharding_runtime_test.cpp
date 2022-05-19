@@ -34,12 +34,15 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/vector_clock.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
 #include "mongo/util/fail_point.h"
@@ -78,11 +81,10 @@ protected:
                         boost::none);
 
         if (!OperationShardingState::isOperationVersioned(opCtx)) {
-            const auto version = cm.getVersion(ShardId("0"));
-            BSONObjBuilder builder;
-            version.serializeToBSON(ChunkVersion::kShardVersionField, &builder);
-            auto& oss = OperationShardingState::get(opCtx);
-            oss.initializeClientRoutingVersionsFromCommand(kTestNss, builder.obj());
+            OperationShardingState::setShardRole(opCtx,
+                                                 kTestNss,
+                                                 cm.getVersion(ShardId("0")) /* shardVersion */,
+                                                 boost::none /* databaseVersion */);
         }
 
         return CollectionMetadata(std::move(cm), ShardId("0"));
@@ -123,7 +125,6 @@ TEST_F(CollectionShardingRuntimeTest,
 TEST_F(
     CollectionShardingRuntimeTest,
     GetCurrentMetadataIfKnownReturnsUnshardedAfterSetFilteringMetadataIsCalledWithUnshardedMetadata) {
-
     CollectionShardingRuntime csr(getServiceContext(), kTestNss, executor());
     csr.setFilteringMetadata(operationContext(), CollectionMetadata());
     const auto optCurrMetadata = csr.getCurrentMetadataIfKnown();
@@ -135,7 +136,6 @@ TEST_F(
 TEST_F(
     CollectionShardingRuntimeTest,
     GetCurrentMetadataIfKnownReturnsShardedAfterSetFilteringMetadataIsCalledWithShardedMetadata) {
-
     CollectionShardingRuntime csr(getServiceContext(), kTestNss, executor());
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx);
@@ -264,9 +264,7 @@ public:
     }
 
     CollectionType createCollection(const OID& epoch, const Timestamp& timestamp) {
-        CollectionType res(kNss, epoch, timestamp, Date_t::now(), kCollUUID);
-        res.setKeyPattern(BSON(kShardKey << 1));
-        res.setUnique(false);
+        CollectionType res(kNss, epoch, timestamp, Date_t::now(), kCollUUID, BSON(kShardKey << 1));
         res.setAllowMigrations(false);
         return res;
     }
@@ -343,6 +341,35 @@ private:
     UUID _uuid{UUID::gen()};
 };
 
+// The 'pending' field must not be set in order for a range deletion task to succeed, but the
+// ShardServerOpObserver will submit the task for deletion upon seeing an insert without the
+// 'pending' field. The tests call removeDocumentsFromRange directly, so we want to avoid having
+// the op observer also submit the task. The ShardServerOpObserver will ignore replacement
+//  updates on the range deletions namespace though, so we can get around the issue by inserting
+// the task with the 'pending' field set, and then remove the field using a replacement update
+// after.
+RangeDeletionTask insertRangeDeletionTask(OperationContext* opCtx,
+                                          const NamespaceString& nss,
+                                          const UUID& uuid,
+                                          const ChunkRange& range,
+                                          int64_t numOrphans) {
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    auto migrationId = UUID::gen();
+    RangeDeletionTask t(migrationId, nss, uuid, ShardId("donor"), range, CleanWhenEnum::kDelayed);
+    t.setPending(true);
+    t.setNumOrphanDocs(numOrphans);
+    const auto currentTime = VectorClock::get(opCtx)->getTime();
+    t.setTimestamp(currentTime.clusterTime().asTimestamp());
+    store.add(opCtx, t);
+
+    auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
+    t.setPending(boost::none);
+    auto update = t.toBSON();
+    store.update(opCtx, query, update);
+
+    return t;
+}
+
 TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
        WaitForCleanReturnsErrorIfMetadataManagerDoesNotExist) {
     auto status = CollectionShardingRuntime::waitForClean(
@@ -394,19 +421,15 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
 
     auto metadata = makeShardedMetadata(opCtx, uuid());
     csr().setFilteringMetadata(opCtx, metadata);
+    const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
+    const auto task = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
     auto cleanupComplete =
-        csr().cleanUpRange(ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-                           boost::none,
-                           CollectionShardingRuntime::CleanWhen::kNow);
+        csr().cleanUpRange(range, task.getId(), CollectionShardingRuntime::CleanWhen::kNow);
 
     opCtx->setDeadlineAfterNowBy(Milliseconds(100), ErrorCodes::MaxTimeMSExpired);
-    auto status = CollectionShardingRuntime::waitForClean(
-        opCtx,
-        kTestNss,
-        uuid(),
-        ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Date_t::max());
+    auto status =
+        CollectionShardingRuntime::waitForClean(opCtx, kTestNss, uuid(), range, Date_t::max());
 
     ASSERT_EQ(status.code(), ErrorCodes::MaxTimeMSExpired);
 
@@ -421,16 +444,16 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     csr().setFilteringMetadata(opCtx, metadata);
 
     const auto middleKey = 5;
+    const ChunkRange range1 = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << middleKey));
+    const auto task1 = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range1, 0);
+    const ChunkRange range2 = ChunkRange(BSON(kShardKey << middleKey), BSON(kShardKey << MAXKEY));
+    const auto task2 = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range2, 0);
 
     auto cleanupCompleteFirst =
-        csr().cleanUpRange(ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << middleKey)),
-                           boost::none,
-                           CollectionShardingRuntime::CleanWhen::kNow);
+        csr().cleanUpRange(range1, task1.getId(), CollectionShardingRuntime::CleanWhen::kNow);
 
     auto cleanupCompleteSecond =
-        csr().cleanUpRange(ChunkRange(BSON(kShardKey << middleKey), BSON(kShardKey << MAXKEY)),
-                           boost::none,
-                           CollectionShardingRuntime::CleanWhen::kNow);
+        csr().cleanUpRange(range2, task2.getId(), CollectionShardingRuntime::CleanWhen::kNow);
 
     auto status = CollectionShardingRuntime::waitForClean(
         opCtx,
@@ -453,18 +476,14 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx, uuid());
     csr().setFilteringMetadata(opCtx, metadata);
+    const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
+    const auto task = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
     auto cleanupComplete =
-        csr().cleanUpRange(ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-                           boost::none,
-                           CollectionShardingRuntime::CleanWhen::kNow);
+        csr().cleanUpRange(range, task.getId(), CollectionShardingRuntime::CleanWhen::kNow);
 
-    auto status = CollectionShardingRuntime::waitForClean(
-        opCtx,
-        kTestNss,
-        uuid(),
-        ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)),
-        Date_t::max());
+    auto status =
+        CollectionShardingRuntime::waitForClean(opCtx, kTestNss, uuid(), range, Date_t::max());
 
     ASSERT_OK(status);
     ASSERT(cleanupComplete.isReady());

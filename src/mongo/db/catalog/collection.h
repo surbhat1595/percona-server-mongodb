@@ -573,7 +573,9 @@ public:
     virtual void updateClusteredIndexTTLSetting(OperationContext* opCtx,
                                                 boost::optional<int64_t> expireAfterSeconds) = 0;
 
-    virtual Status updateCappedSize(OperationContext* opCtx, long long newCappedSize) = 0;
+    virtual Status updateCappedSize(OperationContext* opCtx,
+                                    boost::optional<long long> newCappedSize,
+                                    boost::optional<long long> newCappedMax) = 0;
 
     //
     // Index
@@ -602,17 +604,16 @@ public:
     virtual void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) = 0;
 
     /*
-     * Converts the the given index to be unique.
-     * This is a one-way transformation - the uniqueness constraint cannot be removed.
+     * Converts the the given index to be unique or non-unique.
      */
-    virtual void updateUniqueSetting(OperationContext* opCtx, StringData idxName) = 0;
+    virtual void updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) = 0;
 
     /*
      * Disallows or allows new duplicates in the given index.
      */
-    virtual void updateDisallowNewDuplicateKeysSetting(OperationContext* opCtx,
-                                                       StringData idxName,
-                                                       bool disallowNewDuplicateKeys) = 0;
+    virtual void updatePrepareUniqueSetting(OperationContext* opCtx,
+                                            StringData idxName,
+                                            bool prepareUnique) = 0;
 
     /**
      * Removes invalid index options on all indexes in this collection. Returns a list of index

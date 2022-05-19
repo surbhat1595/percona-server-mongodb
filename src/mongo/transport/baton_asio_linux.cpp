@@ -251,11 +251,11 @@ bool TransportLayerASIO::BatonASIO::cancelSession(Session& session) noexcept {
         if (iter == _sessions.end())
             return;
 
-        TransportSession session = std::exchange(iter->second, {});
+        TransportSession ts = std::exchange(iter->second, {});
         _sessions.erase(iter);
         lk.unlock();
 
-        session.promise.setError(getCanceledError());
+        ts.promise.setError(getCanceledError());
     });
 
     return true;
@@ -273,12 +273,12 @@ bool TransportLayerASIO::BatonASIO::cancelTimer(const ReactorTimer& timer) noexc
         if (iter == _timersById.end())
             return;
 
-        Timer timer = std::exchange(iter->second->second, {});
+        Timer batonTimer = std::exchange(iter->second->second, {});
         _timers.erase(iter->second);
         _timersById.erase(iter);
         lk.unlock();
 
-        timer.promise.setError(getCanceledError());
+        batonTimer.promise.setError(getCanceledError());
     });
 
     return true;
@@ -321,7 +321,7 @@ std::list<Promise<void>> TransportLayerASIO::BatonASIO::_poll(stdx::unique_lock<
     if (deadline && !clkSource->tracksSystemClock()) {
         // The clock source and `::poll` may track time differently, so use the clock source to
         // enforce the timeout.
-        invariant(clkSource->setAlarm(*deadline, [self = shared_from_this()] { self->notify(); }));
+        clkSource->setAlarm(*deadline, [self = shared_from_this()] { self->notify(); });
         deadline.reset();
     }
 

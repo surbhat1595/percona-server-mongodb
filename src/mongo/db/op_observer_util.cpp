@@ -64,9 +64,11 @@ BSONObj makeCollModCmdObj(const BSONObj& collModCmd,
             if (indexInfo->unique)
                 indexObjBuilder.append("unique", indexInfo->unique.get());
 
-            if (indexInfo->disallowNewDuplicateKeys)
-                indexObjBuilder.append("disallowNewDuplicateKeys",
-                                       indexInfo->disallowNewDuplicateKeys.get());
+            if (indexInfo->prepareUnique)
+                indexObjBuilder.append("prepareUnique", indexInfo->prepareUnique.get());
+
+            if (indexInfo->forceNonUnique)
+                indexObjBuilder.append("forceNonUnique", indexInfo->forceNonUnique.get());
 
             cmdObjBuilder.append(indexFieldName, indexObjBuilder.obj());
         } else {

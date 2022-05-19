@@ -46,6 +46,7 @@
 #include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/util/fail_point.h"
@@ -112,6 +113,12 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
                         source->constraints().isAllowedInChangeStream());
             }
         }
+    }
+
+    // Verify that usage of $searchMeta and $search is legal.
+    if (pipeline.getContext()->opCtx->getServiceContext()) {
+        getSearchHelpers(pipeline.getContext()->opCtx->getServiceContext())
+            ->assertSearchMetaAccessValid(sources);
     }
 }
 
@@ -236,10 +243,11 @@ void Pipeline::validateCommon(bool alreadyOptimized) const {
                 str::stream() << stage->getSourceName() << " can only be run on mongoS",
                 !(constraints.hostRequirement == HostTypeRequirement::kMongoS && !pCtx->inMongos));
 
-        uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Stage not supported inside of a multi-document transaction: "
-                              << stage->getSourceName(),
-                !(pCtx->inMultiDocumentTransaction && !constraints.isAllowedInTransaction()));
+        uassert(
+            ErrorCodes::OperationNotSupportedInTransaction,
+            str::stream() << "Stage not supported inside of a multi-document transaction: "
+                          << stage->getSourceName(),
+            !(pCtx->opCtx->inMultiDocumentTransaction() && !constraints.isAllowedInTransaction()));
     }
 }
 

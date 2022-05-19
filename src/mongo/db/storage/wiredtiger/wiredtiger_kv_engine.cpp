@@ -357,7 +357,7 @@ static void copy_keydb_files(const boost::filesystem::path& from,
 
 namespace {
 
-StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(
+StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
     OperationContext* opCtx,
     boost::optional<Timestamp> checkpointTimestamp,
     WT_SESSION* session,
@@ -367,7 +367,7 @@ StatusWith<std::vector<BackupBlock>> getBackupBlocksFromBackupCursor(
     std::string dbPath,
     const char* statusPrefix) {
     int wtRet;
-    std::vector<BackupBlock> backupBlocks;
+    std::deque<BackupBlock> backupBlocks;
     const char* filename;
     const auto directoryPath = boost::filesystem::path(dbPath);
     const auto wiredTigerLogFilePrefix = "WiredTigerLog";
@@ -1706,7 +1706,7 @@ StatusWith<std::deque<std::string>> WiredTigerKVEngine::extendBackupCursor(
 
 // Similar to beginNonBlockingBackup but
 // - returns empty list of files
-StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup() {
+StatusWith<std::deque<BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup() {
     // This cursor will be freed by the backupSession being closed as the session is uncached
     auto sessionRaii = std::make_unique<WiredTigerSession>(_conn);
     WT_CURSOR* cursor = nullptr;
@@ -1721,10 +1721,10 @@ StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::_disableIncrementalBackup(
     _backupSession = std::move(sessionRaii);
     _backupCursor = cursor;
 
-    return std::vector<BackupBlock>();
+    return std::deque<BackupBlock>();
 }
 
-StatusWith<std::vector<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
+StatusWith<std::deque<BackupBlock>> EncryptionKeyDB::beginNonBlockingBackup(
     OperationContext* opCtx,
     boost::optional<Timestamp> checkpointTimestamp,
     const StorageEngine::BackupOptions& options) {
@@ -1784,7 +1784,7 @@ Status EncryptionKeyDB::endNonBlockingBackup(OperationContext* opCtx) {
     return Status::OK();
 }
 
-StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor(OperationContext* opCtx) {
+StatusWith<std::deque<std::string>> EncryptionKeyDB::extendBackupCursor(OperationContext* opCtx) {
     invariant(_backupCursor);
 
     // The "target=(\"log:\")" configuration string for the cursor will ensure that we only see the
@@ -1819,7 +1819,7 @@ StatusWith<std::vector<std::string>> EncryptionKeyDB::extendBackupCursor(Operati
     // have a consistent view of the data. For shards that opened their backup cursor before the
     // established point-in-time for backup, they will need to create a full copy of the additional
     // journal files returned by this method to ensure a consistent backup of the data is taken.
-    std::vector<std::string> filenames;
+    std::deque<std::string> filenames;
     for (const auto& entry : swBackupBlocks.getValue()) {
         filenames.push_back(entry.filePath());
     }

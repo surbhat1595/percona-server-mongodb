@@ -61,7 +61,7 @@ public:
      * Inform the encryption storage system to prepare its data such that its files can be copied
      * along with MongoDB data files for a backup.
      */
-    virtual StatusWith<std::vector<BackupBlock>> beginNonBlockingBackup(
+    virtual StatusWith<std::deque<BackupBlock>> beginNonBlockingBackup(
         OperationContext* opCtx,
         boost::optional<Timestamp> checkpointTimestamp,
         const StorageEngine::BackupOptions& options) override;
@@ -76,7 +76,7 @@ public:
     /**
      * Get list of log files changed since the moment of backup cursor creation
      */
-    virtual StatusWith<std::vector<std::string>> extendBackupCursor(
+    virtual StatusWith<std::deque<std::string>> extendBackupCursor(
         OperationContext* opCtx) override;
 
 protected:

@@ -105,8 +105,8 @@ private:
     const StorageEngine::BackupOptions _backupOptions;
     BackupCursorState _backupCursorState;
     // Current batch of backup blocks
-    std::vector<BackupBlock> _backupBlocks;
-    std::vector<BackupBlock>::const_iterator _docIt;
+    std::deque<BackupBlock> _backupBlocks;
+    std::deque<BackupBlock>::const_iterator _docIt;
 };
 
 }  // namespace mongo

@@ -140,12 +140,16 @@ public:
         _lastSentRequest = cmdBob.obj();
 
         auto nextResponse = _nextResponse;
-        if (!_secondResponse.isEmpty()) {
-            _nextResponse = _secondResponse;
-            _secondResponse = BSONObj();
+        if (_secondResponse) {
+            _nextResponse = *_secondResponse;
+            _secondResponse.reset();
         }
-        _hooks->runReplyHook(nextResponse);
-        return SemiFuture<BSONObj>::makeReady(nextResponse);
+        if (!nextResponse.isOK()) {
+            return SemiFuture<BSONObj>::makeReady(nextResponse);
+        }
+        auto nextResponseRes = nextResponse.getValue();
+        _hooks->runReplyHook(nextResponseRes);
+        return SemiFuture<BSONObj>::makeReady(nextResponseRes);
     }
 
     virtual SemiFuture<BatchedCommandResponse> runCRUDOp(
@@ -166,18 +170,18 @@ public:
         return _lastSentRequest;
     }
 
-    void setNextCommandResponse(BSONObj res) {
+    void setNextCommandResponse(StatusWith<BSONObj> res) {
         _nextResponse = res;
     }
 
-    void setSecondCommandResponse(BSONObj res) {
+    void setSecondCommandResponse(StatusWith<BSONObj> res) {
         _secondResponse = res;
     }
 
 private:
     std::unique_ptr<TxnMetadataHooks> _hooks;
-    mutable BSONObj _nextResponse;
-    mutable BSONObj _secondResponse;
+    mutable StatusWith<BSONObj> _nextResponse{BSONObj()};
+    mutable boost::optional<StatusWith<BSONObj>> _secondResponse;
     mutable BSONObj _lastSentRequest;
 };
 
@@ -296,6 +300,10 @@ protected:
         if (resourceYielder) {
             _resourceYielder = resourceYielder.get();
         }
+
+        // Reset _txnWithRetries so it returns and reacquires the same session from the session
+        // pool. This ensures that we can predictably monitor txnNumber's value.
+        _txnWithRetries = nullptr;
         _txnWithRetries =
             std::make_unique<txn_api::TransactionWithRetries>(opCtx(),
                                                               InlineQueuedCountingExecutor::make(),
@@ -373,16 +381,20 @@ TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnCommit) {
         WriteConcernOptions{
             2, WriteConcernOptions::SyncMode::NONE, WriteConcernOptions::kNoWaiting}};
 
+    auto txnNumber{0};
     for (const auto& writeConcern : writeConcernOptions) {
+
         opCtx()->setWriteConcern(writeConcern);
 
+        // resetTxnWithRetries() function releases and reacquires the txn, so lastTxnNumber is
+        // incremented.
         resetTxnWithRetries();
+        ++txnNumber;
 
         int attempt = -1;
         auto swResult = txnWithRetries().runSyncNoThrow(
             opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
                 attempt += 1;
-
                 // No write concern on requests prior to commit/abort.
                 mockClient()->setNextCommandResponse(kOKInsertResponse);
                 auto insertRes = txnClient
@@ -392,11 +404,15 @@ TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnCommit) {
                                                       << "documents" << BSON_ARRAY(BSON("x" << 1))))
                                      .get();
                 ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+
+                // Each attempt releases and reacquires the session from the session pool,
+                // incrementing the txnNumber.
                 assertTxnMetadata(mockClient()->getLastSentRequest(),
-                                  attempt /* txnNumber */,
+                                  attempt + txnNumber /* txnNumber */,
                                   true /* startTransaction */);
                 assertSessionIdMetadata(mockClient()->getLastSentRequest(),
                                         LsidAssertion::kStandalone);
+
 
                 mockClient()->setNextCommandResponse(kOKInsertResponse);
                 insertRes = txnClient
@@ -406,8 +422,11 @@ TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnCommit) {
                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
                                 .get();
                 ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+
+                // Each attempt returns and reacquires the session from the session pool,
+                // incrementing the txnNumber.
                 assertTxnMetadata(mockClient()->getLastSentRequest(),
-                                  attempt /* txnNumber */,
+                                  attempt + txnNumber /* txnNumber */,
                                   boost::none /* startTransaction */);
                 assertSessionIdMetadata(mockClient()->getLastSentRequest(),
                                         LsidAssertion::kStandalone);
@@ -423,13 +442,18 @@ TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnCommit) {
         ASSERT(swResult.getValue().getEffectiveStatus().isOK());
 
         auto lastRequest = mockClient()->getLastSentRequest();
+
+        // Each attempt returns and reacquires the session from the session pool, incrementing the
+        // txnNumber.
         assertTxnMetadata(lastRequest,
-                          attempt /* txnNumber */,
+                          attempt + txnNumber /* txnNumber */,
                           boost::none /* startTransaction */,
                           boost::none /* readConcern */,
                           writeConcern.toBSON());
         assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+
         ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
+        txnNumber += attempt;
     }
 }
 
@@ -441,10 +465,15 @@ TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnAbort) {
         WriteConcernOptions{
             2, WriteConcernOptions::SyncMode::NONE, WriteConcernOptions::kNoWaiting}};
 
+    auto txnNumber{0};
     for (const auto& writeConcern : writeConcernOptions) {
         opCtx()->setWriteConcern(writeConcern);
 
+        // resetTxnWithRetries() function releases and reacquires the txn, so lastTxnNumber is
+        // incremented.
         resetTxnWithRetries();
+        ++txnNumber;
+
         auto swResult = txnWithRetries().runSyncNoThrow(
             opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
                 mockClient()->setNextCommandResponse(kOKInsertResponse);
@@ -464,7 +493,7 @@ TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnAbort) {
             });
         ASSERT_EQ(swResult.getStatus(), ErrorCodes::InternalError);
 
-        expectSentAbort(0 /* txnNumber */, writeConcern.toBSON());
+        expectSentAbort(txnNumber /* txnNumber */, writeConcern.toBSON());
     }
 }
 
@@ -474,11 +503,15 @@ TEST_F(TxnAPITest, OwnSession_AttachesReadConcernOnStartTransaction) {
         repl::ReadConcernLevel::kMajorityReadConcern,
         repl::ReadConcernLevel::kSnapshotReadConcern};
 
+    auto txnNumber{0};
     for (const auto& readConcernLevel : readConcernLevels) {
         auto readConcern = repl::ReadConcernArgs(readConcernLevel);
         repl::ReadConcernArgs::get(opCtx()) = readConcern;
 
+        // resetTxnWithRetries() function releases and reacquires the txn, so lastTxnNumber is
+        // incremented.
         resetTxnWithRetries();
+        ++txnNumber;
 
         int attempt = -1;
         auto swResult = txnWithRetries().runSyncNoThrow(
@@ -492,8 +525,11 @@ TEST_F(TxnAPITest, OwnSession_AttachesReadConcernOnStartTransaction) {
                                                       << "documents" << BSON_ARRAY(BSON("x" << 1))))
                                      .get();
                 ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+
+                // Each attempt returns and reacquires the session from the session pool,
+                // incrementing the txnNumber.
                 assertTxnMetadata(mockClient()->getLastSentRequest(),
-                                  attempt /* txnNumber */,
+                                  attempt + txnNumber /* txnNumber */,
                                   true /* startTransaction */,
                                   readConcern.toBSONInner());
                 assertSessionIdMetadata(mockClient()->getLastSentRequest(),
@@ -508,8 +544,11 @@ TEST_F(TxnAPITest, OwnSession_AttachesReadConcernOnStartTransaction) {
                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
                                 .get();
                 ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+
+                // Each attempt returns and reacquires the session from the session pool,
+                // incrementing the txnNumber.
                 assertTxnMetadata(mockClient()->getLastSentRequest(),
-                                  attempt /* txnNumber */,
+                                  attempt + txnNumber /* txnNumber */,
                                   boost::none /* startTransaction */);
                 assertSessionIdMetadata(mockClient()->getLastSentRequest(),
                                         LsidAssertion::kStandalone);
@@ -525,13 +564,17 @@ TEST_F(TxnAPITest, OwnSession_AttachesReadConcernOnStartTransaction) {
         ASSERT(swResult.getValue().getEffectiveStatus().isOK());
 
         auto lastRequest = mockClient()->getLastSentRequest();
+
+        // Each attempt returns and reacquires the session from the session pool, incrementing the
+        // txnNumber.
         assertTxnMetadata(lastRequest,
-                          attempt /* txnNumber */,
+                          attempt + txnNumber /* txnNumber */,
                           boost::none /* startTransaction */,
                           boost::none /* readConcern */,
                           WriteConcernOptions().toBSON() /* writeConcern */);
         assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
         ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
+        txnNumber += attempt;
     }
 }
 
@@ -618,7 +661,6 @@ TEST_F(TxnAPITest, OwnSession_RetriesOnTransientError) {
                       boost::none /* startTransaction */,
                       boost::none /* readConcern */,
                       WriteConcernOptions().toBSON() /* writeConcern */);
-    assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
     ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
 }
 
@@ -1110,12 +1152,6 @@ TEST_F(TxnAPITest, ClientSession_UsesNonRetryableInternalSession) {
 }
 
 TEST_F(TxnAPITest, ClientRetryableWrite_UsesRetryableInternalSession) {
-    // This case is only currently supported on mongos.
-    // TODO SERVER-63747: Remove this once this restriction is lifted.
-    bool savedMongos = isMongos();
-    ON_BLOCK_EXIT([&] { setMongos(savedMongos); });
-    setMongos(true);
-
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx()->setTxnNumber(5);
     resetTxnWithRetries();
@@ -1193,12 +1229,6 @@ TEST_F(TxnAPITest, ClientRetryableWrite_UsesRetryableInternalSession) {
 }
 
 TEST_F(TxnAPITest, ClientRetryableWrite_RetryableWriteWithoutStmtIdFails) {
-    // This case is only currently supported on mongos.
-    // TODO SERVER-63747: Remove this once this restriction is lifted.
-    bool savedMongos = isMongos();
-    ON_BLOCK_EXIT([&] { setMongos(savedMongos); });
-    setMongos(true);
-
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx()->setTxnNumber(5);
     resetTxnWithRetries();
@@ -1360,6 +1390,42 @@ TEST_F(TxnAPITest, ClientTransaction_DoesNotRetryOnTransientErrors) {
     // No best effort abort should have been sent.
     auto lastRequest = mockClient()->getLastSentRequest();
     ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "insert"_sd);
+}
+
+TEST_F(TxnAPITest, OwnSession_HandleErrorRetryCommitOnNetworkError) {
+    auto swResult = txnWithRetries().runSyncNoThrow(
+        opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            mockClient()->setNextCommandResponse(kOKInsertResponse);
+            auto insertRes = txnClient
+                                 .runCommand("user"_sd,
+                                             BSON("insert"
+                                                  << "foo"
+                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                                 .get();
+
+            ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+            assertTxnMetadata(
+                mockClient()->getLastSentRequest(), 0 /* txnNumber */, true /* startTransaction */);
+            assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+
+            // The commit response.
+            mockClient()->setNextCommandResponse(
+                Status(ErrorCodes::HostUnreachable, "Host Unreachable"));
+            mockClient()->setSecondCommandResponse(kOKCommandResponse);
+
+            return SemiFuture<void>::makeReady();
+        });
+    ASSERT(swResult.getStatus().isOK());
+    ASSERT(swResult.getValue().getEffectiveStatus().isOK());
+
+    auto lastRequest = mockClient()->getLastSentRequest();
+    assertTxnMetadata(lastRequest,
+                      0 /* txnNumber */,
+                      boost::none /* startTransaction */,
+                      boost::none /* readConcern */,
+                      WriteConcernOptions().toBSON() /* writeConcern */);
+    assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+    ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
 }
 
 }  // namespace

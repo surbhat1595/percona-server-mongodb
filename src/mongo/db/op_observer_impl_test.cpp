@@ -116,7 +116,6 @@ void beginRetryableInternalTransactionWithTxnNumber(
     TxnNumber txnNumber,
     std::unique_ptr<MongoDOperationContextSession>& contextSession) {
     RAIIServerParameterControllerForTest controller{"featureFlagInternalTransactions", true};
-    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
 
     opCtx->setLogicalSessionId(makeLogicalSessionIdWithTxnNumberAndUUIDForTest());
     opCtx->setTxnNumber(txnNumber);
@@ -1755,7 +1754,6 @@ class OpObserverRetryableFindAndModifyInsidePreparedRetryableInternalTransaction
     : public OpObserverRetryableFindAndModifyTest {
 public:
     void setUp() override {
-        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
         OpObserverTxnParticipantTest::setUp();
         OpObserverTxnParticipantTest::setUpRetryableInternalTransaction();
     }
@@ -1940,6 +1938,14 @@ protected:
             if (updateOplogEntry.getTxnNumber()) {
                 ASSERT_EQ(*updateOplogEntry.getTxnNumber(), *preImage.getTxnNumber());
             }
+            if (!updateOplogEntry.getStatementIds().empty()) {
+                const auto& updateOplogStmtIds = updateOplogEntry.getStatementIds();
+                const auto& preImageOplogStmtIds = preImage.getStatementIds();
+                ASSERT_EQ(updateOplogStmtIds.size(), preImageOplogStmtIds.size());
+                for (size_t i = 0; i < updateOplogStmtIds.size(); i++) {
+                    ASSERT_EQ(updateOplogStmtIds[i], preImageOplogStmtIds[i]);
+                }
+            }
         } else {
             ASSERT_FALSE(updateOplogEntry.getPreImageOpTime());
         }
@@ -1968,6 +1974,14 @@ protected:
             }
             if (updateOplogEntry.getTxnNumber()) {
                 ASSERT_EQ(*updateOplogEntry.getTxnNumber(), *postImage.getTxnNumber());
+            }
+            if (!updateOplogEntry.getStatementIds().empty()) {
+                const auto& updateOplogStmtIds = updateOplogEntry.getStatementIds();
+                const auto& postImageOplogStmtIds = postImage.getStatementIds();
+                ASSERT_EQ(updateOplogStmtIds.size(), postImageOplogStmtIds.size());
+                for (size_t i = 0; i < updateOplogStmtIds.size(); i++) {
+                    ASSERT_EQ(updateOplogStmtIds[i], postImageOplogStmtIds[i]);
+                }
             }
         } else {
             ASSERT_FALSE(updateOplogEntry.getPostImageOpTime());
@@ -2127,9 +2141,6 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
 
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {
         const auto& testCase = _cases[testIdx];
-        if (testCase.alwaysRecordPreImages || testCase.changeStreamImagesEnabled) {
-            continue;
-        }
         logTestCase(testCase);
 
         auto opCtxRaii = cc().makeOperationContext();
@@ -2168,7 +2179,41 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
             testCase, updateEntryArgs, oplogs, updateOplogEntry, applyOpsOplogEntry);
         checkSideCollectionIfNeeded(
             opCtx, testCase, updateEntryArgs, oplogs, updateOplogEntry, applyOpsOplogEntry);
+        checkChangeStreamImagesIfNeeded(opCtx, testCase, updateEntryArgs, updateOplogEntry);
     }
+}
+
+TEST_F(OnUpdateOutputsTest,
+       RetryableInternalTransactionUpdateWithPreImageRecordingEnabledOnShardServerThrows) {
+    // Create a registry that only registers the Impl. It can be challenging to call methods on
+    // the Impl directly. It falls into cases where `ReservedTimes` is expected to be
+    // instantiated. Due to strong encapsulation, we use the registry that managers the
+    // `ReservedTimes` on our behalf.
+    OpObserverRegistry opObserver;
+    opObserver.addObserver(std::make_unique<OpObserverImpl>());
+
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+
+    resetOplogAndTransactions(opCtx);
+
+    std::unique_ptr<MongoDOperationContextSession> contextSession;
+    beginRetryableInternalTransactionWithTxnNumber(opCtx, 0, contextSession);
+
+    CollectionUpdateArgs updateArgs;
+    updateArgs.preImageRecordingEnabledForCollection = true;
+    updateArgs.preImageDoc = BSON("_id" << 0 << "preImage" << true);
+    updateArgs.updatedDoc = BSON("_id" << 0 << "postImage" << true);
+    updateArgs.update =
+        BSON("$set" << BSON("postImage" << true) << "$unset" << BSON("preImage" << 1));
+    updateArgs.criteria = BSON("_id" << 0);
+    OplogUpdateEntryArgs updateEntryArgs(&updateArgs, _nss, _uuid);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+    ON_BLOCK_EXIT([] { serverGlobalParams.clusterRole = ClusterRole::None; });
+
+    WriteUnitOfWork wuow(opCtx);
+    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+    ASSERT_THROWS_CODE(opObserver.onUpdate(opCtx, updateEntryArgs), DBException, 6462400);
 }
 
 struct InsertTestCase {
@@ -2355,6 +2400,14 @@ protected:
             if (deleteOplogEntry.getTxnNumber()) {
                 ASSERT_EQ(*deleteOplogEntry.getTxnNumber(), *preImage.getTxnNumber());
             }
+            if (!deleteOplogEntry.getStatementIds().empty()) {
+                const auto& deleteOplogStmtIds = deleteOplogEntry.getStatementIds();
+                const auto& preImageOplogStmtIds = preImage.getStatementIds();
+                ASSERT_EQ(deleteOplogStmtIds.size(), preImageOplogStmtIds.size());
+                for (size_t i = 0; i < deleteOplogStmtIds.size(); i++) {
+                    ASSERT_EQ(deleteOplogStmtIds[i], preImageOplogStmtIds[i]);
+                }
+            }
         } else {
             ASSERT_FALSE(deleteOplogEntry.getPreImageOpTime());
         }
@@ -2487,9 +2540,6 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
 
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {
         const auto& testCase = _cases[testIdx];
-        if (testCase.alwaysRecordPreImages || testCase.changeStreamImagesEnabled) {
-            continue;
-        }
         logTestCase(testCase);
 
         auto opCtxRaii = cc().makeOperationContext();
@@ -2530,7 +2580,41 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
             testCase, deleteEntryArgs, oplogs, deleteOplogEntry, applyOpsOplogEntry);
         checkSideCollectionIfNeeded(
             opCtx, testCase, deleteEntryArgs, oplogs, deleteOplogEntry, applyOpsOplogEntry);
+        checkChangeStreamImagesIfNeeded(opCtx, testCase, deleteEntryArgs, deleteOplogEntry);
     }
+}
+
+TEST_F(OnDeleteOutputsTest,
+       RetryableInternalTransactionDeleteWithPreImageRecordingEnabledOnShardServerThrows) {
+    // Create a registry that only registers the Impl. It can be challenging to call methods on
+    // the Impl directly. It falls into cases where `ReservedTimes` is expected to be
+    // instantiated. Due to strong encapsulation, we use the registry that managers the
+    // `ReservedTimes` on our behalf.
+    OpObserverRegistry opObserver;
+    opObserver.addObserver(std::make_unique<OpObserverImpl>());
+
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+
+    resetOplogAndTransactions(opCtx);
+
+    std::unique_ptr<MongoDOperationContextSession> contextSession;
+    beginRetryableInternalTransactionWithTxnNumber(opCtx, 0, contextSession);
+
+    OplogDeleteEntryArgs deleteEntryArgs;
+    deleteEntryArgs.preImageRecordingEnabledForCollection = true;
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+    ON_BLOCK_EXIT([] { serverGlobalParams.clusterRole = ClusterRole::None; });
+
+    WriteUnitOfWork wuow(opCtx);
+    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+    // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
+    // of setting of `documentKey` on the delete for sharding purposes.
+    // `OpObserverImpl::onDelete` asserts its existence.
+    documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
+    ASSERT_THROWS_CODE(opObserver.onDelete(opCtx, _nss, _uuid, 1 /* stmtId */, deleteEntryArgs),
+                       DBException,
+                       6462401);
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {

@@ -205,7 +205,7 @@ public:
 
     void endNonBlockingBackup(OperationContext* opCtx) override;
 
-    virtual StatusWith<std::vector<std::string>> extendBackupCursor(
+    virtual StatusWith<std::deque<std::string>> extendBackupCursor(
         OperationContext* opCtx) override;
 
     Status hotBackup(OperationContext* opCtx, const std::string& path) override;

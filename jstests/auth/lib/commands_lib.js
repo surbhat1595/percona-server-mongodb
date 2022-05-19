@@ -254,6 +254,21 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "clusterAbortTransaction",
+          command: {clusterAbortTransaction: 1},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
           testname: "_addShard",
           command: {
               _addShard: 1,
@@ -2693,6 +2708,21 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "clusterCommitTransaction",
+          command: {clusterCommitTransaction: 1},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
           testname: "compact",
           command: {compact: "foo"},
           skipSharded: true,
@@ -3803,6 +3833,19 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "clusterFind",
+          command: {clusterFind: "foo"},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
+          ]
+        },
+        {
           testname: "find",
           command: {find: "foo"},
           testcases: [
@@ -4293,6 +4336,45 @@ var authCommandsLib = {
                 roles: roles_monitoring,
                 privileges: [{resource: {cluster: true}, actions: ["hostInfo"]}]
               }
+          ]
+        },
+        {
+          testname: "clusterDelete",
+          command: {clusterDelete: "foo", deletes: [{q: {}, limit: 1}]},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
+          ]
+        },
+        {
+          testname: "clusterInsert",
+          command: {clusterInsert: "foo", documents: [{data: 5}]},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
+          ]
+        },
+        {
+          testname: "clusterUpdate",
+          command: {clusterUpdate: "foo", updates: [{q: {doesNotExist: 1}, u: {x: 1}}]},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
           ]
         },
         {
@@ -5546,6 +5628,18 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "setClusterParameter",
+          command: {setClusterParameter: {param: true}},
+          skipTest: (conn) => !TestData.setParameters.featureFlagClusterWideConfig,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {clusterManager: 1, clusterAdmin: 1, root:1, __system:1},
+                privileges: [{resource: {cluster: true}, actions: ["setClusterParameter"]}]
+              }
+          ]
+        },
+        {
             testname: "setDefaultRWConcern",
             command: {
                 setDefaultRWConcern: 1,
@@ -5609,7 +5703,11 @@ var authCommandsLib = {
         {
           testname: "setUserWriteBlockMode",
           command: {setUserWriteBlockMode: 1, global: false},
-          skipTest: (conn) => !TestData.setParameters.featureFlagUserWriteBlocking,
+          skipTest: (conn) => {
+              const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
+              const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
+              return !TestData.setParameters.featureFlagUserWriteBlocking || isStandalone;
+	  },
           testcases: [
               {
                 runOnDb: adminDbName,

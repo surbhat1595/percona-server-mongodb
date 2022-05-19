@@ -41,10 +41,12 @@
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_source_manager.h"
+#include "mongo/db/s/shard_key_index_util.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/start_chunk_clone_request.h"
@@ -136,16 +138,11 @@ public:
     LogOpForShardingHandler(MigrationChunkClonerSourceLegacy* cloner,
                             const BSONObj& idObj,
                             const char op,
-                            const repl::OpTime& opTime,
-                            const repl::OpTime& prePostImageOpTime)
-        : _cloner(cloner),
-          _idObj(idObj.getOwned()),
-          _op(op),
-          _opTime(opTime),
-          _prePostImageOpTime(prePostImageOpTime) {}
+                            const repl::OpTime& opTime)
+        : _cloner(cloner), _idObj(idObj.getOwned()), _op(op), _opTime(opTime) {}
 
     void commit(boost::optional<Timestamp>) override {
-        _cloner->_addToTransferModsQueue(_idObj, _op, _opTime, _prePostImageOpTime);
+        _cloner->_addToTransferModsQueue(_idObj, _op, _opTime);
         _cloner->_decrementOutstandingOperationTrackRequests();
     }
 
@@ -158,15 +155,37 @@ private:
     const BSONObj _idObj;
     const char _op;
     const repl::OpTime _opTime;
-    const repl::OpTime _prePostImageOpTime;
 };
 
 void LogTransactionOperationsForShardingHandler::commit(boost::optional<Timestamp>) {
     std::set<NamespaceString> namespacesTouchedByTransaction;
 
+    // Inform the session migration subsystem that a transaction has committed for the given
+    // namespace.
+    auto addToSessionMigrationOptimeQueue =
+        [&namespacesTouchedByTransaction](MigrationChunkClonerSourceLegacy* const cloner,
+                                          const NamespaceString& nss,
+                                          const repl::OpTime opTime) {
+            if (namespacesTouchedByTransaction.find(nss) == namespacesTouchedByTransaction.end()) {
+                cloner->_addToSessionMigrationOptimeQueue(
+                    opTime, SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+
+                namespacesTouchedByTransaction.emplace(nss);
+            }
+        };
+
     for (const auto& stmt : _stmts) {
         auto opType = stmt.getOpType();
-        if (opType == repl::OpTypeEnum::kNoop) {
+
+        // Skip every noop entry except for a WouldChangeOwningShard (WCOS) sentinel noop entry
+        // since for an internal transaction for a retryable WCOS findAndModify that is an upsert,
+        // the applyOps oplog entry on the old owning shard would not have the insert entry; so if
+        // we skip the noop entry here, the write history for the internal transaction would not get
+        // transferred to the recipient since the _prepareOrCommitOpTime would not get added to the
+        // session migration opTime queue below, and this would cause the write to execute again if
+        // there is a retry after the migration.
+        if (opType == repl::OpTypeEnum::kNoop &&
+            !isWouldChangeOwningShardSentinelOplogEntry(stmt)) {
             continue;
         }
 
@@ -182,6 +201,11 @@ void LogTransactionOperationsForShardingHandler::commit(boost::optional<Timestam
             continue;
         }
         auto* const cloner = dynamic_cast<MigrationChunkClonerSourceLegacy*>(clonerPtr.get());
+
+        if (isWouldChangeOwningShardSentinelOplogEntry(stmt)) {
+            addToSessionMigrationOptimeQueue(cloner, nss, _prepareOrCommitOpTime);
+            continue;
+        }
 
         auto documentKey = getDocumentKeyFromReplOperation(stmt, opType);
 
@@ -213,19 +237,11 @@ void LogTransactionOperationsForShardingHandler::commit(boost::optional<Timestam
             }
         }
 
-        // Inform the session migration subsystem that a transaction has committed for all involved
-        // namespaces.
-        if (namespacesTouchedByTransaction.find(nss) == namespacesTouchedByTransaction.end()) {
-            cloner->_addToSessionMigrationOptimeQueue(
-                _prepareOrCommitOpTime,
-                SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
-
-            namespacesTouchedByTransaction.emplace(nss);
-        }
+        addToSessionMigrationOptimeQueue(cloner, nss, _prepareOrCommitOpTime);
 
         // Pass an empty prePostOpTime to the queue because retryable write history doesn't care
         // about writes in transactions.
-        cloner->_addToTransferModsQueue(idElement.wrap(), getOpCharForCrudOpType(opType), {}, {});
+        cloner->_addToTransferModsQueue(idElement.wrap(), getOpCharForCrudOpType(opType), {});
     }
 }
 
@@ -446,11 +462,11 @@ void MigrationChunkClonerSourceLegacy::onInsertOp(OperationContext* opCtx,
     }
 
     if (opCtx->getTxnNumber()) {
-        opCtx->recoveryUnit()->registerChange(std::make_unique<LogOpForShardingHandler>(
-            this, idElement.wrap(), 'i', opTime, repl::OpTime()));
+        opCtx->recoveryUnit()->registerChange(
+            std::make_unique<LogOpForShardingHandler>(this, idElement.wrap(), 'i', opTime));
     } else {
-        opCtx->recoveryUnit()->registerChange(std::make_unique<LogOpForShardingHandler>(
-            this, idElement.wrap(), 'i', repl::OpTime(), repl::OpTime()));
+        opCtx->recoveryUnit()->registerChange(
+            std::make_unique<LogOpForShardingHandler>(this, idElement.wrap(), 'i', repl::OpTime()));
     }
 }
 
@@ -489,18 +505,18 @@ void MigrationChunkClonerSourceLegacy::onUpdateOp(OperationContext* opCtx,
     }
 
     if (opCtx->getTxnNumber()) {
-        opCtx->recoveryUnit()->registerChange(std::make_unique<LogOpForShardingHandler>(
-            this, idElement.wrap(), 'u', opTime, prePostImageOpTime));
+        opCtx->recoveryUnit()->registerChange(
+            std::make_unique<LogOpForShardingHandler>(this, idElement.wrap(), 'u', opTime));
     } else {
-        opCtx->recoveryUnit()->registerChange(std::make_unique<LogOpForShardingHandler>(
-            this, idElement.wrap(), 'u', repl::OpTime(), repl::OpTime()));
+        opCtx->recoveryUnit()->registerChange(
+            std::make_unique<LogOpForShardingHandler>(this, idElement.wrap(), 'u', repl::OpTime()));
     }
 }
 
 void MigrationChunkClonerSourceLegacy::onDeleteOp(OperationContext* opCtx,
                                                   const BSONObj& deletedDocId,
                                                   const repl::OpTime& opTime,
-                                                  const repl::OpTime& preImageOpTime) {
+                                                  const repl::OpTime&) {
     dassert(opCtx->lockState()->isCollectionLockedForMode(_args.getNss(), MODE_IX));
 
     BSONElement idElement = deletedDocId["_id"];
@@ -519,11 +535,11 @@ void MigrationChunkClonerSourceLegacy::onDeleteOp(OperationContext* opCtx,
     }
 
     if (opCtx->getTxnNumber()) {
-        opCtx->recoveryUnit()->registerChange(std::make_unique<LogOpForShardingHandler>(
-            this, idElement.wrap(), 'd', opTime, preImageOpTime));
+        opCtx->recoveryUnit()->registerChange(
+            std::make_unique<LogOpForShardingHandler>(this, idElement.wrap(), 'd', opTime));
     } else {
-        opCtx->recoveryUnit()->registerChange(std::make_unique<LogOpForShardingHandler>(
-            this, idElement.wrap(), 'd', repl::OpTime(), repl::OpTime()));
+        opCtx->recoveryUnit()->registerChange(
+            std::make_unique<LogOpForShardingHandler>(this, idElement.wrap(), 'd', repl::OpTime()));
     }
 }
 
@@ -537,11 +553,9 @@ void MigrationChunkClonerSourceLegacy::_addToSessionMigrationOptimeQueue(
     }
 }
 
-void MigrationChunkClonerSourceLegacy::_addToTransferModsQueue(
-    const BSONObj& idObj,
-    const char op,
-    const repl::OpTime& opTime,
-    const repl::OpTime& prePostImageOpTime) {
+void MigrationChunkClonerSourceLegacy::_addToTransferModsQueue(const BSONObj& idObj,
+                                                               const char op,
+                                                               const repl::OpTime& opTime) {
     switch (op) {
         case 'd': {
             stdx::lock_guard<Latch> sl(_mutex);
@@ -562,8 +576,6 @@ void MigrationChunkClonerSourceLegacy::_addToTransferModsQueue(
             MONGO_UNREACHABLE;
     }
 
-    _addToSessionMigrationOptimeQueue(
-        prePostImageOpTime, SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
     _addToSessionMigrationOptimeQueue(
         opTime, SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
 }
@@ -844,9 +856,11 @@ MigrationChunkClonerSourceLegacy::_getIndexScanExecutor(
     InternalPlanner::IndexScanOptions scanOption) {
     // Allow multiKey based on the invariant that shard keys must be single-valued. Therefore, any
     // multi-key index prefixed by shard key cannot be multikey over the shard key fields.
-    auto catalog = collection->getIndexCatalog();
-    auto shardKeyIdx = catalog->findShardKeyPrefixedIndex(
-        opCtx, collection, _shardKeyPattern.toBSON(), /*requireSingleKey=*/false);
+    auto shardKeyIdx = findShardKeyPrefixedIndex(opCtx,
+                                                 collection,
+                                                 collection->getIndexCatalog(),
+                                                 _shardKeyPattern.toBSON(),
+                                                 /*requireSingleKey=*/false);
     if (!shardKeyIdx) {
         return {ErrorCodes::IndexNotFound,
                 str::stream() << "can't find index with prefix " << _shardKeyPattern.toBSON()

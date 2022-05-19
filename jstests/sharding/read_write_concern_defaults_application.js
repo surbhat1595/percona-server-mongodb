@@ -242,6 +242,12 @@ let testCases = {
         checkReadConcern: false,
         checkWriteConcern: true,
     },
+    clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
+    clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
+    clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
+    clusterFind: {skip: "already tested by 'find' tests on mongos"},
+    clusterInsert: {skip: "already tested by 'insert' tests on mongos"},
+    clusterUpdate: {skip: "already tested by 'update' tests on mongos"},
     collMod: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: 1}}));
@@ -685,6 +691,7 @@ let testCases = {
     setIndexCommitQuorum: {skip: "does not accept read or write concern"},
     setParameter: {skip: "does not accept read or write concern"},
     setShardVersion: {skip: "internal command"},
+    setClusterParameter: {skip: "does not accept read or write concern"},
     setUserWriteBlockMode: {skip: "does not accept read or write concern"},
     shardCollection: {skip: "does not accept read or write concern"},
     shardingState: {skip: "does not accept read or write concern"},

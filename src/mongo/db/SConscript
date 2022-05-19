@@ -493,15 +493,18 @@ env.Library(
 )
 
 env.Library(
-    target="write_concern_options",
+    target='write_concern_options',
     source=[
-        "write_concern_options.cpp",
+        'write_concern_options.cpp',
+        'write_concern_options.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/bson/util/bson_extract',
-        '$BUILD_DIR/mongo/idl/basic_types',
         'read_write_concern_provenance',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_options_core', # For serverGlobalParams
+    ]
 )
 
 env.Library(
@@ -801,7 +804,6 @@ env.Library(
         'logical_session_id_helpers',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/s/is_mongos',
         'internal_transactions_feature_flag',
         'service_context',
     ]
@@ -836,6 +838,7 @@ env.Library(
         'transaction_history_iterator.cpp',
         'transaction_metrics_observer.cpp',
         'transaction_participant.cpp',
+        'transaction_participant_resource_yielder.cpp',
         'session_txn_record.idl',
         'transaction_participant.idl',
         'transactions_stats.idl',
@@ -1761,7 +1764,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
-        '$BUILD_DIR/mongo/s/is_mongos',
         'internal_transactions_feature_flag',
     ]
 )

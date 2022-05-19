@@ -37,6 +37,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/error_labels.h"
+#include "mongo/db/internal_session_pool.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -52,7 +53,6 @@
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/reply_interface.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/stdx/future.h"
 #include "mongo/transport/service_entry_point.h"
 
@@ -431,8 +431,14 @@ Transaction::ErrorHandlingStep Transaction::handleError(
 
     const auto& clientStatus = swResult.getStatus();
     if (!clientStatus.isOK()) {
-        // A network error before commit is a transient transaction error.
-        if (!hasStartedCommit && ErrorCodes::isNetworkError(clientStatus)) {
+        if (ErrorCodes::isNetworkError(clientStatus)) {
+            // A network error before commit is a transient transaction error, so we can retry the
+            // entire transaction. If there is a network error after a commit is sent, we can retry
+            // the commit command to either recommit if the operation failed or get the result of
+            // the successful commit.
+            if (hasStartedCommit) {
+                return ErrorHandlingStep::kRetryCommit;
+            }
             return ErrorHandlingStep::kRetryTransaction;
         }
         return ErrorHandlingStep::kAbortAndDoNotRetry;
@@ -564,14 +570,21 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
     auto clientInMultiDocumentTransaction = opCtx->inMultiDocumentTransaction();
 
     if (!clientSession) {
-        // TODO SERVER-61783: Integrate session pool.
-        _setSessionInfo(
-            lg, makeLogicalSessionId(opCtx), 0 /* txnNumber */, {true} /* startTransaction */);
+        const auto acquiredSession =
+            InternalSessionPool::get(opCtx)->acquireStandaloneSession(opCtx);
+        _acquiredSessionFromPool = true;
+        _setSessionInfo(lg,
+                        acquiredSession.getSessionId(),
+                        acquiredSession.getTxnNumber(),
+                        {true} /* startTransaction */);
         _execContext = ExecutionContext::kOwnSession;
     } else if (!clientTxnNumber) {
+        const auto acquiredSession =
+            InternalSessionPool::get(opCtx)->acquireChildSession(opCtx, *clientSession);
+        _acquiredSessionFromPool = true;
         _setSessionInfo(lg,
-                        makeLogicalSessionIdWithTxnUUID(*clientSession),
-                        0 /* txnNumber */,
+                        acquiredSession.getSessionId(),
+                        acquiredSession.getTxnNumber(),
                         {true} /* startTransaction */);
         _execContext = ExecutionContext::kClientSession;
     } else if (!clientInMultiDocumentTransaction) {
@@ -580,10 +593,6 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
                         0 /* txnNumber */,
                         {true} /* startTransaction */);
         _execContext = ExecutionContext::kClientRetryableWrite;
-
-        // TODO SERVER-63747: Handle client retryable write case on mongod. This is different from
-        // mongos because only mongod checks out a transaction session for retryable writes.
-        invariant(isMongos(), "This case is not yet supported on a mongod");
     } else {
         // Note that we don't want to include startTransaction or any first transaction command
         // fields because we assume that if we're in a client transaction the component tracking
@@ -622,6 +631,14 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
 LogicalTime Transaction::getOperationTime() const {
     stdx::lock_guard<Latch> lg(_mutex);
     return _lastOperationTime;
+}
+
+Transaction::~Transaction() {
+    if (_acquiredSessionFromPool) {
+        InternalSessionPool::get(_service)->release(
+            {*_sessionInfo.getSessionId(), *_sessionInfo.getTxnNumber()});
+        _acquiredSessionFromPool = false;
+    }
 }
 
 }  // namespace details

@@ -625,6 +625,10 @@ bool isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
         internalQueryCollectionMaxStorageSizeBytesToChooseHashJoin.load();
 }
 
+bool isEligibleForIndexedLoopJoin() {
+    return feature_flags::gFeatureFlagSBELookupPushdownIndexJoin.isEnabledAndIgnoreFCV();
+}
+
 // static
 void QueryPlannerAnalysis::determineLookupStrategy(
     EqLookupNode* eqLookupNode,
@@ -659,7 +663,8 @@ void QueryPlannerAnalysis::determineLookupStrategy(
 
         for (const auto& index : indexes) {
             if ((index.type == INDEX_BTREE || index.type == INDEX_HASHED) &&
-                index.keyPattern.firstElement().fieldName() == eqLookupNode->joinFieldForeign) {
+                index.keyPattern.firstElement().fieldName() ==
+                    eqLookupNode->joinFieldForeign.fullPath()) {
                 return index;
             }
         }
@@ -667,7 +672,7 @@ void QueryPlannerAnalysis::determineLookupStrategy(
         return boost::none;
     }();
 
-    if (foreignIndex) {
+    if (foreignIndex && isEligibleForIndexedLoopJoin()) {
         eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kIndexedLoopJoin;
         eqLookupNode->idxEntry = foreignIndex;
     } else if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {

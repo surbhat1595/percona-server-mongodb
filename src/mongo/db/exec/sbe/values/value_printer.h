@@ -29,10 +29,53 @@
 
 #pragma once
 
+#include <ostream>
+
+#include "mongo/db/exec/sbe/util/print_options.h"
+#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/platform/basic.h"
+#include "mongo/util/str.h"
 
-#include "mongo/idl/cluster_server_parameter_test_gen.h"
+namespace mongo::sbe::value {
 
-namespace mongo {
-extern ClusterServerParameterTest cspTestStorage;
-}
+template <typename T>
+class ValuePrinter;
+
+/**
+ * Companion static class to ValuePrinter template.
+ */
+class ValuePrinters {
+    ValuePrinters() = delete;
+    ValuePrinters(const ValuePrinters&) = delete;
+
+public:
+    static ValuePrinter<std::ostream> make(std::ostream& stream, const PrintOptions& options);
+    static ValuePrinter<str::stream> make(str::stream& stream, const PrintOptions& options);
+};
+
+/**
+ * Utility for printing values to stream.
+ */
+template <typename T>
+class ValuePrinter {
+    ValuePrinter() = delete;
+    ValuePrinter(T& stream, const PrintOptions& options);
+    friend class ValuePrinters;
+
+public:
+    void writeTagToStream(TypeTags tag);
+    void writeStringDataToStream(StringData sd, bool isJavaScript = false);
+    void writeArrayToStream(TypeTags tag, Value val, size_t depth = 1);
+    void writeObjectToStream(TypeTags tag, Value val, size_t depth = 1);
+    void writeObjectToStream(const BSONObj& obj);
+    void writeObjectIdToStream(TypeTags tag, Value val);
+    void writeCollatorToStream(const CollatorInterface* collator);
+    void writeBsonRegexToStream(const BsonRegex& regex);
+    void writeValueToStream(TypeTags tag, Value val, size_t depth = 1);
+
+public:
+    T& stream;
+    PrintOptions options;
+};
+
+}  // namespace mongo::sbe::value

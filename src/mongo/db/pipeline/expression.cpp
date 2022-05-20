@@ -1983,11 +1983,7 @@ void ExpressionDateToString::_doAddDependencies(DepsTracker* deps) const {
 
 /* ----------------------- ExpressionDateDiff ---------------------------- */
 
-REGISTER_EXPRESSION_WITH_MIN_VERSION(dateDiff,
-                                     ExpressionDateDiff::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     boost::none);
+REGISTER_STABLE_EXPRESSION(dateDiff, ExpressionDateDiff::parse);
 
 ExpressionDateDiff::ExpressionDateDiff(ExpressionContext* const expCtx,
                                        boost::intrusive_ptr<Expression> startDate,
@@ -2325,14 +2321,6 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::parse(ExpressionContext*
         const StringData varName = fieldPath.substr(0, fieldPath.find('.'));
         variableValidation::validateNameForUserRead(varName);
         auto varId = vps.getVariable(varName);
-        if (varName.compare(Variables::getBuiltinVariableName(Variables::kSearchMetaId)) == 0) {
-            return new ExpressionFieldPathNonSharded(
-                expCtx,
-                fieldPath.toString(),
-                varId,
-                std::string("Search queries accessing $$SEARCH_META are not supported in sharded "
-                            "pipelines"));
-        }
         return new ExpressionFieldPath(expCtx, fieldPath.toString(), varId);
     } else {
         return new ExpressionFieldPath(expCtx,
@@ -2467,12 +2455,6 @@ Value ExpressionFieldPath::serialize(bool explain) const {
     } else {
         return Value("$$" + _fieldPath.fullPath());
     }
-}
-
-Value ExpressionFieldPathNonSharded::evaluate(const Document& root, Variables* variables) const {
-    uassert(
-        5858100, _errMsg, !getExpressionContext()->needsMerge && !getExpressionContext()->inMongos);
-    return ExpressionFieldPath::evaluate(root, variables);
 }
 
 Expression::ComputedPaths ExpressionFieldPath::getComputedPaths(const std::string& exprFieldPath,
@@ -2994,6 +2976,8 @@ const std::string recordIdName = "recordId";
 const std::string indexKeyName = "indexKey";
 const std::string sortKeyName = "sortKey";
 const std::string searchScoreDetailsName = "searchScoreDetails";
+const std::string timeseriesBucketMinTimeName = "timeseriesBucketMinTime";
+const std::string timeseriesBucketMaxTimeName = "timeseriesBucketMaxTime";
 
 using MetaType = DocumentMetadataFields::MetaType;
 const StringMap<DocumentMetadataFields::MetaType> kMetaNameToMetaType = {
@@ -3007,6 +2991,8 @@ const StringMap<DocumentMetadataFields::MetaType> kMetaNameToMetaType = {
     {searchScoreDetailsName, MetaType::kSearchScoreDetails},
     {sortKeyName, MetaType::kSortKey},
     {textScoreName, MetaType::kTextScore},
+    {timeseriesBucketMinTimeName, MetaType::kTimeseriesBucketMinTime},
+    {timeseriesBucketMaxTimeName, MetaType::kTimeseriesBucketMaxTime},
 };
 
 const stdx::unordered_map<DocumentMetadataFields::MetaType, StringData> kMetaTypeToMetaName = {
@@ -3020,6 +3006,8 @@ const stdx::unordered_map<DocumentMetadataFields::MetaType, StringData> kMetaTyp
     {MetaType::kSearchScoreDetails, searchScoreDetailsName},
     {MetaType::kSortKey, sortKeyName},
     {MetaType::kTextScore, textScoreName},
+    {MetaType::kTimeseriesBucketMinTime, timeseriesBucketMinTimeName},
+    {MetaType::kTimeseriesBucketMaxTime, timeseriesBucketMaxTimeName},
 };
 
 }  // namespace
@@ -3085,6 +3073,14 @@ Value ExpressionMeta::evaluate(const Document& root, Variables* variables) const
         case MetaType::kSearchScoreDetails:
             return metadata.hasSearchScoreDetails() ? Value(metadata.getSearchScoreDetails())
                                                     : Value();
+        case MetaType::kTimeseriesBucketMinTime:
+            return metadata.hasTimeseriesBucketMinTime()
+                ? Value(metadata.getTimeseriesBucketMinTime())
+                : Value();
+        case MetaType::kTimeseriesBucketMaxTime:
+            return metadata.hasTimeseriesBucketMaxTime()
+                ? Value(metadata.getTimeseriesBucketMaxTime())
+                : Value();
         default:
             MONGO_UNREACHABLE;
     }
@@ -4621,10 +4617,9 @@ Value ExpressionSortArray::evaluate(const Document& root, Variables* variables) 
     return Value(array);
 }
 
-// TODO: SERVER-61855 Add the expression to the stable API with others that have been introduced.
 REGISTER_EXPRESSION_CONDITIONALLY(sortArray,
                                   ExpressionSortArray::parse,
-                                  AllowedWithApiStrict::kNeverInVersion1,
+                                  AllowedWithApiStrict::kAlways,
                                   AllowedWithClientType::kAny,
                                   feature_flags::gFeatureFlagSortArray.getVersion(),
                                   feature_flags::gFeatureFlagSortArray.isEnabledAndIgnoreFCV());
@@ -7410,11 +7405,8 @@ Value ExpressionDateArithmetics::evaluate(const Document& root, Variables* varia
         startDate.coerceToDate(), unit, amount.coerceToLong(), timezone.get());
 }
 
-REGISTER_EXPRESSION_WITH_MIN_VERSION(dateAdd,
-                                     ExpressionDateAdd::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     boost::none);
+/* ----------------------- ExpressionDateAdd ---------------------------- */
+REGISTER_STABLE_EXPRESSION(dateAdd, ExpressionDateAdd::parse);
 
 boost::intrusive_ptr<Expression> ExpressionDateAdd::parse(ExpressionContext* const expCtx,
                                                           BSONElement expr,
@@ -7437,11 +7429,9 @@ Value ExpressionDateAdd::evaluateDateArithmetics(Date_t date,
     return Value(dateAdd(date, unit, amount, timezone));
 }
 
-REGISTER_EXPRESSION_WITH_MIN_VERSION(dateSubtract,
-                                     ExpressionDateSubtract::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     boost::none);
+/* ----------------------- ExpressionDateSubtract ---------------------------- */
+
+REGISTER_STABLE_EXPRESSION(dateSubtract, ExpressionDateSubtract::parse);
 
 boost::intrusive_ptr<Expression> ExpressionDateSubtract::parse(ExpressionContext* const expCtx,
                                                                BSONElement expr,
@@ -7470,11 +7460,7 @@ Value ExpressionDateSubtract::evaluateDateArithmetics(Date_t date,
 
 /* ----------------------- ExpressionDateTrunc ---------------------------- */
 
-REGISTER_EXPRESSION_WITH_MIN_VERSION(dateTrunc,
-                                     ExpressionDateTrunc::parse,
-                                     AllowedWithApiStrict::kNeverInVersion1,
-                                     AllowedWithClientType::kAny,
-                                     boost::none);
+REGISTER_STABLE_EXPRESSION(dateTrunc, ExpressionDateTrunc::parse);
 
 ExpressionDateTrunc::ExpressionDateTrunc(ExpressionContext* const expCtx,
                                          boost::intrusive_ptr<Expression> date,
@@ -7648,7 +7634,7 @@ void ExpressionDateTrunc::_doAddDependencies(DepsTracker* deps) const {
 REGISTER_EXPRESSION_WITH_MIN_VERSION(
     getField,
     ExpressionGetField::parse,
-    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithApiStrict::kAlways,
     AllowedWithClientType::kAny,
     multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
@@ -7760,7 +7746,7 @@ Value ExpressionGetField::serialize(const bool explain) const {
 REGISTER_EXPRESSION_WITH_MIN_VERSION(
     setField,
     ExpressionSetField::parse,
-    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithApiStrict::kAlways,
     AllowedWithClientType::kAny,
     multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
@@ -7904,7 +7890,7 @@ Value ExpressionTsSecond::evaluate(const Document& root, Variables* variables) c
 REGISTER_EXPRESSION_WITH_MIN_VERSION(
     tsSecond,
     ExpressionTsSecond::parse,
-    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithApiStrict::kAlways,
     AllowedWithClientType::kAny,
     multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 
@@ -7928,7 +7914,7 @@ Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables
 REGISTER_EXPRESSION_WITH_MIN_VERSION(
     tsIncrement,
     ExpressionTsIncrement::parse,
-    AllowedWithApiStrict::kNeverInVersion1,
+    AllowedWithApiStrict::kAlways,
     AllowedWithClientType::kAny,
     multiversion::FeatureCompatibilityVersion::kFullyDowngradedTo_5_0);
 

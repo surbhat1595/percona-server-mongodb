@@ -326,8 +326,10 @@ public:
     /**
      * Assigns an optional input parameter ID to each node which is eligible for
      * auto-parameterization.
+     *
+     * Returns a map to a parameterized MatchExpression from assigned InputParamId.
      */
-    static void parameterize(MatchExpression* tree);
+    static std::vector<const MatchExpression*> parameterize(MatchExpression* tree);
 
     MatchExpression(MatchType type, clonable_ptr<ErrorAnnotation> annotation = nullptr);
     virtual ~MatchExpression() {}

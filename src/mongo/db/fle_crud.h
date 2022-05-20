@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "boost/smart_ptr/intrusive_ptr.hpp"
 #include <cstdint>
 
 #include "mongo/bson/bsonobj.h"
@@ -38,6 +39,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/transaction_api.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 
@@ -68,6 +70,37 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
                                BatchedCommandResponse* response,
                                boost::optional<OID> targetEpoch);
 
+
+/**
+ * Initialize the FLE CRUD subsystem on Mongod.
+ */
+void startFLECrud(ServiceContext* serviceContext);
+
+/**
+ * Stop the FLE CRUD subsystem on Mongod.
+ */
+void stopFLECrud();
+
+
+/**
+ * Process a replica set insert.
+ */
+FLEBatchResult processFLEInsert(OperationContext* opCtx,
+                                const write_ops::InsertCommandRequest& insertRequest,
+                                write_ops::InsertCommandReply* insertReply);
+
+/**
+ * Process a replica set delete.
+ */
+write_ops::DeleteCommandReply processFLEDelete(
+    OperationContext* opCtx, const write_ops::DeleteCommandRequest& deleteRequest);
+
+/**
+ * Process a replica set update.
+ */
+write_ops::UpdateCommandReply processFLEUpdate(
+    OperationContext* opCtx, const write_ops::UpdateCommandRequest& updateRequest);
+
 /**
  * Process a findAndModify request from mongos
  */
@@ -75,6 +108,35 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
                                        const std::string& dbName,
                                        const BSONObj& cmdObj,
                                        BSONObjBuilder& result);
+
+/**
+ * Process a findAndModify request from a replica set.
+ */
+write_ops::FindAndModifyCommandReply processFLEFindAndModify(
+    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
+
+/**
+ * Process a find command from mongos.
+ */
+void processFLEFindS(OperationContext* opCtx, FindCommandRequest* findCommand);
+
+/**
+ * Process a find command from a replica set.
+ */
+void processFLEFindD(OperationContext* opCtx, FindCommandRequest* findCommand);
+
+/**
+ * Helper function to determine if an IDL object with encryption information should be rewritten.
+ */
+template <typename T>
+bool shouldDoFLERewrite(const std::unique_ptr<T>& cmd) {
+    return gFeatureFlagFLE2.isEnabledAndIgnoreFCV() && cmd->getEncryptionInformation();
+}
+
+template <typename T>
+bool shouldDoFLERewrite(const T& cmd) {
+    return gFeatureFlagFLE2.isEnabledAndIgnoreFCV() && cmd.getEncryptionInformation();
+}
 
 /**
  * Abstraction layer for FLE
@@ -104,9 +166,8 @@ public:
      * If translateDuplicateKey == true and the insert returns DuplicateKey, returns
      * FLEStateCollectionContention instead.
      */
-    virtual void insertDocument(const NamespaceString& nss,
-                                BSONObj obj,
-                                bool translateDuplicateKey) = 0;
+    virtual StatusWith<write_ops::InsertCommandReply> insertDocument(
+        const NamespaceString& nss, BSONObj obj, bool translateDuplicateKey) = 0;
 
     /**
      * Delete a single document with the given query.
@@ -114,9 +175,10 @@ public:
      * Returns the pre-image of the deleted document. If no documents were deleted, returns an empty
      * BSON object.
      */
-    virtual BSONObj deleteWithPreimage(const NamespaceString& nss,
-                                       const EncryptionInformation& ei,
-                                       const write_ops::DeleteCommandRequest& deleteRequest) = 0;
+    virtual std::pair<write_ops::DeleteCommandReply, BSONObj> deleteWithPreimage(
+        const NamespaceString& nss,
+        const EncryptionInformation& ei,
+        const write_ops::DeleteCommandRequest& deleteRequest) = 0;
 
     /**
      * Update a single document with the given query and update operators.
@@ -124,9 +186,10 @@ public:
      * Returns the pre-image of the updated document. If no documents were updated, returns an empty
      * BSON object.
      */
-    virtual BSONObj updateWithPreimage(const NamespaceString& nss,
-                                       const EncryptionInformation& ei,
-                                       const write_ops::UpdateCommandRequest& updateRequest) = 0;
+    virtual std::pair<write_ops::UpdateCommandReply, BSONObj> updateWithPreimage(
+        const NamespaceString& nss,
+        const EncryptionInformation& ei,
+        const write_ops::UpdateCommandRequest& updateRequest) = 0;
 
     /**
      * Do a single findAndModify request.
@@ -137,34 +200,128 @@ public:
         const NamespaceString& nss,
         const EncryptionInformation& ei,
         const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) = 0;
+
+    /**
+     * Find a document with the given filter.
+     */
+    virtual std::vector<BSONObj> findDocuments(const NamespaceString& nss, BSONObj filter) = 0;
 };
+/**
+ * Implementation of the FLE Query interface that exposes the DB operations needed for FLE 2
+ * server-side work.
+ */
+class FLEQueryInterfaceImpl : public FLEQueryInterface {
+public:
+    FLEQueryInterfaceImpl(const txn_api::TransactionClient& txnClient) : _txnClient(txnClient) {}
+
+    BSONObj getById(const NamespaceString& nss, BSONElement element) final;
+
+    uint64_t countDocuments(const NamespaceString& nss) final;
+
+    StatusWith<write_ops::InsertCommandReply> insertDocument(const NamespaceString& nss,
+                                                             BSONObj obj,
+                                                             bool translateDuplicateKey) final;
+
+    std::pair<write_ops::DeleteCommandReply, BSONObj> deleteWithPreimage(
+        const NamespaceString& nss,
+        const EncryptionInformation& ei,
+        const write_ops::DeleteCommandRequest& deleteRequest) final;
+
+    std::pair<write_ops::UpdateCommandReply, BSONObj> updateWithPreimage(
+        const NamespaceString& nss,
+        const EncryptionInformation& ei,
+        const write_ops::UpdateCommandRequest& updateRequest) final;
+
+    write_ops::FindAndModifyCommandReply findAndModify(
+        const NamespaceString& nss,
+        const EncryptionInformation& ei,
+        const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) final;
+
+    std::vector<BSONObj> findDocuments(const NamespaceString& nss, BSONObj filter) final;
+
+private:
+    const txn_api::TransactionClient& _txnClient;
+};
+
+/**
+ * Implementation of FLEStateCollectionReader for txn_api::TransactionClient
+ *
+ * Document count is cached since we only need it once per esc or ecc collection.
+ */
+class TxnCollectionReader : public FLEStateCollectionReader {
+public:
+    TxnCollectionReader(uint64_t count, FLEQueryInterface* queryImpl, const NamespaceString& nss)
+        : _count(count), _queryImpl(queryImpl), _nss(nss) {}
+
+    uint64_t getDocumentCount() const override {
+        return _count;
+    }
+
+    BSONObj getById(PrfBlock block) const override {
+        auto doc = BSON("v" << BSONBinData(block.data(), block.size(), BinDataGeneral));
+        BSONElement element = doc.firstElement();
+        return _queryImpl->getById(_nss, element);
+    }
+
+private:
+    uint64_t _count;
+    FLEQueryInterface* _queryImpl;
+    NamespaceString _nss;
+};
+
+/**
+ * Runs a callback function inside a transaction, and retrying if the transaction fails
+ * with a retryable error status.
+ */
+StatusWith<txn_api::CommitResult> runInTxnWithRetry(
+    OperationContext* opCtx,
+    std::shared_ptr<txn_api::TransactionWithRetries> trun,
+    std::function<SemiFuture<void>(const txn_api::TransactionClient& txnClient,
+                                   ExecutorPtr txnExec)> callback);
+
+/**
+ * Creates a new TransactionWithRetries object that runs a transaction on the
+ * sharding fixed task executor.
+ */
+std::shared_ptr<txn_api::TransactionWithRetries> getTransactionWithRetriesForMongoS(
+    OperationContext* opCtx);
+
+/**
+ * Creates a new TransactionWithRetries object that runs a transaction on a
+ * thread pool local to mongod.
+ */
+std::shared_ptr<txn_api::TransactionWithRetries> getTransactionWithRetriesForMongoD(
+    OperationContext* opCtx);
 
 /**
  * Process a FLE insert with the query interface
  *
  * Used by unit tests.
  */
-void processInsert(FLEQueryInterface* queryImpl,
-                   const NamespaceString& edcNss,
-                   std::vector<EDCServerPayloadInfo>& serverPayload,
-                   const EncryptedFieldConfig& efc,
-                   BSONObj document);
+StatusWith<write_ops::InsertCommandReply> processInsert(
+    FLEQueryInterface* queryImpl,
+    const NamespaceString& edcNss,
+    std::vector<EDCServerPayloadInfo>& serverPayload,
+    const EncryptedFieldConfig& efc,
+    BSONObj document);
 
 /**
  * Process a FLE delete with the query interface
  *
  * Used by unit tests.
  */
-uint64_t processDelete(FLEQueryInterface* queryImpl,
-                       const write_ops::DeleteCommandRequest& deleteRequest);
+write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
+                                            boost::intrusive_ptr<ExpressionContext> expCtx,
+                                            const write_ops::DeleteCommandRequest& deleteRequest);
 
 /**
  * Process a FLE Update with the query interface
  *
  * Used by unit tests.
  */
-uint64_t processUpdate(FLEQueryInterface* queryImpl,
-                       const write_ops::UpdateCommandRequest& updateRequest);
+write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
+                                            boost::intrusive_ptr<ExpressionContext> expCtx,
+                                            const write_ops::UpdateCommandRequest& updateRequest);
 
 /**
  * Process a FLE Find And Modify with the query interface
@@ -175,4 +332,28 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
+/**
+ * Callback function to get a TransactionWithRetries with the appropiate Executor
+ */
+using GetTxnCallback =
+    std::function<std::shared_ptr<txn_api::TransactionWithRetries>(OperationContext*)>;
+
+std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
+    OperationContext* opCtx,
+    const write_ops::InsertCommandRequest& insertRequest,
+    GetTxnCallback getTxns);
+
+write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
+                                            const write_ops::DeleteCommandRequest& deleteRequest,
+                                            GetTxnCallback getTxns);
+
+StatusWith<write_ops::FindAndModifyCommandReply> processFindAndModifyRequest(
+    OperationContext* opCtx,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
+    GetTxnCallback getTxns);
+
+
+write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
+                                            const write_ops::UpdateCommandRequest& updateRequest,
+                                            GetTxnCallback getTxns);
 }  // namespace mongo

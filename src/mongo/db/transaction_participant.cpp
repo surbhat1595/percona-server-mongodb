@@ -62,6 +62,7 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/retryable_writes_stats.h"
+#include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/server_transactions_metrics.h"
 #include "mongo/db/stats/fill_locker_info.h"
@@ -71,6 +72,7 @@
 #include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/grid.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_with_sampling.h"
@@ -95,6 +97,8 @@ MONGO_FAIL_POINT_DEFINE(skipCommitTxnCheckPrepareMajorityCommitted);
 MONGO_FAIL_POINT_DEFINE(restoreLocksFail);
 
 MONGO_FAIL_POINT_DEFINE(failTransactionNoopWrite);
+
+MONGO_FAIL_POINT_DEFINE(hangAfterCheckingInternalTransactionsFeatureFlag);
 
 const auto getTransactionParticipant = Session::declareDecoration<TransactionParticipant>();
 
@@ -851,26 +855,43 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
         retryableWriteTxnParticipantCatalog.reset();
     }
 
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
-    o(lk).txnState.transitionTo(TransactionState::kInProgress);
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        o(lk).txnState.transitionTo(TransactionState::kInProgress);
+        // Start tracking various transactions metrics.
+        //
+        // We measure the start time in both microsecond and millisecond resolution. The TickSource
+        // provides microsecond resolution to record the duration of the transaction. The start
+        // "wall clock" time can be considered an approximation to the microsecond measurement.
+        auto now = opCtx->getServiceContext()->getPreciseClockSource()->now();
+        auto tickSource = opCtx->getServiceContext()->getTickSource();
 
-    // Start tracking various transactions metrics.
-    //
-    // We measure the start time in both microsecond and millisecond resolution. The TickSource
-    // provides microsecond resolution to record the duration of the transaction. The start "wall
-    // clock" time can be considered an approximation to the microsecond measurement.
-    auto now = opCtx->getServiceContext()->getPreciseClockSource()->now();
-    auto tickSource = opCtx->getServiceContext()->getTickSource();
+        o(lk).transactionExpireDate = now + Seconds(gTransactionLifetimeLimitSeconds.load());
 
-    o(lk).transactionExpireDate = now + Seconds(gTransactionLifetimeLimitSeconds.load());
+        o(lk).transactionMetricsObserver.onStart(
+            ServerTransactionsMetrics::get(opCtx->getServiceContext()),
+            *p().autoCommit,
+            tickSource,
+            now,
+            *o().transactionExpireDate);
+        invariant(p().transactionOperations.empty());
+    }
 
-    o(lk).transactionMetricsObserver.onStart(
-        ServerTransactionsMetrics::get(opCtx->getServiceContext()),
-        *p().autoCommit,
-        tickSource,
-        now,
-        *o().transactionExpireDate);
-    invariant(p().transactionOperations.empty());
+    // TODO: (SERVER-62375): Remove upgrade/downgrade code for internal transactions
+    if (_isInternalSession()) {
+        uassert(ErrorCodes::InternalTransactionNotSupported,
+                "Internal transactions are not enabled",
+                feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                    serverGlobalParams.featureCompatibility));
+        hangAfterCheckingInternalTransactionsFeatureFlag.pauseWhileSet(opCtx);
+    }
+    if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
+        txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
+        uassert(ErrorCodes::TxnRetryCounterNotSupported,
+                "TxnRetryCounter support is not enabled",
+                feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                    serverGlobalParams.featureCompatibility));
+    }
 }
 
 void TransactionParticipant::Participant::beginOrContinue(
@@ -878,23 +899,6 @@ void TransactionParticipant::Participant::beginOrContinue(
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
     boost::optional<bool> startTransaction) {
-    if (startTransaction) {
-        if (_isInternalSession()) {
-            uassert(ErrorCodes::InternalTransactionNotSupported,
-                    "Internal transactions are not enabled",
-                    feature_flags::gFeatureFlagInternalTransactions.isEnabled(
-                        serverGlobalParams.featureCompatibility));
-        }
-        if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
-            txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
-            // TODO: (SERVER-62375): Remove upgrade/downgrade code for internal transactions
-            uassert(ErrorCodes::TxnRetryCounterNotSupported,
-                    "TxnRetryCounter support is not enabled",
-                    feature_flags::gFeatureFlagInternalTransactions.isEnabled(
-                        serverGlobalParams.featureCompatibility));
-        }
-    }
-
     if (_isInternalSessionForRetryableWrite()) {
         auto parentTxnParticipant =
             TransactionParticipant::get(opCtx, _session()->getParentSession());
@@ -1613,11 +1617,24 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
             hangAfterReservingPrepareTimestamp.pauseWhileSet();
         }
     }
+    auto opObserver = opCtx->getServiceContext()->getOpObserver();
+    const auto wallClockTime = opCtx->getServiceContext()->getFastClockSource()->now();
+    auto applyOpsOplogSlotAndOperationAssignment =
+        opObserver->preTransactionPrepare(opCtx,
+                                          reservedSlots,
+                                          p().numberOfPrePostImagesToWrite,
+                                          wallClockTime,
+                                          &completedTransactionOperations);
+
     opCtx->recoveryUnit()->setPrepareTimestamp(prepareOplogSlot.getTimestamp());
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
-    opCtx->getServiceContext()->getOpObserver()->onTransactionPrepare(
-        opCtx, reservedSlots, &completedTransactionOperations, p().numberOfPrePostImagesToWrite);
+    opObserver->onTransactionPrepare(opCtx,
+                                     reservedSlots,
+                                     &completedTransactionOperations,
+                                     applyOpsOplogSlotAndOperationAssignment.get(),
+                                     p().numberOfPrePostImagesToWrite,
+                                     wallClockTime);
 
     abortGuard.dismiss();
 
@@ -3108,6 +3125,21 @@ void TransactionParticipant::Participant::handleWouldChangeOwningShardError(
         repl::ReplOperation operation;
         operation.setOpType(repl::OpTypeEnum::kNoop);
         operation.setObject(kWouldChangeOwningShardSentinel);
+        // Set the "o2" field to differentiate between a WouldChangeOwningShard noop oplog entry
+        // written while handling a WouldChangeOwningShard error and a noop oplog entry with
+        // {"o": {$wouldChangeOwningShard: 1}} written by an external client through the
+        // appendOplogNote command.
+        operation.setObject2(BSONObj());
+
+        // Required by chunk migration and resharding.
+        invariant(wouldChangeOwningShardInfo->getNs());
+        invariant(wouldChangeOwningShardInfo->getUuid());
+        operation.setNss(*wouldChangeOwningShardInfo->getNs());
+        operation.setUuid(*wouldChangeOwningShardInfo->getUuid());
+        ShardingWriteRouter shardingWriteRouter(
+            opCtx, *wouldChangeOwningShardInfo->getNs(), Grid::get(opCtx)->catalogCache());
+        operation.setDestinedRecipient(shardingWriteRouter.getReshardingDestinedRecipient(
+            wouldChangeOwningShardInfo->getPreImage()));
 
         // Required by chunk migration.
         invariant(wouldChangeOwningShardInfo->getNs());

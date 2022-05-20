@@ -13,19 +13,67 @@ const JoinAlgorithm = {
     Classic: 0,
     NLJ: 1,
     INLJ: 2,
-    // These two joins aren't implemented yet and will throw errors with the corresponding codes.
-    HJ: 5842602,
-    INLJHashedIndex: 6357203,
+    HJ: 3,
 };
 
 // Standalone cases.
-const conn = MongoRunner.runMongod({
-    setParameter: {featureFlagSBELookupPushdown: true, featureFlagSBELookupPushdownIndexJoin: true}
-});
+const conn = MongoRunner.runMongod({setParameter: "featureFlagSBELookupPushdown=true"});
 assert.neq(null, conn, "mongod was unable to start up");
 const name = "lookup_pushdown";
 const foreignCollName = "foreign_lookup_pushdown";
 const viewName = "view_lookup_pushdown";
+
+/**
+ * Helper function which verifies that at least one $lookup was lowered into SBE within
+ * 'explain', and that the EqLookupNode at 'eqLookupNodeIndex' chose the appropriate strategy.
+ * In particular, if 'IndexedLoopJoin' was chosen, we verify that the index described by
+ * 'indexKeyPattern' was chosen. Otherwise, we verify that 'NestedLoopJoin' was chosen.
+ */
+function verifyEqLookupNodeStrategy(
+    explain, eqLookupNodeIndex, expectedStrategy, indexKeyPattern = {}) {
+    const eqLookupNodes = getAggPlanStages(explain, "EQ_LOOKUP");
+    assert.gt(
+        eqLookupNodes.length, 0, "expected at least one EQ_LOOKUP node; got " + tojson(explain));
+
+    // Verify that we're selecting an EQ_LOOKUP node within range.
+    assert(eqLookupNodeIndex >= 0 && eqLookupNodeIndex < eqLookupNodes.length,
+           "expected eqLookupNodeIndex of '" + eqLookupNodeIndex +
+               "' to be within range of available EQ_LOOKUP nodes; got " + tojson(explain));
+
+    // Fetch the requested EQ_LOOKUP node.
+    const eqLookupNode = eqLookupNodes[eqLookupNodes.length - 1 - eqLookupNodeIndex];
+    assert(eqLookupNode, "expected EQ_LOOKUP node; explain: " + tojson(explain));
+    const strategy = eqLookupNode.strategy;
+    assert(strategy, "expected EQ_LOOKUP node to have a strategy " + tojson(eqLookupNode));
+    assert.eq(
+        expectedStrategy,
+        strategy,
+        "Incorrect strategy; expected " + tojson(expectedStrategy) + ", got " + tojson(strategy));
+
+    if (strategy === "IndexedLoopJoin") {
+        assert(indexKeyPattern,
+               "expected indexKeyPattern should be set for IndexedLoopJoin algorithm");
+        assert.docEq(eqLookupNode.indexKeyPattern,
+                     indexKeyPattern,
+                     "expected IndexedLoopJoin node to have index " + tojson(indexKeyPattern) +
+                         ", got plan " + tojson(eqLookupNode));
+    }
+}
+
+function getJoinAlgorithmStrategyName(joinAlgorithm) {
+    switch (joinAlgorithm) {
+        case JoinAlgorithm.NLJ:
+            return "NestedLoopJoin";
+        case JoinAlgorithm.INLJ:
+        case JoinAlgorithm.INLJHashedIndex:
+            return "IndexedLoopJoin";
+        case JoinAlgorithm.HJ:
+            return "HashJoin";
+        case JoinAlgorithm.Classic:
+        default:
+            assert(false, "No strategy for JoinAlgorithm: " + joinAlgorithm);
+    }
+}
 
 function runTest(coll,
                  pipeline,
@@ -49,47 +97,11 @@ function runTest(coll,
         assert.eq(eqLookupNodes.length,
                   0,
                   "there should be no lowered EQ_LOOKUP stages; got " + tojson(explain));
-    } else if (expectedJoinAlgorithm === JoinAlgorithm.HJ ||
-               expectedJoinAlgorithm === JoinAlgorithm.INLJHashedIndex) {
-        const result = assert.commandFailedWithCode(response, expectedJoinAlgorithm);
-        if (errMsgRegex) {
-            const errorMessage = result.errmsg;
-            assert(errMsgRegex.test(errorMessage),
-                   "Error message '" + errorMessage + "' did not match the RegEx '" + errMsgRegex +
-                       "'");
-        }
     } else {
         assert.commandWorked(response);
         const explain = coll.explain().aggregate(pipeline, aggOptions);
-        const eqLookupNodes = getAggPlanStages(explain, "EQ_LOOKUP");
-
-        // Verify via explain that $lookup was lowered and appropriate join algorithm was chosen.
-        assert.gt(eqLookupNodes.length,
-                  0,
-                  "expected at least one EQ_LOOKUP node; got " + tojson(explain));
-
-        // Verify that we're selecting an EQ_LOOKUP node within range.
-        assert(eqLookupNodeIndex >= 0 && eqLookupNodeIndex < eqLookupNodes.length,
-               "expected eqLookupNodeIndex within range of available EQ_LOOKUP nodes; got " +
-                   tojson(explain));
-
-        // Fetch the requested EQ_LOOKUP node.
-        const eqLookupNode = eqLookupNodes[eqLookupNodes.length - 1 - eqLookupNodeIndex];
-        assert(eqLookupNode, "expected EQ_LOOKUP node; explain: " + tojson(explain));
-        const strategy = eqLookupNode.strategy;
-        assert(strategy, "expected EQ_LOOKUP node to have a strategy " + tojson(eqLookupNode));
-        if (strategy === "IndexedLoopJoin") {
-            assert(indexKeyPattern,
-                   "expected indexKeyPattern should be set for IndexedLoopJoin algorithm");
-            assert.docEq(eqLookupNode.indexKeyPattern,
-                         indexKeyPattern,
-                         "expected IndexedLoopJoin node to have index " + tojson(indexKeyPattern) +
-                             ", got plan " + tojson(eqLookupNode));
-        } else {
-            assert.eq("NestedLoopJoin",
-                      strategy,
-                      "Incorrect strategy; expected NestedLoopJoin, got " + tojson(strategy));
-        }
+        const expectedStrategy = getJoinAlgorithmStrategyName(expectedJoinAlgorithm);
+        verifyEqLookupNodeStrategy(explain, eqLookupNodeIndex, expectedStrategy, indexKeyPattern);
 
         // Verify that multiplanning took place by verifying that there was at least one
         // rejected plan.
@@ -122,8 +134,10 @@ let view = db[viewName];
             [{$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}],
             JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
 
-    // TODO SERVER-64091: Add a test case for pushed down $lookup against a non-existent foreign
-    // collection.
+    // $lookup against a non-existent foreign collection should always pick NLJ.
+    runTest(coll,
+            [{$lookup: {from: "nonexistent", localField: "a", foreignField: "b", as: "out"}}],
+            JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
 
     // Self join $lookup, no views.
     runTest(coll,
@@ -271,13 +285,11 @@ let view = db[viewName];
 // join strategy should be used.
 (function testIndexNestedLoopJoinHashedIndex() {
     assert.commandWorked(foreignColl.dropIndexes());
-    assert.commandWorked(foreignColl.createIndex({b: 'hashed'}));
+    assert.commandWorked(foreignColl.createIndex({b: "hashed"}));
     runTest(coll,
             [{$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}],
-            JoinAlgorithm.INLJHashedIndex /* expectedJoinAlgorithm */,
-            null /* indexKeyPattern */,
-            {} /* aggOptions */,
-            /b_hashed//* errMsgRegex */);
+            JoinAlgorithm.INLJ /* expectedJoinAlgorithm */,
+            {b: "hashed"} /* indexKeyPattern */);
     assert.commandWorked(foreignColl.dropIndexes());
 })();
 
@@ -335,13 +347,11 @@ let view = db[viewName];
 (function testFewerComponentsFavoredOverIndexType() {
     assert.commandWorked(foreignColl.dropIndexes());
     assert.commandWorked(foreignColl.createIndex({b: 1, c: 1, d: 1}));
-    assert.commandWorked(foreignColl.createIndex({b: 'hashed'}));
+    assert.commandWorked(foreignColl.createIndex({b: "hashed"}));
     runTest(coll,
             [{$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}],
-            JoinAlgorithm.INLJHashedIndex /* expectedJoinAlgorithm */,
-            null /* indexKeyPattern */,
-            {} /* aggOptions */,
-            /b_hashed//* errMsgRegex */);
+            JoinAlgorithm.INLJ /* expectedJoinAlgorithm */,
+            {b: "hashed"} /* indexKeyPattern */);
     assert.commandWorked(foreignColl.dropIndexes());
 }());
 
@@ -436,19 +446,18 @@ let view = db[viewName];
             JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
 }());
 
-// Until SERVER-63690 is implemented, lowering of $lookup with paths into SBE is disabled.
 (function testLocalOrForeignFieldsWithPaths() {
     // "localField" is a path.
     runTest(coll,
             [{$lookup: {from: name, localField: "a.b", foreignField: "a", as: "out"}}],
-            JoinAlgorithm.Classic /* expectedJoinAlgorithm */);
+            JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
 
     // "foreignField" is a path.
     runTest(coll,
             [{$lookup: {from: name, localField: "a", foreignField: "a.b", as: "out"}}],
-            JoinAlgorithm.Classic /* expectedJoinAlgorithm */);
+            JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
 
-    // SERVER-63690 doesn't apply to the "as" field.
+    // "as" field is a path.
     runTest(coll,
             [{$lookup: {from: name, localField: "a", foreignField: "a", as: "out.b"}}],
             JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
@@ -524,6 +533,26 @@ let view = db[viewName];
             true /* checkMultiplanning */);
         assert.commandWorked(coll.dropIndexes());
     })();
+
+// Verify that $lookup is correctly pushed down when it is nested inside of a $unionWith.
+(
+    function
+        verifyLookupNestedInUnionWithGetsPushedDown() {
+            const unionCollName = "unionColl";
+            const unionColl = db[unionCollName];
+            assert.commandWorked(unionColl.insert({}));
+            const explain = coll.explain().aggregate([{$unionWith: {coll: unionCollName, pipeline: [{$lookup: {from:
+                foreignCollName, localField: "a", foreignField: "b", as: "results"}}]}}]);
+            const unionWithStage = getAggPlanStage(explain, "$unionWith");
+            const unionWithSpec = unionWithStage["$unionWith"];
+            assert(unionWithSpec.hasOwnProperty("pipeline"), unionWithSpec);
+
+            // Wrap the subpipeline's explain output in a format that can be parsed by
+            // 'getAggPlanStages'.
+            verifyEqLookupNodeStrategy({stages: unionWithSpec["pipeline"]}, 0, "NestedLoopJoin");
+            assert(unionColl.drop());
+        }());
+
 MongoRunner.stopMongod(conn);
 
 (function testHashJoinQueryKnobs() {
@@ -638,12 +667,7 @@ MongoRunner.stopMongod(conn);
 const st = new ShardingTest({
     shards: 2,
     mongos: 1,
-    other: {
-        shardOptions: {
-            setParameter:
-                {featureFlagSBELookupPushdown: true, featureFlagSBELookupPushdownIndexJoin: true}
-        }
-    }
+    other: {shardOptions: {setParameter: "featureFlagSBELookupPushdown=true"}}
 });
 db = st.s.getDB(name);
 

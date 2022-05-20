@@ -388,7 +388,6 @@ add_option('use-diagnostic-latches',
 
 # Most of the "use-system-*" options follow a simple form.
 for pack in [
-    ('abseil-cpp',),
     ('asio', 'ASIO',),
     ('boost',),
     ('fmt',),
@@ -1595,9 +1594,8 @@ use_libunwind = get_option("use-libunwind")
 use_system_libunwind = use_system_version_of_library("libunwind")
 
 # Assume system libunwind works if it's installed and selected.
-# Vendored libunwind, however, works only on linux-x86_64.
 can_use_libunwind = (use_system_libunwind or
-    env.TargetOSIs('linux') and (env['TARGET_ARCH'] == 'x86_64' or env['TARGET_ARCH'] == 'aarch64'))
+    env.TargetOSIs('linux') and (env['TARGET_ARCH'] in ('x86_64', 'aarch64', 'ppc64le', 's390x')))
 
 if use_libunwind == "off":
     use_libunwind = False
@@ -2540,11 +2538,9 @@ if env.TargetOSIs('posix'):
             pass
 
     if has_option( "gcov" ):
-        if not (env.TargetOSIs('linux') and env.ToolchainIs('gcc')):
+        if not (env.TargetOSIs('linux') and (env.ToolchainIs('gcc', 'clang'))):
             # TODO: This should become supported under: https://jira.mongodb.org/browse/SERVER-49877
-            # TODO SERVER-63055: clang is not supported due to consistent
-            # failures in ValidateCollections when using gcov.
-            env.FatalError("Coverage option 'gcov' is currently only supported on linux with gcc. See SERVER-49877 and SERVER-63055.")
+            env.FatalError("Coverage option 'gcov' is currently only supported on linux with gcc and clang. See SERVER-49877.")
 
         env.AppendUnique(
             CCFLAGS=['--coverage'],
@@ -3599,6 +3595,7 @@ def doConfigure(myenv):
                 # https://github.com/ccache/ccache/pull/258
                 # https://github.com/ccache/ccache/issues/318
                 env.Append(CCACHE_EXTRAFILES=supportedDenyfiles)
+                env['CCACHE_EXTRAFILES_USE_SOURCE_PATHS'] = True
 
             def SanitizerDenylistGenerator(source, target, env, for_signature):
                 if for_signature:
@@ -4574,6 +4571,17 @@ if 'CCACHE' in env and env['CCACHE']:
 if 'ICECC' in env and env['ICECC']:
     env['ICECREAM_VERBOSE'] = env.Verbose()
     env['ICECREAM_TARGET_DIR'] = '$BUILD_ROOT/scons/icecream'
+
+    # Posssibly multiple ninja files are in play, and there are cases where ninja will
+    # use the wrong icecc run script, so we must create a unique script per ninja variant
+    # for ninja to track separately. We will use the variant dir which contains the each
+    # separate ninja builds meta files. This has to be under an additional flag then just
+    # ninja disabled, because the run icecc script is generated under a context where ninja
+    # is always disabled via the scons callback mechanism. The __NINJA_NO flag is intended
+    # to differentiate this particular context.
+    if env.get('__NINJA_NO') or get_option('ninja') != 'disabled':
+        env['ICECREAM_RUN_SCRIPT_SUBPATH'] = '$VARIANT_DIR'
+
     icecream = Tool('icecream')
     if not icecream.exists(env):
         env.FatalError(f"Failed to load icecream tool with ICECC={env['ICECC']}")

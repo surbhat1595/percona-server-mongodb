@@ -128,7 +128,8 @@ feature_flags:
     featureFlagTimeseriesMetricIndexes:
         description: "When enabled, support secondary indexes on time-series measurements"
         cpp_varname: feature_flags::gTimeseriesMetricIndexes
-        default: false
+        default: true
+        version: 6.0
     featureFlagTimeseriesBucketCompression:
         description: "Enable bucket compression on time-series collections"
         cpp_varname: feature_flags::gTimeseriesBucketCompression
@@ -147,7 +148,8 @@ feature_flags:
     featureFlagSelectiveBackup:
         description: "When enabled, support selective backups and restores on collections"
         cpp_varname: feature_flags::gSelectiveBackup
-        default: false
+        default: true
+        version: 6.0
     featureFlagBatchMultiDeletes:
         description: "When enabled, support batching multi-document deletions"
         cpp_varname: feature_flags::gBatchMultiDeletes
@@ -160,4 +162,8 @@ feature_flags:
     featureFlagDatabaseRenameDuringRestore:
         description: "When enabled, allow renaming databases during restore"
         cpp_varname: feature_flags::gDatabaseRenameDuringRestore
+        default: false
+    featureFlagTimeseriesBucketCompressionWithArrays:
+        description: "Enable array compression support for time-series bucket compression"
+        cpp_varname: feature_flags::gTimeseriesBucketCompressionWithArrays
         default: false

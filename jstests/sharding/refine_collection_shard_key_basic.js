@@ -274,6 +274,11 @@ assert.commandFailedWithCode(
     mongos.adminCommand({refineCollectionShardKey: kNsName, key: {_id: 1, aKey: 1}}),
     ErrorCodes.NamespaceNotSharded);
 
+// Should fail because operation can't run on config server
+assert.commandFailedWithCode(
+    mongos.adminCommand({refineCollectionShardKey: "config.collections", key: {_id: 1, aKey: 1}}),
+    ErrorCodes.NoShardingEnabled);
+
 enableShardingAndShardColl({_id: 1});
 
 // Should fail because shard key is invalid (i.e. bad values).
@@ -517,6 +522,15 @@ assert.commandWorked(mongos.getCollection(kNsName).createIndex({_id: 1, aKey: 1}
 
 assert.commandWorked(
     mongos.adminCommand({refineCollectionShardKey: kNsName, key: {_id: 1, aKey: 1}}));
+validateConfigCollectionsUnique(true);
+
+// Verify that enforceUniquenessCheck: false allows non-unique indexes.
+assert.commandWorked(mongos.getDB(kDbName).runCommand({drop: kCollName}));
+assert.commandWorked(mongos.getCollection(kNsName).createIndex({a: 1, b: 1}));
+assert.commandWorked(mongos.adminCommand(
+    {shardCollection: kNsName, key: {a: 1}, unique: true, enforceUniquenessCheck: false}));
+assert.commandWorked(mongos.adminCommand(
+    {refineCollectionShardKey: kNsName, key: {a: 1, b: 1}, enforceUniquenessCheck: false}));
 validateConfigCollectionsUnique(true);
 
 assert.commandWorked(mongos.getDB(kDbName).dropDatabase());

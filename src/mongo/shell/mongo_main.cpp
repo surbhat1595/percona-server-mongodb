@@ -693,7 +693,6 @@ bool mechanismRequiresPassword(const MongoURI& uri) {
 }  // namespace
 
 int mongo_main(int argc, char* argv[]) {
-
     try {
 
         registerShutdownTask([] {

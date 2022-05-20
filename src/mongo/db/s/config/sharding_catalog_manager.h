@@ -231,6 +231,14 @@ public:
     //
 
     /**
+     * Bumps the major component of the shard version for each 'shardIds'.
+     */
+    void bumpMajorVersionOneChunkPerShard(OperationContext* opCtx,
+                                          const NamespaceString& nss,
+                                          TxnNumber txnNumber,
+                                          const std::vector<ShardId>& shardIds);
+
+    /**
      * Updates metadata in the config.chunks collection to show the given chunk as split into
      * smaller chunks at the specified split points.
      *
@@ -434,6 +442,14 @@ public:
                                       boost::optional<bool> defragmentCollection,
                                       boost::optional<bool> enableAutoSplitter);
 
+    /**
+     * Updates the granularity value of a time-series collection. Also bumps the shard versions for
+     * all shards.
+     */
+    void updateTimeSeriesGranularity(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     BucketGranularityEnum granularity);
+
     //
     // Shard Operations
     //
@@ -628,6 +644,12 @@ private:
                                                       const ReadPreferenceSetting& readPref,
                                                       const std::string& shardName,
                                                       const std::string& zoneName);
+
+    /**
+     * Sets the current cluster's user-write blocking state on the shard that is being added.
+     */
+    void _setUserWriteBlockingStateOnNewShard(OperationContext* opCtx,
+                                              RemoteCommandTargeter* targeter);
 
     // The owning service context
     ServiceContext* const _serviceContext;

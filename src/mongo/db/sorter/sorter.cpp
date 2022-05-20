@@ -1371,7 +1371,7 @@ void BoundedSorter<Key, Value, Comparator, BoundMaker>::add(Key key, Value value
             !_checkInput || !_min || compare(*_min, key) <= 0);
 
     // Each new item can potentially give us a tighter bound (a higher min).
-    Key newMin = makeBound(key);
+    Key newMin = makeBound(key, value);
     if (!_min || compare(*_min, newMin) < 0)
         _min = newMin;
 
@@ -1383,6 +1383,34 @@ void BoundedSorter<Key, Value, Comparator, BoundMaker>::add(Key key, Value value
 
     if (_memUsed > _opts.maxMemoryUsageBytes)
         _spill();
+}
+
+template <typename Key, typename Value, typename Comparator, typename BoundMaker>
+void BoundedSorter<Key, Value, Comparator, BoundMaker>::restart() {
+    tassert(
+        6434804, "BoundedSorter must be in state kDone to restart()", getState() == State::kDone);
+
+    // In state kDone, the heap and spill are usually empty, because kDone means the sorter has
+    // no more elements to return. However, if there is a limit then we can also reach state
+    // kDone when '_numSorted == _opts.limit'.
+    _spillIter.reset();
+    _heap = decltype(_heap){Greater{&compare}};
+    _memUsed = 0;
+
+    _done = false;
+    _min.reset();
+
+    // There are now two possible states we could be in:
+    // - Typically, we should be ready for more input (kWait).
+    // - If there is a limit and we reached it, then we're done. We were done before restart()
+    //   and we're still done.
+    if (_opts.limit && _numSorted == _opts.limit) {
+        tassert(6434806,
+                "BoundedSorter has fulfilled _opts.limit and should still be in state kDone",
+                getState() == State::kDone);
+    } else {
+        tassert(6434805, "BoundedSorter should now be ready for input", getState() == State::kWait);
+    }
 }
 
 template <typename Key, typename Value, typename Comparator, typename BoundMaker>

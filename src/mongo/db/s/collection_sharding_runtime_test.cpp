@@ -34,6 +34,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_settings.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
@@ -80,13 +81,6 @@ protected:
                                                          {std::move(chunk)})),
                         boost::none);
 
-        if (!OperationShardingState::isOperationVersioned(opCtx)) {
-            OperationShardingState::setShardRole(opCtx,
-                                                 kTestNss,
-                                                 cm.getVersion(ShardId("0")) /* shardVersion */,
-                                                 boost::none /* databaseVersion */);
-        }
-
         return CollectionMetadata(std::move(cm), ShardId("0"));
     }
 };
@@ -96,7 +90,9 @@ TEST_F(CollectionShardingRuntimeTest,
     OperationContext* opCtx = operationContext();
     CollectionShardingRuntime csr(getServiceContext(), kTestNss, executor());
     ASSERT_FALSE(csr.getCollectionDescription(opCtx).isSharded());
-    makeShardedMetadata(opCtx);
+    auto metadata = makeShardedMetadata(opCtx);
+    ScopedSetShardRole scopedSetShardRole{
+        opCtx, kTestNss, metadata.getShardVersion(), boost::none /* databaseVersion */};
     ASSERT_THROWS_CODE(csr.getCollectionDescription(opCtx), DBException, ErrorCodes::StaleConfig);
 }
 
@@ -112,7 +108,10 @@ TEST_F(CollectionShardingRuntimeTest,
        GetCollectionDescriptionReturnsShardedAfterSetFilteringMetadataIsCalledWithShardedMetadata) {
     CollectionShardingRuntime csr(getServiceContext(), kTestNss, executor());
     OperationContext* opCtx = operationContext();
-    csr.setFilteringMetadata(opCtx, makeShardedMetadata(opCtx));
+    auto metadata = makeShardedMetadata(opCtx);
+    csr.setFilteringMetadata(opCtx, metadata);
+    ScopedSetShardRole scopedSetShardRole{
+        opCtx, kTestNss, metadata.getShardVersion(), boost::none /* databaseVersion */};
     ASSERT_TRUE(csr.getCollectionDescription(opCtx).isSharded());
 }
 
@@ -175,6 +174,8 @@ TEST_F(CollectionShardingRuntimeTest,
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx);
     csr.setFilteringMetadata(opCtx, metadata);
+    ScopedSetShardRole scopedSetShardRole{
+        opCtx, kTestNss, metadata.getShardVersion(), boost::none /* databaseVersion */};
     ASSERT_EQ(csr.getNumMetadataManagerChanges_forTest(), 1);
 
     // Set it again with a different metadata object (UUID is generated randomly in
@@ -185,6 +186,55 @@ TEST_F(CollectionShardingRuntimeTest,
     ASSERT_EQ(csr.getNumMetadataManagerChanges_forTest(), 2);
     ASSERT(
         csr.getCollectionDescription(opCtx).uuidMatches(newMetadata.getChunkManager()->getUUID()));
+}
+
+TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
+    const NamespaceString testNss("TestDBForServerless", "TestColl");
+    OperationContext* opCtx = operationContext();
+
+    // Enable serverless mode in global settings.
+    repl::ReplSettings severlessRs;
+    severlessRs.setServerlessMode();
+    repl::ReplSettings originalRs = getGlobalReplSettings();
+    setGlobalReplSettings(severlessRs);
+    ASSERT_TRUE(getGlobalReplSettings().isServerless());
+
+    // Enable sharding state and set shard version on the OSS for testNss.
+    ScopedSetShardRole scopedSetShardRole1{
+        opCtx,
+        testNss,
+        ChunkVersion::UNSHARDED(), /* shardVersion */
+        boost::none                /* databaseVersion */
+    };
+
+    CollectionShardingRuntime csr(getServiceContext(), testNss, executor());
+    auto collectionFilter = csr.getOwnershipFilter(
+        opCtx, CollectionShardingRuntime::OrphanCleanupPolicy::kAllowOrphanCleanup, true);
+    ASSERT_FALSE(collectionFilter.isSharded());
+    ASSERT_FALSE(csr.getCurrentMetadataIfKnown()->isSharded());
+    ASSERT_FALSE(csr.getCollectionDescription(opCtx).isSharded());
+
+    // Enable sharding state and set shard version on the OSS for logical session nss.
+    ScopedSetShardRole scopedSetShardRole2{
+        opCtx,
+        NamespaceString::kLogicalSessionsNamespace,
+        ChunkVersion(1, 0, OID::gen(), Timestamp(1, 1)), /* shardVersion */
+        boost::none                                      /* databaseVersion */
+    };
+
+    CollectionShardingRuntime csrLogicalSession(
+        getServiceContext(), NamespaceString::kLogicalSessionsNamespace, executor());
+    ASSERT(csrLogicalSession.getCurrentMetadataIfKnown() == boost::none);
+    ASSERT_THROWS_CODE(
+        csrLogicalSession.getCollectionDescription(opCtx), DBException, ErrorCodes::StaleConfig);
+    ASSERT_THROWS_CODE(
+        csrLogicalSession.getOwnershipFilter(
+            opCtx, CollectionShardingRuntime::OrphanCleanupPolicy::kAllowOrphanCleanup, true),
+        DBException,
+        ErrorCodes::StaleConfig);
+
+    // Reset the global settings.
+    setGlobalReplSettings(originalRs);
 }
 
 class CollectionShardingRuntimeTestWithMockedLoader : public ShardServerTestFixture {

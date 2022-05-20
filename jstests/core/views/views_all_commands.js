@@ -83,6 +83,7 @@ let viewsCommandTests = {
     _configsvrBalancerStatus: {skip: isAnInternalCommand},
     _configsvrBalancerStop: {skip: isAnInternalCommand},
     _configsvrCleanupReshardCollection: {skip: isAnInternalCommand},
+    _configsvrCollMod: {skip: isAnInternalCommand},
     _configsvrClearJumboFlag: {skip: isAnInternalCommand},
     _configsvrCommitChunksMerge: {skip: isAnInternalCommand},
     _configsvrCommitChunkMigration: {skip: isAnInternalCommand},
@@ -142,6 +143,7 @@ let viewsCommandTests = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
+    _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatching: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
@@ -171,6 +173,7 @@ let viewsCommandTests = {
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
+    _shardsvrParticipantBlock: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {skip: isUnrelated},
@@ -230,9 +233,11 @@ let viewsCommandTests = {
         expectFailure: true,
     },
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
+    clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
     clusterFind: {skip: "already tested by 'find' tests on mongos"},
+    clusterGetMore: {skip: "already tested by 'getMore' tests on mongos"},
     clusterInsert: {skip: "already tested by 'insert' tests on mongos"},
     clusterUpdate: {skip: "already tested by 'update' tests on mongos"},
     collMod: {command: {collMod: "view", viewOn: "other", pipeline: []}},
@@ -240,11 +245,7 @@ let viewsCommandTests = {
     commitReshardCollection: {skip: isUnrelated},
     commitTransaction: {skip: isUnrelated},
     compact: {command: {compact: "view", force: true}, expectFailure: true, skipSharded: true},
-    compactStructuredEncryptionData: {
-        command: {compactStructuredEncryptionData: "view", compactionTokens: {}},
-        expectFailure: true,
-        skipSharded: true
-    },
+    compactStructuredEncryptionData: {skip: isUnrelated},
     configureFailPoint: {skip: isUnrelated},
     configureCollectionAutoSplitter: {
         skip: isUnrelated
@@ -358,6 +359,7 @@ let viewsCommandTests = {
     getAuditConfig: {skip: isUnrelated},
     getDatabaseVersion: {skip: isUnrelated},
     getChangeStreamOptions: {skip: isUnrelated},
+    getClusterParameter: {skip: isUnrelated},
     getCmdLineOpts: {skip: isUnrelated},
     getDefaultRWConcern: {skip: isUnrelated},
     getDiagnosticData: {skip: isUnrelated},
@@ -566,6 +568,7 @@ let viewsCommandTests = {
         expectFailure: true,
         isAdminCommand: true,
     },
+    renameDatabaseForRestore: {skip: isUnrelated},
     revokePrivilegesFromRole: {
         command: {
             revokePrivilegesFromRole: "testrole",

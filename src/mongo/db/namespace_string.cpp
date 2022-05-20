@@ -45,6 +45,11 @@ constexpr auto listCollectionsCursorCol = "$cmd.listCollections"_sd;
 constexpr auto collectionlessAggregateCursorCol = "$cmd.aggregate"_sd;
 constexpr auto dropPendingNSPrefix = "system.drop."_sd;
 
+constexpr auto fle2Prefix = "fle2."_sd;
+constexpr auto fle2EscSuffix = ".esc"_sd;
+constexpr auto fle2EccSuffix = ".ecc"_sd;
+constexpr auto fle2EcocSuffix = ".ecoc"_sd;
+
 }  // namespace
 
 constexpr StringData NamespaceString::kAdminDb;
@@ -153,6 +158,12 @@ const NamespaceString NamespaceString::kConfigsvrCoordinatorsNamespace(
 
 const NamespaceString NamespaceString::kUserWritesCriticalSectionsNamespace(
     NamespaceString::kConfigDb, "user_writes_critical_sections");
+
+const NamespaceString NamespaceString::kCompactStructuredEncryptionCoordinatorNamespace(
+    NamespaceString::kConfigDb, "compact_structured_encryption_coordinator");
+
+const NamespaceString NamespaceString::kClusterParametersNamespace(NamespaceString::kConfigDb,
+                                                                   "clusterParameters");
 
 bool NamespaceString::isListCollectionsCursorNS() const {
     return coll() == listCollectionsCursorCol;
@@ -369,6 +380,12 @@ bool NamespaceString::isConfigImagesCollection() const {
 
 bool NamespaceString::isConfigTransactionsCollection() const {
     return ns() == kSessionTransactionsTableNamespace.ns();
+}
+
+bool NamespaceString::isFLE2StateCollection() const {
+    return coll().startsWith(fle2Prefix) &&
+        (coll().endsWith(fle2EscSuffix) || coll().endsWith(fle2EccSuffix) ||
+         coll().endsWith(fle2EcocSuffix));
 }
 
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {

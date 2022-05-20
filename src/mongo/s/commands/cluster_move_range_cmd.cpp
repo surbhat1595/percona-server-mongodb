@@ -43,8 +43,8 @@ public:
     using Request = ClusterMoveRange;
 
     std::string help() const override {
-        // TODO SERVER-64148 document this command with an inline example.
-        return "TODO";
+        // TODO SERVER-64486 document this command with an inline example.
+        return "Move the range delimited by the the given key(s) to the destination shard.";
     }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
@@ -62,26 +62,9 @@ public:
         void typedRun(OperationContext* opCtx) {
             const auto nss = ns();
             const auto& req = request();
-            const auto& min = req.getMin();
-            const auto& max = req.getMax();
 
-            {
-                // TODO SERVER-64148 evaluate moving/removing the following checks
-                const auto cm = uassertStatusOK(
-                    Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
-                        opCtx, nss));
-                const auto& skPattern = cm.getShardKeyPattern();
-                const auto skInvalidErrorMsg = "Shard key bounds [" + min.toString() + "," +
-                    max.toString() + ") are not valid";
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << skInvalidErrorMsg << " for shard key pattern "
-                                      << skPattern.toString(),
-                        skPattern.isShardKey(min) && skPattern.isShardKey(max));
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream()
-                            << skInvalidErrorMsg << ": max key must be greater than min key",
-                        min.woCompare(max) < 0);
-            }
+            // TODO SERVER-64926 do not assume min always present
+            uassert(ErrorCodes::InvalidOptions, "Missing required parameter 'min'", req.getMin());
 
             ConfigsvrMoveRange configsvrRequest(nss);
             configsvrRequest.setDbName(NamespaceString::kAdminDb);

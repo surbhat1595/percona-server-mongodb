@@ -13,14 +13,8 @@ load("jstests/serverless/libs/basic_serverless_test.js");
 
 const recipientTagName = "recipientNode";
 const recipientSetName = "recipientSetName";
-const test = new BasicServerlessTest({
-    recipientTagName,
-    recipientSetName,
-    nodeOptions: {
-        // Set a short timeout to test that the operation times out waiting for replication
-        setParameter: "shardSplitTimeoutMS=100000"
-    }
-});
+const test =
+    new BasicServerlessTest({recipientTagName, recipientSetName, quickGarbageCollection: true});
 
 test.addRecipientNodes();
 test.donor.awaitSecondaryNodes();
@@ -29,16 +23,21 @@ const migrationId = UUID();
 
 jsTestLog("Running the commitShardSplit operation");
 const admin = test.donor.getPrimary().getDB("admin");
-assert.commandWorked(admin.runCommand({
-    commitShardSplit: 1,
-    migrationId,
-    tenantIds: ["tenant1", "tenant2"],
-    recipientTagName,
-    recipientSetName
-}));
+const tenantIds = ["tenant1", "tenant2"];
+assert.soon(() => {
+    const result = admin.runCommand(
+        {commitShardSplit: 1, migrationId, tenantIds, recipientTagName, recipientSetName});
+    assert.commandWorked(result);
+    return result.state === 'committed';
+});
 
-jsTestLog("Forgetting shard split");
-assert.commandWorked(test.donor.getPrimary().adminCommand({forgetShardSplit: 1, migrationId}));
+test.removeRecipientNodesFromDonor();
 
+// getPrimary can only be called once recipient nodes have been remove from test.
+assertMigrationState(test.donor.getPrimary(), migrationId, "committed");
+
+test.forgetShardSplit(migrationId);
+
+test.waitForGarbageCollection(migrationId, tenantIds);
 test.stop();
 })();

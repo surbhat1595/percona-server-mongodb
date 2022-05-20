@@ -43,6 +43,7 @@
 #include "mongo/db/commands/write_commands_common.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/doc_validation_error.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
@@ -64,12 +65,15 @@
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/retryable_writes_stats.h"
+#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/timeseries_stats.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/write_concern.h"
@@ -524,6 +528,14 @@ public:
         write_ops::InsertCommandReply typedRun(OperationContext* opCtx) final try {
             transactionChecks(opCtx, ns());
 
+            if (request().getEncryptionInformation().has_value()) {
+                write_ops::InsertCommandReply insertReply;
+                auto batch = processFLEInsert(opCtx, request(), &insertReply);
+                if (batch == FLEBatchResult::kProcessed) {
+                    return insertReply;
+                }
+            }
+
             if (isTimeseries(opCtx, request())) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
@@ -924,6 +936,28 @@ public:
             return TimeseriesAtomicWriteResult::kSuccess;
         }
 
+        // For sharded time-series collections, we need to use the granularity from the config
+        // server (through shard filtering information) as the source of truth for the current
+        // granularity value, due to the possible inconsistency in the process of granularity
+        // updates.
+        static void _rebuildOptionsWithGranularityFromConfigServer(
+            OperationContext* opCtx,
+            TimeseriesOptions& timeSeriesOptions,
+            const NamespaceString& bucketsNs) {
+            AutoGetCollectionForRead coll(opCtx, bucketsNs);
+            auto collDesc =
+                CollectionShardingState::get(opCtx, bucketsNs)->getCollectionDescription(opCtx);
+            if (collDesc.isSharded()) {
+                tassert(6102801,
+                        "Sharded time-series buckets collection is missing time-series fields",
+                        collDesc.getTimeseriesFields());
+                auto granularity = collDesc.getTimeseriesFields()->getGranularity();
+                auto bucketSpan = timeseries::getMaxSpanSecondsFromGranularity(granularity);
+                timeSeriesOptions.setGranularity(granularity);
+                timeSeriesOptions.setBucketMaxSpanSeconds(bucketSpan);
+            }
+        }
+
         std::tuple<TimeseriesBatches,
                    TimeseriesStmtIds,
                    size_t /* numInserted */,
@@ -948,12 +982,36 @@ public:
                     "Time-series buckets collection is missing time-series options",
                     bucketsColl->getTimeseriesOptions());
 
+            auto timeSeriesOptions = *bucketsColl->getTimeseriesOptions();
+
+            boost::optional<Status> rebuildOptionsError;
+            try {
+                _rebuildOptionsWithGranularityFromConfigServer(opCtx, timeSeriesOptions, bucketsNs);
+            } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
+                // This could occur when the shard version attached to the request is for the time
+                // series namespace (unsharded), which is compared to the shard version of the
+                // bucket namespace. Consequently, every single entry fails but the whole operation
+                // succeeds.
+
+                rebuildOptionsError = ex.toStatus();
+
+                auto& oss{OperationShardingState::get(opCtx)};
+                oss.setShardingOperationFailedStatus(ex.toStatus());
+            }
+
             TimeseriesBatches batches;
             TimeseriesStmtIds stmtIds;
             bool canContinue = true;
 
             auto insert = [&](size_t index) {
                 invariant(start + index < request().getDocuments().size());
+
+                if (rebuildOptionsError) {
+                    const auto error{
+                        generateError(opCtx, *rebuildOptionsError, start + index, errors->size())};
+                    errors->emplace_back(std::move(*error));
+                    return false;
+                }
 
                 auto stmtId = request().getStmtIds()
                     ? request().getStmtIds()->at(start + index)
@@ -971,7 +1029,7 @@ public:
                     opCtx,
                     ns().isTimeseriesBucketsCollection() ? ns().getTimeseriesViewNamespace() : ns(),
                     bucketsColl->getDefaultCollator(),
-                    *bucketsColl->getTimeseriesOptions(),
+                    timeSeriesOptions,
                     request().getDocuments()[start + index],
                     _canCombineTimeseriesInsertWithOtherClients(opCtx));
 
@@ -1387,6 +1445,10 @@ public:
             write_ops::UpdateCommandReply updateReply;
             OperationSource source = OperationSource::kStandard;
 
+            if (request().getEncryptionInformation().has_value()) {
+                return processFLEUpdate(opCtx, request());
+            }
+
             if (isTimeseries(opCtx, request())) {
                 uassert(ErrorCodes::InvalidOptions,
                         "Time-series updates are not enabled",
@@ -1562,6 +1624,10 @@ public:
             transactionChecks(opCtx, ns());
             write_ops::DeleteCommandReply deleteReply;
             OperationSource source = OperationSource::kStandard;
+
+            if (request().getEncryptionInformation().has_value()) {
+                return processFLEDelete(opCtx, request());
+            }
 
             if (isTimeseries(opCtx, request())) {
                 uassert(ErrorCodes::InvalidOptions,

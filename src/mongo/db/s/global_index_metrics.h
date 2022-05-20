@@ -39,11 +39,12 @@ namespace mongo {
 
 class GlobalIndexMetrics : public ShardingDataTransformInstanceMetrics {
 public:
-    GlobalIndexMetrics(UUID uuid,
+    GlobalIndexMetrics(UUID instanceId,
+                       BSONObj originatingCommand,
                        NamespaceString nss,
                        Role role,
-                       BSONObj keyPattern,
-                       bool unique,
+                       Date_t startTime,
+                       ClockSource* clockSource,
                        ShardingDataTransformCumulativeMetrics* cumulativeMetrics);
 
     static std::unique_ptr<GlobalIndexMetrics> makeInstance(UUID uuid,

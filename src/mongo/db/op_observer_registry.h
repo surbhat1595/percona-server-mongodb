@@ -184,10 +184,12 @@ public:
                             const NamespaceString& collectionName,
                             const CollectionOptions& options,
                             const BSONObj& idIndex,
-                            const OplogSlot& createOpTime) override {
+                            const OplogSlot& createOpTime,
+                            bool fromMigrate) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onCreateCollection(opCtx, coll, collectionName, options, idIndex, createOpTime);
+            o->onCreateCollection(
+                opCtx, coll, collectionName, options, idIndex, createOpTime, fromMigrate);
     }
 
     void onCollMod(OperationContext* const opCtx,
@@ -384,14 +386,42 @@ public:
                 opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
     }
 
-    void onTransactionPrepare(OperationContext* opCtx,
-                              const std::vector<OplogSlot>& reservedSlots,
-                              std::vector<repl::ReplOperation>* statements,
-                              size_t numberOfPrePostImagesToWrite) override {
+    std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        size_t numberOfPrePostImagesToWrite,
+        Date_t wallClockTime,
+        std::vector<repl::ReplOperation>* statements) override {
+        std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment>
+            applyOpsOplogSlotAndOperationAssignment;
+        for (auto&& observer : _observers) {
+            auto applyOpsAssignment = observer->preTransactionPrepare(
+                opCtx, reservedSlots, numberOfPrePostImagesToWrite, wallClockTime, statements);
+            tassert(6278501,
+                    "More than one OpObserver returned operation to \"applyOps\" assignment",
+                    !(applyOpsAssignment && applyOpsOplogSlotAndOperationAssignment));
+            if (applyOpsAssignment) {
+                applyOpsOplogSlotAndOperationAssignment = std::move(applyOpsAssignment);
+            }
+        }
+        return applyOpsOplogSlotAndOperationAssignment;
+    }
+
+    void onTransactionPrepare(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        std::vector<repl::ReplOperation>* statements,
+        const ApplyOpsOplogSlotAndOperationAssignment* applyOpsOperationAssignment,
+        size_t numberOfPrePostImagesToWrite,
+        Date_t wallClockTime) override {
         ReservedTimes times{opCtx};
         for (auto& observer : _observers) {
-            observer->onTransactionPrepare(
-                opCtx, reservedSlots, statements, numberOfPrePostImagesToWrite);
+            observer->onTransactionPrepare(opCtx,
+                                           reservedSlots,
+                                           statements,
+                                           applyOpsOperationAssignment,
+                                           numberOfPrePostImagesToWrite,
+                                           wallClockTime);
         }
     }
 
@@ -400,6 +430,13 @@ public:
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onTransactionAbort(opCtx, abortOplogEntryOpTime);
+    }
+
+    void onBatchedWriteCommit(OperationContext* opCtx) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onBatchedWriteCommit(opCtx);
+        }
     }
 
     void onMajorityCommitPointUpdate(ServiceContext* service,

@@ -27,7 +27,7 @@ class ReplicatorFixture(interface.Fixture):
         self.replicator = None
 
     def setup(self):
-        """Since launching the binary starts the replication, we do nothing here."""
+        """Launch the replicator webserver to begin accepting replicator commands."""
         self._launch_replicator_process()
 
     def pids(self):
@@ -41,14 +41,12 @@ class ReplicatorFixture(interface.Fixture):
         """
         Block until the fixture can be used for testing.
 
-        NOOP by default since on `setup` nothing is done.
+        NOOP since the binary is fully launched in `setup`.
         """
         pass
 
     def _launch_replicator_process(self):
         """Launch the replicator binary."""
-        if "sourceURI" not in self.cli_options or "destinationURI" not in self.cli_options:
-            raise ValueError("Cannot launch the replicator without source and destination URIs.")
 
         replicator = self.fixturelib.generic_program(self.logger, [self.executable], self.job_num,
                                                      test_id=None, process_kwargs=None,
@@ -70,7 +68,8 @@ class ReplicatorFixture(interface.Fixture):
         url = self.get_api_url() + '/api/v1/start'
         # Right now we set reversible to false, at some point this could be an
         # argument to start.
-        data = '{"reversible": false}'.encode('ascii')
+        data = '{"reversible": false, "source": "cluster0", "destination": "cluster1"}'.encode(
+            'ascii')
         headers = {'Content-Type': 'application/json'}
 
         req = request.Request(url=url, data=data, headers=headers)
@@ -83,12 +82,14 @@ class ReplicatorFixture(interface.Fixture):
             self.logger.exception(msg)
             raise self.fixturelib.ServerFailure(msg)
 
-    def stop(self, mode=None):
-        """Stop the replicator binary."""
+    def commit(self):
+        """Commit the migration. This currently will just sleep for a quiesce period."""
         self.logger.info("Sleeping for %d s to allow replicator to finish up.", self.quiesce_period)
         time.sleep(self.quiesce_period)
         self.logger.info("Done sleeping through quiesce period.")
 
+    def stop(self, mode=None):
+        """Stop the replicator binary."""
         mode = interface.TeardownMode.TERMINATE if mode is None else mode
 
         self.logger.info("Stopping replicator with pid %d...", self.replicator.pid)

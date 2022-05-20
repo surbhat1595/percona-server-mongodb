@@ -96,7 +96,10 @@ void generatePlannerInfo(PlanExecutor* exec,
             QuerySettingsDecoration::get(collection->getSharedDecorations());
         if (exec->getCanonicalQuery()->isSbeCompatible() &&
             feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() &&
-            !exec->getCanonicalQuery()->getForceClassicEngine()) {
+            !exec->getCanonicalQuery()->getForceClassicEngine() &&
+            // TODO(SERVER-61507): Remove pipeline check once lowered pipelines are integrated with
+            // SBE plan cache.
+            exec->getCanonicalQuery()->pipeline().empty()) {
             const auto planCacheKeyInfo = plan_cache_key_factory::make<sbe::PlanCacheKey>(
                 *exec->getCanonicalQuery(), collection);
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
@@ -107,8 +110,8 @@ void generatePlannerInfo(PlanExecutor* exec,
                 plan_cache_key_factory::make<PlanCacheKey>(*exec->getCanonicalQuery(), collection);
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
             queryHash = planCacheKeyInfo.queryHash();
-            if (auto allowedIndicesFilter =
-                    querySettings->getAllowedIndicesFilter(planCacheKeyInfo.getQueryShape())) {
+            if (auto allowedIndicesFilter = querySettings->getAllowedIndicesFilter(
+                    exec->getCanonicalQuery()->encodeKeyForIndexFilters())) {
                 // Found an index filter set on the query shape.
                 indexFilterSet = true;
             }
@@ -383,7 +386,7 @@ void Explain::explainStages(PlanExecutor* exec,
         // If executing the query failed, for any number of reasons other than a planning failure,
         // then the collection may no longer be valid. We conservatively set our collection pointer
         // to null in case it is invalid.
-        if (executePlanStatus != ErrorCodes::NoQueryExecutionPlans) {
+        if (!executePlanStatus.isOK() && executePlanStatus != ErrorCodes::NoQueryExecutionPlans) {
             collectionPtr = &CollectionPtr::null;
         }
     }

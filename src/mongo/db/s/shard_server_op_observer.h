@@ -112,7 +112,8 @@ public:
                             const NamespaceString& collectionName,
                             const CollectionOptions& options,
                             const BSONObj& idIndex,
-                            const OplogSlot& createOpTime) override;
+                            const OplogSlot& createOpTime,
+                            bool fromMigrate) override;
 
     void onCollMod(OperationContext* opCtx,
                    const NamespaceString& nss,
@@ -189,13 +190,27 @@ public:
         Timestamp commitTimestamp,
         const std::vector<repl::ReplOperation>& statements) noexcept override {}
 
-    void onTransactionPrepare(OperationContext* opCtx,
-                              const std::vector<OplogSlot>& reservedSlots,
-                              std::vector<repl::ReplOperation>* statements,
-                              size_t numberOfPrePostImagesToWrite) override {}
+    std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        size_t numberOfPrePostImagesToWrite,
+        Date_t wallClockTime,
+        std::vector<repl::ReplOperation>* statements) override {
+        return nullptr;
+    }
+
+    void onTransactionPrepare(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        std::vector<repl::ReplOperation>* statements,
+        const ApplyOpsOplogSlotAndOperationAssignment* applyOpsOperationAssignment,
+        size_t numberOfPrePostImagesToWrite,
+        Date_t wallClockTime) override {}
 
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) override {}
+
+    void onBatchedWriteCommit(OperationContext* opCtx) final {}
 
     void onMajorityCommitPointUpdate(ServiceContext* service,
                                      const repl::OpTime& newCommitPoint) override {}

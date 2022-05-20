@@ -6,6 +6,7 @@
 
 load("jstests/aggregation/extras/utils.js");
 load("jstests/libs/fixture_helpers.js");  // For isSharded.
+load("jstests/libs/sbe_util.js");         // For checkSBEEnabled.
 
 const localColl = db.lookup_arrays_semantics_local;
 const foreignColl = db.lookup_arrays_semantics_foreign;
@@ -175,6 +176,12 @@ function runTest_ExpectFailure(
 })();
 
 (function testMatchingUndefined() {
+    if (checkSBEEnabled(db, ["featureFlagSBELookupPushdown"])) {
+        jsTestLog(
+            "SERVER-64586, SERVER-64587: Skipping 'undefined' test when $lookup is lowered into SBE.");
+        return;
+    }
+
     const docs = [
         {_id: 0, no_a: 1},
         {_id: 1, a: null},
@@ -208,6 +215,35 @@ function runTest_ExpectFailure(
         foreignRecords: docs,
         foreignField: "a",
         expectedErrorCode: ErrorCodes.BadValue
+    });
+})();
+
+(function testMatchingNaN() {
+    const docs = [
+        {_id: 0, a: NaN},
+        {_id: 1, a: NumberDecimal("NaN")},
+        {_id: 2, a: [1, NaN]},
+        {_id: 3, a: [1, NumberDecimal("NaN")]},
+
+        {_id: 10, a: null},
+        {_id: 11, no_a: 42},
+    ];
+
+    runTest_SingleForeignRecord({
+        testDescription: "NaN in foreign, top-level field in local",
+        localRecords: docs,
+        localField: "a",
+        foreignRecord: {_id: 0, b: NaN},
+        foreignField: "b",
+        idsExpectedToMatch: [0, 1, 2, 3]
+    });
+    runTest_SingleLocalRecord({
+        testDescription: "NaN in local, top-level field in foreign",
+        localRecord: {_id: 0, b: NaN},
+        localField: "b",
+        foreignRecords: docs,
+        foreignField: "a",
+        idsExpectedToMatch: [0, 1, 2, 3]
     });
 })();
 
@@ -493,7 +529,7 @@ function runTest_ExpectFailure(
         localField: "a.x",
         foreignRecord: {_id: 0, b: null},
         foreignField: "b",
-        idsExpectedToMatch: [0, 1, 2, /*SERVER-64060: 3, 4,*/ 5, 6, 7, 8, 9, 10, 11, 12]
+        idsExpectedToMatch: [0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12]
     });
     runTest_SingleLocalRecord({
         testDescription: "Top-level null in local and missing in foreign path",
@@ -501,7 +537,7 @@ function runTest_ExpectFailure(
         localField: "b",
         foreignRecords: docs,
         foreignField: "a.x",
-        idsExpectedToMatch: [0, 1, 2, 3, 4, 5, 6, 7, 8, /*SERVER-64006: 9, 10, 11, 12, 13*/]
+        idsExpectedToMatch: [0, 1, 2, 3, 4, 5, 6, 7, 8]
     });
 
     runTest_SingleForeignRecord({
@@ -510,7 +546,7 @@ function runTest_ExpectFailure(
         localField: "a.x",
         foreignRecord: {_id: 0, no_b: 1},
         foreignField: "b",
-        idsExpectedToMatch: [0, 1, 2, /*SERVER-64060: 3, 4,*/ 5, 6, 7, 8, 9, 10, 11, 12]
+        idsExpectedToMatch: [0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12]
     });
     runTest_SingleLocalRecord({
         testDescription: "Top-level missing in local and missing in foreign path",
@@ -518,7 +554,39 @@ function runTest_ExpectFailure(
         localField: "b",
         foreignRecords: docs,
         foreignField: "a.x",
-        idsExpectedToMatch: [0, 1, 2, 3, 4, 5, 6, 7, 8, /*SERVER-64006: 9, 10, 11, 12, 13*/]
+        idsExpectedToMatch: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    });
+})();
+
+(function testMatchingScalarsOnPath() {
+    const docs = [
+        {_id: 0, a: 1},
+        {_id: 1, no_a: 1},
+        {_id: 2, a: [1]},
+
+        {_id: 3, a: {b: 1}},
+        {_id: 4, a: {no_b: 1}},
+        {_id: 5, a: {b: [1]}},
+
+        {_id: 6, a: [{b: {no_c: 1}}, 1]},
+        {_id: 7, a: {b: [{no_c: 1}, 1]}},
+    ];
+
+    runTest_SingleForeignRecord({
+        testDescription: "Scalars on local path and top-level null in foreign",
+        localRecords: docs,
+        localField: "a.b.c",
+        foreignRecord: {_id: 0, b: null},
+        foreignField: "b",
+        idsExpectedToMatch: [0, 1, 2, 3, 4, 5, 6, 7]
+    });
+    runTest_SingleLocalRecord({
+        testDescription: "Top-level null in local and scalars on path in foreign",
+        localRecord: {_id: 0, b: null},
+        localField: "b",
+        foreignRecords: docs,
+        foreignField: "a.b.c",
+        idsExpectedToMatch: [0, 1, 3, 4, 6, 7]
     });
 })();
 
@@ -560,7 +628,7 @@ function runTest_ExpectFailure(
         localField: "b",
         foreignRecords: docs,
         foreignField: "a",
-        idsExpectedToMatch: [/*SERVER-63368: */ 2, 10, 11, 12, 13]
+        idsExpectedToMatch: [2, 10, 11, 12, 13]
     });
 
     runTest_SingleForeignRecord({
@@ -638,7 +706,6 @@ function runTest_ExpectFailure(
         {_id: 22, a: [{no_x: 1}, {no_x: 2}]},
         {_id: 23, a: [{x: null}, {x: 1}]},
 
-        // SERVER-64006
         {_id: 30, a: []},
         {_id: 31, a: [1]},
         {_id: 32, a: [null, 1]},
@@ -753,7 +820,7 @@ function runTest_ExpectFailure(
         localField: "b",
         foreignRecords: docs,
         foreignField: "a.0.x",
-        idsExpectedToMatch: [0, 1, 2, 3, 4, /*SERVER-64006: 5,*/ /*SERVER-64221: */ 10, 11]
+        idsExpectedToMatch: [0, 1, 2, 3, 4, /*SERVER-64221: */ 10, 11]
     });
 })();
 }());

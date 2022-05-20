@@ -15,6 +15,7 @@
 "use strict";
 
 load("jstests/libs/analyze_plan.js");
+load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
 
 var colName = "jstests_index_stats";
 var col = db[colName];
@@ -230,9 +231,56 @@ assert.eq(2,
                  ])
                   .itcount());
 assert.eq(1, getUsageCount("_id_", col), "Expected aggregation to use _id index");
-assert.eq(2,
-          getUsageCount("_id_", foreignCollection),
-          "Expected each lookup to be tracked as an index use");
+if (!checkSBEEnabled(db, ["featureFlagSBELookupPushdown"])) {
+    assert.eq(2,
+              getUsageCount("_id_", foreignCollection),
+              "Expected each lookup to be tracked as an index use");
+} else {
+    assert.eq(1,
+              getUsageCount("_id_", foreignCollection),
+              "Expected the index join lookup to be tracked as a single index use");
+}
+
+//
+// Confirm index use is recorded for partially pushed down pipelines with a $lookup stage
+//
+assert.eq(true, foreignCollection.drop());
+assert.commandWorked(foreignCollection.insert([{_id: 0}, {_id: 1}, {_id: 2}]));
+assert(col.drop());
+assert.commandWorked(col.insert([{_id: 0, foreignId: 1}, {_id: 1, foreignId: 2}]));
+assert.eq(0, getUsageCount("_id_"));
+const pipeline = [
+    {$match: {_id: {$in: [0, 1]}}},
+    {
+        $lookup: {
+            from: foreignCollection.getName(),
+            localField: 'foreignId',
+            foreignField: '_id',
+            as: 'results'
+        }
+    },
+    {
+        $project: {
+            foreignId: 1,
+            results: 1,
+            matches: {$size: "$results"},
+        }
+    }
+];
+assert.eq(2, col.aggregate(pipeline).itcount());
+assert.eq(1, getUsageCount("_id_", col), "Expected aggregation to use _id index");
+if (!checkSBEEnabled(db, ["featureFlagSBELookupPushdown"])) {
+    assert.eq(2,
+              getUsageCount("_id_", foreignCollection),
+              "Expected each lookup to be tracked as an index use");
+} else {
+    assert.eq(1,
+              getUsageCount("_id_", foreignCollection),
+              "Expected the index join lookup to be tracked as a single index use");
+}
+const explain = col.explain().aggregate(pipeline);
+assert(getAggPlanStage(explain, "$cursor"),
+       "Expected a $cursor stage for a partially pushed down pipeline");
 
 //
 // Confirm index use is recorded for $graphLookup.

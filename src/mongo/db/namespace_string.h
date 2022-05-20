@@ -213,6 +213,12 @@ public:
     // Namespace used during the recovery procedure for the config server.
     static const NamespaceString kConfigsvrRestoreNamespace;
 
+    // Namespace used for CompactParticipantCoordinator service.
+    static const NamespaceString kCompactStructuredEncryptionCoordinatorNamespace;
+
+    // Namespace used for storing cluster wide parameters.
+    static const NamespaceString kClusterParametersNamespace;
+
     /**
      * Constructs an empty NamespaceString.
      */
@@ -410,6 +416,11 @@ public:
      * Returns whether the specified namespace is config.transactions.
      */
     bool isConfigTransactionsCollection() const;
+
+    /**
+     * Returns whether the specified namespace is <database>.fle2.<.+>.(esc|ecc|ecoc).
+     */
+    bool isFLE2StateCollection() const;
 
     /**
      * Returns the time-series buckets namespace for this view.

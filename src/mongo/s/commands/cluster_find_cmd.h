@@ -35,6 +35,7 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/stats/counters.h"
@@ -286,6 +287,11 @@ public:
             uassert(5746101,
                     "Cannot specify ntoreturn in a find command against mongos",
                     findCommand->getNtoreturn() == boost::none);
+
+            if (shouldDoFLERewrite(findCommand)) {
+                processFLEFindS(opCtx, findCommand.get());
+            }
+
             return findCommand;
         }
 

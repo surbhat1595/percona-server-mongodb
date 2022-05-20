@@ -148,10 +148,8 @@ void handleWouldChangeOwningShardErrorRetryableWrite(
     const NamespaceString& nss,
     const write_ops::FindAndModifyCommandRequest& request,
     BSONObjBuilder* result) {
-    auto txn =
-        txn_api::TransactionWithRetries(opCtx,
-                                        Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
-                                        TransactionRouterResourceYielder::make());
+    auto txn = txn_api::TransactionWithRetries(
+        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
 
     // Shared state for the transaction API use below.
     struct SharedBlock {
@@ -185,7 +183,7 @@ void handleWouldChangeOwningShardErrorRetryableWrite(
         (bodyStatus == ErrorCodes::DuplicateKey &&
          !bodyStatus.extraInfo<DuplicateKeyErrorInfo>()->getKeyPattern().hasField("_id"))) {
         bodyStatus.addContext(documentShardKeyUpdateUtil::kNonDuplicateKeyErrorContext);
-    };
+    }
     uassertStatusOK(bodyStatus);
 
     uassertStatusOK(swCommitResult.getValue().cmdStatus);
@@ -245,10 +243,11 @@ void handleWouldChangeOwningShardErrorTransaction(
         WouldChangeOwningShardInfo::parseFromCommandError(extraInfo), nss);
 
     try {
-        auto txn =
-            txn_api::TransactionWithRetries(opCtx,
-                                            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
-                                            TransactionRouterResourceYielder::make());
+        auto txn = txn_api::TransactionWithRetries(
+            opCtx,
+            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
+            TransactionRouterResourceYielder::makeForLocalHandoff());
+
 
         txn.runSync(opCtx,
                     [sharedBlock](const txn_api::TransactionClient& txnClient,
@@ -541,7 +540,7 @@ private:
         }
 
         if (responseStatus.code() == ErrorCodes::WouldChangeOwningShard) {
-            if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+            if (feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi.isEnabled(
                     serverGlobalParams.featureCompatibility)) {
                 auto parsedRequest = write_ops::FindAndModifyCommandRequest::parse(
                     IDLParserErrorContext("ClusterFindAndModify"), cmdObj);
@@ -622,7 +621,7 @@ private:
                 (e.code() == ErrorCodes::DuplicateKey &&
                  !e.extraInfo<DuplicateKeyErrorInfo>()->getKeyPattern().hasField("_id"))) {
                 e.addContext(documentShardKeyUpdateUtil::kNonDuplicateKeyErrorContext);
-            };
+            }
 
             auto txnRouterForAbort = TransactionRouter::get(opCtx);
             if (txnRouterForAbort)

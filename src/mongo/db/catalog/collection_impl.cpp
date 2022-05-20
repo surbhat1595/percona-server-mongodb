@@ -151,7 +151,7 @@ Status checkFailCollectionInsertsFailPoint(const NamespaceString& ns, const BSON
 // CollatorInterface. Returns null if the BSONObj is empty. We expect the stored collation to be
 // valid, since it gets validated on collection create.
 std::unique_ptr<CollatorInterface> parseCollation(OperationContext* opCtx,
-                                                  const TenantNamespace& tenantNs,
+                                                  const NamespaceString& nss,
                                                   BSONObj collationSpec) {
     if (collationSpec.isEmpty()) {
         return {nullptr};
@@ -168,7 +168,7 @@ std::unique_ptr<CollatorInterface> parseCollation(OperationContext* opCtx,
               "Collection {namespace} has a default collation which is incompatible with this "
               "version: {collationSpec}"
               "Collection has a default collation incompatible with this version",
-              logAttrs(tenantNs),
+              logAttrs(nss),
               "collationSpec"_attr = collationSpec);
         fassertFailedNoTrace(40144);
     }
@@ -204,6 +204,24 @@ Status checkValidatorCanBeUsedOnNs(const BSONObj& validator,
                 str::stream() << "Document validators are not allowed on collection " << nss.ns()
                               << " with UUID " << uuid << " in the " << nss.db()
                               << " internal database"};
+    }
+    return Status::OK();
+}
+
+Status checkValidationOptionsCanBeUsed(const CollectionOptions& opts,
+                                       boost::optional<ValidationLevelEnum> newLevel,
+                                       boost::optional<ValidationActionEnum> newAction) {
+    if (!opts.encryptedFieldConfig) {
+        return Status::OK();
+    }
+    if (validationLevelOrDefault(newLevel) != ValidationLevelEnum::strict) {
+        return Status(
+            ErrorCodes::BadValue,
+            "Validation levels other than 'strict' are not allowed on encrypted collections");
+    }
+    if (validationActionOrDefault(newAction) == ValidationActionEnum::warn) {
+        return Status(ErrorCodes::BadValue,
+                      "Validation action of 'warn' is not allowed on encrypted collections");
     }
     return Status::OK();
 }
@@ -412,22 +430,22 @@ void CollectionImpl::SharedState::instanceDeleted(CollectionImpl* collection) {
 }
 
 CollectionImpl::CollectionImpl(OperationContext* opCtx,
-                               const TenantNamespace& tenantNs,
+                               const NamespaceString& nss,
                                RecordId catalogId,
                                const CollectionOptions& options,
                                std::unique_ptr<RecordStore> recordStore)
-    : _tenantNs(tenantNs),
+    : _ns(nss),
       _catalogId(catalogId),
       _uuid(options.uuid.get()),
       _shared(std::make_shared<SharedState>(this, std::move(recordStore), options)),
       _indexCatalog(std::make_unique<IndexCatalogImpl>()) {}
 
 CollectionImpl::CollectionImpl(OperationContext* opCtx,
-                               const TenantNamespace& tenantNs,
+                               const NamespaceString& nss,
                                RecordId catalogId,
                                std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
                                std::unique_ptr<RecordStore> recordStore)
-    : CollectionImpl(opCtx, tenantNs, catalogId, metadata->options, std::move(recordStore)) {
+    : CollectionImpl(opCtx, nss, catalogId, metadata->options, std::move(recordStore)) {
     _metadata = std::move(metadata);
 }
 
@@ -443,21 +461,21 @@ void CollectionImpl::onDeregisterFromCatalog(OperationContext* opCtx) {
 
 std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
     OperationContext* opCtx,
-    const TenantNamespace& tenantNs,
+    const NamespaceString& nss,
     RecordId catalogId,
     const CollectionOptions& options,
     std::unique_ptr<RecordStore> rs) const {
-    return std::make_shared<CollectionImpl>(opCtx, tenantNs, catalogId, options, std::move(rs));
+    return std::make_shared<CollectionImpl>(opCtx, nss, catalogId, options, std::move(rs));
 }
 
 std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
     OperationContext* opCtx,
-    const TenantNamespace& tenantNs,
+    const NamespaceString& nss,
     RecordId catalogId,
     std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
     std::unique_ptr<RecordStore> rs) const {
     return std::make_shared<CollectionImpl>(
-        opCtx, tenantNs, catalogId, std::move(metadata), std::move(rs));
+        opCtx, nss, catalogId, std::move(metadata), std::move(rs));
 }
 
 std::shared_ptr<Collection> CollectionImpl::clone() const {
@@ -476,20 +494,24 @@ void CollectionImpl::init(OperationContext* opCtx) {
     _metadata = DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
     const auto& collectionOptions = _metadata->options;
 
-    _shared->_collator = parseCollation(opCtx, _tenantNs, collectionOptions.collation);
+    _shared->_collator = parseCollation(opCtx, _ns, collectionOptions.collation);
     auto validatorDoc = collectionOptions.validator.getOwned();
 
     // Enforce that the validator can be used on this namespace.
     uassertStatusOK(checkValidatorCanBeUsedOnNs(validatorDoc, ns(), _uuid));
 
+    // Make sure validationAction and validationLevel are allowed on this collection
+    uassertStatusOK(checkValidationOptionsCanBeUsed(
+        collectionOptions, collectionOptions.validationLevel, collectionOptions.validationAction));
+
     // Make sure to copy the action and level before parsing MatchExpression, since certain features
     // are not supported with certain combinations of action and level.
     if (collectionOptions.recordPreImages) {
-        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_tenantNs.getNss()));
+        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_ns));
     }
 
     if (collectionOptions.changeStreamPreAndPostImagesOptions.getEnabled()) {
-        uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_tenantNs.getNss()));
+        uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_ns));
     }
 
     // Store the result (OK / error) of parsing the validator, but do not enforce that the result is
@@ -503,7 +525,7 @@ void CollectionImpl::init(OperationContext* opCtx) {
                               {logv2::LogTag::kStartupWarnings},
                               "Collection {namespace} has malformed validator: {validatorStatus}",
                               "Collection has malformed validator",
-                              logAttrs(_tenantNs),
+                              logAttrs(_ns),
                               "validatorStatus"_attr = _validator.getStatus());
     }
 
@@ -550,7 +572,7 @@ void CollectionImpl::setCommitted(bool val) {
 }
 
 bool CollectionImpl::requiresIdIndex() const {
-    if (_tenantNs.getNss().isOplog()) {
+    if (_ns.isOplog()) {
         // No indexes on the oplog.
         return false;
     }
@@ -560,9 +582,8 @@ bool CollectionImpl::requiresIdIndex() const {
         return false;
     }
 
-    if (_tenantNs.getNss().isSystem()) {
-        StringData shortName =
-            _tenantNs.getNss().coll().substr(_tenantNs.getNss().coll().find('.') + 1);
+    if (_ns.isSystem()) {
+        StringData shortName = _ns.coll().substr(_ns.coll().find('.') + 1);
         if (shortName == "indexes" || shortName == "namespaces" || shortName == "profile") {
             return false;
         }
@@ -606,54 +627,76 @@ Status CollectionImpl::checkValidatorAPIVersionCompatability(OperationContext* o
     return Status::OK();
 }
 
-Status CollectionImpl::checkValidation(OperationContext* opCtx, const BSONObj& document) const {
+std::pair<CollectionImpl::SchemaValidationResult, Status> CollectionImpl::checkValidation(
+    OperationContext* opCtx, const BSONObj& document) const {
     if (!_validator.isOK()) {
-        return _validator.getStatus();
+        return {SchemaValidationResult::kError, _validator.getStatus()};
     }
 
     const auto* const validatorMatchExpr = _validator.filter.getValue().get();
     if (!validatorMatchExpr)
-        return Status::OK();
+        return {SchemaValidationResult::kPass, Status::OK()};
 
     if (validationLevelOrDefault(_metadata->options.validationLevel) == ValidationLevelEnum::off)
-        return Status::OK();
+        return {SchemaValidationResult::kPass, Status::OK()};
 
     if (DocumentValidationSettings::get(opCtx).isSchemaValidationDisabled())
-        return Status::OK();
+        return {SchemaValidationResult::kPass, Status::OK()};
 
     if (ns().isTemporaryReshardingCollection()) {
         // In resharding, the donor shard primary is responsible for performing document validation
         // and the recipient should not perform validation on documents inserted into the temporary
         // resharding collection.
-        return Status::OK();
+        return {SchemaValidationResult::kPass, Status::OK()};
     }
 
     auto status = checkValidatorAPIVersionCompatability(opCtx);
     if (!status.isOK()) {
-        return status;
+        return {SchemaValidationResult::kError, status};
     }
 
     try {
         if (validatorMatchExpr->matchesBSON(document))
-            return Status::OK();
+            return {SchemaValidationResult::kPass, Status::OK()};
     } catch (DBException&) {
     };
 
     BSONObj generatedError = doc_validation_error::generateError(*validatorMatchExpr, document);
 
+    static constexpr auto kValidationFailureErrorStr = "Document failed validation"_sd;
+    status = Status(doc_validation_error::DocumentValidationFailureInfo(generatedError),
+                    kValidationFailureErrorStr);
+
     if (validationActionOrDefault(_metadata->options.validationAction) ==
         ValidationActionEnum::warn) {
-        LOGV2_WARNING(20294,
-                      "Document would fail validation",
-                      logAttrs(ns()),
-                      "document"_attr = redact(document),
-                      "errInfo"_attr = generatedError);
+        return {SchemaValidationResult::kWarn, status};
+    }
+
+    return {SchemaValidationResult::kError, status};
+}
+
+Status CollectionImpl::_checkValidationAndParseResult(OperationContext* opCtx,
+                                                      const BSONObj& document) const {
+    std::pair<CollectionImpl::SchemaValidationResult, Status> result =
+        checkValidation(opCtx, document);
+
+    if (result.first == CollectionImpl::SchemaValidationResult::kPass) {
         return Status::OK();
     }
 
-    static constexpr auto kValidationFailureErrorStr = "Document failed validation"_sd;
-    return {doc_validation_error::DocumentValidationFailureInfo(generatedError),
-            kValidationFailureErrorStr};
+    if (result.first == CollectionImpl::SchemaValidationResult::kWarn) {
+        LOGV2_WARNING(
+            20294,
+            "Document would fail validation",
+            logAttrs(ns()),
+            "document"_attr = redact(document),
+            "errInfo"_attr =
+                result.second.extraInfo<doc_validation_error::DocumentValidationFailureInfo>()
+                    ->getDetails());
+        return Status::OK();
+    }
+
+    return result.second;
 }
 
 Collection::Validator CollectionImpl::parseValidator(
@@ -780,8 +823,7 @@ Status CollectionImpl::insertDocuments(OperationContext* opCtx,
                                        OpDebug* opDebug,
                                        bool fromMigrate) const {
 
-    auto status = checkFailCollectionInsertsFailPoint(_tenantNs.getNss(),
-                                                      (begin != end ? begin->doc : BSONObj()));
+    auto status = checkFailCollectionInsertsFailPoint(_ns, (begin != end ? begin->doc : BSONObj()));
     if (!status.isOK()) {
         return status;
     }
@@ -793,11 +835,11 @@ Status CollectionImpl::insertDocuments(OperationContext* opCtx,
         if (hasIdIndex && it->doc["_id"].eoo()) {
             return Status(ErrorCodes::InternalError,
                           str::stream()
-                              << "Collection::insertDocument got document without _id for tenantNs:"
-                              << _tenantNs.toString());
+                              << "Collection::insertDocument got document without _id for ns:"
+                              << _ns.toString());
         }
 
-        auto status = checkValidation(opCtx, it->doc);
+        auto status = _checkValidationAndParseResult(opCtx, it->doc);
         if (!status.isOK())
             return status;
     }
@@ -824,7 +866,7 @@ Status CollectionImpl::insertDocuments(OperationContext* opCtx,
             LOGV2(20289,
                   "hangAfterCollectionInserts fail point enabled. Blocking "
                   "until fail point is disabled.",
-                  "tenantNs"_attr = _tenantNs,
+                  "ns"_attr = _ns,
                   "whenFirst"_attr = whenFirst);
             hangAfterCollectionInserts.pauseWhileSet(opCtx);
         },
@@ -832,7 +874,7 @@ Status CollectionImpl::insertDocuments(OperationContext* opCtx,
             const auto& collElem = data["collectionNS"];
             const auto& firstIdElem = data["first_id"];
             // If the failpoint specifies no collection or matches the existing one, hang.
-            return (!collElem || _tenantNs.getNss().ns() == collElem.str()) &&
+            return (!collElem || _ns.ns() == collElem.str()) &&
                 (!firstIdElem ||
                  (begin != end && firstIdElem.type() == mongo::String &&
                   begin->doc["_id"].str() == firstIdElem.str()));
@@ -853,12 +895,12 @@ Status CollectionImpl::insertDocument(OperationContext* opCtx,
 Status CollectionImpl::insertDocumentForBulkLoader(
     OperationContext* opCtx, const BSONObj& doc, const OnRecordInsertedFn& onRecordInserted) const {
 
-    auto status = checkFailCollectionInsertsFailPoint(_tenantNs.getNss(), doc);
+    auto status = checkFailCollectionInsertsFailPoint(_ns, doc);
     if (!status.isOK()) {
         return status;
     }
 
-    status = checkValidation(opCtx, doc);
+    status = _checkValidationAndParseResult(opCtx, doc);
     if (!status.isOK()) {
         return status;
     }
@@ -886,7 +928,7 @@ Status CollectionImpl::insertDocumentForBulkLoader(
         LOGV2(20290,
               "Failpoint failAfterBulkLoadDocInsert enabled. Throwing "
               "WriteConflictException",
-              logAttrs(_tenantNs));
+              logAttrs(_ns));
         throw WriteConflictException();
     }
 
@@ -894,7 +936,7 @@ Status CollectionImpl::insertDocumentForBulkLoader(
     OplogSlot slot;
     // Fetch a new optime now, if necessary.
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->isOplogDisabledFor(opCtx, _tenantNs.getNss())) {
+    if (!replCoord->isOplogDisabledFor(opCtx, _ns)) {
         // Populate 'slot' with a new optime.
         slot = repl::getNextOpTime(opCtx);
     }
@@ -938,7 +980,7 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
         // increasing cluster key natively guarantee preservation of the insertion order, and don't
         // need serialisation. We allow concurrent inserts for clustered capped collections.
         Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _tenantNs.getNss().ns()), MODE_X};
+            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
     }
 
     std::vector<Record> records;
@@ -1060,8 +1102,8 @@ void CollectionImpl::_cappedDeleteAsNeeded(OperationContext* opCtx,
         // '_cappedFirstRecord' until the outermost WriteUnitOfWork commits or aborts. Locking the
         // metadata resource exclusively on the collection gives us that guarantee as it uses
         // two-phase locking semantics.
-        invariant(opCtx->lockState()->getLockMode(
-                      ResourceId(RESOURCE_METADATA, _tenantNs.getNss().ns())) == MODE_X);
+        invariant(opCtx->lockState()->getLockMode(ResourceId(RESOURCE_METADATA, _ns.ns())) ==
+                  MODE_X);
     } else {
         // Capped deletes not performed under the capped lock need the '_cappedFirstRecordMutex'
         // mutex.
@@ -1299,14 +1341,14 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
                                         OpDebug* opDebug,
                                         CollectionUpdateArgs* args) const {
     {
-        auto status = checkValidation(opCtx, newDoc);
+        auto status = _checkValidationAndParseResult(opCtx, newDoc);
         if (!status.isOK()) {
             if (validationLevelOrDefault(_metadata->options.validationLevel) ==
                 ValidationLevelEnum::strict) {
                 uassertStatusOK(status);
             }
             // moderate means we have to check the old doc
-            auto oldDocStatus = checkValidation(opCtx, oldDoc.value());
+            auto oldDocStatus = _checkValidationAndParseResult(opCtx, oldDoc.value());
             if (oldDocStatus.isOK()) {
                 // transitioning from good -> bad is not ok
                 uassertStatusOK(status);
@@ -1325,7 +1367,7 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         // '_cappedFirstRecord'.
         // See SERVER-21646.
         Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _tenantNs.getNss().ns()), MODE_X};
+            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
     }
 
     SnapshotId sid = opCtx->recoveryUnit()->getSnapshotId();
@@ -1585,7 +1627,7 @@ bool CollectionImpl::getRecordPreImages() const {
 
 void CollectionImpl::setRecordPreImages(OperationContext* opCtx, bool val) {
     if (val) {
-        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_tenantNs.getNss()));
+        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_ns));
     }
 
     _writeMetadata(
@@ -1599,7 +1641,7 @@ bool CollectionImpl::isChangeStreamPreAndPostImagesEnabled() const {
 void CollectionImpl::setChangeStreamPreAndPostImages(OperationContext* opCtx,
                                                      ChangeStreamPreAndPostImagesOptions val) {
     if (val.getEnabled()) {
-        uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_tenantNs.getNss()));
+        uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_ns));
     }
 
     _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
@@ -1781,6 +1823,11 @@ boost::optional<ValidationActionEnum> CollectionImpl::getValidationAction() cons
 Status CollectionImpl::setValidationLevel(OperationContext* opCtx, ValidationLevelEnum newLevel) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
 
+    auto status = checkValidationOptionsCanBeUsed(_metadata->options, newLevel, boost::none);
+    if (!status.isOK()) {
+        return status;
+    }
+
     auto storedValidationLevel = validationLevelOrDefault(newLevel);
 
     // Reparse the validator as there are some features which are only supported with certain
@@ -1806,6 +1853,11 @@ Status CollectionImpl::setValidationLevel(OperationContext* opCtx, ValidationLev
 Status CollectionImpl::setValidationAction(OperationContext* opCtx,
                                            ValidationActionEnum newAction) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+
+    auto status = checkValidationOptionsCanBeUsed(_metadata->options, boost::none, newAction);
+    if (!status.isOK()) {
+        return status;
+    }
 
     auto storedValidationAction = validationActionOrDefault(newAction);
 
@@ -1834,6 +1886,11 @@ Status CollectionImpl::updateValidator(OperationContext* opCtx,
                                        boost::optional<ValidationLevelEnum> newLevel,
                                        boost::optional<ValidationActionEnum> newAction) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+
+    auto status = checkValidationOptionsCanBeUsed(_metadata->options, newLevel, newAction);
+    if (!status.isOK()) {
+        return status;
+    }
 
     auto validator =
         parseValidator(opCtx, newValidator, MatchExpressionParser::kAllowAllSpecialFeatures);
@@ -1941,22 +1998,20 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CollectionImpl::makePlanExe
         opCtx, &yieldableCollection, yieldPolicy, direction, resumeAfterRecordId);
 }
 
-Status CollectionImpl::rename(OperationContext* opCtx,
-                              const TenantNamespace& tenantNs,
-                              bool stayTemp) {
+Status CollectionImpl::rename(OperationContext* opCtx, const NamespaceString& nss, bool stayTemp) {
     auto metadata = std::make_shared<BSONCollectionCatalogEntry::MetaData>(*_metadata);
-    metadata->tenantNs = tenantNs;
+    metadata->ns = nss.ns();
     if (!stayTemp)
         metadata->options.temp = false;
     Status status =
-        DurableCatalog::get(opCtx)->renameCollection(opCtx, getCatalogId(), tenantNs, *metadata);
+        DurableCatalog::get(opCtx)->renameCollection(opCtx, getCatalogId(), nss, *metadata);
     if (!status.isOK()) {
         return status;
     }
 
     _metadata = std::move(metadata);
-    _tenantNs = std::move(tenantNs);
-    _shared->_recordStore.get()->setNs(_tenantNs.getNss());
+    _ns = std::move(nss);
+    _shared->_recordStore.get()->setNs(_ns);
     return status;
 }
 

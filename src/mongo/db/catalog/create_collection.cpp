@@ -57,7 +57,6 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/tenant_database_name.h"
-#include "mongo/db/tenant_namespace.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
@@ -737,7 +736,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
         // names will remain.
         const bool stayTemp = true;
         auto futureColl = db ? catalog->lookupCollectionByNamespace(opCtx, newCollName) : nullptr;
-        bool needsRenaming = static_cast<bool>(futureColl);
+        bool needsRenaming(futureColl);
         invariant(!needsRenaming || allowRenameOutOfTheWay,
                   str::stream() << "Current collection name: " << currentName << ", UUID: " << uuid
                                 << ". Future collection name: " << newCollName);

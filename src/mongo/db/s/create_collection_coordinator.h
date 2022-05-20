@@ -39,7 +39,7 @@
 
 namespace mongo {
 
-class CreateCollectionCoordinator final : public ShardingDDLCoordinator {
+class CreateCollectionCoordinator : public ShardingDDLCoordinator {
 public:
     using CoordDoc = CreateCollectionCoordinatorDocument;
     using Phase = CreateCollectionCoordinatorPhaseEnum;
@@ -64,6 +64,9 @@ public:
         invariant(_result.is_initialized());
         return *_result;
     }
+
+protected:
+    CoordDoc _doc;
 
 private:
     ShardingDDLCoordinatorMetadata const& metadata() const override {
@@ -146,8 +149,17 @@ private:
      */
     void _logEndCreateCollection(OperationContext* opCtx);
 
-    CreateCollectionCoordinatorDocument _doc;
-    BSONObj _critSecReason;
+    /**
+     * Returns the BSONObj used as critical section reason
+     *
+     * TODO SERVER-64720 remove this function, directly access _critSecReason
+     *
+     */
+    virtual const BSONObj& _getCriticalSectionReason() const {
+        return _critSecReason;
+    };
+
+    const BSONObj _critSecReason;
 
     // Objects generated on each execution.
     boost::optional<ShardKeyPattern> _shardKeyPattern;
@@ -158,6 +170,34 @@ private:
     boost::optional<CreateCollectionResponse> _result;
     boost::optional<bool> _collectionEmpty;
     boost::optional<size_t> _numChunks;
+};
+
+class CreateCollectionCoordinatorDocumentPre60Compatible final
+    : public CreateCollectionCoordinatorDocument {
+    // TODO SERVER-64720 remove once 6.0 becomes last LTS
+public:
+    using CreateCollectionCoordinatorDocument::CreateCollectionCoordinatorDocument;
+
+    static const BSONObj kPre60IncompatibleFields;
+    void serialize(BSONObjBuilder* builder) const;
+    BSONObj toBSON() const;
+};
+
+class CreateCollectionCoordinatorPre60Compatible final : public CreateCollectionCoordinator {
+    // TODO SERVER-64720 remove once 6.0 becomes last LTS
+public:
+    using CreateCollectionCoordinator::CreateCollectionCoordinator;
+    using CoordDoc = CreateCollectionCoordinatorDocumentPre60Compatible;
+
+    CreateCollectionCoordinatorPre60Compatible(ShardingDDLCoordinatorService* service,
+                                               const BSONObj& initialState);
+
+    virtual const BSONObj& _getCriticalSectionReason() const override {
+        return _critSecReason;
+    };
+
+private:
+    const BSONObj _critSecReason;
 };
 
 }  // namespace mongo

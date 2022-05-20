@@ -798,6 +798,17 @@ Future<void> CheckoutSessionAndInvokeCommand::run() {
             uassertStatusOK(tenant_migration_access_blocker::handleTenantMigrationConflict(
                 _ecd->getExecutionContext()->getOpCtx(), std::move(status)));
         })
+        .onError<ErrorCodes::WouldChangeOwningShard>([this](Status status) -> Future<void> {
+            auto wouldChangeOwningShardInfo = status.extraInfo<WouldChangeOwningShardInfo>();
+            invariant(wouldChangeOwningShardInfo);
+            _txnParticipant->handleWouldChangeOwningShardError(
+                _ecd->getExecutionContext()->getOpCtx(), wouldChangeOwningShardInfo);
+            _stashTransaction();
+
+            auto txnResponseMetadata = _txnParticipant->getResponseMetadata();
+            txnResponseMetadata.serialize(_ecd->getExtraFieldsBuilder());
+            return status;
+        })
         .tapError([this](Status status) { _tapError(status); })
         .then([this] { return _commitInvocation(); });
 }
@@ -854,7 +865,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
     // Used for waiting for an in-progress transaction to transition out of the conflicting state.
     auto waitForInProgressTxn = [](OperationContext* opCtx, auto& stateTransitionFuture) {
         // Check the session back in and wait for the conflict to resolve.
-        MongoDOperationContextSession::checkIn(opCtx);
+        MongoDOperationContextSession::checkIn(opCtx,
+                                               OperationContextSession::CheckInReason::kYield);
         stateTransitionFuture.wait(opCtx);
         // Wait for any commit or abort oplog entry to be visible in the oplog. This will prevent a
         // new transaction from missing the transaction table update for the previous commit or
@@ -967,7 +979,6 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
 }
 
 void CheckoutSessionAndInvokeCommand::_tapError(Status status) {
-    auto opCtx = _ecd->getExecutionContext()->getOpCtx();
     const OperationSessionInfoFromClient& sessionOptions = _ecd->getSessionOptions();
     if (status.code() == ErrorCodes::CommandOnShardedViewNotSupportedOnMongod) {
         // Exceptions are used to resolve views in a sharded cluster, so they should be handled
@@ -988,14 +999,6 @@ void CheckoutSessionAndInvokeCommand::_tapError(Status status) {
         // If this shard has completed an earlier statement for this transaction, it must already be
         // in the transaction's participant list, so it is guaranteed to learn its outcome.
         _stashTransaction();
-    } else if (status.code() == ErrorCodes::WouldChangeOwningShard) {
-        auto wouldChangeOwningShardInfo = status.extraInfo<WouldChangeOwningShardInfo>();
-        invariant(wouldChangeOwningShardInfo);
-        _txnParticipant->handleWouldChangeOwningShardError(opCtx, wouldChangeOwningShardInfo);
-        _stashTransaction();
-
-        auto txnResponseMetadata = _txnParticipant->getResponseMetadata();
-        txnResponseMetadata.serialize(_ecd->getExtraFieldsBuilder());
     }
 }
 
@@ -1617,21 +1620,11 @@ Future<void> ExecCommandDatabase::_commandExec() {
     _execContext->behaviors->waitForReadConcern(opCtx, _invocation.get(), request);
     _execContext->behaviors->setPrepareConflictBehaviorForReadConcern(opCtx, _invocation.get());
 
-    const auto dbname = request.getDatabase().toString();
-    const bool iAmPrimary =
-        repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase_UNSAFE(opCtx, dbname);
-    auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    if (!opCtx->getClient()->isInDirectClient() &&
-        readConcernArgs.getLevel() != repl::ReadConcernLevel::kAvailableReadConcern &&
-        (iAmPrimary || (readConcernArgs.hasLevel() || readConcernArgs.getArgsAfterClusterTime()))) {
-        auto& oss = OperationShardingState::get(opCtx);
-        auto const shardingState = ShardingState::get(opCtx);
-        if (OperationShardingState::isOperationVersioned(opCtx) || oss.hasDbVersion()) {
-            uassertStatusOK(shardingState->canAcceptShardedCommands());
-        }
-    }
-
     _execContext->getReplyBuilder()->reset();
+
+    if (OperationShardingState::isComingFromRouter(opCtx)) {
+        uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
+    }
 
     auto runCommand = [&] {
         if (getInvocation()->supportsWriteConcern() ||

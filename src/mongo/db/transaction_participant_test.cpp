@@ -103,10 +103,20 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
 
 class OpObserverMock : public OpObserverNoop {
 public:
-    void onTransactionPrepare(OperationContext* opCtx,
-                              const std::vector<OplogSlot>& reservedSlots,
-                              std::vector<repl::ReplOperation>* statements,
-                              size_t numberOfPrePostImagesToWrite) override;
+    std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        size_t numberOfPrePostImagesToWrite,
+        Date_t wallClockTime,
+        std::vector<repl::ReplOperation>* statements) override;
+
+    void onTransactionPrepare(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        std::vector<repl::ReplOperation>* statements,
+        const ApplyOpsOplogSlotAndOperationAssignment* applyOpsOperationAssignment,
+        size_t numberOfPrePostImagesToWrite,
+        Date_t wallClockTime) override;
 
     bool onTransactionPrepareThrowsException = false;
     bool transactionPrepared = false;
@@ -148,13 +158,30 @@ public:
     const repl::OpTime dropOpTime = {Timestamp(Seconds(100), 1U), 1LL};
 };
 
-void OpObserverMock::onTransactionPrepare(OperationContext* opCtx,
-                                          const std::vector<OplogSlot>& reservedSlots,
-                                          std::vector<repl::ReplOperation>* statements,
-                                          size_t numberOfPrePostImagesToWrite) {
+std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
+OpObserverMock::preTransactionPrepare(OperationContext* opCtx,
+                                      const std::vector<OplogSlot>& reservedSlots,
+                                      size_t numberOfPrePostImagesToWrite,
+                                      Date_t wallClockTime,
+                                      std::vector<repl::ReplOperation>* statements) {
+    return std::make_unique<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>(
+        OpObserver::ApplyOpsOplogSlotAndOperationAssignment{{}, {}});
+}
+
+void OpObserverMock::onTransactionPrepare(
+    OperationContext* opCtx,
+    const std::vector<OplogSlot>& reservedSlots,
+    std::vector<repl::ReplOperation>* statements,
+    const ApplyOpsOplogSlotAndOperationAssignment* applyOpsOperationAssignment,
+    size_t numberOfPrePostImagesToWrite,
+    Date_t wallClockTime) {
     ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
-    OpObserverNoop::onTransactionPrepare(
-        opCtx, reservedSlots, statements, numberOfPrePostImagesToWrite);
+    OpObserverNoop::onTransactionPrepare(opCtx,
+                                         reservedSlots,
+                                         statements,
+                                         applyOpsOperationAssignment,
+                                         numberOfPrePostImagesToWrite,
+                                         wallClockTime);
 
     uassert(ErrorCodes::OperationFailed,
             "onTransactionPrepare() failed",
@@ -805,7 +832,7 @@ TEST_F(TxnParticipantTest, KillOpBeforeCommittingPreparedTransaction) {
 
     // Check the session back in.
     txnParticipant.stashTransactionResources(opCtx());
-    sessionCheckout->checkIn(opCtx());
+    sessionCheckout->checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
 
     // The transaction state should have been unaffected.
     ASSERT_TRUE(txnParticipant.transactionIsPrepared());
@@ -849,7 +876,7 @@ TEST_F(TxnParticipantTest, KillOpBeforeAbortingPreparedTransaction) {
 
     // Check the session back in.
     txnParticipant.stashTransactionResources(opCtx());
-    sessionCheckout->checkIn(opCtx());
+    sessionCheckout->checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
 
     // The transaction state should have been unaffected.
     ASSERT_TRUE(txnParticipant.transactionIsPrepared());
@@ -1288,7 +1315,7 @@ TEST_F(TxnParticipantTest, CannotStartNewTransactionWhilePreparedTransactionInPr
     ASSERT_EQ(ruPrepareTimestamp, prepareTimestamp);
 
     txnParticipant.stashTransactionResources(opCtx());
-    OperationContextSession::checkIn(opCtx());
+    OperationContextSession::checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
     {
         ScopeGuard guard([&]() { OperationContextSession::checkOut(opCtx()); });
         // Try to start a new transaction while there is already a prepared transaction on the
@@ -4770,7 +4797,7 @@ TEST_F(ShardTxnParticipantTest,
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsInProgress());
-    OperationContextSession::checkIn(opCtx());
+    OperationContextSession::checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
 
     runFunctionFromDifferentOpCtx([parentLsid, parentTxnNumber](OperationContext* newOpCtx) {
         newOpCtx->setLogicalSessionId(
@@ -4799,7 +4826,7 @@ TEST_F(ShardTxnParticipantTest,
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsInProgress());
-    OperationContextSession::checkIn(opCtx());
+    OperationContextSession::checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
 
     runFunctionFromDifferentOpCtx([parentLsid, parentTxnNumber](OperationContext* newOpCtx) {
         newOpCtx->setLogicalSessionId(parentLsid);
@@ -4852,7 +4879,7 @@ TEST_F(ShardTxnParticipantTest,
     txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT(txnParticipant.transactionIsPrepared());
     txnParticipant.stashTransactionResources(opCtx());
-    OperationContextSession::checkIn(opCtx());
+    OperationContextSession::checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
 
     runFunctionFromDifferentOpCtx([parentLsid, parentTxnNumber](OperationContext* newOpCtx) {
         newOpCtx->setLogicalSessionId(
@@ -4885,7 +4912,7 @@ TEST_F(ShardTxnParticipantTest,
     txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT(txnParticipant.transactionIsPrepared());
     txnParticipant.stashTransactionResources(opCtx());
-    OperationContextSession::checkIn(opCtx());
+    OperationContextSession::checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
 
     runFunctionFromDifferentOpCtx([parentLsid, parentTxnNumber](OperationContext* newOpCtx) {
         newOpCtx->setLogicalSessionId(parentLsid);
@@ -5147,10 +5174,12 @@ TEST_F(ShardTxnParticipantTest, CannotModifyParentLsidOfNonChildSession) {
     }
 }
 
-TEST_F(TxnParticipantTest,
+TEST_F(ShardTxnParticipantTest,
        ThrowIfTxnRetryCounterIsSpecifiedOnStartTransactionWithFeatureFlagDisabled) {
     MongoDOperationContextSession opCtxSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    RAIIServerParameterControllerForTest controller{"featureFlagInternalTransactions", false};
     ASSERT_THROWS_CODE(txnParticipant.beginOrContinue(opCtx(),
                                                       {*opCtx()->getTxnNumber(), 1},
                                                       false /* autocommit */,

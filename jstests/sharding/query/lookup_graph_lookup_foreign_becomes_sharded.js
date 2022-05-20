@@ -23,6 +23,16 @@ const shard0 = st.rs0;
 const freshMongos = st.s0.getDB(jsTestName());
 const staleMongos = st.s1.getDB(jsTestName());
 
+// TODO SERVER-64714 Reenable this test after SERVER-64714 is fixed.
+const res = shard0.getPrimary().getDB("admin").adminCommand(
+    {getParameter: 1, featureFlagSBELookupPushdown: 1});
+if (!res.ok ||
+    res.hasOwnProperty("featureFlagSBELookupPushdown") && res.featureFlagSBELookupPushdown.value) {
+    jsTestLog("Skipping test because SBE and SBE $lookup features are both enabled.");
+    st.stop();
+    return;
+}
+
 const sourceCollection = freshMongos.source;
 const foreignCollection = freshMongos.foreign;
 

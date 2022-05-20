@@ -118,7 +118,7 @@ Status isSpecOKClusteredIndexCheck(const BSONObj& indexSpec,
     bool keysMatch = clustered_util::matchesClusterKey(key, collInfo);
 
     bool clusteredOptionPresent =
-        indexSpec.hasField("clustered") && indexSpec.getBoolField("clustered");
+        indexSpec.hasField("clustered") && indexSpec["clustered"].trueValue();
 
     if (clusteredOptionPresent && !keysMatch) {
         // The 'clustered' option implies the indexSpec must match the clustered index.
@@ -135,6 +135,12 @@ Status isSpecOKClusteredIndexCheck(const BSONObj& indexSpec,
     if (!keysMatch && !namesMatch) {
         // The indexes don't conflict at all.
         return Status::OK();
+    }
+
+    if (!collInfo) {
+        return Status(ErrorCodes::Error(6479600),
+                      str::stream() << "Cannot create an index with 'clustered' in the spec on a "
+                                    << "collection that is not clustered");
     }
 
     // The collection is guaranteed to be clustered since at least the name or key matches a
@@ -1221,7 +1227,9 @@ public:
         // Refresh the CollectionIndexUsageTrackerDecoration's knowledge of what indices are
         // present as it is shared state across Collection copies.
         CollectionIndexUsageTrackerDecoration::get(_collectionDecorations)
-            .registerIndex(indexDescriptor->indexName(), indexDescriptor->keyPattern());
+            .registerIndex(indexDescriptor->indexName(),
+                           indexDescriptor->keyPattern(),
+                           IndexFeatures::make(indexDescriptor, _nss.isOnInternalDb()));
     }
 
 private:
@@ -1438,7 +1446,9 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     invariant(newEntry->isReady(opCtx));
     auto desc = newEntry->descriptor();
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
-        .registerIndex(desc->indexName(), desc->keyPattern());
+        .registerIndex(desc->indexName(),
+                       desc->keyPattern(),
+                       IndexFeatures::make(desc, collection->ns().isOnInternalDb()));
 
     // Last rebuild index data for CollectionQueryInfo for this Collection.
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);

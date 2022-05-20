@@ -48,10 +48,11 @@ namespace mongo::sbe {
 using namespace value;
 
 class LookupStageBuilderTest : public SbeStageBuilderTestFixture {
+protected:
     // Set to "true" and recompile the tests to dump plans and skip asserts in favor of printing
     // more data. Because asserts are suppressed in this mode tests might pass while being broken.
     // Do not check in with 'enableDebugOutput' set to "true".
-    const bool enableDebugOutput = false;
+    bool enableDebugOutput = false;
 
 public:
     void setUp() override {
@@ -117,7 +118,8 @@ public:
     };
 
     // Constructs ready-to-execute SBE tree for $lookup specified by the arguments.
-    CompiledTree buildLookupSbeTree(const std::string& localKey,
+    CompiledTree buildLookupSbeTree(EqLookupNode::LookupStrategy strategy,
+                                    const std::string& localKey,
                                     const std::string& foreignKey,
                                     const std::string& asKey) {
         // Documents from the local collection are provided using collection scan.
@@ -128,6 +130,7 @@ public:
         auto foreignCollName = _foreignNss.toString();
         auto lookupNode = std::make_unique<EqLookupNode>(
             std::move(localScanNode), foreignCollName, localKey, foreignKey, asKey);
+        lookupNode->lookupStrategy = strategy;
         auto solution = makeQuerySolution(std::move(lookupNode));
 
         // Convert logical solution into the physical SBE plan.
@@ -151,11 +154,18 @@ public:
     }
 
     // Check that SBE plan for '$lookup' returns expected documents.
-    void assertReturnedDocuments(const std::string& localKey,
+    void assertReturnedDocuments(EqLookupNode::LookupStrategy strategy,
+                                 const std::string& localKey,
                                  const std::string& foreignKey,
                                  const std::string& asKey,
                                  const std::vector<BSONObj>& expected) {
-        auto tree = buildLookupSbeTree(localKey, foreignKey, asKey);
+        if (enableDebugOutput) {
+            std::cout << std::endl
+                      << "LookupStrategy: " << EqLookupNode::serializeLookupStrategy(strategy)
+                      << std::endl;
+        }
+
+        auto tree = buildLookupSbeTree(strategy, localKey, foreignKey, asKey);
         auto& stage = tree.stage;
 
         size_t i = 0;
@@ -192,13 +202,28 @@ public:
         stage->close();
     }
 
+    void assertReturnedDocuments(const std::string& localKey,
+                                 const std::string& foreignKey,
+                                 const std::string& asKey,
+                                 const std::vector<BSONObj>& expected) {
+        for (auto strategy : strategies) {
+            assertReturnedDocuments(strategy, localKey, foreignKey, asKey, expected);
+        }
+    }
+
     // Check that SBE plan for '$lookup' returns expected documents. Expected documents are
     // described in pairs '(local document, matched foreign documents)'.
     void assertMatchedDocuments(
+        EqLookupNode::LookupStrategy strategy,
         const std::string& localKey,
         const std::string& foreignKey,
         const std::vector<std::pair<BSONObj, std::vector<BSONObj>>>& expectedPairs) {
         const std::string resultFieldName{"result"};
+        if (enableDebugOutput) {
+            std::cout << std::endl
+                      << "LookupStrategy: " << EqLookupNode::serializeLookupStrategy(strategy)
+                      << std::endl;
+        }
 
         // Construct expected documents.
         std::vector<BSONObj> expectedDocuments;
@@ -215,8 +240,22 @@ public:
             expectedDocuments.push_back(expectedBson);
         }
 
-        assertReturnedDocuments(localKey, foreignKey, resultFieldName, expectedDocuments);
+        assertReturnedDocuments(strategy, localKey, foreignKey, resultFieldName, expectedDocuments);
     }
+
+    void assertMatchedDocuments(
+        const std::string& localKey,
+        const std::string& foreignKey,
+        const std::vector<std::pair<BSONObj, std::vector<BSONObj>>>& expectedPairs) {
+
+        for (auto strategy : strategies) {
+            assertMatchedDocuments(strategy, localKey, foreignKey, expectedPairs);
+        }
+    }
+
+protected:
+    std::vector<EqLookupNode::LookupStrategy> strategies = {
+        EqLookupNode::LookupStrategy::kNestedLoopJoin, EqLookupNode::LookupStrategy::kHashJoin};
 
 private:
     std::unique_ptr<repl::StorageInterface> _storage;
@@ -272,7 +311,7 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_MatchingArrayAsValue) {
 
     const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
         {ldocs[0], {fdocs[0], fdocs[1]}},
-        {ldocs[1], {/*TODO SERVER-64483: fdocs[1],*/ fdocs[2]}},
+        {ldocs[1], {fdocs[1], fdocs[2]}},
     };
 
     insertDocuments(ldocs, fdocs);
@@ -341,7 +380,7 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_TopLevelFields_EmptyArrays) {
 
     std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
         {ldocs[0], {fdocs[1], fdocs[2], fdocs[3]}},
-        {ldocs[1], {fdocs[7]}},  // TODO SERVER-64483: it should be {fdocs[6], fdocs[7]}
+        {ldocs[1], {fdocs[6], fdocs[7]}},
     };
 
     insertDocuments(ldocs, fdocs);
@@ -409,9 +448,8 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_MatchingForeignPathToLocalScalar) 
          }},
     };
 
-    // TODO SERVER-64483
-    // insertDocuments(ldocs, MatchingPathToScalar_Docs);
-    // assertMatchedDocuments("lkey", "a.x", expected);
+    insertDocuments(ldocs, MatchingPathToScalar_Docs);
+    assertMatchedDocuments("lkey", "a.x", expected);
 }
 
 TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_Basic) {
@@ -430,88 +468,206 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_Basic) {
     };
 
     const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
-        {ldocs[0], {fdocs[0], fdocs[1], fdocs[2], /*SERVER-64483: fdocs[5], fdocs[6]*/}},
+        {ldocs[0], {fdocs[0], fdocs[1], fdocs[2], fdocs[5], fdocs[6]}},
     };
 
     insertDocuments(ldocs, fdocs);
     assertMatchedDocuments("a.b.c", "fkey", expected);
 }
 
-TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_Missing) {
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepForeignPath_Basic) {
     const std::vector<BSONObj> ldocs = {
-        fromjson("{_id: 0, a: {b: [ {no_c: 42}, {c: 1}      ]}}"),
-        fromjson("{_id: 1, a: {b: [ {no_c: 42}, {c: [1, 2]} ]}}"),
-        fromjson("{_id: 2, a: {b: [ {no_c: 42}, {c: [[]]}   ]}}"),
-        fromjson("{_id: 3, a: {b: [ {no_c: 42}, {no_c: 42}  ]}}"),
-        fromjson("{_id: 4, a: {b: [41, 42]}}"),
-
-        fromjson("{_id: 5, a: [ {b: {no_c: 42}}, {b: {c: 1}}      ]}"),
-        fromjson("{_id: 6, a: [ {b: {no_c: 42}}, {b: {c: [1, 2]}} ]}"),
-        fromjson("{_id: 7, a: [ {b: {no_c: 42}}, {b: {c: [[]]}}   ]}"),
-        fromjson("{_id: 8, a: [ {b: {no_c: 42}}, {b: {no_c: 42}}  ]}"),
-        fromjson("{_id: 9, a: [41, 42]}"),
-
-        fromjson("{_id: 10, a: [ {b: [ {no_c: 42}, {c: 1}     ]}, {b: {no_c: 42}} ]}"),
-        fromjson("{_id: 11, a: [ {b: [ {no_c: 42}, {no_c: 42} ]}, {b: {c: 1}}     ]}"),
-        fromjson("{_id: 12, a: [ {b: [ {no_c: 42}, {no_c: 42} ]}, {b: {c: [[]]}}  ]}"),
-
-        fromjson("{_id: 13, a: [ {no_b: 42}, {b: [ {no_c: 42}, {c: 1}    ]} ]}"),
-        fromjson("{_id: 14, a: [ {no_b: 42}, {b: [ {no_c: 42}, {c: [[]]} ]} ]}"),
-
-        fromjson("{_id: 15, no_a: 42}"),
+        fromjson("{_id: 0, key: 1}"),
+        fromjson("{_id: 1, key: 3}"),
+        fromjson("{_id: 2, key: 4}"),
+        fromjson("{_id: 3, key: 5}"),
+        fromjson("{_id: 4, key: [[2, 3], 21]}"),
+        fromjson("{_id: 5, key: [[4, 5], 21]}"),
+        fromjson("{_id: 6, key: [[5, 4], 21]}"),
     };
 
     const std::vector<BSONObj> fdocs = {
-        fromjson("{_id: 0, fkey: 1}"),
-        fromjson("{_id: 1, fkey: null}"),
-        fromjson("{_id: 2, fkey: [[]]}"),
+        fromjson("{_id: 0, a: [ {b: [ {c: 1}, {c: [2, 3]} ]}, {b: {c: [[4, 5], 4]}} ]}"),
     };
 
     const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
         {ldocs[0], {fdocs[0]}},
         {ldocs[1], {fdocs[0]}},
-        {ldocs[2], {fdocs[2]}},
-        {ldocs[3], {fdocs[1]}},
-        {ldocs[4], {fdocs[1]}},
+        {ldocs[2], {fdocs[0]}},
+        {ldocs[3], {}},
+        {ldocs[4], {fdocs[0]}},
+        {ldocs[5], {fdocs[0]}},
+        {ldocs[6], {}},
+    };
 
+    insertDocuments(ldocs, fdocs);
+    assertMatchedDocuments("key", "a.b.c", expected);
+}
+
+const std::vector<BSONObj> DocsWithScalarsOnPath = {
+    fromjson("{_id: 0, a: 42}"),
+    fromjson("{_id: 1, no_a: 42}"),
+    fromjson("{_id: 2, a: [42]}"),
+
+    fromjson("{_id: 3, a: {b: 42}}"),
+    fromjson("{_id: 4, a: {no_b: 42}}"),
+    fromjson("{_id: 5, a: {b: [42]}}"),
+
+    fromjson("{_id: 6, a: [{b: {no_c: 1}}, 1]}"),
+    fromjson("{_id: 7, a: {b: [{no_c: 1}, 1]}}"),
+};
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_ScalarsOnPath) {
+    const auto& ldocs = DocsWithScalarsOnPath;
+    const std::vector<BSONObj> fdocs = {fromjson("{_id: 0, key: null}")};
+    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0], {fdocs[0]}},
+        {ldocs[1], {fdocs[0]}},
+        {ldocs[2], {fdocs[0]}},
+        {ldocs[3], {fdocs[0]}},
+        {ldocs[4], {fdocs[0]}},
         {ldocs[5], {fdocs[0]}},
         {ldocs[6], {fdocs[0]}},
-        {ldocs[7], {fdocs[2]}},
+        {ldocs[7], {fdocs[0]}},
+    };
+
+    insertDocuments(DocsWithScalarsOnPath, fdocs);
+    assertMatchedDocuments("a.b.c", "key", expected);
+}
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepForeignPath_ScalarsOnPath) {
+    const std::vector<BSONObj> ldocs = {fromjson("{_id: 0, key: null}")};
+    const auto& fdocs = DocsWithScalarsOnPath;
+    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0],
+         {
+             fdocs[0],
+             fdocs[1],
+             // fdocs[2], is expected and different from matching in local!
+             fdocs[3],
+             fdocs[4],
+             // fdocs[5], is expected and different from matching in local!
+             fdocs[6],
+             fdocs[7],
+         }},
+    };
+
+    insertDocuments(ldocs, fdocs);
+    assertMatchedDocuments("key", "a.b.c", expected);
+}
+
+const std::vector<BSONObj> DocsWithMissingTerminal = {
+    fromjson("{_id: 0, a: {b: [ 42, {no_c: 42}, {c: 1}      ]}}"),
+    fromjson("{_id: 1, a: {b: [ 42, {no_c: 42}, {c: [1, 2]} ]}}"),
+    fromjson("{_id: 2, a: {b: [ 42, {no_c: 42}, {no_c: 42}  ]}}"),
+
+    fromjson("{_id: 3, a: [ 42, {b: {no_c: 42}}, {b: {c: 1}}      ]}"),
+    fromjson("{_id: 4, a: [ 42, {b: {no_c: 42}}, {b: {c: [1, 2]}} ]}"),
+    fromjson("{_id: 5, a: [ 42, {b: {no_c: 42}}, {b: {no_c: 42}}  ]}"),
+
+    fromjson("{_id: 6, a: [ 42, {b: [ 42, {no_c: 42}, {c: 1}     ]}, {b: {no_c: 42}} ]}"),
+    fromjson("{_id: 7, a: [ 42, {b: [ 42, {no_c: 42}, {no_c: 42} ]}, {b: {c: 1}}     ]}"),
+    fromjson("{_id: 8, a: [ 42, {b: [ 42, {no_c: 42}, {no_c: 42} ]}, {no_b: 42}      ]}"),
+};
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_MissingTerminal) {
+    const auto& ldocs = DocsWithMissingTerminal;
+    const std::vector<BSONObj> fdocs = {fromjson("{_id: 0, fkey: 1}"),
+                                        fromjson("{_id: 1, fkey: null}")};
+
+    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0], {fdocs[0]}},
+        {ldocs[1], {fdocs[0]}},
+        {ldocs[2], {fdocs[1]}},
+
+        {ldocs[3], {fdocs[0]}},
+        {ldocs[4], {fdocs[0]}},
+        {ldocs[5], {fdocs[1]}},
+
+        {ldocs[6], {fdocs[0]}},
+        {ldocs[7], {fdocs[0]}},
         {ldocs[8], {fdocs[1]}},
-        {ldocs[9], {fdocs[1]}},
-
-        {ldocs[10], {fdocs[0]}},
-        {ldocs[11], {fdocs[0]}},
-        {ldocs[12], {fdocs[2]}},
-
-        {ldocs[13], {fdocs[0]}},
-        {ldocs[14], {fdocs[2]}},
-
-        {ldocs[15], {fdocs[1]}},
     };
 
     insertDocuments(ldocs, fdocs);
     assertMatchedDocuments("a.b.c", "fkey", expected);
 }
-
-TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_EmptyArrays) {
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepForeignPath_MissingTerminal) {
     const std::vector<BSONObj> ldocs = {
-        fromjson("{_id: 0, a: {b: {c: []}}}"),
-        fromjson("{_id: 1, a: {b: [ {c: []}, {c: []}             ]}}"),
-        fromjson("{_id: 2, a: {b: [ {no_c: 42}, {c: []}, {c: []} ]}}"),
-        fromjson("{_id: 3, a: [ {b: {c: []}}, {b: {c: []}}                  ]}"),
-        fromjson("{_id: 4, a: [ {b: {no_c: 42}}, {b: {c: []}}, {b: {c: []}} ]}"),
+        fromjson("{_id: 0, key: 1}"),
+        fromjson("{_id: 1, key: null}"),
+    };
+    const auto& fdocs = DocsWithMissingTerminal;
 
-        fromjson("{_id: 5, a: {b: {c: [[]]}}}"),
-        fromjson("{_id: 6, a: {b: [ {c: []}, {c: [[]]}             ]}}"),
-        fromjson("{_id: 7, a: {b: [ {no_c: 42}, {c: []}, {c: [[]]} ]}}"),
-        fromjson("{_id: 8, a: [ {b: {c: []}}, {b: {c: [[]]}}                  ]}"),
-        fromjson("{_id: 9, a: [ {b: {no_c: 42}}, {b: {c: []}}, {b: {c: [[]]}} ]}"),
+    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0], {fdocs[0], fdocs[1], fdocs[3], fdocs[4], fdocs[6], fdocs[7]}},
+        {ldocs[1],
+         {fdocs[0],
+          fdocs[1],
+          fdocs[2],
+          fdocs[3],
+          fdocs[4],
+          fdocs[5],
+          fdocs[6],
+          fdocs[7],
+          fdocs[8]}},
     };
-    const std::vector<BSONObj> fdocs = {
-        fromjson("{_id: 0, fkey: null}"),
-        fromjson("{_id: 1, fkey: [[]]}"),
+
+    insertDocuments(ldocs, fdocs);
+    assertMatchedDocuments("key", "a.b.c", expected);
+}
+
+const std::vector<BSONObj> DocsWithMissingOnPath = {
+    fromjson("{_id: 0, no_a: {x: 42}}"),
+    fromjson("{_id: 1, a: {no_b: {x: 42}}}"),
+    fromjson("{_id: 2, a: [ 42, {no_b: {x: 42}}              ]}"),
+    fromjson("{_id: 3, a: [ 42, {no_b: {x: 42}}, {b: {c: 1}} ]}"),
+};
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_MissingOnPath) {
+    const auto& ldocs = DocsWithMissingOnPath;
+    const std::vector<BSONObj> fdocs = {fromjson("{_id: 0, fkey: null}"),
+                                        fromjson("{_id: 1, fkey: 1}")};
+
+    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0], {fdocs[0]}},
+        {ldocs[1], {fdocs[0]}},
+        {ldocs[2], {fdocs[0]}},
+        {ldocs[3], {fdocs[1]}},
     };
+
+    insertDocuments(ldocs, fdocs);
+    assertMatchedDocuments("a.b.c", "fkey", expected);
+}
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepForeignPath_MissingOnPath) {
+    const std::vector<BSONObj> ldocs = {
+        fromjson("{_id: 0, key: null}"),
+        fromjson("{_id: 1, key: 1}"),
+    };
+    const auto& fdocs = DocsWithMissingOnPath;
+
+    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0], {fdocs[0], fdocs[1], fdocs[2], fdocs[3]}},
+        {ldocs[1], {fdocs[3]}},
+    };
+
+    insertDocuments(ldocs, fdocs);
+    assertMatchedDocuments("key", "a.b.c", expected);
+}
+
+const std::vector<BSONObj> DocsWithEmptyArraysInTerminal = {
+    fromjson("{_id: 0, a: {b: {c: []}}}"),
+    fromjson("{_id: 1, a: {b: [ {c: []}, {c: []}             ]}}"),
+    fromjson("{_id: 2, a: {b: [ {no_c: 42}, {c: []}, {c: []} ]}}"),
+    fromjson("{_id: 3, a: [ {b: {c: []}}, {b: {c: []}}                  ]}"),
+    fromjson("{_id: 4, a: [ {b: {no_c: 42}}, {b: {c: []}}, {b: {c: []}} ]}"),
+
+    fromjson("{_id: 5, a: {b: {c: [[]]}}}"),
+    fromjson("{_id: 6, a: {b: [ {c: 42}, {c: [[]]}             ]}}"),
+    fromjson("{_id: 7, a: {b: [ {no_c: 42}, {c: 42}, {c: [[]]} ]}}"),
+    fromjson("{_id: 8, a: [ {b: {c: 42}}, {b: {c: [[]]}}                  ]}"),
+    fromjson("{_id: 9, a: [ {b: {no_c: 42}}, {b: {c: 42}}, {b: {c: [[]]}} ]}"),
+};
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_EmptyArrays) {
+    const auto& ldocs = DocsWithEmptyArraysInTerminal;
+    const std::vector<BSONObj> fdocs = {fromjson("{_id: 0, fkey: null}"),
+                                        fromjson("{_id: 1, fkey: [[]]}")};
 
     std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
         {ldocs[0], {fdocs[0]}},
@@ -529,6 +685,33 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepLocalPath_EmptyArrays) {
 
     insertDocuments(ldocs, fdocs);
     assertMatchedDocuments("a.b.c", "fkey", expected);
+}
+TEST_F(LookupStageBuilderTest, NestedLoopJoin_DeepForeignPath_EmptyArrays) {
+    const std::vector<BSONObj> ldocs = {
+        fromjson("{_id: 0, key: [[]]}"),
+        fromjson("{_id: 1, key: null}"),
+    };
+    const auto& fdocs = DocsWithEmptyArraysInTerminal;
+
+    std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
+        {ldocs[0],
+         {
+             fdocs[0],
+             fdocs[1],
+             fdocs[2],
+             fdocs[3],
+             fdocs[4],
+             fdocs[5],
+             fdocs[6],
+             fdocs[7],
+             fdocs[8],
+             fdocs[9],
+         }},
+        {ldocs[1], {fdocs[2], fdocs[4], fdocs[7], fdocs[9]}},
+    };
+
+    insertDocuments(ldocs, fdocs);
+    assertMatchedDocuments("key", "a.b.c", expected);
 }
 
 TEST_F(LookupStageBuilderTest, OneComponentAsPath) {

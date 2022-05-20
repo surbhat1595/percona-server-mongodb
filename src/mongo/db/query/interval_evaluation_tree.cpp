@@ -32,16 +32,16 @@
 #include "mongo/db/matcher/expression_internal_expr_comparison.h"
 #include "mongo/db/query/index_bounds_builder.h"
 
-namespace mongo {
+namespace mongo::interval_evaluation_tree {
 namespace {
-class IetPrinter {
+class Printer {
 public:
     static constexpr char kOpen = '(';
     static constexpr char kClose = ')';
 
-    IetPrinter(std::ostream& os) : _os{os} {}
+    Printer(std::ostream& os) : _os{os} {}
 
-    void operator()(const IET&, const UnionInterval& node) {
+    void operator()(const IET&, const UnionNode& node) {
         _os << kOpen << "union ";
         node.get<0>().visit(*this);
         _os << ' ';
@@ -49,7 +49,7 @@ public:
         _os << kClose;
     }
 
-    void operator()(const IET&, const IntersectInterval& node) {
+    void operator()(const IET&, const IntersectNode& node) {
         _os << kOpen << "intersect ";
         node.get<0>().visit(*this);
         _os << ' ';
@@ -57,20 +57,20 @@ public:
         _os << kClose;
     }
 
-    void operator()(const IET&, const ConstInterval& node) {
+    void operator()(const IET&, const ConstNode& node) {
         _os << kOpen << "const";
-        for (auto&& interval : node.intervals) {
+        for (auto&& interval : node.oil.intervals) {
             _os << ' ' << interval.toString(false);
         }
         _os << kClose;
     }
 
-    void operator()(const IET&, const EvalInterval& node) {
+    void operator()(const IET&, const EvalNode& node) {
         _os << kOpen << "eval " << matchTypeToString(node.matchType()) << " #"
             << node.inputParamId() << kClose;
     }
 
-    void operator()(const IET&, const ComplementInterval& node) {
+    void operator()(const IET&, const ComplementNode& node) {
         _os << kOpen << "not ";
         node.get<0>().visit(*this);
         _os << kClose;
@@ -93,8 +93,10 @@ private:
                 return "$in";
             case MatchExpression::REGEX:
                 return "$regex";
+            case MatchExpression::TYPE_OPERATOR:
+                return "$type";
             default:
-                tasserted(6334800, str::stream() << "unexpected MatchType" << matchType);
+                tasserted(6334800, str::stream() << "unexpected MatchType " << matchType);
         }
     }
 
@@ -111,11 +113,69 @@ auto extractInputParamId(const MatchExpression* expr) {
     return checked_cast<const T*>(expr)->getInputParamId();
 }
 
+/**
+ * Evaluates given Interval Evalution Tree to index bounds represented by OrderedIntervalList.
+ *
+ * This class is intended to live for a short period only as it keeps references to some external
+ * objects such as the index entry, BSONElement and inputParamIdMap and it is imperative that the
+ * referenced objects stay alive for the lifetime of the class.
+ */
+class IntervalEvalTransporter {
+public:
+    IntervalEvalTransporter(const std::vector<const MatchExpression*>& inputParamIdMap,
+                            const IndexEntry& index,
+                            const BSONElement& elt)
+        : _index{index}, _elt{elt}, _inputParamIdMap{inputParamIdMap} {}
+
+    OrderedIntervalList transport(const IntersectNode&,
+                                  OrderedIntervalList&& left,
+                                  OrderedIntervalList&& right) const {
+        IndexBoundsBuilder::intersectize(right, &left);
+        return std::move(left);
+    }
+
+    OrderedIntervalList transport(const UnionNode&,
+                                  OrderedIntervalList&& left,
+                                  OrderedIntervalList&& right) const {
+        for (auto&& interval : right.intervals) {
+            left.intervals.emplace_back(std::move(interval));
+        }
+
+        IndexBoundsBuilder::unionize(&left);
+        return std::move(left);
+    }
+
+    OrderedIntervalList transport(const ComplementNode&, OrderedIntervalList&& child) const {
+        child.complement();
+        return std::move(child);
+    }
+
+    OrderedIntervalList transport(const EvalNode& node) const {
+        tassert(6335000,
+                "InputParamId is not found",
+                static_cast<size_t>(node.inputParamId()) < _inputParamIdMap.size());
+        auto expr = _inputParamIdMap[node.inputParamId()];
+
+        OrderedIntervalList oil{};
+        IndexBoundsBuilder::BoundsTightness tightness;
+        IndexBoundsBuilder::translate(expr, _elt, _index, &oil, &tightness, nullptr);
+        return oil;
+    }
+
+    OrderedIntervalList transport(const ConstNode& node) const {
+        return node.oil;
+    }
+
+private:
+    const IndexEntry& _index;
+    const BSONElement& _elt;
+    const std::vector<const MatchExpression*>& _inputParamIdMap;
+};
 }  // namespace
 
 std::string ietToString(const IET& iet) {
     std::ostringstream oss;
-    IetPrinter printer{oss};
+    Printer printer{oss};
     iet.visit(printer);
     return oss.str();
 }
@@ -126,94 +186,95 @@ std::string ietsToString(const IndexEntry& index, const std::vector<IET>& iets) 
             index.keyPattern.nFields() == static_cast<int>(iets.size()));
 
     std::ostringstream oss;
-    IetPrinter printer{oss};
+    Printer printer{oss};
 
-    oss << IetPrinter::kOpen << "iets " << index.keyPattern;
+    oss << Printer::kOpen << "iets " << index.keyPattern;
 
     BSONObjIterator it(index.keyPattern);
     for (const auto& iet : iets) {
-        oss << ' ' << IetPrinter::kOpen << it.next() << ' ';
+        oss << ' ' << Printer::kOpen << it.next() << ' ';
         iet.visit(printer);
-        oss << IetPrinter::kClose;
+        oss << Printer::kClose;
     }
 
-    oss << IetPrinter::kClose;
+    oss << Printer::kClose;
     return oss.str();
 }
 
-void IETBuilder::intersectIntervals() {
+void Builder::addIntersect() {
     tassert(6334802, "Intersection requires two index intervals", _intervals.size() >= 2);
     auto rhs = std::move(_intervals.top());
     _intervals.pop();
     auto lhs = std::move(_intervals.top());
     _intervals.pop();
-    _intervals.push(makeInterval<IntersectInterval>(std::move(lhs), std::move(rhs)));
+    _intervals.push(makeInterval<IntersectNode>(std::move(lhs), std::move(rhs)));
 }
 
-void IETBuilder::unionIntervals() {
+void Builder::addUnion() {
     tassert(6334803, "Union requires two index intervals", _intervals.size() >= 2);
     auto rhs = std::move(_intervals.top());
     _intervals.pop();
     auto lhs = std::move(_intervals.top());
     _intervals.pop();
-    _intervals.push(makeInterval<UnionInterval>(std::move(lhs), std::move(rhs)));
+    _intervals.push(makeInterval<UnionNode>(std::move(lhs), std::move(rhs)));
 }
 
-void IETBuilder::complementInterval() {
+void Builder::addComplement() {
     tassert(6334804, "Not requires at least one index interval", _intervals.size() >= 1);
     auto child = std::move(_intervals.top());
     _intervals.pop();
-    _intervals.push(makeInterval<ComplementInterval>(std::move(child)));
+    _intervals.push(makeInterval<ComplementNode>(std::move(child)));
 }
 
-void IETBuilder::translate(const MatchExpression& expr, const OrderedIntervalList& oil) {
-    tassert(6334805, "OrderedIntervalList must be non empty", !oil.intervals.empty());
-
-    auto [inputParamId, shouldAppendConstInterval] =
-        [&expr]() -> std::pair<boost::optional<MatchExpression::InputParamId>, bool> {
+void Builder::addEval(const MatchExpression& expr, const OrderedIntervalList& oil) {
+    auto inputParamId = [&expr]() -> boost::optional<MatchExpression::InputParamId> {
         if (ComparisonMatchExpression::isComparisonMatchExpression(&expr)) {
-            return {extractInputParamId<ComparisonMatchExpression>(&expr), true};
+            return extractInputParamId<ComparisonMatchExpression>(&expr);
         }
 
         switch (expr.matchType()) {
             case MatchExpression::MATCH_IN:
-                return {extractInputParamId<InMatchExpression>(&expr), true};
-            case MatchExpression::EXISTS:
-            case MatchExpression::MOD:
-                return {boost::none, true};
-            case MatchExpression::ELEM_MATCH_VALUE:
-            case MatchExpression::NOT:
-                return {boost::none, false};
+                return extractInputParamId<InMatchExpression>(&expr);
+            case MatchExpression::TYPE_OPERATOR:
+                return extractInputParamId<TypeMatchExpression>(&expr);
             case MatchExpression::REGEX: {
                 const auto* regexExpr = checked_cast<const RegexMatchExpression*>(&expr);
                 const auto inputParamId = regexExpr->getSourceRegexInputParamId();
-                tassert(6334810, "RegexMatchExpression must be parameterized", inputParamId);
-                return {inputParamId, false};
+                tassert(6334805, "RegexMatchExpression must be parameterized", inputParamId);
+                return inputParamId;
             }
             default:
-                tasserted(6334811,
+                tasserted(6334806,
                           str::stream()
                               << "Got unexpected expression to translate: " << expr.matchType());
         };
     }();
 
     if (inputParamId) {
-        _intervals.push(makeInterval<EvalInterval>(*inputParamId, expr.matchType()));
-    } else if (shouldAppendConstInterval) {
-        _intervals.push(makeInterval<ConstInterval>(oil.intervals));
+        _intervals.push(makeInterval<EvalNode>(*inputParamId, expr.matchType()));
+    } else {
+        addConst(oil);
     }
 }
 
-void IETBuilder::appendIntervalList(const OrderedIntervalList& oil) {
-    _intervals.push(makeInterval<ConstInterval>(oil.intervals));
+void Builder::addConst(const OrderedIntervalList& oil) {
+    _intervals.push(makeInterval<ConstNode>(oil));
 }
 
-boost::optional<IET> IETBuilder::done() const {
+boost::optional<IET> Builder::done() const {
     if (_intervals.empty()) {
         return boost::none;
     }
 
-    tassert(6334812, "All intervals should be merged into one", _intervals.size() == 1);
+    tassert(6334807, "All intervals should be merged into one", _intervals.size() == 1);
     return _intervals.top();
 }
-}  // namespace mongo
+
+OrderedIntervalList evaluateIntervals(const IET& iet,
+                                      const std::vector<const MatchExpression*>& inputParamIdMap,
+                                      const BSONElement& elt,
+                                      const IndexEntry& index) {
+    IntervalEvalTransporter transporter{inputParamIdMap, index, elt};
+    return optimizer::algebra::transport(iet, transporter);
+}
+}  // namespace mongo::interval_evaluation_tree

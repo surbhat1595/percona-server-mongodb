@@ -1369,18 +1369,19 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
         auto& record = records[i];
         invariant(!record.id.isNull());
         invariant(!record_id_helpers::isReserved(record.id));
-        Timestamp ts;
-        if (timestamps[i].isNull() && _isOplog) {
-            // If the timestamp is 0, that probably means someone inserted a document directly
-            // into the oplog.  In this case, use the RecordId as the timestamp, since they are
-            // one and the same. Setting this transaction to be unordered will trigger a journal
-            // flush. Because these are direct writes into the oplog, the machinery to trigger a
-            // journal flush is bypassed. A followup oplog read will require a fresh visibility
-            // value to make progress.
-            ts = Timestamp(record.id.getLong());
+        Timestamp ts = timestamps[i];
+        if (_isOplog) {
+            // Setting this transaction to be unordered will trigger a journal flush. Because these
+            // are direct writes into the oplog, the machinery to trigger a journal flush is
+            // bypassed. A followup oplog read will require a fres value to make progress.
             opCtx->recoveryUnit()->setOrderedCommit(false);
-        } else {
-            ts = timestamps[i];
+            auto oplogKeyTs = Timestamp(record.id.getLong());
+            if (!ts.isNull()) {
+                invariant(oplogKeyTs == ts);
+            }
+            if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
+                invariant(oplogKeyTs == opCtx->recoveryUnit()->getCommitTimestamp());
+            }
         }
         if (!ts.isNull()) {
             LOGV2_DEBUG(22403, 4, "inserting record with timestamp {ts}", "ts"_attr = ts);
@@ -1950,7 +1951,8 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     // largest_key API returns the largest key in the table regardless of visibility. This ensures
     // we don't re-use RecordIds that are not visible.
     int ret = cursor->largest_key(cursor);
-    if (ret == WT_CACHE_FULL) {
+    // TODO (SERVER-64461): Remove WT_CACHE_FULL error check after WT-8767
+    if (ret == WT_CACHE_FULL || ret == WT_ROLLBACK) {
         // Force the caller to rollback its transaction if we can't make progess with eviction.
         // TODO (SERVER-63620): Convert this to a different error code that is distinguishable from
         // a true write conflict.

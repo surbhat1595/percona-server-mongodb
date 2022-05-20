@@ -128,7 +128,7 @@ public:
      * A managed Collection pointer may be returned as nullptr, which indicates a drop.
      * If the returned boolean is false then the Collection will always be nullptr.
      */
-    std::pair<bool, Collection*> lookupCollection(UUID uuid) const {
+    std::pair<bool, std::shared_ptr<Collection>> lookupCollection(UUID uuid) const {
         // Doing reverse search so we find most recent entry affecting this uuid
         auto it = std::find_if(_entries.rbegin(), _entries.rend(), [uuid](auto&& entry) {
             // Rename actions don't have UUID
@@ -139,7 +139,7 @@ public:
         });
         if (it == _entries.rend())
             return {false, nullptr};
-        return {true, it->collection.get()};
+        return {true, it->collection};
     }
 
     /**
@@ -147,14 +147,15 @@ public:
      * A managed Collection pointer may be returned as nullptr, which indicates drop or rename.
      * If the returned boolean is false then the Collection will always be nullptr.
      */
-    std::pair<bool, Collection*> lookupCollection(const NamespaceString& nss) const {
+    std::pair<bool, std::shared_ptr<Collection>> lookupCollection(
+        const NamespaceString& nss) const {
         // Doing reverse search so we find most recent entry affecting this namespace
         auto it = std::find_if(_entries.rbegin(), _entries.rend(), [&nss](auto&& entry) {
             return entry.nss == nss && isCollectionEntry(entry);
         });
         if (it == _entries.rend())
             return {false, nullptr};
-        return {true, it->collection.get()};
+        return {true, it->collection};
     }
 
     boost::optional<const ViewsForDatabase&> getViewsForDatabase(StringData dbName) const {
@@ -370,15 +371,16 @@ public:
         for (auto&& entry : entries) {
             switch (entry.action) {
                 case UncommittedCatalogUpdates::Entry::Action::kWritableCollection:
-                    writeJobs.push_back(
-                        [collection = std::move(entry.collection)](CollectionCatalog& catalog) {
-                            catalog._collections[collection->ns()] = collection;
-                            catalog._catalog[collection->uuid()] = collection;
-                            auto dbIdPair =
-                                std::make_pair(collection->tenantNs().createTenantDatabaseName(),
-                                               collection->uuid());
-                            catalog._orderedCollections[dbIdPair] = collection;
-                        });
+                    writeJobs.push_back([collection = std::move(entry.collection)](
+                                            CollectionCatalog& catalog) {
+                        catalog._collections[collection->ns()] = collection;
+                        catalog._catalog[collection->uuid()] = collection;
+                        // TODO SERVER-64608 Use tenantID from ns
+                        auto dbIdPair =
+                            std::make_pair(TenantDatabaseName(boost::none, collection->ns().db()),
+                                           collection->uuid());
+                        catalog._orderedCollections[dbIdPair] = collection;
+                    });
                     break;
                 case UncommittedCatalogUpdates::Entry::Action::kRenamedCollection:
                     writeJobs.push_back(
@@ -915,6 +917,16 @@ uint64_t CollectionCatalog::getEpoch() const {
 
 std::shared_ptr<const Collection> CollectionCatalog::lookupCollectionByUUIDForRead(
     OperationContext* opCtx, const UUID& uuid) const {
+
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+    auto [found, uncommittedPtr] = uncommittedCatalogUpdates.lookupCollection(uuid);
+    // If UUID is managed by uncommittedCatalogUpdates return the pointer which will be nullptr in
+    // case of a drop. We don't need to check UncommittedCollections as we will never share UUID for
+    // a new Collection.
+    if (found) {
+        return uncommittedPtr;
+    }
+
     if (auto coll = UncommittedCollections::getForTxn(opCtx, uuid)) {
         return coll;
     }
@@ -936,7 +948,7 @@ Collection* CollectionCatalog::lookupCollectionByUUIDForMetadataWrite(OperationC
     // case of a drop. We don't need to check UncommittedCollections as we will never share UUID for
     // a new Collection.
     if (found) {
-        return uncommittedPtr;
+        return uncommittedPtr.get();
     }
 
     if (auto coll = UncommittedCollections::getForTxn(opCtx, uuid)) {
@@ -969,7 +981,7 @@ CollectionPtr CollectionCatalog::lookupCollectionByUUID(OperationContext* opCtx,
     // case of a drop. We don't need to check UncommittedCollections as we will never share UUID for
     // a new Collection.
     if (found) {
-        return uncommittedPtr;
+        return uncommittedPtr.get();
     }
 
     if (auto coll = UncommittedCollections::getForTxn(opCtx, uuid)) {
@@ -994,8 +1006,24 @@ std::shared_ptr<Collection> CollectionCatalog::_lookupCollectionByUUID(UUID uuid
 
 std::shared_ptr<const Collection> CollectionCatalog::lookupCollectionByNamespaceForRead(
     OperationContext* opCtx, const NamespaceString& nss) const {
+
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+    auto [found, uncommittedPtr] = uncommittedCatalogUpdates.lookupCollection(nss);
+    // If uncommittedPtr is valid, found is always true. Return the pointer as the collection still
+    // exists.
+    if (uncommittedPtr) {
+        return uncommittedPtr;
+    }
+
+    // If found=true above but we don't have a Collection pointer it is a drop or rename. But first
+    // check UncommittedCollections in case we find a new collection there.
     if (auto coll = UncommittedCollections::getForTxn(opCtx, nss)) {
         return coll;
+    }
+
+    // Report the drop or rename as nothing new was created.
+    if (found) {
+        return nullptr;
     }
 
     auto it = _collections.find(nss);
@@ -1014,7 +1042,7 @@ Collection* CollectionCatalog::lookupCollectionByNamespaceForMetadataWrite(
     // If uncommittedPtr is valid, found is always true. Return the pointer as the collection still
     // exists.
     if (uncommittedPtr) {
-        return uncommittedPtr;
+        return uncommittedPtr.get();
     }
 
     // If found=true above but we don't have a Collection pointer it is a drop or rename. But first
@@ -1052,7 +1080,7 @@ CollectionPtr CollectionCatalog::lookupCollectionByNamespace(OperationContext* o
     // If uncommittedPtr is valid, found is always true. Return the pointer as the collection still
     // exists.
     if (uncommittedPtr) {
-        return uncommittedPtr;
+        return uncommittedPtr.get();
     }
 
     // If found=true above but we don't have a Collection pointer it is a drop or rename. But first
@@ -1318,10 +1346,11 @@ CollectionCatalog::ViewCatalogSet CollectionCatalog::getViewCatalogDbNames(
 void CollectionCatalog::registerCollection(OperationContext* opCtx,
                                            const UUID& uuid,
                                            std::shared_ptr<Collection> coll) {
-    auto tenantNs = coll->tenantNs();
-    auto tenantDbName = tenantNs.createTenantDatabaseName();
+    auto nss = coll->ns();
+    // TODO SERVER-64608 Use tenantId from nss
+    auto tenantDbName = TenantDatabaseName(boost::none, nss.db());
     if (NonExistenceType::kDropPending ==
-        _ensureNamespaceDoesNotExist(opCtx, tenantNs.getNss(), NamespaceType::kAll)) {
+        _ensureNamespaceDoesNotExist(opCtx, nss, NamespaceType::kAll)) {
         // If we have an uncommitted drop of this collection we can defer the creation, the register
         // will happen in the same catalog write as the drop.
         auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
@@ -1333,7 +1362,7 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
                 1,
                 "Registering collection {namespace} with UUID {uuid}",
                 "Registering collection",
-                logAttrs(tenantNs),
+                logAttrs(nss),
                 "uuid"_attr = uuid);
 
     auto dbIdPair = std::make_pair(tenantDbName, uuid);
@@ -1343,10 +1372,10 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     invariant(_orderedCollections.find(dbIdPair) == _orderedCollections.end());
 
     _catalog[uuid] = coll;
-    _collections[tenantNs.getNss()] = coll;
+    _collections[nss] = coll;
     _orderedCollections[dbIdPair] = coll;
 
-    if (!tenantNs.getNss().isOnInternalDb() && !tenantNs.getNss().isSystem()) {
+    if (!nss.isOnInternalDb() && !nss.isSystem()) {
         _stats.userCollections += 1;
         if (coll->isCapped()) {
             _stats.userCapped += 1;
@@ -1364,8 +1393,8 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     auto dbRid = ResourceId(RESOURCE_DATABASE, tenantDbName.dbName());
     addResource(dbRid, tenantDbName.dbName());
 
-    auto collRid = ResourceId(RESOURCE_COLLECTION, tenantNs.getNss().ns());
-    addResource(collRid, tenantNs.getNss().ns());
+    auto collRid = ResourceId(RESOURCE_COLLECTION, nss.ns());
+    addResource(collRid, nss.ns());
 }
 
 std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationContext* opCtx,
@@ -1374,7 +1403,8 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
 
     auto coll = std::move(_catalog[uuid]);
     auto ns = coll->ns();
-    auto tenantDbName = coll->tenantNs().createTenantDatabaseName();
+    // TODO SERVER-64608 Use tenantID from ns
+    auto tenantDbName = TenantDatabaseName(boost::none, coll->ns().db());
     auto dbIdPair = std::make_pair(tenantDbName, uuid);
 
     LOGV2_DEBUG(20281, 1, "Deregistering collection", logAttrs(ns), "uuid"_attr = uuid);

@@ -57,6 +57,7 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/shard_key_util.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/write_block_bypass.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
@@ -135,13 +136,10 @@ ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
     ReshardingDataReplicationFactory dataReplicationFactory)
     : repl::PrimaryOnlyService::TypedInstance<RecipientStateMachine>(),
       _recipientService{recipientService},
-      _metricsNew{ReshardingMetricsNew::makeInstance(
-          recipientDoc.getReshardingUUID(),
-          recipientDoc.getSourceNss(),
-          ReshardingMetricsNew::Role::kRecipient,
-          recipientDoc.getCommonReshardingMetadata().getReshardingKey().toBSON(),
-          false,
-          getGlobalServiceContext())},
+      _metricsNew{
+          ShardingDataTransformMetrics::isEnabled()
+              ? ReshardingMetricsNew::initializeFrom(recipientDoc, getGlobalServiceContext())
+              : nullptr},
       _metadata{recipientDoc.getCommonReshardingMetadata()},
       _minimumOperationDuration{Milliseconds{recipientDoc.getMinimumOperationDurationMillis()}},
       _recipientCtx{recipientDoc.getMutableState()},
@@ -722,6 +720,9 @@ void ReshardingRecipientService::RecipientStateMachine::_renameTemporaryReshardi
 
     if (!_isAlsoDonor) {
         auto opCtx = factory.makeOperationContext(&cc());
+        // Allow bypassing user write blocking. The check has already been performed on the
+        // db-primary shard's ReshardCollectionCoordinator.
+        WriteBlockBypass::get(opCtx.get()).set(true);
 
         RecoverableCriticalSectionService::get(opCtx.get())
             ->promoteRecoverableCriticalSectionToBlockAlsoReads(

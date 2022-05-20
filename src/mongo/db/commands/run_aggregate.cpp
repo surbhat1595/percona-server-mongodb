@@ -96,6 +96,10 @@ using std::stringstream;
 using std::unique_ptr;
 
 namespace {
+Counter64 allowDiskUseCounter;
+ServerStatusMetricField<Counter64> allowDiskUseMetric{"commands.aggregate.allowDiskUseTrue",
+                                                      &allowDiskUseCounter};
+
 /**
  * If a pipeline is empty (assuming that a $cursor stage hasn't been created yet), it could mean
  * that we were able to absorb all pipeline stages and pull them into a single PlanExecutor. So,
@@ -654,6 +658,7 @@ Status runAggregate(OperationContext* opCtx,
                     const BSONObj& cmdObj,
                     const PrivilegeVector& privileges,
                     rpc::ReplyBuilderInterface* result) {
+
     // Perform some validations on the LiteParsedPipeline and request before continuing with the
     // aggregation command.
     performValidationChecks(opCtx, request, liteParsedPipeline);
@@ -845,20 +850,6 @@ Status runAggregate(OperationContext* opCtx,
                                                   ChunkVersion::UNSHARDED() /* shardVersion */,
                                                   boost::none /* databaseVersion */);
 
-            bool collectionIsSharded = [opCtx, &resolvedView]() {
-                AutoGetCollection autoColl(opCtx,
-                                           resolvedView.getNamespace(),
-                                           MODE_IS,
-                                           AutoGetCollectionViewMode::kViewsPermitted);
-                return CollectionShardingState::get(opCtx, resolvedView.getNamespace())
-                    ->getCollectionDescription(opCtx)
-                    .isSharded();
-            }();
-
-            uassert(std::move(resolvedView),
-                    "Resolved views on sharded collections must be executed by mongos",
-                    !collectionIsSharded);
-
             uassert(std::move(resolvedView),
                     "Explain of a resolved view must be executed by mongos",
                     !ShardingState::get(opCtx)->enabled() || !request.getExplain());
@@ -867,7 +858,23 @@ Status runAggregate(OperationContext* opCtx,
             auto newRequest = resolvedView.asExpandedViewAggregation(request);
             auto newCmd = aggregation_request_helper::serializeToCommandObj(newRequest);
 
-            auto status = runAggregate(opCtx, origNss, newRequest, newCmd, privileges, result);
+            auto status{Status::OK()};
+            try {
+                status = runAggregate(opCtx, origNss, newRequest, newCmd, privileges, result);
+            } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
+                // Since we expect the view to be UNSHARDED, if we reached to this point there are
+                // two possibilities:
+                //   1. The shard doesn't know what its shard version/state is and needs to recover
+                //      it (in which case we throw so that the shard can run recovery)
+                //   2. The collection references by the view is actually SHARDED, in which case the
+                //      router must execute it
+                if (const auto staleInfo{ex.extraInfo<StaleConfigInfo>()}) {
+                    uassert(std::move(resolvedView),
+                            "Resolved views on sharded collections must be executed by mongos",
+                            !staleInfo->getVersionWanted());
+                }
+                throw;
+            }
 
             {
                 // Set the namespace of the curop back to the view namespace so ctx records
@@ -893,6 +900,10 @@ Status runAggregate(OperationContext* opCtx,
         expCtx->startExpressionCounters();
         auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
         expCtx->stopExpressionCounters();
+
+        if (request.getAllowDiskUse()) {
+            allowDiskUseCounter.increment();
+        }
 
         // Check that the view's collation matches the collation of any views involved in the
         // pipeline.
@@ -1006,15 +1017,28 @@ Status runAggregate(OperationContext* opCtx,
             cursorFreer.dismiss();
         }
 
+        const auto& planExplainer = pins[0].getCursor()->getExecutor()->getPlanExplainer();
         PlanSummaryStats stats;
-        pins[0].getCursor()->getExecutor()->getPlanExplainer().getSummaryStats(&stats);
+        planExplainer.getSummaryStats(&stats);
         curOp->debug().setPlanSummaryMetrics(stats);
         curOp->debug().nreturned = stats.nReturned;
+
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.
-        if (ctx && ctx->getCollection()) {
-            const CollectionPtr& coll = ctx->getCollection();
-            CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, stats);
+        if (ctx) {
+            if (const auto& coll = ctx->getCollection()) {
+                CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, stats);
+            }
+            // For SBE pushed down pipelines, we may need to report stats saved for secondary
+            // collections separately.
+            for (const auto& [secondaryNss, coll] : collections.getSecondaryCollections()) {
+                if (coll) {
+                    PlanSummaryStats secondaryStats;
+                    planExplainer.getSecondarySummaryStats(secondaryNss.toString(),
+                                                           &secondaryStats);
+                    CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, secondaryStats);
+                }
+            }
         }
     }
 

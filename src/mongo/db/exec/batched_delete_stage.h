@@ -88,13 +88,35 @@ public:
 
 private:
     /**
-     * Deletes the documents staged in _ridBuffer in a batch.
-     * Returns NEED_TIME on success.
+     * Returns NEED_YIELD when there is a write conflict. Otherwise, returns NEED_TIME when
+     * some, or all, of the documents staged in the _stagedDeletesBuffer are successfully deleted.
      */
     PlanStage::StageState _deleteBatch(WorkingSetID* out);
 
-    // Buffer of RecordId's of documents that are staged for deletion.
-    std::deque<RecordId> _ridBuffer;
+    // Tries to restore the child's state. Returns NEED_TIME if the restore succeeds, NEED_YIELD
+    // upon write conflict.
+    PlanStage::StageState _tryRestoreState(WorkingSetID* out);
+
+    // Prepares to retry draining the _stagedDeletesBuffer after a write conflict. Removes
+    // 'recordsThatNoLongerMatch' then yields.
+    PlanStage::StageState _prepareToRetryDrainAfterWCE(
+        WorkingSetID* out, const std::set<RecordId>& recordsThatNoLongerMatch);
+
+    // Metadata of a document staged for deletion.
+    struct StagedDocumentMetadata {
+        RecordId rid;
+
+        // SnapshotId associated with the document when it is staged for deletion. Must be checked
+        // before deletion to ensure the document still matches the query.
+        SnapshotId snapshotId;
+    };
+
+    // Stores documents staged for deletion.
+    std::vector<StagedDocumentMetadata> _stagedDeletesBuffer;
+
+    // Whether there are remaining docs in the buffer from a previous call to doWork() that should
+    // be drained before fetching more documents.
+    bool _drainRemainingBuffer = false;
 
     // Batch targeting parameters.
     std::unique_ptr<BatchedDeleteStageBatchParams> _batchParams;

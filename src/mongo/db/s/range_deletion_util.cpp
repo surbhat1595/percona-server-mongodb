@@ -325,8 +325,7 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                                                                          keyPattern,
                                                                          range,
                                                                          numDocsToRemovePerBatch));
-                       migrationutil::persistUpdatedNumOrphans(
-                           opCtx, BSON("_id" << migrationId), -numDeleted);
+                       migrationutil::persistUpdatedNumOrphans(opCtx, migrationId, -numDeleted);
 
                        if (MONGO_unlikely(hangAfterDoingDeletion.shouldFail())) {
                            hangAfterDoingDeletion.pauseWhileSet(opCtx);
@@ -674,27 +673,30 @@ void setOrphanCountersOnRangeDeletionTasks(OperationContext* opCtx) {
             setNumOrphansOnTask(deletionTask, numOrphansInRange);
             return true;
         });
-
-    auto replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());
-    replClientInfo.setLastOpToSystemLastOpTime(opCtx);
-    WriteConcernResult ignoreResult;
-    uassertStatusOK(waitForWriteConcern(opCtx,
-                                        replClientInfo.getLastOp(),
-                                        WriteConcerns::kMajorityWriteConcernNoTimeout,
-                                        &ignoreResult));
 }
 
 void clearOrphanCountersFromRangeDeletionTasks(OperationContext* opCtx) {
     BSONObj allDocsQuery;
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
     try {
-        store.update(opCtx,
-                     allDocsQuery,
-                     BSON("$unset" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName << "")),
-                     WriteConcerns::kMajorityWriteConcernNoTimeout);
+        // TODO (SERVER-54284) Remove writeConflictRetry loop
+        writeConflictRetry(
+            opCtx, "clearOrphanCounters", NamespaceString::kRangeDeletionNamespace.ns(), [&] {
+                store.update(
+                    opCtx,
+                    allDocsQuery,
+                    BSON("$unset" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName << "")),
+                    WriteConcerns::kLocalWriteConcern);
+            });
     } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
         // There may be no range deletion tasks, so it is possible no document is updated
     }
 }
+
+// TODO (SERVER-65015) Use granular locks for synchronizing orphan tracking
+ScopedRangeDeleterLock::ScopedRangeDeleterLock(OperationContext* opCtx)
+    : _configLock(Lock::DBLock(opCtx, NamespaceString::kConfigDb, MODE_IX)),
+      _rangeDeletionLock(
+          Lock::CollectionLock(opCtx, NamespaceString::kRangeDeletionNamespace, MODE_X)) {}
 
 }  // namespace mongo

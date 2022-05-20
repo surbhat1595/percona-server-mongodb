@@ -37,6 +37,8 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
+#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 
@@ -265,7 +267,7 @@ AutoGetCollection::AutoGetCollection(
         auto secondaryResolvedNss =
             catalog->resolveNamespaceStringOrUUID(opCtx, secondaryNssOrUUID);
         auto secondaryColl = catalog->lookupCollectionByNamespace(opCtx, secondaryResolvedNss);
-        // TODO SERVER-62926 Change collection lock RAII types to use TenantNamespace
+        // TODO SERVER-64608 Use tenantID on NamespaceString to construct DatabaseName
         const TenantDatabaseName secondaryTenantDbName(boost::none, secondaryNssOrUUID.db());
         verifyDbAndCollection(opCtx,
                               MODE_IS,
@@ -283,6 +285,8 @@ AutoGetCollection::AutoGetCollection(
         //
         // Note: sharding versioning for an operation has no concept of multiple collections.
         auto css = CollectionShardingState::getSharedForLockFreeReads(opCtx, _resolvedNss);
+        css->checkShardVersionOrThrow(opCtx);
+
         auto collDesc = css->getCollectionDescription(opCtx);
         if (collDesc.isSharded()) {
             _coll.setShardKeyPattern(collDesc.getKeyPattern());
@@ -291,14 +295,27 @@ AutoGetCollection::AutoGetCollection(
         return;
     }
 
-    _view = catalog->lookupView(opCtx, _resolvedNss);
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
-            !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted ||
-                !_view->timeseries());
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            str::stream() << "Namespace " << _resolvedNss.ns() << " is a view, not a collection",
-            !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted);
+    if ((_view = catalog->lookupView(opCtx, _resolvedNss))) {
+        uassert(ErrorCodes::CommandNotSupportedOnView,
+                str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
+                viewMode == AutoGetCollectionViewMode::kViewsPermitted || !_view->timeseries());
+
+        uassert(ErrorCodes::CommandNotSupportedOnView,
+                str::stream() << "Namespace " << _resolvedNss.ns()
+                              << " is a view, not a collection",
+                viewMode == AutoGetCollectionViewMode::kViewsPermitted);
+
+        const auto receivedShardVersion{
+            OperationShardingState::get(opCtx).getShardVersion(_resolvedNss)};
+        uassert(StaleConfigInfo(_resolvedNss,
+                                *receivedShardVersion,
+                                ChunkVersion::UNSHARDED() /* wantedVersion */,
+                                ShardingState::get(opCtx)->shardId()),
+                str::stream() << "Namespace " << _resolvedNss << " is a view and the shard version"
+                              << " attached to the request must be UNSHARDED, instead it is "
+                              << *receivedShardVersion,
+                !receivedShardVersion || *receivedShardVersion == ChunkVersion::UNSHARDED());
+    }
 }
 
 Collection* AutoGetCollection::getWritableCollection(OperationContext* opCtx,

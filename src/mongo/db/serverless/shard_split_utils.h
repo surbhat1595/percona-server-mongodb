@@ -118,6 +118,12 @@ bool shouldRemoveStateDocumentOnRecipient(OperationContext* opCtx,
                                           const ShardSplitDonorDocument& stateDocument);
 
 /**
+ * Returns StatusWith true if the validation succeeds otherwise returns different error status with
+ * the proper error causing the failure.
+ */
+Status validateRecipientNodesForShardSplit(const ShardSplitDonorDocument& stateDocument,
+                                           const repl::ReplSetConfig& localConfig);
+/**
  * Listener that receives heartbeat events and fulfills a future once it sees the expected number
  * of nodes in the recipient replica set to monitor.
  */
@@ -134,10 +140,11 @@ private:
     mutable Mutex _mutex =
         MONGO_MAKE_LATCH("ShardSplitDonorService::getRecipientAcceptSplitFuture::_mutex");
 
-    AtomicWord<bool> _fulfilled{false};
+    bool _fulfilled{false};
     const size_t _numberOfRecipient;
     std::string _recipientSetName;
     std::map<HostAndPort, std::string> _reportedSetNames;
+    bool _hasPrimary{false};
     SharedPromise<void> _promise;
 };
 

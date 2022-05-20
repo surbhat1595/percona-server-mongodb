@@ -39,6 +39,8 @@
 #include "mongo/db/pipeline/document_source_count.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/s/collmod_coordinator.h"
+#include "mongo/db/s/collmod_coordinator_pre60_compatible.h"
+#include "mongo/db/s/compact_structured_encryption_data_coordinator.h"
 #include "mongo/db/s/create_collection_coordinator.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/drop_collection_coordinator.h"
@@ -72,6 +74,10 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
             break;
         case DDLCoordinatorTypeEnum::kRenameCollection:
             return std::make_shared<RenameCollectionCoordinator>(service, std::move(initialState));
+        case DDLCoordinatorTypeEnum::kCreateCollectionPre60Compatible:
+            return std::make_shared<CreateCollectionCoordinatorPre60Compatible>(
+                service, std::move(initialState));
+            break;
         case DDLCoordinatorTypeEnum::kCreateCollection:
             return std::make_shared<CreateCollectionCoordinator>(service, std::move(initialState));
             break;
@@ -90,11 +96,19 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kCollMod:
             return std::make_shared<CollModCoordinator>(service, std::move(initialState));
             break;
+        case DDLCoordinatorTypeEnum::kCollModPre60Compatible:
+            return std::make_shared<CollModCoordinatorPre60Compatible>(service,
+                                                                       std::move(initialState));
+            break;
         case DDLCoordinatorTypeEnum::kReshardCollection:
             return std::make_shared<ReshardCollectionCoordinator>(service, std::move(initialState));
             break;
         case DDLCoordinatorTypeEnum::kReshardCollectionNoResilient:
             return std::make_shared<ReshardCollectionCoordinator_NORESILIENT>(
+                service, std::move(initialState));
+            break;
+        case DDLCoordinatorTypeEnum::kCompactStructuredEncryptionData:
+            return std::make_shared<CompactStructuredEncryptionDataCoordinator>(
                 service, std::move(initialState));
             break;
         default:
@@ -165,15 +179,16 @@ void ShardingDDLCoordinatorService::waitForCoordinatorsOfGivenTypeToComplete(
     });
 }
 
-void ShardingDDLCoordinatorService::waitForOngoingCoordinatorsToFinish(OperationContext* opCtx) {
+void ShardingDDLCoordinatorService::waitForOngoingCoordinatorsToFinish(
+    OperationContext* opCtx, std::function<bool(const ShardingDDLCoordinator&)> pred) {
     std::vector<SharedSemiFuture<void>> futuresToWait;
 
     const auto instances = getAllInstances(opCtx);
     for (const auto& instance : instances) {
         auto typedInstance = checked_pointer_cast<ShardingDDLCoordinator>(instance);
-        // TODO: SERVER-63724 Wait only for coordinators that don't have the user-write-blocking
-        // bypass enabled.
-        futuresToWait.emplace_back(typedInstance->getCompletionFuture());
+        if (pred(*typedInstance)) {
+            futuresToWait.emplace_back(typedInstance->getCompletionFuture());
+        }
     }
 
     for (auto&& future : futuresToWait) {

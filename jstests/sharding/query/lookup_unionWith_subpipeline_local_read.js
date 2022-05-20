@@ -12,6 +12,7 @@ load('jstests/libs/profiler.js');             // For various profiler helpers.
 load('jstests/aggregation/extras/utils.js');  // For arrayEq()
 load("jstests/libs/fail_point_util.js");      // for configureFailPoint.
 load("jstests/libs/log.js");                  // For findMatchingLogLines.
+load("jstests/libs/sbe_util.js");             // For checkSBEEnabled.
 
 const st = new ShardingTest({name: jsTestName(), mongos: 1, shards: 2, rs: {nodes: 2}});
 
@@ -500,11 +501,17 @@ assertAggResultAndRouting(pipeline, expectedRes, {comment: "lookup_foreign_does_
     // The $lookup is not executed in parallel because mongos defaults to believing the foreign
     // namespace is unsharded.
     toplevelExec: [1, 0],
-    // The node executing the $lookup believes it has stale information about the foreign collection
-    // and needs to target shards to properly resolve it. Then, it can use the local read path for
-    // each subpipeline query.
+    // The node executing the $lookup believes it has stale information about the foreign
+    // collection and needs to target shards to properly resolve it. Then, it can use the local
+    // read path for each subpipeline query.
     subPipelineLocal: [4, 0],
-    subPipelineRemote: [1, 0],
+    // If the $lookup is pushed down, we will try to take a lock on the foreign collection to check
+    // foreign collection's sharding state. Given that the stale shard version is resolved earlier
+    // and we've figured out that the foreign collection is unsharded, we no longer need to target a
+    // shard and instead can read locally. As such, we will not generate an entry in the profiler
+    // for querying the foreign collection.
+    subPipelineRemote: checkSBEEnabled(mongosDB, ["featureFlagSBELookupPushdown"]) ? [0, 0]
+                                                                                   : [1, 0],
 });
 
 //

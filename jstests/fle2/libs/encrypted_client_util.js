@@ -1,6 +1,11 @@
+load("jstests/concurrency/fsm_workload_helpers/server_types.js");  // For isMongos.
+
 /**
  * Create a FLE client that has an unencrypted and encrypted client to the same database
  */
+
+const kSafeContentField = "__safeContent__";
+
 class EncryptedClient {
     /**
      * Create a new encrypted FLE connection to the target server with a local KMS
@@ -160,6 +165,17 @@ class EncryptedClient {
         }
     }
 
+    assertWriteCommandReplyFields(response) {
+        if (isMongod(this._edb)) {
+            // These fields are replica set specific
+            assert(response.hasOwnProperty("electionId"));
+            assert(response.hasOwnProperty("opTime"));
+        }
+
+        assert(response.hasOwnProperty("$clusterTime"));
+        assert(response.hasOwnProperty("operationTime"));
+    }
+
     /**
      * Take a snapshot of a collection sorted by _id, run a operation, take a second snapshot.
      *
@@ -224,6 +240,44 @@ class EncryptedClient {
 
         assert.docEq(onDiskDocs, docs);
     }
+
+    assertStateCollectionsAfterCompact(collName) {
+        const suffixes = ['esc', 'ecc', 'ecoc'];
+        const prefix = "fle2." + collName + ".";
+
+        // assert the state collections still exist
+        suffixes.forEach((suffix) => {
+            let coll = prefix + suffix;
+            let cis = this._edb.getCollectionInfos({"name": coll});
+            assert.eq(cis.length, 1, coll + " does not exist after compact");
+        });
+
+        // assert the renamed ecoc collection does not exist
+        let coll = prefix + "ecoc.compact";
+        let cis = this._edb.getCollectionInfos({"name": coll});
+        assert.eq(cis.length, 0, coll + " still exists after compact");
+    }
+}
+
+function runEncryptedTest(db, dbName, collName, encryptedFields, runTestsCallback) {
+    const dbTest = db.getSiblingDB(dbName);
+    dbTest.dropDatabase();
+
+    // Delete existing keyIds from encryptedFields to force
+    // EncryptedClient to generate new keys on the new DB.
+    for (let field of encryptedFields.fields) {
+        if (field.hasOwnProperty("keyId")) {
+            delete field.keyId;
+        }
+    }
+
+    let client = new EncryptedClient(db.getMongo(), dbName);
+
+    assert.commandWorked(
+        client.createEncryptionCollection(collName, {encryptedFields: encryptedFields}));
+
+    let edb = client.getDB();
+    runTestsCallback(edb, client);
 }
 
 // TODO - remove this when the feature flag is removed
@@ -263,4 +317,16 @@ function assertIsIndexedEncryptedField(value) {
     assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
     assert(value.hex().startsWith("07"),
            "Expected subtype 7 but found the wrong type: " + value.hex());
+}
+
+/**
+ * Assert a field is an unindexed encrypted field
+ *
+ * @param {BinData} value bindata value
+ */
+function assertIsUnindexedEncryptedField(value) {
+    assert(value instanceof BinData, "Expected BinData, found: " + value);
+    assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
+    assert(value.hex().startsWith("06"),
+           "Expected subtype 6 but found the wrong type: " + value.hex());
 }

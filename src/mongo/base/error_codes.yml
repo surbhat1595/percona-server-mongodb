@@ -98,7 +98,7 @@ error_codes:
     - {code: 62,name: OplogOperationUnsupported}
     - {code: 63,name: StaleShardVersion,categories: [StaleShardVersionError,NeedRetargettingError]}
     - {code: 64,name: WriteConcernFailed,categories: [WriteConcernError]}
-    - {code: 65,name: MultipleErrorsOccurred}
+    - {code: 65,name: MultipleErrorsOccurred, extra: MultipleErrorsOccurredInfo}
     - {code: 66,name: ImmutableField}
     - {code: 67,name: CannotCreateIndex}
     - {code: 68,name: IndexAlreadyExists}
@@ -475,6 +475,8 @@ error_codes:
 
     - {code: 367, name: FLECompactionPlaceholder}
     - {code: 368, name: FLEStateCollectionContention}
+    - {code: 369, name: FLETransactionAbort}
+    - {code: 370, name: CannotDropShardKeyIndex}
 
     # Error codes 4000-8999 are reserved.
 

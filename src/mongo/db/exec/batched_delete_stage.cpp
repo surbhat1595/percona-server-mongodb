@@ -51,6 +51,43 @@
 
 namespace mongo {
 
+MONGO_FAIL_POINT_DEFINE(throwWriteConflictExceptionInBatchedDeleteStage);
+
+namespace {
+void incrementSSSMetricNoOverflow(AtomicWord<long long>& metric, long long value) {
+    const int64_t MAX = 1ULL << 60;
+
+    if (metric.loadRelaxed() > MAX) {
+        metric.store(value);
+    } else {
+        metric.fetchAndAdd(value);
+    }
+}
+
+// Returns true to if the Record exists and its data still matches the query. Returns false
+// otherwise.
+bool ensureStillMatches(OperationContext* opCtx,
+                        const CollectionPtr& collection,
+                        RecordId rid,
+                        SnapshotId snapshotId,
+                        const CanonicalQuery* cq) {
+
+    if (opCtx->recoveryUnit()->getSnapshotId() != snapshotId) {
+        Snapshotted<BSONObj> docData;
+        bool docExists = collection->findDoc(opCtx, rid, &docData);
+        if (!docExists) {
+            return false;
+        }
+
+        // Make sure the re-fetched doc still matches the predicate.
+        if (cq && !cq->root()->matchesBSON(docData.value(), nullptr)) {
+            // No longer matches.
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
 
 /**
  * Reports globally-aggregated batch stats.
@@ -79,15 +116,6 @@ struct BatchedDeletesSSS : ServerStatusSection {
     AtomicWord<long long> timeMillis;
 } batchedDeletesSSS;
 
-void incrementSSSMetricNoOverflow(AtomicWord<long long>& metric, long long value) {
-    const int64_t MAX = 1ULL << 60;
-
-    if (metric.loadRelaxed() > MAX) {
-        metric.store(value);
-    } else {
-        metric.fetchAndAdd(value);
-    }
-}
 
 BatchedDeleteStage::BatchedDeleteStage(ExpressionContext* expCtx,
                                        std::unique_ptr<DeleteStageParams> params,
@@ -98,7 +126,7 @@ BatchedDeleteStage::BatchedDeleteStage(ExpressionContext* expCtx,
     : DeleteStage::DeleteStage(
           kStageType.rawData(), expCtx, std::move(params), ws, collection, child),
       _batchParams(std::move(batchParams)) {
-    uassert(6303800,
+    tassert(6303800,
             "batched deletions only support multi-document deletions (multi: true)",
             _params->isMulti);
     tassert(6303801,
@@ -130,122 +158,180 @@ BatchedDeleteStage::BatchedDeleteStage(ExpressionContext* expCtx,
 BatchedDeleteStage::~BatchedDeleteStage() {}
 
 PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
+    tassert(6389900, "Expected documents for batched deletion", _stagedDeletesBuffer.size() != 0);
     try {
         child()->saveState();
     } catch (const WriteConflictException&) {
         std::terminate();
     }
 
-    // TODO (SERVER-63047): use a single write timestamp by grouping oplog entries.
-    opCtx()->recoveryUnit()->ignoreAllMultiTimestampConstraints();
+
+    std::set<RecordId> recordsThatNoLongerMatch;
+    Timer batchTimer(opCtx()->getServiceContext()->getTickSource());
 
     unsigned int docsDeleted = 0;
-    const auto startOfBatchTimestampMillis = Date_t::now().toMillisSinceEpoch();
+    unsigned int batchIdx = 0;
 
     try {
-        WriteUnitOfWork wuow(opCtx());
+        // Start a WUOW with 'groupOplogEntries' which groups a delete batch into a single timestamp
+        // and oplog entry
+        WriteUnitOfWork wuow(opCtx(), true /* groupOplogEntries */);
+        for (; batchIdx < _stagedDeletesBuffer.size(); ++batchIdx) {
+            if (MONGO_unlikely(throwWriteConflictExceptionInBatchedDeleteStage.shouldFail())) {
+                throw WriteConflictException();
+            }
 
-        while (!_ridBuffer.empty()) {
-            const auto rid = _ridBuffer.front();
-            _ridBuffer.pop_front();
+            auto& stagedDocument = _stagedDeletesBuffer.at(batchIdx);
 
-            // TODO (SERVER-63863): skip the record if it does not exist any longer.
+            // The PlanExecutor YieldPolicy may change snapshots between calls to 'doWork()'.
+            // Different documents may have different snapshots.
+            bool docStillMatches = ensureStillMatches(opCtx(),
+                                                      collection(),
+                                                      stagedDocument.rid,
+                                                      stagedDocument.snapshotId,
+                                                      _params->canonicalQuery);
+            if (docStillMatches) {
+                collection()->deleteDocument(opCtx(),
+                                             _params->stmtId,
+                                             stagedDocument.rid,
+                                             _params->opDebug,
+                                             _params->fromMigrate,
+                                             false,
+                                             _params->returnDeleted
+                                                 ? Collection::StoreDeletedDoc::On
+                                                 : Collection::StoreDeletedDoc::Off);
 
-            collection()->deleteDocument(opCtx(),
-                                         _params->stmtId,
-                                         rid,
-                                         _params->opDebug,
-                                         _params->fromMigrate,
-                                         false,
-                                         _params->returnDeleted ? Collection::StoreDeletedDoc::On
-                                                                : Collection::StoreDeletedDoc::Off);
-            docsDeleted++;
+                docsDeleted++;
+            } else {
+                recordsThatNoLongerMatch.insert(stagedDocument.rid);
+            }
+
+            const Milliseconds elapsedMillis(batchTimer.millis());
+            if (_batchParams->targetBatchTimeMS != Milliseconds(0) &&
+                elapsedMillis >= _batchParams->targetBatchTimeMS) {
+                // Met targetBatchTimeMS after evaluating _ridSnapShotBuffer[batchIdx].
+                break;
+            }
         }
 
         wuow.commit();
     } catch (const WriteConflictException&) {
-        // TODO (SERVER-63863): retriability on write conflict exception.
+        return _prepareToRetryDrainAfterWCE(out, recordsThatNoLongerMatch);
     }
 
-    const auto endOfBatchTimestampMillis = Date_t::now().toMillisSinceEpoch();
     incrementSSSMetricNoOverflow(batchedDeletesSSS.docs, docsDeleted);
     incrementSSSMetricNoOverflow(batchedDeletesSSS.batches, 1);
-    incrementSSSMetricNoOverflow(batchedDeletesSSS.timeMillis,
-                                 endOfBatchTimestampMillis - startOfBatchTimestampMillis);
+    incrementSSSMetricNoOverflow(batchedDeletesSSS.timeMillis, batchTimer.millis());
     // TODO (SERVER-63039): report batch size
-
     _specificStats.docsDeleted += docsDeleted;
 
-    try {
-        child()->restoreState(&collection());
-    } catch (const WriteConflictException&) {
-        // Note we don't need to retry anything in this case since the delete already was committed.
-        *out = WorkingSet::INVALID_ID;
-        return NEED_YIELD;
+    if (batchIdx < _stagedDeletesBuffer.size() - 1) {
+        // _stagedDeletesBuffer[batchIdx] is the last document evaluated in this batch - and it is
+        // not the last element in the buffer. targetBatchTimeMS was exceeded. Remove all records
+        // that have been evaluated (deleted or skipped because they no longer match the query) from
+        // the buffer before retrying.
+        _stagedDeletesBuffer.erase(_stagedDeletesBuffer.begin(),
+                                   _stagedDeletesBuffer.begin() + batchIdx + 1);
+
+        _drainRemainingBuffer = true;
+        return _tryRestoreState(out);
     }
 
-    return NEED_TIME;
+    // The elements in the buffer are preserved during document deletion so deletes can be retried
+    // in case of a write conflict. No write conflict occurred, update the buffer that all documents
+    // are deleted.
+    _stagedDeletesBuffer.clear();
+    _drainRemainingBuffer = false;
+
+    return _tryRestoreState(out);
 }
 
 PlanStage::StageState BatchedDeleteStage::doWork(WorkingSetID* out) {
-    // TODO (SERVER-63863): handle retries due to a previous write conflict exception.
-    WorkingSetID id;
-    auto status = child()->work(&id);
+    if (!_drainRemainingBuffer) {
+        WorkingSetID id;
+        auto status = child()->work(&id);
 
-    switch (status) {
-        case PlanStage::ADVANCED:
-            break;
+        switch (status) {
+            case PlanStage::ADVANCED:
+                break;
 
-        case PlanStage::NEED_TIME:
-            return status;
+            case PlanStage::NEED_TIME:
+                return status;
 
-        case PlanStage::NEED_YIELD:
-            *out = id;
-            return status;
+            case PlanStage::NEED_YIELD:
+                *out = id;
+                return status;
 
-        case PlanStage::IS_EOF:
-            if (!_ridBuffer.empty()) {
-                // Drain the outstanding deletions.
-                auto ret = _deleteBatch(out);
-                if (ret != NEED_TIME) {
-                    return ret;
+            case PlanStage::IS_EOF:
+                if (!_stagedDeletesBuffer.empty()) {
+                    // Drain the outstanding deletions.
+                    auto ret = _deleteBatch(out);
+                    if (ret != NEED_TIME || (ret == NEED_TIME && _drainRemainingBuffer == true)) {
+                        // Only return NEED_TIME if there is more to drain in the buffer. Otherwise,
+                        // there is no more to fetch and NEED_TIME signals all documents have been
+                        // sucessfully deleted.
+                        return ret;
+                    }
                 }
-            }
-            return status;
+                return status;
 
-        default:
-            MONGO_UNREACHABLE;
-    }
+            default:
+                MONGO_UNREACHABLE;
+        }
 
-    // We advanced, or are retrying, and id is set to the WSM to work on.
-    WorkingSetMember* member = _ws->get(id);
+        WorkingSetMember* member = _ws->get(id);
 
-    // We want to free this member when we return, unless we need to retry deleting it.
-    ScopeGuard memberFreer([&] { _ws->free(id); });
+        // Free the WSM at the end of this scope. Retries will re-fetch by the RecordId and will not
+        // need to keep the WSM around
+        ScopeGuard memberFreer([&] { _ws->free(id); });
 
-    invariant(member->hasRecordId());
-    RecordId recordId = member->recordId;
-    // Deletes can't have projections. This means that covering analysis will always add
-    // a fetch. We should always get fetched data, and never just key data.
-    invariant(member->hasObj());
+        invariant(member->hasRecordId());
+        RecordId recordId = member->recordId;
 
-    // Ensure that the BSONObj underlying the WSM is owned because saveState() is
-    // allowed to free the memory the BSONObj points to. The BSONObj will be needed
-    // later when it is passed to Collection::deleteDocument(). Note that the call to
-    // makeObjOwnedIfNeeded() will leave the WSM in the RID_AND_OBJ state in case we need to retry
-    // deleting it.
-    member->makeObjOwnedIfNeeded();
+        // Deletes can't have projections. This means that covering analysis will always add
+        // a fetch. We should always get fetched data, and never just key data.
+        invariant(member->hasObj());
 
-    // Do the write, unless this is an explain.
-    if (!_params->isExplain) {
-        _ridBuffer.emplace_back(recordId);
-        if (_batchParams->targetBatchDocs &&
-            _ridBuffer.size() >= static_cast<unsigned long long>(_batchParams->targetBatchDocs)) {
-            return _deleteBatch(out);
+        if (!_params->isExplain) {
+            _stagedDeletesBuffer.push_back({recordId, member->doc.snapshotId()});
         }
     }
 
+    if (!_params->isExplain &&
+        (_drainRemainingBuffer ||
+         (_batchParams->targetBatchDocs &&
+          _stagedDeletesBuffer.size() >=
+              static_cast<unsigned long long>(_batchParams->targetBatchDocs)))) {
+        return _deleteBatch(out);
+    }
+
     return PlanStage::NEED_TIME;
+}
+
+PlanStage::StageState BatchedDeleteStage::_tryRestoreState(WorkingSetID* out) {
+    try {
+        child()->restoreState(&collection());
+    } catch (const WriteConflictException&) {
+        *out = WorkingSet::INVALID_ID;
+        return NEED_YIELD;
+    }
+    return NEED_TIME;
+}
+
+PlanStage::StageState BatchedDeleteStage::_prepareToRetryDrainAfterWCE(
+    WorkingSetID* out, const std::set<RecordId>& recordsThatNoLongerMatch) {
+    // Remove records that no longer match the query before retrying.
+    _stagedDeletesBuffer.erase(std::remove_if(_stagedDeletesBuffer.begin(),
+                                              _stagedDeletesBuffer.end(),
+                                              [&](const auto& stagedDelete) {
+                                                  return recordsThatNoLongerMatch.find(
+                                                             stagedDelete.rid) !=
+                                                      recordsThatNoLongerMatch.end();
+                                              }),
+                               _stagedDeletesBuffer.end());
+    *out = WorkingSet::INVALID_ID;
+    _drainRemainingBuffer = true;
+    return NEED_YIELD;
 }
 
 }  // namespace mongo

@@ -1035,7 +1035,19 @@ var authCommandsLib = {
               },
           ]
         },
-
+        {
+          testname: "clusterAggregate",
+          command: {clusterAggregate: "foo", pipeline: [], cursor: {}},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
+          ]
+        },
         {
           testname: "aggregate_readonly",
           command: {aggregate: "foo", pipeline: [], cursor: {}},
@@ -4164,6 +4176,18 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "getClusterParameter",
+          command: {getClusterParameter: "testIntClusterParameter"},
+          skipTest: (conn) => !TestData.setParameters.featureFlagClusterWideConfig,
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: {clusterManager: 1, clusterAdmin: 1, root: 1, __system: 1},
+              privileges: [{resource: {cluster: true}, actions: ["getClusterParameter"]}]
+            }
+          ]
+        },
+        {
           testname: "getCmdLineOpts",
           command: {getCmdLineOpts: 1},
           testcases: [
@@ -4248,6 +4272,19 @@ var authCommandsLib = {
               },
               {runOnDb: firstDbName, roles: {}},
               {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "clusterGetMore",
+          command: {clusterGetMore: NumberLong(1), collection: "foo"},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true,
+              },
           ]
         },
         {
@@ -5627,10 +5664,14 @@ var authCommandsLib = {
               }
           ]
         },
-        {
+        { 
           testname: "setClusterParameter",
-          command: {setClusterParameter: {param: true}},
-          skipTest: (conn) => !TestData.setParameters.featureFlagClusterWideConfig,
+          command: {setClusterParameter: {testIntClusterParameterParam: {intData: 17}}},
+          skipTest: (conn) => {
+              const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
+              const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
+              return !TestData.setParameters.featureFlagClusterWideConfig || isStandalone;
+          },
           testcases: [
               {
                 runOnDb: adminDbName,

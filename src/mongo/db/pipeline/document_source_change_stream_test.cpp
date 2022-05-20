@@ -45,6 +45,7 @@
 #include "mongo/db/matcher/schema/expression_internal_schema_object_match.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/change_stream_rewrite_helpers.h"
+#include "mongo/db/pipeline/change_stream_test_helpers.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
@@ -73,6 +74,7 @@
 
 namespace mongo {
 namespace {
+using namespace change_stream_test_helper;
 
 using boost::intrusive_ptr;
 using repl::OplogEntry;
@@ -85,13 +87,6 @@ using D = Document;
 using V = Value;
 
 using DSChangeStream = DocumentSourceChangeStream;
-
-static const Timestamp kDefaultTs(100, 1);
-static const repl::OpTime kDefaultOpTime(kDefaultTs, 1);
-static const NamespaceString nss("unittests.change_stream");
-static const BSONObj kDefaultSpec = fromjson("{$changeStream: {}}");
-static const BSONObj kShowExpandedEventsSpec =
-    fromjson("{$changeStream: {showExpandedEvents: true}}");
 
 class ChangeStreamStageTestNoSetup : public AggregationContextFixture {
 public:
@@ -296,21 +291,6 @@ public:
                               opTime);               // opTime
     }
 
-    Document makeResumeToken(Timestamp ts,
-                             ImplicitValue uuid = Value(),
-                             ImplicitValue docKey = Value(),
-                             ResumeTokenData::FromInvalidate fromInvalidate =
-                                 ResumeTokenData::FromInvalidate::kNotFromInvalidate,
-                             size_t txnOpIndex = 0) {
-        ResumeTokenData tokenData;
-        tokenData.clusterTime = ts;
-        tokenData.eventIdentifier = docKey;
-        tokenData.fromInvalidate = fromInvalidate;
-        tokenData.txnOpIndex = txnOpIndex;
-        if (!uuid.missing())
-            tokenData.uuid = uuid.getUuid();
-        return ResumeToken(tokenData).toDocument();
-    }
 
     /**
      * Helper for running an applyOps through the pipeline, and getting all of the results.
@@ -344,62 +324,6 @@ public:
             next = transform->getNext();
         }
         return res;
-    }
-
-
-    /**
-     * This method is required to avoid a static initialization fiasco resulting from calling
-     * UUID::gen() in file static scope.
-     */
-    static const UUID& testUuid() {
-        static const UUID* uuid_gen = new UUID(UUID::gen());
-        return *uuid_gen;
-    }
-
-    static LogicalSessionFromClient testLsid() {
-        // Required to avoid static initialization fiasco.
-        static const UUID* uuid = new UUID(UUID::gen());
-        LogicalSessionFromClient lsid{};
-        lsid.setId(*uuid);
-        return lsid;
-    }
-
-    /**
-     * Creates an OplogEntry with given parameters and preset defaults for this test suite.
-     */
-    static repl::OplogEntry makeOplogEntry(
-        repl::OpTypeEnum opType,
-        NamespaceString nss,
-        BSONObj object,
-        boost::optional<UUID> uuid = testUuid(),
-        boost::optional<bool> fromMigrate = boost::none,
-        boost::optional<BSONObj> object2 = boost::none,
-        boost::optional<repl::OpTime> opTime = boost::none,
-        OperationSessionInfo sessionInfo = {},
-        boost::optional<repl::OpTime> prevOpTime = {},
-        boost::optional<repl::OpTime> preImageOpTime = boost::none) {
-        long long hash = 1LL;
-        return {
-            repl::DurableOplogEntry(opTime ? *opTime : kDefaultOpTime,  // optime
-                                    hash,                               // hash
-                                    opType,                             // opType
-                                    boost::none,                        // tenant id
-                                    nss,                                // namespace
-                                    uuid,                               // uuid
-                                    fromMigrate,                        // fromMigrate
-                                    repl::OplogEntry::kOplogVersion,    // version
-                                    object,                             // o
-                                    object2,                            // o2
-                                    sessionInfo,                        // sessionInfo
-                                    boost::none,                        // upsert
-                                    Date_t(),                           // wall clock time
-                                    {},                                 // statement ids
-                                    prevOpTime,  // optime of previous write within same transaction
-                                    preImageOpTime,  // pre-image optime
-                                    boost::none,     // post-image optime
-                                    boost::none,     // ShardId of resharding recipient
-                                    boost::none,     // _id
-                                    boost::none)};   // needsRetryImage
     }
 
     /**
@@ -567,8 +491,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectBothStartAtOperationTimeAndResumeAfter
     auto expCtx = getExpCtx();
 
     // Need to put the collection in the collection catalog so the resume token is valid.
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(expCtx->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(expCtx->opCtx, testUuid(), std::move(collection));
     });
@@ -590,8 +513,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectBothStartAfterAndResumeAfterOptions) {
     auto opCtx = expCtx->opCtx;
 
     // Need to put the collection in the collection catalog so the resume token is validcollection
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(opCtx, testUuid(), std::move(collection));
     });
@@ -614,8 +536,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectBothStartAtOperationTimeAndStartAfterO
     auto opCtx = expCtx->opCtx;
 
     // Need to put the collection in the collection catalog so the resume token is valid.
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(opCtx, testUuid(), std::move(collection));
     });
@@ -637,8 +558,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectResumeAfterWithResumeTokenMissingUUID)
     auto opCtx = expCtx->opCtx;
 
     // Need to put the collection in the collection catalog so the resume token is valid.
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(opCtx, testUuid(), std::move(collection));
     });
@@ -2641,8 +2561,7 @@ TEST_F(ChangeStreamStageTest, DocumentKeyShouldIncludeShardKeyFromResumeTokenWhe
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -2684,8 +2603,7 @@ TEST_F(ChangeStreamStageTest, DocumentKeyShouldPrioritizeO2FieldOverDocumentKeyC
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -2728,8 +2646,7 @@ TEST_F(ChangeStreamStageTest, DocumentKeyShouldNotIncludeShardKeyFieldsIfNotPres
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -2767,8 +2684,7 @@ TEST_F(ChangeStreamStageTest, ResumeAfterFailsIfResumeTokenDoesNotContainUUID) {
     const Timestamp ts(3, 45);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -2823,8 +2739,7 @@ TEST_F(ChangeStreamStageTest, ResumeAfterWithTokenFromInvalidateShouldFail) {
     auto expCtx = getExpCtx();
 
     // Need to put the collection in the collection catalog so the resume token is valid.
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(expCtx->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, testUuid(), std::move(collection));
     });
@@ -3555,8 +3470,7 @@ TEST_F(ChangeStreamStageDBTest,
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -3593,8 +3507,7 @@ TEST_F(ChangeStreamStageDBTest, DocumentKeyShouldPrioritizeO2FieldOverDocumentKe
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -3632,8 +3545,7 @@ TEST_F(ChangeStreamStageDBTest, DocumentKeyShouldNotIncludeShardKeyFieldsIfNotPr
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -3669,8 +3581,7 @@ TEST_F(ChangeStreamStageDBTest, DocumentKeyShouldNotIncludeShardKeyIfResumeToken
     const auto opTime = repl::OpTime(ts, term);
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -3705,8 +3616,7 @@ TEST_F(ChangeStreamStageDBTest, ResumeAfterWithTokenFromInvalidateShouldFail) {
     auto expCtx = getExpCtx();
 
     // Need to put the collection in the collection catalog so the resume token is valid.
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(expCtx->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, testUuid(), std::move(collection));
     });
@@ -3729,8 +3639,7 @@ TEST_F(ChangeStreamStageDBTest, ResumeAfterWithTokenFromInvalidateShouldFail) {
 TEST_F(ChangeStreamStageDBTest, ResumeAfterWithTokenFromDropDatabase) {
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });
@@ -3759,8 +3668,7 @@ TEST_F(ChangeStreamStageDBTest, ResumeAfterWithTokenFromDropDatabase) {
 TEST_F(ChangeStreamStageDBTest, StartAfterSucceedsEvenIfResumeTokenDoesNotContainUUID) {
     const auto uuid = testUuid();
 
-    std::shared_ptr<Collection> collection =
-        std::make_shared<CollectionMock>(TenantNamespace(boost::none, nss));
+    std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
     CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(getExpCtx()->opCtx, uuid, std::move(collection));
     });

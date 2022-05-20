@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/sorter/sorter_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
@@ -386,6 +387,15 @@ public:
     // Together, add() and done() represent the input stream.
     virtual void done() = 0;
 
+    // Prepare the sorter to receive a new stream of input.
+    //
+    // The new input stream is treated as unrelated to the old one: new elements are only compared
+    // against each other, not against any elements of the old input stream.
+    //
+    // However, any SortOptions::limit applies to the entire sorter, not to each input stream
+    // separately.
+    virtual void restart() = 0;
+
     enum class State {
         // An output document is not available yet, but this may change as more input arrives.
         kWait,
@@ -404,7 +414,7 @@ public:
     virtual std::pair<Key, Value> next() = 0;
 
     // Serialize the bound for explain output
-    virtual long long serializeBound() const = 0;
+    virtual Document serializeBound() const = 0;
 
     virtual size_t numSpills() const = 0;
 
@@ -440,6 +450,9 @@ public:
     // And also, 'Comparator' compares Keys, but std::priority_queue calls its comparator
     // on whole elements.
     struct Greater {
+        // Prevent default construction.
+        explicit Greater(Comparator const* compare) : compare(compare) {}
+
         bool operator()(const std::pair<Key, Value>& p1, const std::pair<Key, Value>& p2) const {
             return (*compare)(p1.first, p2.first) > 0;
         }
@@ -467,6 +480,8 @@ public:
         _done = true;
     }
 
+    void restart();
+
     // Together, state() and next() represent the output stream.
     // See BoundedSorter::State for the meaning of each case.
     using State = typename BoundedSorterInterface<Key, Value>::State;
@@ -478,8 +493,8 @@ public:
     std::pair<Key, Value> next();
 
     // Serialize the bound for explain output
-    long long serializeBound() const {
-        return makeBound.serialize();
+    Document serializeBound() const {
+        return {makeBound.serialize()};
     };
 
     size_t numSpills() const {

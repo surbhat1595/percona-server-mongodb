@@ -83,6 +83,7 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/fcv_op_observer.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
@@ -758,6 +759,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         }
 
         storageEngine->startTimestampMonitor();
+
+        startFLECrud(serviceContext);
     }
 
     startClientCursorMonitor();
@@ -801,15 +804,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() ==
         repl::ReplicationCoordinator::modeNone;
     if (!isStandalone) {
-        try {
-            PeriodicChangeStreamExpiredPreImagesRemover::get(serviceContext)->start();
-        } catch (ExceptionFor<ErrorCodes::PeriodicJobIsStopped>&) {
-            LOGV2_WARNING(5869107, "Not starting periodic jobs as shutdown is in progress");
-            // Shutdown has already started before initialization is complete. Wait for the
-            // shutdown task to complete and return.
-            MONGO_IDLE_THREAD_BLOCK;
-            return waitForShutdown();
-        }
+        startChangeStreamExpiredPreImagesRemover(serviceContext);
     }
 
     // Set up the logical session cache
@@ -1250,6 +1245,9 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         LOGV2_OPTIONS(4695103, {LogComponent::kReplication}, "Exiting quiesce mode for shutdown");
     }
 
+    LOGV2_OPTIONS(6371601, {LogComponent::kDefault}, "Shutting down the FLE Crud thread pool");
+    stopFLECrud();
+
     LOGV2_OPTIONS(4784901, {LogComponent::kCommand}, "Shutting down the MirrorMaestro");
     MirrorMaestro::shutdown(serviceContext);
 
@@ -1285,16 +1283,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
             4784907, {LogComponent::kReplication}, "Shutting down the replica set node executor");
         exec->shutdown();
         exec->join();
-    }
-
-    const auto isStandalone =
-        repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() ==
-        repl::ReplicationCoordinator::modeNone;
-    if (!isStandalone) {
-        LOGV2_OPTIONS(5869108,
-                      {LogComponent::kQuery},
-                      "Shutting down the ChangeStreamExpiredPreImagesRemover");
-        PeriodicChangeStreamExpiredPreImagesRemover::get(serviceContext)->stop();
     }
 
     if (auto storageEngine = serviceContext->getStorageEngine()) {
@@ -1430,6 +1418,9 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     LOGV2(4784928, "Shutting down the TTL monitor");
     shutdownTTLMonitor(serviceContext);
+
+    LOGV2(6278511, "Shutting down the Change Stream Expired Pre-images Remover");
+    shutdownChangeStreamExpiredPreImagesRemover(serviceContext);
 
     // We should always be able to acquire the global lock at shutdown.
     // An OperationContext is not necessary to call lockGlobal() during shutdown, as it's only used

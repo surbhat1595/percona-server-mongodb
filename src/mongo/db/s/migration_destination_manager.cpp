@@ -71,6 +71,7 @@
 #include "mongo/db/storage/remove_saver.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/vector_clock.h"
+#include "mongo/db/write_block_bypass.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache_loader.h"
@@ -79,6 +80,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/s/shard_key_pattern.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/producer_consumer_queue.h"
@@ -124,7 +126,7 @@ constexpr bool returnsVoid() {
 // throwing, will reacquire the session and verify it is still valid to proceed with the migration.
 template <typename Callable, std::enable_if_t<!returnsVoid<Callable>(), int> = 0>
 auto runWithoutSession(OperationContext* opCtx, Callable&& callable) {
-    MongoDOperationContextSession::checkIn(opCtx);
+    MongoDOperationContextSession::checkIn(opCtx, OperationContextSession::CheckInReason::kYield);
 
     auto retVal = callable();
 
@@ -138,7 +140,7 @@ auto runWithoutSession(OperationContext* opCtx, Callable&& callable) {
 // Same as runWithoutSession above but takes a void function.
 template <typename Callable, std::enable_if_t<returnsVoid<Callable>(), int> = 0>
 void runWithoutSession(OperationContext* opCtx, Callable&& callable) {
-    MongoDOperationContextSession::checkIn(opCtx);
+    MongoDOperationContextSession::checkIn(opCtx, OperationContextSession::CheckInReason::kYield);
 
     callable();
 
@@ -995,6 +997,7 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
         auto db = autoDb.ensureDbExists(opCtx);
 
         auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
+        auto fromMigrate = true;
         if (collection) {
             checkUUIDsMatch(collection);
         } else {
@@ -1021,7 +1024,8 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                                              nss,
                                              collectionOptions,
                                              createDefaultIndexes,
-                                             collectionOptionsAndIndexes.idIndexSpec));
+                                             collectionOptionsAndIndexes.idIndexSpec,
+                                             fromMigrate));
             wuow.commit();
             collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
         }
@@ -1029,7 +1033,6 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
         auto indexSpecs = checkEmptyOrGetMissingIndexesFromDonor(collection);
         if (!indexSpecs.empty()) {
             WriteUnitOfWork wunit(opCtx);
-            auto fromMigrate = true;
             CollectionWriter collWriter(opCtx, collection->uuid());
             IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
                 opCtx, collWriter, indexSpecs, fromMigrate);
@@ -1208,6 +1211,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             auto altOpCtx = CancelableOperationContext(
                 cc().makeOperationContext(), outerOpCtx->getCancellationToken(), executor);
 
+            // Enable write blocking bypass to allow migrations to create the collection and indexes
+            // even when user writes are blocked.
+            WriteBlockBypass::get(altOpCtx.get()).set(true);
+
             _dropLocalIndexesIfNecessary(altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes);
             cloneCollectionIndexesAndOptions(
                 altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes);
@@ -1227,6 +1234,9 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             recipientDeletionTask.setPending(true);
             const auto currentTime = VectorClock::get(outerOpCtx)->getTime();
             recipientDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
+            if (feature_flags::gOrphanTracking.isEnabled(serverGlobalParams.featureCompatibility)) {
+                recipientDeletionTask.setNumOrphanDocs(0);
+            }
 
             // It is illegal to wait for write concern with a session checked out, so persist the
             // range deletion task with an immediately satsifiable write concern and then wait for
@@ -1317,7 +1327,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                     }
 
                     migrationutil::persistUpdatedNumOrphans(
-                        opCtx, BSON("_id" << _migrationId.get()), batchNumCloned);
+                        opCtx, _migrationId.get(), batchNumCloned);
 
                     {
                         stdx::lock_guard<Latch> statsLock(_mutex);
@@ -1638,7 +1648,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
 bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const BSONObj& xfer) {
     bool didAnything = false;
-    int changeInOrphans = 0;
+    long long changeInOrphans = 0;
 
     // Deleted documents
     if (xfer["deleted"].isABSONObj()) {
@@ -1742,8 +1752,7 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
     }
 
     if (changeInOrphans != 0) {
-        migrationutil::persistUpdatedNumOrphans(
-            opCtx, BSON("_id" << _migrationId.get()), changeInOrphans);
+        migrationutil::persistUpdatedNumOrphans(opCtx, _migrationId.get(), changeInOrphans);
     }
     return didAnything;
 }

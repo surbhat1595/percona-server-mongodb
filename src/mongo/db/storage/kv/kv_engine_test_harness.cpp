@@ -31,14 +31,12 @@
 
 #include "mongo/db/catalog/collection_impl.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/multitenancy.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/durable_catalog_impl.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
-#include "mongo/db/tenant_namespace.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -85,8 +83,7 @@ protected:
                            const CollectionOptions& options,
                            DurableCatalogImpl* catalog) {
         Lock::DBLock dbLk(opCtx, ns.db(), MODE_IX);
-        TenantNamespace tenantNs(boost::none, ns);
-        auto swEntry = catalog->_addEntry(opCtx, tenantNs, options);
+        auto swEntry = catalog->_addEntry(opCtx, ns, options);
         ASSERT_OK(swEntry.getStatus());
         return swEntry.getValue().catalogId;
     }
@@ -243,7 +240,7 @@ TEST_F(KVEngineTestHarness, SimpleSorted1) {
     ASSERT(engine);
 
     std::string ident = "abc";
-    auto tenantNs = TenantNamespace(boost::none, NamespaceString("mydb.mycoll"));
+    auto nss = NamespaceString("mydb.mycoll");
 
     CollectionOptions options;
     options.uuid = UUID::gen();
@@ -262,8 +259,8 @@ TEST_F(KVEngineTestHarness, SimpleSorted1) {
     {
         auto opCtx = _makeOperationContext(engine);
         WriteUnitOfWork uow(opCtx.get());
-        collection = std::make_unique<CollectionImpl>(
-            opCtx.get(), tenantNs, RecordId(0), options, std::move(rs));
+        collection =
+            std::make_unique<CollectionImpl>(opCtx.get(), nss, RecordId(0), options, std::move(rs));
         uow.commit();
     }
 
@@ -1074,7 +1071,7 @@ TEST_F(KVEngineTestHarness, RollingBackToLastStable) {
  */
 DEATH_TEST_REGEX_F(KVEngineTestHarness,
                    CommitBehindStable,
-                   ".*commit timestamp.*is less than the stable timestamp.*") {
+                   ".*commit timestamp.*(is less than|must be after) the stable timestamp.*") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
     // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
@@ -1105,76 +1102,11 @@ DEATH_TEST_REGEX_F(KVEngineTestHarness,
     }
 
     {
-        // Committing a behind the stable timestamp is not allowed.
+        // Committing at or behind the stable timestamp is not allowed.
         auto opCtx = _makeOperationContext(engine);
         WriteUnitOfWork uow(opCtx.get());
         auto swRid = rs->insertRecord(opCtx.get(), "abc", 4, Timestamp(1, 1));
         uow.commit();
-    }
-}
-
-/*
- * Commit at stable
- * | Session                         | GlobalActor                |
- * |---------------------------------+----------------------------|
- * |                                 | GlobalTimestamp :stable 2  |
- * | Begin                           |                            |
- * | Write A 1                       |                            |
- * | Timestamp :commit 2             |                            |
- */
-TEST_F(KVEngineTestHarness, CommitAtStable) {
-    std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
-    KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
-
-    // The initial data timestamp has to be set to take stable checkpoints.
-    engine->setInitialDataTimestamp(Timestamp(1, 1));
-    std::string ns = "a.b";
-    std::unique_ptr<RecordStore> rs;
-    {
-        auto opCtx = _makeOperationContext(engine);
-        ASSERT_OK(engine->createRecordStore(opCtx.get(), ns, ns, CollectionOptions()));
-        rs = engine->getRecordStore(opCtx.get(), ns, ns, CollectionOptions());
-        ASSERT(rs);
-    }
-
-    {
-        // Set the stable timestamp to (2, 2).
-        ASSERT(!engine->getLastStableRecoveryTimestamp());
-        engine->setStableTimestamp(Timestamp(2, 2), false);
-        ASSERT(!engine->getLastStableRecoveryTimestamp());
-
-        // Force a checkpoint to be taken. This should advance the last stable timestamp.
-        auto opCtx = _makeOperationContext(engine);
-        engine->flushAllFiles(opCtx.get(), false);
-        ASSERT_EQ(engine->getLastStableRecoveryTimestamp(), Timestamp(2, 2));
-    }
-
-    RecordId rid;
-    {
-        // For a non-prepared transaction, the commit timestamp can be equal to the stable
-        // timestamp.
-        auto opCtx = _makeOperationContext(engine);
-        WriteUnitOfWork uow(opCtx.get());
-        auto swRid = rs->insertRecord(opCtx.get(), "abc", 4, Timestamp(2, 2));
-        ASSERT_OK(swRid);
-        rid = swRid.getValue();
-        uow.commit();
-    }
-
-    {
-        // Rollback to the last stable timestamp.
-        auto opCtx = _makeOperationContext(engine);
-        StatusWith<Timestamp> swTimestamp = engine->recoverToStableTimestamp(opCtx.get());
-        ASSERT_EQ(swTimestamp.getValue(), Timestamp(2, 2));
-
-        // Transaction with timestamps equal to lastStable will not be rolled back.
-        opCtx->recoveryUnit()->abandonSnapshot();
-        RecordData data;
-        ASSERT_TRUE(rs->findRecord(opCtx.get(), rid, &data));
-        ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 }
 
@@ -1263,7 +1195,7 @@ TEST_F(DurableCatalogImplTest, Idx1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
+        md.ns = "a.b";
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1297,7 +1229,7 @@ TEST_F(DurableCatalogImplTest, Idx1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
+        md.ns = "a.b";
         putMetaData(opCtx, catalog.get(), catalogId, md);  // remove index
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
@@ -1351,7 +1283,7 @@ TEST_F(DurableCatalogImplTest, DirectoryPerDb1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
+        md.ns = "a.b";
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1401,7 +1333,7 @@ TEST_F(DurableCatalogImplTest, Split1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
+        md.ns = "a.b";
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1451,7 +1383,7 @@ TEST_F(DurableCatalogImplTest, DirectoryPerAndSplit1) {
         WriteUnitOfWork uow(opCtx);
 
         BSONCollectionCatalogEntry::MetaData md;
-        md.tenantNs = TenantNamespace(boost::none, NamespaceString("a.b"));
+        md.ns = "a.b";
 
         BSONCollectionCatalogEntry::IndexMetaData imd;
         imd.spec = BSON("name"
@@ -1487,7 +1419,7 @@ DEATH_TEST_REGEX_F(DurableCatalogImplTest,
     ASSERT(engine);
 
     std::string ident = "abc";
-    auto tenantNs = TenantNamespace(boost::none, NamespaceString("mydb.mycoll"));
+    auto nss = NamespaceString("mydb.mycoll");
 
     CollectionOptions options;
     options.uuid = UUID::gen();
@@ -1508,7 +1440,7 @@ DEATH_TEST_REGEX_F(DurableCatalogImplTest,
         auto opCtx = clientAndCtx.opCtx();
         WriteUnitOfWork uow(opCtx);
         collection =
-            std::make_unique<CollectionImpl>(opCtx, tenantNs, RecordId(0), options, std::move(rs));
+            std::make_unique<CollectionImpl>(opCtx, nss, RecordId(0), options, std::move(rs));
         uow.commit();
     }
 

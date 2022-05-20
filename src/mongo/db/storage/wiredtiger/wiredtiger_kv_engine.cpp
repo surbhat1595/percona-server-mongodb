@@ -91,12 +91,11 @@
 #include "mongo/db/snapshot_window_options_gen.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/key_format.h"
-#include "mongo/db/storage/storage_engine_parameters.h"
-#include "mongo/db/storage/storage_engine_parameters_gen.h"
 #include "mongo/db/storage/storage_file_util.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
+#include "mongo/db/storage/ticketholders.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_backup_cursor_hooks.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
@@ -145,6 +144,7 @@ MONGO_FAIL_POINT_DEFINE(WTPreserveSnapshotHistoryIndefinitely);
 MONGO_FAIL_POINT_DEFINE(WTSetOldestTSToStableTS);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportCollection);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportIndex);
+MONGO_FAIL_POINT_DEFINE(WTRollbackToStableReturnOnEBUSY);
 
 const std::string kPinOldestTimestampAtStartupName = "_wt_startup";
 
@@ -417,8 +417,13 @@ StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
                             "offset"_attr = offset,
                             "size"_attr = size,
                             "type"_attr = type);
-                backupBlocks.push_back(BackupBlock(
-                    opCtx, filePath.string(), checkpointTimestamp, offset, size, fileSize));
+                backupBlocks.push_back(BackupBlock(opCtx,
+                                                   filePath.string(),
+                                                   {} /* identToNamespaceAndUUIDMap */,
+                                                   checkpointTimestamp,
+                                                   offset,
+                                                   size,
+                                                   fileSize));
             }
 
             // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows
@@ -427,6 +432,7 @@ StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
             if (fileUnchangedFlag) {
                 backupBlocks.push_back(BackupBlock(opCtx,
                                                    filePath.string(),
+                                                   {} /* identToNamespaceAndUUIDMap */,
                                                    checkpointTimestamp,
                                                    0 /* offset */,
                                                    0 /* length */,
@@ -446,8 +452,13 @@ StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
             // to an entire file. Full backups cannot open an incremental cursor, even if they
             // are the initial incremental backup.
             const std::uint64_t length = incrementalBackup ? fileSize : 0;
-            backupBlocks.push_back(BackupBlock(
-                opCtx, filePath.string(), checkpointTimestamp, 0 /* offset */, length, fileSize));
+            backupBlocks.push_back(BackupBlock(opCtx,
+                                               filePath.string(),
+                                               {} /* identToNamespaceAndUUIDMap */,
+                                               checkpointTimestamp,
+                                               0 /* offset */,
+                                               length,
+                                               fileSize));
         }
     }
 
@@ -635,7 +646,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
     // The setting may have a later setting override it if not using the journal.  We make it
     // unconditional here because even nojournal may need this setting if it is a transition
     // from using the journal.
-    ss << "log=(enabled=true,archive=" << (_readOnly ? "false" : "true")
+    ss << "log=(enabled=true,remove=" << (_readOnly ? "false" : "true")
        << ",path=journal,compressor=";
     ss << wiredTigerGlobalOptions.journalCompressor << "),";
     ss << "builtin_extension_config=(zstd=(compression_level="
@@ -737,6 +748,10 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         }
         // This setting overrides the earlier setting because it is later in the config string.
         ss << ",log=(enabled=false),";
+    }
+
+    if (WiredTigerUtil::willRestoreFromBackup()) {
+        ss << WiredTigerUtil::generateRestoreConfig() << ",";
     }
 
     string config = ss.str();
@@ -853,28 +868,6 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
 
     _sizeStorer = std::make_unique<WiredTigerSizeStorer>(_conn, _sizeStorerUri, _readOnly);
 
-    auto readTransactions = gConcurrentReadTransactions.load();
-    static constexpr auto DEFAULT_TICKETS_VALUE = 128;
-    readTransactions = readTransactions == 0 ? DEFAULT_TICKETS_VALUE : readTransactions;
-    auto writeTransactions = gConcurrentWriteTransactions.load();
-    writeTransactions = writeTransactions == 0 ? DEFAULT_TICKETS_VALUE : writeTransactions;
-
-    auto serviceContext = getGlobalServiceContext();
-    auto lockManager = LockManager::get(serviceContext);
-    switch (gTicketQueueingPolicy) {
-        case QueueingPolicyEnum::Semaphore:
-            LOGV2_DEBUG(6382201, 1, "Using Semaphore-based ticketing scheduler");
-            lockManager->setTicketHolders(
-                std::make_unique<SemaphoreTicketHolder>(readTransactions),
-                std::make_unique<SemaphoreTicketHolder>(writeTransactions));
-            break;
-        case QueueingPolicyEnum::FifoQueue:
-            LOGV2_DEBUG(6382200, 1, "Using FIFO queue-based ticketing scheduler");
-            lockManager->setTicketHolders(std::make_unique<FifoTicketHolder>(readTransactions),
-                                          std::make_unique<FifoTicketHolder>(writeTransactions));
-            break;
-    }
-
     _runTimeConfigParam.reset(makeServerParameter<WiredTigerEngineRuntimeConfigParameter>(
         "wiredTigerEngineRuntimeConfig", ServerParameterType::kRuntimeOnly));
     _runTimeConfigParam->_data.second = this;
@@ -886,13 +879,6 @@ WiredTigerKVEngine::~WiredTigerKVEngine() {
     ServerParameterSet::getNodeParameterSet()->remove("wiredTigerEngineRuntimeConfig");
 
     cleanShutdown();
-
-    // Cleanup the ticket holders.
-    if (hasGlobalServiceContext()) {
-        auto serviceContext = getGlobalServiceContext();
-        auto lockManager = LockManager::get(serviceContext);
-        lockManager->setTicketHolders(nullptr, nullptr);
-    }
 
     _sessionCache.reset(nullptr);
     _encryptionKeyDB.reset(nullptr);
@@ -906,10 +892,9 @@ void WiredTigerKVEngine::notifyStartupComplete() {
 void WiredTigerKVEngine::appendGlobalStats(BSONObjBuilder& b) {
     BSONObjBuilder bb(b.subobjStart("concurrentTransactions"));
     auto serviceContext = getGlobalServiceContext();
-    auto lockManager = LockManager::get(serviceContext);
-    auto writer = lockManager->getTicketHolder(MODE_IX);
-    auto reader = lockManager->getTicketHolder(MODE_IS);
+    auto& ticketHolders = ticketHoldersDecoration(serviceContext);
     {
+        auto writer = ticketHolders.getTicketHolder(MODE_IX);
         BSONObjBuilder bbb(bb.subobjStart("write"));
         bbb.append("out", writer->used());
         bbb.append("available", writer->available());
@@ -917,6 +902,7 @@ void WiredTigerKVEngine::appendGlobalStats(BSONObjBuilder& b) {
         bbb.done();
     }
     {
+        auto reader = ticketHolders.getTicketHolder(MODE_IS);
         BSONObjBuilder bbb(bb.subobjStart("read"));
         bbb.append("out", reader->used());
         bbb.append("available", reader->available());
@@ -1449,6 +1435,7 @@ public:
                 const std::uint64_t length = options.incrementalBackup ? fileSize : 0;
                 backupBlocks.push_back(BackupBlock(opCtx,
                                                    filePath.string(),
+                                                   _wtBackup->identToNamespaceAndUUIDMap,
                                                    _checkpointTimestamp,
                                                    0 /* offset */,
                                                    length,
@@ -1506,8 +1493,13 @@ private:
                         "offset"_attr = offset,
                         "size"_attr = size,
                         "type"_attr = type);
-            backupBlocks->push_back(BackupBlock(
-                opCtx, filePath.string(), _checkpointTimestamp, offset, size, fileSize));
+            backupBlocks->push_back(BackupBlock(opCtx,
+                                                filePath.string(),
+                                                _wtBackup->identToNamespaceAndUUIDMap,
+                                                _checkpointTimestamp,
+                                                offset,
+                                                size,
+                                                fileSize));
         }
 
         // If the file is unchanged, push a BackupBlock with offset=0 and length=0. This allows us
@@ -1515,6 +1507,7 @@ private:
         if (fileUnchangedFlag) {
             backupBlocks->push_back(BackupBlock(opCtx,
                                                 filePath.string(),
+                                                _wtBackup->identToNamespaceAndUUIDMap,
                                                 _checkpointTimestamp,
                                                 0 /* offset */,
                                                 0 /* length */,
@@ -1627,6 +1620,22 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
 
     invariant(_wtBackup.logFilePathsSeenByExtendBackupCursor.empty());
     invariant(_wtBackup.logFilePathsSeenByGetNextBatch.empty());
+    invariant(_wtBackup.identToNamespaceAndUUIDMap.empty());
+
+    DurableCatalog* catalog = DurableCatalog::get(opCtx);
+    std::vector<DurableCatalog::Entry> catalogEntries = catalog->getAllCatalogEntries(opCtx);
+    for (const DurableCatalog::Entry& e : catalogEntries) {
+        // Populate the collection ident with its namespace and UUID.
+        UUID uuid = catalog->getMetaData(opCtx, e.catalogId)->options.uuid.get();
+        _wtBackup.identToNamespaceAndUUIDMap.emplace(e.ident, std::make_pair(e.nss, uuid));
+
+        // Populate the collection's index idents with the collection's namespace and UUID.
+        std::vector<std::string> idxIdents = catalog->getIndexIdents(opCtx, e.catalogId);
+        for (const std::string& idxIdent : idxIdents) {
+            _wtBackup.identToNamespaceAndUUIDMap.emplace(idxIdent, std::make_pair(e.nss, uuid));
+        }
+    }
+
     auto streamingCursor = std::make_unique<StreamingCursorImpl>(
         session, _path, checkpointTimestamp, options, &_wtBackup);
 
@@ -1650,6 +1659,7 @@ void WiredTigerKVEngine::endNonBlockingBackup(OperationContext* opCtx) {
     _wtBackup.dupCursor = nullptr;
     _wtBackup.logFilePathsSeenByExtendBackupCursor = {};
     _wtBackup.logFilePathsSeenByGetNextBatch = {};
+    _wtBackup.identToNamespaceAndUUIDMap = {};
 
     boost::filesystem::remove(getOngoingBackupPath());
 }
@@ -3607,7 +3617,28 @@ StatusWith<Timestamp> WiredTigerKVEngine::recoverToStableTimestamp(OperationCont
                        "Rolling back to the stable timestamp",
                        "stableTimestamp"_attr = stableTimestamp,
                        "initialDataTimestamp"_attr = initialDataTimestamp);
-    int ret = _conn->rollback_to_stable(_conn, nullptr);
+    int ret = 0;
+
+    // The rollback_to_stable operation requires all open cursors to be closed or reset before the
+    // call, otherwise EBUSY will be returned. Occasionally, there could be an operation that hasn't
+    // been killed yet, such as the CappedInsertNotifier for a yielded oplog getMore. We will retry
+    // rollback_to_stable until the system quiesces.
+    size_t attempts = 0;
+    do {
+        ret = _conn->rollback_to_stable(_conn, nullptr);
+        if (ret != EBUSY) {
+            break;
+        }
+
+        if (MONGO_unlikely(WTRollbackToStableReturnOnEBUSY.shouldFail())) {
+            return wtRCToStatus(ret, nullptr);
+        }
+
+        LOGV2_FOR_ROLLBACK(
+            6398900, 0, "Retrying rollback to stable due to EBUSY", "attempts"_attr = ++attempts);
+        opCtx->sleepFor(Seconds(1));
+    } while (ret == EBUSY);
+
     if (ret) {
         return {ErrorCodes::UnrecoverableRollbackError,
                 str::stream() << "Error rolling back to stable. Err: " << wiredtiger_strerror(ret)};

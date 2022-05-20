@@ -268,6 +268,7 @@ let testCases = {
             }
         }
     },
+    appendOplogNote: {skip: "unversioned and executes on all shards"},
     authenticate: {skip: "does not forward command to primary shard"},
     availableQueryOptions: {skip: "executes locally on mongos (not sent to any remote node)"},
     balancerCollectionStatus: {skip: "does not forward command to primary shard"},
@@ -299,6 +300,7 @@ let testCases = {
     commitReshardCollection: {skip: "always targets the config server"},
     commitTransaction: {skip: "unversioned and uses special targetting rules"},
     compact: {skip: "not allowed through mongos"},
+    compactStructuredEncryptionData: {skip: "requires encrypted collections"},
     configureCollectionBalancing: {skip: "always targets the config server"},
     configureFailPoint: {skip: "executes locally on mongos (not sent to any remote node)"},
     connPoolStats: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -456,6 +458,7 @@ let testCases = {
     getAuditConfig: {skip: "not on a user database", conditional: true},
     getChangeStreamOptions:
         {skip: "executes locally on mongos (not sent to any remote node)", conditional: true},
+    getClusterParameter: {skip: "always targets the config server"},
     getCmdLineOpts: {skip: "executes locally on mongos (not sent to any remote node)"},
     getDefaultRWConcern: {skip: "executes locally on mongos (not sent to any remote node)"},
     getDiagnosticData: {skip: "executes locally on mongos (not sent to any remote node)"},

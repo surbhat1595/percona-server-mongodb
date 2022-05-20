@@ -43,13 +43,14 @@
 #include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/timeseries/timeseries_stats.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 #include "mongo/db/stats/storage_stats.h"
 
 namespace mongo {
 
 namespace {
-int countOrphanDocsForCollection(OperationContext* opCtx, const UUID& uuid) {
+long long countOrphanDocsForCollection(OperationContext* opCtx, const UUID& uuid) {
     // TODO (SERVER-64162): move this function to range_deletion_util.cpp and replace
     // "collectionUuid" and "numOrphanDocs" with RangeDeletionTask field names.
     DBDirectClient client(opCtx);
@@ -74,7 +75,7 @@ int countOrphanDocsForCollection(OperationContext* opCtx, const UUID& uuid) {
     invariant(!cursor->more());
     auto numOrphans = res.getField("count");
     invariant(numOrphans);
-    return numOrphans.numberInt();
+    return numOrphans.exactNumberLong();
 }
 }  // namespace
 
@@ -82,7 +83,7 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
                                     const NamespaceString& nss,
                                     const StorageStatsSpec& storageStatsSpec,
                                     BSONObjBuilder* result) {
-    const std::string kOrphanCountField = "orphanCount";
+    static constexpr auto kOrphanCountField = "numOrphanDocs"_sd;
 
     auto scale = storageStatsSpec.getScale().value_or(1);
     bool verbose = storageStatsSpec.getVerbose();
@@ -142,8 +143,11 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
         }
     }
 
-    result->appendNumber(kOrphanCountField,
-                         countOrphanDocsForCollection(opCtx, collection->uuid()));
+    if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        feature_flags::gOrphanTracking.isEnabled(serverGlobalParams.featureCompatibility)) {
+        result->appendNumber(kOrphanCountField,
+                             countOrphanDocsForCollection(opCtx, collection->uuid()));
+    }
 
     const RecordStore* recordStore = collection->getRecordStore();
     auto storageSize =

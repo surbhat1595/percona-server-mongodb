@@ -171,6 +171,10 @@ public:
     // the 'showRawUpdateDescription' option is enabled in the change stream spec.
     static constexpr StringData kRawUpdateDescriptionField = "rawUpdateDescription"_sd;
 
+    // Name of the field which stores information about the state of the collection before a
+    // 'modify' (i.e. collMod) operation.
+    static constexpr StringData kStateBeforeChangeField = "stateBeforeChange"_sd;
+
     // The name of the subfield of '_id' where the UUID of the namespace will be located after the
     // transformation.
     static constexpr StringData kUuidField = "uuid"_sd;
@@ -235,6 +239,7 @@ public:
     static constexpr StringData kDropIndexesOpType = "dropIndexes"_sd;
     static constexpr StringData kShardCollectionOpType = "shardCollection"_sd;
     static constexpr StringData kMigrateLastChunkFromShardOpType = "migrateLastChunkFromShard"_sd;
+    static constexpr StringData kModifyOpType = "modify"_sd;
 
     // Default regex for collections match which prohibits system collections.
     static constexpr StringData kRegexAllCollections = R"((?!(\$|system\.)))"_sd;
@@ -251,16 +256,18 @@ public:
      * Helpers for Determining which regex to match a change stream against.
      */
     static ChangeStreamType getChangeStreamType(const NamespaceString& nss);
+    static std::string regexEscapeNsForChangeStream(StringData source);
+    static StringData resolveAllCollectionsRegex(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
     static std::string getNsRegexForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
     static std::string getCollRegexForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
     static std::string getCmdNsRegexForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
-    static StringData resolveAllCollectionsRegex(
+    static std::string getViewNsRegexForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
-
-    static std::string regexEscapeNsForChangeStream(StringData source);
 
     /**
      * Parses a $changeStream stage from 'elem' and produces the $match and transformation

@@ -39,6 +39,7 @@
 
 namespace mongo {
 namespace change_stream_filter {
+
 std::unique_ptr<MatchExpression> buildTsFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     Timestamp startFromInclusive,
@@ -47,9 +48,40 @@ std::unique_ptr<MatchExpression> buildTsFilter(
                                                     expCtx);
 }
 
+std::unique_ptr<MatchExpression> buildFromMigrateSystemOpFilter(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, const MatchExpression* userMatch) {
+    auto cmdNsRegex = DocumentSourceChangeStream::getCmdNsRegexForChangeStream(expCtx);
+
+    // The filter {fromMigrate:true} allows quickly skip nonrelevant oplog entries
+    auto andMigrateEvents = std::make_unique<AndMatchExpression>();
+    andMigrateEvents->add(
+        MatchExpressionParser::parseAndNormalize(BSON("fromMigrate" << true), expCtx));
+    andMigrateEvents->add(
+        MatchExpressionParser::parseAndNormalize(BSON("ns" << BSONRegEx(cmdNsRegex)), expCtx));
+
+    auto orMigrateEvents = std::make_unique<OrMatchExpression>();
+    auto collRegex = DocumentSourceChangeStream::getCollRegexForChangeStream(expCtx);
+    orMigrateEvents->add(
+        MatchExpressionParser::parseAndNormalize(BSON("o.create" << BSONRegEx(collRegex)), expCtx));
+    orMigrateEvents->add(MatchExpressionParser::parseAndNormalize(
+        BSON("o.createIndexes" << BSONRegEx(collRegex)), expCtx));
+    andMigrateEvents->add(std::move(orMigrateEvents));
+    return andMigrateEvents;
+}
+
 std::unique_ptr<MatchExpression> buildNotFromMigrateFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const MatchExpression* userMatch) {
-    return MatchExpressionParser::parseAndNormalize(BSON("fromMigrate" << NE << true), expCtx);
+    // Exclude any events that are marked as 'fromMigrate' in the oplog.
+    auto fromMigrateFilter =
+        MatchExpressionParser::parseAndNormalize(BSON("fromMigrate" << NE << true), expCtx);
+
+    // If 'showSystemEvents' is set, however, we do return some specific 'fromMigrate' events.
+    if (expCtx->changeStreamSpec->getShowSystemEvents()) {
+        auto orMigrateEvents = std::make_unique<OrMatchExpression>(std::move(fromMigrateFilter));
+        orMigrateEvents->add(buildFromMigrateSystemOpFilter(expCtx, userMatch));
+        fromMigrateFilter = std::move(orMigrateEvents);
+    }
+    return fromMigrateFilter;
 }
 
 std::unique_ptr<MatchExpression> buildOperationFilter(
@@ -109,6 +141,7 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     const auto createIndexesEvent = BSON("o.createIndexes" << BSONRegEx(collRegex));
     const auto commitIndexBuildEvent = BSON("o.commitIndexBuild" << BSONRegEx(collRegex));
     const auto dropIndexesEvent = BSON("o.dropIndexes" << BSONRegEx(collRegex));
+    const auto collModEvent = BSON("o.collMod" << BSONRegEx(collRegex));
 
     auto orCmdEvents = std::make_unique<OrMatchExpression>();
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(dropEvent, expCtx));
@@ -118,6 +151,7 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(createIndexesEvent, expCtx));
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(commitIndexBuildEvent, expCtx));
     orCmdEvents->add(MatchExpressionParser::parseAndNormalize(dropIndexesEvent, expCtx));
+    orCmdEvents->add(MatchExpressionParser::parseAndNormalize(collModEvent, expCtx));
 
     // Omit dropDatabase on single-collection streams. While the stream will be invalidated before
     // it sees this event, the user will incorrectly see it if they startAfter the invalidate.
@@ -141,6 +175,26 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     }
 
     return operationFilter;
+}
+
+std::unique_ptr<MatchExpression> buildViewDefinitionEventFilter(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, const MatchExpression* userMatch) {
+    // The view op filter is as follows:
+    // {
+    //   ns: nsSystemViewsRegex, // match system.views for relevant DBs
+    //   $nor: [                 // match only CRUD events
+    //     {op: "n"},
+    //     {op: "c"}
+    //   ]
+    // }
+    auto nsSystemViewsRegex = DocumentSourceChangeStream::getViewNsRegexForChangeStream(expCtx);
+    auto viewEventsFilter = BSON("ns" << BSONRegEx(nsSystemViewsRegex) << "$nor"
+                                      << BSON_ARRAY(BSON("op"
+                                                         << "n")
+                                                    << BSON("op"
+                                                            << "c")));
+
+    return MatchExpressionParser::parseAndNormalize(viewEventsFilter, expCtx);
 }
 
 std::unique_ptr<MatchExpression> buildInvalidationFilter(
@@ -202,8 +256,12 @@ std::unique_ptr<MatchExpression> buildTransactionFilter(
             // Match relevant command events on the monitored namespaces.
             orBuilder.append(BSON(
                 "o.applyOps" << BSON(
-                    "$elemMatch" << BSON("ns" << BSONRegEx(cmdNsRegex)
-                                              << OR(BSON("o.create" << BSONRegEx(collRegex)))))));
+                    "$elemMatch" << BSON(
+                        "ns" << BSONRegEx(cmdNsRegex)
+                             << OR(BSON("o.create" << BSONRegEx(collRegex)),
+                                   // We don't need to consider 'o.commitIndexBuild' here because
+                                   // creating an index on a non-empty collection is not allowed.
+                                   BSON("o.createIndexes" << BSONRegEx(collRegex)))))));
 
             // The default repl::OpTime is the value used to indicate a null "prevOpTime" link.
             orBuilder.append(BSON(repl::OplogEntry::kPrevWriteOpTimeInTransactionFieldName

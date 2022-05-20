@@ -33,12 +33,19 @@
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/s/sharding_ddl_coordinator.h"
+#include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/s/user_writes_recoverable_critical_section_service.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(hangInShardsvrSetUserWriteBlockMode);
 
 class ShardsvrSetUserWriteBlockCommand final
     : public TypedCommand<ShardsvrSetUserWriteBlockCommand> {
@@ -56,16 +63,61 @@ public:
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());
 
-            const auto startBlocking = request().getGlobal();
+            hangInShardsvrSetUserWriteBlockMode.pauseWhileSet();
+
+            _runImpl(opCtx, request());
+
+            // Since it is possible that no actual write happened with this txnNumber, we need to
+            // make a dummy write so that secondaries can be aware of this txn.
+            DBDirectClient client(opCtx);
+            client.update(NamespaceString::kServerConfigurationNamespace.ns(),
+                          BSON("_id"
+                               << "SetUseWriteBlockModeStats"),
+                          BSON("$inc" << BSON("count" << 1)),
+                          true /* upsert */,
+                          false /* multi */);
+        }
+
+    private:
+        void _runImpl(OperationContext* opCtx, const Request& request) {
+            const auto startBlocking = request.getGlobal();
 
             if (startBlocking) {
-                switch (request().getPhase()) {
+                switch (request.getPhase()) {
                     case ShardsvrSetUserWriteBlockModePhaseEnum::kPrepare:
                         UserWritesRecoverableCriticalSectionService::get(opCtx)
                             ->acquireRecoverableCriticalSectionBlockNewShardedDDL(
                                 opCtx,
                                 UserWritesRecoverableCriticalSectionService::
                                     kGlobalUserWritesNamespace);
+
+                        // Wait for ongoing ShardingDDLCoordinators to finish. This ensures that all
+                        // coordinators that started before enabling blocking have finish, and that
+                        // any new coordinator that is started after this point will see the
+                        // blocking is enabled. Wait only for coordinators that don't have the
+                        // user-write-blocking bypass enabled -- the ones allowed to bypass user
+                        // write blocking don't care about the write blocking state.
+                        {
+                            const auto shouldWaitPred =
+                                [](const ShardingDDLCoordinator& coordinatorInstance) -> bool {
+                                // No need to wait for coordinators that do not modify user data.
+                                if (coordinatorInstance.canAlwaysStartWhenUserWritesAreDisabled()) {
+                                    return false;
+                                }
+
+                                // Don't wait for coordinator instances that are allowed to bypass
+                                // user write blocking.
+                                if (coordinatorInstance.getForwardableOpMetadata()
+                                        .getMayBypassWriteBlocking()) {
+                                    return false;
+                                }
+
+                                return true;
+                            };
+
+                            ShardingDDLCoordinatorService::getService(opCtx)
+                                ->waitForOngoingCoordinatorsToFinish(opCtx, shouldWaitPred);
+                        }
                         break;
                     case ShardsvrSetUserWriteBlockModePhaseEnum::kComplete:
                         UserWritesRecoverableCriticalSectionService::get(opCtx)
@@ -78,7 +130,7 @@ public:
                         MONGO_UNREACHABLE;
                 }
             } else {
-                switch (request().getPhase()) {
+                switch (request.getPhase()) {
                     case ShardsvrSetUserWriteBlockModePhaseEnum::kPrepare:
                         UserWritesRecoverableCriticalSectionService::get(opCtx)
                             ->demoteRecoverableCriticalSectionToNoLongerBlockUserWrites(
@@ -99,7 +151,6 @@ public:
             }
         }
 
-    private:
         NamespaceString ns() const override {
             return NamespaceString();
         }

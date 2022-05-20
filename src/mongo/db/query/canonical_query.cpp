@@ -134,9 +134,6 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 
     std::unique_ptr<MatchExpression> me = std::move(statusWithMatcher.getValue());
 
-    // TODO: SERVER-64055 if encryptionInformation is present, rewrite MatchExpression FLE find
-    // payloads.
-
     Status initStatus =
         cq->init(opCtx,
                  std::move(newExpCtx),
@@ -207,7 +204,7 @@ Status CanonicalQuery::init(OperationContext* opCtx,
         feature_flags::gFeatureFlagAutoParameterization.isEnabledAndIgnoreFCV()) {
         // Both the SBE plan cache and auto-parameterization are enabled. Add parameter markers to
         // the appropriate match expression leaf nodes.
-        MatchExpression::parameterize(_root.get());
+        _inputParamIdToExpressionMap = MatchExpression::parameterize(_root.get());
     }
     // The tree must always be valid after normalization.
     dassert(isValid(_root.get(), *_findCommand).isOK());
@@ -537,5 +534,9 @@ CanonicalQuery::QueryShapeString CanonicalQuery::encodeKey() const {
             !_forceClassicEngine && _sbeCompatible)
         ? canonical_query_encoder::encodeSBE(*this)
         : canonical_query_encoder::encode(*this);
+}
+
+CanonicalQuery::QueryShapeString CanonicalQuery::encodeKeyForIndexFilters() const {
+    return canonical_query_encoder::encodeForIndexFilters(*this);
 }
 }  // namespace mongo

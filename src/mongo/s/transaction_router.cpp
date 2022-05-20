@@ -57,6 +57,7 @@
 #include "mongo/s/router_transactions_metrics.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_with_sampling.h"
 #include "mongo/util/net/socket_utils.h"
@@ -442,11 +443,13 @@ BSONObj TransactionRouter::Participant::attachTxnFieldsIfNeeded(
     auto cmdName = cmd.firstElement().fieldNameStringData();
     bool mustStartTransaction = isFirstStatementInThisParticipant && !isTransactionCommand(cmdName);
 
+    // Strip the command of its read concern if it should not have one.
     if (!mustStartTransaction) {
         auto readConcernFieldName = repl::ReadConcernArgs::kReadConcernFieldName;
-        dassert(!cmd.hasField(readConcernFieldName) ||
-                cmd.getObjectField(readConcernFieldName).isEmpty() ||
-                sharedOptions.isInternalTransactionForRetryableWrite);
+        if (cmd.hasField(readConcernFieldName) &&
+            !sharedOptions.isInternalTransactionForRetryableWrite) {
+            cmd = cmd.removeField(readConcernFieldName);
+        }
     }
 
     BSONObjBuilder newCmd = mustStartTransaction
@@ -1038,13 +1041,18 @@ void TransactionRouter::Router::beginOrContinueTxn(OperationContext* opCtx,
     _updateLastClientInfo(opCtx->getClient());
 }
 
-void TransactionRouter::Router::stash(OperationContext* opCtx) {
+void TransactionRouter::Router::stash(OperationContext* opCtx, StashReason reason) {
     if (!isInitialized()) {
         return;
     }
 
-    auto tickSource = opCtx->getServiceContext()->getTickSource();
     stdx::lock_guard<Client> lk(*opCtx->getClient());
+
+    if (reason == StashReason::kYield) {
+        ++o(lk).activeYields;
+    }
+
+    auto tickSource = opCtx->getServiceContext()->getTickSource();
     o(lk).metricsTracker->trySetInactive(tickSource, tickSource->getTicks());
 }
 
@@ -1053,8 +1061,22 @@ void TransactionRouter::Router::unstash(OperationContext* opCtx) {
         return;
     }
 
-    // TODO SERVER-64052: Validate that the transaction number hasn't changed and metrics are
-    // updated appropriately.
+    // Validate that the transaction number hasn't changed while we were yielded. This is guaranteed
+    // by the activeYields check when beginning a new transaction.
+    invariant(opCtx->getTxnNumber(), "Cannot unstash without a transaction number");
+    invariant(o().txnNumberAndRetryCounter.getTxnNumber() == opCtx->getTxnNumber(),
+              str::stream()
+                  << "The requested operation has a different transaction number than the active "
+                     "transaction. Active: "
+                  << o().txnNumberAndRetryCounter.getTxnNumber()
+                  << ", operation: " << *opCtx->getTxnNumber());
+
+    {
+        stdx::lock_guard<Client> lg(*opCtx->getClient());
+        --o(lg).activeYields;
+        invariant(o(lg).activeYields >= 0,
+                  str::stream() << "Invalid activeYields: " << o(lg).activeYields);
+    }
 
     auto tickSource = opCtx->getServiceContext()->getTickSource();
     stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -1236,12 +1258,29 @@ BSONObj TransactionRouter::Router::_commitTransaction(
     return _handOffCommitToCoordinator(opCtx);
 }
 
+// Returns if the opCtx has yielded its session and failed to unyield it, which may happen during
+// methods that send network requests at global shutdown when running on a mongod.
+bool failedToUnyieldSessionAtShutdown(OperationContext* opCtx) {
+    if (!TransactionRouter::get(opCtx)) {
+        invariant(globalInShutdownDeprecated());
+        return true;
+    }
+    return false;
+}
+
 BSONObj TransactionRouter::Router::abortTransaction(OperationContext* opCtx) {
     invariant(isInitialized());
 
     // Update stats on scope exit so the transaction is considered "active" while waiting on abort
     // responses.
-    ScopeGuard updateStatsGuard([&] { _onExplicitAbort(opCtx); });
+    ScopeGuard updateStatsGuard([&] {
+        if (failedToUnyieldSessionAtShutdown(opCtx)) {
+            // It's unsafe to continue without the session checked out. This should only happen at
+            // global shutdown, so it's acceptable to skip updating stats.
+            return;
+        }
+        _onExplicitAbort(opCtx);
+    });
 
     // The router has yet to send any commands to a remote shard for this transaction.
     // Return the same error that would have been returned by a shard.
@@ -1319,7 +1358,14 @@ void TransactionRouter::Router::implicitlyAbortTransaction(OperationContext* opC
 
     // Update stats on scope exit so the transaction is considered "active" while waiting on abort
     // responses.
-    ScopeGuard updateStatsGuard([&] { _onImplicitAbort(opCtx, status); });
+    ScopeGuard updateStatsGuard([&] {
+        if (failedToUnyieldSessionAtShutdown(opCtx)) {
+            // It's unsafe to continue without the session checked out. This should only happen at
+            // global shutdown, so it's acceptable to skip updating stats.
+            return;
+        }
+        _onImplicitAbort(opCtx, status);
+    });
 
     if (o().participants.empty()) {
         return;
@@ -1390,6 +1436,11 @@ void TransactionRouter::Router::appendRecoveryToken(BSONObjBuilder* builder) con
 void TransactionRouter::Router::_resetRouterState(
     OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
     stdx::lock_guard<Client> lk(*opCtx->getClient());
+
+    uassert(ErrorCodes::ConflictingOperationInProgress,
+            "Cannot start a new transaction while the previous is yielded",
+            o(lk).activeYields == 0);
+
     o(lk).txnNumberAndRetryCounter.setTxnNumber(txnNumberAndRetryCounter.getTxnNumber());
     o(lk).txnNumberAndRetryCounter.setTxnRetryCounter(
         *txnNumberAndRetryCounter.getTxnRetryCounter());

@@ -36,6 +36,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "boost/smart_ptr/intrusive_ptr.hpp"
+
 #include "mongo/base/data_range.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -47,8 +49,10 @@
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/crypto/fle_tags.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/fle_query_interface_mock.h"
 #include "mongo/db/matcher/schema/encrypt_schema_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops_gen.h"
@@ -67,134 +71,6 @@
 
 namespace mongo {
 namespace {
-
-class FLEQueryTestImpl : public FLEQueryInterface {
-public:
-    FLEQueryTestImpl(OperationContext* opCtx, repl::StorageInterface* storage)
-        : _opCtx(opCtx), _storage(storage) {}
-    ~FLEQueryTestImpl() = default;
-
-    BSONObj getById(const NamespaceString& nss, BSONElement element) final;
-
-    BSONObj getById(const NamespaceString& nss, PrfBlock block) {
-        auto doc = BSON("v" << BSONBinData(block.data(), block.size(), BinDataGeneral));
-        BSONElement element = doc.firstElement();
-        return getById(nss, element);
-    }
-
-    uint64_t countDocuments(const NamespaceString& nss) final;
-
-    void insertDocument(const NamespaceString& nss, BSONObj obj, bool translateDuplicateKey) final;
-
-    BSONObj deleteWithPreimage(const NamespaceString& nss,
-                               const EncryptionInformation& ei,
-                               const write_ops::DeleteCommandRequest& deleteRequest) final;
-
-    BSONObj updateWithPreimage(const NamespaceString& nss,
-                               const EncryptionInformation& ei,
-                               const write_ops::UpdateCommandRequest& updateRequest) final;
-
-    write_ops::FindAndModifyCommandReply findAndModify(
-        const NamespaceString& nss,
-        const EncryptionInformation& ei,
-        const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) final;
-
-private:
-    OperationContext* _opCtx;
-    repl::StorageInterface* _storage;
-};
-
-BSONObj FLEQueryTestImpl::getById(const NamespaceString& nss, BSONElement element) {
-    auto obj = BSON("_id" << element);
-    auto swDoc = _storage->findById(_opCtx, nss, obj.firstElement());
-    if (swDoc.getStatus() == ErrorCodes::NoSuchKey) {
-        return BSONObj();
-    }
-
-    return uassertStatusOK(swDoc);
-}
-
-uint64_t FLEQueryTestImpl::countDocuments(const NamespaceString& nss) {
-    return uassertStatusOK(_storage->getCollectionCount(_opCtx, nss));
-}
-
-void FLEQueryTestImpl::insertDocument(const NamespaceString& nss,
-                                      BSONObj obj,
-                                      bool translateDuplicateKey) {
-    repl::TimestampedBSONObj tb;
-    tb.obj = obj;
-
-    auto status = _storage->insertDocument(_opCtx, nss, tb, 0);
-
-    uassertStatusOK(status);
-}
-
-BSONObj FLEQueryTestImpl::deleteWithPreimage(const NamespaceString& nss,
-                                             const EncryptionInformation& ei,
-                                             const write_ops::DeleteCommandRequest& deleteRequest) {
-    // A limit of the API, we can delete by _id and get the pre-image so we limit our unittests to
-    // this
-    ASSERT_EQ(deleteRequest.getDeletes().size(), 1);
-    auto deleteOpEntry = deleteRequest.getDeletes()[0];
-    ASSERT_EQ("_id"_sd, deleteOpEntry.getQ().firstElementFieldNameStringData());
-
-    auto swDoc = _storage->deleteById(_opCtx, nss, deleteOpEntry.getQ().firstElement());
-
-    // Some of the unit tests delete documents that do not exist
-    if (swDoc.getStatus() == ErrorCodes::NoSuchKey) {
-        return BSONObj();
-    }
-
-    return uassertStatusOK(swDoc);
-}
-
-BSONObj FLEQueryTestImpl::updateWithPreimage(const NamespaceString& nss,
-                                             const EncryptionInformation& ei,
-                                             const write_ops::UpdateCommandRequest& updateRequest) {
-    // A limit of the API, we can delete by _id and get the pre-image so we limit our unittests to
-    // this
-    ASSERT_EQ(updateRequest.getUpdates().size(), 1);
-    auto updateOpEntry = updateRequest.getUpdates()[0];
-    ASSERT_EQ("_id"_sd, updateOpEntry.getQ().firstElementFieldNameStringData());
-
-    BSONObj preimage = getById(nss, updateOpEntry.getQ().firstElement());
-
-    uassertStatusOK(_storage->upsertById(_opCtx,
-                                         nss,
-                                         updateOpEntry.getQ().firstElement(),
-                                         updateOpEntry.getU().getUpdateModifier()));
-
-    return preimage;
-}
-
-write_ops::FindAndModifyCommandReply FLEQueryTestImpl::findAndModify(
-    const NamespaceString& nss,
-    const EncryptionInformation& ei,
-    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
-    // Repl storage interface does not have find and modify support directly. We emulate it, poorly
-    ASSERT_EQ("_id"_sd, findAndModifyRequest.getQuery().firstElementFieldNameStringData());
-    ASSERT_EQ(findAndModifyRequest.getNew().get_value_or(false), false);
-
-    BSONObj preimage = getById(nss, findAndModifyRequest.getQuery().firstElement());
-
-    if (findAndModifyRequest.getRemove().get_value_or(false)) {
-        // Remove
-        auto swDoc =
-            _storage->deleteById(_opCtx, nss, findAndModifyRequest.getQuery().firstElement());
-        uassertStatusOK(swDoc);
-
-    } else {
-        uassertStatusOK(
-            _storage->upsertById(_opCtx,
-                                 nss,
-                                 findAndModifyRequest.getQuery().firstElement(),
-                                 findAndModifyRequest.getUpdate()->getUpdateModifier()));
-    }
-
-    write_ops::FindAndModifyCommandReply reply;
-    reply.setValue(preimage);
-    return reply;
-}
 
 constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"_sd;
 constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
@@ -264,11 +140,10 @@ std::string fieldNameFromInt(uint64_t i) {
 }
 
 class FleCrudTest : public ServiceContextMongoDTest {
-private:
-    void setUp() final;
-    void tearDown() final;
-
 protected:
+    void setUp();
+    void tearDown();
+
     void createCollection(const NamespaceString& ns);
 
     void assertDocumentCounts(uint64_t edc, uint64_t esc, uint64_t ecc, uint64_t ecoc);
@@ -281,6 +156,7 @@ protected:
     void doSingleUpdate(int id, BSONElement element);
     void doSingleUpdate(int id, BSONObj obj);
     void doSingleUpdateWithUpdateDoc(int id, BSONObj update);
+    void doSingleUpdateWithUpdateDoc(int id, const write_ops::UpdateModification& modification);
 
     void doFindAndModify(write_ops::FindAndModifyCommandRequest& request);
 
@@ -289,6 +165,10 @@ protected:
     void doSingleWideInsert(int id, uint64_t fieldCount, ValueGenerator func);
 
     void validateDocument(int id, boost::optional<BSONObj> doc);
+
+    ESCDerivedFromDataToken getTestESCDataToken(BSONObj obj);
+    ECCDerivedFromDataToken getTestECCDataToken(BSONObj obj);
+    EDCDerivedFromDataToken getTestEDCDataToken(BSONObj obj);
 
     ESCTwiceDerivedTagToken getTestESCToken(BSONElement value);
     ESCTwiceDerivedTagToken getTestESCToken(BSONObj obj);
@@ -311,7 +191,7 @@ protected:
 
     repl::StorageInterface* _storage{nullptr};
 
-    std::unique_ptr<FLEQueryTestImpl> _queryImpl;
+    std::unique_ptr<FLEQueryInterfaceMock> _queryImpl;
 
     TestKeyVault _keyVault;
 
@@ -333,7 +213,7 @@ void FleCrudTest::setUp() {
     repl::StorageInterface::set(service, std::make_unique<repl::StorageInterfaceImpl>());
     _storage = repl::StorageInterface::get(service);
 
-    _queryImpl = std::make_unique<FLEQueryTestImpl>(_opCtx.get(), _storage);
+    _queryImpl = std::make_unique<FLEQueryInterfaceMock>(_opCtx.get(), _storage);
 
     createCollection(_edcNs);
     createCollection(_escNs);
@@ -358,11 +238,37 @@ ConstDataRange toCDR(BSONElement element) {
     return ConstDataRange(element.value(), element.value() + element.valuesize());
 }
 
+ESCDerivedFromDataToken FleCrudTest::getTestESCDataToken(BSONObj obj) {
+    auto element = obj.firstElement();
+    auto c1token = FLELevel1TokenGenerator::generateCollectionsLevel1Token(
+        _keyVault.getIndexKeyById(indexKeyId).key);
+    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1token);
+    return FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken,
+                                                                             toCDR(element));
+}
+
+ECCDerivedFromDataToken FleCrudTest::getTestECCDataToken(BSONObj obj) {
+    auto element = obj.firstElement();
+    auto c1token = FLELevel1TokenGenerator::generateCollectionsLevel1Token(
+        _keyVault.getIndexKeyById(indexKeyId).key);
+    auto eccToken = FLECollectionTokenGenerator::generateECCToken(c1token);
+    return FLEDerivedFromDataTokenGenerator::generateECCDerivedFromDataToken(eccToken,
+                                                                             toCDR(element));
+}
+
+EDCDerivedFromDataToken FleCrudTest::getTestEDCDataToken(BSONObj obj) {
+    auto element = obj.firstElement();
+    auto c1token = FLELevel1TokenGenerator::generateCollectionsLevel1Token(
+        _keyVault.getIndexKeyById(indexKeyId).key);
+    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(c1token);
+    return FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken,
+                                                                             toCDR(element));
+}
+
 ESCTwiceDerivedTagToken FleCrudTest::getTestESCToken(BSONElement element) {
     auto c1token = FLELevel1TokenGenerator::generateCollectionsLevel1Token(
         _keyVault.getIndexKeyById(indexKeyId).key);
     auto escToken = FLECollectionTokenGenerator::generateESCToken(c1token);
-
     auto escDataToken =
         FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, toCDR(element));
     auto escContentionToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
@@ -398,7 +304,6 @@ ECCDerivedFromDataTokenAndContentionFactorToken FleCrudTest::getTestECCToken(BSO
     auto c1token = FLELevel1TokenGenerator::generateCollectionsLevel1Token(
         _keyVault.getIndexKeyById(indexKeyId).key);
     auto eccToken = FLECollectionTokenGenerator::generateECCToken(c1token);
-
     auto eccDataToken =
         FLEDerivedFromDataTokenGenerator::generateECCDerivedFromDataToken(eccToken, toCDR(element));
     return FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
@@ -485,13 +390,13 @@ void FleCrudTest::doSingleWideInsert(int id, uint64_t fieldCount, ValueGenerator
 
     auto clientDoc = builder.obj();
 
-    auto result = FLEClientCrypto::generateInsertOrUpdateFromPlaceholders(clientDoc, &_keyVault);
+    auto result = FLEClientCrypto::transformPlaceholders(clientDoc, &_keyVault);
 
     auto serverPayload = EDCServerCollection::getEncryptedFieldInfo(result);
 
     auto efc = getTestEncryptedFieldConfig();
 
-    processInsert(_queryImpl.get(), _edcNs, serverPayload, efc, result);
+    uassertStatusOK(processInsert(_queryImpl.get(), _edcNs, serverPayload, efc, result));
 }
 
 
@@ -546,13 +451,13 @@ void FleCrudTest::doSingleInsert(int id, BSONElement element) {
 
     auto clientDoc = builder.obj();
 
-    auto result = FLEClientCrypto::generateInsertOrUpdateFromPlaceholders(clientDoc, &_keyVault);
+    auto result = FLEClientCrypto::transformPlaceholders(clientDoc, &_keyVault);
 
     auto serverPayload = EDCServerCollection::getEncryptedFieldInfo(result);
 
     auto efc = getTestEncryptedFieldConfig();
 
-    processInsert(_queryImpl.get(), _edcNs, serverPayload, efc, result);
+    uassertStatusOK(processInsert(_queryImpl.get(), _edcNs, serverPayload, efc, result));
 }
 
 void FleCrudTest::doSingleInsert(int id, BSONObj obj) {
@@ -570,12 +475,20 @@ void FleCrudTest::doSingleUpdate(int id, BSONElement element) {
     builder.append("$set",
                    BSON("encrypted" << BSONBinData(buf.data(), buf.size(), BinDataType::Encrypt)));
     auto clientDoc = builder.obj();
-    auto result = FLEClientCrypto::generateInsertOrUpdateFromPlaceholders(clientDoc, &_keyVault);
+    auto result = FLEClientCrypto::transformPlaceholders(clientDoc, &_keyVault);
 
     doSingleUpdateWithUpdateDoc(id, result);
 }
 
 void FleCrudTest::doSingleUpdateWithUpdateDoc(int id, BSONObj update) {
+    doSingleUpdateWithUpdateDoc(
+        id,
+        write_ops::UpdateModification(update, write_ops::UpdateModification::ClassicTag{}, false));
+}
+
+void FleCrudTest::doSingleUpdateWithUpdateDoc(int id,
+                                              const write_ops::UpdateModification& modification) {
+
     auto efc = getTestEncryptedFieldConfig();
     auto doc = EncryptionInformationHelpers::encryptionInformationSerializeForDelete(
         _edcNs, efc, &_keyVault);
@@ -583,14 +496,20 @@ void FleCrudTest::doSingleUpdateWithUpdateDoc(int id, BSONObj update) {
 
     write_ops::UpdateOpEntry entry;
     entry.setQ(BSON("_id" << id));
-    entry.setU(
-        write_ops::UpdateModification(update, write_ops::UpdateModification::ClassicTag{}, false));
+    entry.setU(modification);
 
     write_ops::UpdateCommandRequest updateRequest(_edcNs);
     updateRequest.setUpdates({entry});
     updateRequest.getWriteCommandRequestBase().setEncryptionInformation(ei);
 
-    processUpdate(_queryImpl.get(), updateRequest);
+
+    std::unique_ptr<CollatorInterface> collator;
+    auto expCtx = make_intrusive<ExpressionContext>(_opCtx.get(),
+                                                    std::move(collator),
+                                                    updateRequest.getNamespace(),
+                                                    updateRequest.getLegacyRuntimeConstants(),
+                                                    updateRequest.getLet());
+    processUpdate(_queryImpl.get(), expCtx, updateRequest);
 }
 
 void FleCrudTest::doSingleDelete(int id) {
@@ -610,7 +529,14 @@ void FleCrudTest::doSingleDelete(int id) {
     deleteRequest.setDeletes({entry});
     deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(ei);
 
-    processDelete(_queryImpl.get(), deleteRequest);
+    std::unique_ptr<CollatorInterface> collator;
+    auto expCtx = make_intrusive<ExpressionContext>(_opCtx.get(),
+                                                    std::move(collator),
+                                                    deleteRequest.getNamespace(),
+                                                    deleteRequest.getLegacyRuntimeConstants(),
+                                                    deleteRequest.getLet());
+
+    processDelete(_queryImpl.get(), expCtx, deleteRequest);
 }
 
 void FleCrudTest::doFindAndModify(write_ops::FindAndModifyCommandRequest& request) {
@@ -623,6 +549,43 @@ void FleCrudTest::doFindAndModify(write_ops::FindAndModifyCommandRequest& reques
 
     processFindAndModify(_queryImpl.get(), request);
 }
+
+class CollectionReader : public FLEStateCollectionReader {
+public:
+    CollectionReader(std::string&& coll, FLEQueryInterfaceMock& queryImpl)
+        : _coll(NamespaceString(coll)), _queryImpl(queryImpl) {}
+
+    uint64_t getDocumentCount() const override {
+        return _queryImpl.countDocuments(_coll);
+    }
+
+    BSONObj getById(PrfBlock block) const override {
+        auto doc = BSON("v" << BSONBinData(block.data(), block.size(), BinDataGeneral));
+        return _queryImpl.getById(_coll, doc.firstElement());
+    }
+
+private:
+    NamespaceString _coll;
+    FLEQueryInterfaceMock& _queryImpl;
+};
+
+class FleTagsTest : public FleCrudTest {
+protected:
+    void setUp() {
+        FleCrudTest::setUp();
+    }
+    void tearDown() {
+        FleCrudTest::tearDown();
+    }
+    std::vector<PrfBlock> readTags(BSONObj obj) {
+        auto s = getTestESCDataToken(obj);
+        auto c = getTestECCDataToken(obj);
+        auto d = getTestEDCDataToken(obj);
+        auto esc = CollectionReader("test.esc", *_queryImpl);
+        auto ecc = CollectionReader("test.ecc", *_queryImpl);
+        return mongo::fle::readTags(esc, ecc, s, c, d, 0);
+    }
+};
 
 // Insert one document
 TEST_F(FleCrudTest, InsertOne) {
@@ -879,6 +842,42 @@ TEST_F(FleCrudTest, UpdateOneSameValue) {
                                 << "secret"));
 }
 
+
+// Update one document with replacement
+TEST_F(FleCrudTest, UpdateOneReplace) {
+
+    doSingleInsert(1,
+                   BSON("encrypted"
+                        << "secret"));
+
+    assertDocumentCounts(1, 1, 0, 1);
+
+    auto replace = BSON("encrypted"
+                        << "top secret");
+
+    auto buf = generateSinglePlaceholder(replace.firstElement());
+
+    auto replaceEP = BSON("plainText"
+                          << "fake"
+                          << "encrypted"
+                          << BSONBinData(buf.data(), buf.size(), BinDataType::Encrypt));
+
+    auto result = FLEClientCrypto::transformPlaceholders(replaceEP, &_keyVault);
+
+    doSingleUpdateWithUpdateDoc(
+        1,
+        write_ops::UpdateModification(result, write_ops::UpdateModification::ClassicTag{}, true));
+
+
+    assertDocumentCounts(1, 2, 1, 3);
+
+    validateDocument(1,
+                     BSON("_id" << 1 << "plainText"
+                                << "fake"
+                                << "encrypted"
+                                << "top secret"));
+}
+
 // Rename safeContent
 TEST_F(FleCrudTest, RenameSafeContent) {
 
@@ -930,7 +929,7 @@ TEST_F(FleCrudTest, FindAndModify_UpdateOne) {
     builder.append("$set",
                    BSON("encrypted" << BSONBinData(buf.data(), buf.size(), BinDataType::Encrypt)));
     auto clientDoc = builder.obj();
-    auto result = FLEClientCrypto::generateInsertOrUpdateFromPlaceholders(clientDoc, &_keyVault);
+    auto result = FLEClientCrypto::transformPlaceholders(clientDoc, &_keyVault);
 
 
     write_ops::FindAndModifyCommandRequest req(_edcNs);
@@ -1013,6 +1012,84 @@ TEST_F(FleCrudTest, FindAndModify_SetSafeContent) {
     ASSERT_THROWS_CODE(doFindAndModify(req), DBException, 6371507);
 }
 
+TEST_F(FleTagsTest, InsertOne) {
+    auto doc = BSON("encrypted"
+                    << "a");
 
+    doSingleInsert(1, doc);
+
+    ASSERT_EQ(1, readTags(doc).size());
+}
+
+TEST_F(FleTagsTest, InsertTwoSame) {
+    auto doc = BSON("encrypted"
+                    << "a");
+
+    doSingleInsert(1, doc);
+    doSingleInsert(2, doc);
+
+    ASSERT_EQ(2, readTags(doc).size());
+}
+
+TEST_F(FleTagsTest, InsertTwoDifferent) {
+    auto doc1 = BSON("encrypted"
+                     << "a");
+    auto doc2 = BSON("encrypted"
+                     << "b");
+
+    doSingleInsert(1, doc1);
+    doSingleInsert(2, doc2);
+
+    ASSERT_EQ(1, readTags(doc1).size());
+    ASSERT_EQ(1, readTags(doc2).size());
+}
+
+TEST_F(FleTagsTest, InsertAndDeleteOne) {
+    auto doc = BSON("encrypted"
+                    << "a");
+
+    doSingleInsert(1, doc);
+    doSingleDelete(1);
+
+    ASSERT_EQ(0, readTags(doc).size());
+}
+
+TEST_F(FleTagsTest, InsertTwoSameAndDeleteOne) {
+    auto doc = BSON("encrypted"
+                    << "a");
+
+    doSingleInsert(1, doc);
+    doSingleInsert(2, doc);
+    doSingleDelete(2);
+
+    ASSERT_EQ(1, readTags(doc).size());
+}
+
+TEST_F(FleTagsTest, InsertTwoDifferentAndDeleteOne) {
+    auto doc1 = BSON("encrypted"
+                     << "a");
+    auto doc2 = BSON("encrypted"
+                     << "b");
+
+    doSingleInsert(1, doc1);
+    doSingleInsert(2, doc2);
+    doSingleDelete(1);
+
+    ASSERT_EQ(0, readTags(doc1).size());
+    ASSERT_EQ(1, readTags(doc2).size());
+}
+
+TEST_F(FleTagsTest, InsertAndUpdate) {
+    auto doc1 = BSON("encrypted"
+                     << "a");
+    auto doc2 = BSON("encrypted"
+                     << "b");
+
+    doSingleInsert(1, doc1);
+    doSingleUpdate(1, doc2);
+
+    ASSERT_EQ(0, readTags(doc1).size());
+    ASSERT_EQ(1, readTags(doc2).size());
+}
 }  // namespace
 }  // namespace mongo

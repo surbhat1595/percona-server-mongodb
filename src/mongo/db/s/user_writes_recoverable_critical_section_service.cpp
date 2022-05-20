@@ -36,8 +36,8 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/global_user_write_block_state.h"
-#include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/s/user_writes_critical_section_document_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
@@ -59,6 +59,8 @@ bool inRecoveryMode(OperationContext* opCtx) {
 }  // namespace user_writes_recoverable_critical_section_util
 
 namespace {
+MONGO_FAIL_POINT_DEFINE(skipRecoverUserWriteCriticalSections);
+
 const auto serviceDecorator =
     ServiceContext::declareDecoration<UserWritesRecoverableCriticalSectionService>();
 
@@ -192,11 +194,6 @@ void UserWritesRecoverableCriticalSectionService::
     // Take the user writes critical section blocking only ShardingDDLCoordinators.
     acquireRecoverableCriticalSection(
         opCtx, nss, true /* blockShardedDDL */, false /* blockUserWrites */);
-
-    // Wait for ongoing ShardingDDLCoordinators to finish. This ensures that all coordinators that
-    // started before enabling blocking have finish, and that any new coordinator that is started
-    // after this point will see the blocking is enabled.
-    ShardingDDLCoordinatorService::getService(opCtx)->waitForOngoingCoordinatorsToFinish(opCtx);
 }
 
 void UserWritesRecoverableCriticalSectionService::
@@ -337,12 +334,25 @@ void UserWritesRecoverableCriticalSectionService::releaseRecoverableCriticalSect
 
         // Release the critical section by deleting the critical section document. The OpObserver
         // will release the in-memory CS when reacting to the delete event.
-        PersistentTaskStore<UserWriteBlockingCriticalSectionDocument> store(
-            NamespaceString::kUserWritesCriticalSectionsNamespace);
-        store.remove(
-            opCtx,
-            BSON(UserWriteBlockingCriticalSectionDocument::kNssFieldName << nss.toString()),
-            ShardingCatalogClient::kLocalWriteConcern);
+        DBDirectClient dbClient(opCtx);
+        const auto cmdResponse = dbClient.runCommand([&] {
+            write_ops::DeleteCommandRequest deleteOp(
+                NamespaceString::kUserWritesCriticalSectionsNamespace);
+
+            deleteOp.setDeletes({[&] {
+                write_ops::DeleteOpEntry entry;
+                entry.setQ(BSON(UserWriteBlockingCriticalSectionDocument::kNssFieldName
+                                << nss.toString()));
+                // At most one doc can possibly match the above query.
+                entry.setMulti(false);
+                return entry;
+            }()});
+
+            return deleteOp.serialize({});
+        }());
+
+        const auto commandReply = cmdResponse->getCommandReply();
+        uassertStatusOK(getStatusFromWriteCommandReply(commandReply));
     }
 
     LOGV2_DEBUG(
@@ -351,6 +361,10 @@ void UserWritesRecoverableCriticalSectionService::releaseRecoverableCriticalSect
 
 void UserWritesRecoverableCriticalSectionService::recoverRecoverableCriticalSections(
     OperationContext* opCtx) {
+    if (MONGO_unlikely(skipRecoverUserWriteCriticalSections.shouldFail())) {
+        return;
+    }
+
     LOGV2_DEBUG(6351912, 2, "Recovering all user writes recoverable critical sections");
 
     GlobalUserWriteBlockState::get(opCtx)->disableUserShardedDDLBlocking(opCtx);

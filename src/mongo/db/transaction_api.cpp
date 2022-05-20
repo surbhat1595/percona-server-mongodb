@@ -44,6 +44,7 @@
 #include "mongo/db/operation_time_tracker.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/db/transaction_validation.h"
@@ -57,6 +58,43 @@
 #include "mongo/transport/service_entry_point.h"
 
 namespace mongo::txn_api {
+
+namespace {
+
+/**
+ * Accepts a callback that returns a future. Yields the ResourceYielder before constructing and
+ * waiting on the future and then unyields before returning the ready future's result. Unyield will
+ * always be called if yield is successful. Errors from the callback are returned if it and unyield
+ * return errors.
+ *
+ * Notably, the futures are constructed after yielding so a future made with an inline executor
+ * will still run after the yield.
+ */
+template <typename Callback>
+StatusOrStatusWith<typename std::invoke_result_t<Callback>::value_type> getWithYields(
+    OperationContext* opCtx,
+    Callback&& cb,
+    const std::unique_ptr<ResourceYielder>& resourceYielder) {
+    auto yieldStatus = resourceYielder ? resourceYielder->yieldNoThrow(opCtx) : Status::OK();
+    if (!yieldStatus.isOK()) {
+        return yieldStatus;
+    }
+
+    auto fut = std::forward<Callback>(cb)();
+    auto futureStatus = fut.getNoThrow(opCtx);
+
+    auto unyieldStatus = resourceYielder ? resourceYielder->unyieldNoThrow(opCtx) : Status::OK();
+
+    if (!futureStatus.isOK()) {
+        return futureStatus;
+    } else if (!unyieldStatus.isOK()) {
+        return unyieldStatus;
+    }
+
+    return futureStatus;
+}
+
+}  // namespace
 
 namespace details {
 
@@ -113,56 +151,14 @@ void logNextStep(Transaction::ErrorHandlingStep nextStep, const BSONObj& txnInfo
 
 }  // namespace details
 
-Status TransactionWithRetries::_runBodyWithYields(OperationContext* opCtx) noexcept try {
-    if (_resourceYielder) {
-        _resourceYielder->yield(opCtx);
-    }
-
-    auto bodyFuture = _internalTxn->runCallback();
-    bodyFuture.wait(opCtx);
-
-    if (_resourceYielder) {
-        _resourceYielder->unyield(opCtx);
-    }
-
-    return bodyFuture.getNoThrow(opCtx);
-} catch (const DBException& e) {
-    return e.toStatus();
-}
-
-StatusWith<CommitResult> TransactionWithRetries::_runCommitWithYields(
-    OperationContext* opCtx) noexcept try {
-    if (_resourceYielder) {
-        _resourceYielder->yield(opCtx);
-    }
-
-    auto commitFuture = _internalTxn->commit();
-    commitFuture.wait(opCtx);
-
-    if (_resourceYielder) {
-        _resourceYielder->unyield(opCtx);
-    }
-
-    return commitFuture.getNoThrow(opCtx);
-} catch (const DBException& e) {
-    return e.toStatus();
-}
-
-Status TransactionWithRetries::_runAbortWithYields(OperationContext* opCtx) noexcept try {
-    if (_resourceYielder) {
-        _resourceYielder->yield(opCtx);
-    }
-
-    auto abortFuture = _internalTxn->abort();
-    abortFuture.wait(opCtx);
-
-    if (_resourceYielder) {
-        _resourceYielder->unyield(opCtx);
-    }
-
-    return abortFuture.getNoThrow(opCtx);
-} catch (const DBException& e) {
-    return e.toStatus();
+TransactionWithRetries::TransactionWithRetries(OperationContext* opCtx,
+                                               ExecutorPtr executor,
+                                               std::unique_ptr<ResourceYielder> resourceYielder)
+    : _internalTxn(std::make_shared<details::Transaction>(opCtx, executor)),
+      _resourceYielder(std::move(resourceYielder)) {
+    // Callers should always provide a yielder when using the API with a session checked out,
+    // otherwise commands run by the API won't be able to check out that session.
+    invariant(!OperationContextSession::get(opCtx) || _resourceYielder);
 }
 
 StatusWith<CommitResult> TransactionWithRetries::runSyncNoThrow(OperationContext* opCtx,
@@ -175,7 +171,8 @@ StatusWith<CommitResult> TransactionWithRetries::runSyncNoThrow(OperationContext
     _internalTxn->setCallback(std::move(callback));
     while (true) {
         {
-            auto bodyStatus = _runBodyWithYields(opCtx);
+            auto bodyStatus =
+                getWithYields(opCtx, [&] { return _internalTxn->runCallback(); }, _resourceYielder);
 
             if (!bodyStatus.isOK()) {
                 auto nextStep = _internalTxn->handleError(bodyStatus);
@@ -198,7 +195,8 @@ StatusWith<CommitResult> TransactionWithRetries::runSyncNoThrow(OperationContext
         }
 
         while (true) {
-            auto swResult = _runCommitWithYields(opCtx);
+            auto swResult =
+                getWithYields(opCtx, [&] { return _internalTxn->commit(); }, _resourceYielder);
 
             if (swResult.isOK() && swResult.getValue().getEffectiveStatus().isOK()) {
                 // Commit succeeded so return to the caller.
@@ -230,7 +228,8 @@ StatusWith<CommitResult> TransactionWithRetries::runSyncNoThrow(OperationContext
 
 void TransactionWithRetries::_bestEffortAbort(OperationContext* opCtx) {
     try {
-        uassertStatusOK(_runAbortWithYields(opCtx));
+        uassertStatusOK(
+            getWithYields(opCtx, [&] { return _internalTxn->abort(); }, _resourceYielder));
     } catch (const DBException& e) {
         LOGV2(5875900,
               "Unable to abort internal transaction",
@@ -250,10 +249,16 @@ void primeInternalClientAndOpCtx(Client* client, OperationContext* opCtx) {
     }
 }
 
-SemiFuture<BSONObj> SEPTransactionClient::runCommand(StringData dbName, BSONObj cmdObj) const {
-    BSONObjBuilder cmdBuilder(std::move(cmdObj));
+Future<DbResponse> DefaultSEPTransactionClientBehaviors::handleRequest(
+    OperationContext* opCtx, const Message& request) const {
+    auto serviceEntryPoint = opCtx->getServiceContext()->getServiceEntryPoint();
+    return serviceEntryPoint->handleRequest(opCtx, request);
+}
 
+SemiFuture<BSONObj> SEPTransactionClient::runCommand(StringData dbName, BSONObj cmdObj) const {
     invariant(_hooks, "Transaction metadata hooks must be injected before a command can be run");
+
+    BSONObjBuilder cmdBuilder(_behaviors->maybeModifyCommand(std::move(cmdObj)));
     _hooks->runRequestHook(&cmdBuilder);
 
     invariant(!haveClient());
@@ -262,10 +267,9 @@ SemiFuture<BSONObj> SEPTransactionClient::runCommand(StringData dbName, BSONObj 
     auto cancellableOpCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
     primeInternalClientAndOpCtx(&cc(), cancellableOpCtx.get());
 
-    auto sep = cc().getServiceContext()->getServiceEntryPoint();
     auto opMsgRequest = OpMsgRequest::fromDBAndBody(dbName, cmdBuilder.obj());
     auto requestMessage = opMsgRequest.serialize();
-    return sep->handleRequest(cancellableOpCtx.get(), requestMessage)
+    return _behaviors->handleRequest(cancellableOpCtx.get(), requestMessage)
         .then([this](DbResponse dbResponse) {
             auto reply = rpc::makeReply(&dbResponse.response)->getCommandReply().getOwned();
             _hooks->runReplyHook(reply);
@@ -304,16 +308,31 @@ SemiFuture<BatchedCommandResponse> SEPTransactionClient::runCRUDOp(
 
 SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
     const FindCommandRequest& cmd) const {
-    // TODO SERVER-61779 Support cursors.
-    uassert(ErrorCodes::IllegalOperation,
-            "Only single batch finds are supported",
-            cmd.getSingleBatch());
+    // TODO SERVER-64793: Make exhaustiveFind asynchronous
     return runCommand(cmd.getDbName(), cmd.toBSON({}))
         .thenRunOn(_executor)
-        .then([](BSONObj reply) {
-            // Will throw if the response has a non OK top level status.
+        .then([this, batchSize = cmd.getBatchSize()](BSONObj reply) {
+            std::vector<BSONObj> response;
             auto cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(reply));
-            return cursorResponse.releaseBatch();
+            while (true) {
+                auto releasedBatch = cursorResponse.releaseBatch();
+                response.insert(response.end(), releasedBatch.begin(), releasedBatch.end());
+
+                // We keep issuing getMores until the cursorId signifies that there are no more
+                // documents to fetch.
+                if (!cursorResponse.getCursorId()) {
+                    break;
+                }
+
+                GetMoreCommandRequest getMoreRequest(cursorResponse.getCursorId(),
+                                                     cursorResponse.getNSS().coll().toString());
+                getMoreRequest.setBatchSize(batchSize);
+
+                // We block until we get the response back from runCommand().
+                cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(
+                    runCommand(cursorResponse.getNSS().db(), getMoreRequest.toBSON({})).get()));
+            }
+            return response;
         })
         .semi();
 }
@@ -471,16 +490,15 @@ void Transaction::prepareRequest(BSONObjBuilder* cmdBuilder) {
         // (aka -1), which indicates retry history should not be saved. If statement ids are not
         // explicitly sent, implicit ids may be inferred, which could lead to bugs if different
         // commands have the same ids inferred.
-        uassert(
-            6410500,
-            str::stream()
-                << "In a retryable write transaction every retryable write command should have an "
-                   "explicit statement id, command: "
-                << redact(cmdBuilder->asTempObj()),
+        dassert(
             !isRetryableWriteCommand(
                 cmdBuilder->asTempObj().firstElement().fieldNameStringData()) ||
                 (cmdBuilder->hasField(write_ops::WriteCommandRequestBase::kStmtIdsFieldName) ||
-                 cmdBuilder->hasField(write_ops::WriteCommandRequestBase::kStmtIdFieldName)));
+                 cmdBuilder->hasField(write_ops::WriteCommandRequestBase::kStmtIdFieldName)),
+            str::stream()
+                << "In a retryable write transaction every retryable write command should have an "
+                   "explicit statement id, command: "
+                << redact(cmdBuilder->asTempObj()));
     }
 
     stdx::lock_guard<Latch> lg(_mutex);

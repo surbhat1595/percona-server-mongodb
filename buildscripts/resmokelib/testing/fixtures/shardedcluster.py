@@ -8,7 +8,6 @@ import pymongo
 import pymongo.errors
 
 import buildscripts.resmokelib.testing.fixtures.interface as interface
-import buildscripts.resmokelib.utils.registry as registry
 
 
 class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-instance-attributes
@@ -108,6 +107,13 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
             self.logger.info("Ignoring write concern timeout for refreshLogicalSessionCacheNow "
                              "command and continuing to wait")
             target.await_last_op_committed(target.AWAIT_REPL_TIMEOUT_FOREVER_MINS * 60)
+
+    def get_shard_ids(self):
+        """Get the list of shard ids in the cluster."""
+        client = self.mongo_client()
+        interface.authenticate(client, self.auth_options)
+        res = client.admin.command("listShards")
+        return [shard_info["_id"] for shard_info in res["shards"]]
 
     def await_ready(self):
         """Block until the fixture can be used for testing."""
@@ -281,7 +287,8 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
         replset_config_options["configsvr"] = True
 
         mongod_options = self.mongod_options.copy()
-        mongod_options.update(
+        mongod_options = self.fixturelib.merge_mongo_option_dicts(
+            mongod_options,
             self.fixturelib.make_historic(configsvr_options.pop("mongod_options", {})))
         mongod_options["configsvr"] = ""
         mongod_options["dbpath"] = os.path.join(self._dbpath_prefix, "config")
@@ -321,8 +328,8 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
         replset_config_options["configsvr"] = False
 
         mongod_options = self.mongod_options.copy()
-        mongod_options.update(
-            self.fixturelib.make_historic(shard_options.pop("mongod_options", {})))
+        mongod_options = self.fixturelib.merge_mongo_option_dicts(
+            mongod_options, self.fixturelib.make_historic(shard_options.pop("mongod_options", {})))
         mongod_options["shardsvr"] = ""
         mongod_options["dbpath"] = os.path.join(self._dbpath_prefix, "shard{}".format(index))
         mongod_options["replSet"] = self._SHARD_REPLSET_NAME_PREFIX + str(index)

@@ -82,6 +82,7 @@ let testCases = {
     _killOperations: {skip: "does not return user data"},
     _mergeAuthzCollections: {skip: "primary only"},
     _migrateClone: {skip: "primary only"},
+    _shardsvrCompactStructuredEncryptionData: {skip: "primary only"},
     _shardsvrMovePrimary: {skip: "primary only"},
     _shardsvrMoveRange: {skip: "primary only"},
     _recvChunkAbort: {skip: "primary only"},
@@ -124,9 +125,11 @@ let testCases = {
     clone: {skip: "primary only"},
     cloneCollectionAsCapped: {skip: "primary only"},
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
+    clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
     clusterFind: {skip: "already tested by 'find' tests on mongos"},
+    clusterGetMore: {skip: "already tested by 'getMore' tests on mongos"},
     clusterInsert: {skip: "already tested by 'insert' tests on mongos"},
     clusterUpdate: {skip: "already tested by 'update' tests on mongos"},
     collMod: {skip: "primary only"},
@@ -134,6 +137,7 @@ let testCases = {
     commitReshardCollection: {skip: "primary only"},
     commitTransaction: {skip: "primary only"},
     compact: {skip: "does not return user data"},
+    compactStructuredEncryptionData: {skip: "does not return user data"},
     configureCollectionAutoSplitter: {
         skip: "does not return user data"
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
@@ -210,6 +214,7 @@ let testCases = {
     fsyncUnlock: {skip: "does not return user data"},
     getAuditConfig: {skip: "does not return user data"},
     getChangeStreamOptions: {skip: "does not return user data"},
+    getClusterParameter: {skip: "does not return user data"},
     getCmdLineOpts: {skip: "does not return user data"},
     getDefaultRWConcern: {skip: "does not return user data"},
     getDiagnosticData: {skip: "does not return user data"},

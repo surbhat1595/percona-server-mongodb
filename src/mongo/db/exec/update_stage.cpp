@@ -184,11 +184,13 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
         // metadata has not been initialized.
         const auto collDesc = CollectionShardingState::get(opCtx(), collection()->ns())
                                   ->getCollectionDescription(opCtx());
-        if (collDesc.isSharded() && !OperationShardingState::isOperationVersioned(opCtx())) {
+        if (collDesc.isSharded() && !OperationShardingState::isComingFromRouter(opCtx())) {
             immutablePaths.fillFrom(collDesc.getKeyPatternFields());
         }
+
         immutablePaths.keepShortest(&idFieldRef);
     }
+
     if (!driver->needMatchDetails()) {
         // If we don't need match details, avoid doing the rematch
         status = driver->update(opCtx(),
@@ -672,7 +674,8 @@ bool UpdateStage::wasReshardingKeyUpdated(const ShardingWriteRouter& shardingWri
     auto newRecipShard = *shardingWriteRouter.getReshardingDestinedRecipient(newObj);
 
     uassert(
-        WouldChangeOwningShardInfo(oldObj.value(), newObj, false /* upsert */, collection()->ns()),
+        WouldChangeOwningShardInfo(
+            oldObj.value(), newObj, false /* upsert */, collection()->ns(), collection()->uuid()),
         "This update would cause the doc to change owning shards under the new shard key",
         oldRecipShard == newRecipShard);
 
@@ -751,8 +754,11 @@ bool UpdateStage::wasExistingShardKeyUpdated(const ShardingWriteRouter& sharding
             hangBeforeThrowWouldChangeOwningShard.pauseWhileSet(opCtx());
         }
 
-        uasserted(WouldChangeOwningShardInfo(
-                      oldObj.value(), newObj, false /* upsert */, collection()->ns()),
+        uasserted(WouldChangeOwningShardInfo(oldObj.value(),
+                                             newObj,
+                                             false /* upsert */,
+                                             collection()->ns(),
+                                             collection()->uuid()),
                   "This update would cause the doc to change owning shards");
     }
 

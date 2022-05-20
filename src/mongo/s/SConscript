@@ -47,6 +47,7 @@ env.Library(
     target='sharding_router_api',
     source=[
         'cluster_commands_helpers.cpp',
+        'collection_uuid_mismatch.cpp',
         'multi_statement_transaction_requests_sender.cpp',
         'router_transactions_metrics.cpp',
         'router_transactions_stats.idl',
@@ -193,7 +194,6 @@ env.Library(
         'request_types/cleanup_reshard_collection.idl',
         'request_types/clear_jumbo_flag.idl',
         'request_types/clone_catalog_data.idl',
-        'request_types/clone_collection_options_from_primary_shard.idl',
         'request_types/commit_chunk_migration_request_type.cpp',
         'request_types/commit_reshard_collection.idl',
         'request_types/configure_collection_balancing.idl',
@@ -234,7 +234,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/connection_string',
         '$BUILD_DIR/mongo/db/coll_mod_command_idl',
-        '$BUILD_DIR/mongo/db/commands/set_cluster_parameter_idl',
+        '$BUILD_DIR/mongo/db/commands/cluster_server_parameter_cmds_idl',
         '$BUILD_DIR/mongo/db/commands/set_user_write_block_mode_idl',
         '$BUILD_DIR/mongo/db/common',
         '$BUILD_DIR/mongo/db/namespace_string',
@@ -650,6 +650,7 @@ env.CppUnitTest(
         'shard_key_pattern_test.cpp',
         'sharding_task_executor_test.cpp',
         'stale_exception_test.cpp',
+        'stale_shard_version_helpers_test.cpp',
         'transaction_router_test.cpp',
         'write_ops/batch_write_exec_test.cpp',
         'write_ops/batch_write_op_test.cpp',

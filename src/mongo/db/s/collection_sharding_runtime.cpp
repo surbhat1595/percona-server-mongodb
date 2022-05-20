@@ -33,6 +33,7 @@
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/global_settings.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/s/sharding_state.h"
@@ -60,7 +61,7 @@ const auto kUnshardedCollection = std::make_shared<UnshardedCollection>();
 boost::optional<ChunkVersion> getOperationReceivedVersion(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
     // If there is a version attached to the OperationContext, use it as the received version.
-    if (OperationShardingState::isOperationVersioned(opCtx)) {
+    if (OperationShardingState::isComingFromRouter(opCtx)) {
         return OperationShardingState::get(opCtx).getShardVersion(nss);
     }
 
@@ -123,18 +124,19 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     OperationContext* opCtx) {
     auto& oss = OperationShardingState::get(opCtx);
+
     // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
     // consider all collections as unsharded. Also, return unsharded if no shard version or db
     // version is present on the context.
-    if (!ShardingState::get(_serviceContext)->enabled() ||
-        (!OperationShardingState::isOperationVersioned(opCtx) && !oss.hasDbVersion())) {
+    if (!OperationShardingState::isComingFromRouter(opCtx)) {
         return {kUnshardedCollection};
     }
 
     auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
+    const auto receivedShardVersion{oss.getShardVersion(_nss)};
     uassert(
         StaleConfigInfo(_nss,
-                        ChunkVersion::IGNORED() /* receivedVersion */,
+                        receivedShardVersion ? *receivedShardVersion : ChunkVersion::IGNORED(),
                         boost::none /* wantedVersion */,
                         ShardingState::get(_serviceContext)->shardId()),
         str::stream() << "sharding status of collection " << _nss.ns()
@@ -308,6 +310,12 @@ CollectionShardingRuntime::_getCurrentMetadataIfKnown(
     stdx::lock_guard lk(_metadataManagerLock);
     switch (_metadataType) {
         case MetadataType::kUnknown:
+            // Until user collections can be sharded in serverless, the sessions collection will be
+            // the only sharded collection.
+            if (getGlobalReplSettings().isServerless() &&
+                _nss != NamespaceString::kLogicalSessionsNamespace) {
+                return kUnshardedCollection;
+            }
             return nullptr;
         case MetadataType::kUnsharded:
             return kUnshardedCollection;
@@ -334,13 +342,9 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     if (!optReceivedShardVersion && !supportNonVersionedOperations)
         return kUnshardedCollection;
 
-    // Assume that the received shard version was IGNORED if the current operation wasn't verioned.
+    // Assume that the received shard version was IGNORED if the current operation wasn't versioned
     const auto& receivedShardVersion =
         optReceivedShardVersion ? *optReceivedShardVersion : ChunkVersion::IGNORED();
-
-    // An operation with read concern 'available' should never have shardVersion set.
-    invariant(repl::ReadConcernArgs::get(opCtx).getLevel() !=
-              repl::ReadConcernLevel::kAvailableReadConcern);
 
     auto csrLock = CSRLock::lockShared(opCtx, this);
 
@@ -348,12 +352,14 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         auto criticalSectionSignal = _critSec.getSignal(
             opCtx->lockState()->isWriteLocked() ? ShardingMigrationCriticalSection::kWrite
                                                 : ShardingMigrationCriticalSection::kRead);
+        std::string reason = _critSec.getReason() ? _critSec.getReason()->toString() : "unknown";
         uassert(StaleConfigInfo(_nss,
                                 receivedShardVersion,
                                 boost::none /* wantedVersion */,
                                 ShardingState::get(opCtx)->shardId(),
                                 std::move(criticalSectionSignal)),
-                str::stream() << "migration commit in progress for " << _nss.ns(),
+                str::stream() << "The critical section for " << _nss.ns()
+                              << " is acquired with reason: " << reason,
                 !criticalSectionSignal);
     }
 

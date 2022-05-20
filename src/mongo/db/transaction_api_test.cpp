@@ -29,6 +29,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/config.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/operation_context.h"
@@ -38,8 +39,11 @@
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/is_mongos.h"
 #include "mongo/stdx/future.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/executor_test_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
@@ -127,8 +131,10 @@ private:
 
 namespace txn_api::details {
 
-class MockTransactionClient : public TransactionClient {
+class MockTransactionClient : public SEPTransactionClient {
 public:
+    using SEPTransactionClient::SEPTransactionClient;
+
     virtual void injectHooks(std::unique_ptr<TxnMetadataHooks> hooks) override {
         _hooks = std::move(hooks);
     }
@@ -154,11 +160,6 @@ public:
 
     virtual SemiFuture<BatchedCommandResponse> runCRUDOp(
         const BatchedCommandRequest& cmd, std::vector<StmtId> stmtIds) const override {
-        MONGO_UNREACHABLE;
-    }
-
-    virtual SemiFuture<std::vector<BSONObj>> exhaustiveFind(
-        const FindCommandRequest& cmd) const override {
         MONGO_UNREACHABLE;
     }
 
@@ -269,13 +270,29 @@ protected:
 
         _opCtx = makeOperationContext();
 
-        auto mockClient = std::make_unique<txn_api::details::MockTransactionClient>();
+        ThreadPool::Options options;
+        options.poolName = "TxnAPITest";
+        options.minThreads = 1;
+        options.maxThreads = 1;
+
+        _threadPool = std::make_shared<ThreadPool>(std::move(options));
+        _threadPool->startup();
+
+        auto mockClient = std::make_unique<txn_api::details::MockTransactionClient>(
+            opCtx(), _threadPool, nullptr);
         _mockClient = mockClient.get();
-        _txnWithRetries =
-            std::make_unique<txn_api::TransactionWithRetries>(opCtx(),
-                                                              InlineQueuedCountingExecutor::make(),
-                                                              std::move(mockClient),
-                                                              nullptr /* resourceYielder */);
+        _txnWithRetries = std::make_unique<txn_api::TransactionWithRetries>(
+            opCtx(), _threadPool, std::move(mockClient), nullptr /* resourceYielder */);
+    }
+
+    void tearDown() override {
+        _threadPool->shutdown();
+        _threadPool->join();
+        _threadPool.reset();
+    }
+
+    void waitForAllEarlierTasksToComplete() {
+        _threadPool->waitForIdle();
     }
 
     OperationContext* opCtx() {
@@ -295,7 +312,8 @@ protected:
     }
 
     void resetTxnWithRetries(std::unique_ptr<MockResourceYielder> resourceYielder = nullptr) {
-        auto mockClient = std::make_unique<txn_api::details::MockTransactionClient>();
+        auto mockClient = std::make_unique<txn_api::details::MockTransactionClient>(
+            opCtx(), _threadPool, nullptr);
         _mockClient = mockClient.get();
         if (resourceYielder) {
             _resourceYielder = resourceYielder.get();
@@ -304,11 +322,8 @@ protected:
         // Reset _txnWithRetries so it returns and reacquires the same session from the session
         // pool. This ensures that we can predictably monitor txnNumber's value.
         _txnWithRetries = nullptr;
-        _txnWithRetries =
-            std::make_unique<txn_api::TransactionWithRetries>(opCtx(),
-                                                              InlineQueuedCountingExecutor::make(),
-                                                              std::move(mockClient),
-                                                              std::move(resourceYielder));
+        _txnWithRetries = std::make_unique<txn_api::TransactionWithRetries>(
+            opCtx(), _threadPool, std::move(mockClient), std::move(resourceYielder));
     }
 
     void expectSentAbort(TxnNumber txnNumber, BSONObj writeConcern) {
@@ -323,6 +338,7 @@ protected:
 
 private:
     ServiceContext::UniqueOperationContext _opCtx;
+    std::shared_ptr<ThreadPool> _threadPool;
     txn_api::details::MockTransactionClient* _mockClient{nullptr};
     MockResourceYielder* _resourceYielder{nullptr};
     std::unique_ptr<txn_api::TransactionWithRetries> _txnWithRetries;
@@ -1072,6 +1088,49 @@ TEST_F(TxnAPITest, HandlesExceptionWhileYieldingDuringAbort) {
     ASSERT_EQ(resourceYielder()->timesUnyielded(), 1);
 }
 
+TEST_F(TxnAPITest, UnyieldsAfterCancellation) {
+    resetTxnWithRetries(std::make_unique<MockResourceYielder>());
+
+    unittest::Barrier txnApiStarted(2);
+    unittest::Barrier opCtxKilled(2);
+
+    auto killerThread = stdx::thread([&txnApiStarted, &opCtxKilled, opCtx = opCtx()] {
+        txnApiStarted.countDownAndWait();
+        opCtx->markKilled();
+    });
+
+    auto swResult = txnWithRetries().runSyncNoThrow(
+        opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            mockClient()->setNextCommandResponse(kOKInsertResponse);
+            auto insertRes = txnClient
+                                 .runCommand("user"_sd,
+                                             BSON("insert"
+                                                  << "foo"
+                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                                 .get();
+
+            resourceYielder()->throwInUnyield(ErrorCodes::InternalError);
+
+            txnApiStarted.countDownAndWait();
+            opCtxKilled.countDownAndWait();
+
+            return SemiFuture<void>::makeReady();
+        });
+
+    // The transaction should fail with an Interrupted error from killing the opCtx using the
+    // API instead of the ResourceYielder error from within the API callback.
+    ASSERT_EQ(swResult.getStatus(), ErrorCodes::Interrupted);
+    // 2 yields in body and best effort abort and both of their corresponding unyields.
+    ASSERT_EQ(resourceYielder()->timesYielded(), 2);
+    ASSERT_EQ(resourceYielder()->timesUnyielded(), 2);
+
+    opCtxKilled.countDownAndWait();
+    killerThread.join();
+
+    // Wait until the API callback has completed before letting the barriers go out of scope.
+    waitForAllEarlierTasksToComplete();
+}
+
 TEST_F(TxnAPITest, HandlesExceptionWhileUnyieldingDuringAbort) {
     resetTxnWithRetries(std::make_unique<MockResourceYielder>());
 
@@ -1228,7 +1287,10 @@ TEST_F(TxnAPITest, ClientRetryableWrite_UsesRetryableInternalSession) {
     ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
 }
 
-TEST_F(TxnAPITest, ClientRetryableWrite_RetryableWriteWithoutStmtIdFails) {
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+DEATH_TEST_F(TxnAPITest,
+             ClientRetryableWrite_RetryableWriteWithoutStmtIdCrashesOnDebug,
+             "In a retryable write transaction every retryable write command should") {
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx()->setTxnNumber(5);
     resetTxnWithRetries();
@@ -1247,6 +1309,7 @@ TEST_F(TxnAPITest, ClientRetryableWrite_RetryableWriteWithoutStmtIdFails) {
         });
     ASSERT_EQ(swResult.getStatus(), ErrorCodes::duplicateCodeForTest(6410500));
 }
+#endif
 
 TEST_F(TxnAPITest, ClientTransaction_UsesClientTransactionOptionsAndDoesNotCommitOnSuccess) {
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
@@ -1428,5 +1491,114 @@ TEST_F(TxnAPITest, OwnSession_HandleErrorRetryCommitOnNetworkError) {
     ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
 }
 
+TEST_F(TxnAPITest, TestExhaustiveFindWithSingleBatch) {
+    FindCommandRequest findCommand(NamespaceString("foo.bar"));
+    findCommand.setBatchSize(1);
+    findCommand.setSingleBatch(true);
+
+    const long long cursorId = 0;
+    BSONObj firstBatchDoc = BSON("_id" << 0);
+    auto findResponse = BSON("cursor" << BSON("id" << cursorId << "ns"
+                                                   << "foo.bar"
+                                                   << "firstBatch" << BSON_ARRAY(firstBatchDoc))
+                                      << "ok" << 1);
+
+    mockClient()->setNextCommandResponse(findResponse);
+    auto exhaustiveFindRes = mockClient()->exhaustiveFind(findCommand).get();
+
+    ASSERT_EQ(exhaustiveFindRes.size(), 1);
+    ASSERT_BSONOBJ_EQ(exhaustiveFindRes[0], firstBatchDoc);
+
+    // Check that we only ran the find command and no follow up getMores.
+    auto lastRequest = mockClient()->getLastSentRequest();
+    ASSERT_EQ(lastRequest["find"].String(), "bar");
+    ASSERT_EQ(lastRequest["batchSize"].Long(), 1);
+    ASSERT_EQ(lastRequest["singleBatch"].Bool(), true);
+}
+
+TEST_F(TxnAPITest, TestExhaustiveFindWithMultipleBatches) {
+    FindCommandRequest findCommand(NamespaceString("foo.bar"));
+    findCommand.setBatchSize(1);
+    findCommand.setSingleBatch(false);
+
+    const long long cursorId = 1;
+    const long long cursorIdNext = 0;
+    BSONObj firstBatchDoc = BSON("_id" << 0);
+    BSONObj nextBatchDoc = BSON("_id" << 1);
+    auto findResponse = BSON("cursor" << BSON("id" << cursorId << "ns"
+                                                   << "foo.bar"
+                                                   << "firstBatch" << BSON_ARRAY(firstBatchDoc))
+                                      << "ok" << 1);
+    auto getMoreResponse = BSON("cursor" << BSON("id" << cursorIdNext << "ns"
+                                                      << "foo.bar"
+                                                      << "nextBatch" << BSON_ARRAY(nextBatchDoc))
+                                         << "ok" << 1);
+
+    mockClient()->setNextCommandResponse(findResponse);
+    mockClient()->setSecondCommandResponse(getMoreResponse);
+    auto exhaustiveFindRes = mockClient()->exhaustiveFind(findCommand).get();
+
+    ASSERT_EQ(exhaustiveFindRes.size(), 2);
+    ASSERT_BSONOBJ_EQ(exhaustiveFindRes[0], firstBatchDoc);
+    ASSERT_BSONOBJ_EQ(exhaustiveFindRes[1], nextBatchDoc);
+
+    // Check that getMore was run.
+    auto lastRequest = mockClient()->getLastSentRequest();
+    ASSERT_EQ(lastRequest["getMore"].Long(), 1);
+    ASSERT_EQ(lastRequest["batchSize"].Long(), 1);
+    ASSERT_EQ(lastRequest["collection"].String(), "bar");
+}
+
+TEST_F(TxnAPITest, TestExhaustiveFindErrorOnFind) {
+    FindCommandRequest findCommand(NamespaceString("foo.bar"));
+    findCommand.setBatchSize(1);
+    findCommand.setSingleBatch(true);
+
+    const long long cursorId = 0;
+    BSONObj firstBatchDoc = BSON("_id" << 0);
+    auto findResponse = BSON("cursor" << BSON("id" << cursorId << "ns"
+                                                   << "foo.bar"
+                                                   << "firstBatch" << BSON_ARRAY(firstBatchDoc))
+                                      << "ok" << 1);
+
+    auto badFindResponse = BSON("ok" << 0 << "code" << ErrorCodes::HostUnreachable);
+    mockClient()->setNextCommandResponse(badFindResponse);
+    auto exhaustiveFindRes = mockClient()->exhaustiveFind(findCommand).getNoThrow();
+
+    ASSERT_EQ(exhaustiveFindRes.getStatus(), ErrorCodes::HostUnreachable);
+
+    // Check that we only ran the find command and no follow up getMores.
+    auto lastRequest = mockClient()->getLastSentRequest();
+    ASSERT_EQ(lastRequest["find"].String(), "bar");
+    ASSERT_EQ(lastRequest["batchSize"].Long(), 1);
+    ASSERT_EQ(lastRequest["singleBatch"].Bool(), true);
+}
+
+TEST_F(TxnAPITest, TestExhaustiveFindErrorOnGetMore) {
+    FindCommandRequest findCommand(NamespaceString("foo.bar"));
+    findCommand.setBatchSize(2);
+    findCommand.setSingleBatch(false);
+
+    const long long cursorId = 1;
+    BSONObj firstBatchDoc = BSON("_id" << 0);
+    BSONObj nextBatchDoc = BSON("_id" << 1);
+    auto findResponse = BSON("cursor" << BSON("id" << cursorId << "ns"
+                                                   << "foo.bar"
+                                                   << "firstBatch" << BSON_ARRAY(firstBatchDoc))
+                                      << "ok" << 1);
+    auto badGetMoreResponse = BSON("ok" << 0 << "code" << ErrorCodes::HostUnreachable);
+
+    mockClient()->setNextCommandResponse(findResponse);
+    mockClient()->setSecondCommandResponse(badGetMoreResponse);
+    auto exhaustiveFindRes = mockClient()->exhaustiveFind(findCommand).getNoThrow();
+
+    ASSERT_EQ(exhaustiveFindRes.getStatus(), ErrorCodes::HostUnreachable);
+
+    // Check that getMore was run.
+    auto lastRequest = mockClient()->getLastSentRequest();
+    ASSERT_EQ(lastRequest["getMore"].Long(), 1);
+    ASSERT_EQ(lastRequest["batchSize"].Long(), 2);
+    ASSERT_EQ(lastRequest["collection"].String(), "bar");
+}
 }  // namespace
 }  // namespace mongo

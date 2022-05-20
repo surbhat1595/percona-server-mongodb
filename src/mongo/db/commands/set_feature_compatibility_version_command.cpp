@@ -105,6 +105,7 @@ MONGO_FAIL_POINT_DEFINE(hangWhileUpgrading);
 MONGO_FAIL_POINT_DEFINE(failDowngrading);
 MONGO_FAIL_POINT_DEFINE(hangWhileDowngrading);
 MONGO_FAIL_POINT_DEFINE(hangBeforeUpdatingFcvDoc);
+MONGO_FAIL_POINT_DEFINE(hangBeforeDrainingMigrations);
 
 /**
  * Ensures that only one instance of setFeatureCompatibilityVersion can run at a given time.
@@ -360,7 +361,7 @@ public:
 
                 if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
                     if (requestedVersion < actualVersion) {
-                        // TODO SERVER-62584 review/adapt this scope before v6.0 branches out
+                        // TODO SERVER-64779 review/adapt this scope before v6.0 branches out
                         // Make sure no collection is currently being defragmented
                         DBDirectClient client(opCtx);
 
@@ -395,13 +396,14 @@ public:
                 invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
                 // TODO SERVER-64162 Destroy the BalancerStatsRegistry
                 if (actualVersion > requestedVersion &&
-                    !feature_flags::gNoMoreAutoSplitter.isEnabledOnVersion(requestedVersion)) {
+                    !feature_flags::gOrphanTracking.isEnabledOnVersion(requestedVersion)) {
+                    ScopedRangeDeleterLock rangeDeleterLock(opCtx);
                     clearOrphanCountersFromRangeDeletionTasks(opCtx);
                 }
 
                 // TODO (SERVER-62325): Remove collMod draining mechanism after 6.0 branching.
                 if (actualVersion > requestedVersion &&
-                    requestedVersion < multiversion::FeatureCompatibilityVersion::kVersion_5_3) {
+                    requestedVersion < multiversion::FeatureCompatibilityVersion::kVersion_6_0) {
                     // No more collMod coordinators will start because we have already switched
                     // the FCV value to kDowngrading. Wait for the ongoing collMod coordinators to
                     // finish.
@@ -436,12 +438,17 @@ public:
             _runDowngrade(opCtx, request, changeTimestamp);
         }
 
+        hangBeforeDrainingMigrations.pauseWhileSet();
         {
             boost::optional<MigrationBlockingGuard> drainOldMoveChunks;
 
+            bool orphanTrackingCondition =
+                serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+                !feature_flags::gOrphanTracking.isEnabledOnVersion(actualVersion) &&
+                feature_flags::gOrphanTracking.isEnabledOnVersion(requestedVersion);
             // Drain moveChunks if the actualVersion relies on the old migration protocol but the
-            // requestedVersion uses the new one (upgrading) or we're persisting the new chunk
-            // version format.
+            // requestedVersion uses the new one (upgrading), we're persisting the new chunk
+            // version format, or we are adding the numOrphans field to range deletion documents.
             if ((!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
                      actualVersion) &&
                  feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
@@ -449,13 +456,20 @@ public:
                 (!feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabledOnVersion(
                      actualVersion) &&
                  feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabledOnVersion(
-                     requestedVersion))) {
+                     requestedVersion)) ||
+                orphanTrackingCondition) {
                 drainOldMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
 
                 // At this point, because we are holding the MigrationBlockingGuard, no new
                 // migrations can start and there are no active ongoing ones. Still, there could
                 // be migrations pending recovery. Drain them.
                 migrationutil::drainMigrationsPendingRecovery(opCtx);
+
+                if (orphanTrackingCondition) {
+                    // TODO SERVER-64162 Initialize the BalancerStatsRegistry
+                    ScopedRangeDeleterLock rangeDeleterLock(opCtx);
+                    setOrphanCountersOnRangeDeletionTasks(opCtx);
+                }
             }
 
             // Complete transition by updating the local FCV document to the fully upgraded or
@@ -569,13 +583,6 @@ private:
             abortAllReshardCollection(opCtx);
         }
 
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
-            request.getPhase() == SetFCVPhaseEnum::kComplete &&
-            feature_flags::gNoMoreAutoSplitter.isEnabledOnVersion(requestedVersion)) {
-            // TODO SERVER-64162 Initialize the BalancerStatsRegistry
-            setOrphanCountersOnRangeDeletionTasks(opCtx);
-        }
-
         // Create the pre-images collection if the feature flag is enabled on the requested version.
         // TODO SERVER-61770: Remove once FCV 6.0 becomes last-lts.
         if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabledOnVersion(
@@ -595,9 +602,7 @@ private:
                 requestedVersion);
 
         // TODO SERVER-62693: remove the following scope once 6.0 branches out
-        if (requestedVersion == multiversion::GenericFCV::kLastLTS ||
-            // TODO SERVER-62584: remove the last-continuous check once 5.3 branches out
-            requestedVersion == multiversion::GenericFCV::kLastContinuous) {
+        if (requestedVersion == multiversion::GenericFCV::kLastLTS) {
             if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
                 serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
                 sharding_util::downgradeCollectionBalancingFieldsToPre53(opCtx);
@@ -847,6 +852,13 @@ private:
                                                << NamespaceString::kTransactionCoordinatorsNamespace
                                                << " documents for internal transactions");
             }
+        }
+
+        // TODO SERVER-64720 Remove when 6.0 becomes last LTS
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
         }
 
         // TODO SERVER-62338 Remove when 6.0 branches-out

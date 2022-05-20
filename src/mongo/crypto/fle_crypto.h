@@ -191,6 +191,19 @@ struct FLEToken {
         return ConstDataRange(data.data(), data.data() + data.size());
     }
 
+    bool operator==(const FLEToken<TokenT>& other) const {
+        return (type == other.type) && (data == other.data);
+    }
+
+    bool operator!=(const FLEToken<TokenT>& other) const {
+        return !(*this == other);
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const FLEToken<TokenT>& token) {
+        return H::combine(std::move(h), token.type, token.data);
+    }
+
     FLETokenType type{TokenT};
     PrfBlock data;
 };
@@ -445,12 +458,12 @@ public:
      *
      * TODO - how perfect does it need to be ? Is too high or too low ok if it is just an estimate?
      */
-    virtual uint64_t getDocumentCount() = 0;
+    virtual uint64_t getDocumentCount() const = 0;
 
     /**
      * Get a document by its _id.
      */
-    virtual BSONObj getById(PrfBlock block) = 0;
+    virtual BSONObj getById(PrfBlock block) const = 0;
 };
 
 class ESCCollection {
@@ -477,20 +490,12 @@ public:
                                           uint64_t count);
 
     /**
-     * Generate a positional ESC document.
-     */
-    static BSONObj generatePositionalDocument(ESCTwiceDerivedTagToken tagToken,
-                                              ESCTwiceDerivedValueToken valueToken,
-                                              uint64_t index,
-                                              uint64_t pos,
-                                              uint64_t count);
-
-    /**
      * Generate a compaction placeholder ESC document.
      */
     static BSONObj generateCompactionPlaceholderDocument(ESCTwiceDerivedTagToken tagToken,
                                                          ESCTwiceDerivedValueToken valueToken,
-                                                         uint64_t index);
+                                                         uint64_t index,
+                                                         uint64_t count);
 
     /**
      * Decrypt the null document.
@@ -499,15 +504,27 @@ public:
                                                            BSONObj& doc);
 
     /**
+     * Decrypt the null document.
+     */
+    static StatusWith<ESCNullDocument> decryptNullDocument(ESCTwiceDerivedValueToken valueToken,
+                                                           BSONObj&& doc);
+
+    /**
      * Decrypt a regular document.
      */
     static StatusWith<ESCDocument> decryptDocument(ESCTwiceDerivedValueToken valueToken,
                                                    BSONObj& doc);
 
     /**
+     * Decrypt a regular document.
+     */
+    static StatusWith<ESCDocument> decryptDocument(ESCTwiceDerivedValueToken valueToken,
+                                                   BSONObj&& doc);
+
+    /**
      * Search for the highest document id for a given field/value pair based on the token.
      */
-    static boost::optional<uint64_t> emuBinary(FLEStateCollectionReader* reader,
+    static boost::optional<uint64_t> emuBinary(const FLEStateCollectionReader& reader,
                                                ESCTwiceDerivedTagToken tagToken,
                                                ESCTwiceDerivedValueToken valueToken);
 };
@@ -655,7 +672,7 @@ public:
     /**
      * Search for the highest document id for a given field/value pair based on the token.
      */
-    static boost::optional<uint64_t> emuBinary(FLEStateCollectionReader* reader,
+    static boost::optional<uint64_t> emuBinary(const FLEStateCollectionReader& reader,
                                                ECCTwiceDerivedTagToken tagToken,
                                                ECCTwiceDerivedValueToken valueToken);
 };
@@ -714,6 +731,14 @@ public:
     static std::pair<BSONType, std::vector<uint8_t>> decrypt(BSONElement element,
                                                              FLEKeyVault* keyVault);
 
+    static FLE2FindEqualityPayload parseFindPayload(ConstDataRange cdr);
+
+    static FLE2FindEqualityPayload serializeFindPayload(FLEIndexKeyAndId indexKey,
+                                                        FLEUserKeyAndId userKey,
+                                                        BSONElement element,
+                                                        uint64_t maxContentionFactor);
+
+
     /**
      * Generates a client-side payload that is sent to the server.
      *
@@ -730,8 +755,7 @@ public:
      *   e : ServerDataEncryptionLevel1Token,
      * }
      */
-    static BSONObj generateInsertOrUpdateFromPlaceholders(const BSONObj& obj,
-                                                          FLEKeyVault* keyVault);
+    static BSONObj transformPlaceholders(const BSONObj& obj, FLEKeyVault* keyVault);
 
 
     /**
@@ -794,12 +818,21 @@ public:
 
 
 struct ECOCCompactionDocument {
+
+    bool operator==(const ECOCCompactionDocument& other) const {
+        return (fieldName == other.fieldName) && (esc == other.esc) && (ecc == other.ecc);
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const ECOCCompactionDocument& doc) {
+        return H::combine(std::move(h), doc.fieldName, doc.esc, doc.ecc);
+    }
+
     // Id is not included as it unimportant
     std::string fieldName;
     ESCDerivedFromDataTokenAndContentionFactorToken esc;
     ECCDerivedFromDataTokenAndContentionFactorToken ecc;
 };
-
 
 /**
  * ECOC Collection schema
@@ -875,6 +908,28 @@ struct FLE2IndexedEqualityEncryptedValue {
     BSONType bsonType;
     UUID indexKeyId;
     std::vector<uint8_t> clientEncryptedValue;
+};
+
+/**
+ * Class to read/write FLE2 Unindexed Encrypted Values
+ *
+ * Fields are encrypted with the following:
+ *
+ * struct {
+ *   uint8_t fle_blob_subtype = 6;
+ *   uint8_t key_uuid[16];
+ *   uint8  original_bson_type;
+ *   ciphertext[ciphertext_length];
+ * } blob;
+ *
+ */
+struct FLE2UnindexedEncryptedValue {
+    static std::vector<uint8_t> serialize(const FLEUserKeyAndId& userKey,
+                                          const BSONElement& element);
+    static std::pair<BSONType, std::vector<uint8_t>> deserialize(FLEKeyVault* keyVault,
+                                                                 ConstDataRange blob);
+
+    static constexpr size_t assocDataSize = sizeof(uint8_t) + sizeof(UUID) + sizeof(uint8_t);
 };
 
 
@@ -1022,11 +1077,60 @@ public:
 };
 
 /**
+ * A parsed element in the compaction tokens BSON object from
+ * a compactStructuredEncryptionData command
+ */
+struct CompactionToken {
+    std::string fieldPathName;
+    ECOCToken token;
+};
+
+class CompactionHelpers {
+public:
+    /**
+     * Converts the compaction tokens BSON object that contains encrypted
+     * field paths as the key, and ECOC tokens as the value, to a list of
+     * string and ECOCToken pairs.
+     */
+    static std::vector<CompactionToken> parseCompactionTokens(BSONObj compactionTokens);
+
+    /**
+     * Validates the compaction tokens BSON contains an element for each field
+     * in the encrypted field config
+     */
+    static void validateCompactionTokens(const EncryptedFieldConfig& efc, BSONObj compactionTokens);
+
+    /**
+     * Merges the list of ECCDocuments so that entries whose tuple values are
+     * adjacent to each other are combined into a single entry. For example,
+     * the input [ (1,3), (11,11), (7,9), (4,6) ] outputs [ (1,9), (11,11) ].
+     * Assumes none of the input entries overlap with each other.
+     */
+    static std::vector<ECCDocument> mergeECCDocuments(std::vector<ECCDocument>& unmerged);
+
+    /**
+     * Given a list of ECCDocument, where each document is a range of
+     * deleted positions, this calculates the total number of deleted
+     * positions.
+     */
+    static uint64_t countDeleted(const std::vector<ECCDocument>& rangeList);
+};
+
+/**
  * Split a ConstDataRange into a byte for EncryptedBinDataType and a ConstDataRange for the trailing
  * bytes
  *
  * Verifies that EncryptedBinDataType is valid.
  */
 std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedConstDataRange(ConstDataRange cdr);
+
+struct ParsedFindPayload {
+    ESCDerivedFromDataToken escToken;
+    ECCDerivedFromDataToken eccToken;
+    EDCDerivedFromDataToken edcToken;
+    boost::optional<std::int64_t> maxCounter;
+
+    explicit ParsedFindPayload(BSONElement fleFindPayload);
+};
 
 }  // namespace mongo

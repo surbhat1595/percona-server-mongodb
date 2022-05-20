@@ -91,7 +91,6 @@ env.Library(
     target='multitenancy',
     source=[
         'multitenancy.cpp',
-        'tenant_namespace.cpp',
         'tenant_database_name.cpp',
     ],
     LIBDEPS=[
@@ -277,12 +276,16 @@ env.Library(
 env.Library(
     target='collection_index_usage_tracker',
     source=[
-        'collection_index_usage_tracker.cpp'
+        'collection_index_usage_tracker.cpp',
+        'global_index_usage_tracker.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/index_names',
+    ]
 )
 
 env.Library(
@@ -857,6 +860,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/index/index_access_method',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/idl/server_parameter',
+        '$BUILD_DIR/mongo/s/sharding_router_api',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         'catalog_raii',
         'curop_failpoint_helpers',
@@ -901,16 +905,68 @@ env.Library(
     target='fle_crud',
     source=[
         'fle_crud.cpp',
+        'query/fle/server_rewrite.cpp'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        'transaction_api',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/crypto/encrypted_field_config',
         '$BUILD_DIR/mongo/crypto/fle_crypto',
-        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        '$BUILD_DIR/mongo/db/matcher/expressions',
+        '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/executor/task_executor_pool',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sharding_router_api',
         'logical_session_id',
+    ],
+)
+
+env.Library(
+    target='fle_crud_mongod',
+    source=[
+        'fle_crud_mongod.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
+        '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/executor/task_executor_pool',
+        "$BUILD_DIR/mongo/util/concurrency/thread_pool",
+        'fle_crud',
+        'logical_session_id',
+        'transaction',
+    ],
+)
+
+env.Library(
+    target='fle_mocks',
+    source=[
+        'fle_query_interface_mock.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
+        '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
+        'fle_crud',
+        'write_ops',
+    ],
+)
+
+env.Library(
+    target='cluster_transaction_api',
+    source=[
+        'cluster_transaction_api.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/rpc/rpc',
+        '$BUILD_DIR/mongo/s/startup_initialization',
+        '$BUILD_DIR/mongo/transport/service_entry_point',
+        'logical_session_id',
+        'logical_session_id_helpers',
+        'service_context',
+        'shared_request_handling',
         'transaction_api',
     ],
 )
@@ -1029,6 +1085,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/bucket_catalog',
         '$BUILD_DIR/mongo/s/coreshard',
         '$BUILD_DIR/mongo/s/grid',
+        'batched_write_context',
         'catalog/collection_options',
         'catalog/database_holder',
         'op_observer',
@@ -1048,6 +1105,16 @@ env.Library(
         'repl/image_collection_entry',
         'repl/repl_server_parameters',
         'transaction',
+    ],
+)
+
+env.Library(
+    target="batched_write_context",
+    source=[
+        "batched_write_context.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/base",
     ],
 )
 
@@ -2431,9 +2498,7 @@ env.Library(
         # mongod_initializers.
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
-        '$BUILD_DIR/mongo/db/commands/set_user_write_block_mode_command',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
-        '$BUILD_DIR/mongo/db/s/shardsvr_set_user_write_block_mode_command',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
         '$BUILD_DIR/mongo/s/grid',
@@ -2459,6 +2524,7 @@ env.Library(
         'concurrency/flow_control_ticketholder',
         'concurrency/lock_manager',
         'fcv_op_observer',
+        'fle_crud_mongod',
         'free_mon/free_mon_mongod',
         'ftdc/ftdc_mongod',
         'index/index_access_method_factory',
@@ -2642,6 +2708,7 @@ if wiredtiger:
             'operation_id_test.cpp',
             'operation_time_tracker_test.cpp',
             'persistent_task_store_test.cpp',
+            'query/fle/server_rewrite_test.cpp',
             'range_arithmetic_test.cpp',
             'read_write_concern_defaults_test.cpp',
             'read_write_concern_provenance_test.cpp',
@@ -2651,7 +2718,6 @@ if wiredtiger:
             'session_catalog_test.cpp',
             'startup_warnings_mongod_test.cpp',
             'tenant_database_name_test.cpp',
-            'tenant_namespace_test.cpp',
             'thread_client_test.cpp',
             'time_proof_service_test.cpp',
             'transaction_api_test.cpp',
@@ -2703,6 +2769,7 @@ if wiredtiger:
             'dbmessage',
             'fcv_op_observer',
             'fle_crud',
+            'fle_mocks',
             'index_build_entry_helpers',
             'index_builds_coordinator_mongod',
             'keys_collection_client_direct',

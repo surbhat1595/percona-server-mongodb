@@ -274,18 +274,14 @@
     let unshardedColl = db.partial_sum2;
 
     for (let i = 0; i < 3; ++i) {
-        assert.commandWorked(hashShardedColl.insert([
+        const docs = [
             {k: i, n: 1e+34},
             {k: i, n: NumberDecimal("0.1")},
             {k: i, n: NumberDecimal("0.01")},
             {k: i, n: -1e+34}
-        ]));
-        assert.commandWorked(unshardedColl.insert([
-            {k: i, n: 1e+34},
-            {k: i, n: NumberDecimal("0.1")},
-            {k: i, n: NumberDecimal("0.01")},
-            {k: i, n: -1e+34}
-        ]));
+        ];
+        assert.commandWorked(hashShardedColl.insert(docs));
+        assert.commandWorked(unshardedColl.insert(docs));
     }
 
     let pipeline = [{$group: {_id: "$k", s: {$sum: "$n"}}}, {$group: {_id: "$s"}}];

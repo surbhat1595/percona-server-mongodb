@@ -85,6 +85,8 @@ env.Library(
     source=[
         'end_sessions_command.cpp',
         'fail_point_cmd.cpp',
+        'fle2_compact.cpp',
+        'fle2_compact.idl',
         'generic.cpp',
         'generic.idl',
         'hashcmd.cpp',
@@ -104,19 +106,24 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
+        '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/db/common',
+        '$BUILD_DIR/mongo/db/fle_crud',
         '$BUILD_DIR/mongo/db/kill_sessions',
         '$BUILD_DIR/mongo/db/logical_session_cache',
         '$BUILD_DIR/mongo/db/logical_session_cache_impl',
         '$BUILD_DIR/mongo/db/logical_session_id',
         '$BUILD_DIR/mongo/db/logical_session_id_helpers',
         '$BUILD_DIR/mongo/db/mongohasher',
+        '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/idl/basic_types',
+        '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/idl/server_parameter',
         '$BUILD_DIR/mongo/rpc/message',
         'test_commands_enabled',
@@ -227,22 +234,6 @@ env.Library(
 )
 
 env.Library(
-    target="fle2_compact",
-    source=[
-        'fle2_compact.cpp',
-        'fle2_compact.idl',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/crypto/encrypted_field_config',
-        '$BUILD_DIR/mongo/db/auth/auth',
-        '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
-        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
-        '$BUILD_DIR/mongo/db/catalog_raii',
-        '$BUILD_DIR/mongo/db/commands',
-    ]
-)
-
-env.Library(
     target="mongod_fsync",
     source=[
         "fsync.cpp",
@@ -331,9 +322,9 @@ env.Library(
 )
 
 env.Library(
-    target='set_cluster_parameter_idl',
+    target='cluster_server_parameter_cmds_idl',
     source=[
-        'set_cluster_parameter.idl',
+        'cluster_server_parameter_cmds.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -372,6 +363,7 @@ env.Library(
         "plan_cache_clear_command.cpp",
         "plan_cache_commands.cpp",
         "rename_collection_cmd.cpp",
+        "rename_database_for_restore_command.cpp",
         "run_aggregate.cpp",
         "sleep_command.cpp",
         "validate.cpp",
@@ -396,6 +388,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
         '$BUILD_DIR/mongo/db/curop_failpoint_helpers',
         '$BUILD_DIR/mongo/db/exec/sbe/query_sbe_abt',
+        '$BUILD_DIR/mongo/db/fle_crud_mongod',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/index_commands_idl',
         '$BUILD_DIR/mongo/db/multitenancy',
@@ -420,6 +413,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_collmod',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_stats',
         '$BUILD_DIR/mongo/db/transaction',
         '$BUILD_DIR/mongo/db/views/view_catalog_helpers',
@@ -438,6 +432,7 @@ env.Library(
         'list_collections_filter',
         'list_databases_command',
         'rename_collection_idl',
+        'rename_database_for_restore_command_idl',
         'test_commands_enabled',
         'validate_db_metadata_command',
     ],
@@ -463,6 +458,16 @@ env.Library(
 )
 
 env.Library(
+    target='rename_database_for_restore_command_idl',
+    source=[
+        'rename_database_for_restore_command.idl',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
     target='set_index_commit_quorum_idl',
     source=[
         'set_index_commit_quorum.idl',
@@ -471,20 +476,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/commit_quorum_options',
         '$BUILD_DIR/mongo/db/rw_concern_d',
         '$BUILD_DIR/mongo/idl/idl_parser',
-    ],
-)
-
-env.Library(
-    target='set_user_write_block_mode_command',
-    source=[
-        'set_user_write_block_mode_command.cpp',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/commands',
-        '$BUILD_DIR/mongo/db/rw_concern_d',
-        '$BUILD_DIR/mongo/db/s/user_writes_recoverable_critical_section',
-        'set_user_write_block_mode_idl',
     ],
 )
 
@@ -544,7 +535,9 @@ env.Library(
         "dbcommands_d.cpp",
         "dbhash.cpp",
         "driverHelpers.cpp",
+        'get_cluster_parameter_command.cpp',
         "internal_rename_if_options_and_indexes_match_cmd.cpp",
+        "fle2_compact_cmd.cpp",
         "map_reduce_command.cpp",
         "oplog_application_checks.cpp",
         "oplog_note.cpp",
@@ -555,6 +548,7 @@ env.Library(
         'set_cluster_parameter_command.cpp',
         "set_feature_compatibility_version_command.cpp",
         "set_index_commit_quorum_command.cpp",
+        'set_user_write_block_mode_command.cpp',
         "shutdown_d.cpp",
         "snapshot_management.cpp",
         "tenant_migration_donor_cmds.cpp",
@@ -569,6 +563,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
         '$BUILD_DIR/mongo/db/auth/address_restriction',
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/auth/auth_options',
@@ -591,6 +586,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/exec/sbe_cmd',
         '$BUILD_DIR/mongo/db/exec/stagedebug_cmd',
+        '$BUILD_DIR/mongo/db/fle_crud_mongod',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/pipeline/pipeline',
@@ -608,12 +604,13 @@ env.Library(
         '$BUILD_DIR/mongo/db/s/sharding_commands_d',
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/db/s/transaction_coordinator',
+        '$BUILD_DIR/mongo/db/s/user_writes_recoverable_critical_section',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
         'core',
-        'fle2_compact',
+        'create_command',
         'kill_common',
         'map_reduce_agg',
         'mongod_fcv',
@@ -622,15 +619,28 @@ env.Library(
         'rwc_defaults_commands',
         'server_status',
         'servers',
-        'set_cluster_parameter_idl',
+        'set_cluster_parameter_invocation',
         'set_feature_compatibility_version_idl',
         'set_index_commit_quorum_idl',
+        'set_user_write_block_mode_idl',
         'shell_protocol',
         'shutdown_idl',
         'standalone',
         'tenant_migration_cmds_request',
         'test_commands_enabled',
         'txn_cmd_request',
+    ],
+)
+
+env.Library(
+    target='set_cluster_parameter_invocation',
+    source=[
+        'set_cluster_parameter_invocation.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/s/write_ops/cluster_write_ops',
+        'cluster_server_parameter_cmds_idl'
     ],
 )
 
@@ -808,16 +818,22 @@ env.CppUnitTest(
     target="db_commands_test",
     source=[
         "index_filter_commands_test.cpp",
+        "fle_compact_test.cpp",
         "list_collections_filter_test.cpp",
         "mr_test.cpp" if get_option('js-engine') != 'none' else [],
         "parse_log_component_settings_test.cpp",
         "plan_cache_commands_test.cpp",
+        "set_cluster_parameter_invocation_test.cpp",
     ],
     LIBDEPS=[
+        "$BUILD_DIR/mongo/crypto/encrypted_field_config",
+        "$BUILD_DIR/mongo/crypto/fle_crypto",
         "$BUILD_DIR/mongo/db/auth/authmocks",
         "$BUILD_DIR/mongo/db/catalog/collection",
         "$BUILD_DIR/mongo/db/commands/list_collections_filter",
         "$BUILD_DIR/mongo/db/dbdirectclient",
+        "$BUILD_DIR/mongo/db/fle_crud",
+        "$BUILD_DIR/mongo/db/fle_mocks",
         "$BUILD_DIR/mongo/db/multitenancy",
         "$BUILD_DIR/mongo/db/op_observer",
         "$BUILD_DIR/mongo/db/query/query_planner",
@@ -832,6 +848,7 @@ env.CppUnitTest(
         "create_command",
         "mongod",
         "servers",
+        "set_cluster_parameter_invocation",
         "standalone",
     ],
 )

@@ -31,6 +31,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/batched_write_context.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/locker_noop.h"
@@ -41,6 +42,7 @@
 #include "mongo/db/keys_collection_client_sharded.h"
 #include "mongo/db/keys_collection_manager.h"
 #include "mongo/db/logical_time_validator.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer_impl.h"
 #include "mongo/db/op_observer_registry.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
@@ -490,8 +492,9 @@ TEST_F(OpObserverTest, CollModWithCollectionOptionsAndTTLInfo) {
                                    << ValidationLevel_serializer(*oldCollOpts.validationLevel)
                                    << "validationAction"
                                    << ValidationAction_serializer(*oldCollOpts.validationAction))
-                           << "expireAfterSeconds_old"
-                           << durationCount<Seconds>(indexInfo.oldExpireAfterSeconds.get()));
+                           << "indexOptions_old"
+                           << BSON("expireAfterSeconds" << durationCount<Seconds>(
+                                       indexInfo.oldExpireAfterSeconds.get())));
 
     ASSERT_BSONOBJ_EQ(o2Expected, o2);
 }
@@ -864,6 +867,22 @@ protected:
         return *_txnParticipant;
     }
 
+    void prepareTransaction(const std::vector<OplogSlot>& reservedSlots,
+                            repl::OpTime prepareOpTime,
+                            size_t numberOfPrePostImagesToWrite = 0) {
+        auto txnOps = txnParticipant().retrieveCompletedTransactionOperations(opCtx());
+        auto currentTime = Date_t::now();
+        auto applyOpsAssignment = opObserver().preTransactionPrepare(
+            opCtx(), reservedSlots, numberOfPrePostImagesToWrite, currentTime, &txnOps);
+        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
+        opObserver().onTransactionPrepare(opCtx(),
+                                          reservedSlots,
+                                          &txnOps,
+                                          applyOpsAssignment.get(),
+                                          numberOfPrePostImagesToWrite,
+                                          currentTime);
+    }
+
 private:
     class ExposeOpObserverTimes : public OpObserver {
     public:
@@ -1007,9 +1026,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
         auto reservedSlots = repl::getNextOpTimes(opCtx(), 5);
         auto prepareOpTime = reservedSlots.back();
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+        prepareTransaction(reservedSlots, prepareOpTime);
     }
 
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
@@ -1068,8 +1085,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
         const auto prepareSlot = repl::getNextOpTime(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareSlot);
         prepareTimestamp = prepareSlot.getTimestamp();
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), {prepareSlot}, &txnOps, 0);
+        prepareTransaction({prepareSlot}, prepareSlot);
 
         commitSlot = repl::getNextOpTime(opCtx());
     }
@@ -1137,8 +1153,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
 
         const auto prepareSlot = repl::getNextOpTime(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareSlot);
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), {prepareSlot}, &txnOps, 0);
+        prepareTransaction({prepareSlot}, prepareSlot);
         abortSlot = repl::getNextOpTime(opCtx());
     }
 
@@ -1217,9 +1232,7 @@ TEST_F(OpObserverTransactionTest,
         WriteUnitOfWork wuow(opCtx());
         prepareOpTime = repl::getNextOpTime(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), {prepareOpTime}, &txnOps, 0);
+        prepareTransaction({prepareOpTime}, prepareOpTime);
     }
 
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
@@ -1250,9 +1263,7 @@ TEST_F(OpObserverTransactionTest, PreparingTransactionWritesToTransactionTable) 
         OplogSlot slot = repl::getNextOpTime(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), slot);
         prepareOpTime = slot;
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), {slot}, &txnOps, 0);
-        opCtx()->recoveryUnit()->setPrepareTimestamp(slot.getTimestamp());
+        prepareTransaction({slot}, prepareOpTime);
     }
 
     ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
@@ -1283,9 +1294,7 @@ TEST_F(OpObserverTransactionTest, AbortingPreparedTransactionWritesToTransaction
         Lock::GlobalLock lk(opCtx(), MODE_IX);
         WriteUnitOfWork wuow(opCtx());
         OplogSlot slot = repl::getNextOpTime(opCtx());
-        opCtx()->recoveryUnit()->setPrepareTimestamp(slot.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), {slot}, &txnOps, 0);
+        prepareTransaction({slot}, slot);
         txnParticipant.transitionToPreparedforTest(opCtx(), slot);
         abortSlot = repl::getNextOpTime(opCtx());
     }
@@ -1357,9 +1366,7 @@ TEST_F(OpObserverTransactionTest, CommittingPreparedTransactionWritesToTransacti
         WriteUnitOfWork wuow(opCtx());
         OplogSlot slot = repl::getNextOpTime(opCtx());
         prepareOpTime = slot;
-        opCtx()->recoveryUnit()->setPrepareTimestamp(slot.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), {slot}, &txnOps, 0);
+        prepareTransaction({slot}, slot);
         txnParticipant.transitionToPreparedforTest(opCtx(), slot);
     }
 
@@ -1563,7 +1570,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     std::vector<InsertStatement> inserts;
-    inserts.emplace_back(0, BSON("_id" << 0));
+    inserts.emplace_back(0, BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a')));
 
     WriteUnitOfWork wuow(opCtx());
     AutoGetCollection autoColl1(opCtx(), nss, MODE_IX);
@@ -1578,11 +1585,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
     ASSERT_EQ(repl::OpTime(), *oplogEntry.getPrevWriteOpTimeInTransaction());
 
     // The implicit commit oplog entry.
-    auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
-                                           << "ns" << nss.toString() << "ui" << uuid << "o"
-                                           << BSON("_id" << 0) << "o2" << BSON("_id" << 0))));
+    auto oExpected = BSON("applyOps" << BSON_ARRAY(BSON(
+                              "op"
+                              << "i"
+                              << "ns" << nss.toString() << "ui" << uuid << "o"
+                              << BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a'))
+                              << "o2" << BSON("_id" << 0))));
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntry.getObject());
 }
 
@@ -1760,14 +1768,14 @@ public:
 
 protected:
     void commit() final {
-        const auto prepareSlot = repl::getNextOpTime(opCtx());
+        const auto reservedOplogSlots = repl::getNextOpTimes(
+            opCtx(), 1 + txnParticipant().getNumberOfPrePostImagesToWriteForTest());
+        invariant(reservedOplogSlots.size() >= 1);
+        const auto prepareSlot = reservedOplogSlots.back();
         txnParticipant().transitionToPreparedforTest(opCtx(), prepareSlot);
-        auto txnOps = txnParticipant().retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(
-            opCtx(),
-            {prepareSlot},
-            &txnOps,
-            txnParticipant().getNumberOfPrePostImagesToWriteForTest());
+        prepareTransaction(reservedOplogSlots,
+                           prepareSlot,
+                           txnParticipant().getNumberOfPrePostImagesToWriteForTest());
     };
 
     BSONObj assertGetSingleOplogEntry() final {
@@ -2339,6 +2347,170 @@ struct DeleteTestCase {
     }
 };
 
+class BatchedWriteOutputsTest : public OpObserverTest {
+protected:
+    const NamespaceString _nss{"test", "coll"};
+    const UUID _uuid = UUID::gen();
+};
+
+DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
+                   TestCannotGroupInserts,
+                   "Invariant failure.*getOpType.*repl::OpTypeEnum::kDelete") {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+
+    auto& bwc = BatchedWriteContext::get(opCtx);
+    bwc.addBatchedOperation(opCtx,
+                            repl::MutableOplogEntry::makeInsertOperation(
+                                _nss, _uuid, BSON("_id" << 0), BSON("_id" << 0)));
+}
+
+DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
+                   TestDoesNotSupportPreImagesInCollection,
+                   "Invariant "
+                   "failure.*getChangeStreamPreImageRecordingMode.*repl::ReplOperation::"
+                   "ChangeStreamPreImageRecordingMode::kOff") {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+
+    auto& bwc = BatchedWriteContext::get(opCtx);
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    entry.setChangeStreamPreImageRecordingMode(
+        repl::ReplOperation::ChangeStreamPreImageRecordingMode::kPreImagesCollection);
+    bwc.addBatchedOperation(opCtx, entry);
+}
+
+DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
+                   TestDoesNotSupportPreImagesInOplog,
+                   "Invariant "
+                   "failure.*getChangeStreamPreImageRecordingMode.*repl::ReplOperation::"
+                   "ChangeStreamPreImageRecordingMode::kOff") {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+
+    auto& bwc = BatchedWriteContext::get(opCtx);
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    entry.setChangeStreamPreImageRecordingMode(
+        repl::ReplOperation::ChangeStreamPreImageRecordingMode::kOplog);
+    bwc.addBatchedOperation(opCtx, entry);
+}
+
+DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
+                   TestDoesNotSupportMultiDocTxn,
+                   "Invariant failure.*!opCtx->inMultiDocumentTransaction()") {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    opCtx->setInMultiDocumentTransaction();
+    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+
+    auto& bwc = BatchedWriteContext::get(opCtx);
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    bwc.addBatchedOperation(opCtx, entry);
+}
+
+DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
+                   TestDoesNotSupportRetryableWrites,
+                   "Invariant failure.*!opCtx->getTxnNumber()") {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    opCtx->setLogicalSessionId(LogicalSessionId(makeLogicalSessionIdForTest()));
+    opCtx->setTxnNumber(TxnNumber{1});
+    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+
+    auto& bwc = BatchedWriteContext::get(opCtx);
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    bwc.addBatchedOperation(opCtx, entry);
+}
+
+// Verifies that a WriteUnitOfWork with groupOplogEntries=true replicates its writes as a single
+// applyOps. Tests WUOWs batching a range of 1 to 5 deletes (inclusive).
+TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
+    const auto nDocsToDelete = 5;
+    const BSONObj docsToDelete[nDocsToDelete] = {
+        BSON("_id" << 0),
+        BSON("_id" << 1),
+        BSON("_id" << 2),
+        BSON("_id" << 3),
+        BSON("_id" << 4),
+    };
+
+    // Setup.
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
+    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
+
+    // Run the test with WUOW's grouping 1 to 5 deletions.
+    for (size_t docsToBeBatched = 1; docsToBeBatched <= nDocsToDelete; docsToBeBatched++) {
+
+        // Start a WUOW with groupOplogEntries=true. Verify that initialises the
+        // BatchedWriteContext.
+        auto& bwc = BatchedWriteContext::get(opCtx);
+        ASSERT(!bwc.writesAreBatched());
+        WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+        ASSERT(bwc.writesAreBatched());
+
+        AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+
+        for (size_t doc = 0; doc < docsToBeBatched; doc++) {
+            // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
+            // of setting of `documentKey` on the delete for sharding purposes.
+            // `OpObserverImpl::onDelete` asserts its existence.
+            documentKeyDecoration(opCtx).emplace(docsToDelete[doc]["_id"].wrap(), boost::none);
+            const OplogDeleteEntryArgs args;
+            opCtx->getServiceContext()->getOpObserver()->onDelete(
+                opCtx, _nss, _uuid, kUninitializedStmtId, args);
+        }
+
+        wuow.commit();
+
+        // Retrieve the oplog entries. We expect 'docsToBeBatched' oplog entries because of previous
+        // iteration of this loop that exercised previous batch sizes.
+        std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, docsToBeBatched);
+        // Entries in ascending timestamp order, so fetch the last one at the back of the vector.
+        auto lastOplogEntry = oplogs.back();
+        auto lastOplogEntryParsed = assertGet(OplogEntry::parse(oplogs.back()));
+
+        // The batch consists of an applyOps, whose array contains all deletes issued within the
+        // WUOW.
+        ASSERT(lastOplogEntryParsed.getCommandType() == OplogEntry::CommandType::kApplyOps);
+        std::vector<repl::OplogEntry> innerEntries;
+        repl::ApplyOps::extractOperationsTo(
+            lastOplogEntryParsed, lastOplogEntryParsed.getEntry().toBSON(), &innerEntries);
+        ASSERT_EQ(innerEntries.size(), docsToBeBatched);
+
+        for (size_t opIdx = 0; opIdx < docsToBeBatched; opIdx++) {
+            const auto innerEntry = innerEntries[opIdx];
+            ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
+            ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kDelete);
+            ASSERT(innerEntry.getNss() == NamespaceString("test.coll"));
+            ASSERT(0 == innerEntry.getObject().woCompare(docsToDelete[opIdx]));
+        }
+    }
+}
+
+// Verifies an empty WUOW doesn't generate an oplog entry.
+TEST_F(BatchedWriteOutputsTest, testEmptyWUOW) {
+    // Setup.
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
+    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
+
+    // Start and commit an empty WUOW.
+    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
+    wuow.commit();
+
+    // The getNOplogEntries call below asserts that the oplog is empty.
+    getNOplogEntries(opCtx, 0);
+}
 class OnDeleteOutputsTest : public OpObserverTest {
 
 protected:
@@ -2873,9 +3045,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPreImageTest) {
         auto reservedSlots = repl::getNextOpTimes(opCtx(), 4);
         prepareOpTime = reservedSlots.back();
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 2);
+        prepareTransaction(reservedSlots, prepareOpTime, 2);
     }
 
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 4);
@@ -3000,9 +3170,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
         auto reservedSlots = repl::getNextOpTimes(opCtx(), 4);
         prepareOpTime = reservedSlots.back();
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+        prepareTransaction(reservedSlots, prepareOpTime);
     }
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 4);
     std::vector<OplogEntry> oplogEntries;
@@ -3092,9 +3260,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     auto reservedSlots = repl::getNextOpTimes(opCtx(), 2);
     prepareOpTime = reservedSlots.back();
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-    opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+    prepareTransaction(reservedSlots, prepareOpTime);
 
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
     std::vector<OplogEntry> oplogEntries;
@@ -3168,9 +3334,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
         prepareOpTime = reservedSlots.back();
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
         prepareOpTime = reservedSlots.back();
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+        prepareTransaction(reservedSlots, prepareOpTime);
     }
 
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
@@ -3231,10 +3395,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
         auto reservedSlots = repl::getNextOpTimes(opCtx(), 2);
         prepareOpTime = reservedSlots.back();
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+        prepareTransaction(reservedSlots, prepareOpTime);
     }
 
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
@@ -3314,10 +3475,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
         auto reservedSlots = repl::getNextOpTimes(opCtx(), 1);
         prepareOpTime = reservedSlots.back();
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-        opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+        prepareTransaction(reservedSlots, prepareOpTime);
     }
 
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 1);
@@ -3447,9 +3605,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
     auto reservedSlots = repl::getNextOpTimes(opCtx(), 4);
     prepareOpTime = reservedSlots.back();
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-    opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+    prepareTransaction(reservedSlots, prepareOpTime);
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
     std::vector<OplogEntry> oplogEntries;
     mongo::repl::OpTime expectedPrevWriteOpTime;
@@ -3504,10 +3660,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
     auto reservedSlots = repl::getNextOpTimes(opCtx(), 2);
     prepareOpTime = reservedSlots.back();
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-
-    opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onTransactionPrepare(opCtx(), reservedSlots, &txnOps, 0);
+    prepareTransaction(reservedSlots, prepareOpTime);
 
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 1);
 

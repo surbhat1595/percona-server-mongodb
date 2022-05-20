@@ -13,9 +13,12 @@ const commandsRemovedFromMongosSinceLastLTS = [
 // defined without always existing on the mongos being used.
 const commandsAddedToMongosSinceLastLTS = [
     "abortReshardCollection",
+    "appendOplogNote",
     "cleanupReshardCollection",
     "commitReshardCollection",
+    "compactStructuredEncryptionData",
     "configureCollectionBalancing",
+    "getClusterParameter",
     "moveRange",
     "reshardCollection",
     "rotateCertificates",

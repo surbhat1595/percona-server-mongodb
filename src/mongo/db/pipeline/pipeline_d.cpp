@@ -223,22 +223,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     if (aggRequest) {
         findCommand->setAllowDiskUse(aggRequest->getAllowDiskUse());
         findCommand->setHint(aggRequest->getHint().value_or(BSONObj()).getOwned());
-        // TODO SERVER-62100: No need to populate the "let" object to FindCommand for encoding.
-        if (auto let = aggRequest->getLet()) {
-            findCommand->setLet(let);
-        }
-    }
-
-    // TODO SERVER-62100: No need to populate the "let" object to FindCommand for encoding.
-    if (!findCommand->getLet() && expCtx->variablesParseState.hasDefinedVariables()) {
-        auto varIds = expCtx->variablesParseState.getDefinedVariableIDs();
-        for (auto&& id : varIds) {
-            // Only serialize "let" if there is user-defined "let" variable.
-            if (expCtx->variables.hasValue(id)) {
-                findCommand->setLet(expCtx->variablesParseState.serialize(expCtx->variables));
-                break;
-            }
-        }
     }
 
     // The collation on the ExpressionContext has been resolved to either the user-specified
@@ -657,11 +641,11 @@ PipelineD::buildInnerQueryExecutorSample(DocumentSourceSample* sampleStage,
             ? DocumentSourceCursor::CursorType::kEmptyDocuments
             : DocumentSourceCursor::CursorType::kRegular;
         attachExecutorCallback =
-            [cursorType](const CollectionPtr& collection,
+            [cursorType](const MultipleCollectionAccessor& collections,
                          std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
                          Pipeline* pipeline) {
                 auto cursor = DocumentSourceCursor::create(
-                    collection, std::move(exec), pipeline->getContext(), cursorType);
+                    collections, std::move(exec), pipeline->getContext(), cursorType);
                 pipeline->addInitialSource(std::move(cursor));
             };
         return std::pair(std::move(attachExecutorCallback), std::move(exec));
@@ -719,7 +703,7 @@ void PipelineD::attachInnerQueryExecutorToPipeline(
     // PlanExecutor provided in the 'attachExecutorCallback' object, so we don't need to do
     // anything.
     if (attachExecutorCallback && exec) {
-        attachExecutorCallback(collections.getMainCollection(), std::move(exec), pipeline);
+        attachExecutorCallback(collections, std::move(exec), pipeline);
     }
 }
 
@@ -940,11 +924,11 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
         (aggRequest && aggRequest->getRequestReshardingResumeToken());
 
     auto attachExecutorCallback =
-        [cursorType, trackOplogTS](const CollectionPtr& collection,
+        [cursorType, trackOplogTS](const MultipleCollectionAccessor& collections,
                                    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
                                    Pipeline* pipeline) {
             auto cursor = DocumentSourceCursor::create(
-                collection, std::move(exec), pipeline->getContext(), cursorType, trackOplogTS);
+                collections, std::move(exec), pipeline->getContext(), cursorType, trackOplogTS);
             pipeline->addInitialSource(std::move(cursor));
         };
     return std::make_pair(std::move(attachExecutorCallback), std::move(exec));
@@ -997,10 +981,10 @@ PipelineD::buildInnerQueryExecutorGeoNear(const MultipleCollectionAccessor& coll
                                    locationField = geoNearStage->getLocationField(),
                                    distanceMultiplier =
                                        geoNearStage->getDistanceMultiplier().value_or(1.0)](
-                                      const CollectionPtr& collection,
+                                      const MultipleCollectionAccessor& collections,
                                       std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
                                       Pipeline* pipeline) {
-        auto cursor = DocumentSourceGeoNearCursor::create(collection,
+        auto cursor = DocumentSourceGeoNearCursor::create(collections,
                                                           std::move(exec),
                                                           pipeline->getContext(),
                                                           distanceField,

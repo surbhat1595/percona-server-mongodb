@@ -30,8 +30,9 @@
 #pragma once
 
 #include "mongo/base/status_with.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/commands/fle2_compact_gen.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/fle_crud.h"
 
 namespace mongo {
 
@@ -40,13 +41,38 @@ struct EncryptedStateCollectionsNamespaces {
     static StatusWith<EncryptedStateCollectionsNamespaces> createFromDataCollection(
         const Collection& edc);
 
+    NamespaceString edcNss;
     NamespaceString escNss;
     NamespaceString eccNss;
     NamespaceString ecocNss;
     NamespaceString ecocRenameNss;
 };
 
-StatusWith<CompactStats> compactEncryptedCompactionCollection(
-    OperationContext* opCtx, const CompactStructuredEncryptionData& request);
+CompactStats processFLECompact(OperationContext* opCtx,
+                               const CompactStructuredEncryptionData& request,
+                               GetTxnCallback getTxn,
+                               const EncryptedStateCollectionsNamespaces& namespaces);
 
+/**
+ * Get all unique documents in the ECOC collection in their decrypted form.
+ *
+ * Used by unit tests.
+ */
+stdx::unordered_set<ECOCCompactionDocument> getUniqueCompactionDocuments(
+    FLEQueryInterface* queryImpl,
+    const CompactStructuredEncryptionData& request,
+    const NamespaceString& ecocNss,
+    ECOCStats* ecocStats);
+
+/**
+ * Performs compaction of the ESC and ECC entries for the encrypted field/value pair
+ * whose tokens are in the provided ECOC compaction document.
+ *
+ * Used by unit tests.
+ */
+void compactOneFieldValuePair(FLEQueryInterface* queryImpl,
+                              const ECOCCompactionDocument& ecocDoc,
+                              const EncryptedStateCollectionsNamespaces& namespaces,
+                              ECStats* escStats,
+                              ECStats* eccStats);
 }  // namespace mongo

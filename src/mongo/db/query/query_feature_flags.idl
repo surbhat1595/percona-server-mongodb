@@ -69,7 +69,8 @@ feature_flags:
     featureFlagChangeStreamPreAndPostImages:
       description: "Feature flag for allowing usage of point-in-time pre- and post-images of documents in change streams"
       cpp_varname: gFeatureFlagChangeStreamPreAndPostImages
-      default: false
+      default: true
+      version: 6.0
 
     featureFlagSearchMeta:
       description: "Feature flag for allowing use of search collectors alongside search results"
@@ -130,11 +131,6 @@ feature_flags:
     featureFlagSBELookupPushdown:
       description: "Feature flag for allowing SBE $lookup pushdown"
       cpp_varname: gFeatureFlagSBELookupPushdown
-      default: false
-
-    featureFlagSBELookupPushdownIndexJoin:
-      description: "Feature flag for allowing SBE $lookup pushdown to execute query using index join strategy"
-      cpp_varname: gFeatureFlagSBELookupPushdownIndexJoin
       default: false
 
     featureFlagSearchShardedFacets:

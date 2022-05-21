@@ -8,6 +8,10 @@
 //   requires_non_retryable_commands,
 //   requires_non_retryable_writes,
 //   uses_map_reduce_with_temp_collections,
+//   # Tenant migrations don't support applyOps.
+//   tenant_migration_incompatible,
+//   # Explain of a resolved view must be executed by mongos.
+//   directly_against_shardsvrs_incompatible,
 // ]
 
 /*
@@ -153,6 +157,7 @@ let viewsCommandTests = {
     _shardsvrCreateCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
+    _shardsvrGetStatsForBalancing: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isAnInternalCommand},
     _shardsvrMoveRange: {
         command: {_shardsvrMoveRange: "test.view"},
@@ -168,6 +173,7 @@ let viewsCommandTests = {
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
+    _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
     _shardsvrShardCollection:
         {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
@@ -358,7 +364,7 @@ let viewsCommandTests = {
     fsyncUnlock: {skip: isUnrelated},
     getAuditConfig: {skip: isUnrelated},
     getDatabaseVersion: {skip: isUnrelated},
-    getChangeStreamOptions: {skip: isUnrelated},
+    getChangeStreamOptions: {skip: isUnrelated},  // TODO SERVER-65353 remove in 6.1.
     getClusterParameter: {skip: isUnrelated},
     getCmdLineOpts: {skip: isUnrelated},
     getDefaultRWConcern: {skip: isUnrelated},
@@ -568,7 +574,6 @@ let viewsCommandTests = {
         expectFailure: true,
         isAdminCommand: true,
     },
-    renameDatabaseForRestore: {skip: isUnrelated},
     revokePrivilegesFromRole: {
         command: {
             revokePrivilegesFromRole: "testrole",
@@ -600,7 +605,7 @@ let viewsCommandTests = {
     saslStart: {skip: isUnrelated},
     sbe: {skip: isAnInternalCommand},
     serverStatus: {command: {serverStatus: 1}, skip: isUnrelated},
-    setChangeStreamOptions: {skip: isUnrelated},
+    setChangeStreamOptions: {skip: isUnrelated},  // TODO SERVER-65353 remove in 6.1.
     setIndexCommitQuorum: {skip: isUnrelated},
     setAuditConfig: {skip: isUnrelated},
     setCommittedSnapshot: {skip: isAnInternalCommand},

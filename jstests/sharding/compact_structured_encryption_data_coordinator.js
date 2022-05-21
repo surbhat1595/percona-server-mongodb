@@ -6,11 +6,6 @@
 
 load('jstests/fle2/libs/encrypted_client_util.js');
 
-if (!TestData.setParameters.featureFlagFLE2) {
-    jsTest.log('Skipping test because feature flag is not enabled');
-    return;
-}
-
 const options = {
     mongos: 1,
     config: 1,
@@ -46,24 +41,24 @@ assert.commandWorked(
     client.createEncryptionCollection("encrypted", {encryptedFields: encryptedFields}));
 assert.commandWorked(test.createCollection("unencrypted"));
 
-assert.commandFailedWithCode(test.unencrypted.compact(), ErrorCodes.BadValue);
+assert.commandFailedWithCode(test.unencrypted.compact(), 6346807);
 
 const reply = assert.commandWorked(test.encrypted.compact());
 jsTest.log(reply);
 
 // Validate dummy data we expect the placeholder compaction algorithm to return.
-assert.eq(reply.stats.ecoc.read, 1);
-assert.eq(reply.stats.ecoc.deleted, 2);
+assert.eq(reply.stats.ecoc.read, 0);
+assert.eq(reply.stats.ecoc.deleted, 0);
 
-assert.eq(reply.stats.ecc.read, 3);
-assert.eq(reply.stats.ecc.inserted, 4);
-assert.eq(reply.stats.ecc.updated, 5);
-assert.eq(reply.stats.ecc.deleted, 6);
+assert.eq(reply.stats.ecc.read, 0);
+assert.eq(reply.stats.ecc.inserted, 0);
+assert.eq(reply.stats.ecc.updated, 0);
+assert.eq(reply.stats.ecc.deleted, 0);
 
-assert.eq(reply.stats.esc.read, 7);
-assert.eq(reply.stats.esc.inserted, 8);
-assert.eq(reply.stats.esc.updated, 9);
-assert.eq(reply.stats.esc.deleted, 10);
+assert.eq(reply.stats.esc.read, 0);
+assert.eq(reply.stats.esc.inserted, 0);
+assert.eq(reply.stats.esc.updated, 0);
+assert.eq(reply.stats.esc.deleted, 0);
 
 // The eccoc collection is gone, so we should return quickly with no work done.
 const nowork = assert.commandWorked(test.encrypted.compact());
@@ -93,7 +88,7 @@ if (kHaveAuditing) {
     jsTest.log('Audit Log: ' + tojson(audit));
 
     const renameEvents = audit.filter((ev) => (ev.atype === 'renameCollection') &&
-                                          (ev.param.old === 'test.fle2.encrypted.ecoc'));
+                                          (ev.param.old === 'test.enxcol_.encrypted.ecoc'));
     assert.eq(renameEvents.length, 1, 'Invalid number of rename events: ' + tojson(renameEvents));
     assert.eq(renameEvents[0].result, ErrorCodes.OK);
     const tempNSS = renameEvents[0].param.new;

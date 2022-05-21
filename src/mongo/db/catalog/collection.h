@@ -739,6 +739,9 @@ public:
 
     virtual long long numRecords(OperationContext* opCtx) const = 0;
 
+    /**
+     * Return uncompressed collection data size in bytes
+     */
     virtual long long dataSize(OperationContext* opCtx) const = 0;
 
 
@@ -747,6 +750,9 @@ public:
      */
     virtual bool isEmpty(OperationContext* opCtx) const = 0;
 
+    /**
+     * Return the average object size in bytes
+     */
     virtual int averageObjectSize(OperationContext* opCtx) const = 0;
 
     virtual uint64_t getIndexSize(OperationContext* opCtx,
@@ -820,7 +826,7 @@ public:
      * Called by catalog::openCatalog() to re-establish the oplog collection pointer while holding
      * onto the global lock in exclusive mode.
      */
-    virtual void establishOplogCollectionForLogging(OperationContext* opCtx) = 0;
+    virtual void establishOplogCollectionForLogging(OperationContext* opCtx) const = 0;
 
     /**
      * Called when this Collection is deregistered from the catalog

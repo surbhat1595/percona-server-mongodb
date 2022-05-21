@@ -6,6 +6,9 @@
 (function() {
 "use strict";
 
+load("jstests/libs/sbe_explain_helpers.js");  // For getSbePlanStages.
+load("jstests/libs/sbe_util.js");             // For checkSBEEnabled.
+
 const replTest = new ReplSetTest({
     nodes: 3,
 });
@@ -13,7 +16,8 @@ const replTest = new ReplSetTest({
 replTest.startSet();
 replTest.initiate();
 
-// Test that spilling '$group' pipeline on a secondary works with a writeConcern greater than w:1.
+// Test that spilling '$group' and '$lookup' pipeline on a secondary works with a writeConcern
+// greater than w:1.
 let primary = replTest.getPrimary();
 const insertColl = primary.getDB("test").foo;
 for (let i = 0; i < 500; ++i) {
@@ -24,11 +28,53 @@ let secondary = replTest.getSecondary();
 assert.commandWorked(secondary.adminCommand(
     {setParameter: 1, internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill: 1}));
 
+assert.commandWorked(secondary.adminCommand({
+    setParameter: 1,
+    internalQuerySlotBasedExecutionHashLookupApproxMemoryUseInBytesBeforeSpill: 1
+}));
+
+const isSBELookupEnabled =
+    checkSBEEnabled(secondary.getDB("test"), ["featureFlagSBELookupPushdown"]);
+
 const readColl = secondary.getDB("test").foo;
 
 let pipeline = [{$group: {_id: '$a', s: {$addToSet: '$string'}, p: {$push: '$a'}}}];
 
+if (isSBELookupEnabled) {
+    let explainRes = readColl.explain('executionStats').aggregate(pipeline, {allowDiskUse: true});
+    const hashAggGroups = getSbePlanStages(explainRes, 'group');
+    assert.eq(hashAggGroups.length, 1, explainRes);
+    const hashAggGroup = hashAggGroups[0];
+    assert(hashAggGroup, explainRes);
+    assert(hashAggGroup.hasOwnProperty("usedDisk"), hashAggGroup);
+    assert(hashAggGroup.usedDisk, hashAggGroup);
+    assert.eq(hashAggGroup.spilledRecords, 500, hashAggGroup);
+    assert.eq(hashAggGroup.spilledBytesApprox, 27500, hashAggGroup);
+}
+
 let res =
+    readColl
+        .aggregate(
+            pipeline,
+            {allowDiskUse: true, readConcern: {level: "majority"}, writeConcern: {"w": "majority"}})
+        .toArray();
+
+pipeline =
+    [{$lookup: {from: readColl.getName(), localField: "a", foreignField: "a", as: "results"}}];
+
+if (isSBELookupEnabled) {
+    let explainRes = readColl.explain('executionStats').aggregate(pipeline, {allowDiskUse: true});
+    const hLookups = getSbePlanStages(explainRes, 'hash_lookup');
+    assert.eq(hLookups.length, 1, explainRes);
+    const hLookup = hLookups[0];
+    assert(hLookup, explainRes);
+    assert(hLookup.hasOwnProperty("usedDisk"), hLookup);
+    assert(hLookup.usedDisk, hLookup);
+    assert.eq(hLookup.spilledRecords, 1000, hLookup);
+    assert.eq(hLookup.spilledBytesApprox, 63000, hLookup);
+}
+
+res =
     readColl
         .aggregate(
             pipeline,

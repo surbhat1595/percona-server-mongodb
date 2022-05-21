@@ -146,6 +146,7 @@ const std::string MergeChunksCommandInfo::kCommandName = "mergeChunks";
 const std::string MergeChunksCommandInfo::kBounds = "bounds";
 const std::string MergeChunksCommandInfo::kShardName = "shardName";
 const std::string MergeChunksCommandInfo::kEpoch = "epoch";
+const std::string MergeChunksCommandInfo::kTimestamp = "timestamp";
 
 const std::string DataSizeCommandInfo::kCommandName = "dataSize";
 const std::string DataSizeCommandInfo::kKeyPattern = "keyPattern";
@@ -159,6 +160,7 @@ const std::string SplitChunkCommandInfo::kKeyPattern = "keyPattern";
 const std::string SplitChunkCommandInfo::kLowerBound = "min";
 const std::string SplitChunkCommandInfo::kUpperBound = "max";
 const std::string SplitChunkCommandInfo::kEpoch = "epoch";
+const std::string SplitChunkCommandInfo::kTimestamp = "timestamp";
 const std::string SplitChunkCommandInfo::kSplitKeys = "splitKeys";
 
 BalancerCommandsSchedulerImpl::BalancerCommandsSchedulerImpl() {}
@@ -229,14 +231,16 @@ SemiFuture<void> BalancerCommandsSchedulerImpl::requestMoveChunk(
         .semi();
 }
 
-SemiFuture<void> BalancerCommandsSchedulerImpl::requestMoveRange(OperationContext* opCtx,
-                                                                 ShardsvrMoveRange& request,
-                                                                 bool issuedByRemoteUser) {
+SemiFuture<void> BalancerCommandsSchedulerImpl::requestMoveRange(
+    OperationContext* opCtx,
+    const ShardsvrMoveRange& request,
+    const WriteConcernOptions& secondaryThrottleWC,
+    bool issuedByRemoteUser) {
     auto externalClientInfo =
         issuedByRemoteUser ? boost::optional<ExternalClientInfo>(opCtx) : boost::none;
 
     auto commandInfo = std::make_shared<MoveRangeCommandInfo>(
-        request, opCtx->getWriteConcern(), std::move(externalClientInfo));
+        request, secondaryThrottleWC, std::move(externalClientInfo));
 
     return _buildAndEnqueueNewRequest(opCtx, std::move(commandInfo))
         .then([](const executor::RemoteCommandResponse& remoteResponse) {
@@ -561,15 +565,17 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
         }
     }
     // Wait for each outstanding command to complete, clean out its resources and leave.
+    stdx::unordered_map<UUID, RequestData, UUID::Hash> requestsToClean;
     {
         stdx::unique_lock<Latch> ul(_mutex);
         _stateUpdatedCV.wait(
             ul, [this] { return (_requests.size() == _recentlyCompletedRequestIds.size()); });
-        auto opCtxHolder = cc().makeOperationContext();
-        _performDeferredCleanup(opCtxHolder.get(), _requests);
+        requestsToClean.swap(_requests);
         _requests.clear();
         _recentlyCompletedRequestIds.clear();
     }
+    auto opCtxHolder = cc().makeOperationContext();
+    _performDeferredCleanup(opCtxHolder.get(), requestsToClean);
 }
 
 

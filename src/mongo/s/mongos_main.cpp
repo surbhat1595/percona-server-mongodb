@@ -51,6 +51,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authz_manager_external_state_s.h"
 #include "mongo/db/auth/user_cache_invalidator_job.h"
+#include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/dbdirectclient.h"
@@ -702,6 +703,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     }
 
     ReadWriteConcernDefaults::create(serviceContext, readWriteConcernDefaultsCacheLookupMongoS);
+    ChangeStreamOptionsManager::create(serviceContext);
 
     auto opCtxHolder = tc->makeOperationContext();
     auto const opCtx = opCtxHolder.get();

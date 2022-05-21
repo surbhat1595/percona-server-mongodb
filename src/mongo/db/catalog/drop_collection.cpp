@@ -37,7 +37,6 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/uncommitted_collections.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
@@ -201,6 +200,8 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
         return status;
     }
 
+    warnEncryptedCollectionsIfNeeded(opCtx, coll);
+
     try {
         checkCollectionUUIDMismatch(opCtx, startingNss, coll, expectedUUID);
     } catch (const DBException& ex) {
@@ -357,11 +358,7 @@ Status _dropCollection(OperationContext* opCtx,
                 return Status(ErrorCodes::NamespaceNotFound, "ns not found");
             }
 
-            auto collectionPtr =
-                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, collectionName);
-            if (collectionPtr) {
-                warnEncryptedCollectionsIfNeeded(opCtx, collectionPtr);
-
+            if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, collectionName)) {
                 return _abortIndexBuildsAndDrop(
                     opCtx,
                     std::move(autoDb),

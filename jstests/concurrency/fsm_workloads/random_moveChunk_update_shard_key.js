@@ -79,7 +79,8 @@ var $config = extendWorkload($config, function($config, $super) {
         // filter out those errors.
         let skippableErrors = [
             ErrorCodes.StaleConfig,
-            ErrorCodes.StaleShardVersion,
+            // TODO (SERVER-64449): Get rid of this exception
+            ErrorCodes.OBSOLETE_StaleShardVersion,
             ErrorCodes.WriteConflict,
             ErrorCodes.LockTimeout,
             ErrorCodes.PreparedTransactionInProgress,
@@ -243,7 +244,7 @@ var $config = extendWorkload($config, function($config, $super) {
 
                     // With internal transactions enabled, IncompleteTransactionHistory means the
                     // write succeeded, so we can treat this error as success.
-                    if (this.internalTransactionsEnabled) {
+                    if (this.updateDocumentShardKeyUsingTransactionApiEnabled) {
                         print("Internal transactions are on so assuming the operation succeeded");
                         assertDocWasUpdated(
                             collection, idToUpdate, currentShardKey, newShardKey, counterForId + 1);
@@ -321,7 +322,7 @@ var $config = extendWorkload($config, function($config, $super) {
 
                     // With internal transactions enabled, IncompleteTransactionHistory means the
                     // write succeeded, so we can treat this error as success.
-                    if (this.internalTransactionsEnabled) {
+                    if (this.updateDocumentShardKeyUsingTransactionApiEnabled) {
                         print("Internal transactions are on so assuming the operation succeeded");
                         assertDocWasUpdated(
                             collection, idToUpdate, currentShardKey, newShardKey, counterForId + 1);
@@ -438,7 +439,7 @@ var $config = extendWorkload($config, function($config, $super) {
         // consistency, so use a non causally consistent session with internal transactions.
         const shouldUseCausalConsistency =
             (this.runningWithStepdowns || this.retryOnKilledSession) &&
-            !this.internalTransactionsEnabled;
+            !this.updateDocumentShardKeyUsingTransactionApiEnabled;
         this.session = db.getMongo().startSession(
             {causalConsistency: shouldUseCausalConsistency, retryWrites: true});
 
@@ -480,15 +481,18 @@ var $config = extendWorkload($config, function($config, $super) {
         }
         db.printShardingStatus();
 
-        const parameterRes = db.adminCommand({getParameter: 1, featureFlagInternalTransactions: 1});
+        const parameterRes = db.adminCommand(
+            {getParameter: 1, featureFlagUpdateDocumentShardKeyUsingTransactionApi: 1});
         if (!parameterRes.ok) {
             assert.eq(parameterRes.errmsg, "no option found to get", parameterRes);
-            this.internalTransactionsEnabled = false;
+            this.updateDocumentShardKeyUsingTransactionApiEnabled = false;
         } else {
             assert.commandWorked(parameterRes);
-            this.internalTransactionsEnabled = parameterRes.featureFlagInternalTransactions.value;
+            this.updateDocumentShardKeyUsingTransactionApiEnabled =
+                parameterRes.featureFlagUpdateDocumentShardKeyUsingTransactionApi.value;
         }
-        print("Internal transactions enabled: " + this.internalTransactionsEnabled);
+        print("Updating document shard key using transaction api enabled: " +
+              this.updateDocumentShardKeyUsingTransactionApiEnabled);
     };
 
     /**

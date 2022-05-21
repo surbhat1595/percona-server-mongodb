@@ -128,12 +128,32 @@ TEST(TimeseriesIndexSchemaConversionTest, OriginalSpecFieldName) {
     }
 }
 
-// {} <=> {}
-TEST(TimeseriesIndexSchemaConversionTest, EmptyTimeseriesIndexSpecDoesNothing) {
+// {} is invalid.
+TEST(TimeseriesIndexSchemaConversionTest, EmptyTimeseriesIndexSpecInvalid) {
     TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
-    BSONObj emptyIndexSpec = {};
+    BSONObj timeseriesIndexSpec = {};
 
-    testBothWaysIndexSpecConversion(timeseriesOptions, emptyIndexSpec, emptyIndexSpec);
+    ASSERT_NOT_OK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(timeseriesOptions,
+                                                                            timeseriesIndexSpec));
+}
+
+// {$hint: 'abc'} is invalid.
+TEST(TimeseriesIndexSchemaConversionTest, HintTimeseriesIndexSpecInvalid) {
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+    BSONObj timeseriesIndexSpec = BSON("$hint"
+                                       << "abc");
+
+    ASSERT_NOT_OK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(timeseriesOptions,
+                                                                            timeseriesIndexSpec));
+}
+
+// {$natural: 1} is invalid.
+TEST(TimeseriesIndexSchemaConversionTest, NaturalTimeseriesIndexSpecInvalid) {
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+    BSONObj timeseriesIndexSpec = BSON("$natural" << 1);
+
+    ASSERT_NOT_OK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(timeseriesOptions,
+                                                                            timeseriesIndexSpec));
 }
 
 // {tm: 1} <=> {control.min.tm: 1, control.max.tm: 1}

@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/exec/batched_delete_stage_buffer.h"
 #include "mongo/db/exec/batched_delete_stage_gen.h"
 #include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/write_stage_common.h"
@@ -37,30 +38,29 @@
 namespace mongo {
 
 /**
- * Batch sizing parameters. A batch of documents staged for deletion is committed as soon
+ * Batch sizing parameters. A batch of staged document deletes is committed as soon
  * as one of the targets below is met, or upon reaching EOF.
  */
 struct BatchedDeleteStageBatchParams {
     BatchedDeleteStageBatchParams()
-        : targetBatchBytes(gBatchedDeletesTargetBatchBytes.load()),
-          targetBatchDocs(gBatchedDeletesTargetBatchDocs.load()),
-          targetBatchTimeMS(Milliseconds(gBatchedDeletesTargetBatchTimeMS.load())) {}
+        : targetBatchDocs(gBatchedDeletesTargetBatchDocs.load()),
+          targetBatchTimeMS(Milliseconds(gBatchedDeletesTargetBatchTimeMS.load())),
+          targetStagedDocBytes(gBatchedDeletesTargetStagedDocBytes.load()) {}
 
-    // Documents staged for deletions are processed in a batch once this batch size target is met.
-    // Accounts for documents and indexes. A value of zero means unlimited.
-    long long targetBatchBytes = 0;
     // Documents staged for deletions are processed in a batch once this document count target is
     // met. A value of zero means unlimited.
     long long targetBatchDocs = 0;
     // A batch is committed as soon as this target execution time is met. Zero means unlimited.
     Milliseconds targetBatchTimeMS = Milliseconds(0);
+    // Documents staged for deletions are processed in a batch once this size target is met.
+    // Accounts for document size, not for indexes. A value of zero means unlimited.
+    long long targetStagedDocBytes = 0;
 };
 
 /**
- * The BATCHED_DELETE stage deletes documents in batches, using RecordId's that are returned from
- * its child. In comparison, the base class DeleteStage deletes documents one by one. The stage
- * returns NEED_TIME after deleting a document, or after staging a document to be deleted in the
- * next batch.
+ * The BATCHED_DELETE stage deletes documents in batches. In comparison, the base class DeleteStage
+ * deletes documents one by one. The stage returns NEED_TIME after executing a batch of deletes, or
+ * after staging a delete for the next batch.
  *
  * Callers of work() must be holding a write lock (and, for replicated deletes, callers must have
  * had the replication coordinator approve the write).
@@ -100,26 +100,29 @@ private:
     // Prepares to retry draining the _stagedDeletesBuffer after a write conflict. Removes
     // 'recordsThatNoLongerMatch' then yields.
     PlanStage::StageState _prepareToRetryDrainAfterWCE(
-        WorkingSetID* out, const std::set<RecordId>& recordsThatNoLongerMatch);
+        WorkingSetID* out, const std::set<WorkingSetID>& recordsThatNoLongerMatch);
 
-    // Metadata of a document staged for deletion.
-    struct StagedDocumentMetadata {
-        RecordId rid;
+    // Either signals that all the elements in the buffer have been drained or that there are more
+    // elements to drain.
+    void _signalIfDrainComplete();
 
-        // SnapshotId associated with the document when it is staged for deletion. Must be checked
-        // before deletion to ensure the document still matches the query.
-        SnapshotId snapshotId;
-    };
-
-    // Stores documents staged for deletion.
-    std::vector<StagedDocumentMetadata> _stagedDeletesBuffer;
-
-    // Whether there are remaining docs in the buffer from a previous call to doWork() that should
-    // be drained before fetching more documents.
-    bool _drainRemainingBuffer = false;
+    // Returns true if one or more of the batch targets are met and it is time to delete the batch.
+    bool _batchTargetMet();
 
     // Batch targeting parameters.
     std::unique_ptr<BatchedDeleteStageBatchParams> _batchParams;
+
+    // Holds information for each document staged for delete.
+    BatchedDeleteStageBuffer _stagedDeletesBuffer;
+
+    // Holds the maximum cumulative size of all documents staged for delete. It is a watermark in
+    // that it resets to zero once the target is met and the staged documents start being processed,
+    // regardless of whether all staged deletes have been committed yet.
+    size_t _stagedDeletesWatermarkBytes;
+
+    // Whether there are remaining docs in the buffer from a previous call to doWork() that should
+    // be drained before fetching more documents.
+    bool _drainRemainingBuffer;
 };
 
 }  // namespace mongo

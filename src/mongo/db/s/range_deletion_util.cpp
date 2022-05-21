@@ -320,12 +320,15 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                            !collectionUuidHasChanged(
                                nss, collection.getCollection(), collectionUuid));
 
+                       markAsProcessingRangeDeletionTask(opCtx, migrationId);
+
                        auto numDeleted = uassertStatusOK(deleteNextBatch(opCtx,
                                                                          collection.getCollection(),
                                                                          keyPattern,
                                                                          range,
                                                                          numDocsToRemovePerBatch));
-                       migrationutil::persistUpdatedNumOrphans(opCtx, migrationId, -numDeleted);
+                       migrationutil::persistUpdatedNumOrphans(
+                           opCtx, migrationId, collectionUuid, -numDeleted);
 
                        if (MONGO_unlikely(hangAfterDoingDeletion.shouldFail())) {
                            hangAfterDoingDeletion.pauseWhileSet(opCtx);
@@ -495,6 +498,14 @@ void deleteRangeDeletionTasksForRename(OperationContext* opCtx,
                                         BSON(RangeDeletionTask::kNssFieldName << toNss.ns()));
 }
 
+void markAsProcessingRangeDeletionTask(OperationContext* opCtx, const UUID& migrationId) {
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
+    static const auto update =
+        BSON("$set" << BSON(RangeDeletionTask::kProcessingFieldName << true));
+
+    store.update(opCtx, query, update, WriteConcerns::kLocalWriteConcern);
+}
 
 SharedSemiFuture<void> removeDocumentsInRange(
     const std::shared_ptr<executor::TaskExecutor>& executor,

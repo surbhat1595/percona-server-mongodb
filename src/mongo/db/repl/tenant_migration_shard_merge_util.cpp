@@ -39,7 +39,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog/uncommitted_collections.h"
+#include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/cursor_server_params_gen.h"
@@ -63,7 +63,7 @@ using namespace fmt::literals;
 void moveFile(const std::string& src, const std::string& dst) {
     LOGV2_DEBUG(6114304, 1, "Moving file", "src"_attr = src, "dst"_attr = dst);
 
-    tassert(6114401,
+    uassert(6114401,
             "Destination file '{}' already exists"_format(dst),
             !boost::filesystem::exists(dst));
 
@@ -215,7 +215,7 @@ void wiredTigerImportFromBackupCursor(OperationContext* opCtx,
             opCtx->recoveryUnit()->registerChange(
                 makeCountsChange(ownedCollection->getRecordStore(), collectionMetadata));
 
-            UncommittedCollections::addToTxn(opCtx, std::move(ownedCollection));
+            CollectionCatalog::get(opCtx)->onCreateCollection(opCtx, std::move(ownedCollection));
             // TODO SERVER-63789 Uncomment wunit.commit() call below when we
             // make file copy/import async.
             // wunit.commit();

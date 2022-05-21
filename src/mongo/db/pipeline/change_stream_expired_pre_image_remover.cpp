@@ -70,13 +70,14 @@ bool PreImageAttributes::isExpiredPreImage(const boost::optional<Date_t>& preIma
     return preImageOplogEntryIsDeleted || operationTime <= expirationTime;
 }
 
-// Get the 'expireAfterSeconds' from the 'ChangeStreamOptions' if present, boost::none otherwise.
+// Get the 'expireAfterSeconds' from the 'ChangeStreamOptions' if not 'off', boost::none otherwise.
 boost::optional<std::int64_t> getExpireAfterSecondsFromChangeStreamOptions(
     ChangeStreamOptions& changeStreamOptions) {
-    if (auto preAndPostImages = changeStreamOptions.getPreAndPostImages(); preAndPostImages &&
-        preAndPostImages->getExpireAfterSeconds() &&
-        !stdx::holds_alternative<std::string>(*preAndPostImages->getExpireAfterSeconds())) {
-        return stdx::get<std::int64_t>(*preAndPostImages->getExpireAfterSeconds());
+    const stdx::variant<std::string, std::int64_t>& expireAfterSeconds =
+        changeStreamOptions.getPreAndPostImages().getExpireAfterSeconds();
+
+    if (!stdx::holds_alternative<std::string>(expireAfterSeconds)) {
+        return stdx::get<std::int64_t>(expireAfterSeconds);
     }
 
     return boost::none;
@@ -88,9 +89,8 @@ boost::optional<Date_t> getPreImageExpirationTime(OperationContext* opCtx, Date_
     boost::optional<std::int64_t> expireAfterSeconds = boost::none;
 
     // Get the expiration time directly from the change stream manager.
-    if (auto changeStreamOptions = ChangeStreamOptionsManager::get(opCtx).getOptions(opCtx)) {
-        expireAfterSeconds = getExpireAfterSecondsFromChangeStreamOptions(*changeStreamOptions);
-    }
+    auto changeStreamOptions = ChangeStreamOptionsManager::get(opCtx).getOptions(opCtx);
+    expireAfterSeconds = getExpireAfterSecondsFromChangeStreamOptions(changeStreamOptions);
 
     // A pre-image is eligible for deletion if:
     //   pre-image's op-time + expireAfterSeconds  < currentTime.
@@ -346,8 +346,6 @@ void deleteExpiredChangeStreamPreImages(Client* client, Date_t currentTimeForTim
             ->getEarliestOplogTimestamp(opCtx.get());
 
     const bool isBatchedRemoval = gBatchedExpiredChangeStreamPreImageRemoval.load();
-    const bool isMultiDeletesFeatureFlagEnabled =
-        feature_flags::gBatchMultiDeletes.isEnabled(serverGlobalParams.featureCompatibility);
     size_t numberOfRemovals = 0;
 
     ChangeStreamExpiredPreImageIterator expiredPreImages(
@@ -367,7 +365,7 @@ void deleteExpiredChangeStreamPreImages(Client* client, Date_t currentTimeForTim
                 params->isMulti = true;
 
                 boost::optional<std::unique_ptr<BatchedDeleteStageBatchParams>> batchParams;
-                if (isMultiDeletesFeatureFlagEnabled && isBatchedRemoval) {
+                if (isBatchedRemoval) {
                     batchParams = std::make_unique<BatchedDeleteStageBatchParams>();
                 }
 
@@ -384,10 +382,13 @@ void deleteExpiredChangeStreamPreImages(Client* client, Date_t currentTimeForTim
             });
     }
 
-    LOGV2(5869104,
-          "Periodic expired pre-images removal job finished executing",
-          "numberOfRemovals"_attr = numberOfRemovals,
-          "jobDuration"_attr = (Date_t::now() - startTime).toString());
+    if (numberOfRemovals > 0) {
+        LOGV2_DEBUG(5869104,
+                    3,
+                    "Periodic expired pre-images removal job finished executing",
+                    "numberOfRemovals"_attr = numberOfRemovals,
+                    "jobDuration"_attr = (Date_t::now() - startTime).toString());
+    }
 }
 
 void performExpiredChangeStreamPreImagesRemovalPass(Client* client) {

@@ -43,6 +43,7 @@
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/clock_source_mock.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/executor_test_util.h"
 #include "mongo/util/fail_point.h"
@@ -140,7 +141,7 @@ public:
     }
 
     virtual SemiFuture<BSONObj> runCommand(StringData dbName, BSONObj cmd) const override {
-        auto cmdBob = BSONObjBuilder(cmd);
+        auto cmdBob = BSONObjBuilder(std::move(cmd));
         invariant(_hooks);
         _hooks->runRequestHook(&cmdBob);
         _lastSentRequest = cmdBob.obj();
@@ -231,11 +232,28 @@ void assertSessionIdMetadata(BSONObj obj,
     }
 }
 
+// Assumes all fields are set in the given APIParameters.
+void assertAPIParameters(BSONObj obj, boost::optional<APIParameters> expectedParams) {
+    if (expectedParams) {
+        ASSERT_EQ(obj[APIParametersFromClient::kApiVersionFieldName].String(),
+                  expectedParams->getAPIVersion().get());
+        ASSERT_EQ(obj[APIParametersFromClient::kApiStrictFieldName].Bool(),
+                  expectedParams->getAPIStrict().get());
+        ASSERT_EQ(obj[APIParametersFromClient::kApiDeprecationErrorsFieldName].Bool(),
+                  expectedParams->getAPIDeprecationErrors().get());
+    } else {
+        ASSERT(obj[APIParametersFromClient::kApiVersionFieldName].eoo());
+        ASSERT(obj[APIParametersFromClient::kApiStrictFieldName].eoo());
+        ASSERT(obj[APIParametersFromClient::kApiDeprecationErrorsFieldName].eoo());
+    }
+}
+
 void assertTxnMetadata(BSONObj obj,
                        TxnNumber txnNumber,
                        boost::optional<bool> startTransaction,
                        boost::optional<BSONObj> readConcern = boost::none,
-                       boost::optional<BSONObj> writeConcern = boost::none) {
+                       boost::optional<BSONObj> writeConcern = boost::none,
+                       boost::optional<int> maxTimeMS = boost::none) {
     ASSERT_EQ(obj["lsid"].type(), BSONType::Object);
     ASSERT_EQ(obj["autocommit"].Bool(), false);
     ASSERT_EQ(obj["txnNumber"].Long(), txnNumber);
@@ -260,6 +278,12 @@ void assertTxnMetadata(BSONObj obj,
         ASSERT_BSONOBJ_EQ(obj["writeConcern"].Obj(), *writeConcern);
     } else {
         ASSERT(obj["writeConcern"].eoo());
+    }
+
+    if (maxTimeMS) {
+        ASSERT_EQ(obj["maxTimeMS"].numberInt(), *maxTimeMS);
+    } else {
+        ASSERT(obj["maxTimeMS"].eoo());
     }
 }
 
@@ -358,6 +382,7 @@ TEST_F(TxnAPITest, OwnSession_AttachesTxnMetadata) {
             assertTxnMetadata(
                 mockClient()->getLastSentRequest(), 0 /* txnNumber */, true /* startTransaction */);
             assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+            assertAPIParameters(mockClient()->getLastSentRequest(), boost::none);
 
             mockClient()->setNextCommandResponse(kOKInsertResponse);
             insertRes = txnClient
@@ -371,6 +396,7 @@ TEST_F(TxnAPITest, OwnSession_AttachesTxnMetadata) {
                               0 /* txnNumber */,
                               boost::none /* startTransaction */);
             assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+            assertAPIParameters(mockClient()->getLastSentRequest(), boost::none);
 
             // The commit response.
             mockClient()->setNextCommandResponse(kOKCommandResponse);
@@ -386,7 +412,70 @@ TEST_F(TxnAPITest, OwnSession_AttachesTxnMetadata) {
                       boost::none /* readConcern */,
                       WriteConcernOptions().toBSON() /* writeConcern */);
     assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+    assertAPIParameters(mockClient()->getLastSentRequest(), boost::none);
     ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
+}
+
+TEST_F(TxnAPITest, AttachesAPIVersion) {
+    APIParameters params = APIParameters();
+    params.setAPIVersion("2");
+    params.setAPIStrict(true);
+    params.setAPIDeprecationErrors(true);
+    APIParameters::get(opCtx()) = params;
+    resetTxnWithRetries();
+
+    int attempt = -1;
+    auto swResult = txnWithRetries().runSyncNoThrow(
+        opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            attempt += 1;
+
+            mockClient()->setNextCommandResponse(kOKInsertResponse);
+            auto insertRes = txnClient
+                                 .runCommand("user"_sd,
+                                             BSON("insert"
+                                                  << "foo"
+                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                                 .get();
+            ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+            assertTxnMetadata(mockClient()->getLastSentRequest(),
+                              attempt + 1 /* txnNumber */,
+                              true /* startTransaction */);
+            assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+            assertAPIParameters(mockClient()->getLastSentRequest(), params);
+
+            mockClient()->setNextCommandResponse(kOKInsertResponse);
+            insertRes = txnClient
+                            .runCommand("user"_sd,
+                                        BSON("insert"
+                                             << "foo"
+                                             << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                            .get();
+            ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+            assertTxnMetadata(mockClient()->getLastSentRequest(),
+                              attempt + 1 /* txnNumber */,
+                              boost::none /* startTransaction */);
+            assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+            assertAPIParameters(mockClient()->getLastSentRequest(), params);
+
+            // Throw a transient error to verify we attach API params on retries as well.
+            uassert(ErrorCodes::HostUnreachable, "Mock network error", attempt != 0);
+
+            // The commit response.
+            mockClient()->setNextCommandResponse(kOKCommandResponse);
+            return SemiFuture<void>::makeReady();
+        });
+    ASSERT(swResult.getStatus().isOK());
+    ASSERT(swResult.getValue().getEffectiveStatus().isOK());
+
+    auto lastRequest = mockClient()->getLastSentRequest();
+    assertTxnMetadata(lastRequest,
+                      attempt + 1 /* txnNumber */,
+                      boost::none /* startTransaction */,
+                      boost::none /* readConcern */,
+                      WriteConcernOptions().toBSON() /* writeConcern */);
+    assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+    ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
+    assertAPIParameters(mockClient()->getLastSentRequest(), params);
 }
 
 TEST_F(TxnAPITest, OwnSession_AttachesWriteConcernOnCommit) {
@@ -1599,6 +1688,123 @@ TEST_F(TxnAPITest, TestExhaustiveFindErrorOnGetMore) {
     ASSERT_EQ(lastRequest["getMore"].Long(), 1);
     ASSERT_EQ(lastRequest["batchSize"].Long(), 2);
     ASSERT_EQ(lastRequest["collection"].String(), "bar");
+}
+
+TEST_F(TxnAPITest, OwnSession_StartTransactionRetryLimitOnTransientErrors) {
+    int retryCount = 0;
+    auto swResult = txnWithRetries().runSyncNoThrow(
+        opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            retryCount++;
+
+            // Command response used for insert below and eventually abortTransaction.
+            mockClient()->setNextCommandResponse(kOKCommandResponse);
+            auto insertRes = txnClient
+                                 .runCommand("user"_sd,
+                                             BSON("insert"
+                                                  << "foo"
+                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                                 .get();
+            uasserted(ErrorCodes::HostUnreachable, "Host unreachable error");
+            return SemiFuture<void>::makeReady();
+        });
+    // The transient error should have been propagated.
+    ASSERT_EQ(swResult.getStatus(), ErrorCodes::HostUnreachable);
+
+    // We get 11 due to the initial try and then 10 follow up retries.
+    ASSERT_EQ(retryCount, 11);
+
+    auto lastRequest = mockClient()->getLastSentRequest();
+    assertTxnMetadata(lastRequest,
+                      10 /* txnNumber */,
+                      boost::none /* startTransaction */,
+                      boost::none /* readConcern */,
+                      WriteConcernOptions().toBSON() /* writeConcern */);
+    assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+    ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "abortTransaction"_sd);
+}
+
+TEST_F(TxnAPITest, OwnSession_CommitTransactionRetryLimitOnTransientErrors) {
+    // If we are able to successfully finish this test, then we know that we have limited our
+    // retries.
+    auto swResult = txnWithRetries().runSyncNoThrow(
+        opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            mockClient()->setNextCommandResponse(kOKInsertResponse);
+            auto insertRes = txnClient
+                                 .runCommand("user"_sd,
+                                             BSON("insert"
+                                                  << "foo"
+                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                                 .get();
+            ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+            assertTxnMetadata(
+                mockClient()->getLastSentRequest(), 0 /* txnNumber */, true /* startTransaction */);
+            assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+
+            // The commit response.
+            mockClient()->setNextCommandResponse(
+                BSON("ok" << 0 << "code" << ErrorCodes::PrimarySteppedDown));
+            return SemiFuture<void>::makeReady();
+        });
+
+    // The transient error should have been propagated.
+    ASSERT_EQ(swResult.getValue().getEffectiveStatus(), ErrorCodes::PrimarySteppedDown);
+    auto lastRequest = mockClient()->getLastSentRequest();
+    assertTxnMetadata(lastRequest,
+                      0 /* txnNumber */,
+                      boost::none /* startTransaction */,
+                      boost::none /* readConcern */,
+                      WriteConcernOptions().toBSON() /* writeConcern */);
+    assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+    ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "abortTransaction"_sd);
+}
+
+TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadline) {
+    const std::shared_ptr<ClockSourceMock> mockClock = std::make_shared<ClockSourceMock>();
+    mockClock->reset(getServiceContext()->getFastClockSource()->now());
+    getServiceContext()->setFastClockSource(std::make_unique<SharedClockSourceAdapter>(mockClock));
+    int maxTimeMS = 2000;
+    opCtx()->setDeadlineByDate(mockClock->now() + Milliseconds(maxTimeMS),
+                               ErrorCodes::MaxTimeMSExpired);
+
+    // txnNumber will be incremented upon the release of a session.
+    resetTxnWithRetries();
+
+    auto swResult = txnWithRetries().runSyncNoThrow(
+        opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            mockClient()->setNextCommandResponse(kOKInsertResponse);
+            auto insertRes = txnClient
+                                 .runCommand("user"_sd,
+                                             BSON("insert"
+                                                  << "foo"
+                                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                                 .get();
+            ASSERT_EQ(insertRes["n"].Int(), 1);  // Verify the mocked response was returned.
+            assertTxnMetadata(mockClient()->getLastSentRequest(),
+                              1 /* txnNumber */,
+                              true /* startTransaction */,
+                              boost::none /* readConcern */,
+                              boost::none /* writeConcern */,
+                              maxTimeMS /* maxTimeMS */);
+            assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+
+            mockClock->advance(Milliseconds(1000));
+
+            // The commit response.
+            mockClient()->setNextCommandResponse(kOKCommandResponse);
+            return SemiFuture<void>::makeReady();
+        });
+    ASSERT(swResult.getStatus().isOK());
+    ASSERT(swResult.getValue().getEffectiveStatus().isOK());
+
+    auto lastRequest = mockClient()->getLastSentRequest();
+    assertTxnMetadata(lastRequest,
+                      1 /* txnNumber */,
+                      boost::none /* startTransaction */,
+                      boost::none /* readConcern */,
+                      WriteConcernOptions().toBSON() /* writeConcern */,
+                      1000 /* maxTimeMS */);
+    assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
+    ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
 }
 }  // namespace
 }  // namespace mongo

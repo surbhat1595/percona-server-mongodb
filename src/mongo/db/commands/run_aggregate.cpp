@@ -46,8 +46,10 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -246,7 +248,7 @@ bool handleCursorCommand(OperationContext* opCtx,
         // for later.
 
         if (!FindCommon::haveSpaceForNext(nextDoc, objCount, responseBuilder.bytesUsed())) {
-            exec->enqueue(nextDoc);
+            exec->stashResult(nextDoc);
             stashedResult = true;
             break;
         }
@@ -440,6 +442,15 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     expCtx->collationMatchesDefault = collationMatchesDefault;
     expCtx->forPerShardCursor = request.getPassthroughToShard().has_value();
+    expCtx->allowDiskUse = request.getAllowDiskUse().value_or(allowDiskUseByDefault.load());
+
+    // If the request specified v2 resume tokens for change streams, set this on the expCtx. On 6.0
+    // we only expect this to occur during testing.
+    // TODO SERVER-65370: after 6.0, assume true unless present and explicitly false.
+    if (request.getGenerateV2ResumeTokens()) {
+        uassert(6528200, "Invalid request for v2 resume tokens", getTestCommandsEnabled());
+        expCtx->changeStreamTokenVersion = 2;
+    }
 
     return expCtx;
 }
@@ -644,7 +655,7 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
 
 Status runAggregate(OperationContext* opCtx,
                     const NamespaceString& nss,
-                    const AggregateCommandRequest& request,
+                    AggregateCommandRequest& request,
                     const BSONObj& cmdObj,
                     const PrivilegeVector& privileges,
                     rpc::ReplyBuilderInterface* result) {
@@ -653,7 +664,7 @@ Status runAggregate(OperationContext* opCtx,
 
 Status runAggregate(OperationContext* opCtx,
                     const NamespaceString& origNss,
-                    const AggregateCommandRequest& request,
+                    AggregateCommandRequest& request,
                     const LiteParsedPipeline& liteParsedPipeline,
                     const BSONObj& cmdObj,
                     const PrivilegeVector& privileges,
@@ -671,7 +682,10 @@ Status runAggregate(OperationContext* opCtx,
     std::vector<NamespaceStringOrUUID> secondaryExecNssList;
 
     // Taking locks over multiple collections is not supported outside of $lookup pushdown.
-    if (feature_flags::gFeatureFlagSBELookupPushdown.isEnabledAndIgnoreFCV()) {
+    if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        feature_flags::gFeatureFlagSBELookupPushdown.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        !internalQueryForceClassicEngine.load()) {
         secondaryExecNssList = liteParsedPipeline.getForeignExecutionNamespaces();
     }
 
@@ -913,6 +927,15 @@ Status runAggregate(OperationContext* opCtx,
             if (!pipelineCollationStatus.isOK()) {
                 return pipelineCollationStatus;
             }
+        }
+
+        // If the aggregate command supports encrypted collections, do rewrites of the pipeline to
+        // support querying against encrypted fields.
+        if (shouldDoFLERewrite(request)) {
+            // After this rewriting, the encryption info does not need to be kept around.
+            pipeline = processFLEPipelineD(
+                opCtx, nss, request.getEncryptionInformation().get(), std::move(pipeline));
+            request.setEncryptionInformation(boost::none);
         }
 
         pipeline->optimizePipeline();

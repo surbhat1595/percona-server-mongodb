@@ -58,12 +58,8 @@ Status validateStorageEngineOptions(const BSONObj& storageEngine) {
 
 EncryptedFieldConfig processAndValidateEncryptedFields(EncryptedFieldConfig config) {
 
-    if (!gFeatureFlagFLE2.isEnabledAndIgnoreFCV()) {
-        uasserted(6338408, "Feature flag FLE2 is not enabled");
-    }
-
     stdx::unordered_set<UUID, UUID::Hash> keys(config.getFields().size());
-    std::vector<std::string> fieldPaths;
+    std::vector<FieldRef> fieldPaths;
     fieldPaths.reserve(config.getFields().size());
 
     for (const auto& field : config.getFields()) {
@@ -73,18 +69,17 @@ EncryptedFieldConfig processAndValidateEncryptedFields(EncryptedFieldConfig conf
         uassert(6338401, "Duplicate key ids are not allowed", keys.count(keyId) == 0);
         keys.insert(keyId);
 
-        BSONType type = typeFromName(field.getBsonType());
-
+        FieldRef newPath(field.getPath());
         for (const auto& path : fieldPaths) {
-            uassert(6338402, "Duplicate paths are not allowed", field.getPath() != path);
+            uassert(6338402, "Duplicate paths are not allowed", newPath != path);
             // Cannot have indexes on "a" and "a.b"
             uassert(6338403,
                     str::stream() << "Conflicting index paths found as one is a prefix of another '"
-                                  << field.getPath() << "' and '" << path << "'",
-                    !field.getPath().startsWith(path) &&
-                        !StringData(path).startsWith(field.getPath()));
+                                  << newPath.dottedField() << "' and '" << path.dottedField()
+                                  << "'",
+                    !path.fullyOverlapsWith(newPath));
         }
-        fieldPaths.push_back(field.getPath().toString());
+        fieldPaths.push_back(std::move(newPath));
 
         if (field.getQueries().has_value()) {
             auto queriesVariant = field.getQueries().get();
@@ -98,15 +93,25 @@ EncryptedFieldConfig processAndValidateEncryptedFields(EncryptedFieldConfig conf
                         queries->size() == 1);
             }
 
+            uassert(6412601,
+                    "Bson type needs to be specified for equality indexed field",
+                    field.getBsonType().has_value());
+
+            BSONType type = typeFromName(field.getBsonType().value());
+
             uassert(6338405,
                     str::stream() << "Type '" << typeName(type)
                                   << "' is not a supported equality indexed type",
                     isFLE2EqualityIndexedSupportedType(type));
         } else {
-            uassert(6338406,
-                    str::stream() << "Type '" << typeName(type)
-                                  << "' is not a supported unindexed type",
-                    isFLE2UnindexedSupportedType(type));
+            if (field.getBsonType().has_value()) {
+                BSONType type = typeFromName(field.getBsonType().value());
+
+                uassert(6338406,
+                        str::stream()
+                            << "Type '" << typeName(type) << "' is not a supported unindexed type",
+                        isFLE2UnindexedSupportedType(type));
+            }
         }
     }
 

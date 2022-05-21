@@ -280,7 +280,8 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
                 if (responseStatus.isOK()) {
                     TrackedErrors trackedErrors;
                     trackedErrors.startTracking(ErrorCodes::StaleConfig);
-                    trackedErrors.startTracking(ErrorCodes::StaleShardVersion);
+                    // TODO (SERVER-64449): Get rid of this exception
+                    trackedErrors.startTracking(ErrorCodes::OBSOLETE_StaleShardVersion);
                     trackedErrors.startTracking(ErrorCodes::StaleDbVersion);
                     trackedErrors.startTracking(ErrorCodes::TenantMigrationAborted);
 
@@ -320,8 +321,9 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
                     // Note if anything was stale
                     auto staleConfigErrors = trackedErrors.getErrors(ErrorCodes::StaleConfig);
                     {
+                        // TODO (SERVER-64449): Get rid of this exception
                         const auto& staleShardVersionErrors =
-                            trackedErrors.getErrors(ErrorCodes::StaleShardVersion);
+                            trackedErrors.getErrors(ErrorCodes::OBSOLETE_StaleShardVersion);
                         staleConfigErrors.insert(staleConfigErrors.begin(),
                                                  staleShardVersionErrors.begin(),
                                                  staleShardVersionErrors.end());
@@ -440,6 +442,7 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
                                 {logv2::LogComponent::kShardMigrationPerf},
                                 "Finished post-migration commit refresh on the router with error",
                                 "error"_attr = redact(ex));
+
             // It's okay if we can't refresh, we'll just record errors for the ops if needed
             LOGV2_WARNING(22911,
                           "Could not refresh targeter due to {error}",

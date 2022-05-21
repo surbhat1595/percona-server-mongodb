@@ -78,12 +78,16 @@ public:
 
     ~BalancerDefragmentationPolicyImpl() {}
 
+    void interruptAllDefragmentations() override;
+
     bool isDefragmentingCollection(const UUID& uuid) override;
 
     virtual BSONObj reportProgressOn(const UUID& uuid) override;
 
     MigrateInfoVector selectChunksToMove(OperationContext* opCtx,
                                          stdx::unordered_set<ShardId>* usedShards) override;
+
+    StringData getName() const override;
 
     boost::optional<DefragmentationAction> getNextStreamingAction(OperationContext* opCtx) override;
 
@@ -134,6 +138,8 @@ private:
      * Must be called while holding the _stateMutex.
      */
     void _clearDefragmentationState(OperationContext* opCtx, const UUID& uuid);
+
+    const std::string kPolicyName{"BalancerDefragmentationPolicy"};
 
     Mutex _stateMutex = MONGO_MAKE_LATCH("BalancerChunkMergerImpl::_stateMutex");
 

@@ -97,7 +97,7 @@ class ChangeStreamOplogCollectionMock : public CollectionMock {
 public:
     ChangeStreamOplogCollectionMock() : CollectionMock(NamespaceString::kRsOplogNamespace) {
         _recordStore =
-            _devNullEngine.getRecordStore(nullptr, NamespaceString::kRsOplogNamespace.ns(), "", {});
+            _devNullEngine.getRecordStore(nullptr, NamespaceString::kRsOplogNamespace, "", {});
     }
 
     void push_back(Document doc) {
@@ -385,7 +385,9 @@ protected:
     }
     intrusive_ptr<DocumentSourceChangeStreamCheckResumability> createDSCheckResumability(
         Timestamp ts) {
-        return createDSCheckResumability(ResumeToken::makeHighWaterMarkToken(ts).getData());
+        return createDSCheckResumability(
+            ResumeToken::makeHighWaterMarkToken(ts, ResumeTokenData::kDefaultTokenVersion)
+                .getData());
     }
 };
 

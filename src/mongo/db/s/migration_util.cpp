@@ -203,9 +203,11 @@ void retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
     const auto initialTerm = repl::ReplicationCoordinator::get(opCtx)->getTerm();
 
     for (int attempt = 1;; attempt++) {
-        // If the server is already doing a clean shutdown, join the shutdown.
+        // Since we can't differenciate if a shutdown exception is coming from a remote node or
+        // locally we need to directly inspect the the global shutdown state to correctly interrupt
+        // this task in case this node is shutting down.
         if (globalInShutdownDeprecated()) {
-            shutdown(waitForShutdown());
+            uasserted(ErrorCodes::ShutdownInProgress, "Shutdown in progress");
         }
 
         // If the node is no longer primary, stop retrying.
@@ -508,16 +510,34 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
             }
 
             auto opCtx = tc->makeOperationContext();
+            opCtx->setAlwaysInterruptAtStepDownOrUp();
+
+            DBDirectClient client(opCtx.get());
+            FindCommandRequest findCommand(NamespaceString::kRangeDeletionNamespace);
+            findCommand.setFilter(BSON(RangeDeletionTask::kProcessingFieldName << true));
+            auto cursor = client.find(std::move(findCommand));
+            if (cursor->more()) {
+                return migrationutil::submitRangeDeletionTask(
+                    opCtx.get(),
+                    RangeDeletionTask::parse(IDLParserErrorContext("rangeDeletionRecovery"),
+                                             cursor->next()));
+            } else {
+                return ExecutorFuture<void>(getMigrationUtilExecutor(serviceContext));
+            }
+        })
+        .then([serviceContext] {
+            ThreadClient tc("ResubmitRangeDeletions", serviceContext);
+            {
+                stdx::lock_guard<Client> lk(*tc.get());
+                tc->setSystemOperationKillableByStepdown(lk);
+            }
+
+            auto opCtx = tc->makeOperationContext();
+            opCtx->setAlwaysInterruptAtStepDownOrUp();
 
             submitPendingDeletions(opCtx.get());
         })
-        .getAsync([](const Status& status) {
-            if (!status.isOK()) {
-                LOGV2(45739,
-                      "Error while submitting pending range deletions",
-                      "error"_attr = redact(status));
-            }
-        });
+        .getAsync([](auto) {});
 }
 
 void dropRangeDeletionsCollection(OperationContext* opCtx) {
@@ -672,6 +692,7 @@ void persistRangeDeletionTaskLocally(OperationContext* opCtx,
 
 void persistUpdatedNumOrphans(OperationContext* opCtx,
                               const UUID& migrationId,
+                              const UUID& collectionUuid,
                               long long changeInOrphans) {
     // TODO (SERVER-63819) Remove numOrphanDocsFieldName field from the query
     // Add $exists to the query to ensure that on upgrade and downgrade, the numOrphanDocs field
@@ -690,6 +711,7 @@ void persistUpdatedNumOrphans(OperationContext* opCtx,
                                                  << changeInOrphans)),
                              WriteConcerns::kLocalWriteConcern);
             });
+        BalancerStatsRegistry::get(opCtx)->updateOrphansCount(collectionUuid, changeInOrphans);
     } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
         // When upgrading or downgrading, there may be no documents with the orphan count field.
     }

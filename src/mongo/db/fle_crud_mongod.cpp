@@ -39,6 +39,7 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/fle_crypto.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/ops/write_ops_parsers.h"
@@ -174,6 +175,10 @@ FLEBatchResult processFLEInsert(OperationContext* opCtx,
             repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getReplicationMode() ==
                 repl::ReplicationCoordinator::modeReplSet);
 
+    uassert(5926101,
+            "FLE 2 is only supported when FCV supports 6.0",
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
+
     auto [batchResult, insertReplyReturn] =
         processInsert(opCtx, insertRequest, &getTransactionWithRetriesForMongoD);
 
@@ -196,6 +201,10 @@ write_ops::DeleteCommandReply processFLEDelete(
             repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getReplicationMode() ==
                 repl::ReplicationCoordinator::modeReplSet);
 
+    uassert(5926102,
+            "FLE 2 is only supported when FCV supports 6.0",
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
+
     auto deleteReply = processDelete(opCtx, deleteRequest, &getTransactionWithRetriesForMongoD);
 
     setMongosFieldsInReply(opCtx, &deleteReply.getWriteCommandReplyBase());
@@ -211,7 +220,11 @@ write_ops::FindAndModifyCommandReply processFLEFindAndModify(
             repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getReplicationMode() ==
                 repl::ReplicationCoordinator::modeReplSet);
 
-    auto reply = processFindAndModifyRequest(
+    uassert(5926103,
+            "FLE 2 is only supported when FCV supports 6.0",
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
+
+    auto reply = processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
         opCtx, findAndModifyRequest, &getTransactionWithRetriesForMongoD);
 
     return uassertStatusOK(reply);
@@ -225,6 +238,10 @@ write_ops::UpdateCommandReply processFLEUpdate(
             repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getReplicationMode() ==
                 repl::ReplicationCoordinator::modeReplSet);
 
+    uassert(5926104,
+            "FLE 2 is only supported when FCV supports 6.0",
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
+
     auto updateReply = processUpdate(opCtx, updateRequest, &getTransactionWithRetriesForMongoD);
 
     setMongosFieldsInReply(opCtx, &updateReply.getWriteCommandReplyBase());
@@ -232,8 +249,47 @@ write_ops::UpdateCommandReply processFLEUpdate(
     return updateReply;
 }
 
-void processFLEFindD(OperationContext* opCtx, FindCommandRequest* findCommand) {
-    fle::processFindCommand(opCtx, findCommand, &getTransactionWithRetriesForMongoD);
+void processFLEFindD(OperationContext* opCtx,
+                     const NamespaceString& nss,
+                     FindCommandRequest* findCommand) {
+    fle::processFindCommand(opCtx, nss, findCommand, &getTransactionWithRetriesForMongoD);
+}
+
+void processFLECountD(OperationContext* opCtx,
+                      const NamespaceString& nss,
+                      CountCommandRequest* countCommand) {
+    fle::processCountCommand(opCtx, nss, countCommand, &getTransactionWithRetriesForMongoD);
+}
+
+std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineD(
+    OperationContext* opCtx,
+    NamespaceString nss,
+    const EncryptionInformation& encryptInfo,
+    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite) {
+    return fle::processPipeline(
+        opCtx, nss, encryptInfo, std::move(toRewrite), &getTransactionWithRetriesForMongoD);
+}
+
+BSONObj processFLEWriteExplainD(OperationContext* opCtx,
+                                const BSONObj& collation,
+                                const NamespaceString& nss,
+                                const EncryptionInformation& info,
+                                const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
+                                const boost::optional<BSONObj>& letParameters,
+                                const BSONObj& query) {
+    auto expCtx = make_intrusive<ExpressionContext>(
+        opCtx, fle::collatorFromBSON(opCtx, collation), nss, runtimeConstants, letParameters);
+    return fle::rewriteQuery(opCtx, expCtx, nss, info, query, &getTransactionWithRetriesForMongoD);
+}
+
+write_ops::FindAndModifyCommandRequest processFLEFindAndModifyExplainMongod(
+    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& request) {
+    tassert(6513401,
+            "Missing encryptionInformation for findAndModify",
+            request.getEncryptionInformation().has_value());
+
+    return uassertStatusOK(processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
+        opCtx, request, &getTransactionWithRetriesForMongoD, processFindAndModifyExplain));
 }
 
 }  // namespace mongo

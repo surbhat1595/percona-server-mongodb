@@ -34,6 +34,7 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/trial_period_utils.h"
+#include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
@@ -63,6 +64,25 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
                                     PlanYieldPolicySBE* yieldPolicy);
 
 class PlanStageReqs;
+
+/**
+ * The ParameterizedIndexScanSlots struct is used by SlotBasedStageBuilder while building the index
+ * scan stage to return the slots that are registered in the runtime environment and will be
+ * populated based on the index bounds.
+ */
+struct ParameterizedIndexScanSlots {
+    // Holds the value whether the generic or optimized index scan should be used.
+    sbe::value::SlotId isGenericScan;
+
+    // Holds the value of the initial 'startKey' for the generic index scan algorithm.
+    sbe::value::SlotId initialStartKey;
+
+    // Holds the value of the IndexBounds used for the generic index scan algorithm.
+    sbe::value::SlotId indexBounds;
+
+    // Holds the value of an array of low and high keys for each interval.
+    sbe::value::SlotId lowHighKeyIntervals;
+};
 
 /**
  * The PlanStageSlots class is used by SlotBasedStageBuilder to return the output slots produced
@@ -248,6 +268,20 @@ using InputParamToSlotMap = stdx::unordered_map<MatchExpression::InputParamId, s
 using VariableIdToSlotMap = stdx::unordered_map<Variables::Id, sbe::value::SlotId>;
 
 /**
+ * IndexBoundsEvaluationInfo struct contains Interval Evaluation Trees (IETs) and additional data
+ * structures required to restore index bounds from IETs and bind them to generic index scan
+ * algorithm.
+ */
+struct IndexBoundsEvaluationInfo {
+    IndexEntry index;
+    KeyString::Version keyStringVersion;
+    Ordering ordering;
+    int direction;
+    std::vector<interval_evaluation_tree::IET> iets;
+    ParameterizedIndexScanSlots slots;
+};
+
+/**
  * Some auxiliary data returned by a 'SlotBasedStageBuilder' along with a PlanStage tree root, which
  * is needed to execute the PlanStage tree.
  */
@@ -318,6 +352,10 @@ struct PlanStageData {
     // SBE Slots. The slots are registered in the 'RuntimeEnvironment'.
     VariableIdToSlotMap variableIdToSlotMap;
 
+    // Stores auxiliary data to restore index bounds for a cached auto-parameterized SBE plan for
+    // every index used by the plan.
+    std::vector<IndexBoundsEvaluationInfo> indexBoundsEvaluationInfos;
+
 private:
     // This copy function copies data from 'other' but will not create a copy of its
     // RuntimeEnvironment and CompileCtx.
@@ -340,6 +378,7 @@ private:
         }
         inputParamToSlotMap = other.inputParamToSlotMap;
         variableIdToSlotMap = other.variableIdToSlotMap;
+        indexBoundsEvaluationInfos = other.indexBoundsEvaluationInfos;
     }
 };
 

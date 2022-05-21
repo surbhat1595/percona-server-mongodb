@@ -29,8 +29,9 @@
 
 #pragma once
 
-#include "boost/smart_ptr/intrusive_ptr.hpp"
 #include <cstdint>
+
+#include "boost/smart_ptr/intrusive_ptr.hpp"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
@@ -39,6 +40,9 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/count_command_gen.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/transaction_api.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -70,6 +74,12 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
                                BatchedCommandResponse* response,
                                boost::optional<OID> targetEpoch);
 
+/**
+ * Rewrite a BatchedCommandRequest for explain commands.
+ */
+std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(OperationContext* opCtx,
+                                                              const BatchedCommandRequest& request);
+
 
 /**
  * Initialize the FLE CRUD subsystem on Mongod.
@@ -96,6 +106,38 @@ write_ops::DeleteCommandReply processFLEDelete(
     OperationContext* opCtx, const write_ops::DeleteCommandRequest& deleteRequest);
 
 /**
+ * Rewrite the query within a replica set explain command for delete and update.
+ * This concrete function is passed all the parameters directly.
+ */
+BSONObj processFLEWriteExplainD(OperationContext* opCtx,
+                                const BSONObj& collation,
+                                const NamespaceString& nss,
+                                const EncryptionInformation& info,
+                                const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
+                                const boost::optional<BSONObj>& letParameters,
+                                const BSONObj& query);
+
+/**
+ * Rewrite the query within a replica set explain command for delete and update.
+ * This template is passed the request object from the command and delegates
+ * to the function above.
+ */
+template <typename T>
+BSONObj processFLEWriteExplainD(OperationContext* opCtx,
+                                const BSONObj& collation,
+                                const T& request,
+                                const BSONObj& query) {
+
+    return processFLEWriteExplainD(opCtx,
+                                   collation,
+                                   request.getNamespace(),
+                                   request.getEncryptionInformation().get(),
+                                   request.getLegacyRuntimeConstants(),
+                                   request.getLet(),
+                                   query);
+}
+
+/**
  * Process a replica set update.
  */
 write_ops::UpdateCommandReply processFLEUpdate(
@@ -105,9 +147,11 @@ write_ops::UpdateCommandReply processFLEUpdate(
  * Process a findAndModify request from mongos
  */
 FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
-                                       const std::string& dbName,
                                        const BSONObj& cmdObj,
                                        BSONObjBuilder& result);
+
+write_ops::FindAndModifyCommandRequest processFLEFindAndModifyExplainMongos(
+    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
 /**
  * Process a findAndModify request from a replica set.
@@ -115,27 +159,73 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
 write_ops::FindAndModifyCommandReply processFLEFindAndModify(
     OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
+write_ops::FindAndModifyCommandRequest processFLEFindAndModifyExplainMongod(
+    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
+
 /**
  * Process a find command from mongos.
  */
-void processFLEFindS(OperationContext* opCtx, FindCommandRequest* findCommand);
+void processFLEFindS(OperationContext* opCtx,
+                     const NamespaceString& nss,
+                     FindCommandRequest* findCommand);
 
 /**
  * Process a find command from a replica set.
  */
-void processFLEFindD(OperationContext* opCtx, FindCommandRequest* findCommand);
+void processFLEFindD(OperationContext* opCtx,
+                     const NamespaceString& nss,
+                     FindCommandRequest* findCommand);
+
+
+/**
+ * Process a find command from mongos.
+ */
+void processFLECountS(OperationContext* opCtx,
+                      const NamespaceString& nss,
+                      CountCommandRequest* countCommand);
+
+/**
+ * Process a find command from a replica set.
+ */
+void processFLECountD(OperationContext* opCtx,
+                      const NamespaceString& nss,
+                      CountCommandRequest* countCommand);
+
+/**
+ * Process a pipeline from mongos.
+ */
+std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineS(
+    OperationContext* opCtx,
+    NamespaceString nss,
+    const EncryptionInformation& encryptInfo,
+    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite);
+
+/**
+ * Process a pipeline from a replica set.
+ */
+std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineD(
+    OperationContext* opCtx,
+    NamespaceString nss,
+    const EncryptionInformation& encryptInfo,
+    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite);
 
 /**
  * Helper function to determine if an IDL object with encryption information should be rewritten.
  */
 template <typename T>
 bool shouldDoFLERewrite(const std::unique_ptr<T>& cmd) {
-    return gFeatureFlagFLE2.isEnabledAndIgnoreFCV() && cmd->getEncryptionInformation();
+    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
+    return (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) &&
+        cmd->getEncryptionInformation();
 }
 
 template <typename T>
 bool shouldDoFLERewrite(const T& cmd) {
-    return gFeatureFlagFLE2.isEnabledAndIgnoreFCV() && cmd.getEncryptionInformation();
+    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
+    return (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) &&
+        cmd.getEncryptionInformation();
 }
 
 /**
@@ -167,7 +257,7 @@ public:
      * FLEStateCollectionContention instead.
      */
     virtual StatusWith<write_ops::InsertCommandReply> insertDocument(
-        const NamespaceString& nss, BSONObj obj, bool translateDuplicateKey) = 0;
+        const NamespaceString& nss, BSONObj obj, StmtId* pStmtId, bool translateDuplicateKey) = 0;
 
     /**
      * Delete a single document with the given query.
@@ -191,10 +281,21 @@ public:
         const EncryptionInformation& ei,
         const write_ops::UpdateCommandRequest& updateRequest) = 0;
 
+
+    /**
+     * Update a single document with the given query and update operators.
+     *
+     * Returns an update reply.
+     */
+    virtual write_ops::UpdateCommandReply update(
+        const NamespaceString& nss,
+        int32_t stmtId,
+        const write_ops::UpdateCommandRequest& updateRequest) = 0;
+
     /**
      * Do a single findAndModify request.
      *
-     * TODO
+     * Returns a findAndModify reply.
      */
     virtual write_ops::FindAndModifyCommandReply findAndModify(
         const NamespaceString& nss,
@@ -220,6 +321,7 @@ public:
 
     StatusWith<write_ops::InsertCommandReply> insertDocument(const NamespaceString& nss,
                                                              BSONObj obj,
+                                                             int32_t* pStmtId,
                                                              bool translateDuplicateKey) final;
 
     std::pair<write_ops::DeleteCommandReply, BSONObj> deleteWithPreimage(
@@ -230,6 +332,11 @@ public:
     std::pair<write_ops::UpdateCommandReply, BSONObj> updateWithPreimage(
         const NamespaceString& nss,
         const EncryptionInformation& ei,
+        const write_ops::UpdateCommandRequest& updateRequest) final;
+
+    write_ops::UpdateCommandReply update(
+        const NamespaceString& nss,
+        int32_t stmtId,
         const write_ops::UpdateCommandRequest& updateRequest) final;
 
     write_ops::FindAndModifyCommandReply findAndModify(
@@ -270,16 +377,6 @@ private:
 };
 
 /**
- * Runs a callback function inside a transaction, and retrying if the transaction fails
- * with a retryable error status.
- */
-StatusWith<txn_api::CommitResult> runInTxnWithRetry(
-    OperationContext* opCtx,
-    std::shared_ptr<txn_api::TransactionWithRetries> trun,
-    std::function<SemiFuture<void>(const txn_api::TransactionClient& txnClient,
-                                   ExecutorPtr txnExec)> callback);
-
-/**
  * Creates a new TransactionWithRetries object that runs a transaction on the
  * sharding fixed task executor.
  */
@@ -303,6 +400,7 @@ StatusWith<write_ops::InsertCommandReply> processInsert(
     const NamespaceString& edcNss,
     std::vector<EDCServerPayloadInfo>& serverPayload,
     const EncryptedFieldConfig& efc,
+    int32_t stmtId,
     BSONObj document);
 
 /**
@@ -329,6 +427,12 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
  * Used by unit tests.
  */
 write_ops::FindAndModifyCommandReply processFindAndModify(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    FLEQueryInterface* queryImpl,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
+
+write_ops::FindAndModifyCommandRequest processFindAndModifyExplain(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
@@ -347,10 +451,18 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
                                             const write_ops::DeleteCommandRequest& deleteRequest,
                                             GetTxnCallback getTxns);
 
-StatusWith<write_ops::FindAndModifyCommandReply> processFindAndModifyRequest(
+template <typename ReplyType>
+using ProcessFindAndModifyCallback =
+    std::function<ReplyType(boost::intrusive_ptr<ExpressionContext> expCtx,
+                            FLEQueryInterface* queryImpl,
+                            const write_ops::FindAndModifyCommandRequest& findAndModifyRequest)>;
+
+template <typename ReplyType>
+StatusWith<ReplyType> processFindAndModifyRequest(
     OperationContext* opCtx,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
-    GetTxnCallback getTxns);
+    GetTxnCallback getTxns,
+    ProcessFindAndModifyCallback<ReplyType> processCallback = processFindAndModify);
 
 
 write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,

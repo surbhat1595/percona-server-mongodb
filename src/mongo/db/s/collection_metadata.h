@@ -162,20 +162,9 @@ public:
     BSONObj extractDocumentKey(const BSONObj& doc) const;
 
     /**
-     * BSON output of the basic metadata information (chunk and shard version).
-     */
-    void toBSONBasic(BSONObjBuilder& bb) const;
-
-    BSONObj toBSON() const;
-
-    /**
      * String output of the collection and shard versions.
      */
     std::string toStringBasic() const;
-
-    std::string toString() const {
-        return toStringBasic();
-    }
 
     //
     // Methods used for orphan filtering and general introspection of the chunks owned by the shard
@@ -202,12 +191,6 @@ public:
      * Passing a key that is not a valid shard key for this range results in undefined behavior.
      */
     bool getNextChunk(const BSONObj& lookupKey, ChunkType* chunk) const;
-
-    /**
-     * Validates that the passed-in range's bounds belong to exactly one chunk in the metadata
-     * cache.
-     */
-    Status checkRangeIsValid(const BSONObj& min, const BSONObj& max) const;
 
     /**
      * Returns true if the argument range overlaps any chunk.

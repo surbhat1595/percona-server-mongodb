@@ -62,6 +62,9 @@ static const long kExpectedVersion = 1;
 
 class DurableCatalogTest : public CatalogTestFixture {
 public:
+    // TODO (SERVER-65189): Use wiredTiger.
+    DurableCatalogTest() : CatalogTestFixture(Options{}.engine("ephemeralForTest")) {}
+
     void setUp() final {
         CatalogTestFixture::setUp();
 
@@ -83,8 +86,7 @@ public:
     }
 
     CollectionWriter getCollectionWriter() {
-        return CollectionWriter(
-            operationContext(), *_collectionUUID, CollectionCatalog::LifetimeMode::kInplace);
+        return CollectionWriter(operationContext(), *_collectionUUID);
     }
 
     UUID createCollection(const NamespaceString& nss, CollectionOptions options) {
@@ -225,6 +227,7 @@ TEST_F(DurableCatalogTest, CanSetIndividualPathComponentOfBtreeIndexAsMultikey) 
     auto collection = getCollection();
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(operationContext(),
                                               indexEntry->descriptor()->indexName(),
@@ -245,6 +248,7 @@ TEST_F(DurableCatalogTest, MultikeyPathsAccumulateOnDifferentFields) {
     auto collection = getCollection();
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(operationContext(),
                                               indexEntry->descriptor()->indexName(),
@@ -260,6 +264,7 @@ TEST_F(DurableCatalogTest, MultikeyPathsAccumulateOnDifferentFields) {
     }
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(operationContext(),
                                               indexEntry->descriptor()->indexName(),
@@ -280,6 +285,7 @@ TEST_F(DurableCatalogTest, MultikeyPathsAccumulateOnDifferentComponentsOfTheSame
     auto collection = getCollection();
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), {{0U}}));
@@ -294,6 +300,7 @@ TEST_F(DurableCatalogTest, MultikeyPathsAccumulateOnDifferentComponentsOfTheSame
     }
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), {{1U}}));
@@ -313,6 +320,7 @@ TEST_F(DurableCatalogTest, NoOpWhenSpecifiedPathComponentsAlreadySetAsMultikey) 
     auto collection = getCollection();
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), {{0U}}));
@@ -327,6 +335,7 @@ TEST_F(DurableCatalogTest, NoOpWhenSpecifiedPathComponentsAlreadySetAsMultikey) 
     }
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(!collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), {{0U}}));
@@ -345,6 +354,7 @@ TEST_F(DurableCatalogTest, CanSetMultipleFieldsAndComponentsAsMultikey) {
     auto indexEntry = createIndex(BSON("a.b.c" << 1 << "a.b.d" << 1));
     auto collection = getCollection();
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), {{0U, 1U}, {0U, 1U}}));
@@ -365,6 +375,7 @@ DEATH_TEST_REGEX_F(DurableCatalogTest,
     auto indexEntry = createIndex(BSON("a" << 1 << "b" << 1));
     auto collection = getCollection();
 
+    Lock::GlobalLock globalLock{operationContext(), MODE_IX};
     WriteUnitOfWork wuow(operationContext());
     collection->setIndexIsMultikey(
         operationContext(), indexEntry->descriptor()->indexName(), MultikeyPaths{});
@@ -376,6 +387,7 @@ DEATH_TEST_REGEX_F(DurableCatalogTest,
     auto indexEntry = createIndex(BSON("a" << 1 << "b" << 1));
     auto collection = getCollection();
 
+    Lock::GlobalLock globalLock{operationContext(), MODE_IX};
     WriteUnitOfWork wuow(operationContext());
     collection->setIndexIsMultikey(operationContext(),
 
@@ -416,6 +428,7 @@ TEST_F(DurableCatalogTest, CanSetEntireTextIndexAsMultikey) {
     auto collection = getCollection();
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), MultikeyPaths{}));
@@ -436,6 +449,7 @@ TEST_F(DurableCatalogTest, NoOpWhenEntireIndexAlreadySetAsMultikey) {
     auto collection = getCollection();
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), MultikeyPaths{}));
@@ -450,6 +464,7 @@ TEST_F(DurableCatalogTest, NoOpWhenEntireIndexAlreadySetAsMultikey) {
     }
 
     {
+        Lock::GlobalLock globalLock{operationContext(), MODE_IX};
         WriteUnitOfWork wuow(operationContext());
         ASSERT(!collection->setIndexIsMultikey(
             operationContext(), indexEntry->descriptor()->indexName(), MultikeyPaths{}));
@@ -472,6 +487,9 @@ TEST_F(DurableCatalogTest, SinglePhaseIndexBuild) {
     ASSERT_FALSE(collection->getIndexBuildUUID(indexEntry->descriptor()->indexName()));
 
     {
+        Lock::DBLock dbLk(operationContext(), collection->ns().db(), MODE_IX);
+        Lock::CollectionLock collLk(operationContext(), collection->ns(), MODE_X);
+
         WriteUnitOfWork wuow(operationContext());
         getCollectionWriter().getWritableCollection()->indexBuildSuccess(operationContext(),
                                                                          indexEntry);
@@ -492,6 +510,9 @@ TEST_F(DurableCatalogTest, TwoPhaseIndexBuild) {
     ASSERT_TRUE(collection->getIndexBuildUUID(indexEntry->descriptor()->indexName()));
 
     {
+        Lock::DBLock dbLk(operationContext(), collection->ns().db(), MODE_IX);
+        Lock::CollectionLock collLk(operationContext(), collection->ns(), MODE_X);
+
         WriteUnitOfWork wuow(operationContext());
         getCollectionWriter().getWritableCollection()->indexBuildSuccess(operationContext(),
                                                                          indexEntry);
@@ -510,6 +531,7 @@ DEATH_TEST_REGEX_F(DurableCatalogTest,
     auto indexEntry = createIndex(BSON("a" << indexType << "b" << 1), indexType);
     auto collection = getCollection();
 
+    Lock::GlobalLock globalLock{operationContext(), MODE_IX};
     WriteUnitOfWork wuow(operationContext());
     collection->setIndexIsMultikey(
         operationContext(), indexEntry->descriptor()->indexName(), {{0U}, {0U}});
@@ -651,6 +673,7 @@ TEST_F(DurableCatalogTest, CheckTimeseriesBucketsMayHaveMixedSchemaDataFlagFCVLa
         const NamespaceString regularNss = NamespaceString("test.regular");
         createCollection(regularNss, CollectionOptions());
 
+        Lock::GlobalLock globalLock{operationContext(), MODE_IS};
         auto collection = CollectionCatalog::get(operationContext())
                               ->lookupCollectionByNamespace(operationContext(), regularNss);
         RecordId catalogId = collection->getCatalogId();
@@ -665,6 +688,7 @@ TEST_F(DurableCatalogTest, CheckTimeseriesBucketsMayHaveMixedSchemaDataFlagFCVLa
         options.timeseries = TimeseriesOptions(/*timeField=*/"t");
         createCollection(bucketsNss, options);
 
+        Lock::GlobalLock globalLock{operationContext(), MODE_IS};
         auto collection = CollectionCatalog::get(operationContext())
                               ->lookupCollectionByNamespace(operationContext(), bucketsNss);
         RecordId catalogId = collection->getCatalogId();

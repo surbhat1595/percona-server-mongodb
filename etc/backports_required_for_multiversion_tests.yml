@@ -152,8 +152,36 @@ last-continuous:
       test_file: jstests/core/exhaust.js
     - ticket: SERVER-63141
       test_file: jstests/aggregation/lookup_let_optimization.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_cloning_uses_read_concern_majority.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_collection_ttl.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_concurrent_reads_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_concurrent_writes_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_recipient_current_op.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_retry_session_migration.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_retryable_write_retry_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_timeseries_retryable_write_retry_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_recipient_initial_sync_recovery.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_recipient_startup_recovery.js
     - ticket: SERVER-63129
       test_file: jstests/replsets/tenant_migration_resume_collection_cloner_after_recipient_failover_with_dropped_views.js
+    - ticket: SERVER-61864
+      test_file: jstests/replsets/reconfig_may_not_remove_custom_wc_in_use.js
+    - ticket: SERVER-61864
+      test_file: jstests/replsets/default_write_concern_race_with_config_tags.js
+    - ticket: SERVER-61864
+      test_file: jstests/replsets/config_tags_race_with_default_write_concern.js
     - ticket: SERVER-62710
       test_file: jstests/sharding/max_time_ms_does_not_leak_shard_cursor.js
     - ticket: SERVER-62759
@@ -166,6 +194,14 @@ last-continuous:
       test_file: jstests/sharding/refine_collection_shard_key_basic.js
     - ticket: SERVER-64485
       test_file: jstests/sharding/update_with_dollar_fields.js
+    - ticket: SERVER-64141
+      test_file: jstests/core/in_with_mixed_values.js
+    - ticket: SERVER-63531
+      test_file: jstests/replsets/buildindexes_false_commit_quorum.js
+    - ticket: SERVER-64780
+      test_file: jstests/sharding/resharding_change_stream_namespace_filtering.js
+    - ticket: SERVER-65261
+      test_file: jstests/replsets/capped_deletes.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -459,10 +495,38 @@ last-lts:
       test_file: jstests/aggregation/lookup_let_optimization.js
     - ticket: SERVER-63129
       test_file: jstests/replsets/tenant_migration_resume_collection_cloner_after_recipient_failover_with_dropped_views.js
+    - ticket: SERVER-61864
+      test_file: jstests/replsets/reconfig_may_not_remove_custom_wc_in_use.js
+    - ticket: SERVER-61864
+      test_file: jstests/replsets/default_write_concern_race_with_config_tags.js
+    - ticket: SERVER-61864
+      test_file: jstests/replsets/config_tags_race_with_default_write_concern.js
     - ticket: SERVER-62710
       test_file: jstests/sharding/max_time_ms_does_not_leak_shard_cursor.js
     - ticket: SERVER-62759
       test_file: jstests/replsets/apply_ops_dropDatabase.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_cloning_uses_read_concern_majority.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_collection_ttl.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_concurrent_reads_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_concurrent_writes_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_recipient_current_op.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_retry_session_migration.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_retryable_write_retry_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_timeseries_retryable_write_retry_on_recipient.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_recipient_initial_sync_recovery.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_recipient_startup_recovery.js
     - ticket: SERVER-63732
       test_file: jstests/sharding/shard_collection_basic.js
     - ticket: SERVER-6491
@@ -473,6 +537,8 @@ last-lts:
       test_file: jstests/sharding/update_with_dollar_fields.js
     - ticket: SERVER-64142
       test_file: jstests/sharding/refine_collection_shard_key_basic.js
+    - ticket: SERVER-65261
+      test_file: jstests/replsets/capped_deletes.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

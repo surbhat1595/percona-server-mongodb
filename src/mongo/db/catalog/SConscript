@@ -42,6 +42,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
+        '$BUILD_DIR/mongo/db/common',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface',
         '$BUILD_DIR/mongo/db/query/query_knobs',
         '$BUILD_DIR/mongo/db/server_options_core',
@@ -139,6 +140,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
         '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/query/query_knobs',
+        '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/storage/storage_repair_observer',
         'index_repair',
         'multi_index_block',
@@ -276,7 +278,7 @@ env.Library(
     target='collection_catalog',
     source=[
         'collection_catalog.cpp',
-        'uncommitted_collections.cpp',
+        'uncommitted_catalog_updates.cpp',
         'uncommitted_multikey.cpp',
         'views_for_database.cpp',
     ],

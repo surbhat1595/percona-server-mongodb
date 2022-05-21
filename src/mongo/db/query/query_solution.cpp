@@ -38,9 +38,11 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/index_bounds_builder.h"
@@ -302,8 +304,15 @@ std::vector<NamespaceStringOrUUID> QuerySolution::getAllSecondaryNamespaces(
 //
 // CollectionScanNode
 //
+CollectionScanNode::CollectionScanNode()
+    : clusteredIndex(boost::none), tailable(false), direction(1) {}
 
-CollectionScanNode::CollectionScanNode() : tailable(false), direction(1) {}
+void CollectionScanNode::computeProperties() {
+    if (clusteredIndex && hasCompatibleCollation) {
+        auto sort = clustered_util::getSortPattern(*clusteredIndex);
+        sortSet = ProvidedSortSet(sort);
+    }
+}
 
 void CollectionScanNode::appendToString(str::stream* ss, int indent) const {
     addIndent(ss, indent);
@@ -327,7 +336,8 @@ QuerySolutionNode* CollectionScanNode::clone() const {
     copy->shouldTrackLatestOplogTimestamp = this->shouldTrackLatestOplogTimestamp;
     copy->assertTsHasNotFallenOffOplog = this->assertTsHasNotFallenOffOplog;
     copy->shouldWaitForOplogVisibility = this->shouldWaitForOplogVisibility;
-
+    copy->clusteredIndex = this->clusteredIndex;
+    copy->hasCompatibleCollation = this->hasCompatibleCollation;
     return copy;
 }
 
@@ -1072,15 +1082,31 @@ bool IndexScanNode::operator==(const IndexScanNode& other) const {
 //
 // ColumnIndexScanNode
 //
-ColumnIndexScanNode::ColumnIndexScanNode(ColumnIndexEntry indexEntry)
-    : indexEntry(std::move(indexEntry)) {}
+ColumnIndexScanNode::ColumnIndexScanNode(ColumnIndexEntry indexEntry,
+                                         std::set<std::string> outputFieldsIn,
+                                         std::set<std::string> matchFieldsIn,
+                                         StringMap<std::unique_ptr<MatchExpression>> filtersByPath,
+                                         std::unique_ptr<MatchExpression> postAssemblyFilter)
+    : indexEntry(std::move(indexEntry)),
+      outputFields(std::move(outputFieldsIn)),
+      matchFields(std::move(matchFieldsIn)),
+      filtersByPath(std::move(filtersByPath)),
+      postAssemblyFilter(std::move(postAssemblyFilter)) {
+    allFields = outputFields;
+    allFields.insert(matchFields.begin(), matchFields.end());
+}
 
 void ColumnIndexScanNode::appendToString(str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "COLUMN_IX_SCAN\n";
     addIndent(ss, indent + 1);
-    *ss << "fields = [" << boost::algorithm::join(fields, ", ");
-    *ss << "]\n";
+    *ss << "outputFields = [" << boost::algorithm::join(outputFields, ", ") << "]\n";
+    addIndent(ss, indent + 1);
+    *ss << "matchFields = [" << boost::algorithm::join(matchFields, ", ") << "]\n";
+    addIndent(ss, indent + 1);
+    *ss << "filtersByPath = [" << expression::filterMapToString(filtersByPath) << "]\n";
+    addIndent(ss, indent + 1);
+    *ss << "postAssemblyFilter = [" << postAssemblyFilter->toString() << "]\n";
     addCommon(ss, indent);
 }
 
@@ -1562,7 +1588,8 @@ QuerySolutionNode* GroupNode::clone() const {
         std::make_unique<GroupNode>(std::unique_ptr<QuerySolutionNode>(children[0]->clone()),
                                     groupByExpression,
                                     accumulators,
-                                    doingMerge);
+                                    doingMerge,
+                                    shouldProduceBson);
     return copy.release();
 }
 
@@ -1594,7 +1621,8 @@ QuerySolutionNode* EqLookupNode::clone() const {
                                        foreignCollection,
                                        joinFieldLocal,
                                        joinFieldForeign,
-                                       joinField);
+                                       joinField,
+                                       shouldProduceBson);
     return copy.release();
 }
 /**

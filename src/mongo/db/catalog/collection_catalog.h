@@ -46,7 +46,6 @@ namespace mongo {
 
 class CollectionCatalog;
 class Database;
-class UncommittedCatalogUpdates;
 
 class CollectionCatalog {
     friend class iterator;
@@ -55,19 +54,10 @@ public:
     using CollectionInfoFn = std::function<bool(const CollectionPtr& collection)>;
     using ViewIteratorCallback = std::function<bool(const ViewDefinition& view)>;
 
-    /**
-     * Defines lifetime and behavior of writable Collections.
-     */
-    enum class LifetimeMode {
-        // Lifetime of writable Collection is managed by an active write unit of work. The writable
-        // collection is installed in the catalog during commit and discarded on rollback.
-        kManagedInWriteUnitOfWork,
-
-        // Inplace writable access to the Collection currently installed in the catalog. This is
-        // only safe when the server is in a state where there can be no concurrent readers. Does
-        // not require an active write unit of work.
-        kInplace
-    };
+    // Number of how many Collection references for a single Collection that is stored in the
+    // catalog. Used to determine whether there are external references (uniquely owned). Needs to
+    // be kept in sync with the data structures below.
+    static constexpr size_t kNumCollectionReferencesStored = 3;
 
     class iterator {
     public:
@@ -85,7 +75,7 @@ public:
         iterator operator++(int);
         boost::optional<UUID> uuid();
 
-        Collection* getWritableCollection(OperationContext* opCtx, LifetimeMode mode);
+        Collection* getWritableCollection(OperationContext* opCtx);
 
         /*
          * Equality operators == and != do not attempt to reposition the iterators being compared.
@@ -204,6 +194,13 @@ public:
     Status reloadViews(OperationContext* opCtx, StringData dbName) const;
 
     /**
+     * Handles committing a collection to the catalog within a WriteUnitOfWork.
+     *
+     * Must be called within a WriteUnitOfWork.
+     */
+    void onCreateCollection(OperationContext* opCtx, std::shared_ptr<Collection> coll) const;
+
+    /**
      * This function is responsible for safely tracking a Collection rename within a
      * WriteUnitOfWork.
      *
@@ -287,7 +284,6 @@ public:
      * Returns nullptr if the 'uuid' is not known.
      */
     Collection* lookupCollectionByUUIDForMetadataWrite(OperationContext* opCtx,
-                                                       LifetimeMode mode,
                                                        const UUID& uuid) const;
     CollectionPtr lookupCollectionByUUID(OperationContext* opCtx, UUID uuid) const;
     std::shared_ptr<const Collection> lookupCollectionByUUIDForRead(OperationContext* opCtx,
@@ -316,7 +312,6 @@ public:
      * Returns nullptr if the namespace is unknown.
      */
     Collection* lookupCollectionByNamespaceForMetadataWrite(OperationContext* opCtx,
-                                                            LifetimeMode mode,
                                                             const NamespaceString& nss) const;
     CollectionPtr lookupCollectionByNamespace(OperationContext* opCtx,
                                               const NamespaceString& nss) const;
@@ -519,6 +514,12 @@ public:
      */
     void addResource(const ResourceId& rid, const std::string& entry);
 
+    /**
+     * Ensures we have a MODE_X lock on a collection or MODE_IX lock for newly created collections.
+     */
+    static void invariantHasExclusiveAccessToCollection(OperationContext* opCtx,
+                                                        const NamespaceString& nss);
+
 private:
     friend class CollectionCatalog::iterator;
     class PublishCatalogUpdates;
@@ -550,22 +551,30 @@ private:
                                ViewsForDatabase&& viewsForDb) const;
 
     /**
+     * Returns true if this CollectionCatalog instance is part of an ongoing batched catalog write.
+     */
+    bool _isCatalogBatchWriter() const;
+
+    /**
+     * Returns true if we can saftely skip performing copy-on-write on the provided collection
+     * instance.
+     */
+    bool _alreadyClonedForBatchedWriter(const std::shared_ptr<Collection>& collection) const;
+
+
+    /**
      * Throws 'WriteConflictException' if given namespace is already registered with the catalog, as
-     * either a view or collection. In the case of an collection drop (by the calling thread) that
-     * has not been committed yet, it will not throw, but it will return
-     * 'NonExistenceType::kDropPending' to distinguish from the case that the namespace is simply
-     * not registered with the catalog at all. The results will include namespaces which have been
-     * registered by preCommitHooks on other threads, but which have not truly been committed yet.
+     * either a view or collection. The results will include namespaces which have been registered
+     * by preCommitHooks on other threads, but which have not truly been committed yet.
      *
      * If 'type' is set to 'NamespaceType::kCollection', we will only check for collisions with
      * collections. If set to 'NamespaceType::kAll', we will check against both collections and
      * views.
      */
-    enum class NonExistenceType { kDropPending, kNormal };
     enum class NamespaceType { kAll, kCollection };
-    NonExistenceType _ensureNamespaceDoesNotExist(OperationContext* opCtx,
-                                                  const NamespaceString& nss,
-                                                  NamespaceType type) const;
+    void _ensureNamespaceDoesNotExist(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      NamespaceType type) const;
 
     /**
      * When present, indicates that the catalog is in closed state, and contains a map from UUID
@@ -662,7 +671,11 @@ private:
  * restore implementation for CollectionPtr when acquired from the catalog.
  */
 struct LookupCollectionForYieldRestore {
+    explicit LookupCollectionForYieldRestore(const NamespaceString& nss) : _nss(nss) {}
     const Collection* operator()(OperationContext* opCtx, const UUID& uuid) const;
+
+private:
+    const NamespaceString _nss;
 };
 
 /**
@@ -678,11 +691,16 @@ public:
     BatchedCollectionCatalogWriter(const BatchedCollectionCatalogWriter&) = delete;
     BatchedCollectionCatalogWriter(BatchedCollectionCatalogWriter&&) = delete;
 
+    const CollectionCatalog* operator->() const {
+        return _batchedInstance;
+    }
+
 private:
     OperationContext* _opCtx;
     // Store base when we clone the CollectionCatalog so we can verify that there has been no other
     // writers during the batching.
     std::shared_ptr<CollectionCatalog> _base = nullptr;
+    const CollectionCatalog* _batchedInstance = nullptr;
 };
 
 }  // namespace mongo

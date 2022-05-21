@@ -51,7 +51,8 @@ const runCommandInLoop = function(
         ErrorCodes.ConflictingOperationInProgress,
         ErrorCodes.BackgroundOperationInProgressForNamespace,
         ErrorCodes.ReshardCollectionInProgress,
-        ErrorCodes.StaleShardVersion,
+        // TODO (SERVER-64449): Get rid of this exception
+        ErrorCodes.OBSOLETE_StaleShardVersion,
         ErrorCodes.QueryPlanKilled,
     ];
 

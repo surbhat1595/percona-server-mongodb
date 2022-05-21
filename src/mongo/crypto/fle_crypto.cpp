@@ -66,6 +66,7 @@
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/crypto/symmetric_key.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/idl/basic_types.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/platform/random.h"
@@ -208,6 +209,15 @@ ConstDataRange binDataToCDR(const BSONElement element) {
 
     int len;
     const char* data = element.binData(len);
+    return ConstDataRange(data, data + len);
+}
+
+ConstDataRange binDataToCDR(const Value& value) {
+    uassert(6334103, "Expected binData Value type", value.getType() == BinData);
+
+    auto binData = value.getBinData();
+    int len = binData.length;
+    const char* data = static_cast<const char*>(binData.data);
     return ConstDataRange(data, data + len);
 }
 
@@ -636,7 +646,7 @@ public:
     static FLE2InsertUpdatePayload serializeInsertUpdatePayload(FLEIndexKeyAndId indexKey,
                                                                 FLEUserKeyAndId userKey,
                                                                 BSONElement element,
-                                                                uint64_t maxContentionFactor);
+                                                                uint64_t contentionFactor);
 };
 
 
@@ -644,12 +654,10 @@ FLE2InsertUpdatePayload EDCClientPayload::parseInsertUpdatePayload(ConstDataRang
     return parseFromCDR<FLE2InsertUpdatePayload>(cdr);
 }
 
-
-FLE2InsertUpdatePayload EDCClientPayload::serializeInsertUpdatePayload(
-    FLEIndexKeyAndId indexKey,
-    FLEUserKeyAndId userKey,
-    BSONElement element,
-    uint64_t maxContentionFactor) {
+FLE2InsertUpdatePayload EDCClientPayload::serializeInsertUpdatePayload(FLEIndexKeyAndId indexKey,
+                                                                       FLEUserKeyAndId userKey,
+                                                                       BSONElement element,
+                                                                       uint64_t contentionFactor) {
     auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
 
     auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(indexKey.key);
@@ -666,12 +674,6 @@ FLE2InsertUpdatePayload EDCClientPayload::serializeInsertUpdatePayload(
         FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
     ECCDerivedFromDataToken eccDatakey =
         FLEDerivedFromDataTokenGenerator::generateECCDerivedFromDataToken(eccToken, value);
-
-    uint64_t contentionFactor = 0;
-    if (maxContentionFactor > 0) {
-        // Generate a number between [1,maxContentionFactor]
-        contentionFactor = SecureRandom().nextInt64(maxContentionFactor) + 1;
-    }
 
     EDCDerivedFromDataTokenAndContentionFactorToken edcDataCounterkey =
         FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
@@ -888,7 +890,8 @@ void visitEncryptedBSON(const BSONObj& object,
 void convertToFLE2Payload(FLEKeyVault* keyVault,
                           ConstDataRange cdr,
                           BSONObjBuilder* builder,
-                          StringData fieldNameToSerialize) {
+                          StringData fieldNameToSerialize,
+                          const ContentionFactorFn& contentionFactor) {
     auto [encryptedType, subCdr] = fromEncryptedConstDataRange(cdr);
 
     if (encryptedType == EncryptedBinDataType::kFLE2Placeholder) {
@@ -896,6 +899,9 @@ void convertToFLE2Payload(FLEKeyVault* keyVault,
         auto ep = parseFromCDR<FLE2EncryptionPlaceholder>(subCdr);
 
         auto el = ep.getValue().getElement();
+        uassert(6409401,
+                "Encrypting already encrypted data prohibited",
+                !el.isBinData(BinDataType::Encrypt));
 
         FLEIndexKeyAndId indexKey = keyVault->getIndexKeyById(ep.getIndexKeyId());
         FLEUserKeyAndId userKey = keyVault->getUserKeyById(ep.getUserKeyId());
@@ -908,7 +914,7 @@ void convertToFLE2Payload(FLEKeyVault* keyVault,
 
             if (ep.getType() == Fle2PlaceholderType::kInsert) {
                 auto iupayload = EDCClientPayload::serializeInsertUpdatePayload(
-                    indexKey, userKey, el, ep.getMaxContentionCounter());
+                    indexKey, userKey, el, contentionFactor(ep));
 
                 toEncryptedBinData(fieldNameToSerialize,
                                    EncryptedBinDataType::kFLE2InsertUpdatePayload,
@@ -963,6 +969,7 @@ void parseAndVerifyInsertUpdatePayload(std::vector<EDCServerPayloadInfo>* pField
 
 void collectEDCServerInfo(std::vector<EDCServerPayloadInfo>* pFields,
                           ConstDataRange cdr,
+
                           StringData fieldPath) {
 
     // TODO - validate field is actually indexed in the schema?
@@ -1146,6 +1153,18 @@ stdx::unordered_map<std::string, EncryptedField> toFieldMap(const EncryptedField
     return fields;
 }
 
+uint64_t generateRandomContention(uint64_t cm) {
+    // For non-contentious fields, we select the partition number, u, to be equal to 0.
+    //
+    // for contentious fields, with a contention factor, p, we pick the partition number, u,
+    // uniformly at random from the set {0, ..., p}.
+    //
+    // Note: nextInt64() returns [0,p) instead of [0,p] so we +1.
+    //
+    uassert(6535701, "Illegal contention factor", cm != std::numeric_limits<uint64_t>::max());
+    return cm > 0 ? SecureRandom().nextInt64(cm + 1) : 0;
+}
+
 }  // namespace
 
 
@@ -1265,18 +1284,25 @@ std::vector<uint8_t> FLEClientCrypto::encrypt(BSONElement element,
                                               FLEIndexKeyAndId indexKey,
                                               FLEUserKeyAndId userKey,
                                               FLECounter counter) {
-
-    auto iupayload =
-        EDCClientPayload::serializeInsertUpdatePayload(indexKey, userKey, element, counter);
-
-    return toEncryptedVector(EncryptedBinDataType::kFLE2InsertUpdatePayload, iupayload);
+    return toEncryptedVector(EncryptedBinDataType::kFLE2InsertUpdatePayload,
+                             EDCClientPayload::serializeInsertUpdatePayload(
+                                 indexKey, userKey, element, generateRandomContention(counter)));
 }
 
 
 BSONObj FLEClientCrypto::transformPlaceholders(const BSONObj& obj, FLEKeyVault* keyVault) {
+    return transformPlaceholders(obj, keyVault, [](const FLE2EncryptionPlaceholder& ep) {
+        // Generate a number between [1,maxContentionFactor]
+        return generateRandomContention(ep.getMaxContentionCounter());
+    });
+}
+
+BSONObj FLEClientCrypto::transformPlaceholders(const BSONObj& obj,
+                                               FLEKeyVault* keyVault,
+                                               const ContentionFactorFn& cf) {
     auto ret = transformBSON(
-        obj, [keyVault](ConstDataRange cdr, BSONObjBuilder* builder, StringData field) {
-            convertToFLE2Payload(keyVault, cdr, builder, field);
+        obj, [keyVault, cf](ConstDataRange cdr, BSONObjBuilder* builder, StringData field) {
+            convertToFLE2Payload(keyVault, cdr, builder, field, cf);
         });
 
     return ret;
@@ -1339,6 +1365,8 @@ std::pair<BSONType, std::vector<uint8_t>> FLEClientCrypto::decrypt(ConstDataRang
         // FLE Find Payloads only contain non-encrypted data that is related to encryption, so
         // return the unencrypted body. The EOO BSONType signals to the caller that this should
         // maintain the encryption subtype.
+        return {EOO, vectorFromCDR(pair.second)};
+    } else if (pair.first == EncryptedBinDataType::kFLE2InsertUpdatePayload) {
         return {EOO, vectorFromCDR(pair.second)};
     } else {
         uasserted(6373507, "Not supported");
@@ -1990,10 +2018,29 @@ ESCDerivedFromDataTokenAndContentionFactorToken EDCServerPayloadInfo::getESCToke
         payload.getEscDerivedToken());
 }
 
+void EDCServerCollection::validateEncryptedFieldInfo(BSONObj& obj,
+                                                     const EncryptedFieldConfig& efc) {
+    stdx::unordered_set<std::string> indexedFields;
+    for (auto f : efc.getFields()) {
+        if (f.getQueries().has_value()) {
+            indexedFields.insert(f.getPath().toString());
+        }
+    }
+
+    visitEncryptedBSON(obj, [&indexedFields](ConstDataRange cdr, StringData fieldPath) {
+        auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
+        if (encryptedTypeBinding == EncryptedBinDataType::kFLE2InsertUpdatePayload) {
+            uassert(6373601,
+                    str::stream() << "Field '" << fieldPath
+                                  << "' is encrypted, but absent from schema",
+                    indexedFields.contains(fieldPath.toString()));
+        }
+    });
+}
+
+
 std::vector<EDCServerPayloadInfo> EDCServerCollection::getEncryptedFieldInfo(BSONObj& obj) {
     std::vector<EDCServerPayloadInfo> fields;
-    // TODO (SERVER-63736) - Validate only fields listed in EncryptedFieldConfig are indexed
-
     visitEncryptedBSON(obj, [&fields](ConstDataRange cdr, StringData fieldPath) {
         collectEDCServerInfo(&fields, cdr, fieldPath);
     });
@@ -2310,8 +2357,14 @@ StringMap<FLEDeleteToken> EncryptionInformationHelpers::getDeleteTokens(
     return map;
 }
 
-ParsedFindPayload::ParsedFindPayload(BSONElement fleFindPayload) {
-    auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(binDataToCDR(fleFindPayload));
+ParsedFindPayload::ParsedFindPayload(BSONElement fleFindPayload)
+    : ParsedFindPayload(binDataToCDR(fleFindPayload)){};
+
+ParsedFindPayload::ParsedFindPayload(const Value& fleFindPayload)
+    : ParsedFindPayload(binDataToCDR(fleFindPayload)){};
+
+ParsedFindPayload::ParsedFindPayload(ConstDataRange cdr) {
+    auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     auto encryptedType = encryptedTypeBinding;
 
     uassert(6435600,
@@ -2355,6 +2408,29 @@ void CompactionHelpers::validateCompactionTokens(const EncryptedFieldConfig& efc
                 << field.getPath() << "'",
             !tokenElement.eoo());
     }
+}
+
+std::vector<ECCDocument> CompactionHelpers::mergeECCDocuments(std::vector<ECCDocument>& unmerged) {
+    std::vector<ECCDocument> merged;
+    std::sort(unmerged.begin(), unmerged.end());
+
+    for (size_t i = 0; i < unmerged.size();) {
+        merged.push_back(unmerged[i]);
+        auto& last = merged.back();
+        i++;
+        for (; i < unmerged.size() && ((last.end + 1) == unmerged[i].start); i++) {
+            last.end = unmerged[i].end;
+        }
+    }
+    return merged;
+}
+
+uint64_t CompactionHelpers::countDeleted(const std::vector<ECCDocument>& rangeList) {
+    uint64_t sum = 0;
+    for (auto& range : rangeList) {
+        sum += range.end - range.start + 1;
+    }
+    return sum;
 }
 
 }  // namespace mongo

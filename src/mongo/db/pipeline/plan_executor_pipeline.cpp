@@ -93,8 +93,8 @@ PlanExecutor::ExecState PlanExecutorPipeline::getNextDocument(Document* docOut,
     invariant(!recordIdOut);
     invariant(docOut);
 
-    // Callers which use 'enqueue()' are not allowed to use 'getNextDocument()', and must instead
-    // use 'getNext()'.
+    // Callers which use 'stashResult()' are not allowed to use 'getNextDocument()', and must
+    // instead use 'getNext()'.
     invariant(_stash.empty());
 
     if (auto next = _getNext()) {
@@ -174,7 +174,8 @@ void PlanExecutorPipeline::_performChangeStreamsAccounting(const boost::optional
         // high-water-mark token at the current clusterTime.
         auto highWaterMark = PipelineD::getLatestOplogTimestamp(_pipeline.get());
         if (highWaterMark > _latestOplogTimestamp) {
-            auto token = ResumeToken::makeHighWaterMarkToken(highWaterMark);
+            auto token = ResumeToken::makeHighWaterMarkToken(
+                highWaterMark, _pipeline->getContext()->changeStreamTokenVersion);
             _postBatchResumeToken = token.toDocument().toBson();
             _latestOplogTimestamp = highWaterMark;
             _setSpeculativeReadTimestamp();

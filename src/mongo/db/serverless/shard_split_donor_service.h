@@ -38,18 +38,8 @@
 
 namespace mongo {
 
+using TaskExecutorPtr = std::shared_ptr<executor::TaskExecutor>;
 using ScopedTaskExecutorPtr = std::shared_ptr<executor::ScopedTaskExecutor>;
-
-namespace detail {
-
-SemiFuture<void> makeRecipientAcceptSplitFuture(
-    ExecutorPtr executor,
-    std::shared_ptr<executor::TaskExecutor> taskExecutor,
-    const CancellationToken& token,
-    const StringData& recipientTagName,
-    const StringData& recipientSetName);
-
-};  // namespace detail
 
 class ShardSplitDonorService final : public repl::PrimaryOnlyService {
 public:
@@ -76,7 +66,7 @@ protected:
     void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
-        const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override{};
+        const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override;
 
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override;
 
@@ -150,8 +140,23 @@ public:
         return !!_stateDoc.getExpireAt();
     }
 
+    /**
+     * Only used for testing. Allows settinga custom task executor for observing split acceptance.
+     */
+    static void setSplitAcceptanceTaskExecutor_forTest(TaskExecutorPtr taskExecutor) {
+        _splitAcceptanceTaskExecutorForTest = taskExecutor;
+    }
+
+    ShardSplitDonorStateEnum getStateDocState() const {
+        stdx::lock_guard<Latch> lg(_mutex);
+        return _stateDoc.getState();
+    }
+
 private:
     // Tasks
+    ExecutorFuture<void> _enterBlockingOrAbortedState(const ScopedTaskExecutorPtr& executor,
+                                                      const CancellationToken& token);
+
     ExecutorFuture<void> _waitForRecipientToReachBlockTimestamp(
         const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
 
@@ -161,10 +166,16 @@ private:
     ExecutorFuture<void> _waitForRecipientToAcceptSplit(const ScopedTaskExecutorPtr& executor,
                                                         const CancellationToken& token);
 
-    // Helpers
-    ExecutorFuture<void> _writeInitialDocument(const ScopedTaskExecutorPtr& executor,
-                                               const CancellationToken& token);
+    ExecutorFuture<void> _waitForForgetCmdThenMarkGarbageCollectible(
+        const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
 
+    ExecutorFuture<DurableState> _handleErrorOrEnterAbortedState(
+        StatusWith<DurableState> durableState,
+        const ScopedTaskExecutorPtr& executor,
+        const CancellationToken& instanceAbortToken,
+        const CancellationToken& abortToken);
+
+    // Helpers
     ExecutorFuture<repl::OpTime> _updateStateDocument(const ScopedTaskExecutorPtr& executor,
                                                       const CancellationToken& token,
                                                       ShardSplitDonorStateEnum nextState);
@@ -175,20 +186,6 @@ private:
 
     void _initiateTimeout(const ScopedTaskExecutorPtr& executor,
                           const CancellationToken& abortToken);
-
-    void _createReplicaSetMonitor(const CancellationToken& abortToken);
-
-    ExecutorFuture<DurableState> _handleErrorOrEnterAbortedState(
-        StatusWith<DurableState> durableState,
-        const ScopedTaskExecutorPtr& executor,
-        const CancellationToken& instanceAbortToken,
-        const CancellationToken& abortToken);
-
-    ExecutorFuture<repl::OpTime> _markStateDocAsGarbageCollectable(
-        std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token);
-
-    ExecutorFuture<void> _waitForForgetCmdThenMarkGarbageCollectible(
-        const ScopedTaskExecutorPtr& executor, const CancellationToken& token);
 
     /*
      * We need to call this method when we find out the replica set name is the same as the state
@@ -223,10 +220,13 @@ private:
     SharedPromise<void> _completionPromise;
 
     // A promise fulfilled when all recipient nodes have accepted the split.
-    SharedPromise<void> _recipientAcceptedSplit;
+    SharedPromise<void> _splitAcceptancePromise;
 
     // A promise fulfilled when tryForget is called.
     SharedPromise<void> _forgetShardSplitReceivedPromise;
+
+    // A task executor used for the split acceptance future in tests
+    static boost::optional<TaskExecutorPtr> _splitAcceptanceTaskExecutorForTest;
 };
 
 }  // namespace mongo

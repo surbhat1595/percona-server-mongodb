@@ -1419,11 +1419,15 @@ void BalancerDefragmentationPolicyImpl::abortCollectionDefragmentation(Operation
     }
 }
 
+void BalancerDefragmentationPolicyImpl::interruptAllDefragmentations() {
+    stdx::lock_guard<Latch> lk(_stateMutex);
+    _defragmentationStates.clear();
+}
+
 bool BalancerDefragmentationPolicyImpl::isDefragmentingCollection(const UUID& uuid) {
     stdx::lock_guard<Latch> lk(_stateMutex);
     return _defragmentationStates.contains(uuid);
 }
-
 
 BSONObj BalancerDefragmentationPolicyImpl::reportProgressOn(const UUID& uuid) {
     stdx::lock_guard<Latch> lk(_stateMutex);
@@ -1507,6 +1511,10 @@ MigrateInfoVector BalancerDefragmentationPolicyImpl::selectChunksToMove(
         _onStateUpdated();
     }
     return chunksToMove;
+}
+
+StringData BalancerDefragmentationPolicyImpl::getName() const {
+    return StringData(kPolicyName);
 }
 
 boost::optional<DefragmentationAction> BalancerDefragmentationPolicyImpl::getNextStreamingAction(

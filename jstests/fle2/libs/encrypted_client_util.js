@@ -149,7 +149,7 @@ class EncryptedClient {
         let encryptedDoc = encryptedDocs[0];
         let unEncryptedDoc = unEncryptedDocs[0];
 
-        assert(encryptedDoc["__safeContent__"] !== undefined);
+        assert(encryptedDoc[kSafeContentField] !== undefined);
 
         for (let field in fields) {
             assert(encryptedDoc.hasOwnProperty(field),
@@ -218,44 +218,40 @@ class EncryptedClient {
     }
 
     /**
-     * Take a snapshot of a collection sorted by _id, run a operation, take a second snapshot.
-     *
-     * Ensure that the documents listed by index in unchangedDocumentIndexArray remain unchanged.
-     * Ensure that the documents listed by index in changedDocumentIndexArray are changed.
+     * Verify that the collection 'collName' contains exactly the documents 'docs'.
      *
      * @param {string} collName
-     * @param {Array} unchangedDocumentIndexArray
-     * @param {Array} changedDocumentIndexArray
-     * @param {Function} func
+     * @param {Array} docs
      * @returns
      */
     assertEncryptedCollectionDocuments(collName, docs) {
         let coll = this._edb.getCollection(collName);
 
-        let onDiskDocs = coll.find({}).sort({_id: 1}).toArray();
-
-        for (let doc of onDiskDocs) {
-            delete doc.__safeContent__;
-        }
+        let onDiskDocs = coll.find({}, {[kSafeContentField]: 0}).sort({_id: 1}).toArray();
 
         assert.docEq(onDiskDocs, docs);
     }
 
-    assertStateCollectionsAfterCompact(collName) {
-        const suffixes = ['esc', 'ecc', 'ecoc'];
-        const prefix = "fle2." + collName + ".";
+    assertStateCollectionsAfterCompact(collName, ecocExists) {
+        const baseCollInfos = this._edb.getCollectionInfos({"name": collName});
+        assert.eq(baseCollInfos.length, 1);
+        const baseCollInfo = baseCollInfos[0];
+        assert(baseCollInfo.options.encryptedFields !== undefined);
 
-        // assert the state collections still exist
-        suffixes.forEach((suffix) => {
-            let coll = prefix + suffix;
-            let cis = this._edb.getCollectionInfos({"name": coll});
-            assert.eq(cis.length, 1, coll + " does not exist after compact");
+        const checkMap = {};
+
+        // Always expect ESC and ECC collections, optionally expect ECOC.
+        // ECOC is not expected in sharded clusters.
+        checkMap[baseCollInfo.options.encryptedFields.escCollection] = true;
+        checkMap[baseCollInfo.options.encryptedFields.eccCollection] = true;
+        checkMap[baseCollInfo.options.encryptedFields.ecocCollection] = ecocExists;
+
+        const edb = this._edb;
+        Object.keys(checkMap).forEach(function(coll) {
+            const info = edb.getCollectionInfos({"name": coll});
+            const msg = coll + (checkMap[coll] ? " does not exit" : " exists") + " after compact";
+            assert.eq(info.length, checkMap[coll], msg);
         });
-
-        // assert the renamed ecoc collection does not exist
-        let coll = prefix + "ecoc.compact";
-        let cis = this._edb.getCollectionInfos({"name": coll});
-        assert.eq(cis.length, 0, coll + " still exists after compact");
     }
 }
 
@@ -280,19 +276,10 @@ function runEncryptedTest(db, dbName, collName, encryptedFields, runTestsCallbac
     runTestsCallback(edb, client);
 }
 
-// TODO - remove this when the feature flag is removed
-function isFLE2Enabled() {
-    return TestData == undefined || TestData.setParameters.featureFlagFLE2;
-}
-
 /**
  * @returns Returns true if talking to a sharded cluster
  */
 function isFLE2ShardingEnabled() {
-    if (!isFLE2Enabled()) {
-        return false;
-    }
-
     return typeof (testingFLESharding) == "undefined" || testingFLESharding === true;
 }
 
@@ -300,10 +287,6 @@ function isFLE2ShardingEnabled() {
  * @returns Returns true if talking to a replica set
  */
 function isFLE2ReplicationEnabled() {
-    if (!isFLE2Enabled()) {
-        return false;
-    }
-
     return typeof (testingReplication) == "undefined" || testingReplication === true;
 }
 

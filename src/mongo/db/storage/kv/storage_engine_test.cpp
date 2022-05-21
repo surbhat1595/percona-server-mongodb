@@ -130,7 +130,6 @@ TEST_F(StorageEngineTest, TemporaryRecordStoreClustered) {
     WriteUnitOfWork wuow(opCtx.get());
     StatusWith<RecordId> s = rs->insertRecord(opCtx.get(), rid, data, strlen(data), Timestamp());
     ASSERT_TRUE(s.isOK());
-    ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     wuow.commit();
 
     // Read the record back.
@@ -175,13 +174,7 @@ TEST_F(StorageEngineTest, ReconcileKeepsTemporary) {
     ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
 
-    if (_storageEngine->supportsResumableIndexBuilds()) {
-        // The storage engine does not drop its temporary idents outside of starting up after an
-        // unclean shutdown.
-        ASSERT(identExists(opCtx.get(), ident));
-    } else {
-        ASSERT_FALSE(identExists(opCtx.get(), ident));
-    }
+    ASSERT_FALSE(identExists(opCtx.get(), ident));
 }
 
 class StorageEngineTimestampMonitorTest : public StorageEngineTest {
@@ -246,7 +239,7 @@ TEST_F(StorageEngineTimestampMonitorTest, TemporaryRecordStoreKeep) {
 TEST_F(StorageEngineTest, ReconcileUnfinishedIndex) {
     auto opCtx = cc().makeOperationContext();
 
-    Lock::GlobalLock lk(&*opCtx, MODE_IX);
+    Lock::GlobalLock lk(&*opCtx, MODE_X);
 
     const NamespaceString ns("db.coll1");
     const std::string indexName("a_1");
@@ -297,6 +290,9 @@ TEST_F(StorageEngineTest, ReconcileUnfinishedBackgroundSecondaryIndex) {
     const bool isBackgroundSecondaryBuild = true;
     const boost::optional<UUID> buildUUID = boost::none;
     {
+        Lock::DBLock dbLk(opCtx.get(), ns.db(), MODE_IX);
+        Lock::CollectionLock collLk(opCtx.get(), ns, MODE_X);
+
         WriteUnitOfWork wuow(opCtx.get());
         ASSERT_OK(
             startIndexBuild(opCtx.get(), ns, indexName, isBackgroundSecondaryBuild, buildUUID));
@@ -344,14 +340,20 @@ TEST_F(StorageEngineTest, ReconcileTwoPhaseIndexBuilds) {
     // Start two indexes with the same buildUUID to simulate building multiple indexes within the
     // same build.
     {
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_OK(startIndexBuild(opCtx.get(), ns, indexA, isBackgroundSecondaryBuild, buildUUID));
-        wuow.commit();
-    }
-    {
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_OK(startIndexBuild(opCtx.get(), ns, indexB, isBackgroundSecondaryBuild, buildUUID));
-        wuow.commit();
+        Lock::DBLock dbLk(opCtx.get(), ns.db(), MODE_IX);
+        Lock::CollectionLock collLk(opCtx.get(), ns, MODE_X);
+        {
+            WriteUnitOfWork wuow(opCtx.get());
+            ASSERT_OK(
+                startIndexBuild(opCtx.get(), ns, indexA, isBackgroundSecondaryBuild, buildUUID));
+            wuow.commit();
+        }
+        {
+            WriteUnitOfWork wuow(opCtx.get());
+            ASSERT_OK(
+                startIndexBuild(opCtx.get(), ns, indexB, isBackgroundSecondaryBuild, buildUUID));
+            wuow.commit();
+        }
     }
 
     const auto indexIdentA = _storageEngine->getCatalog()->getIndexIdent(
@@ -676,7 +678,7 @@ TEST_F(TimestampKVEngineTest, TimestampAdvancesOnNotification) {
     _storageEngine->getTimestampMonitor()->clearListeners();
 }
 
-TEST_F(StorageEngineDurableTest, UseAlternateStorageLocation) {
+TEST_F(StorageEngineTest, UseAlternateStorageLocation) {
     auto opCtx = cc().makeOperationContext();
 
     const NamespaceString coll1Ns("db.coll1");

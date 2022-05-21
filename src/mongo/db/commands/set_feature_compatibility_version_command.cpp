@@ -64,6 +64,8 @@
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/s/active_migrations_registry.h"
+#include "mongo/db/s/balancer/balancer.h"
+#include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/migration_coordinator_document_gen.h"
 #include "mongo/db/s/migration_util.h"
@@ -74,6 +76,7 @@
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/db/session_txn_record_gen.h"
@@ -359,28 +362,26 @@ public:
                 const auto fcvChangeRegion(
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
 
-                if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-                    if (requestedVersion < actualVersion) {
-                        // TODO SERVER-64779 review/adapt this scope before v6.0 branches out
-                        // Make sure no collection is currently being defragmented
-                        DBDirectClient client(opCtx);
+                if (!gFeatureFlagUserWriteBlocking.isEnabledOnVersion(requestedVersion)) {
+                    // TODO SERVER-65010 Remove this scope once 6.0 has branched out
 
-                        const BSONObj collBeingDefragmentedQuery =
-                            BSON(CollectionType::kDefragmentCollectionFieldName
-                                 << BSON("$exists" << true));
-
-                        const bool isDefragmenting = client.count(CollectionType::ConfigNS,
-                                                                  collBeingDefragmentedQuery,
-                                                                  0 /*options*/,
-                                                                  1 /* limit */);
-
-                        uassert(ErrorCodes::CannotDowngrade,
-                                str::stream()
-                                    << "Cannot downgrade the cluster when there are collections "
-                                       "being defragmented. Please drain all the defragmentation "
-                                       "processes before downgrading.",
-                                !isDefragmenting);
+                    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+                        uassert(
+                            ErrorCodes::CannotDowngrade,
+                            "Cannot downgrade while user write blocking is being changed",
+                            ConfigsvrCoordinatorService::getService(opCtx)
+                                ->isAnyCoordinatorOfGivenTypeRunning(
+                                    opCtx, ConfigsvrCoordinatorTypeEnum::kSetUserWriteBlockMode));
                     }
+
+                    DBDirectClient client(opCtx);
+
+                    const bool isBlockingUserWrites =
+                        client.count(NamespaceString::kUserWritesCriticalSectionsNamespace) != 0;
+
+                    uassert(ErrorCodes::CannotDowngrade,
+                            "Cannot downgrade while user write blocking is enabled.",
+                            !isBlockingUserWrites);
                 }
 
                 FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
@@ -394,9 +395,9 @@ public:
 
             if (request.getPhase() == SetFCVPhaseEnum::kStart) {
                 invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
-                // TODO SERVER-64162 Destroy the BalancerStatsRegistry
                 if (actualVersion > requestedVersion &&
                     !feature_flags::gOrphanTracking.isEnabledOnVersion(requestedVersion)) {
+                    BalancerStatsRegistry::get(opCtx)->terminate();
                     ScopedRangeDeleterLock rangeDeleterLock(opCtx);
                     clearOrphanCountersFromRangeDeletionTasks(opCtx);
                 }
@@ -422,6 +423,17 @@ public:
                     ShardingDDLCoordinatorService::getService(opCtx)
                         ->waitForCoordinatorsOfGivenTypeToComplete(
                             opCtx, DDLCoordinatorTypeEnum::kRefineCollectionShardKey);
+                }
+
+                // TODO SERVER-65077: Remove FCV check once 6.0 is released
+                if (actualVersion > requestedVersion &&
+                    !gFeatureFlagFLE2.isEnabledOnVersion(requestedVersion)) {
+                    // No more (recoverable) CompactStructuredEncryptionDataCoordinator will start
+                    // because we have already switched the FCV value to kDowngrading. Wait for the
+                    // ongoing CompactStructuredEncryptionDataCoordinator to finish.
+                    ShardingDDLCoordinatorService::getService(opCtx)
+                        ->waitForCoordinatorsOfGivenTypeToComplete(
+                            opCtx, DDLCoordinatorTypeEnum::kCompactStructuredEncryptionData);
                 }
 
                 // If we are only running phase-1, then we are done
@@ -466,9 +478,11 @@ public:
                 migrationutil::drainMigrationsPendingRecovery(opCtx);
 
                 if (orphanTrackingCondition) {
-                    // TODO SERVER-64162 Initialize the BalancerStatsRegistry
-                    ScopedRangeDeleterLock rangeDeleterLock(opCtx);
-                    setOrphanCountersOnRangeDeletionTasks(opCtx);
+                    {
+                        ScopedRangeDeleterLock rangeDeleterLock(opCtx);
+                        setOrphanCountersOnRangeDeletionTasks(opCtx);
+                    }
+                    BalancerStatsRegistry::get(opCtx)->initializeAsync(opCtx);
                 }
             }
 
@@ -568,6 +582,11 @@ private:
                 !failUpgrading.shouldFail());
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            // Always abort the reshardCollection regardless of version to ensure that it will run
+            // on a consistent version from start to finish. This will ensure that it will be able
+            // to apply the oplog entries correctly.
+            abortAllReshardCollection(opCtx);
+
             // Tell the shards to enter phase-2 of setFCV (fully upgraded)
             auto requestPhase2 = request;
             requestPhase2.setFromConfigServer(true);
@@ -576,11 +595,6 @@ private:
             uassertStatusOK(
                 ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
-
-            // Always abort the reshardCollection regardless of version to ensure that it will run
-            // on a consistent version from start to finish. This will ensure that it will be able
-            // to apply the oplog entries correctly.
-            abortAllReshardCollection(opCtx);
         }
 
         // Create the pre-images collection if the feature flag is enabled on the requested version.
@@ -609,6 +623,8 @@ private:
             }
         }
 
+        // TODO  SERVER-65332 remove logic bound to this future object When kLastLTS is 6.0
+        boost::optional<SharedSemiFuture<void>> chunkResizeAsyncTask;
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-1 of setFCV
             auto requestPhase1 = request;
@@ -618,6 +634,9 @@ private:
             uassertStatusOK(
                 ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase1.toBSON({}))));
+
+            chunkResizeAsyncTask =
+                Balancer::get(opCtx)->applyLegacyChunkSizeConstraintsOnClusterData(opCtx);
         }
 
         _cancelTenantMigrations(opCtx);
@@ -794,6 +813,22 @@ private:
                         deletionStatus.isOK() ||
                             deletionStatus.code() == ErrorCodes::NamespaceNotFound);
             }
+
+            // Block downgrade for collections with encrypted fields
+            // TODO SERVER-65077: Remove once FCV 6.0 becomes last-lts.
+            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
+                const auto& dbName = tenantDbName.dbName();
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                catalog::forEachCollectionFromDb(
+                    opCtx, tenantDbName, MODE_X, [&](const CollectionPtr& collection) {
+                        uassert(
+                            ErrorCodes::CannotDowngrade,
+                            str::stream() << "Cannot downgrade the cluster as collection "
+                                          << collection->ns() << " has 'encryptedFields'",
+                            !collection->getCollectionOptions().encryptedFieldConfig.has_value());
+                        return true;
+                    });
+            }
         }
 
         {
@@ -895,6 +930,13 @@ private:
                     opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
         }
 
+        if (chunkResizeAsyncTask.has_value()) {
+            LOGV2(6417108, "Waiting for cluster chunks resize process to complete.");
+            uassertStatusOKWithContext(
+                chunkResizeAsyncTask->getNoThrow(opCtx),
+                "Failed to enforce chunk size constraint during FCV downgrade");
+            LOGV2(6417109, "Cluster chunks resize process completed.");
+        }
         hangWhileDowngrading.pauseWhileSet(opCtx);
 
         if (request.getDowngradeOnDiskChanges()) {

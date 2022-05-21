@@ -54,6 +54,9 @@ public:
     void tearDown() override;
 
 protected:
+    explicit PrimaryOnlyServiceMongoDTest(Options options = {})
+        : ServiceContextMongoDTest(std::move(options)) {}
+
     void startup(OperationContext* opCtx);
     void shutdown();
 
@@ -80,8 +83,6 @@ protected:
     repl::PrimaryOnlyService* _service = nullptr;
     long long _term = 0;
 };
-
-std::shared_ptr<executor::TaskExecutor> makeTestExecutor();
 
 }  // namespace repl
 }  // namespace mongo

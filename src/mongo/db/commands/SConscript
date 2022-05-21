@@ -142,6 +142,7 @@ env.Library(
         'rotate_certificates_command.cpp',
         'generic_servers.cpp',
         'generic_servers.idl',
+        'internal_transactions_test_command.idl',
         'isself.cpp',
         'logical_session_server_status_section.cpp',
         'mr_common.cpp',
@@ -198,18 +199,6 @@ env.Library(
         'rwc_defaults_commands.idl',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/read_write_concern_defaults',
-    ]
-)
-
-env.Library(
-    target='change_stream_options',
-    source=[
-        'change_stream_options.idl',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/auth/auth',
-        '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
     ]
 )
@@ -363,7 +352,6 @@ env.Library(
         "plan_cache_clear_command.cpp",
         "plan_cache_commands.cpp",
         "rename_collection_cmd.cpp",
-        "rename_database_for_restore_command.cpp",
         "run_aggregate.cpp",
         "sleep_command.cpp",
         "validate.cpp",
@@ -432,7 +420,6 @@ env.Library(
         'list_collections_filter',
         'list_databases_command',
         'rename_collection_idl',
-        'rename_database_for_restore_command_idl',
         'test_commands_enabled',
         'validate_db_metadata_command',
     ],
@@ -454,16 +441,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/write_ops',
         'test_commands_enabled',
-    ],
-)
-
-env.Library(
-    target='rename_database_for_restore_command_idl',
-    source=[
-        'rename_database_for_restore_command.idl',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
 
@@ -527,7 +504,6 @@ env.Library(
     target="mongod",
     source=[
         "apply_ops_cmd.cpp",
-        "change_stream_options_command.cpp",
         "collection_to_capped.cpp",
         "compact.cpp",
         "cpuload.cpp",
@@ -537,6 +513,7 @@ env.Library(
         "driverHelpers.cpp",
         'get_cluster_parameter_command.cpp',
         "internal_rename_if_options_and_indexes_match_cmd.cpp",
+        "internal_transactions_test_command_d.cpp",
         "fle2_compact_cmd.cpp",
         "map_reduce_command.cpp",
         "oplog_application_checks.cpp",
@@ -580,8 +557,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/database_holder',
         '$BUILD_DIR/mongo/db/catalog/index_key_validate',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
+        '$BUILD_DIR/mongo/db/cluster_transaction_api',
         '$BUILD_DIR/mongo/db/commands',
-        '$BUILD_DIR/mongo/db/commands/change_stream_options',
         '$BUILD_DIR/mongo/db/curop_failpoint_helpers',
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/exec/sbe_cmd',
@@ -605,8 +582,10 @@ env.Library(
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/db/s/transaction_coordinator',
         '$BUILD_DIR/mongo/db/s/user_writes_recoverable_critical_section',
+        '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
+        '$BUILD_DIR/mongo/db/transaction_api',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
         'core',

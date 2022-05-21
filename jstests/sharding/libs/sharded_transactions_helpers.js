@@ -213,12 +213,15 @@ function getOplogEntriesForTxn(rs, lsid, txnNumber) {
     return getOplogEntriesForTxnOnNode(rs.getPrimary(), lsid, txnNumber);
 }
 
-function getTxnEntriesForSession(rs, lsid) {
-    return rs.getPrimary()
-        .getCollection("config.transactions")
+function getTxnEntriesForSessionOnNode(node, lsid) {
+    return node.getCollection("config.transactions")
         .find(makeLsidFilter(lsid, "_id"))
         .sort({_id: 1})
         .toArray();
+}
+
+function getTxnEntriesForSession(rs, lsid) {
+    return getTxnEntriesForSessionOnNode(rs.getPrimary(), lsid);
 }
 
 function getImageEntriesForTxnOnNode(node, lsid, txnNumber) {
@@ -264,4 +267,13 @@ function areInternalTransactionsEnabled(conn) {
         assert
             .commandWorked(conn.adminCommand({getParameter: 1, featureFlagInternalTransactions: 1}))
             .featureFlagInternalTransactions.value;
+}
+
+function isUpdateDocumentShardKeyUsingTransactionApiEnabled(conn) {
+    return jsTestOptions().mongosBinVersion !== "last-lts" &&
+        jsTestOptions().mongosBinVersion !== "last-continuous" &&
+        assert
+            .commandWorked(conn.adminCommand(
+                {getParameter: 1, featureFlagUpdateDocumentShardKeyUsingTransactionApi: 1}))
+            .featureFlagUpdateDocumentShardKeyUsingTransactionApi.value;
 }

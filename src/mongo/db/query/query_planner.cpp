@@ -39,6 +39,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/bson/dotted_path_support.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_algo.h"
@@ -46,6 +47,7 @@
 #include "mongo/db/matcher/expression_text.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -55,6 +57,8 @@
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
+#include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/logv2/log.h"
@@ -164,6 +168,89 @@ bool hintMatchesClusterKey(const boost::optional<ClusteredCollectionInfo>& clust
     return hintObj.woCompare(clusteredIndexSpec.getKey()) == 0;
 }
 
+/**
+ * Returns the dependencies for the CanoncialQuery, split by those needed to answer the filter, and
+ * those needed for "everything else" which is the project and sort.
+ */
+std::pair<DepsTracker, DepsTracker> computeDeps(const CanonicalQuery& query) {
+    DepsTracker filterDeps;
+    query.root()->addDependencies(&filterDeps);
+    DepsTracker outputDeps;
+    if (!query.getProj() || query.getProj()->requiresDocument()) {
+        outputDeps.needWholeDocument = true;
+        return {std::move(filterDeps), std::move(outputDeps)};
+    }
+    auto projectionFields = query.getProj()->getRequiredFields();
+    outputDeps.fields.insert(projectionFields.begin(), projectionFields.end());
+    if (auto sortPattern = query.getSortPattern()) {
+        sortPattern->addDependencies(&outputDeps);
+    }
+    // There's no known way a sort would depend on the whole document, and we already verified that
+    // the projection doesn't depend on the whole document.
+    tassert(6430503, "Unexpectedly required entire object", !outputDeps.needWholeDocument);
+    return {std::move(filterDeps), std::move(outputDeps)};
+}
+
+void tryToAddColumnScan(const QueryPlannerParams& params,
+                        const CanonicalQuery& query,
+                        std::vector<std::unique_ptr<QuerySolution>>& out) {
+    if (params.columnarIndexes.empty()) {
+        return;
+    }
+    invariant(params.columnarIndexes.size() == 1);
+
+    auto [filterDeps, outputDeps] = computeDeps(query);
+    if (filterDeps.needWholeDocument || outputDeps.needWholeDocument) {
+        // We only want to use the columnar index if we can avoid fetching the whole document.
+        return;
+    }
+    if (!query.isSbeCompatible() || query.getForceClassicEngine()) {
+        // We only support column scans in SBE.
+        return;
+    }
+    if (!query.pipeline().empty()) {
+        LOGV2_DEBUG(
+            6430502, 3, "Not yet prepared to handle and test CQ pipeline with a columnstore index");
+        return;
+    }
+    // TODO SERVER-63123: Check if the columnar index actually provides the fields we need.
+    auto fieldsNeededForFilter = std::move(filterDeps.fields);
+    auto filterSplitByColumn = expression::splitMatchExpressionForColumns(query.root());
+    auto canPushFilters = bool(filterSplitByColumn) && !query.getQueryObj().isEmpty();
+    if (canPushFilters) {
+        fieldsNeededForFilter.clear();
+        for (auto&& [key, expr] : *filterSplitByColumn) {
+            fieldsNeededForFilter.emplace(key);
+        }
+    }
+
+    // TODO SERVER-64306 support splitting into 'can push down' and 'cannot push down' rather
+    // than all or nothing.
+    auto columnScan = std::make_unique<ColumnIndexScanNode>(
+        params.columnarIndexes.front(),
+        std::move(outputDeps.fields),
+        std::move(fieldsNeededForFilter),
+        filterSplitByColumn ? std::move(*filterSplitByColumn)
+                            : StringMap<std::unique_ptr<MatchExpression>>{},
+        query.root()->shallowClone());
+
+    const int nReferencedFields = static_cast<int>(columnScan->allFields.size());
+    const int maxNumFields = canPushFilters
+        ? internalQueryMaxNumberOfFieldsToChooseFilteredColumnScan.load()
+        : internalQueryMaxNumberOfFieldsToChooseUnfilteredColumnScan.load();
+    if (nReferencedFields > maxNumFields) {
+        LOGV2_DEBUG(6430508,
+                    5,
+                    "Opting out of column scan plan due to too many referenced fields",
+                    "nReferencedFields"_attr = nReferencedFields,
+                    "maxNumFields"_attr = maxNumFields,
+                    "canPushFilters"_attr = canPushFilters);
+        return;
+    }
+    // We have few enough dependencies that we suspect a column scan is still better than a
+    // collection scan. Add that solution.
+    out.push_back(QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(columnScan)));
+}
 }  // namespace
 
 using std::numeric_limits;
@@ -383,9 +470,10 @@ static BSONObj finishMaxObj(const IndexEntry& indexEntry,
 
 std::unique_ptr<QuerySolution> buildCollscanSoln(const CanonicalQuery& query,
                                                  bool tailable,
-                                                 const QueryPlannerParams& params) {
+                                                 const QueryPlannerParams& params,
+                                                 int direction = 1) {
     std::unique_ptr<QuerySolutionNode> solnRoot(
-        QueryPlannerAccess::makeCollectionScan(query, tailable, params));
+        QueryPlannerAccess::makeCollectionScan(query, tailable, params, direction));
     return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
 }
 
@@ -1159,6 +1247,37 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 }
             }
         }
+
+        // The base index is sorted on some key, so it's possible we might want to use
+        // a collection scan to provide the sort requested
+        if (params.clusteredInfo) {
+            if (CollatorInterface::collatorsMatch(params.clusteredCollectionCollator,
+                                                  query.getCollator())) {
+                auto kp = clustered_util::getSortPattern(params.clusteredInfo->getIndexSpec());
+                int direction = 0;
+                if (providesSort(query, kp)) {
+                    direction = 1;
+                } else if (providesSort(query, QueryPlannerCommon::reverseSortObj(kp))) {
+                    direction = -1;
+                }
+
+                if (direction != 0) {
+                    auto soln = buildCollscanSoln(query, isTailable, params, direction);
+                    if (soln) {
+                        LOGV2_DEBUG(
+                            6082401,
+                            5,
+                            "Planner: outputting soln that uses clustered index to provide sort");
+                        SolutionCacheData* scd = new SolutionCacheData();
+                        scd->solnType = SolutionCacheData::COLLSCAN_SOLN;
+                        scd->wholeIXSolnDir = direction;
+
+                        soln->cacheData.reset(scd);
+                        out.push_back(std::move(soln));
+                    }
+                }
+            }
+        }
     }
 
     // If a projection exists, there may be an index that allows for a covered plan, even if none
@@ -1196,17 +1315,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // Check whether we're eligible to use the columnar index, assuming no other indexes can be
     // used.
-    if (out.empty() && !params.columnarIndexes.empty() && query.getProj() &&
-        !query.getProj()->requiresDocument() && query.isSbeCompatible() &&
-        !query.getForceClassicEngine()) {
-        // TODO SERVER-63123: Check if the columnar index actually provides the fields we need.
-        auto columnScan = std::make_unique<ColumnIndexScanNode>(params.columnarIndexes.front());
-        columnScan->fields = query.getProj()->getRequiredFields();
-        if (auto filterSplitByColumn = expression::splitMatchExpressionForColumns(query.root())) {
-            columnScan->filtersByPath = std::move(*filterSplitByColumn);
-            out.push_back(
-                QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(columnScan)));
-        }
+    if (out.empty()) {
+        tryToAddColumnScan(params, query, out);
     }
 
     // The caller can explicitly ask for a collscan.
@@ -1266,10 +1376,32 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     for (auto& innerStage : query.pipeline()) {
         auto groupStage = dynamic_cast<DocumentSourceGroup*>(innerStage->documentSource());
         if (groupStage) {
-            solnForAgg = std::make_unique<GroupNode>(std::move(solnForAgg),
-                                                     groupStage->getIdExpression(),
-                                                     groupStage->getAccumulatedFields(),
-                                                     groupStage->doingMerge());
+            solnForAgg =
+                std::make_unique<GroupNode>(std::move(solnForAgg),
+                                            groupStage->getIdExpression(),
+                                            groupStage->getAccumulatedFields(),
+                                            groupStage->doingMerge(),
+                                            innerStage->isLastSource() /* shouldProduceBson */);
+            continue;
+        }
+
+        auto projStage =
+            dynamic_cast<DocumentSourceSingleDocumentTransformation*>(innerStage->documentSource());
+        if (projStage) {
+            auto projObj =
+                projStage->getTransformer().serializeTransformation(boost::none).toBson();
+            auto projAst =
+                projection_ast::parseAndAnalyze(projStage->getContext(),
+                                                projObj,
+                                                ProjectionPolicies::aggregateProjectionPolicies());
+
+            if (projAst.isSimple()) {
+                solnForAgg = std::make_unique<ProjectionNodeSimple>(
+                    std::move(solnForAgg), *query.root(), projAst);
+            } else {
+                solnForAgg = std::make_unique<ProjectionNodeDefault>(
+                    std::move(solnForAgg), *query.root(), projAst);
+            }
             continue;
         }
 
@@ -1283,15 +1415,19 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                lookupStage->getFromNs().toString(),
                                                lookupStage->getLocalField()->fullPath(),
                                                lookupStage->getForeignField()->fullPath(),
-                                               lookupStage->getAsField().fullPath());
-            QueryPlannerAnalysis::determineLookupStrategy(
-                eqLookupNode.get(), secondaryCollInfos, query.getExpCtx()->allowDiskUse);
+                                               lookupStage->getAsField().fullPath(),
+                                               innerStage->isLastSource() /* shouldProduceBson */);
+            QueryPlannerAnalysis::determineLookupStrategy(eqLookupNode.get(),
+                                                          secondaryCollInfos,
+                                                          query.getExpCtx()->allowDiskUse,
+                                                          query.getCollator());
             solnForAgg = std::move(eqLookupNode);
             continue;
         }
 
         tasserted(5842400,
-                  "Cannot support pushdown of a stage other than $group or $lookup at the moment");
+                  "Cannot support pushdown of a stage other than $group $project or $lookup at the "
+                  "moment");
     }
 
     solution->extendWith(std::move(solnForAgg));

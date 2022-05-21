@@ -41,6 +41,7 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
@@ -122,7 +123,8 @@ std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(Operation
 
     // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
     if (shouldDoFLERewrite(findCommand)) {
-        processFLEFindD(opCtx, findCommand.get());
+        invariant(findCommand->getNamespaceOrUUID().nss());
+        processFLEFindD(opCtx, findCommand->getNamespaceOrUUID().nss().get(), findCommand.get());
     }
 
     return translateNtoReturnToLimitOrBatchSize(std::move(findCommand));
@@ -157,7 +159,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         verbosity,
         false,  // fromMongos
         false,  // needsMerge
-        findCommand.getAllowDiskUse(),
+        findCommand.getAllowDiskUse().value_or(allowDiskUseByDefault.load()),
         false,  // bypassDocumentValidation
         false,  // isMapReduceCommand
         findCommand.getNamespaceOrUUID().nss().value_or(NamespaceString()),
@@ -626,7 +628,7 @@ public:
                     // If we can't fit this result inside the current batch, then we stash it for
                     // later.
                     if (!FindCommon::haveSpaceForNext(obj, numResults, firstBatch.bytesUsed())) {
-                        exec->enqueue(obj);
+                        exec->stashResult(obj);
                         stashedResult = true;
                         break;
                     }

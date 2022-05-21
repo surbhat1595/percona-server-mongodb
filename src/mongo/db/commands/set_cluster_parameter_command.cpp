@@ -35,12 +35,17 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/cluster_server_parameter_cmds_gen.h"
 #include "mongo/db/commands/set_cluster_parameter_invocation.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/idl/cluster_server_parameter_gen.h"
 #include "mongo/logv2/log.h"
 
 namespace mongo {
 
 namespace {
+
+const WriteConcernOptions kMajorityWriteConcern{WriteConcernOptions::kMajority,
+                                                WriteConcernOptions::SyncMode::UNSET,
+                                                WriteConcernOptions::kNoTimeout};
 
 class SetClusterParameterCommand final : public TypedCommand<SetClusterParameterCommand> {
 public:
@@ -63,10 +68,21 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
+            uassert(
+                ErrorCodes::IllegalOperation,
+                "Cannot set cluster parameter, gFeatureFlagClusterWideConfig is not enabled",
+                gFeatureFlagClusterWideConfig.isEnabled(serverGlobalParams.featureCompatibility));
 
+            uassert(ErrorCodes::ErrorCodes::NotImplemented,
+                    "setClusterParameter can only run on mongos in sharded clusters",
+                    (serverGlobalParams.clusterRole == ClusterRole::None));
+
+            // TODO SERVER-65249: This will eventually be made specific to the parameter being set
+            // so that some parameters will be able to use setClusterParameter even on standalones.
             uassert(ErrorCodes::IllegalOperation,
-                    "Cannot set cluster parameter, gFeatureFlagClusterWideConfig is not enabled",
-                    gFeatureFlagClusterWideConfig.isEnabledAndIgnoreFCV());
+                    str::stream() << Request::kCommandName << " cannot be run on standalones",
+                    repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
+                        repl::ReplicationCoordinator::modeNone);
 
             std::unique_ptr<ServerParameterService> parameterService =
                 std::make_unique<ClusterParameterService>();
@@ -76,7 +92,7 @@ public:
 
             SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
 
-            invocation.invoke(opCtx, request());
+            invocation.invoke(opCtx, request(), boost::none, kMajorityWriteConcern);
         }
 
     private:

@@ -2650,7 +2650,6 @@ TEST(PipelineOptimizationTest, ChangeStreamLookupSwapsWithIndependentMatch) {
 
     // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
     // filters out newly added events.
-    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
     auto spec = BSON("$changeStream" << BSON(
                          "fullDocument"
                          << "updateLookup"
@@ -2682,7 +2681,6 @@ TEST(PipelineOptimizationTest, ChangeStreamLookupDoesNotSwapWithMatchOnPostImage
 
     // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
     // filters out newly added events.
-    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
     auto spec = BSON("$changeStream" << BSON(
                          "fullDocument"
                          << "updateLookup"
@@ -2712,7 +2710,6 @@ TEST(PipelineOptimizationTest, FullDocumentBeforeChangeLookupSwapsWithIndependen
 
     // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
     // filters out newly added events.
-    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
     auto spec = BSON("$changeStream" << BSON(
                          "fullDocumentBeforeChange"
                          << "required"
@@ -2744,7 +2741,6 @@ TEST(PipelineOptimizationTest, FullDocumentBeforeChangeDoesNotSwapWithMatchOnPre
 
     // We enable the 'showExpandedEvents' flag to avoid injecting an additional $match stage which
     // filters out newly added events.
-    RAIIServerParameterControllerForTest controller("featureFlagChangeStreamsVisibility", true);
     auto spec = BSON("$changeStream" << BSON(
                          "fullDocumentBeforeChange"
                          << "required"
@@ -4027,13 +4023,19 @@ public:
         return new DocumentSourceDeferredMergeSort(expCtx);
     }
 
+
+    static bool canMovePastDuringSplit(const DocumentSource& ds) {
+        return ds.constraints().preservesOrderAndMetadata;
+    }
+
     boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
         DistributedPlanLogic logic;
 
         logic.mergingStage = nullptr;
-        logic.shardsStage = nullptr;
+        logic.shardsStage = this;
         logic.mergeSortPattern = BSON("a" << 1);
         logic.needsSplit = false;
+        logic.canMovePast = canMovePastDuringSplit;
 
         return logic;
     }

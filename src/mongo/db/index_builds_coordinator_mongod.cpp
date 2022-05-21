@@ -45,6 +45,8 @@
 #include "mongo/db/index_build_entry_helpers.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
+#include "mongo/db/s/forwardable_operation_metadata.h"
+#include "mongo/db/s/global_user_write_block_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -64,6 +66,7 @@ namespace {
 MONGO_FAIL_POINT_DEFINE(hangAfterAcquiringIndexBuildSlot);
 MONGO_FAIL_POINT_DEFINE(hangBeforeInitializingIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildAfterSignalPrimaryForCommitReadiness);
+MONGO_FAIL_POINT_DEFINE(hangBeforeRunningIndexBuild);
 
 const StringData kMaxNumActiveUserIndexBuildsServerParameterName = "maxNumActiveUserIndexBuilds"_sd;
 
@@ -161,6 +164,12 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                                                const boost::optional<ResumeIndexInfo>& resumeInfo) {
     const NamespaceStringOrUUID nssOrUuid{dbName, collectionUUID};
 
+    auto writeBlockState = GlobalUserWriteBlockState::get(opCtx);
+
+    invariant(!opCtx->lockState()->isRSTLExclusive(), buildUUID.toString());
+
+    const auto nss = CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(opCtx, nssOrUuid);
+
     {
         // Only operations originating from user connections need to wait while there are more than
         // 'maxNumActiveUserIndexBuilds' index builds currently running.
@@ -183,10 +192,11 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                         replCoord->canAcceptWritesFor(opCtx, nssOrUuid));
             }
 
-            // The check here catches empty index builds and also allows us to stop index
+            // The checks here catch empty index builds and also allow us to stop index
             // builds before waiting for throttling. It may race with the abort at the start
             // of migration so we do check again later.
             uassertStatusOK(tenant_migration_access_blocker::checkIfCanBuildIndex(opCtx, dbName));
+            uassertStatusOK(writeBlockState->checkIfIndexBuildAllowedToStart(opCtx, nss));
 
             stdx::unique_lock<Latch> lk(_throttlingMutex);
             bool messageLogged = false;
@@ -271,12 +281,20 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                                                        invariant(_getIndexBuild(buildUUID)));
                 return migrationStatus;
             }
+
+            auto buildBlockedStatus = writeBlockState->checkIfIndexBuildAllowedToStart(opCtx, nss);
+            if (!buildBlockedStatus.isOK()) {
+                LOGV2(6511603,
+                      "Aborted index build due to user index builds being blocked",
+                      "error"_attr = buildBlockedStatus,
+                      "buildUUID"_attr = buildUUID,
+                      "collectionUUID"_attr = collectionUUID);
+                activeIndexBuilds.unregisterIndexBuild(&_indexBuildsManager,
+                                                       invariant(_getIndexBuild(buildUUID)));
+                return buildBlockedStatus;
+            }
         }
     }
-
-    invariant(!opCtx->lockState()->isRSTLExclusive(), buildUUID.toString());
-
-    const auto nss = CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(opCtx, nssOrUuid);
 
     auto& oss = OperationShardingState::get(opCtx);
 
@@ -306,6 +324,7 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
     // Since index builds occur in a separate thread, client attributes that are audited must be
     // extracted from the client object and passed into the thread separately.
     audit::ImpersonatedClientAttrs impersonatedClientAttrs(opCtx->getClient());
+    ForwardableOperationMetadata forwardableOpMetadata(opCtx);
 
     // The thread pool task will be responsible for signalling the condition variable when the index
     // build thread is done running.
@@ -324,7 +343,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         shardVersion = oss.getShardVersion(nss),
         dbVersion = oss.getDbVersion(dbName),
         resumeInfo,
-        impersonatedClientAttrs = std::move(impersonatedClientAttrs)
+        impersonatedClientAttrs = std::move(impersonatedClientAttrs),
+        forwardableOpMetadata = std::move(forwardableOpMetadata)
     ](auto status) mutable noexcept {
         ScopeGuard onScopeExitGuard([&] {
             stdx::unique_lock<Latch> lk(_throttlingMutex);
@@ -340,6 +360,10 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         }
 
         auto opCtx = Client::getCurrent()->makeOperationContext();
+
+        // Forward the forwardable operation metadata from the external client to this thread's
+        // client.
+        forwardableOpMetadata.setOn(opCtx.get());
 
         // Load the external client's attributes into this thread's client for auditing.
         auto authSession = AuthorizationSession::get(opCtx->getClient());
@@ -384,6 +408,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
 
         // Signal that the index build started successfully.
         startPromise.setWith([] {});
+
+        hangBeforeRunningIndexBuild.pauseWhileSet(opCtx.get());
 
         // Runs the remainder of the index build. Sets the promise result and cleans up the index
         // build.

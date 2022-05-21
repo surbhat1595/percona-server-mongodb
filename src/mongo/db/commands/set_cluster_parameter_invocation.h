@@ -48,16 +48,22 @@ public:
 
 class DBClientService {
 public:
-    virtual Status updateParameterOnDisk(BSONObj query, BSONObj update) = 0;
-    virtual LogicalTime getUpdateClusterTime(OperationContext*) = 0;
+    virtual StatusWith<bool> updateParameterOnDisk(OperationContext* opCtx,
+                                                   BSONObj query,
+                                                   BSONObj update,
+                                                   const WriteConcernOptions&) = 0;
+    virtual Timestamp getUpdateClusterTime(OperationContext*) = 0;
     virtual ~DBClientService() = default;
 };
 
 class ClusterParameterDBClientService final : public DBClientService {
 public:
     ClusterParameterDBClientService(DBDirectClient& dbDirectClient) : _dbClient(dbDirectClient) {}
-    Status updateParameterOnDisk(BSONObj query, BSONObj update) override;
-    LogicalTime getUpdateClusterTime(OperationContext*) override;
+    StatusWith<bool> updateParameterOnDisk(OperationContext* opCtx,
+                                           BSONObj query,
+                                           BSONObj update,
+                                           const WriteConcernOptions&) override;
+    Timestamp getUpdateClusterTime(OperationContext*) override;
 
 private:
     DBDirectClient& _dbClient;
@@ -69,13 +75,13 @@ public:
                                   DBClientService& dbClientService)
         : _sps(std::move(serverParmeterService)), _dbService(dbClientService) {}
 
-    void invoke(OperationContext*, const SetClusterParameter&);
+    bool invoke(OperationContext*,
+                const SetClusterParameter&,
+                boost::optional<Timestamp>,
+                const WriteConcernOptions&);
 
 private:
     std::unique_ptr<ServerParameterService> _sps;
     DBClientService& _dbService;
-
-    Status updateParameterOnDisk(BSONObj query, BSONObj update);
 };
-
 }  // namespace mongo

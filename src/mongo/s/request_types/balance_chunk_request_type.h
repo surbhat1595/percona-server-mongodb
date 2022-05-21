@@ -58,24 +58,14 @@ public:
                                                                   bool requireUUID = true);
 
     /**
-     * Produces a BSON object for the variant of the command, which requests the balancer to move a
-     * chunk to a user-specified shard.
-     */
-    static BSONObj serializeToMoveCommandForConfig(
-        const NamespaceString& nss,
-        const ChunkType& chunk,
-        const ShardId& newShardId,
-        const MigrationSecondaryThrottleOptions& secondaryThrottle,
-        bool waitForDelete,
-        bool forceJumbo);
-
-    /**
      * Produces a BSON object for the variant of the command, which requests the balancer to pick a
      * better location for a chunk.
      */
     static BSONObj serializeToRebalanceCommandForConfig(const NamespaceString& nss,
-                                                        const ChunkType& chunk);
-
+                                                        const ChunkRange& range,
+                                                        const UUID& collectionUUID,
+                                                        const ShardId& owningShard,
+                                                        const ChunkVersion& expectedChunkVersion);
 
     const NamespaceString& getNss() const {
         return _nss;

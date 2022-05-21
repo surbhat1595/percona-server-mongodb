@@ -23,6 +23,7 @@ env.Library(
     target='key_generator',
     source=[
         'btree_key_generator.cpp',
+        'column_key_generator.cpp',
         'expression_keys_private.cpp',
         'sort_key_generator.cpp',
         'wildcard_key_generator.cpp',
@@ -111,6 +112,7 @@ serveronlyEnv.Library(
         '$BUILD_DIR/mongo/db/storage/execution_context',
         '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         '$BUILD_DIR/mongo/db/storage/key_string',
+        '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/vector_clock',
         '$BUILD_DIR/mongo/idl/server_parameter',
@@ -149,6 +151,7 @@ env.CppUnitTest(
     source=[
         '2d_key_generator_test.cpp',
         'btree_key_generator_test.cpp',
+        'column_key_generator_test.cpp',
         'hash_key_generator_test.cpp',
         's2_key_generator_test.cpp',
         's2_bucket_key_generator_test.cpp',

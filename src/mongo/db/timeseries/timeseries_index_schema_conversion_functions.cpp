@@ -68,9 +68,28 @@ std::pair<std::string, std::string> extractControlPrefixAndKey(const StringData&
     return {std::string(field.begin(), fieldIt + 1), std::string(fieldIt + 1, field.end())};
 }
 
+/**
+ * Converts an event-level index spec to a bucket-level index spec.
+ *
+ * If the input is not a valid index spec, this function must either:
+ *  - return an error Status
+ *  - return an invalid index spec
+ */
 StatusWith<BSONObj> createBucketsSpecFromTimeseriesSpec(const TimeseriesOptions& timeseriesOptions,
                                                         const BSONObj& timeseriesIndexSpecBSON,
                                                         bool isShardKeySpec) {
+    if (timeseriesIndexSpecBSON.isEmpty()) {
+        return {ErrorCodes::BadValue, "Empty object is not a valid index spec"_sd};
+    }
+    if (timeseriesIndexSpecBSON.firstElement().fieldNameStringData() == "$hint"_sd ||
+        timeseriesIndexSpecBSON.firstElement().fieldNameStringData() == "$natural"_sd) {
+        return {
+            ErrorCodes::BadValue,
+            str::stream() << "Invalid index spec (perhaps it's a valid hint, that was incorrectly "
+                          << "passed to createBucketsSpecFromTimeseriesSpec): "
+                          << timeseriesIndexSpecBSON};
+    }
+
     auto timeField = timeseriesOptions.getTimeField();
     auto metaField = timeseriesOptions.getMetaField();
 
@@ -472,6 +491,18 @@ bool doesBucketsIndexIncludeMeasurement(OperationContext* opCtx,
     }
 
     return false;
+}
+
+bool isHintIndexKey(const BSONObj& obj) {
+    if (obj.isEmpty())
+        return false;
+    StringData fieldName = obj.firstElement().fieldNameStringData();
+    if (fieldName == "$hint"_sd)
+        return false;
+    if (fieldName == "$natural"_sd)
+        return false;
+
+    return true;
 }
 
 }  // namespace mongo::timeseries

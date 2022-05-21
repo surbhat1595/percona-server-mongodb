@@ -34,7 +34,8 @@ let txnWriteTs;
 
 const mongos = testColl.getMongo();
 
-const internalTransactionsEnabled = areInternalTransactionsEnabled(mongos);
+const updateDocumentShardKeyUsingTransactionApiEnabled =
+    isUpdateDocumentShardKeyUsingTransactionApiEnabled(mongos);
 
 const recipientShardNames = reshardingTest.recipientShardNames;
 reshardingTest.withReshardingInBackground(  //
@@ -108,7 +109,7 @@ reshardingTest.withReshardingInBackground(  //
             // version to be bumped. The StaleConfig error won't be automatically retried by mongos
             // for the second statement in the transaction (the insert) and would lead to a
             // NoSuchTransaction error.
-            if (internalTransactionsEnabled) {
+            if (updateDocumentShardKeyUsingTransactionApiEnabled) {
                 // The handling of WCOS errors with internal transactions advances the router's
                 // notion of the transaction "statement" number between the initial update, the
                 // delete, and the insert, so if the shard version changes and is detected by the
@@ -133,7 +134,7 @@ const donorOplogColl0 = donor0.getCollection('local.oplog.rs');
 
 function assertOplogEntryIsDeleteInsertApplyOps(entry, isRetryableWrite) {
     assert(entry.o.hasOwnProperty('applyOps'), entry);
-    if (internalTransactionsEnabled && isRetryableWrite) {
+    if (updateDocumentShardKeyUsingTransactionApiEnabled && isRetryableWrite) {
         // With internal transactions the applyOps array for a retryable write update will have a
         // noop entry at the front.
         assert.eq(entry.o.applyOps.length, 3, entry);

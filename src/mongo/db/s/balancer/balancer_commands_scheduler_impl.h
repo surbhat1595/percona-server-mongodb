@@ -273,7 +273,8 @@ public:
         commandBuilder.append(kCommandName, getNameSpace().toString())
             .appendArray(kBounds, boundsArrayBuilder.arr())
             .append(kShardName, getTarget().toString())
-            .append(kEpoch, _version.epoch());
+            .append(kEpoch, _version.epoch())
+            .append(kTimestamp, _version.getTimestamp());
 
         _version.serializeToBSON(ChunkVersion::kShardVersionField, &commandBuilder);
 
@@ -289,7 +290,7 @@ private:
     static const std::string kBounds;
     static const std::string kShardName;
     static const std::string kEpoch;
-    static const std::string kConfig;
+    static const std::string kTimestamp;
 };
 
 class AutoSplitVectorCommandInfo : public CommandInfo {
@@ -392,6 +393,7 @@ public:
             .append(kShardName, getTarget().toString())
             .append(kKeyPattern, _shardKeyPattern)
             .append(kEpoch, _version.epoch())
+            .append(kTimestamp, _version.getTimestamp())
             .append(kLowerBound, _lowerBoundKey)
             .append(kUpperBound, _upperBoundKey)
             .append(kSplitKeys, _splitPoints);
@@ -411,6 +413,7 @@ private:
     static const std::string kLowerBound;
     static const std::string kUpperBound;
     static const std::string kEpoch;
+    static const std::string kTimestamp;
     static const std::string kSplitKeys;
 };
 
@@ -552,7 +555,8 @@ public:
                                       bool issuedByRemoteUser) override;
 
     SemiFuture<void> requestMoveRange(OperationContext* opCtx,
-                                      ShardsvrMoveRange& request,
+                                      const ShardsvrMoveRange& request,
+                                      const WriteConcernOptions& secondaryThrottleWC,
                                       bool issuedByRemoteUser) override;
 
     SemiFuture<void> requestMergeChunks(OperationContext* opCtx,
@@ -635,6 +639,12 @@ private:
 
     void _enqueueRequest(WithLock, RequestData&& request);
 
+    /**
+     * Clears any persisted state and releases any distributed lock associated to the list of
+     * requests specified.
+     * This method must not be called while holding any mutex (this could cause deadlocks if a
+     * stepdown request is also being served).
+     */
     void _performDeferredCleanup(
         OperationContext* opCtx,
         const stdx::unordered_map<UUID, RequestData, UUID::Hash>& requestsHoldingResources);

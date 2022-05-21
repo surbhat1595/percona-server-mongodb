@@ -26,6 +26,7 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
 #include "mongo/db/catalog/collection_catalog.h"
 
 #include <algorithm>
@@ -68,14 +69,20 @@ public:
         ServiceContextMongoDTest::setUp();
         opCtx = makeOperationContext();
 
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(colUUID, nss);
         col = CollectionPtr(collection.get(), CollectionPtr::NoYieldTag{});
         // Register dummy collection in catalog.
-        catalog.registerCollection(opCtx.get(), colUUID, std::move(collection));
+        catalog.registerCollection(opCtx.get(), colUUID, collection);
+
+        // Validate that kNumCollectionReferencesStored is correct, add one reference for the one we
+        // hold in this function.
+        ASSERT_EQUALS(collection.use_count(),
+                      CollectionCatalog::kNumCollectionReferencesStored + 1);
     }
 
 protected:
-    CollectionCatalog catalog;
+    std::shared_ptr<CollectionCatalog> sharedCatalog = std::make_shared<CollectionCatalog>();
+    CollectionCatalog& catalog = *sharedCatalog;
     ServiceContext::UniqueOperationContext opCtx;
     NamespaceString nss;
     CollectionPtr col;
@@ -99,6 +106,7 @@ public:
 
             dbMap["foo"].insert(std::make_pair(fooUuid, fooColl.get()));
             dbMap["bar"].insert(std::make_pair(barUuid, barColl.get()));
+
             catalog.registerCollection(&opCtx, fooUuid, fooColl);
             catalog.registerCollection(&opCtx, barUuid, barColl);
         }
@@ -437,23 +445,75 @@ TEST_F(CollectionCatalogTest, InsertAfterLookup) {
 }
 
 TEST_F(CollectionCatalogTest, OnDropCollection) {
+    auto yieldableColl = catalog.lookupCollectionByUUID(opCtx.get(), colUUID);
+    ASSERT(yieldableColl);
+    ASSERT_EQUALS(yieldableColl, col);
+
+    // Yielding resets a CollectionPtr's internal state to be restored later, provided
+    // the collection has not been dropped or renamed.
+    ASSERT_EQ(yieldableColl->uuid(), colUUID);  // Correct collection UUID is required for restore.
+    yieldableColl.yield();
+    ASSERT_FALSE(yieldableColl);
+
+    // The global catalog is used to refresh the CollectionPtr's internal state, so we temporarily
+    // replace the global instance initialized in the service context test fixture with our own.
+    CollectionCatalogStasher catalogStasher(opCtx.get(), sharedCatalog);
+
+    // Before dropping collection, confirm that the CollectionPtr can be restored successfully.
+    yieldableColl.restore();
+    ASSERT(yieldableColl);
+    ASSERT_EQUALS(yieldableColl, col);
+
+    // Reset CollectionPtr for post-drop restore test.
+    yieldableColl.yield();
+    ASSERT_FALSE(yieldableColl);
+
     catalog.deregisterCollection(opCtx.get(), colUUID);
     // Ensure the lookup returns a null pointer upon removing the colUUID entry.
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
+
+    // After dropping the collection, we should fail to restore the CollectionPtr.
+    yieldableColl.restore();
+    ASSERT_FALSE(yieldableColl);
 }
 
 TEST_F(CollectionCatalogTest, RenameCollection) {
     auto uuid = UUID::gen();
     NamespaceString oldNss(nss.db(), "oldcol");
-    std::shared_ptr<Collection> collShared = std::make_shared<CollectionMock>(oldNss);
+    std::shared_ptr<Collection> collShared = std::make_shared<CollectionMock>(uuid, oldNss);
     auto collection = collShared.get();
     catalog.registerCollection(opCtx.get(), uuid, std::move(collShared));
-    ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), uuid), collection);
+    auto yieldableColl = catalog.lookupCollectionByUUID(opCtx.get(), uuid);
+    ASSERT(yieldableColl);
+    ASSERT_EQUALS(yieldableColl, collection);
+
+    // Yielding resets a CollectionPtr's internal state to be restored later, provided
+    // the collection has not been dropped or renamed.
+    ASSERT_EQ(yieldableColl->uuid(), uuid);  // Correct collection UUID is required for restore.
+    yieldableColl.yield();
+    ASSERT_FALSE(yieldableColl);
+
+    // The global catalog is used to refresh the CollectionPtr's internal state, so we temporarily
+    // replace the global instance initialized in the service context test fixture with our own.
+    CollectionCatalogStasher catalogStasher(opCtx.get(), sharedCatalog);
+
+    // Before renaming collection, confirm that the CollectionPtr can be restored successfully.
+    yieldableColl.restore();
+    ASSERT(yieldableColl);
+    ASSERT_EQUALS(yieldableColl, collection);
+
+    // Reset CollectionPtr for post-rename restore test.
+    yieldableColl.yield();
+    ASSERT_FALSE(yieldableColl);
 
     NamespaceString newNss(NamespaceString(nss.db(), "newcol"));
     ASSERT_OK(collection->rename(opCtx.get(), newNss, false));
     ASSERT_EQ(collection->ns(), newNss);
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), uuid), collection);
+
+    // After renaming the collection, we should fail to restore the CollectionPtr.
+    yieldableColl.restore();
+    ASSERT_FALSE(yieldableColl);
 }
 
 TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsOldNSSIfDropped) {
@@ -620,9 +680,10 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
         catalog.registerCollection(opCtx.get(), uuid, std::move(newColl));
     }
 
-    // One dbName with only an invisible collection does not appear in dbNames.
-    auto invisibleCollA = catalog.lookupCollectionByNamespaceForMetadataWrite(
-        opCtx.get(), CollectionCatalog::LifetimeMode::kInplace, aColl);
+    // One dbName with only an invisible collection does not appear in dbNames. Use const_cast to
+    // modify the collection in the catalog inplace, this bypasses copy-on-write behavior.
+    auto invisibleCollA =
+        const_cast<Collection*>(catalog.lookupCollectionByNamespace(opCtx.get(), aColl).get());
     invisibleCollA->setCommitted(false);
 
     Lock::DBLock dbLock(opCtx.get(), "dbA", MODE_S);
@@ -644,8 +705,10 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
         std::vector<NamespaceString> dCollList = dbDNss;
         dCollList.erase(std::find(dCollList.begin(), dCollList.end(), nss));
 
-        auto invisibleCollD = catalog.lookupCollectionByNamespaceForMetadataWrite(
-            opCtx.get(), CollectionCatalog::LifetimeMode::kInplace, nss);
+        // Use const_cast to modify the collection in the catalog inplace, this bypasses
+        // copy-on-write behavior.
+        auto invisibleCollD =
+            const_cast<Collection*>(catalog.lookupCollectionByNamespace(opCtx.get(), nss).get());
         invisibleCollD->setCommitted(false);
 
         Lock::DBLock dbLock(opCtx.get(), "dbD", MODE_S);
@@ -662,8 +725,10 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
 
     // If all dbNames consist only of invisible collections, none of these dbs is visible.
     for (auto& nss : nsss) {
-        auto invisibleColl = catalog.lookupCollectionByNamespaceForMetadataWrite(
-            opCtx.get(), CollectionCatalog::LifetimeMode::kInplace, nss);
+        // Use const_cast to modify the collection in the catalog inplace, this bypasses
+        // copy-on-write behavior.
+        auto invisibleColl =
+            const_cast<Collection*>(catalog.lookupCollectionByNamespace(opCtx.get(), nss).get());
         invisibleColl->setCommitted(false);
     }
 

@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/local_oplog_info.h"
+#include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -851,7 +852,13 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
         getRetryableWriteTransactionParticipantCatalog(opCtx);
     if (_isInternalSessionForRetryableWrite()) {
         retryableWriteTxnParticipantCatalog.addParticipant(*this);
-    } else {
+    } else if (!_isInternalSessionForNonRetryableWrite()) {
+        // Don't reset the RetryableWriteTransactionParticipantCatalog upon starting an internal
+        // transaction for a non-retryable write since the transaction is unrelated to the
+        // retryable write or transaction in the original session that the write runs in. In
+        // addition, it is incorrect to clear the transaction history in the original session since
+        // the history should be kept until there is a retryable write or transaction with a higher
+        // txnNumber.
         retryableWriteTxnParticipantCatalog.reset();
     }
 
@@ -2145,11 +2152,12 @@ void TransactionParticipant::Participant::_abortTransactionOnSession(OperationCo
     const auto nextState = o().txnState.isPrepared() ? TransactionState::kAbortedWithPrepare
                                                      : TransactionState::kAbortedWithoutPrepare;
 
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
+    stdx::unique_lock<Client> lk(*opCtx->getClient());
     if (o().txnResourceStash && opCtx->recoveryUnit()->getNoEvictionAfterRollback()) {
         o(lk).txnResourceStash->setNoEvictionAfterRollback();
     }
-    _resetTransactionState(lk, nextState);
+    _resetTransactionStateAndUnlock(&lk, nextState);
+
     _resetRetryableWriteState();
 }
 
@@ -2179,7 +2187,7 @@ void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
 
     opCtx->lockState()->unsetMaxLockTimeout();
-    invariant(UncommittedCollections::get(opCtx).isEmpty());
+    invariant(UncommittedCatalogUpdates::get(opCtx).isEmpty());
 }
 
 void TransactionParticipant::Participant::_checkIsCommandValidWithTxnState(
@@ -2657,7 +2665,7 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
         "{lsid}",
         "New transaction started",
         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
-        "lsid"_attr = _sessionId().getId(),
+        "lsid"_attr = _sessionId(),
         "apiParameters"_attr = APIParameters::get(opCtx).toBSON());
 
     // Abort the existing transaction if it's not prepared, committed, or aborted.
@@ -2665,18 +2673,18 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
         _abortTransactionOnSession(opCtx);
     }
 
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
+    stdx::unique_lock<Client> lk(*opCtx->getClient());
     o(lk).activeTxnNumberAndRetryCounter = txnNumberAndRetryCounter;
     o(lk).lastWriteOpTime = repl::OpTime();
 
     // Reset the retryable writes state
     _resetRetryableWriteState();
 
-    // Reset the transactional state
-    _resetTransactionState(lk, TransactionState::kNone);
-
     // Reset the transactions metrics
     o(lk).transactionMetricsObserver.resetSingleTransactionStats(txnNumberAndRetryCounter);
+
+    // Reset the transactional state
+    _resetTransactionStateAndUnlock(&lk, TransactionState::kNone);
 }
 
 void RetryableWriteTransactionParticipantCatalog::addParticipant(
@@ -2729,8 +2737,10 @@ void TransactionParticipant::Participant::_refreshFromStorageIfNeeded(OperationC
                                                                       bool fetchOplogEntries) {
     _refreshSelfFromStorageIfNeeded(opCtx, fetchOplogEntries);
     if (!_isInternalSessionForNonRetryableWrite()) {
-        // Internal sessions for writes without a txnNumber runs independently of the original
-        // session that those write run in, so there is no need to do a cross-session refresh.
+        // Internal sessions for non-retryable writes only support transactions and those
+        // transactions are not retryable or related to the retryable write or transaction the
+        // original sessions that those writes run in, so there is no need to do a cross-session
+        // refresh.
         _refreshActiveTransactionParticipantsFromStorageIfNeeded(opCtx, fetchOplogEntries);
     }
 }
@@ -2939,32 +2949,42 @@ void TransactionParticipant::Participant::_resetRetryableWriteState() {
     p().hasIncompleteHistory = false;
 }
 
-void TransactionParticipant::Participant::_resetTransactionState(
-    WithLock wl, TransactionState::StateFlag state) {
+void TransactionParticipant::Participant::_resetTransactionStateAndUnlock(
+    stdx::unique_lock<Client>* lk, TransactionState::StateFlag state) {
+    invariant(lk && lk->owns_lock());
+
     // If we are transitioning to kNone, we are either starting a new transaction or aborting a
     // prepared transaction for rollback. In the latter case, we will need to relax the
     // invariant that prevents transitioning from kPrepared to kNone.
     if (o().txnState.isPrepared() && state == TransactionState::kNone) {
-        o(wl).txnState.transitionTo(
+        o(*lk).txnState.transitionTo(
             state, TransactionState::TransitionValidation::kRelaxTransitionValidation);
     } else {
-        o(wl).txnState.transitionTo(state);
+        o(*lk).txnState.transitionTo(state);
     }
 
     p().transactionOperationBytes = 0;
     p().transactionOperations.clear();
     p().transactionStmtIds.clear();
-    o(wl).prepareOpTime = repl::OpTime();
-    o(wl).recoveryPrepareOpTime = repl::OpTime();
+    o(*lk).prepareOpTime = repl::OpTime();
+    o(*lk).recoveryPrepareOpTime = repl::OpTime();
     p().autoCommit = boost::none;
     p().needToWriteAbortEntry = false;
 
-    // Release any locks held by this participant and abort the storage transaction.
-    o(wl).txnResourceStash = boost::none;
+    // Swap out txnResourceStash while holding the Client lock, then release any locks held by this
+    // participant and abort the storage transaction after releasing the lock. The transaction
+    // rollback can block indefinitely if the storage engine recruits it for eviction. In that case
+    // we should not be holding the Client lock, as that would block tasks like the periodic
+    // transaction killer from making progress.
+    using std::swap;
+    boost::optional<TxnResources> temporary;
+    swap(o(*lk).txnResourceStash, temporary);
+    lk->unlock();
+    temporary = boost::none;
 }
 
 void TransactionParticipant::Participant::invalidate(OperationContext* opCtx) {
-    stdx::lock_guard<Client> lg(*opCtx->getClient());
+    stdx::unique_lock<Client> lk(*opCtx->getClient());
 
     uassert(ErrorCodes::PreparedTransactionInProgress,
             "Cannot invalidate prepared transaction",
@@ -2972,7 +2992,7 @@ void TransactionParticipant::Participant::invalidate(OperationContext* opCtx) {
 
     // Invalidate the session and clear both the retryable writes and transactional states on
     // this participant.
-    _invalidate(lg);
+    _invalidate(lk);
 
     _resetRetryableWriteState();
     // Get the RetryableWriteTransactionParticipantCatalog without checking the opCtx has checked
@@ -2981,12 +3001,13 @@ void TransactionParticipant::Participant::invalidate(OperationContext* opCtx) {
     auto& retryableWriteTxnParticipantCatalog =
         getRetryableWriteTransactionParticipantCatalog(_session());
     if (!_isInternalSessionForNonRetryableWrite()) {
-        // Internal sessions for writes without a txnNumber runs independently of the original
-        // session that those write run in.
+        // Don't invalidate the RetryableWriteTransactionParticipantCatalog upon invalidating an
+        // internal transaction for a non-retryable write since the transaction is unrelated to
+        // the retryable write or transaction in the original session that the write runs in.
         retryableWriteTxnParticipantCatalog.invalidate();
     }
 
-    _resetTransactionState(lg, TransactionState::kNone);
+    _resetTransactionStateAndUnlock(&lk, TransactionState::kNone);
 }
 
 boost::optional<repl::OplogEntry> TransactionParticipant::Participant::checkStatementExecuted(

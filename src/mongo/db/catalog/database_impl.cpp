@@ -49,7 +49,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/uncommitted_collections.h"
+#include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -169,15 +169,13 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
 
     auto catalog = CollectionCatalog::get(opCtx);
     for (const auto& uuid : catalog->getAllCollectionUUIDsFromDb(_name)) {
-        CollectionWriter collection(
-            opCtx,
-            uuid,
-            opCtx->lockState()->isW() ? CollectionCatalog::LifetimeMode::kInplace
-                                      : CollectionCatalog::LifetimeMode::kManagedInWriteUnitOfWork);
+        CollectionWriter collection(opCtx, uuid);
         invariant(collection);
         // If this is called from the repair path, the collection is already initialized.
         if (!collection->isInitialized()) {
+            WriteUnitOfWork wuow(opCtx);
             collection.getWritableCollection()->init(opCtx);
+            wuow.commit();
         }
     }
 
@@ -229,6 +227,12 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
         // Refresh our copy of the catalog, since we may have modified it above.
         catalog = CollectionCatalog::get(opCtx);
         try {
+            struct ViewToDrop {
+                NamespaceString name;
+                NamespaceString viewOn;
+                NamespaceString resolvedNs;
+            };
+            std::vector<ViewToDrop> viewsToDrop;
             catalog->iterateViews(opCtx, _name.dbName(), [&](const ViewDefinition& view) {
                 auto swResolvedView =
                     view_catalog_helpers::resolveView(opCtx, catalog, view.name(), boost::none);
@@ -249,27 +253,35 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
                     return true;
                 }
 
-                LOGV2(6260803,
-                      "Removing view on collection not restored",
-                      "view"_attr = view.name(),
-                      "viewOn"_attr = view.viewOn(),
-                      "resolvedNs"_attr = resolvedNs);
-
-                WriteUnitOfWork wuow(opCtx);
-                Status status = catalog->dropView(opCtx, view.name());
-                if (!status.isOK()) {
-                    LOGV2_WARNING(6260804,
-                                  "Failed to remove view on unrestored collection",
-                                  "view"_attr = view.name(),
-                                  "viewOn"_attr = view.viewOn(),
-                                  "resolvedNs"_attr = resolvedNs,
-                                  "reason"_attr = status.reason());
-                    return true;
-                }
-                wuow.commit();
+                // Defer the view to drop so we don't do it while iterating. In case we're updating
+                // the catalog inplace, we cannot modify the same data structure as we're iterating
+                // on.
+                viewsToDrop.push_back({view.name(), view.viewOn(), resolvedNs});
 
                 return true;
             });
+
+            // Drop all collected views from above.
+            for (const auto& view : viewsToDrop) {
+                LOGV2(6260803,
+                      "Removing view on collection not restored",
+                      "view"_attr = view.name,
+                      "viewOn"_attr = view.viewOn,
+                      "resolvedNs"_attr = view.resolvedNs);
+
+                WriteUnitOfWork wuow(opCtx);
+                Status status = catalog->dropView(opCtx, view.name);
+                if (!status.isOK()) {
+                    LOGV2_WARNING(6260804,
+                                  "Failed to remove view on unrestored collection",
+                                  "view"_attr = view.name,
+                                  "viewOn"_attr = view.viewOn,
+                                  "resolvedNs"_attr = view.resolvedNs,
+                                  "reason"_attr = status.reason());
+                    continue;
+                }
+                wuow.commit();
+            }
         } catch (const ExceptionFor<ErrorCodes::InvalidViewDefinition>& e) {
             LOGV2_WARNING(6260805,
                           "Failed to access the view catalog during restore",
@@ -428,7 +440,7 @@ Status DatabaseImpl::dropCollection(OperationContext* opCtx,
                                     NamespaceString nss,
                                     repl::OpTime dropOpTime) const {
     // Cannot drop uncommitted collections.
-    invariant(!UncommittedCollections::getForTxn(opCtx, nss));
+    invariant(!UncommittedCatalogUpdates::isCreatedCollection(opCtx, nss));
 
     auto catalog = CollectionCatalog::get(opCtx);
 
@@ -863,7 +875,8 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
     auto collection = ownedCollection.get();
     ownedCollection->init(opCtx);
     ownedCollection->setCommitted(false);
-    UncommittedCollections::addToTxn(opCtx, std::move(ownedCollection));
+
+    CollectionCatalog::get(opCtx)->onCreateCollection(opCtx, std::move(ownedCollection));
     openCreateCollectionWindowFp.executeIf([&](const BSONObj& data) { sleepsecs(3); },
                                            [&](const BSONObj& data) {
                                                const auto collElem = data["collectionNS"];

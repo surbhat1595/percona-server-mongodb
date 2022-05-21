@@ -40,7 +40,6 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/multi_index_block_gen.h"
-#include "mongo/db/catalog/uncommitted_collections.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/index/multikey_paths.h"
@@ -87,17 +86,15 @@ size_t getEachIndexBuildMaxMemoryUsageBytes(size_t numIndexSpecs) {
 }
 
 Status timeseriesMixedSchemaDataFailure(const Collection* collection) {
-    // TODO SERVER-61070: Re-word the error message below if necessary and add a URL for
-    // workarounds.
     return Status(
         ErrorCodes::CannotCreateIndex,
-        str::stream() << "Index build on collection '" << collection->ns() << "' ("
-                      << collection->uuid()
-                      << ") failed due to the detection of mixed-schema data in the "
-                      << "time-series buckets collection. Starting as of v5.2, time-series "
-                      << "measurement bucketing has been modified to ensure that newly created "
-                      << "time-series buckets do not contain mixed-schema data. For workarounds, "
-                      << "see: <url>");
+        str::stream()
+            << "Index build on collection '" << collection->ns() << "' (" << collection->uuid()
+            << ") failed due to the detection of mixed-schema data in the "
+            << "time-series buckets collection. Starting as of v5.2, time-series "
+            << "measurement bucketing has been modified to ensure that newly created "
+            << "time-series buckets do not contain mixed-schema data. For details, "
+            << "see: https://www.mongodb.com/docs/manual/core/timeseries/timeseries-limitations/");
 }
 
 }  // namespace
@@ -130,7 +127,7 @@ void MultiIndexBlock::abortIndexBuild(OperationContext* opCtx,
     }
 
     auto nss = collection->ns();
-    UncommittedCollections::get(opCtx).invariantHasExclusiveAccessToCollection(opCtx, nss);
+    CollectionCatalog::get(opCtx)->invariantHasExclusiveAccessToCollection(opCtx, nss);
 
     while (true) {
         try {

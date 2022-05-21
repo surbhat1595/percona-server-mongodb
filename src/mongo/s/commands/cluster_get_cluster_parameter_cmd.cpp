@@ -144,9 +144,12 @@ public:
                 // Sort and find the set difference of the requested parameters and the parameters
                 // returned.
                 std::vector<std::string> defaultParameterNames;
+
                 defaultParameterNames.reserve(requestedParameterNames.size() -
                                               onDiskParameterNames.size());
+
                 std::sort(onDiskParameterNames.begin(), onDiskParameterNames.end());
+                std::sort(requestedParameterNames.begin(), requestedParameterNames.end());
                 std::set_difference(requestedParameterNames.begin(),
                                     requestedParameterNames.end(),
                                     onDiskParameterNames.begin(),
@@ -156,7 +159,6 @@ public:
                 for (const auto& defaultParameterName : defaultParameterNames) {
                     auto defaultParameter = clusterParameters->get(defaultParameterName);
                     BSONObjBuilder bob;
-                    bob.append("_id"_sd, defaultParameterName);
                     defaultParameter->append(opCtx, bob, defaultParameterName);
                     retrievedParameters.push_back(bob.obj());
                 }

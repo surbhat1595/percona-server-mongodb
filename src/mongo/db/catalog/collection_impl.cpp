@@ -1280,6 +1280,15 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
                   "Cannot remove from a capped collection in a multi-document transaction");
     }
 
+    if (_shared->_needCappedLock) {
+        // X-lock the metadata resource for this capped collection until the end of the WUOW. This
+        // prevents the primary from executing with more concurrency than secondaries and protects
+        // '_cappedFirstRecord'.
+        // See SERVER-21646.
+        Lock::ResourceLock heldUntilEndOfWUOW{
+            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
+    }
+
     std::vector<OplogSlot> oplogSlots;
     auto retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kNone;
     if (storeDeletedDoc == Collection::StoreDeletedDoc::On && !getRecordPreImages() &&
@@ -2030,8 +2039,8 @@ void CollectionImpl::indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntr
     _indexCatalog->indexBuildSuccess(opCtx, this, index);
 }
 
-void CollectionImpl::establishOplogCollectionForLogging(OperationContext* opCtx) {
-    repl::establishOplogCollectionForLogging(opCtx, this);
+void CollectionImpl::establishOplogCollectionForLogging(OperationContext* opCtx) const {
+    repl::establishOplogCollectionForLogging(opCtx, {this, CollectionPtr::NoYieldTag{}});
 }
 
 StatusWith<int> CollectionImpl::checkMetaDataForIndex(const std::string& indexName,
@@ -2170,7 +2179,7 @@ Status CollectionImpl::prepareForIndexBuild(OperationContext* opCtx,
                        md.insertIndex(std::move(indexMetaData));
                    });
 
-    return durableCatalog->createIndex(opCtx, getCatalogId(), getCollectionOptions(), spec);
+    return durableCatalog->createIndex(opCtx, getCatalogId(), ns(), getCollectionOptions(), spec);
 }
 
 boost::optional<UUID> CollectionImpl::getIndexBuildUUID(StringData indexName) const {

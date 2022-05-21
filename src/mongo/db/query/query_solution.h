@@ -33,6 +33,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj_comparator_interface.h"
+#include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/fts/fts_query.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
@@ -75,6 +76,8 @@ class ProvidedSortSet {
 public:
     ProvidedSortSet(BSONObj pattern, std::set<std::string> ignoreFields)
         : _baseSortPattern(std::move(pattern)), _ignoredFields(std::move(ignoreFields)) {}
+    ProvidedSortSet(BSONObj pattern)
+        : _baseSortPattern(std::move(pattern)), _ignoredFields(std::set<std::string>()) {}
     ProvidedSortSet() = default;
 
     /**
@@ -440,6 +443,7 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
         return STAGE_COLLSCAN;
     }
 
+    virtual void computeProperties() override;
     virtual void appendToString(str::stream* ss, int indent) const;
 
     bool fetched() const {
@@ -449,6 +453,11 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
         return FieldAvailability::kFullyProvided;
     }
     bool sortedByDiskLoc() const {
+        // It's possible this is overly conservative. By definition
+        // a collection scan is sorted by its record ids, so if
+        // we're scanning forward this might be true. However,
+        // in practice this is only important for choosing between
+        // hash and merge for index intersection.
         return false;
     }
 
@@ -464,6 +473,13 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
     // If present, this parameter sets the start point of a reverse scan or the end point of a
     // forward scan.
     boost::optional<RecordIdBound> maxRecord;
+
+    // If present, this parameter denotes the clustering info on the collection
+    boost::optional<ClusteredIndexSpec> clusteredIndex;
+
+    // Are the query and collection using the same collation?
+    // Or are the bounds excluding situations where collation matters?
+    bool hasCompatibleCollation;
 
     // If true, the collection scan will return a token that can be used to resume the scan.
     bool requestResumeToken = false;
@@ -498,7 +514,11 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
 };
 
 struct ColumnIndexScanNode : public QuerySolutionNode {
-    ColumnIndexScanNode(ColumnIndexEntry);
+    ColumnIndexScanNode(ColumnIndexEntry,
+                        std::set<std::string> outputFields,
+                        std::set<std::string> matchFields,
+                        StringMap<std::unique_ptr<MatchExpression>> filtersByPath,
+                        std::unique_ptr<MatchExpression> postAssemblyFilter);
 
     virtual StageType getType() const {
         return STAGE_COLUMN_IXSCAN;
@@ -510,12 +530,8 @@ struct ColumnIndexScanNode : public QuerySolutionNode {
         return false;
     }
     FieldAvailability getFieldAvailability(const std::string& field) const {
-        for (const auto& availableField : fields) {
-            if (field == availableField) {
-                return FieldAvailability::kFullyProvided;
-            }
-        }
-        return FieldAvailability::kNotProvided;
+        return allFields.find(field) != allFields.end() ? FieldAvailability::kFullyProvided
+                                                        : FieldAvailability::kNotProvided;
     }
     bool sortedByDiskLoc() const {
         return true;
@@ -526,13 +542,40 @@ struct ColumnIndexScanNode : public QuerySolutionNode {
     }
 
     QuerySolutionNode* clone() const {
-        return new ColumnIndexScanNode(indexEntry);
+        StringMap<std::unique_ptr<MatchExpression>> clonedFiltersByPath;
+        for (auto&& [path, filter] : filtersByPath) {
+            clonedFiltersByPath[path] = filter->shallowClone();
+        }
+        return new ColumnIndexScanNode(indexEntry,
+                                       outputFields,
+                                       matchFields,
+                                       std::move(clonedFiltersByPath),
+                                       postAssemblyFilter->shallowClone());
     }
 
     ColumnIndexEntry indexEntry;
 
+    // The fields we need to output. Dot separated path names.
+    std::set<std::string> outputFields;
+
+    // The fields which are referenced by any and all filters - either in 'filtersByPath' or
+    // 'postAssemblyFilter'.
+    std::set<std::string> matchFields;
+
+    // A column scan can apply a filter to the columns directly while scanning, or to a document
+    // assembled from the scanned columns.
+
+    // Filters to apply to a column directly while scanning. Maps the path to the filter for that
+    // column. Empty if there are none.
     StringMap<std::unique_ptr<MatchExpression>> filtersByPath;
-    std::vector<std::string> fields;
+
+    // An optional filter to apply after assembling a document from all scanned columns. For
+    // example: {$or: [{a: 2}, {b: 2}]}.
+    std::unique_ptr<MatchExpression> postAssemblyFilter;
+
+    // A cached copy of the union of the above two field sets which we expect to be frequently asked
+    // for.
+    std::set<std::string> allFields;
 };
 
 /**
@@ -1339,11 +1382,13 @@ struct GroupNode : public QuerySolutionNode {
     GroupNode(std::unique_ptr<QuerySolutionNode> child,
               boost::intrusive_ptr<Expression> groupByExpression,
               std::vector<AccumulationStatement> accs,
-              bool merging)
+              bool merging,
+              bool shouldProduceBson)
         : QuerySolutionNode(std::move(child)),
           groupByExpression(groupByExpression),
           accumulators(std::move(accs)),
-          doingMerge(merging) {
+          doingMerge(merging),
+          shouldProduceBson(shouldProduceBson) {
         // Use the DepsTracker to extract the fields that the 'groupByExpression' and accumulator
         // expressions depend on.
         for (auto& groupByExprField : groupByExpression->getDependencies().fields) {
@@ -1389,6 +1434,10 @@ struct GroupNode : public QuerySolutionNode {
     // the fields in the 'groupByExpressions' and the fields in the input Expressions of the
     // 'accumulators'.
     StringSet requiredFields;
+
+    // If set to true, generated SBE plan will produce result as BSON object. If false,
+    // 'sbe::Object' is produced instead.
+    bool shouldProduceBson;
 };
 
 /**
@@ -1413,6 +1462,9 @@ struct EqLookupNode : public QuerySolutionNode {
 
         // Execute the join by iterating over the foreign collection for each local key.
         kNestedLoopJoin,
+
+        // Create a plan for a non existent foreign collection.
+        kNonExistentForeignCollection,
     };
 
     static StringData serializeLookupStrategy(LookupStrategy strategy) {
@@ -1423,6 +1475,8 @@ struct EqLookupNode : public QuerySolutionNode {
                 return "IndexedLoopJoin";
             case EqLookupNode::LookupStrategy::kNestedLoopJoin:
                 return "NestedLoopJoin";
+            case EqLookupNode::LookupStrategy::kNonExistentForeignCollection:
+                return "NonExistentForeignCollection";
             default:
                 uasserted(6357204, "Unknown $lookup strategy type");
         }
@@ -1432,12 +1486,14 @@ struct EqLookupNode : public QuerySolutionNode {
                  const std::string& foreignCollection,
                  const FieldPath& joinFieldLocal,
                  const FieldPath& joinFieldForeign,
-                 const FieldPath& joinField)
+                 const FieldPath& joinField,
+                 bool shouldProduceBson)
         : QuerySolutionNode(std::move(child)),
           foreignCollection(foreignCollection),
           joinFieldLocal(joinFieldLocal),
           joinFieldForeign(joinFieldForeign),
-          joinField(joinField) {}
+          joinField(joinField),
+          shouldProduceBson(shouldProduceBson) {}
 
     StageType getType() const override {
         return STAGE_EQ_LOOKUP;
@@ -1504,6 +1560,12 @@ struct EqLookupNode : public QuerySolutionNode {
      * collection. Set to 'boost::none' by default and if a non-indexed strategy is chosen.
      */
     boost::optional<IndexEntry> idxEntry = boost::none;
+
+    /**
+     * If set to true, generated SBE plan will produce result as BSON object. If false,
+     * 'sbe::Object' is produced instead.
+     */
+    bool shouldProduceBson;
 };
 
 struct SentinelNode : public QuerySolutionNode {

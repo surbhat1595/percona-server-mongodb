@@ -336,7 +336,7 @@ public:
 
         int binDataLen;
         auto binData = elem.binData(binDataLen);
-        if (!binDataLen)
+        if (static_cast<size_t>(binDataLen) < sizeof(FleBlobHeader))
             return false;
 
         auto fleBlobSubType =
@@ -414,8 +414,12 @@ public:
             case EncryptedBinDataType::kFLE2EqualityIndexedValue:
             case EncryptedBinDataType::kFLE2UnindexedEncryptedValue: {
                 // Verify the type of the encrypted data.
-                auto fleBlob = reinterpret_cast<const FleBlobHeader*>(binData);
-                return typeSet().hasType(static_cast<BSONType>(fleBlob->originalBsonType));
+                if (typeSet().isEmpty()) {
+                    return true;
+                } else {
+                    auto fleBlob = reinterpret_cast<const FleBlobHeader*>(binData);
+                    return typeSet().hasType(static_cast<BSONType>(fleBlob->originalBsonType));
+                }
             }
             default:
                 return false;

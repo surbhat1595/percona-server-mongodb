@@ -44,6 +44,7 @@
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/fle/server_rewrite.h"
+#include "mongo/db/transaction_api.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
@@ -98,6 +99,22 @@ void replyToResponse(write_ops::WriteCommandReplyBase* replyBase,
     }
 }
 
+void responseToReply(const BatchedCommandResponse& response,
+                     write_ops::WriteCommandReplyBase& replyBase) {
+    if (response.isLastOpSet()) {
+        replyBase.setOpTime(response.getLastOp());
+    }
+
+    if (response.isElectionIdSet()) {
+        replyBase.setElectionId(response.getElectionId());
+    }
+
+    replyBase.setN(response.getN());
+    if (response.isErrDetailsSet()) {
+        replyBase.setWriteErrors(response.getErrDetails());
+    }
+}
+
 boost::optional<BSONObj> mergeLetAndCVariables(const boost::optional<BSONObj>& let,
                                                const boost::optional<BSONObj>& c) {
     if (!let.has_value() && !c.has_value()) {
@@ -111,51 +128,7 @@ boost::optional<BSONObj> mergeLetAndCVariables(const boost::optional<BSONObj>& l
     }
     return c;
 }
-
 }  // namespace
-
-StatusWith<txn_api::CommitResult> runInTxnWithRetry(
-    OperationContext* opCtx,
-    std::shared_ptr<txn_api::TransactionWithRetries> trun,
-    std::function<SemiFuture<void>(const txn_api::TransactionClient& txnClient,
-                                   ExecutorPtr txnExec)> callback) {
-
-    bool inClientTransaction = opCtx->inMultiDocumentTransaction();
-
-    // TODO SERVER-59566 - how much do we retry before we give up?
-    while (true) {
-
-        // Result will get the status of the TXN
-        // Non-client initiated txns get retried automatically.
-        // Client txns are the user responsibility to retry and so if we hit a contention
-        // placeholder, we need to abort and defer to the client
-        auto swResult = trun->runSyncNoThrow(opCtx, callback);
-        if (swResult.isOK()) {
-            return swResult;
-        }
-
-        // We cannot retry the transaction if initiated by a user
-        if (inClientTransaction) {
-            return swResult;
-        }
-
-        // - DuplicateKeyException - suggestions contention on ESC
-        // - FLEContention
-        if (swResult.getStatus().code() != ErrorCodes::FLECompactionPlaceholder &&
-            swResult.getStatus().code() != ErrorCodes::FLEStateCollectionContention) {
-            return swResult;
-        }
-
-        if (!swResult.isOK()) {
-            return swResult;
-        }
-
-        auto commitResult = swResult.getValue();
-        if (commitResult.getEffectiveStatus().isOK()) {
-            return commitResult;
-        }
-    }
-}
 
 std::shared_ptr<txn_api::TransactionWithRetries> getTransactionWithRetriesForMongoS(
     OperationContext* opCtx) {
@@ -165,6 +138,7 @@ std::shared_ptr<txn_api::TransactionWithRetries> getTransactionWithRetriesForMon
         TransactionRouterResourceYielder::makeForLocalHandoff());
 }
 
+namespace {
 /**
  * Make an expression context from a batch command request and a specific operation. Templated out
  * to work with update and delete.
@@ -190,16 +164,24 @@ boost::intrusive_ptr<ExpressionContext> makeExpCtx(OperationContext* opCtx,
     return expCtx;
 }
 
+}  // namespace
+
 std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     OperationContext* opCtx,
     const write_ops::InsertCommandRequest& insertRequest,
     GetTxnCallback getTxns) {
+
+    auto edcNss = insertRequest.getNamespace();
+    auto ei = insertRequest.getEncryptionInformation().get();
+
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
 
     auto documents = insertRequest.getDocuments();
     // TODO - how to check if a document will be too large???
     uassert(6371202, "Only single insert batches are supported in FLE2", documents.size() == 1);
 
     auto document = documents[0];
+    EDCServerCollection::validateEncryptedFieldInfo(document, efc);
     auto serverPayload = std::make_shared<std::vector<EDCServerPayloadInfo>>(
         EDCServerCollection::getEncryptedFieldInfo(document));
 
@@ -209,31 +191,28 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
             FLEBatchResult::kNotProcessed, write_ops::InsertCommandReply()};
     }
 
-    auto ei = insertRequest.getEncryptionInformation().get();
-
-    auto edcNss = insertRequest.getNamespace();
-    auto efc = EncryptionInformationHelpers::getAndValidateSchema(insertRequest.getNamespace(), ei);
     write_ops::InsertCommandReply reply;
+
+    uint32_t stmtId = getStmtIdForWriteAt(insertRequest, 0);
 
     std::shared_ptr<txn_api::TransactionWithRetries> trun = getTxns(opCtx);
 
     // The function that handles the transaction may outlive this function so we need to use
     // shared_ptrs since it runs on another thread
     auto ownedDocument = document.getOwned();
-    auto insertBlock = std::tie(edcNss, efc, serverPayload, reply);
+    auto insertBlock = std::tie(edcNss, efc, serverPayload, reply, stmtId);
     auto sharedInsertBlock = std::make_shared<decltype(insertBlock)>(insertBlock);
 
-    auto swResult = runInTxnWithRetry(
+    auto swResult = trun->runSyncNoThrow(
         opCtx,
-        trun,
         [sharedInsertBlock, ownedDocument](const txn_api::TransactionClient& txnClient,
                                            ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient);
 
-            auto [edcNss2, efc2, serverPayload2, reply2] = *sharedInsertBlock.get();
+            auto [edcNss2, efc2, serverPayload2, reply2, stmtId2] = *sharedInsertBlock.get();
 
-            reply2 = uassertStatusOK(
-                processInsert(&queryImpl, edcNss2, *serverPayload2.get(), efc2, ownedDocument));
+            reply2 = uassertStatusOK(processInsert(
+                &queryImpl, edcNss2, *serverPayload2.get(), efc2, stmtId2, ownedDocument));
 
             if (MONGO_unlikely(fleCrudHangInsert.shouldFail())) {
                 LOGV2(6371903, "Hanging due to fleCrudHangInsert fail point");
@@ -260,6 +239,9 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
         }
 
         appendSingleStatusToWriteErrors(swResult.getStatus(), &reply.getWriteCommandReplyBase());
+    } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
+        appendSingleStatusToWriteErrors(swResult.getValue().getEffectiveStatus(),
+                                        &reply.getWriteCommandReplyBase());
     }
 
     return std::pair<FLEBatchResult, write_ops::InsertCommandReply>{FLEBatchResult::kProcessed,
@@ -288,9 +270,8 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
     auto deleteBlock = std::tie(deleteRequest, reply, expCtx);
     auto sharedDeleteBlock = std::make_shared<decltype(deleteBlock)>(deleteBlock);
 
-    auto swResult = runInTxnWithRetry(
+    auto swResult = trun->runSyncNoThrow(
         opCtx,
-        trun,
         [sharedDeleteBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient);
 
@@ -322,6 +303,9 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
         }
 
         appendSingleStatusToWriteErrors(swResult.getStatus(), &reply.getWriteCommandReplyBase());
+    } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
+        appendSingleStatusToWriteErrors(swResult.getValue().getEffectiveStatus(),
+                                        &reply.getWriteCommandReplyBase());
     }
 
     return reply;
@@ -354,9 +338,8 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
     auto updateBlock = std::tie(updateRequest, reply, expCtx);
     auto sharedupdateBlock = std::make_shared<decltype(updateBlock)>(updateBlock);
 
-    auto swResult = runInTxnWithRetry(
+    auto swResult = trun->runSyncNoThrow(
         opCtx,
-        trun,
         [sharedupdateBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient);
 
@@ -388,6 +371,9 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
         }
 
         appendSingleStatusToWriteErrors(swResult.getStatus(), &reply.getWriteCommandReplyBase());
+    } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
+        appendSingleStatusToWriteErrors(swResult.getValue().getEffectiveStatus(),
+                                        &reply.getWriteCommandReplyBase());
     }
 
     return reply;
@@ -398,7 +384,8 @@ namespace {
 void processFieldsForInsert(FLEQueryInterface* queryImpl,
                             const NamespaceString& edcNss,
                             std::vector<EDCServerPayloadInfo>& serverPayload,
-                            const EncryptedFieldConfig& efc) {
+                            const EncryptedFieldConfig& efc,
+                            int32_t* pStmtId) {
 
     NamespaceString nssEsc(edcNss.db(), efc.getEscCollection().get());
 
@@ -453,6 +440,7 @@ void processFieldsForInsert(FLEQueryInterface* queryImpl,
         auto escInsertReply = uassertStatusOK(queryImpl->insertDocument(
             nssEsc,
             ESCCollection::generateInsertDocument(tagToken, valueToken, position, count),
+            pStmtId,
             true));
         checkWriteErrors(escInsertReply);
 
@@ -464,6 +452,7 @@ void processFieldsForInsert(FLEQueryInterface* queryImpl,
             nssEcoc,
             ECOCCollection::generateDocument(payload.fieldPathName,
                                              payload.payload.getEncryptedTokens()),
+            pStmtId,
             false));
         checkWriteErrors(ecocInsertReply);
     }
@@ -473,7 +462,8 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
                           const NamespaceString& edcNss,
                           const EncryptedFieldConfig& efc,
                           const StringMap<FLEDeleteToken>& tokenMap,
-                          const std::vector<EDCIndexedFields>& deletedFields) {
+                          const std::vector<EDCIndexedFields>& deletedFields,
+                          int32_t* pStmtId) {
 
     NamespaceString nssEcc(edcNss.db(), efc.getEccCollection().get());
 
@@ -543,6 +533,7 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
         auto eccInsertReply = uassertStatusOK(queryImpl->insertDocument(
             nssEcc,
             ECCCollection::generateDocument(tagToken, valueToken, index, plainTextField.count),
+            pStmtId,
             true));
         checkWriteErrors(eccInsertReply);
 
@@ -554,6 +545,7 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
         auto ecocInsertReply = uassertStatusOK(queryImpl->insertDocument(
             nssEcoc,
             ECOCCollection::generateDocument(deletedField.fieldPathName, encryptedTokens),
+            pStmtId,
             false));
         checkWriteErrors(ecocInsertReply);
     }
@@ -561,10 +553,12 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
 
 }  // namespace
 
-StatusWith<write_ops::FindAndModifyCommandReply> processFindAndModifyRequest(
+template <typename ReplyType>
+StatusWith<ReplyType> processFindAndModifyRequest(
     OperationContext* opCtx,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
-    GetTxnCallback getTxns) {
+    GetTxnCallback getTxns,
+    ProcessFindAndModifyCallback<ReplyType> processCallback) {
 
     // Is this a delete
     bool isDelete = findAndModifyRequest.getRemove().value_or(false);
@@ -592,24 +586,25 @@ StatusWith<write_ops::FindAndModifyCommandReply> processFindAndModifyRequest(
 
     std::shared_ptr<txn_api::TransactionWithRetries> trun = getTxns(opCtx);
 
+    auto expCtx = makeExpCtx(opCtx, findAndModifyRequest, findAndModifyRequest);
+
     // The function that handles the transaction may outlive this function so we need to use
     // shared_ptrs
-    write_ops::FindAndModifyCommandReply reply;
-    auto findAndModifyBlock = std::tie(findAndModifyRequest, reply);
+    std::shared_ptr<ReplyType> reply;
+    auto findAndModifyBlock = std::tie(findAndModifyRequest, reply, expCtx);
     auto sharedFindAndModifyBlock =
         std::make_shared<decltype(findAndModifyBlock)>(findAndModifyBlock);
 
-    auto swResult = runInTxnWithRetry(
+    auto swResult = trun->runSyncNoThrow(
         opCtx,
-        trun,
-        [sharedFindAndModifyBlock](const txn_api::TransactionClient& txnClient,
-                                   ExecutorPtr txnExec) {
+        [sharedFindAndModifyBlock, processCallback](const txn_api::TransactionClient& txnClient,
+                                                    ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient);
 
-            auto [findAndModifyRequest2, reply2] = *sharedFindAndModifyBlock.get();
+            auto [findAndModifyRequest2, reply2, expCtx] = *sharedFindAndModifyBlock.get();
 
-            reply2 = processFindAndModify(&queryImpl, findAndModifyRequest2);
-
+            reply2 = std::make_shared<ReplyType>(
+                processCallback(expCtx, &queryImpl, findAndModifyRequest2));
 
             if (MONGO_unlikely(fleCrudHangFindAndModify.shouldFail())) {
                 LOGV2(6371900, "Hanging due to fleCrudHangFindAndModify fail point");
@@ -621,9 +616,11 @@ StatusWith<write_ops::FindAndModifyCommandReply> processFindAndModifyRequest(
 
     if (!swResult.isOK()) {
         return swResult.getStatus();
+    } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
+        return swResult.getValue().getEffectiveStatus();
     }
 
-    return reply;
+    return *reply;
 }
 
 FLEQueryInterface::~FLEQueryInterface() {}
@@ -633,13 +630,14 @@ StatusWith<write_ops::InsertCommandReply> processInsert(
     const NamespaceString& edcNss,
     std::vector<EDCServerPayloadInfo>& serverPayload,
     const EncryptedFieldConfig& efc,
+    int32_t stmtId,
     BSONObj document) {
 
-    processFieldsForInsert(queryImpl, edcNss, serverPayload, efc);
+    processFieldsForInsert(queryImpl, edcNss, serverPayload, efc, &stmtId);
 
     auto finalDoc = EDCServerCollection::finalizeForInsert(document, serverPayload);
 
-    return queryImpl->insertDocument(edcNss, finalDoc, false);
+    return queryImpl->insertDocument(edcNss, finalDoc, &stmtId, false);
 }
 
 write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
@@ -651,15 +649,19 @@ write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
 
     auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
     auto tokenMap = EncryptionInformationHelpers::getDeleteTokens(edcNss, ei);
+    int32_t stmtId = getStmtIdForWriteAt(deleteRequest, 0);
 
-    write_ops::DeleteCommandRequest newDeleteRequest = deleteRequest;
+    auto newDeleteRequest = deleteRequest;
 
     auto newDeleteOp = newDeleteRequest.getDeletes()[0];
     newDeleteOp.setQ(fle::rewriteEncryptedFilterInsideTxn(
         queryImpl, deleteRequest.getDbName(), efc, expCtx, newDeleteOp.getQ()));
     newDeleteRequest.setDeletes({newDeleteOp});
 
-    // TODO SERVER-64143 - use this delete for retryable writes
+    newDeleteRequest.getWriteCommandRequestBase().setStmtIds(boost::none);
+    newDeleteRequest.getWriteCommandRequestBase().setStmtId(stmtId);
+    ++stmtId;
+
     auto [deleteReply, deletedDocument] =
         queryImpl->deleteWithPreimage(edcNss, ei, newDeleteRequest);
 
@@ -673,7 +675,7 @@ write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
 
     auto deletedFields = EDCServerCollection::getEncryptedIndexedFields(deletedDocument);
 
-    processRemovedFields(queryImpl, edcNss, efc, tokenMap, deletedFields);
+    processRemovedFields(queryImpl, edcNss, efc, tokenMap, deletedFields, &stmtId);
 
     return deleteReply;
 }
@@ -703,6 +705,7 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
 
     const auto updateModification = updateOpEntry.getU();
 
+    int32_t stmtId = getStmtIdForWriteAt(updateRequest, 0);
 
     // Step 1 ----
     std::vector<EDCServerPayloadInfo> serverPayload;
@@ -712,9 +715,11 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
 
     if (updateModification.type() == write_ops::UpdateModification::Type::kModifier) {
         auto updateModifier = updateModification.getUpdateModifier();
+        auto setObject = updateModifier.getObjectField("$set");
+        EDCServerCollection::validateEncryptedFieldInfo(setObject, efc);
         serverPayload = EDCServerCollection::getEncryptedFieldInfo(updateModifier);
 
-        processFieldsForInsert(queryImpl, edcNss, serverPayload, efc);
+        processFieldsForInsert(queryImpl, edcNss, serverPayload, efc, &stmtId);
 
         // Step 2 ----
         auto pushUpdate = EDCServerCollection::finalizeForUpdate(updateModifier, serverPayload);
@@ -723,9 +728,10 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
             pushUpdate, write_ops::UpdateModification::ClassicTag(), false));
     } else {
         auto replacementDocument = updateModification.getUpdateReplacement();
+        EDCServerCollection::validateEncryptedFieldInfo(replacementDocument, efc);
         serverPayload = EDCServerCollection::getEncryptedFieldInfo(replacementDocument);
 
-        processFieldsForInsert(queryImpl, edcNss, serverPayload, efc);
+        processFieldsForInsert(queryImpl, edcNss, serverPayload, efc, &stmtId);
 
         // Step 2 ----
         auto safeContentReplace =
@@ -738,8 +744,10 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     // Step 3 ----
     auto newUpdateRequest = updateRequest;
     newUpdateRequest.setUpdates({newUpdateOpEntry});
+    newUpdateRequest.getWriteCommandRequestBase().setStmtIds(boost::none);
+    newUpdateRequest.getWriteCommandRequestBase().setStmtId(stmtId);
+    ++stmtId;
 
-    // TODO - use this update for retryable writes
     auto [updateReply, originalDocument] =
         queryImpl->updateWithPreimage(edcNss, ei, newUpdateRequest);
     if (originalDocument.isEmpty()) {
@@ -770,7 +778,7 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     auto newFields = EDCServerCollection::getEncryptedIndexedFields(newDocument);
     auto deletedFields = EDCServerCollection::getRemovedTags(originalFields, newFields);
 
-    processRemovedFields(queryImpl, edcNss, efc, tokenMap, deletedFields);
+    processRemovedFields(queryImpl, edcNss, efc, tokenMap, deletedFields, &stmtId);
 
     // Step 6 ----
     BSONObj pullUpdate = EDCServerCollection::generateUpdateToRemoveTags(deletedFields, tokenMap);
@@ -781,7 +789,10 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     pullUpdateOpEntry.setU(mongo::write_ops::UpdateModification(
         pullUpdate, write_ops::UpdateModification::ClassicTag(), false));
     newUpdateRequest.setUpdates({pullUpdateOpEntry});
-    /* ignore */ queryImpl->updateWithPreimage(edcNss, ei, newUpdateRequest);
+    newUpdateRequest.getWriteCommandRequestBase().setStmtId(boost::none);
+    newUpdateRequest.setLegacyRuntimeConstants(boost::none);
+    newUpdateRequest.getWriteCommandRequestBase().setEncryptionInformation(boost::none);
+    /* ignore */ queryImpl->update(edcNss, stmtId, newUpdateRequest);
 
     return updateReply;
 }
@@ -792,9 +803,10 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
                                BatchedCommandResponse* response,
                                boost::optional<OID> targetEpoch) {
 
-    if (!gFeatureFlagFLE2.isEnabledAndIgnoreFCV()) {
-        uasserted(6371209, "Feature flag FLE2 is not enabled");
-    }
+    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
+    uassert(6371209,
+            "FLE 2 is only supported when FCV supports 6.0",
+            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Insert) {
         auto insertRequest = request.getInsertRequest();
@@ -847,8 +859,49 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
     MONGO_UNREACHABLE;
 }
 
+std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
+    OperationContext* opCtx, const BatchedCommandRequest& request) {
+    invariant(request.hasEncryptionInformation());
+    auto getExpCtx = [&](const auto& op) {
+        auto expCtx = make_intrusive<ExpressionContext>(
+            opCtx,
+            fle::collatorFromBSON(opCtx, op.getCollation().value_or(BSONObj())),
+            request.getNS(),
+            request.getLegacyRuntimeConstants(),
+            request.getLet());
+        expCtx->stopExpressionCounters();
+        return expCtx;
+    };
+
+    if (request.getBatchType() == BatchedCommandRequest::BatchType_Delete) {
+        auto deleteRequest = request.getDeleteRequest();
+        auto newDeleteOp = deleteRequest.getDeletes()[0];
+        newDeleteOp.setQ(fle::rewriteQuery(opCtx,
+                                           getExpCtx(newDeleteOp),
+                                           request.getNS(),
+                                           deleteRequest.getEncryptionInformation().get(),
+                                           newDeleteOp.getQ(),
+                                           &getTransactionWithRetriesForMongoS));
+        deleteRequest.setDeletes({newDeleteOp});
+        return std::make_unique<BatchedCommandRequest>(deleteRequest);
+    } else if (request.getBatchType() == BatchedCommandRequest::BatchType_Update) {
+        auto updateRequest = request.getUpdateRequest();
+        auto newUpdateOp = updateRequest.getUpdates()[0];
+        newUpdateOp.setQ(fle::rewriteQuery(opCtx,
+                                           getExpCtx(newUpdateOp),
+                                           request.getNS(),
+                                           updateRequest.getEncryptionInformation().get(),
+                                           newUpdateOp.getQ(),
+                                           &getTransactionWithRetriesForMongoS));
+        updateRequest.setUpdates({newUpdateOp});
+        return std::make_unique<BatchedCommandRequest>(updateRequest);
+    }
+    MONGO_UNREACHABLE;
+}
+
 // See processUpdate for algorithm overview
 write_ops::FindAndModifyCommandReply processFindAndModify(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
 
@@ -857,10 +910,21 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
 
     auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
     auto tokenMap = EncryptionInformationHelpers::getDeleteTokens(edcNss, ei);
+    int32_t stmtId = findAndModifyRequest.getStmtId().value_or(0);
+
+    auto newFindAndModifyRequest = findAndModifyRequest;
+
+    // Step 0 ----
+    // Rewrite filter
+    newFindAndModifyRequest.setQuery(fle::rewriteEncryptedFilterInsideTxn(
+        queryImpl, edcNss.db(), efc, expCtx, findAndModifyRequest.getQuery()));
+
+    // Make sure not to inherit the command's writeConcern, this should be set at the transaction
+    // level.
+    newFindAndModifyRequest.setWriteConcern(boost::none);
 
     // Step 1 ----
     // If we have an update object, we have to process for ESC
-    auto newFindAndModifyRequest = findAndModifyRequest;
     if (findAndModifyRequest.getUpdate().has_value()) {
 
         std::vector<EDCServerPayloadInfo> serverPayload;
@@ -869,8 +933,10 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
 
         if (updateModification.type() == write_ops::UpdateModification::Type::kModifier) {
             auto updateModifier = updateModification.getUpdateModifier();
+            auto setObject = updateModifier.getObjectField("$set");
+            EDCServerCollection::validateEncryptedFieldInfo(setObject, efc);
             serverPayload = EDCServerCollection::getEncryptedFieldInfo(updateModifier);
-            processFieldsForInsert(queryImpl, edcNss, serverPayload, efc);
+            processFieldsForInsert(queryImpl, edcNss, serverPayload, efc, &stmtId);
 
             auto pushUpdate = EDCServerCollection::finalizeForUpdate(updateModifier, serverPayload);
 
@@ -879,9 +945,10 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
                 pushUpdate, write_ops::UpdateModification::ClassicTag(), false);
         } else {
             auto replacementDocument = updateModification.getUpdateReplacement();
+            EDCServerCollection::validateEncryptedFieldInfo(replacementDocument, efc);
             serverPayload = EDCServerCollection::getEncryptedFieldInfo(replacementDocument);
 
-            processFieldsForInsert(queryImpl, edcNss, serverPayload, efc);
+            processFieldsForInsert(queryImpl, edcNss, serverPayload, efc, &stmtId);
 
             // Step 2 ----
             auto safeContentReplace =
@@ -895,8 +962,9 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
         newFindAndModifyRequest.setUpdate(newUpdateModification);
     }
 
-    // TODO - use this update for retryable writes
     newFindAndModifyRequest.setNew(false);
+    newFindAndModifyRequest.setStmtId(stmtId);
+    ++stmtId;
 
     auto reply = queryImpl->findAndModify(edcNss, ei, newFindAndModifyRequest);
     if (!reply.getValue().has_value() || reply.getValue().value().isEmpty()) {
@@ -934,7 +1002,7 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     auto originalFields = EDCServerCollection::getEncryptedIndexedFields(originalDocument);
     auto deletedFields = EDCServerCollection::getRemovedTags(originalFields, newFields);
 
-    processRemovedFields(queryImpl, edcNss, efc, tokenMap, deletedFields);
+    processRemovedFields(queryImpl, edcNss, efc, tokenMap, deletedFields, &stmtId);
 
     // Step 6 ----
     // We don't need to make a second update in the case of a delete
@@ -950,16 +1018,36 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
         pullUpdateOpEntry.setU(mongo::write_ops::UpdateModification(
             pullUpdate, write_ops::UpdateModification::ClassicTag(), false));
         newUpdateRequest.setUpdates({pullUpdateOpEntry});
-        auto [finalUpdateReply, finalCorrectDocument] =
-            queryImpl->updateWithPreimage(edcNss, ei, newUpdateRequest);
+        newUpdateRequest.setLegacyRuntimeConstants(boost::none);
+        newUpdateRequest.getWriteCommandRequestBase().setStmtId(boost::none);
+        newUpdateRequest.getWriteCommandRequestBase().setEncryptionInformation(boost::none);
+
+        auto finalUpdateReply = queryImpl->update(edcNss, stmtId, newUpdateRequest);
         checkWriteErrors(finalUpdateReply);
     }
 
     return reply;
 }
 
+write_ops::FindAndModifyCommandRequest processFindAndModifyExplain(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    FLEQueryInterface* queryImpl,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
+
+    auto edcNss = findAndModifyRequest.getNamespace();
+    auto ei = findAndModifyRequest.getEncryptionInformation().get();
+
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
+
+    auto newFindAndModifyRequest = findAndModifyRequest;
+    newFindAndModifyRequest.setQuery(fle::rewriteEncryptedFilterInsideTxn(
+        queryImpl, edcNss.db(), efc, expCtx, findAndModifyRequest.getQuery()));
+
+    newFindAndModifyRequest.setEncryptionInformation(boost::none);
+    return newFindAndModifyRequest;
+}
+
 FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
-                                       const std::string& dbName,
                                        const BSONObj& cmdObj,
                                        BSONObjBuilder& result) {
     // There is no findAndModify parsing in mongos so we need to first parse to decide if it is for
@@ -971,8 +1059,9 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
         return FLEBatchResult::kNotProcessed;
     }
 
-    if (!gFeatureFlagFLE2.isEnabledAndIgnoreFCV()) {
-        uasserted(6371405, "Feature flag FLE2 is not enabled");
+    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
+    if (!gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) {
+        uasserted(6371405, "FLE 2 is only supported when FCV supports 6.0");
     }
 
     // FLE2 Mongos CRUD operations loopback through MongoS with EncryptionInformation as
@@ -982,13 +1071,24 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
         return FLEBatchResult::kNotProcessed;
     }
 
-    auto swReply = processFindAndModifyRequest(opCtx, request, &getTransactionWithRetriesForMongoS);
+    auto swReply = processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
+        opCtx, request, &getTransactionWithRetriesForMongoS);
 
     auto reply = uassertStatusOK(swReply);
 
     reply.serialize(&result);
 
     return FLEBatchResult::kProcessed;
+}
+
+write_ops::FindAndModifyCommandRequest processFLEFindAndModifyExplainMongos(
+    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& request) {
+    tassert(6513400,
+            "Missing encryptionInformation for findAndModify",
+            request.getEncryptionInformation().has_value());
+
+    return uassertStatusOK(processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
+        opCtx, request, &getTransactionWithRetriesForMongoS, processFindAndModifyExplain));
 }
 
 BSONObj FLEQueryInterfaceImpl::getById(const NamespaceString& nss, BSONElement element) {
@@ -1056,50 +1156,40 @@ uint64_t FLEQueryInterfaceImpl::countDocuments(const NamespaceString& nss) {
     if (!firstBatch.empty()) {
         auto countObj = firstBatch.front();
         docCount = countObj.getIntField("n"_sd);
+        uassert(6520701, "Unexpected negative document count", docCount >= 0);
     }
 
     return docCount;
 }
 
 StatusWith<write_ops::InsertCommandReply> FLEQueryInterfaceImpl::insertDocument(
-    const NamespaceString& nss, BSONObj obj, bool translateDuplicateKey) {
+    const NamespaceString& nss, BSONObj obj, StmtId* pStmtId, bool translateDuplicateKey) {
     write_ops::InsertCommandRequest insertRequest(nss);
     insertRequest.setDocuments({obj});
-    // TODO SERVER-64143 - insertRequest.setWriteConcern
 
-    // TODO SERVER-64143 - propagate the retryable statement ids to runCRUDOp
-    auto response = _txnClient.runCRUDOp(BatchedCommandRequest(insertRequest), {}).get();
+    int32_t stmtId = *pStmtId;
+    if (stmtId != kUninitializedStmtId) {
+        (*pStmtId)++;
+    }
+
+    auto response = _txnClient.runCRUDOp(BatchedCommandRequest(insertRequest), {stmtId}).get();
 
     auto status = response.toStatus();
-    if (translateDuplicateKey && status.code() == ErrorCodes::DuplicateKey) {
-        return Status(ErrorCodes::FLEStateCollectionContention, status.reason());
-    }
 
     write_ops::InsertCommandReply reply;
 
-    if (response.isLastOpSet()) {
-        reply.getWriteCommandReplyBase().setOpTime(response.getLastOp());
-    }
-
-    if (response.isElectionIdSet()) {
-        reply.getWriteCommandReplyBase().setElectionId(response.getElectionId());
-    }
-
-    reply.getWriteCommandReplyBase().setN(response.getN());
-    if (response.isErrDetailsSet()) {
-        reply.getWriteCommandReplyBase().setWriteErrors(response.getErrDetails());
-    }
-
-    reply.getWriteCommandReplyBase().setRetriedStmtIds(reply.getRetriedStmtIds());
+    responseToReply(response, reply.getWriteCommandReplyBase());
 
     return {reply};
 }
 
 std::pair<write_ops::DeleteCommandReply, BSONObj> FLEQueryInterfaceImpl::deleteWithPreimage(
-
     const NamespaceString& nss,
     const EncryptionInformation& ei,
     const write_ops::DeleteCommandRequest& deleteRequest) {
+    // We only support a single delete
+    dassert(deleteRequest.getStmtIds().value_or(std::vector<int32_t>()).empty());
+
     auto deleteOpEntry = deleteRequest.getDeletes()[0];
 
     write_ops::FindAndModifyCommandRequest findAndModifyRequest(nss);
@@ -1110,7 +1200,8 @@ std::pair<write_ops::DeleteCommandReply, BSONObj> FLEQueryInterfaceImpl::deleteW
     findAndModifyRequest.setRemove(true);
     findAndModifyRequest.setCollation(deleteOpEntry.getCollation());
     findAndModifyRequest.setLet(deleteRequest.getLet());
-    // TODO SERVER-64143 - writeConcern
+    findAndModifyRequest.setStmtId(deleteRequest.getStmtId());
+
     auto ei2 = ei;
     ei2.setCrudProcessed(true);
     findAndModifyRequest.setEncryptionInformation(ei2);
@@ -1137,6 +1228,9 @@ std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceImpl::updateW
     const NamespaceString& nss,
     const EncryptionInformation& ei,
     const write_ops::UpdateCommandRequest& updateRequest) {
+    // We only support a single update
+    dassert(updateRequest.getStmtIds().value_or(std::vector<int32_t>()).empty());
+
     auto updateOpEntry = updateRequest.getUpdates()[0];
 
     write_ops::FindAndModifyCommandRequest findAndModifyRequest(nss);
@@ -1151,7 +1245,8 @@ std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceImpl::updateW
     findAndModifyRequest.setHint(updateOpEntry.getHint());
     findAndModifyRequest.setLet(
         mergeLetAndCVariables(updateRequest.getLet(), updateOpEntry.getC()));
-    // TODO SERVER-64143 - writeConcern
+    findAndModifyRequest.setStmtId(updateRequest.getStmtId());
+
     auto ei2 = ei;
     ei2.setCrudProcessed(true);
     findAndModifyRequest.setEncryptionInformation(ei2);
@@ -1191,6 +1286,24 @@ std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceImpl::updateW
     return {updateReply, reply.getValue().value_or(BSONObj())};
 }
 
+write_ops::UpdateCommandReply FLEQueryInterfaceImpl::update(
+    const NamespaceString& nss,
+    int32_t stmtId,
+    const write_ops::UpdateCommandRequest& updateRequest) {
+
+    dassert(updateRequest.getStmtIds().value_or(std::vector<int32_t>()).empty());
+
+    auto response = _txnClient.runCRUDOp(BatchedCommandRequest(updateRequest), {stmtId}).get();
+
+    write_ops::UpdateCommandReply reply;
+
+    responseToReply(response, reply.getWriteCommandReplyBase());
+
+    reply.setNModified(response.getNModified());
+
+    return {reply};
+}
+
 write_ops::FindAndModifyCommandReply FLEQueryInterfaceImpl::findAndModify(
     const NamespaceString& nss,
     const EncryptionInformation& ei,
@@ -1218,8 +1331,24 @@ std::vector<BSONObj> FLEQueryInterfaceImpl::findDocuments(const NamespaceString&
     return _txnClient.exhaustiveFind(find).get();
 }
 
-void processFLEFindS(OperationContext* opCtx, FindCommandRequest* findCommand) {
-    fle::processFindCommand(opCtx, findCommand, &getTransactionWithRetriesForMongoS);
+void processFLEFindS(OperationContext* opCtx,
+                     const NamespaceString& nss,
+                     FindCommandRequest* findCommand) {
+    fle::processFindCommand(opCtx, nss, findCommand, &getTransactionWithRetriesForMongoS);
 }
 
+void processFLECountS(OperationContext* opCtx,
+                      const NamespaceString& nss,
+                      CountCommandRequest* countCommand) {
+    fle::processCountCommand(opCtx, nss, countCommand, &getTransactionWithRetriesForMongoS);
+}
+
+std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineS(
+    OperationContext* opCtx,
+    NamespaceString nss,
+    const EncryptionInformation& encryptInfo,
+    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite) {
+    return fle::processPipeline(
+        opCtx, nss, encryptInfo, std::move(toRewrite), &getTransactionWithRetriesForMongoS);
+}
 }  // namespace mongo

@@ -81,14 +81,8 @@ feature_flags:
     featureFlagSbePlanCache:
       description: "Feature flag for enabling use of the SBE plan cache"
       cpp_varname: gFeatureFlagSbePlanCache
-      default: false
-
-    featureFlagAutoParameterization:
-      description: "Feature flag for enabling auto-parameterization of match expressions. This
-      feature is used to store auto-parameterized plans in the SBE plan cache, so this flag is only
-      meaningful to turn on in combination with 'featureFlagSbePlanCache'."
-      cpp_varname: gFeatureFlagAutoParameterization
-      default: false
+      default: true
+      version: 6.0
 
     featureFlagSortArray:
         description: "Feature flag for allowing use of the $sortArray aggregation expression"
@@ -99,7 +93,8 @@ feature_flags:
     featureFlagChangeStreamsVisibility:
       description: "Feature flag for enabling improved change streams visibility"
       cpp_varname: gFeatureFlagChangeStreamsVisibility
-      default: false
+      default: true
+      version: 6.0
 
     featureFlagLocf:
         description: "Feature flag for allowing $locf window function"
@@ -121,22 +116,20 @@ feature_flags:
     featureFlagLastPointQuery:
       description : "Feature flag for optimizing Last Point queries on time-series collections"
       cpp_varname: gfeatureFlagLastPointQuery
-      default: false
-
-    featureFlagChangeStreamPreAndPostImagesTimeBasedRetentionPolicy:
-      description: "Feature flag to enable time based retention policy of point-in-time pre- and post-images of documents in change streams"
-      cpp_varname: gFeatureFlagChangeStreamPreAndPostImagesTimeBasedRetentionPolicy
-      default: false
+      default: true
+      version: 6.0
 
     featureFlagSBELookupPushdown:
       description: "Feature flag for allowing SBE $lookup pushdown"
       cpp_varname: gFeatureFlagSBELookupPushdown
-      default: false
+      default: true
+      version: 6.0
 
     featureFlagSearchShardedFacets:
       description: "Enable use of $$SEARCH_META on sharded collections"
       cpp_varname: gFeatureFlagSearchShardedFacets
-      default: false
+      default: true
+      version: 6.0
 
     featureFlagBucketUnpackWithSort:
       description: "Enables a time-series optimization that allows for partially-blocking sort on time"

@@ -6,6 +6,7 @@
  *   incompatible_with_eft,
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
+ *   incompatible_with_shard_merge,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
@@ -28,8 +29,7 @@ if (!RetryableWritesUtil.storageEngineSupportsRetryableWrites(jsTest.options().s
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
 const kTenantId = "testTenantId";
-const kDbName = kTenantId + "_" +
-    "testDb";
+const kDbName = `${kTenantId}_testDb`;
 const kCollName = "testColl";
 
 const donorPrimary = tenantMigrationTest.getDonorPrimary();
@@ -75,7 +75,7 @@ const fpAfterPreFetchingRetryableWrites = configureFailPoint(
 fpBeforeRetrievingStartOpTime.off();
 fpAfterPreFetchingRetryableWrites.wait();
 
-const kOplogBufferNS = "repl.migration.oplog_" + migrationOpts.migrationIdString;
+const kOplogBufferNS = `repl.migration.oplog_${migrationOpts.migrationIdString}`;
 const recipientOplogBuffer = recipientPrimary.getDB("config")[kOplogBufferNS];
 jsTestLog({"oplog buffer ns": kOplogBufferNS});
 let res = recipientOplogBuffer.find({"entry.o._id": "retryableWrite"}).toArray();

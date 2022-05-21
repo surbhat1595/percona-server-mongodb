@@ -68,7 +68,7 @@ variables:
 # variants
 - &enterprise-windows-nopush-template
   name: enterprise-windows-nopush-template
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - windows-vsCurrent-small
   modules:
@@ -120,7 +120,7 @@ variables:
 - &enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit
   display_name: "Enterprise RHEL 7.0"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -215,7 +215,7 @@ buildvariants:
 - &linux-64-debug-required-template
   name: linux-64-debug-required
   display_name: "! Shared Library Linux DEBUG"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - rhel80-medium
   expansions:
@@ -279,33 +279,43 @@ buildvariants:
 - <<: *linux-64-debug-required-template
   name: linux-64-debug-wtdevelop
   display_name: "~ Linux DEBUG WiredTiger develop"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - wtdevelop
   expansions:
     use_wt_develop: true
     resmoke_jobs_factor: 0.5  # Avoid starting too many mongod's
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enable-free-mon=on --enable-http-client=on
-    scons_cache_mode: nolinked
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enable-free-mon=on --enable-http-client=on --link-model=dynamic
+    scons_cache_mode: all
+    scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
     test_flags: --excludeWithAnyTags=requires_http_client
 
 - name: linux-64-duroff
   display_name: Linux (No Journal)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-small
   expansions: &linux-64-required-duroff-expansions
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enable-free-mon=off --enable-http-client=off
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enable-free-mon=off --enable-http-client=off --link-model=dynamic
     multiversion_platform: rhel80
     multiversion_edition: targeted
     # Running WiredTiger with --nojournal in a replica set is no longer supported, so this variant
     # does not include replica set tests. Since transactions are only supported on replica sets, we
     # exclude those tests as well.
     test_flags: --nojournal --excludeWithAnyTags=requires_journaling,requires_replication,requires_sharding,uses_transactions,requires_http_client
+    scons_cache_mode: all
     scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
     large_distro_name: rhel80-medium
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
   - name: build_variant_gen
@@ -326,7 +336,7 @@ buildvariants:
   display_name: TLA+
   run_on:
   - ubuntu1804-build
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     timeout_secs: 345600 # 4 days
@@ -335,14 +345,14 @@ buildvariants:
 
 - name: enterprise-ubuntu1804-64-ninja
   display_name: "Ninja Build: Enterprise Ubuntu 18.04"
-  cron: "0 0 * * *" # Every day starting at midnight
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
   - ubuntu1804-test
   stepback: false
   expansions:
-    compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     repo_edition: enterprise
     has_packages: false
   tasks:
@@ -356,7 +366,7 @@ buildvariants:
 - &enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-dynamic-v4gcc-debug-experimental
   display_name: "~ Shared Library Enterprise RHEL 8.0 v4 Toolchain GCC DEBUG"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -467,12 +477,12 @@ buildvariants:
   - enterprise
   run_on:
   - rhel80-medium
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: --excludeWithAnyTags=resource_intensive,incompatible_with_gcov
-    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     large_distro_name: rhel80-medium
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -487,8 +497,15 @@ buildvariants:
     timeout_secs: 18000 # 5 hour idle timeout
     use_scons_cache: false
     gcov_tool: /opt/mongodbtoolchain/v3/bin/gcov
+    num_scons_link_jobs_available: 0.99
   tasks: &enterprise-rhel-80-64-bit-coverage-tasks
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel80-large
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-large
   - name: build_variant_gen
@@ -543,12 +560,12 @@ buildvariants:
     - enterprise
   run_on:
     - rhel80-medium
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: --excludeWithAnyTags=resource_intensive,incompatible_with_gcov
-    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars
+    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --link-model=dynamic
     large_distro_name: rhel80-medium
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -566,6 +583,7 @@ buildvariants:
     # gcov does. However, this version of clang still produces .gcda files that
     # the v3 gcov can read natively anyway, so we don't need it.
     gcov_tool: /opt/mongodbtoolchain/v3/bin/gcov
+    num_scons_link_jobs_available: 0.99
   tasks:
     *enterprise-rhel-80-64-bit-coverage-tasks
 
@@ -575,12 +593,12 @@ buildvariants:
     - enterprise
   run_on:
     - rhel80-medium
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: --excludeWithAnyTags=resource_intensive,incompatible_with_gcov
-    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v4_gcc.vars
+    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v4_gcc.vars --link-model=dynamic
     large_distro_name: rhel80-medium
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -595,6 +613,7 @@ buildvariants:
     timeout_secs: 18000 # 5 hour idle timeout
     use_scons_cache: false
     gcov_tool: /opt/mongodbtoolchain/v4/bin/gcov
+    num_scons_link_jobs_available: 0.99
   tasks:
     *enterprise-rhel-80-64-bit-coverage-tasks
 
@@ -604,12 +623,12 @@ buildvariants:
     - enterprise
   run_on:
     - rhel80-medium
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: --excludeWithAnyTags=resource_intensive,incompatible_with_gcov
-    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v4_clang.vars
+    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v4_clang.vars --link-model=dynamic
     large_distro_name: rhel80-medium
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -624,6 +643,7 @@ buildvariants:
     timeout_secs: 9000 # 2.5 hour idle timeout
     use_scons_cache: false
     gcov_tool: /opt/mongodbtoolchain/v4/bin/llvm-cov gcov
+    num_scons_link_jobs_available: 0.99
   tasks:
     *enterprise-rhel-80-64-bit-coverage-tasks
 
@@ -742,7 +762,7 @@ buildvariants:
 #- <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
 #  name: enterprise-rhel80-dynamic-v4gcc-cxx20-debug-pm-1328-experimental
 #  display_name: "~ Shared Library Enterprise RHEL 8.0 v4 Toolchain GCC C++20 DEBUG + PM-1328"
-#  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+#  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
 #  expansions:
 #    <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-expansions
 #    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic --variables-files=etc/scons/mongodbtoolchain_testing_gcc.vars --cxx-std=20 --experimental-optimization=* --experimental-runtime-hardening=* --disable-warnings-as-errors
@@ -750,7 +770,7 @@ buildvariants:
 - <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-dynamic-v4clang-cxx20-debug-pm-1328-experimental
   display_name: "~ Shared Library Enterprise RHEL 8.0 v4 Toolchain Clang C++20 DEBUG + PM-1328"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   expansions:
     <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-expansions
     compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic --variables-files=etc/scons/mongodbtoolchain_testing_clang.vars --cxx-std=20 --experimental-optimization=* --experimental-runtime-hardening=*
@@ -758,7 +778,7 @@ buildvariants:
 - <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-v4gcc-cxx20-pm-1328-experimental
   display_name: "~ Enterprise RHEL 8.0 v4 Toolchain GCC C++20 + PM-1328"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   expansions:
     <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-expansions
     compile_flags: --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_testing_gcc.vars --cxx-std=20 --experimental-optimization=* --experimental-runtime-hardening=* --disable-warnings-as-errors
@@ -766,7 +786,7 @@ buildvariants:
 - <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-v4clang-cxx20-pm-1328-experimental
   display_name: "~ Enterprise RHEL 8.0 v4 Toolchain Clang C++20 + PM-1328"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   expansions:
     <<: *enterprise-rhel80-dynamic-v4gcc-debug-experimental-expansions
     compile_flags: --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_testing_clang.vars --cxx-std=20 --experimental-optimization=* --experimental-runtime-hardening=*
@@ -775,7 +795,7 @@ buildvariants:
   modules:
   - enterprise
   display_name: "~ STM Daily Cron"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-small
   expansions:
@@ -791,7 +811,7 @@ buildvariants:
   modules:
   - enterprise
   display_name: "~ Security Daily Cron"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-small
   stepback: false
@@ -804,7 +824,7 @@ buildvariants:
 
 - name: windows-debug-suggested
   display_name: "* Windows DEBUG"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -872,7 +892,7 @@ buildvariants:
 - &enterprise-windows-required-template
   name: enterprise-windows-required
   display_name: "! Enterprise Windows"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - enterprise
   run_on:
@@ -946,7 +966,7 @@ buildvariants:
 - <<: *enterprise-windows-required-template
   name: enterprise-windows-all-feature-flags-required
   display_name: "! Enterprise Windows (all feature flags)"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   expansions:
     burn_in_tests_build_variant: enterprise-windows-required
     exe: ".exe"
@@ -994,7 +1014,6 @@ buildvariants:
   - name: external_auth_windows
     distros:
     - windows-2016-dc
-  - name: fle2_query_analysis
   - name: .jscore .common !.sharding
   - name: jsCore_auth
   - name: jsCore_ese
@@ -1024,7 +1043,7 @@ buildvariants:
 
 - name: enterprise-windows-ninja
   display_name: "Ninja Build: Enterprise Windows"
-  cron: "0 0 * * *" # Every day starting at midnight
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   expansions:
@@ -1039,7 +1058,7 @@ buildvariants:
 
 - name: enterprise-windows-cxx20-debug-experimental
   display_name: "~ Enterprise Windows C++20 DEBUG"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1093,7 +1112,7 @@ buildvariants:
 
 - name: enterprise-windows-debug-unoptimized
   display_name: Enterprise Windows DEBUG (Unoptimized)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1122,10 +1141,14 @@ buildvariants:
   - name: audit
   # Do not add more tasks to this list.
 
+###########################################
+#         macos buildvariants             #
+###########################################
+
 - &macos-debug-template
   name: macos-debug-suggested
   display_name: "* macOS DEBUG"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - macos-1100
   expansions: &macos-debug-expansions
@@ -1154,7 +1177,7 @@ buildvariants:
 
 - name: macos-enterprise-ninja
   display_name: "Ninja Build: macOS Enterprise"
-  cron: "0 0 * * *" # Every day starting at midnight
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1168,7 +1191,7 @@ buildvariants:
 
 - name: enterprise-macos-rosetta-2
   display_name: "Enterprise macOS Via Rosetta 2"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1197,7 +1220,7 @@ buildvariants:
 
 - name: enterprise-macos-cxx20
   display_name: "Enterprise macOS C++20 DEBUG"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1265,7 +1288,7 @@ buildvariants:
   display_name: "Embedded SDK - macOS"
   run_on:
   - macos-1100
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   expansions:
     test_flags: --excludeWithAnyTags=uses_transactions,incompatible_with_macos
     cmake_path: /Applications/cmake-3.11.0-Darwin-x86_64/CMake.app/Contents/bin/cmake
@@ -1290,7 +1313,7 @@ buildvariants:
 
 - name: embedded-sdk-ubuntu-1804-x86_64
   display_name: "Embedded SDK - Ubuntu 18.04 x86_64"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-build
   expansions:
@@ -1317,7 +1340,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-dynamic-required-template
   name: enterprise-rhel-80-64-bit-dynamic-required
   display_name: "! Shared Library Enterprise RHEL 8.0"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - enterprise
   run_on:
@@ -1460,7 +1483,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-64-bit-dynamic-required-ninja
   display_name: "Ninja Build: Enterprise RHEL 8.0"
-  cron: "0 0 * * *" # Every day at midnight
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1479,7 +1502,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required
   display_name: "! Shared Library Enterprise RHEL 8.0 (all feature flags)"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   stepback: false
   modules:
   - enterprise
@@ -1541,7 +1564,6 @@ buildvariants:
   - name: disk_wiredtiger
   - name: .encrypt
   - name: feature_flag_multiversion_gen
-  - name: fle2_query_analysis
   - name: idl_tests
   - name: initial_sync_fuzzer_gen
   - name: .integration
@@ -1610,7 +1632,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-dynamic-classic-engine
   name: enterprise-rhel-80-64-bit-dynamic-classic-engine
   display_name: "Shared Library Enterprise RHEL 8.0 (Classic Engine)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   stepback: false
   modules:
   - enterprise
@@ -1734,7 +1756,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel80-small
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     compile_flags: >-
@@ -1742,16 +1764,25 @@ buildvariants:
       MONGO_DISTMOD=rhel80
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+      --link-model=dynamic
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     repo_edition: enterprise
+    scons_cache_mode: all
     scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
     large_distro_name: rhel80-medium
     test_flags: >-
       --mongodSetParameters="{maxNumberOfTransactionOperationsInSingleOplogEntry: 2}"
       --excludeWithAnyTags=exclude_from_large_txns
   tasks:
-  - name: compile_and_archive_dist_test_then_package_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel80-large
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-large
   - name: build_variant_gen
@@ -1805,7 +1836,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-multiversion-template
   name: enterprise-rhel-80-64-bit-multiversion
   display_name: "Enterprise RHEL 8.0 (implicit multiversion)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1816,16 +1847,25 @@ buildvariants:
       --ssl
       --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
       MONGO_DISTMOD=rhel80
+      --link-model=dynamic
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     repo_edition: enterprise
     scons_cache_scope: shared
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
     tooltags: "ssl sasl gssapi"
     build_mongoreplay: true
     large_distro_name: rhel80-medium
     resmoke_jobs_factor: 0.25
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
   - name: build_variant_gen
@@ -1836,17 +1876,32 @@ buildvariants:
 - <<: *enterprise-rhel-80-64-bit-multiversion-template
   name: enterprise-rhel-80-64-bit-multiversion-all-feature-flags
   display_name: "Enterprise RHEL 8.0 (implicit multiversion & all feature flags)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   expansions:
     <<: *enterprise-rhel-80-64-bit-multiversion-expansions-template
     # No feature flag tests since they aren't compatible with the older binaries.
     test_flags: >-
       --runAllFeatureFlagsNoTests
       --excludeWithAnyTags=incompatible_with_shard_merge
+  tasks:
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-xlarge
+  # Disabling as the following tests are not aware of feature flags.
+  # - name: compile_test_and_package_parallel_unittest_stream_TG
+  #   distros:
+  #   - rhel80-xlarge
+  # - name: compile_test_and_package_parallel_dbtest_stream_TG
+  #   distros:
+  #   - rhel80-xlarge
+  - name: build_variant_gen
+  - name: .multiversion_fuzzer
+  - name: .multiversion_passthrough
+  - name: .random_multiversion_ds
 
 - name: enterprise-rhel-80-64-bit-future-git-tag-multiversion
   display_name: "Enterprise RHEL 8.0 (future git tag multiversion)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1857,10 +1912,13 @@ buildvariants:
       --ssl
       --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
       MONGO_DISTMOD=rhel80
+      --link-model=dynamic
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     repo_edition: enterprise
     scons_cache_scope: shared
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
     tooltags: "ssl sasl gssapi"
     build_mongoreplay: true
     large_distro_name: rhel80-medium
@@ -1869,7 +1927,13 @@ buildvariants:
     test_flags: >-
       --excludeWithAnyTags=future_git_tag_incompatible
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
   - name: build_variant_gen
@@ -1880,7 +1944,7 @@ buildvariants:
 #  display_name: "RHEL 8.0 Shared Library (No SSL)"
 #  run_on:
 #  - rhel80-small
-#  cron: "0 12 * * *" # Every day starting at 12:00
+#  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
 #  expansions:
 #    compile_flags: >-
 #      -j$(grep -c ^processor /proc/cpuinfo)
@@ -1891,10 +1955,18 @@ buildvariants:
 #    multiversion_platform: rhel80
 #    multiversion_edition: enterprise
 #    scons_cache_scope: shared
+#    scons_cache_mode: all
+#    num_scons_link_jobs_available: 0.99
 #    build_mongoreplay: false
 #    large_distro_name: rhel80-medium
 #  tasks:
-#  - name: compile_test_and_package_serial_TG
+#  - name: compile_test_and_package_parallel_core_stream_TG
+#    distros:
+#    - rhel80-large
+#  - name: compile_test_and_package_parallel_unittest_stream_TG
+#    distros:
+#    - rhel80-large
+#  - name: compile_test_and_package_parallel_dbtest_stream_TG
 #    distros:
 #    - rhel80-large
 #  - name: jsCore
@@ -1902,7 +1974,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-suggested-template
   name: enterprise-rhel-80-64-bit-suggested
   display_name: "* Enterprise RHEL 8.0"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - enterprise
   run_on:
@@ -1959,7 +2031,7 @@ buildvariants:
 #- <<: *enterprise-rhel-70-64-bit-template
 #  name: enterprise-rhel-70-64-bit-kitchen-sink
 #  display_name: "~ Enterprise RHEL 7.0"
-#  cron: "0 12 * * *" # Every day starting at 12:00
+#  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
 #  expansions:
 #    <<: *enterprise-rhel-70-64-bit-expansions-template
 #    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
@@ -1972,16 +2044,21 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: hot_backups-rhel-70-64-bit
   display_name: "hot_backups RHEL 7.0"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel70
   expansions:
     <<: *enterprise-rhel-70-64-bit-expansions-template
     additional_package_targets: ""
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enterprise-features=hot_backups
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enterprise-features=hot_backups --link-model=dynamic
     has_packages: false
+    scons_cache_mode: all
+    scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
   - name: build_variant_gen
   - name: jsCore
   - name: noPassthroughHotBackups_gen
@@ -1989,17 +2066,26 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit-no-libunwind
   display_name: "~ Enterprise RHEL 7.0 (no-libunwind)"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   run_on:
   - rhel70
   expansions:
     <<: *enterprise-rhel-70-64-bit-expansions-template
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 --use-libunwind=off --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 --use-libunwind=off --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     has_packages: false
     additional_package_targets: ""
+    scons_cache_mode: all
+    scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
   # Override list of tasks to exclude package testing and publishing
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel70
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel70
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel70
   - name: build_variant_gen
@@ -2029,7 +2115,7 @@ buildvariants:
 
 - name: ubuntu1804-container
   display_name: "Ubuntu 18.04 Container"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-container-server
   expansions:
@@ -2055,12 +2141,11 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    release_buid: true
-    compile_flags: --ssl MONGO_DISTMOD=rhel72 -j3 --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    compile_flags: --ssl MONGO_DISTMOD=rhel72 -j3 --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     resmoke_jobs_max: 2
     has_packages: true
     packager_script: packager_enterprise.py
@@ -2074,6 +2159,7 @@ buildvariants:
     multiversion_platform: rhel72
     multiversion_architecture: s390x
     multiversion_edition: enterprise
+    num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -2083,7 +2169,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1804-clang-tidy-required
   display_name: "! Enterprise Clang Tidy"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - enterprise
   run_on:
@@ -2106,7 +2192,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-suggested
   display_name: "* Shared Library Ubuntu 18.04 DEBUG"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - ubuntu1804-test
   expansions:
@@ -2146,7 +2232,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-benchmarks
   display_name: Enterprise RHEL 8.0 (Benchmarks)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -2159,7 +2245,7 @@ buildvariants:
 
 - name: linux-64-ephemeralForTest
   display_name: Linux (ephemeralForTest)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-medium
   expansions:
@@ -2172,12 +2258,16 @@ buildvariants:
       --storageEngine=ephemeralForTest
       --excludeWithAnyTags=requires_persistence,requires_fsync,requires_journaling,requires_wiredtiger,uses_transactions,uses_speculative_majority,requires_snapshot_read,requires_majority_read_concern,uses_change_streams,requires_sharding,incompatible_with_eft
       --mongodSetParameters="{oplogApplicationEnforcesSteadyStateConstraints: false}"
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: rhel80
     multiversion_edition: targeted
+    scons_cache_mode: all
     scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     # TODO (SERVER-58125): Re-enable the timeseries fuzzer for EFT
   - name: build_variant_gen
   #  - name: .aggfuzzer .common !.timeseries # Disabled for FCV 5.3
@@ -2213,7 +2303,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-asan-all-feature-flags
   display_name: "~ Shared Library ASAN Enterprise Ubuntu 18.04 DEBUG (all feature flags)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -2289,7 +2379,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-asan-classic-engine
   display_name: ~ ASAN Enterprise Ubuntu 18.04 DEBUG (Classic Engine)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -2362,7 +2452,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-ubsan-all-feature-flags
   display_name: "~ Shared Library UBSAN Enterprise Ubuntu 18.04 DEBUG (all feature flags)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -2435,7 +2525,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-ubsan-classic-engine
   display_name: ~ UBSAN Enterprise Ubuntu 18.04 DEBUG (Classic Engine)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -2503,7 +2593,7 @@ buildvariants:
 - &ubuntu1804-debug-aubsan-lite-required-template
   name: ubuntu1804-debug-aubsan-lite-required
   display_name: "! Shared Library {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - enterprise
   run_on:
@@ -2542,7 +2632,7 @@ buildvariants:
 - <<: *ubuntu1804-debug-aubsan-lite-required-template
   name: ubuntu1804-debug-aubsan-lite-all-feature-flags-required
   display_name: "! Shared Library {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG (all feature flags)"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     lang_environment: LANG=C
@@ -2580,8 +2670,8 @@ buildvariants:
 #  - name: unittest_shell_hang_analyzer_gen
 
 - name: enterprise-ubuntu2004-debug-tsan
-  display_name: ~ TSAN Enterprise Ubuntu 20.04 DEBUG (ephemeralForTest)
-  cron: "0 12 * * *" # Every day starting at 12:00
+  display_name: ~ TSAN Enterprise Ubuntu 20.04 DEBUG
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -2602,9 +2692,6 @@ buildvariants:
     # of the ServiceContext.
     #
     san_options: TSAN_OPTIONS="halt_on_error=1:report_thread_leaks=0:die_after_fork=0:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
-    # TODO: Remove some of the excluded tags when the ephemeralForTest storage engine is
-    # further along in development: https://jira.mongodb.org/browse/SERVER-48325
-    test_flags: --storageEngine=ephemeralForTest --excludeWithAnyTags=requires_persistence,requires_journaling,uses_transactions,requires_wiredtiger,requires_snapshot_read,requires_majority_read_concern
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --enable-free-mon=on --use-libunwind=off -j$(grep -c ^processor /proc/cpuinfo)
     # Avoid starting too many mongod's under TSAN build.
     resmoke_jobs_factor: 0.3
@@ -2616,39 +2703,58 @@ buildvariants:
 
 - name: enterprise-ubuntu-unoptimized-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (without Diagnostic Latches)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   expansions:
-    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --use-diagnostic-latches=off
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --use-diagnostic-latches=off --link-model=dynamic
+    scons_cache_mode: all
+    scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
 
 - name: enterprise-ubuntu-no-latch-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 DEBUG (Unoptimized)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   expansions:
     compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --dbg=on --opt=off --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --detect-odr-violations
+    scons_cache_mode: all
     scons_cache_scope: shared
+    num_scons_link_jobs_available: 0.99
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
 
 - name: enterprise-ubuntu-fixed-service-executor-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with FixedServiceExecutor)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
   modules:
   - enterprise
   expansions:
     scons_cache_scope: shared
-    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: >-
@@ -2656,7 +2762,13 @@ buildvariants:
       --mongodSetParameters="{initialServiceExecutorThreadingModel: borrowed}"
     large_distro_name: ubuntu1804-build
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
   - name: build_variant_gen
@@ -2674,14 +2786,16 @@ buildvariants:
 
 - name: enterprise-ubuntu-sdam-replica-set-monitor-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with SdamReplicaSetMonitor)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
   modules:
   - enterprise
   expansions:
     scons_cache_scope: shared
-    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: >-
@@ -2690,7 +2804,13 @@ buildvariants:
       --excludeWithAnyTags=requires_streamable_rsm
     large_distro_name: ubuntu1804-build
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
   - name: build_variant_gen
@@ -2706,21 +2826,29 @@ buildvariants:
 
 - name: enterprise-ubuntu-task-executor-pool-size-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {taskExecutorPoolSize: 4})"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
   modules:
   - enterprise
   expansions:
     scons_cache_scope: shared
-    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: |- # Set the taskExecutorPoolSize for all tests
       --mongosSetParameters="taskExecutorPoolSize: 4"
     large_distro_name: ubuntu1804-build
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
   - name: build_variant_gen
@@ -2736,14 +2864,16 @@ buildvariants:
 
 - name: enterprise-ubuntu-sharding-task-executor-pool-rsm-matchPrimary-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {ShardingTaskExecutorPoolReplicaSetMatching: \"matchPrimaryNode\"})"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
   modules:
   - enterprise
   expansions:
     scons_cache_scope: shared
-    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: >-
@@ -2751,7 +2881,13 @@ buildvariants:
       --excludeWithAnyTags=sets_replica_set_matching_strategy
     large_distro_name: ubuntu1804-build
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
   - name: build_variant_gen
@@ -2767,14 +2903,16 @@ buildvariants:
 
 - name: enterprise-ubuntu-sharding-task-executor-pool-rsm-matchBusiest-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {ShardingTaskExecutorPoolReplicaSetMatching: \"matchBusiestNode\"})"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
   modules:
   - enterprise
   expansions:
     scons_cache_scope: shared
-    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: >-
@@ -2782,7 +2920,13 @@ buildvariants:
       --excludeWithAnyTags=sets_replica_set_matching_strategy
     large_distro_name: ubuntu1804-build
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - ubuntu1804-build
   - name: build_variant_gen
@@ -2798,9 +2942,48 @@ buildvariants:
 
 - name: enterprise-ubuntu-sharding-task-executor-pool-rsm-disabled-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 (with {ShardingTaskExecutorPoolReplicaSetMatching: \"disabled\"})"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
+  modules:
+  - enterprise
+  expansions:
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
+    compile_flags: MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
+    multiversion_platform: ubuntu1804
+    multiversion_edition: enterprise
+    test_flags: >-
+      --mongosSetParameters="ShardingTaskExecutorPoolReplicaSetMatching: \"disabled\""
+      --excludeWithAnyTags=sets_replica_set_matching_strategy
+    large_distro_name: ubuntu1804-build
+  tasks:
+  - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: compile_test_and_package_parallel_dbtest_stream_TG
+    distros:
+    - ubuntu1804-build
+  - name: build_variant_gen
+  - name: .aggregation !.no_async
+  - name: .sharding .auth
+  - name: .sharding .causally_consistent !.wo_snapshot
+  - name: .concurrency .common !.kill_terminate
+  - name: .integration !.audit
+  - name: .jscore .common
+  - name: .logical_session_cache .one_sec
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.csrs
+
+- name: enterprise-ubuntu-join-ingress-sessions-on-shutdown
+  display_name: "~ Enterprise Ubuntu 18.04 (with {joinIngressSessionsOnShutdown: \"true\"})"
+  activate: false
+  run_on:
+    - ubuntu1804-test
   modules:
   - enterprise
   expansions:
@@ -2809,8 +2992,8 @@ buildvariants:
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     test_flags: >-
-      --mongosSetParameters="ShardingTaskExecutorPoolReplicaSetMatching: \"disabled\""
-      --excludeWithAnyTags=sets_replica_set_matching_strategy
+        --mongosSetParameters="joinIngressSessionsOnShutdown: \"true\""
+        --mongodSetParameters="joinIngressSessionsOnShutdown: \"true\""
     large_distro_name: ubuntu1804-build
   tasks:
   - name: compile_test_and_package_serial_TG
@@ -2829,7 +3012,7 @@ buildvariants:
 
 - name: shared-scons-cache-pruning
   display_name: "Shared SCons Cache Pruning"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1604-test
   stepback: false
@@ -2838,7 +3021,7 @@ buildvariants:
 
 - name: windows-shared-scons-cache-pruning
   display_name: "Windows shared SCons Cache Pruning"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - windows-vsCurrent-small
   stepback: false
@@ -2853,7 +3036,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel80-small
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   expansions:
     selected_tests_buildvariants: enterprise-windows-required linux-64-debug-required enterprise-ubuntu-dynamic-1604-clang ubuntu1804-debug-aubsan-lite-required
@@ -2863,7 +3046,7 @@ buildvariants:
 - <<: *enterprise-rhel-80-64-bit-dynamic-required-template
   name: commit-queue
   display_name: "~ Commit Queue"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
@@ -2885,14 +3068,17 @@ buildvariants:
 
 - name: windows-dynamic-visibility-test
   display_name: "~ Shared Library Windows (visibility test)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   expansions:
+    # --link-model=dynamic is set by visiblity_test's task_compile_flags
+    # expansion
     compile_flags: CPPPATH="c:/sasl/include c:/snmp/include" LIBPATH="c:/sasl/lib c:/snmp/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --win-version-min=win10
     python: '/cygdrive/c/python/python37/python.exe'
     ext: zip
     has_packages: false
     scons_cache_scope: shared
     scons_cache_mode: all
+    num_scons_link_jobs_available: 0.99
   tasks:
   - name: visibility_test_TG
     distros:
@@ -2902,7 +3088,7 @@ buildvariants:
 - <<: *enterprise-rhel-80-64-bit-dynamic-classic-engine
   name: enterprise-rhel-80-64-bit-dynamic-classic-engine-query-patch-only
   display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (Classic Engine)"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday . This is a patch-only variant but we run on mainline to pick up task history.
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter # This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
     <<: *enterprise-rhel-80-64-bit-dynamic-classic-engine-expansions
     jstestfuzz_num_generated_files: 20
@@ -2917,7 +3103,7 @@ buildvariants:
 - <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-query-patch-only
   display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (all feature flags)"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday . This is a patch-only variant but we run on mainline to pick up task history.
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter # This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
     <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     jstestfuzz_num_generated_files: 20
@@ -2931,13 +3117,15 @@ buildvariants:
 
 - name: enterprise-ubuntu1804-64-libvoidstar
   display_name: ~ Enterprise Ubuntu 18.04 w/ libvoidstar
-  cron: "0 0 * * FRI" # Every week starting 00:00 on Friday
+  cron: "0 4 * * FRI" # Every week at 0400 UTC Friday. This has to be a Friday since we run Antithesis on Fridays.
   modules:
   - enterprise
   run_on:
   - ubuntu1804-large
   stepback: false
   expansions:
+    # Do not set link-model=dynamic on this build. The antithesis image builder
+    # scripts cannot handle the shared library build
     compile_flags: --ssl --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars CCFLAGS="-fsanitize-coverage=trace-pc-guard" LIBS="voidstar"
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
@@ -2953,7 +3141,7 @@ buildvariants:
 - <<: *enterprise-windows-nopush-template
   name: enterprise-windows-benchmarks
   display_name: "~ Enterprise Windows (Benchmarks)"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   tasks:
   - name: compile_benchmarks
     distros:
@@ -2963,7 +3151,7 @@ buildvariants:
 - <<: *enterprise-windows-nopush-template
   name: enterprise-windows-wtdevelop
   display_name: "~ Enterprise Windows WiredTiger develop"
-  cron: "0 */4 * * *" # Every 4 hours starting at midnight
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
   - enterprise
   - wtdevelop
@@ -2975,7 +3163,7 @@ buildvariants:
 - <<: *enterprise-windows-nopush-template
   name: windows-compile-query-patch-only
   display_name: "~ Windows Compile Query Patch Only"
-  cron: "0 0 * * 0" # Every week starting 00:00 on Sunday . This is a patch-only variant but we run on mainline to pick up task history.
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter # This is a patch-only variant but we run on mainline to pick up task history.
   tasks:
   - name: compile_dist_test_TG
     distros:
@@ -2983,7 +3171,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-aubsan-lite_fuzzer
   display_name: "{A,UB}SAN Enterprise Ubuntu 18.04 FUZZER"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:

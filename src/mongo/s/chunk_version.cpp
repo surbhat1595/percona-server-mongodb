@@ -27,12 +27,10 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/s/chunk_version.h"
+
 #include "mongo/s/chunk_version_gen.h"
 #include "mongo/s/pm2583_feature_flags_gen.h"
-
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -212,28 +210,49 @@ void ChunkVersion::serializeToPositionalWronlyEcondedOr60AsBSON(StringData field
 }
 
 void ChunkVersion::serializeToBSON(StringData field, BSONObjBuilder* builder) const {
-    BSONArrayBuilder arr(builder->subarrayStart(field));
-    arr.appendTimestamp(_combined);
-    arr.append(_epoch);
-    arr.append(_timestamp);
+    if (feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        ChunkVersion60Format chunkVersion(
+            _timestamp, _epoch, Timestamp(majorVersion(), minorVersion()));
+        builder->append(field, chunkVersion.toBSON());
+    } else {
+        BSONArrayBuilder arr(builder->subarrayStart(field));
+        arr.appendTimestamp(_combined);
+        arr.append(_epoch);
+        arr.append(_timestamp);
+    }
 }
 
 void ChunkVersion::serializeToPositionalFormatWronglyEncodedAsBSON(StringData field,
                                                                    BSONObjBuilder* builder) const {
-    BSONObjBuilder subObjBuilder(builder->subobjStart(field));
-    subObjBuilder.appendElements([&] {
-        BSONArrayBuilder arr;
-        arr.appendTimestamp(_combined);
-        arr.append(_epoch);
-        arr.append(_timestamp);
-        return arr.obj();
-    }());
+    if (feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        ChunkVersion60Format chunkVersion(
+            _timestamp, _epoch, Timestamp(majorVersion(), minorVersion()));
+        builder->append(field, chunkVersion.toBSON());
+    } else {
+        BSONObjBuilder subObjBuilder(builder->subobjStart(field));
+        subObjBuilder.appendElements([&] {
+            BSONArrayBuilder arr;
+            arr.appendTimestamp(_combined);
+            arr.append(_epoch);
+            arr.append(_timestamp);
+            return arr.obj();
+        }());
+    }
 }
 
 void ChunkVersion::appendLegacyWithField(BSONObjBuilder* out, StringData field) const {
-    out->appendTimestamp(field, _combined);
-    out->append(field + "Epoch", _epoch);
-    out->append(field + "Timestamp", _timestamp);
+    if (feature_flags::gFeatureFlagNewPersistedChunkVersionFormat.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        ChunkVersion60Format chunkVersion(
+            _timestamp, _epoch, Timestamp(majorVersion(), minorVersion()));
+        out->append(field, chunkVersion.toBSON());
+    } else {
+        out->appendTimestamp(field, _combined);
+        out->append(field + "Epoch", _epoch);
+        out->append(field + "Timestamp", _timestamp);
+    }
 }
 
 std::string ChunkVersion::toString() const {

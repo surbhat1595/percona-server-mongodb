@@ -52,26 +52,6 @@ Document copyDocExceptFields(const Document& source, const std::set<StringData>&
     return doc.freeze();
 }
 
-ResumeTokenData makeResumeToken(Value ts,
-                                Value txnOpIndex,
-                                Value uuid,
-                                StringData operationType,
-                                Value documentKey,
-                                Value opDescription) {
-    ResumeTokenData resumeTokenData;
-    resumeTokenData.clusterTime = ts.getTimestamp();
-    if (!uuid.missing()) {
-        resumeTokenData.uuid = uuid.getUuid();
-    }
-    if (!txnOpIndex.missing()) {
-        resumeTokenData.txnOpIndex = txnOpIndex.getLong();
-    }
-    resumeTokenData.eventIdentifier =
-        ResumeToken::makeEventIdentifier(operationType, documentKey, opDescription);
-
-    return resumeTokenData;
-}
-
 repl::OpTypeEnum getOplogOpType(const Document& oplog) {
     auto opTypeField = oplog[repl::OplogEntry::kOpTypeFieldName];
     checkValueType(opTypeField, repl::OplogEntry::kOpTypeFieldName, BSONType::String);
@@ -95,8 +75,13 @@ void setResumeTokenForEvent(const ResumeTokenData& resumeTokenData, MutableDocum
 }  // namespace
 
 ChangeStreamEventTransformation::ChangeStreamEventTransformation(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const DocumentSourceChangeStreamSpec& spec)
-    : _changeStreamSpec(spec) {
+    : _changeStreamSpec(spec), _expCtx(expCtx) {
+    // Extract the resume token from the spec and store it.
+    _resumeToken =
+        DocumentSourceChangeStream::resolveResumeTokenFromSpec(_expCtx, _changeStreamSpec);
+
     // Determine whether the user requested a point-in-time pre-image, which will affect this
     // stage's output.
     _preImageRequested =
@@ -109,13 +94,32 @@ ChangeStreamEventTransformation::ChangeStreamEventTransformation(
         _changeStreamSpec.getFullDocument() == FullDocumentModeEnum::kRequired;
 }
 
+ResumeTokenData ChangeStreamEventTransformation::makeResumeToken(Value tsVal,
+                                                                 Value txnOpIndexVal,
+                                                                 Value uuidVal,
+                                                                 StringData operationType,
+                                                                 Value documentKey,
+                                                                 Value opDescription) const {
+    // Resolve the potentially-absent Value arguments to the expected resume token types.
+    auto uuid = uuidVal.missing() ? boost::none : boost::optional<UUID>{uuidVal.getUuid()};
+    size_t txnOpIndex = txnOpIndexVal.missing() ? 0 : txnOpIndexVal.getLong();
+    auto clusterTime = tsVal.getTimestamp();
+
+    // If we have a resume token, we need to match the version with which it was generated until we
+    // have surpassed it, at which point we can begin generating tokens with our default version.
+    auto version = (clusterTime > _resumeToken.clusterTime) ? _expCtx->changeStreamTokenVersion
+                                                            : _resumeToken.version;
+
+    // Construct and return the final resume token.
+    return {clusterTime, version, txnOpIndex, uuid, operationType, documentKey, opDescription};
+}
+
 ChangeStreamDefaultEventTransformation::ChangeStreamDefaultEventTransformation(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const DocumentSourceChangeStreamSpec& spec)
-    : ChangeStreamEventTransformation(spec) {
-    // Extract the resume token and use it to construct the document key cache.
-    auto tokenData = DocumentSourceChangeStream::resolveResumeTokenFromSpec(_changeStreamSpec);
-    _documentKeyCache = std::make_unique<change_stream_legacy::DocumentKeyCache>(expCtx, tokenData);
+    : ChangeStreamEventTransformation(expCtx, spec) {
+    _documentKeyCache =
+        std::make_unique<change_stream_legacy::DocumentKeyCache>(expCtx, _resumeToken);
 }
 
 std::set<std::string> ChangeStreamDefaultEventTransformation::getFieldNameDependencies() const {
@@ -470,6 +474,11 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
     return doc.freeze();
 }
 
+ChangeStreamViewDefinitionEventTransformation::ChangeStreamViewDefinitionEventTransformation(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const DocumentSourceChangeStreamSpec& spec)
+    : ChangeStreamEventTransformation(expCtx, spec) {}
+
 std::set<std::string> ChangeStreamViewDefinitionEventTransformation::getFieldNameDependencies()
     const {
     return std::set<std::string>{repl::OplogEntry::kOpTypeFieldName.toString(),
@@ -495,15 +504,22 @@ Document ChangeStreamViewDefinitionEventTransformation::applyTransformation(
             operationDescription = Value(copyDocExceptFields(oField, {"_id"_sd}));
             break;
         }
-        default: {
-            // TODO SERVER-61886: This should be changed to a tassert after we implement
-            // transformation logic for modify and drop views.
-            //
-            // To be able to generate a 'modify' event, we need the collMod of a view defintion to
-            // to always log the update as replacement.
-            // TODO SERVER-61886: Add a tassert to validate this.
-            operationType = DocumentSourceChangeStream::kInvalidateOpType;
+        case repl::OpTypeEnum::kUpdate: {
+            // To be able to generate a 'modify' event, we need the collMod of a view definition to
+            // always log the update as replacement.
+            tassert(6188601, "Expected replacement update", !oField["_id"].missing());
+
+            operationType = DocumentSourceChangeStream::kModifyOpType;
+            operationDescription = Value(copyDocExceptFields(oField, {"_id"_sd}));
             break;
+        }
+        case repl::OpTypeEnum::kDelete: {
+            operationType = DocumentSourceChangeStream::kDropCollectionOpType;
+            break;
+        }
+        default: {
+            // We shouldn't see an op other than insert, update or delete.
+            MONGO_UNREACHABLE_TASSERT(6188600);
         }
     };
 
@@ -533,7 +549,8 @@ ChangeStreamEventTransformer::ChangeStreamEventTransformer(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const DocumentSourceChangeStreamSpec& spec) {
     _defaultEventBuilder = std::make_unique<ChangeStreamDefaultEventTransformation>(expCtx, spec);
-    _viewNsEventBuilder = std::make_unique<ChangeStreamViewDefinitionEventTransformation>(spec);
+    _viewNsEventBuilder =
+        std::make_unique<ChangeStreamViewDefinitionEventTransformation>(expCtx, spec);
     _isSingleCollStream = DocumentSourceChangeStream::getChangeStreamType(expCtx->ns) ==
         DocumentSourceChangeStream::ChangeStreamType::kSingleCollection;
 }

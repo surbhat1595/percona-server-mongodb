@@ -2,17 +2,13 @@
 
 /**
  * @tags: [
- *  featureFlagFLE2,
+ * requires_fcv_60
  * ]
  */
 load("jstests/fle2/libs/encrypted_client_util.js");
 
 (function() {
 'use strict';
-
-if (!isFLE2Enabled()) {
-    return;
-}
 
 let dbTest = db.getSiblingDB('create_encrypted_collection_db');
 
@@ -65,7 +61,7 @@ assert.commandWorked(dbTest.createCollection("basic", {encryptedFields: sampleEn
 
 const result = dbTest.getCollectionInfos({name: "basic"});
 const ef = result[0].options.encryptedFields;
-assert.eq(ef.escCollection, "fle2.basic.esc");
-assert.eq(ef.eccCollection, "fle2.basic.ecc");
-assert.eq(ef.ecocCollection, "fle2.basic.ecoc");
+assert.eq(ef.escCollection, "enxcol_.basic.esc");
+assert.eq(ef.eccCollection, "enxcol_.basic.ecc");
+assert.eq(ef.ecocCollection, "enxcol_.basic.ecoc");
 }());

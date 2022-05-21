@@ -616,7 +616,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::removeProjectSimpleBelowGro
 // Checks if the foreign collection is eligible for the hash join algorithm. We conservatively
 // choose the hash join algorithm for cases when the hash table is unlikely to spill data.
 bool isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
-    return !internalQueryDisableLookupExecutionUsingHashJoin.load() &&
+    return !internalQueryDisableLookupExecutionUsingHashJoin.load() && foreignCollInfo.exists &&
         foreignCollInfo.noOfRecords <=
         internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin.load() &&
         foreignCollInfo.approximateDataSizeBytes <=
@@ -629,7 +629,8 @@ bool isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
 void QueryPlannerAnalysis::determineLookupStrategy(
     EqLookupNode* eqLookupNode,
     const std::map<NamespaceString, SecondaryCollectionInfo>& collectionsInfo,
-    bool allowDiskUse) {
+    bool allowDiskUse,
+    const CollatorInterface* collator) {
     const auto& foreignCollName = eqLookupNode->foreignCollection;
     auto foreignCollItr = collectionsInfo.find(NamespaceString(foreignCollName));
     tassert(5842600,
@@ -660,7 +661,8 @@ void QueryPlannerAnalysis::determineLookupStrategy(
         for (const auto& index : indexes) {
             if ((index.type == INDEX_BTREE || index.type == INDEX_HASHED) &&
                 index.keyPattern.firstElement().fieldName() ==
-                    eqLookupNode->joinFieldForeign.fullPath()) {
+                    eqLookupNode->joinFieldForeign.fullPath() &&
+                CollatorInterface::collatorsMatch(collator, index.collator)) {
                 return index;
             }
         }
@@ -668,7 +670,9 @@ void QueryPlannerAnalysis::determineLookupStrategy(
         return boost::none;
     }();
 
-    if (foreignIndex) {
+    if (!foreignCollItr->second.exists) {
+        eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kNonExistentForeignCollection;
+    } else if (foreignIndex) {
         eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kIndexedLoopJoin;
         eqLookupNode->idxEntry = foreignIndex;
     } else if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {

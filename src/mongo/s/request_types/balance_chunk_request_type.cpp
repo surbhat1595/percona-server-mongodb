@@ -34,7 +34,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/request_types/balance_chunk_request_type.h"
 
 namespace mongo {
 namespace {
@@ -143,47 +142,19 @@ StatusWith<BalanceChunkRequest> BalanceChunkRequest::parseFromConfigCommand(cons
     return request;
 }
 
-BSONObj BalanceChunkRequest::serializeToMoveCommandForConfig(
+BSONObj BalanceChunkRequest::serializeToRebalanceCommandForConfig(
     const NamespaceString& nss,
-    const ChunkType& chunk,
-    const ShardId& newShardId,
-    const MigrationSecondaryThrottleOptions& secondaryThrottle,
-    bool waitForDelete,
-    bool forceJumbo) {
-    invariant(chunk.validate());
-
+    const ChunkRange& range,
+    const UUID& collectionUUID,
+    const ShardId& owningShard,
+    const ChunkVersion& expectedChunkVersion) {
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(kConfigSvrMoveChunk, 1);
     cmdBuilder.append(kNS, nss.ns());
-    cmdBuilder.appendElements(chunk.toConfigBSON());
-    // ChunkType::toConfigBSON() no longer adds the epoch
-    cmdBuilder.append(ChunkType::lastmod() + "Epoch", chunk.getVersion().epoch());
-    cmdBuilder.append(ChunkType::lastmod() + "Timestamp", chunk.getVersion().getTimestamp());
-    cmdBuilder.append(kToShardId, newShardId.toString());
-    {
-        BSONObjBuilder secondaryThrottleBuilder(cmdBuilder.subobjStart(kSecondaryThrottle));
-        secondaryThrottle.append(&secondaryThrottleBuilder);
-        secondaryThrottleBuilder.doneFast();
-    }
-    cmdBuilder.append(kWaitForDelete, waitForDelete);
-    cmdBuilder.append(kForceJumbo, forceJumbo);
-    cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
-                      kMajorityWriteConcernNoTimeout.toBSON());
-
-    return cmdBuilder.obj();
-}
-
-BSONObj BalanceChunkRequest::serializeToRebalanceCommandForConfig(const NamespaceString& nss,
-                                                                  const ChunkType& chunk) {
-    invariant(chunk.validate());
-
-    BSONObjBuilder cmdBuilder;
-    cmdBuilder.append(kConfigSvrMoveChunk, 1);
-    cmdBuilder.append(kNS, nss.ns());
-    cmdBuilder.appendElements(chunk.toConfigBSON());
-    // ChunkType::toConfigBSON() no longer returns the epoch
-    cmdBuilder.append(ChunkType::lastmod() + "Epoch", chunk.getVersion().epoch());
-    cmdBuilder.append(ChunkType::lastmod() + "Timestamp", chunk.getVersion().getTimestamp());
+    range.append(&cmdBuilder);
+    cmdBuilder.append(ChunkType::shard(), owningShard);
+    collectionUUID.appendToBuilder(&cmdBuilder, ChunkType::collectionUUID());
+    expectedChunkVersion.appendLegacyWithField(&cmdBuilder, ChunkType::lastmod());
     cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
                       kMajorityWriteConcernNoTimeout.toBSON());
 

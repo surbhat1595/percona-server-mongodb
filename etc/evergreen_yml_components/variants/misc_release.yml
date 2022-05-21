@@ -3,7 +3,7 @@
 buildvariants:
 - name: amazon
   display_name: Amazon Linux
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - amazon1-2018-test
   expansions:
@@ -59,7 +59,7 @@ buildvariants:
 
 - name: enterprise-linux-64-amazon-ami
   display_name: "Enterprise Amazon Linux"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -120,7 +120,7 @@ buildvariants:
 
 - name: amazon2
   display_name: Amazon Linux 2
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - amazon2-test
   expansions:
@@ -176,7 +176,7 @@ buildvariants:
 
 - name: enterprise-amazon2
   display_name: "Enterprise Amazon Linux 2"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -237,7 +237,7 @@ buildvariants:
 
 - name: amazon2-arm64
   display_name: Amazon Linux 2 arm64
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - amazon2-arm64-small
   expansions:
@@ -288,7 +288,7 @@ buildvariants:
 
 - name: enterprise-amazon2-arm64
   display_name: "Enterprise Amazon Linux 2 arm64"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -349,7 +349,7 @@ buildvariants:
 
 - name: debian10
   display_name: Debian 10
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - debian10-test
   expansions:
@@ -404,7 +404,7 @@ buildvariants:
 
 - name: enterprise-debian10-64
   display_name: Enterprise Debian 10
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -459,9 +459,121 @@ buildvariants:
     - debian10-small
   - name: generate_buildid_to_debug_symbols_mapping
 
+- name: debian11
+  display_name: Debian 11
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - debian11-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.mongodb.org
+    push_name: linux
+    push_arch: x86_64-debian11
+    compile_flags: --ssl MONGO_DISTMOD=debian11 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: debian11
+    multiversion_edition_42_or_later: targeted
+    has_packages: true
+    packager_script: packager.py
+    packager_arch: x86_64
+    packager_distro: debian11
+    repo_edition: org
+    scons_cache_scope: shared
+    large_distro_name: debian11-large
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - debian11-large
+  - name: build_variant_gen
+  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: aggregation
+  - name: aggregation_auth
+  - name: .auth !.audit !.multiversion
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .misc_js
+  - name: .concurrency .common
+  - name: concurrency_replication_causal_consistency_gen
+  - name: disk_wiredtiger
+  - name: free_monitoring
+  - name: .jscore .common !.decimal
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: multiversion_gen
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.csrs
+  - name: .ssl
+  - name: .stitch
+  - name: test_packages
+    distros:
+    - ubuntu2004-package
+  - name: .publish
+    distros:
+    - debian11-small
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-debian11-64
+  display_name: Enterprise Debian 11
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - debian11-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-debian11
+    compile_flags: --ssl MONGO_DISTMOD=debian11 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: debian11
+    multiversion_edition_42_or_later: enterprise
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: debian11
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    large_distro_name: debian11-large
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - debian11-large
+  - name: build_variant_gen
+  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: audit
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
+  - name: .jepsen_docker
+    distros:
+    - debian11-large
+  - name: .jscore .common !.decimal !.sharding
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough
+  - name: sasl
+  - name: sharding_auth_gen
+  - name: snmp
+  - name: .stitch
+  - name: .csfle
+  - name: .publish_csfle
+  - name: test_packages
+    distros:
+    - ubuntu2004-package
+  - name: .publish
+    distros:
+    - debian11-small
+  - name: generate_buildid_to_debug_symbols_mapping
+
 - name: debian92
   display_name: Debian 9.2
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - debian92-test
   expansions:
@@ -515,7 +627,7 @@ buildvariants:
 
 - name: enterprise-debian92-64
   display_name: Enterprise Debian 9.2
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -568,7 +680,7 @@ buildvariants:
 
 - name: rhel70
   display_name: RHEL 7.0
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel70-small
   expansions:
@@ -623,7 +735,7 @@ buildvariants:
   # This variant compiles on RHEL 7.0 and runs tests on RHEL 7.6
 - name: rhel76_compile_rhel70
   display_name: RHEL 7.0/7.6 Cross-ABI
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel76-test
   expansions:
@@ -639,7 +751,7 @@ buildvariants:
 
 - name: ubi8
   display_name: "UBI 8"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubi8
   expansions:
@@ -661,7 +773,7 @@ buildvariants:
 
 - name: rhel80
   display_name: RHEL 8.0
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-build
   expansions:
@@ -714,7 +826,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-64-bit
   display_name: "Enterprise RHEL 8.0"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -826,7 +938,7 @@ buildvariants:
 
 - name: rhel-82-arm64
   display_name: RHEL 8.2 arm64
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel82-arm64-small
   expansions:
@@ -876,7 +988,7 @@ buildvariants:
 
 - name: enterprise-rhel-82-arm64
   display_name: "Enterprise RHEL 8.2 arm64"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -937,7 +1049,7 @@ buildvariants:
 
 - name: suse12
   display_name: SUSE 12
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - suse12-sp5-small
   expansions:
@@ -989,7 +1101,7 @@ buildvariants:
 
 - name: enterprise-suse12-64
   display_name: Enterprise SLES 12
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1040,7 +1152,7 @@ buildvariants:
 
 - name: enterprise-suse15-64
   display_name: Enterprise SLES 15
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1086,7 +1198,7 @@ buildvariants:
 
 - name: suse15
   display_name: SUSE 15
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - suse15-test
   expansions:
@@ -1138,7 +1250,7 @@ buildvariants:
 
 - name: ubuntu1804
   display_name: Ubuntu 18.04
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-test
   expansions:
@@ -1197,7 +1309,7 @@ buildvariants:
 
 - name: enterprise-ubuntu1804-64
   display_name: Enterprise Ubuntu 18.04
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1268,7 +1380,7 @@ buildvariants:
 
 - name: enterprise-ubuntu1804-arm64
   display_name: Enterprise Ubuntu 18.04 arm64
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1328,7 +1440,7 @@ buildvariants:
 
 - name: ubuntu1804-arm64
   display_name: Ubuntu 18.04 arm64
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-arm64-build
   expansions:
@@ -1365,7 +1477,7 @@ buildvariants:
 
 - name: ubuntu2004
   display_name: Ubuntu 20.04
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu2004-small
   expansions:
@@ -1418,7 +1530,7 @@ buildvariants:
 
 - name: enterprise-ubuntu2004-64
   display_name: Enterprise Ubuntu 20.04
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1475,7 +1587,7 @@ buildvariants:
 
 - name: enterprise-ubuntu2004-arm64
   display_name: Enterprise Ubuntu 20.04 arm64
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1532,7 +1644,7 @@ buildvariants:
 
 - name: ubuntu2004-arm64
   display_name: Ubuntu 20.04 arm64
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu2004-arm64-large
   expansions:
@@ -1568,7 +1680,7 @@ buildvariants:
 
 - name: windows
   display_name: Windows
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -1629,7 +1741,7 @@ buildvariants:
 
 - name: enterprise-windows
   display_name: "Enterprise Windows"
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1703,7 +1815,7 @@ buildvariants:
   ###########################################
 - name: macos
   display_name: macOS
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - macos-1100
   expansions:
@@ -1753,9 +1865,61 @@ buildvariants:
     distros:
     - rhel70-small
 
+- name: macos-arm64
+  display_name: macOS arm64
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - macos-1100-arm64
+  expansions:
+    test_flags: --excludeWithAnyTags=incompatible_with_macos
+    push_path: osx
+    push_bucket: downloads.mongodb.org
+    push_name: macos
+    push_arch: arm64
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
+    resmoke_jobs_max: 6
+  tasks:
+  - name: compile_test_and_package_serial_TG
+  - name: compile_build_tools_next_TG
+  - name: build_variant_gen
+  - name: .aggregation !.auth !.encrypt !.unwind
+  - name: auth_gen
+  - name: .causally_consistent !.sharding
+  - name: .change_streams !.secondary_reads
+  - name: .misc_js
+  - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
+  - name: disk_wiredtiger
+  - name: free_monitoring
+  - name: initial_sync_fuzzer_gen
+  - name: .jscore .common !.auth
+  - name: jsCore_txns_large_txns_format
+  - name: .jstestfuzz .causal
+  - name: .jstestfuzz .interrupt
+  - name: .jstestfuzz .common
+  - name: .jstestfuzz .session
+  - name: .logical_session_cache .one_sec
+  - name: .query_fuzzer
+  - name: .read_write_concern !.linearize
+  - name: replica_sets_gen
+  - name: replica_sets_kill_secondaries_jscore_passthrough
+  - name: replica_sets_large_txns_format_gen
+  - name: .replica_sets .common !.auth
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: .rollbackfuzzer
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .txns
+  - name: .ssl
+  - name: .stitch
+  - name: unittest_shell_hang_analyzer_gen
+  - name: push
+    distros:
+    - rhel70-small
+
 - name: enterprise-macos
   display_name: Enterprise macOS
-  cron: "0 12 * * *" # Every day starting at 12:00
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
@@ -1769,6 +1933,46 @@ buildvariants:
     push_arch: x86_64-enterprise
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
     compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx.vars
+    resmoke_jobs_max: 6
+  tasks:
+  - name: compile_test_and_package_serial_TG
+  - name: compile_build_tools_next_TG
+  - name: build_variant_gen
+  - name: audit
+  - name: auth_audit_gen
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
+  - name: .jscore .common !.decimal !.sharding
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: mqlrun
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough
+  - name: sasl
+  - name: push
+    distros:
+    - rhel70-small
+  - name: .csfle
+  - name: .publish_csfle
+    distros:
+    - rhel70-small
+
+- name: enterprise-macos-arm64
+  display_name: Enterprise macOS arm64
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - macos-1100-arm64
+  expansions:
+    test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: osx
+    push_bucket: downloads.10gen.com
+    push_name: macos
+    push_arch: arm64-enterprise
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
+    compile_flags: --ssl -j$(sysctl -n hw.logicalcpu) --libc++ --variables-files=etc/scons/xcode_macosx_arm.vars
     resmoke_jobs_max: 6
   tasks:
   - name: compile_test_and_package_serial_TG

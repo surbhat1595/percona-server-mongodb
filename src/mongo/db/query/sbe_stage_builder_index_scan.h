@@ -42,6 +42,12 @@ class PlanStageReqs;
 class PlanStageSlots;
 
 /**
+ * A list of low and high key values representing ranges over a particular index.
+ */
+using IndexIntervals =
+    std::vector<std::pair<std::unique_ptr<KeyString::Value>, std::unique_ptr<KeyString::Value>>>;
+
+/**
  * This method generates an SBE plan stage tree implementing an index scan. It returns a tuple
  * containing: (1) a slot produced by the index scan that holds the record ID ('recordIdSlot');
  * (2) a slot vector produced by the index scan which hold parts of the index key ('indexKeySlots');
@@ -96,4 +102,68 @@ std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateSingleInt
     PlanYieldPolicy* yieldPolicy,
     PlanNodeId nodeId);
 
+/**
+ * Constructs low/high key values from the given index 'bounds' if they can be represented either as
+ * a single interval between the low and high keys, or multiple single intervals. If index bounds
+ * for some interval cannot be expressed as valid low/high keys, then an empty vector is returned.
+ */
+IndexIntervals makeIntervalsFromIndexBounds(const IndexBounds& bounds,
+                                            bool forward,
+                                            KeyString::Version version,
+                                            Ordering ordering);
+
+/**
+ * Construct an array containing objects with the low and high keys for each interval.
+ *
+ * E.g., [ {l: KS(...), h: KS(...)},
+ *         {l: KS(...), h: KS(...)}, ... ]
+ */
+std::pair<sbe::value::TypeTags, sbe::value::Value> packIndexIntervalsInSbeArray(
+    IndexIntervals intervals);
+
+/**
+ * Constructs a generic multi-interval index scan. Depending on the intervals will either execute
+ * the optimized or the generic index scan subplan. The generated subtree will have
+ * the following form:
+ *
+ * branch {isGenericScanSlot} [recordIdSlot, resultSlot, ...]
+ * then
+ *    filter {isRecordId(resultSlot)}
+ *    lspool sp1 [resultSlot] {!isRecordId(resultSlot)}
+ *    union [resultSlot]
+             project [startKeySlot = anchorSlot, unusedVarSlot0 = Nothing, ...]
+ *           limit 1
+ *           coscan
+ *       [checkBoundsSlot]
+ *           nlj [] [seekKeySlot]
+ *               left
+ *                   sspool sp1 [seekKeySlot]
+ *               right
+ *                  chkbounds resultSlot recordIdSlot checkBoundsSlot
+ *                  nlj [] [lowKeySlot]
+ *                      left
+ *                          project [lowKeySlot = seekKeySlot]
+ *                          limit 1
+ *                          coscan
+ *                   right
+ *                      ixseek lowKeySlot resultSlot recordIdSlot [] @coll @index
+ * else
+ *     nlj [] [lowKeySlot, highKeySlot]
+ *     left
+ *         project [lowKeySlot = getField (unwindSlot, "l"),
+ *                  highKeySlot = getField (unwindSlot, "h")]
+ *         unwind unwindSlot indexSlot boundsSlot false
+ *         limit 1
+ *         coscan
+ *     right
+ *         ixseek lowKeySlot highKeySlot recordIdSlot [] @coll @index
+ */
+std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScanWithDynamicBounds(
+    StageBuilderState& state,
+    const CollectionPtr& collection,
+    const IndexScanNode* ixn,
+    const sbe::IndexKeysInclusionSet& indexKeyBitset,
+    PlanYieldPolicy* yieldPolicy,
+    StringMap<const IndexAccessMethod*>* iamMap,
+    bool needsCorruptionCheck);
 }  // namespace mongo::stage_builder

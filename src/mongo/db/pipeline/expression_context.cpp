@@ -210,6 +210,7 @@ intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
     expCtx->subPipelineDepth = subPipelineDepth;
     expCtx->tempDir = tempDir;
     expCtx->jsHeapLimitMB = jsHeapLimitMB;
+    expCtx->isParsingViewDefinition = isParsingViewDefinition;
 
     expCtx->variables = variables;
     expCtx->variablesParseState = variablesParseState.copyWith(expCtx->variables.useIdGenerator());
@@ -217,6 +218,9 @@ intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
     expCtx->exprDeprectedForApiV1 = exprDeprectedForApiV1;
 
     expCtx->initialPostBatchResumeToken = initialPostBatchResumeToken.getOwned();
+    expCtx->changeStreamTokenVersion = changeStreamTokenVersion;
+    expCtx->changeStreamSpec = changeStreamSpec;
+
     expCtx->originalAggregateCommand = originalAggregateCommand.getOwned();
 
     // Note that we intentionally skip copying the value of '_interruptCounter' because 'expCtx' is

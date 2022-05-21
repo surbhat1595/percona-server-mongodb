@@ -42,7 +42,8 @@ feature_flags:
     featureFlagFLE2:
         description: "Enable FLE2 support"
         cpp_varname: gFeatureFlagFLE2
-        default: false
+        default: true
+        version: 6.0
 
 structs:
 
@@ -77,6 +78,7 @@ structs:
                 description: "BSON type of field to encrypt"
                 type: string
                 validator: { callback: "isValidBSONTypeName" }
+                optional: true
                 unstable: true
             queries:
                 description: "List of supported query types"

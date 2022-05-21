@@ -59,10 +59,11 @@ void GlobalUserWriteBlockState::disableUserWriteBlocking(OperationContext* opCtx
 void GlobalUserWriteBlockState::checkUserWritesAllowed(OperationContext* opCtx,
                                                        const NamespaceString& nss) const {
     invariant(opCtx->lockState()->isLocked());
-    uassert(ErrorCodes::OperationFailed,
+    uassert(ErrorCodes::UserWritesBlocked,
             "User writes blocked",
             !_globalUserWritesBlocked || WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled() ||
-                nss.isOnInternalDb() || nss.isTemporaryReshardingCollection());
+                nss.isOnInternalDb() || nss.isTemporaryReshardingCollection() ||
+                nss.isSystemDotProfile());
 }
 
 bool GlobalUserWriteBlockState::isUserWriteBlockingEnabled(OperationContext* opCtx) const {
@@ -81,10 +82,27 @@ void GlobalUserWriteBlockState::disableUserShardedDDLBlocking(OperationContext* 
 void GlobalUserWriteBlockState::checkShardedDDLAllowedToStart(OperationContext* opCtx,
                                                               const NamespaceString& nss) const {
     invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
-    uassert(ErrorCodes::OperationFailed,
+    uassert(ErrorCodes::UserWritesBlocked,
             "User writes blocked",
             !_userShardedDDLBlocked.load() ||
                 WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled() || nss.isOnInternalDb());
+}
+
+void GlobalUserWriteBlockState::enableUserIndexBuildBlocking(OperationContext* opCtx) {
+    _userIndexBuildsBlocked.store(true);
+}
+
+void GlobalUserWriteBlockState::disableUserIndexBuildBlocking(OperationContext* opCtx) {
+    _userIndexBuildsBlocked.store(false);
+}
+
+Status GlobalUserWriteBlockState::checkIfIndexBuildAllowedToStart(
+    OperationContext* opCtx, const NamespaceString& nss) const {
+    if (_userIndexBuildsBlocked.load() &&
+        !WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled() && !nss.isOnInternalDb()) {
+        return Status(ErrorCodes::UserWritesBlocked, "User writes blocked");
+    }
+    return Status::OK();
 }
 
 }  // namespace mongo

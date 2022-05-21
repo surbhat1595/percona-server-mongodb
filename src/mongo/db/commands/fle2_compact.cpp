@@ -33,6 +33,9 @@
 
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/commands/fle2_compact_gen.h"
+#include "mongo/db/commands/server_status.h"
+#include "mongo/platform/mutex.h"
 
 namespace mongo {
 namespace {
@@ -139,8 +142,8 @@ void upsertNullDocument(FLEQueryInterface* queryImpl,
     if (hasNullDoc) {
         // update the null doc with a replacement modification
         write_ops::UpdateOpEntry updateEntry;
-        updateEntry.setMulti("false");
-        updateEntry.setUpsert("false");
+        updateEntry.setMulti(false);
+        updateEntry.setUpsert(false);
         updateEntry.setQ(newNullDoc.getField("_id").wrap());
         updateEntry.setU(mongo::write_ops::UpdateModification(
             newNullDoc, write_ops::UpdateModification::ClassicTag(), true));
@@ -153,7 +156,8 @@ void upsertNullDocument(FLEQueryInterface* queryImpl,
         }
     } else {
         // insert the null doc; translate duplicate key error to a FLE contention error
-        auto reply = uassertStatusOK(queryImpl->insertDocument(nss, newNullDoc, true));
+        StmtId stmtId = kUninitializedStmtId;
+        auto reply = uassertStatusOK(queryImpl->insertDocument(nss, newNullDoc, &stmtId, true));
         checkWriteErrors(reply);
         statsCtr.addInserts(1);
     }
@@ -256,12 +260,160 @@ ESCPreCompactState prepareESCForCompaction(FLEQueryInterface* queryImpl,
     // committed before the current compact transaction commits
     auto placeholder = ESCCollection::generateCompactionPlaceholderDocument(
         tagToken, valueToken, state.pos, state.count);
-    auto insertReply = uassertStatusOK(queryImpl->insertDocument(nssEsc, placeholder, true));
+    StmtId stmtId = kUninitializedStmtId;
+    auto insertReply =
+        uassertStatusOK(queryImpl->insertDocument(nssEsc, placeholder, &stmtId, true));
     checkWriteErrors(insertReply);
     stats.addInserts(1);
 
     return state;
 }
+
+struct ECCPreCompactState {
+    uint64_t count{0};
+    uint64_t ipos{0};
+    uint64_t pos{0};
+    std::vector<ECCDocument> g_prime;
+    bool merged{false};
+};
+
+ECCPreCompactState prepareECCForCompaction(FLEQueryInterface* queryImpl,
+                                           const NamespaceString& nssEcc,
+                                           const ECCTwiceDerivedTagToken& tagToken,
+                                           const ECCTwiceDerivedValueToken& valueToken,
+                                           ECStats* eccStats) {
+    CompactStatsCounter<ECStats> stats(eccStats);
+
+    TxnCollectionReader reader(queryImpl, nssEcc, eccStats);
+
+    ECCPreCompactState state;
+    bool flag = true;
+    std::vector<ECCDocument> g;
+
+    // find the null doc
+    auto block = ECCCollection::generateId(tagToken, boost::none);
+    auto r_ecc = reader.getById(block);
+    if (r_ecc.isEmpty()) {
+        state.pos = 1;
+    } else {
+        auto nullDoc = uassertStatusOK(ECCCollection::decryptNullDocument(valueToken, r_ecc));
+        state.pos = nullDoc.position + 2;
+    }
+
+    // get all documents starting from ipos; set pos to one after position of last document found
+    state.ipos = state.pos;
+    while (flag) {
+        block = ECCCollection::generateId(tagToken, state.pos);
+        r_ecc = reader.getById(block);
+        if (!r_ecc.isEmpty()) {
+            auto doc = uassertStatusOK(ECCCollection::decryptDocument(valueToken, r_ecc));
+            g.push_back(std::move(doc));
+            state.pos += 1;
+        } else {
+            flag = false;
+        }
+    }
+
+    if (g.empty()) {
+        // if there's a null doc, then there must be at least one entry
+        uassert(6346901, "Found ECC null doc, but no ECC entries", state.ipos == 1);
+
+        // no null doc & no entries found, so nothing to compact
+        state.pos = 0;
+        state.ipos = 0;
+        state.count = 0;
+        return state;
+    }
+
+    // merge 'g'
+    state.g_prime = CompactionHelpers::mergeECCDocuments(g);
+    dassert(std::is_sorted(g.begin(), g.end()));
+    dassert(std::is_sorted(state.g_prime.begin(), state.g_prime.end()));
+    state.merged = (state.g_prime != g);
+    state.count = CompactionHelpers::countDeleted(state.g_prime);
+
+    if (state.merged) {
+        // Insert a placeholder at the next ECC position; this is deleted later in compact.
+        // This serves to trigger a write conflict if another write transaction is
+        // committed before the current compact transaction commits
+        auto placeholder =
+            ECCCollection::generateCompactionDocument(tagToken, valueToken, state.pos);
+        StmtId stmtId = kUninitializedStmtId;
+        auto insertReply =
+            uassertStatusOK(queryImpl->insertDocument(nssEcc, placeholder, &stmtId, true));
+        checkWriteErrors(insertReply);
+        stats.addInserts(1);
+    } else {
+        // adjust pos back to the last document found
+        state.pos -= 1;
+    }
+
+    return state;
+}
+
+void accumulateStats(ECStats& left, const ECStats& right) {
+    left.setRead(left.getRead() + right.getRead());
+    left.setInserted(left.getInserted() + right.getInserted());
+    left.setUpdated(left.getUpdated() + right.getUpdated());
+    left.setDeleted(left.getDeleted() + right.getDeleted());
+}
+
+void accumulateStats(ECOCStats& left, const ECOCStats& right) {
+    left.setRead(left.getRead() + right.getRead());
+    left.setDeleted(left.getDeleted() + right.getDeleted());
+}
+
+/**
+ * Server status section to track an aggregate of global compact statistics.
+ */
+class FLECompactStatsStatusSection : public ServerStatusSection {
+public:
+    FLECompactStatsStatusSection() : ServerStatusSection("fle") {
+        ECStats zeroStats;
+        ECOCStats zeroECOC;
+
+        _stats.setEcc(zeroStats);
+        _stats.setEsc(zeroStats);
+        _stats.setEcoc(zeroECOC);
+    }
+
+    bool includeByDefault() const final {
+        return _hasStats;
+    }
+
+    BSONObj generateSection(OperationContext* opCtx, const BSONElement& configElement) const final {
+
+        CompactStats temp;
+        {
+            stdx::lock_guard<Mutex> lock(_mutex);
+            temp = _stats;
+        }
+
+        BSONObjBuilder builder;
+        {
+            auto sub = BSONObjBuilder(builder.subobjStart("compactStats"));
+            temp.serialize(&sub);
+        }
+
+        return builder.obj();
+    }
+
+    void updateStats(const CompactStats& stats) {
+        stdx::lock_guard<Mutex> lock(_mutex);
+
+        _hasStats = true;
+        accumulateStats(_stats.getEsc(), stats.getEsc());
+        accumulateStats(_stats.getEcc(), stats.getEcc());
+        accumulateStats(_stats.getEcoc(), stats.getEcoc());
+    }
+
+private:
+    mutable Mutex _mutex = MONGO_MAKE_LATCH("FLECompactStats::_mutex");
+    CompactStats _stats;
+    bool _hasStats{false};
+};
+
+FLECompactStatsStatusSection _fleCompactStatsStatusSection;
 
 }  // namespace
 
@@ -353,12 +505,60 @@ void compactOneFieldValuePair(FLEQueryInterface* queryImpl,
     // PART 2
     // prepare the ECC, and get back the merged set 'g_prime', whether (g_prime != g),
     // ipos_prime, and pos_prime
-    // TODO: SERVER-63469
+    auto eccTagToken = FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedTagToken(ecocDoc.ecc);
+    auto eccValueToken =
+        FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedValueToken(ecocDoc.ecc);
+    auto eccState =
+        prepareECCForCompaction(queryImpl, namespaces.eccNss, eccTagToken, eccValueToken, eccStats);
 
     // PART 3
     // A. compact the ECC
-    // TODO: SERVER-63469
-    bool allEntriesDeleted = false;
+    bool allEntriesDeleted = (escState.count == eccState.count);
+    StmtId stmtId = kUninitializedStmtId;
+
+    if (eccState.count != 0) {
+        bool hasNullDoc = (eccState.ipos > 1);
+
+        if (!allEntriesDeleted) {
+            CompactStatsCounter<ECStats> stats(eccStats);
+
+            if (eccState.merged) {
+                // a. for each entry in g_prime at index k, insert
+                //  {_id: F(eccTagToken, pos'+ k), value: Enc(eccValueToken, g_prime[k])}
+                for (auto k = eccState.g_prime.size(); k > 0; k--) {
+                    const auto& range = eccState.g_prime[k - 1];
+                    auto insertReply = uassertStatusOK(queryImpl->insertDocument(
+                        namespaces.eccNss,
+                        ECCCollection::generateDocument(
+                            eccTagToken, eccValueToken, eccState.pos + k, range.start, range.end),
+                        &stmtId,
+                        true));
+                    checkWriteErrors(insertReply);
+                    stats.addInserts(1);
+                }
+
+                // b & c. update or insert the ECC null doc
+                auto newNullDoc = ECCCollection::generateNullDocument(
+                    eccTagToken, eccValueToken, eccState.pos - 1);
+                upsertNullDocument(queryImpl, hasNullDoc, newNullDoc, namespaces.eccNss, eccStats);
+
+                // d. delete entries between ipos' and pos', inclusive
+                for (auto k = eccState.ipos; k <= eccState.pos; k++) {
+                    deleteECCDocument(queryImpl, namespaces.eccNss, k, eccTagToken, eccStats);
+                }
+            }
+        } else {
+            // delete ECC entries between ipos' and pos', inclusive
+            for (auto k = eccState.ipos; k <= eccState.pos; k++) {
+                deleteECCDocument(queryImpl, namespaces.eccNss, k, eccTagToken, eccStats);
+            }
+
+            // delete the ECC null doc
+            if (hasNullDoc) {
+                deleteECCDocument(queryImpl, namespaces.eccNss, boost::none, eccTagToken, eccStats);
+            }
+        }
+    }
 
     // B. compact the ESC
     if (escState.count != 0) {
@@ -401,10 +601,8 @@ CompactStats processFLECompact(OperationContext* opCtx,
         auto argsBlock = std::tie(c, request, namespaces, ecocStats);
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
 
-        auto swResult = runInTxnWithRetry(
-            opCtx,
-            trun,
-            [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+        auto swResult = trun->runSyncNoThrow(
+            opCtx, [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
                 FLEQueryInterfaceImpl queryImpl(txnClient);
 
                 auto [c2, request2, namespaces2, ecocStats2] = *sharedBlock.get();
@@ -430,10 +628,8 @@ CompactStats processFLECompact(OperationContext* opCtx,
         auto argsBlock = std::tie(ecocDoc, namespaces, escStats, eccStats);
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
 
-        auto swResult = runInTxnWithRetry(
-            opCtx,
-            trun,
-            [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+        auto swResult = trun->runSyncNoThrow(
+            opCtx, [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
                 FLEQueryInterfaceImpl queryImpl(txnClient);
 
                 auto [ecocDoc2, namespaces2, escStats2, eccStats2] = *sharedBlock.get();
@@ -447,7 +643,20 @@ CompactStats processFLECompact(OperationContext* opCtx,
         uassertStatusOK(swResult.getValue().getEffectiveStatus());
     }
 
-    return CompactStats(ecocStats, eccStats, escStats);
+    CompactStats stats(ecocStats, eccStats, escStats);
+    _fleCompactStatsStatusSection.updateStats(stats);
+
+    return stats;
+}
+
+void validateCompactRequest(const CompactStructuredEncryptionData& request, const Collection& edc) {
+    uassert(6346807,
+            "Target namespace is not an encrypted collection",
+            edc.getCollectionOptions().encryptedFieldConfig);
+
+    // Validate the request contains a compaction token for each encrypted field
+    const auto& efc = edc.getCollectionOptions().encryptedFieldConfig.value();
+    CompactionHelpers::validateCompactionTokens(efc, request.getCompactionTokens());
 }
 
 }  // namespace mongo

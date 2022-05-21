@@ -340,6 +340,10 @@ void handleRIDRangeScan(const MatchExpression* conjunct,
         return;  // Collator affects probe and it's not compatible with collection's collator.
     }
 
+    // Even if the collations don't match at this point, it's fine,
+    // because the bounds exclude values that use it
+    collScan->hasCompatibleCollation = true;
+
     const auto collated = IndexBoundsBuilder::objFromElement(element, collator);
     if (dynamic_cast<const EqualityMatchExpression*>(match)) {
         setMinRecord(collScan, collated);
@@ -356,7 +360,7 @@ void handleRIDRangeScan(const MatchExpression* conjunct,
 }  // namespace
 
 std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
-    const CanonicalQuery& query, bool tailable, const QueryPlannerParams& params) {
+    const CanonicalQuery& query, bool tailable, const QueryPlannerParams& params, int direction) {
     // Make the (only) node, a collection scan.
     auto csn = std::make_unique<CollectionScanNode>();
     csn->name = query.ns();
@@ -366,6 +370,11 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
         params.options & QueryPlannerParams::TRACK_LATEST_OPLOG_TS;
     csn->shouldWaitForOplogVisibility =
         params.options & QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
+    csn->direction = direction;
+
+    if (params.clusteredInfo) {
+        csn->clusteredIndex = params.clusteredInfo->getIndexSpec();
+    }
 
     const BSONObj& hint = query.getFindCommandRequest().getHint();
     if (!hint.isEmpty()) {
@@ -434,11 +443,16 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
                 csn->assertTsHasNotFallenOffOplog);
     }
 
+    auto queryCollator = query.getCollator();
+    auto collCollator = params.clusteredCollectionCollator;
+    csn->hasCompatibleCollation =
+        !queryCollator || (collCollator && *queryCollator == *collCollator);
+
     if (params.clusteredInfo && !csn->resumeAfterRecordId) {
         // This is a clustered collection. Attempt to perform an efficient, bounded collection scan
         // via minRecord and maxRecord if applicable.
-        handleRIDRangeScan(csn->filter.get(), csn.get(), params, query.getCollator());
-        handleRIDRangeMinMax(query, csn.get(), params, query.getCollator());
+        handleRIDRangeScan(csn->filter.get(), csn.get(), params, queryCollator);
+        handleRIDRangeMinMax(query, csn.get(), params, queryCollator);
     }
 
     return csn;
@@ -907,7 +921,7 @@ void QueryPlannerAccess::finishAndOutputLeaf(ScanBuildingState* scanState,
                                              vector<std::unique_ptr<QuerySolutionNode>>* out) {
     finishLeafNode(scanState->currentScan.get(),
                    scanState->indices[scanState->currentIndexNumber],
-                   scanState->ietBuilders);
+                   std::move(scanState->ietBuilders));
 
     if (MatchExpression::OR == scanState->root->matchType()) {
         if (orNeedsFetch(scanState)) {
@@ -941,7 +955,7 @@ void QueryPlannerAccess::finishAndOutputLeaf(ScanBuildingState* scanState,
 void QueryPlannerAccess::finishLeafNode(
     QuerySolutionNode* node,
     const IndexEntry& index,
-    const std::vector<interval_evaluation_tree::Builder>& ietBuilders) {
+    std::vector<interval_evaluation_tree::Builder> ietBuilders) {
     const StageType type = node->getType();
 
     if (STAGE_TEXT_MATCH == type) {
@@ -967,7 +981,7 @@ void QueryPlannerAccess::finishLeafNode(
 
         // If this is a $** index, update and populate the keyPattern, bounds, and multikeyPaths.
         if (index.type == IndexType::INDEX_WILDCARD) {
-            wcp::finalizeWildcardIndexScanConfiguration(scan);
+            wcp::finalizeWildcardIndexScanConfiguration(scan, &ietBuilders);
         }
     }
 
@@ -981,6 +995,32 @@ void QueryPlannerAccess::finishLeafNode(
         }
     }
 
+    // Process a case when some fields are not filled out with bounds.
+    if (firstEmptyField != bounds->fields.size()) {
+        // Skip ahead to the firstEmptyField-th element, where we begin filling in bounds.
+        BSONObjIterator it(nodeIndex->keyPattern);
+        for (size_t i = 0; i < firstEmptyField; ++i) {
+            verify(it.more());
+            it.next();
+        }
+
+        // For each field in the key...
+        while (it.more()) {
+            BSONElement kpElt = it.next();
+            // There may be filled-in fields to the right of the firstEmptyField; for instance, the
+            // index {loc:"2dsphere", x:1} with a predicate over x and a near search over loc.
+            if (bounds->fields[firstEmptyField].name.empty()) {
+                verify(bounds->fields[firstEmptyField].intervals.empty());
+                IndexBoundsBuilder::allValuesForField(kpElt, &bounds->fields[firstEmptyField]);
+            }
+            ++firstEmptyField;
+        }
+
+        // Make sure that the length of the key is the length of the bounds we started.
+        verify(firstEmptyField == bounds->fields.size());
+    }
+
+    // Build Interval Evaluation Trees used to restore index bounds from cached SBE Plans.
     if (node->getType() == STAGE_IXSCAN && !ietBuilders.empty()) {
         auto ixScan = static_cast<IndexScanNode*>(node);
         ixScan->iets.reserve(ietBuilders.size());
@@ -996,34 +1036,6 @@ void QueryPlannerAccess::finishLeafNode(
         }
         LOGV2_DEBUG(6334900, 5, "Build IETs", "iets"_attr = ietsToString(index, ixScan->iets));
     }
-
-    // All fields are filled out with bounds, nothing to do.
-    if (firstEmptyField == bounds->fields.size()) {
-        return IndexBoundsBuilder::alignBounds(
-            bounds, nodeIndex->keyPattern, nodeIndex->collator != nullptr);
-    }
-
-    // Skip ahead to the firstEmptyField-th element, where we begin filling in bounds.
-    BSONObjIterator it(nodeIndex->keyPattern);
-    for (size_t i = 0; i < firstEmptyField; ++i) {
-        verify(it.more());
-        it.next();
-    }
-
-    // For each field in the key...
-    while (it.more()) {
-        BSONElement kpElt = it.next();
-        // There may be filled-in fields to the right of the firstEmptyField; for instance, the
-        // index {loc:"2dsphere", x:1} with a predicate over x and a near search over loc.
-        if (bounds->fields[firstEmptyField].name.empty()) {
-            verify(bounds->fields[firstEmptyField].intervals.empty());
-            IndexBoundsBuilder::allValuesForField(kpElt, &bounds->fields[firstEmptyField]);
-        }
-        ++firstEmptyField;
-    }
-
-    // Make sure that the length of the key is the length of the bounds we started.
-    verify(firstEmptyField == bounds->fields.size());
 
     // We create bounds assuming a forward direction but can easily reverse bounds to align
     // according to our desired direction.
@@ -1359,9 +1371,9 @@ bool QueryPlannerAccess::processIndexScansElemMatch(
                 verify(IndexTag::kNoIndex == scanState->currentIndexNumber);
             }
 
-            scanState->currentIndexNumber = scanState->ixtag->index;
+            // Reset state before producing a new leaf.
+            scanState->resetForNextScan(scanState->ixtag, query.isParameterized());
 
-            scanState->tightness = IndexBoundsBuilder::INEXACT_FETCH;
             scanState->currentScan = makeLeafNode(query,
                                                   indices[scanState->currentIndexNumber],
                                                   scanState->ixtag->pos,
@@ -1670,7 +1682,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::_buildIndexedDataAccess(
 
             auto soln = makeLeafNode(query, index, tag->pos, root, &tightness, ietBuilder);
             verify(nullptr != soln);
-            finishLeafNode(soln.get(), index, ietBuilders);
+            finishLeafNode(soln.get(), index, std::move(ietBuilders));
 
             if (!ownedRoot) {
                 // We're performing access planning for the child of an array operator such as

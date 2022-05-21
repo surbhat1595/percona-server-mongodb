@@ -369,7 +369,17 @@ public:
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
         std::string dbName = request.getDatabase().toString();
-        const BSONObj& cmdObj = request.body;
+        const BSONObj& cmdObj = [&]() {
+            // Check whether the query portion needs to be rewritten for FLE.
+            auto findAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
+                IDLParserErrorContext("ClusterFindAndModify"), request.body);
+            if (shouldDoFLERewrite(findAndModifyRequest)) {
+                auto newRequest = processFLEFindAndModifyExplainMongos(opCtx, findAndModifyRequest);
+                return newRequest.toBSON(request.body);
+            } else {
+                return request.body;
+            }
+        }();
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
 
         const auto cm =
@@ -441,7 +451,7 @@ public:
              BSONObjBuilder& result) override {
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
 
-        if (processFLEFindAndModify(opCtx, dbName, cmdObj, result) == FLEBatchResult::kProcessed) {
+        if (processFLEFindAndModify(opCtx, cmdObj, result) == FLEBatchResult::kProcessed) {
             return true;
         }
 
@@ -499,6 +509,7 @@ private:
                             const BSONObj& cmdObj,
                             BSONObjBuilder* result) {
         bool isRetryableWrite = opCtx->getTxnNumber() && !TransactionRouter::get(opCtx);
+
         const auto response = [&] {
             std::vector<AsyncRequestsSender::Request> requests;
             BSONObj filteredCmdObj = CommandHelpers::filterCommandRequestForPassthrough(cmdObj);

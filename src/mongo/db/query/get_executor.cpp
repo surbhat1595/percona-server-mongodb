@@ -282,13 +282,6 @@ void fillOutIndexEntries(OperationContext* opCtx,
                          const CanonicalQuery* canonicalQuery,
                          const CollectionPtr& collection,
                          std::vector<IndexEntry>& entries) {
-    // TODO SERVER-63352: Eliminate this check once we support auto-parameterized index scan plans.
-    if (feature_flags::gFeatureFlagAutoParameterization.isEnabledAndIgnoreFCV()) {
-        // Indexed plans are not yet supported when auto-parameterization is enabled, so make it
-        // look to the planner like there are no indexes.
-        return;
-    }
-
     auto ii = collection->getIndexCatalog()->getIndexIterator(opCtx, false);
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();
@@ -595,7 +588,7 @@ public:
     }
 
     /**
-     * Returns a reference to the main collection that is targetted by this query.
+     * Returns a reference to the main collection that is targeted by this query.
      */
     virtual const CollectionPtr& getMainCollection() const = 0;
 
@@ -692,6 +685,7 @@ public:
             // Only one possible plan. Build the stages from the solution.
             auto result = makeResult();
             auto root = buildExecutableTree(*solutions[0]);
+            solutions[0]->indexFilterApplied = _plannerParams.indexFiltersApplied;
             result->emplace(std::move(root), std::move(solutions[0]));
 
             LOGV2_DEBUG(20926,
@@ -944,9 +938,7 @@ protected:
             std::make_unique<MultiPlanStage>(_cq->getExpCtxRaw(), _collection, _cq);
 
         for (size_t ix = 0; ix < solutions.size(); ++ix) {
-            if (solutions[ix]->cacheData.get()) {
-                solutions[ix]->cacheData->indexFilterApplied = _plannerParams.indexFiltersApplied;
-            }
+            solutions[ix]->indexFilterApplied = _plannerParams.indexFiltersApplied;
 
             auto&& nextPlanRoot = buildExecutableTree(*solutions[ix]);
 
@@ -1004,12 +996,15 @@ protected:
     }
 
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildIdHackPlan() {
-        // Auto-parameterization currently only works for collection scan plans, but idhack plans
-        // use the _id index. Therefore, we inhibit idhack when auto-parametrization is enabled.
+        // When the SBE plan cache is enabled we rely on it for fast find-by-_id queries rather than
+        // having a special implementation of the idhack. Therefore, this function returns nullptr
+        // early when the SBE plan cache is on.
         //
-        // TODO SERVER-64237: Eliminate this check once we support auto-parameterized ID hack
-        // plans.
-        if (feature_flags::gFeatureFlagAutoParameterization.isEnabledAndIgnoreFCV()) {
+        // This is still fast for idhack eligible queries. The first invocation of such a query will
+        // go through the normal planning and plan compilation process, resulting in an
+        // auto-parameterized SBE plan cache entry. Subsequent idhack queries can simply re-use this
+        // cache entry, and the hot path for recovering cached plans is already carefully optimized.
+        if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
             return nullptr;
         }
 
@@ -1173,9 +1168,7 @@ protected:
         std::vector<std::unique_ptr<QuerySolution>> solutions) final {
         auto result = makeResult();
         for (size_t ix = 0; ix < solutions.size(); ++ix) {
-            if (solutions[ix]->cacheData.get()) {
-                solutions[ix]->cacheData->indexFilterApplied = _plannerParams.indexFiltersApplied;
-            }
+            solutions[ix]->indexFilterApplied = _plannerParams.indexFiltersApplied;
 
             auto execTree = buildExecutableTree(*solutions[ix]);
             result->emplace(std::move(execTree), std::move(solutions[ix]));
@@ -1527,6 +1520,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
                     "cannot delete from system namespace",
                     nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
         }
+    }
+
+    if (collection && collection->isCapped()) {
+        expCtx->setIsCappedDelete();
     }
 
     if (collection && collection->isCapped() && opCtx->inMultiDocumentTransaction()) {

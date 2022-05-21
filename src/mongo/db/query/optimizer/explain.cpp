@@ -37,14 +37,8 @@
 namespace mongo::optimizer {
 
 BSONObj ABTPrinter::explainBSON() const {
-    auto [tag, val] = optimizer::ExplainGenerator::explainBSON(
+    return ExplainGenerator::explainBSONObj(
         _abtTree, true /*displayProperties*/, nullptr /*Memo*/, _nodeToPropsMap);
-    uassert(6624070, "Expected an object", tag == sbe::value::TypeTags::Object);
-    sbe::value::ValueGuard vg(tag, val);
-
-    BSONObjBuilder builder;
-    sbe::bson::convertToBsonObj(builder, sbe::value::getObjectView(val));
-    return builder.done().getOwned();
 }
 
 enum class ExplainVersion { V1, V2, V3, Vmax };
@@ -1050,14 +1044,9 @@ public:
             static_assert("Unknown version");
         }
 
-        std::set<std::string> orderedIndexDefName;
-        for (const auto& entry : node.getCandidateIndexMap()) {
-            orderedIndexDefName.insert(entry.first);
-        }
-
         std::vector<ExplainPrinter> candidateIndexesPrinters;
         size_t candidateIndex = 0;
-        for (const auto& indexDefName : orderedIndexDefName) {
+        for (const auto& [indexDefName, candidateIndexEntry] : node.getCandidateIndexMap()) {
             candidateIndex++;
             ExplainPrinter local;
             local.fieldName("candidateId")
@@ -1067,7 +1056,6 @@ public:
                 .print(indexDefName)
                 .separator(", ");
 
-            const auto& candidateIndexEntry = node.getCandidateIndexMap().at(indexDefName);
             local.separator("{");
             printFieldProjectionMap(local, candidateIndexEntry._fieldProjectionMap);
             local.separator("}, {");
@@ -2029,16 +2017,10 @@ public:
         return printer;
     }
 
-    static void printPathProjections(ExplainPrinter& printer,
-                                     const opt::unordered_set<std::string>& names) {
-        std::set<std::string> ordered;
-        for (const std::string& s : names) {
-            ordered.insert(s);
-        }
-
+    static void printPathProjections(ExplainPrinter& printer, const std::set<std::string>& names) {
         if constexpr (version < ExplainVersion::V3) {
             bool first = true;
-            for (const std::string& s : ordered) {
+            for (const std::string& s : names) {
                 if (first) {
                     first = false;
                 } else {
@@ -2048,7 +2030,7 @@ public:
             }
         } else if constexpr (version == ExplainVersion::V3) {
             std::vector<ExplainPrinter> printers;
-            for (const std::string& s : ordered) {
+            for (const std::string& s : names) {
                 ExplainPrinter local;
                 local.print(s);
                 printers.push_back(std::move(local));
@@ -2292,6 +2274,20 @@ std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainBSON
     const NodeToGroupPropsMap& nodeMap) {
     ExplainGeneratorTransporter<ExplainVersion::V3> gen(displayProperties, memo, nodeMap);
     return gen.generate(node).moveValue();
+}
+
+BSONObj ExplainGenerator::explainBSONObj(const ABT& node,
+                                         const bool displayProperties,
+                                         const cascades::Memo* memo,
+                                         const NodeToGroupPropsMap& nodeMap) {
+    auto [tag, val] =
+        optimizer::ExplainGenerator::explainBSON(node, displayProperties, memo, nodeMap);
+    uassert(6624070, "Expected an object", tag == sbe::value::TypeTags::Object);
+    sbe::value::ValueGuard vg(tag, val);
+
+    BSONObjBuilder builder;
+    sbe::bson::convertToBsonObj(builder, sbe::value::getObjectView(val));
+    return builder.done().getOwned();
 }
 
 template <class PrinterType>

@@ -127,23 +127,6 @@ BSONObj CollectionMetadata::extractDocumentKey(const BSONObj& doc) const {
     return doc;
 }
 
-void CollectionMetadata::toBSONBasic(BSONObjBuilder& bb) const {
-    if (isSharded()) {
-        _cm->getVersion().appendLegacyWithField(&bb, "collVersion");
-        getShardVersionForLogging().appendLegacyWithField(&bb, "shardVersion");
-        bb.append("keyPattern", _cm->getShardKeyPattern().toBSON());
-    } else {
-        ChunkVersion::UNSHARDED().appendLegacyWithField(&bb, "collVersion");
-        ChunkVersion::UNSHARDED().appendLegacyWithField(&bb, "shardVersion");
-    }
-}
-
-BSONObj CollectionMetadata::toBSON() const {
-    BSONObjBuilder builder;
-    toBSONBasic(builder);
-    return builder.obj();
-}
-
 std::string CollectionMetadata::toStringBasic() const {
     if (isSharded()) {
         return str::stream() << "collection version: " << _cm->getVersion().toString()
@@ -179,28 +162,6 @@ bool CollectionMetadata::getNextChunk(const BSONObj& lookupKey, ChunkType* chunk
     chunk->setMax(nextChunk->getMax());
 
     return true;
-}
-
-Status CollectionMetadata::checkRangeIsValid(const BSONObj& min, const BSONObj& max) const {
-    invariant(isSharded());
-
-    ChunkType existingChunk;
-
-    if (!getNextChunk(min, &existingChunk)) {
-        return {ErrorCodes::StaleShardVersion,
-                str::stream() << "Chunk with bounds " << ChunkRange(min, max).toString()
-                              << " is not owned by this shard."};
-    }
-
-    const ChunkRange receivedRange(min, max);
-    const auto owningRange = existingChunk.getRange();
-
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "Rejecting moveRange because the provided range is spanning "
-                             "across more than one chunk",
-            owningRange.covers(receivedRange));
-
-    return Status::OK();
 }
 
 bool CollectionMetadata::currentShardHasAnyChunks() const {

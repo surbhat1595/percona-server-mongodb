@@ -54,7 +54,7 @@ uint64_t FLEQueryInterfaceMock::countDocuments(const NamespaceString& nss) {
 }
 
 StatusWith<write_ops::InsertCommandReply> FLEQueryInterfaceMock::insertDocument(
-    const NamespaceString& nss, BSONObj obj, bool translateDuplicateKey) {
+    const NamespaceString& nss, BSONObj obj, StmtId* pStmtId, bool translateDuplicateKey) {
     repl::TimestampedBSONObj tb;
     tb.obj = obj;
 
@@ -131,6 +131,14 @@ std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceMock::updateW
     return {write_ops::UpdateCommandReply(), preimage};
 }
 
+write_ops::UpdateCommandReply FLEQueryInterfaceMock::update(
+    const NamespaceString& nss,
+    int32_t stmtId,
+    const write_ops::UpdateCommandRequest& updateRequest) {
+    auto [reply, _] = updateWithPreimage(nss, EncryptionInformation(), updateRequest);
+    return reply;
+}
+
 write_ops::FindAndModifyCommandReply FLEQueryInterfaceMock::findAndModify(
     const NamespaceString& nss,
     const EncryptionInformation& ei,
@@ -143,20 +151,24 @@ write_ops::FindAndModifyCommandReply FLEQueryInterfaceMock::findAndModify(
             "findAndModify 'new' field must be 'false'",
             findAndModifyRequest.getNew().get_value_or(false) == false);
 
-    BSONObj preimage = getById(nss, findAndModifyRequest.getQuery().firstElement());
+    // The query may be the short form {_id: 1} or the long form {_id: {$eq: 1}}.
+    auto idElt = [&]() {
+        auto id = findAndModifyRequest.getQuery().firstElement();
+        if (id.type() == BSONType::Object && id.Obj().hasField("$eq")) {
+            return id.Obj()["$eq"];
+        }
+        return id;
+    }();
+    BSONObj preimage = getById(nss, idElt);
 
     if (findAndModifyRequest.getRemove().get_value_or(false)) {
         // Remove
-        auto swDoc =
-            _storage->deleteById(_opCtx, nss, findAndModifyRequest.getQuery().firstElement());
+        auto swDoc = _storage->deleteById(_opCtx, nss, idElt);
         uassertStatusOK(swDoc);
 
     } else {
-        uassertStatusOK(
-            _storage->upsertById(_opCtx,
-                                 nss,
-                                 findAndModifyRequest.getQuery().firstElement(),
-                                 findAndModifyRequest.getUpdate()->getUpdateModifier()));
+        uassertStatusOK(_storage->upsertById(
+            _opCtx, nss, idElt, findAndModifyRequest.getUpdate()->getUpdateModifier()));
     }
 
     write_ops::FindAndModifyCommandReply reply;

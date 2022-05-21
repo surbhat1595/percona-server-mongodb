@@ -565,6 +565,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const OID& requestEpoch,
+    const boost::optional<Timestamp>& requestTimestamp,
     const ChunkRange& range,
     const std::vector<BSONObj>& splitPoints,
     const std::string& shardName,
@@ -605,7 +606,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
     auto collVersion = swCollVersion.getValue();
 
     // Return an error if collection epoch does not match epoch of request.
-    if (coll.getEpoch() != requestEpoch) {
+    if (coll.getEpoch() != requestEpoch ||
+        (requestTimestamp && coll.getTimestamp() != requestTimestamp)) {
         return {ErrorCodes::StaleEpoch,
                 str::stream() << "splitChunk cannot split chunk " << range.toString()
                               << ". Epoch of collection '" << nss.ns() << "' has changed."
@@ -785,6 +787,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
 StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
     OperationContext* opCtx,
     const NamespaceString& nss,
+    const boost::optional<OID>& epoch,
+    const boost::optional<Timestamp>& timestamp,
     const UUID& requestCollectionUUID,
     const ChunkRange& chunkRange,
     const ShardId& shardId,
@@ -798,11 +802,11 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
     Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
 
     // 1. Retrieve the initial collection version info to build up the logging info.
-    auto swCollVersion = getCollectionVersion(opCtx, nss);
-    if (!swCollVersion.isOK()) {
-        return swCollVersion.getStatus().withContext(str::stream()
-                                                     << "mergeChunk cannot merge chunks.");
-    }
+    auto collVersion = uassertStatusOK(getCollectionVersion(opCtx, nss));
+    uassert(ErrorCodes::StaleEpoch,
+            "Collection changed",
+            (!epoch || collVersion.epoch() == epoch) &&
+                (!timestamp || collVersion.getTimestamp() == timestamp));
 
     // 2. Retrieve the list of chunks belonging to the requested shard + key range.
     const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
@@ -855,9 +859,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
                           << chunkRange.toString(),
             chunk.getRange() == chunkRange);
         BSONObjBuilder response;
-        swCollVersion.getValue().serializeToBSON(kCollectionVersionField, &response);
-        const auto currentShardVersion =
-            getShardVersion(opCtx, coll, shardId, swCollVersion.getValue());
+        collVersion.serializeToBSON(kCollectionVersionField, &response);
+        const auto currentShardVersion = getShardVersion(opCtx, coll, shardId, collVersion);
         currentShardVersion.serializeToBSON(ChunkVersion::kShardVersionField, &response);
         // Makes sure that the last thing we read in getCollectionVersion and getShardVersion gets
         // majority written before to return from this command, otherwise next RoutingInfo cache
@@ -896,7 +899,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
             !chunksToMerge.empty() &&
                 chunksToMerge.back().getMax().woCompare(chunkRange.getMax()) == 0);
 
-    ChunkVersion initialVersion = swCollVersion.getValue();
+    ChunkVersion initialVersion = collVersion;
     ChunkVersion mergeVersion = initialVersion;
     mergeVersion.incMinor();
 
@@ -940,6 +943,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     const NamespaceString& nss,
     const ChunkType& migratedChunk,
     const OID& collectionEpoch,
+    const Timestamp& collectionTimestamp,
     const ShardId& fromShard,
     const ShardId& toShard,
     const boost::optional<Timestamp>& validAfter) {
@@ -1019,7 +1023,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     // failed to recover the migration. Check that the collection has not been dropped and recreated
     // or had its shard key refined since the migration began, unbeknown to the shard when the
     // command was sent.
-    if (currentCollectionVersion.epoch() != collectionEpoch) {
+    if (currentCollectionVersion.epoch() != collectionEpoch ||
+        currentCollectionVersion.getTimestamp() != collectionTimestamp) {
         return {ErrorCodes::StaleEpoch,
                 str::stream() << "The epoch of collection '" << nss.ns()
                               << "' has changed since the migration began. The config server's "
@@ -1074,9 +1079,10 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
         return {ErrorCodes::ConflictingOperationInProgress,
                 str::stream()
                     << "Rejecting migration request because the version of the requested chunk "
-                    << migratedChunk.toConfigBSON()
-                    << " is older than the version of the current chunk "
-                    << currentChunk.toConfigBSON() << " on the shard " << fromShard.toString()};
+                    << migratedChunk.toConfigBSON() << "(" << migratedChunk.getVersion().toString()
+                    << ") is older than the version of the current chunk "
+                    << currentChunk.toConfigBSON() << "(" << currentChunk.getVersion().toString()
+                    << ") on shard " << fromShard.toString()};
     }
 
     // Generate the new versions of migratedChunk and controlChunk. Migrating chunk's minor version
@@ -1192,7 +1198,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
         configShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            nss.db().toString(),
+            NamespaceString::kAdminDb.toString(),
             command,
             Shard::RetryPolicy::kIdempotent);
 
@@ -1793,6 +1799,7 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
                                                   nss,
                                                   cm.getShardKeyPattern(),
                                                   cm.getVersion().epoch(),
+                                                  cm.getVersion().getTimestamp(),
                                                   ChunkVersion::IGNORED() /*shardVersion*/,
                                                   ChunkRange(chunk.getMin(), chunk.getMax()),
                                                   splitPoints));

@@ -213,6 +213,8 @@ public:
         // mirrored by this process in FTDC collections.
         // "tenantMigrationAccessBlocker" section is filtered out because its variability in
         // document shape hurts FTDC compression.
+        // "oplog" is included to append the earliest and latest optimes, which allow calculation of
+        // the oplog window.
 
         BSONObjBuilder commandBuilder;
         commandBuilder.append(kCommand, 1);
@@ -222,14 +224,20 @@ public:
         commandBuilder.append(MirrorMaestro::kServerStatusSectionName, true);
         commandBuilder.append("tenantMigrationAccessBlocker", false);
 
+        // Avoid requesting metrics that aren't available during a shutdown.
         if (_serverShuttingDown) {
-            // Avoid requesting metrics that aren't available during a shutdown.
             commandBuilder.append("repl", false);
+        } else {
+            commandBuilder.append("oplog", true);
         }
 
         // Exclude 'serverStatus.transactions.lastCommittedTransactions' because it triggers
         // frequent schema changes.
         commandBuilder.append("transactions", BSON("includeLastCommitted" << false));
+
+        // Exclude detailed query planning statistics.
+        commandBuilder.append("metrics",
+                              BSON("query" << BSON("multiPlanner" << BSON("histograms" << false))));
 
         if (gDiagnosticDataCollectionEnableLatencyHistograms.load()) {
             BSONObjBuilder subObjBuilder(commandBuilder.subobjStart("opLatencies"));

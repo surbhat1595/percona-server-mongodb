@@ -28,10 +28,27 @@
  */
 
 #include "mongo/db/pipeline/search_helper.h"
+#include "mongo/db/pipeline/dependencies.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/variables.h"
 
 namespace mongo {
 ServiceContext::Decoration<std::unique_ptr<SearchDefaultHelperFunctions>> getSearchHelpers =
     ServiceContext::declareDecoration<std::unique_ptr<SearchDefaultHelperFunctions>>();
+
+void SearchDefaultHelperFunctions::assertSearchMetaAccessValid(
+    const Pipeline::SourceContainer& pipeline, ExpressionContext* expCtx) {
+    // Any access of $$SEARCH_META is invalid. Note that if we hit a stage that does not support
+    // dep tracking we can't detect whether $$SEARCH_META is present. In that context $$SEARCH_META
+    // will evaluate to missing.
+    for (const auto& source : pipeline) {
+        DepsTracker dep;
+        source->getDependencies(&dep);
+        uassert(6347903,
+                "Can't access $$SEARCH_META without a $search stage earlier in the pipeline",
+                !dep.hasVariableReferenceTo({Variables::kSearchMetaId}));
+    }
+}
 
 ServiceContext::ConstructorActionRegisterer searchQueryHelperRegisterer{
     "searchQueryHelperRegisterer", [](ServiceContext* context) {

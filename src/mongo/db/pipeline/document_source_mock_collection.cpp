@@ -26,65 +26,27 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#pragma once
 
-#include <boost/optional.hpp>
-
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/tick_source.h"
+#include "mongo/db/pipeline/document_source_mock_collection.h"
 
 namespace mongo {
 
-class SemaphoreTicketHolder;
-class FifoTicketHolder;
+REGISTER_INTERNAL_DOCUMENT_SOURCE(mockCollection,
+                                  LiteParsedDocumentSourceDefault::parse,
+                                  DocumentSourceMockCollection::createFromBson,
+                                  true);
 
-/**
- * Move-only token that gets generated when a ticket is acquired and has to be marked invalid when
- * it is released. Only TicketHolders can create and release valid Tickets.
- */
-class Ticket {
-    friend class SemaphoreTicketHolder;
-    friend class FifoTicketHolder;
+boost::intrusive_ptr<DocumentSource> DocumentSourceMockCollection::createFromBson(
+    BSONElement arrayElem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    // Since we've already determined the stage name matched, the parser for $mockCollection is the
+    // same as the parser for $queue. Let's just re-use that parse function.
+    return make_intrusive<DocumentSourceMockCollection>(
+        DocumentSourceQueue::parseFromArray(arrayElem), expCtx);
+}
 
-public:
-    Ticket(Ticket&& t) : _valid(t._valid) {
-        t._valid = false;
-    }
-
-    Ticket& operator=(Ticket&& t) {
-        invariant(!_valid);
-        _valid = t._valid;
-        t._valid = false;
-        return *this;
-    };
-
-    ~Ticket() {
-        // A Ticket can't be destroyed unless it's been released.
-        invariant(!_valid);
-    }
-
-    /**
-     * Returns whether or not a ticket is held. The default constructor creates an invalid Ticket
-     * and the move operators mark the source object as invalid.
-     */
-    bool valid() {
-        return _valid;
-    }
-
-private:
-    Ticket() : _valid(true) {}
-
-    void release() {
-        invariant(_valid);
-        _valid = false;
-    }
-
-    // No copy constructors.
-    Ticket(const Ticket&) = delete;
-    Ticket& operator=(const Ticket&) = delete;
-
-    // Whether this represents a ticket being held.
-    bool _valid;
-};
+Value DocumentSourceMockCollection::serialize(
+    boost::optional<ExplainOptions::Verbosity> explain) const {
+    return DocumentSourceQueue::serializeWithName(explain, kStageName);
+}
 
 }  // namespace mongo

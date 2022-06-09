@@ -36,6 +36,7 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/internal_session_pool.h"
@@ -57,6 +58,8 @@
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/stdx/future.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/util/cancellation.h"
+#include "mongo/util/future_util.h"
 
 // TODO SERVER-65395: Remove failpoint when fle2 tests can reliably support internal transaction
 // retry limit.
@@ -131,17 +134,19 @@ std::string errorHandlingStepToString(Transaction::ErrorHandlingStep nextStep) {
     MONGO_UNREACHABLE;
 }
 
-std::string transactionStateToString(Transaction::TransactionState txnState) {
+std::string Transaction::_transactionStateToString(TransactionState txnState) const {
     switch (txnState) {
-        case Transaction::TransactionState::kInit:
+        case TransactionState::kInit:
             return "init";
-        case Transaction::TransactionState::kStarted:
+        case TransactionState::kStarted:
             return "started";
-        case Transaction::TransactionState::kStartedCommit:
+        case TransactionState::kStartedCommit:
             return "started commit";
-        case Transaction::TransactionState::kStartedAbort:
+        case TransactionState::kRetryingCommit:
+            return "retrying commit";
+        case TransactionState::kStartedAbort:
             return "started abort";
-        case Transaction::TransactionState::kDone:
+        case TransactionState::kDone:
             return "done";
     }
     MONGO_UNREACHABLE;
@@ -316,31 +321,50 @@ SemiFuture<BatchedCommandResponse> SEPTransactionClient::runCRUDOp(
 
 SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
     const FindCommandRequest& cmd) const {
-    // TODO SERVER-64793: Make exhaustiveFind asynchronous
     return runCommand(cmd.getDbName(), cmd.toBSON({}))
         .thenRunOn(_executor)
         .then([this, batchSize = cmd.getBatchSize()](BSONObj reply) {
-            std::vector<BSONObj> response;
-            auto cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(reply));
-            while (true) {
-                auto releasedBatch = cursorResponse.releaseBatch();
-                response.insert(response.end(), releasedBatch.begin(), releasedBatch.end());
+            auto cursorResponse = std::make_shared<CursorResponse>(
+                uassertStatusOK(CursorResponse::parseFromBSON(reply)));
+            auto response = std::make_shared<std::vector<BSONObj>>();
+            return AsyncTry([this,
+                             batchSize = batchSize,
+                             cursorResponse = std::move(cursorResponse),
+                             response]() mutable {
+                       auto releasedBatch = cursorResponse->releaseBatch();
+                       response->insert(
+                           response->end(), releasedBatch.begin(), releasedBatch.end());
 
-                // We keep issuing getMores until the cursorId signifies that there are no more
-                // documents to fetch.
-                if (!cursorResponse.getCursorId()) {
-                    break;
-                }
+                       // If we've fetched all the documents, we can return the response vector
+                       // wrapped in an OK status.
+                       if (!cursorResponse->getCursorId()) {
+                           return SemiFuture<void>(Status::OK());
+                       }
 
-                GetMoreCommandRequest getMoreRequest(cursorResponse.getCursorId(),
-                                                     cursorResponse.getNSS().coll().toString());
-                getMoreRequest.setBatchSize(batchSize);
+                       GetMoreCommandRequest getMoreRequest(
+                           cursorResponse->getCursorId(),
+                           cursorResponse->getNSS().coll().toString());
+                       getMoreRequest.setBatchSize(batchSize);
 
-                // We block until we get the response back from runCommand().
-                cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(
-                    runCommand(cursorResponse.getNSS().db(), getMoreRequest.toBSON({})).get()));
-            }
-            return response;
+                       return runCommand(cursorResponse->getNSS().db(), getMoreRequest.toBSON({}))
+                           .thenRunOn(_executor)
+                           .then([response, cursorResponse](BSONObj reply) {
+                               // We keep the state of cursorResponse to be able to check the
+                               // cursorId in the next iteration.
+                               *cursorResponse =
+                                   uassertStatusOK(CursorResponse::parseFromBSON(reply));
+                               uasserted(ErrorCodes::InternalTransactionsExhaustiveFindHasMore,
+                                         "More documents to fetch");
+                           })
+                           .semi();
+                   })
+                .until([&](Status result) {
+                    // We stop execution if there is either no more documents to fetch or there was
+                    // an error upon fetching more documents.
+                    return result != ErrorCodes::InternalTransactionsExhaustiveFindHasMore;
+                })
+                .on(_executor, CancellationToken::uncancelable())
+                .then([response = std::move(response)] { return std::move(*response); });
         })
         .semi();
 }
@@ -383,14 +407,20 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(StringData dbName, StringData cm
             return BSON("ok" << 1);
         }
         uassert(5875902,
-                "Internal transaction not in progress",
+                "Internal transaction not in progress, state: {}"_format(
+                    _transactionStateToString(_state)),
                 _state == TransactionState::kStarted ||
-                    // Allows the best effort abort to run.
-                    (_state == TransactionState::kStartedCommit &&
-                     cmdName == AbortTransaction::kCommandName));
+                    // Allows retrying commit and the best effort abort after failing to commit.
+                    (_isInCommit() &&
+                     (cmdName == AbortTransaction::kCommandName ||
+                      cmdName == CommitTransaction::kCommandName)));
 
         if (cmdName == CommitTransaction::kCommandName) {
-            _state = TransactionState::kStartedCommit;
+            if (!_isInCommit()) {
+                // Only transition if we aren't already retrying commit.
+                _state = TransactionState::kStartedCommit;
+            }
+
             if (_execContext == ExecutionContext::kClientTransaction) {
                 // Don't commit if we're nested in a client's transaction.
                 return SemiFuture<BSONObj>::makeReady(BSON("ok" << 1));
@@ -405,7 +435,15 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(StringData dbName, StringData cm
 
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(cmdName, 1);
-    cmdBuilder.append(WriteConcernOptions::kWriteConcernField, _writeConcern);
+    if (_state == TransactionState::kRetryingCommit) {
+        // Per the drivers transaction spec, retrying commitTransaction uses majority write concern
+        // to avoid double applying a transaction due to a transient NoSuchTransaction error
+        // response.
+        cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
+                          CommandHelpers::kMajorityWriteConcern.toBSON());
+    } else {
+        cmdBuilder.append(WriteConcernOptions::kWriteConcernField, _writeConcern);
+    }
     auto cmdObj = cmdBuilder.obj();
 
     return ExecutorFuture<void>(_executor)
@@ -462,8 +500,6 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
         return ErrorHandlingStep::kRetryTransaction;
     }
 
-    auto hasStartedCommit = _state == TransactionState::kStartedCommit;
-
     const auto& clientStatus = swResult.getStatus();
     if (!clientStatus.isOK()) {
         if (ErrorCodes::isNetworkError(clientStatus)) {
@@ -471,7 +507,7 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
             // entire transaction. If there is a network error after a commit is sent, we can retry
             // the commit command to either recommit if the operation failed or get the result of
             // the successful commit.
-            if (hasStartedCommit) {
+            if (_isInCommit()) {
                 return ErrorHandlingStep::kRetryCommit;
             }
             return ErrorHandlingStep::kRetryTransaction;
@@ -479,7 +515,7 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
         return ErrorHandlingStep::kAbortAndDoNotRetry;
     }
 
-    if (hasStartedCommit) {
+    if (_isInCommit()) {
         const auto& commitStatus = swResult.getValue().cmdStatus;
         const auto& commitWCStatus = swResult.getValue().wcError.toStatus();
 
@@ -579,9 +615,9 @@ void Transaction::primeForTransactionRetry() {
 
 void Transaction::primeForCommitRetry() {
     stdx::lock_guard<Latch> lg(_mutex);
-    invariant(_state == TransactionState::kStartedCommit);
+    invariant(_isInCommit());
     _latestResponseHasTransientTransactionErrorLabel = false;
-    _state = TransactionState::kStarted;
+    _state = TransactionState::kRetryingCommit;
 }
 
 BSONObj Transaction::reportStateForLog() const {
@@ -592,7 +628,7 @@ BSONObj Transaction::reportStateForLog() const {
 BSONObj Transaction::_reportStateForLog(WithLock) const {
     return BSON("execContext" << execContextToString(_execContext) << "sessionInfo"
                               << _sessionInfo.toBSON() << "state"
-                              << transactionStateToString(_state));
+                              << _transactionStateToString(_state));
 }
 
 void Transaction::_setSessionInfo(WithLock,

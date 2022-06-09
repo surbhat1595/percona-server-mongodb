@@ -5,6 +5,7 @@
 //   requires_auth,
 //   requires_fcv_60,
 //   requires_non_retryable_commands,
+//   requires_persistence,
 //   requires_replication,
 // ]
 
@@ -58,11 +59,20 @@ function runTest(fixture) {
     // This does not need to be tested on replicasets. FCV locks are uninterruptable. Waiting on a
     // failpoint on a replicaset primary would prevent FCV from ever completing.
     if (fixture.hangTransition) {
-        let hangWaiter = fixture.hangTransition();
+        let hangWaiter = fixture.hangTransition({setUserWriteBlockMode: 1, global: true},
+                                                "hangInShardsvrSetUserWriteBlockMode");
 
         fixture.asAdmin(({admin}) => assert.commandFailedWithCode(
                             admin.runCommand({setFeatureCompatibilityVersion: "5.0"}),
                             ErrorCodes.CannotDowngrade));
+
+        // Restart the config server primary while in the middle of activating write block mode. FCV
+        // downgrade should still fail.
+        fixture.restartConfigPrimary();
+        fixture.asAdmin(({admin}) => assert.commandFailedWithCode(
+                            admin.runCommand({setFeatureCompatibilityVersion: "5.0"}),
+                            ErrorCodes.CannotDowngrade));
+
         hangWaiter.failpoint.off();
         hangWaiter.waiter();
     }

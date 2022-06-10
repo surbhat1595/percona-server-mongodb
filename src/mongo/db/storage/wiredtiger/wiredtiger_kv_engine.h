@@ -331,7 +331,7 @@ public:
         return _oplogManager.get();
     }
 
-    static void appendGlobalStats(BSONObjBuilder& b);
+    static void appendGlobalStats(OperationContext* opCtx, BSONObjBuilder& b);
 
     Timestamp getStableTimestamp() const override;
     Timestamp getOldestTimestamp() const override;

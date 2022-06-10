@@ -59,9 +59,6 @@ using std::unique_ptr;
 using std::vector;
 
 namespace {
-constexpr StringData kMin = "min"_sd;
-constexpr StringData kMax = "max"_sd;
-
 struct BoundMakerMin {
     const long long offset;  // Offset in millis
 
@@ -72,7 +69,9 @@ struct BoundMakerMin {
     }
 
     Document serialize() const {
-        return Document{{{"base"_sd, kMin}, {"offset"_sd, offset}}};
+        // Convert from millis to seconds.
+        return Document{{{"base"_sd, DocumentSourceSort::kMin},
+                         {DocumentSourceSort::kOffset, (offset / 1000)}}};
     }
 };
 
@@ -86,7 +85,9 @@ struct BoundMakerMax {
     }
 
     Document serialize() const {
-        return Document{{{"base"_sd, kMax}, {"offset"_sd, offset}}};
+        // Convert from millis to seconds.
+        return Document{{{"base"_sd, DocumentSourceSort::kMax},
+                         {DocumentSourceSort::kOffset, (offset / 1000)}}};
     }
 };
 struct CompAsc {
@@ -244,13 +245,9 @@ DocumentSource::GetNextResult DocumentSourceSort::doGetNext() {
                         _timeSorter->getState() != TimeSorterInterface::State::kWait);
                     continue;
                 case GetNextResult::ReturnStatus::kAdvanced:
-                    Document doc = timeSorterGetNext();
-                    auto time =
-                        doc.getField(_sortExecutor->sortPattern().back().fieldPath->fullPath());
-                    uassert(6369909,
-                            "$_internalBoundedSort only handles Date values",
-                            time.getType() == Date);
-                    _timeSorter->add({time.getDate()}, doc);
+                    auto [time, doc] = extractTime(timeSorterGetNext());
+
+                    _timeSorter->add({time}, doc);
                     continue;
             }
         }
@@ -296,10 +293,9 @@ void DocumentSourceSort::serializeToArray(
 
         MutableDocument mutDoc{Document{{
             {"$_internalBoundedSort"_sd,
-             Document{{
-                 {"sortKey"_sd, std::move(sortKey)},
-                 {"bound"_sd, _timeSorter->serializeBound()},
-             }}},
+             Document{{{"sortKey"_sd, std::move(sortKey)},
+                       {"bound"_sd, _timeSorter->serializeBound()},
+                       {"limit"_sd, static_cast<long long>(_timeSorter->limit())}}}},
         }}};
 
         if (explain >= ExplainOptions::Verbosity::kExecStats) {
@@ -424,6 +420,58 @@ intrusive_ptr<DocumentSourceSort> DocumentSourceSort::create(
     return pSort;
 }
 
+intrusive_ptr<DocumentSourceSort> DocumentSourceSort::createBoundedSort(
+    SortPattern pat,
+    StringData boundBase,
+    long long boundOffset,
+    boost::optional<long long> limit,
+    const intrusive_ptr<ExpressionContext>& expCtx) {
+
+    auto ds = DocumentSourceSort::create(expCtx, pat);
+
+    SortOptions opts;
+    opts.maxMemoryUsageBytes = internalQueryMaxBlockingSortMemoryUsageBytes.load();
+    if (expCtx->allowDiskUse) {
+        opts.extSortAllowed = true;
+        opts.tempDir = expCtx->tempDir;
+    }
+
+    if (limit) {
+        opts.Limit(limit.get());
+    }
+
+    if (boundBase == kMin) {
+        if (pat.back().isAscending) {
+            ds->_timeSorter.reset(
+                new TimeSorterAscMin{opts, CompAsc{}, BoundMakerMin{boundOffset}});
+        } else {
+            ds->_timeSorter.reset(
+                new TimeSorterDescMin{opts, CompDesc{}, BoundMakerMin{boundOffset}});
+        }
+        ds->_requiredMetadata.set(DocumentMetadataFields::MetaType::kTimeseriesBucketMinTime);
+    } else if (boundBase == kMax) {
+        if (pat.back().isAscending) {
+            ds->_timeSorter.reset(
+                new TimeSorterAscMax{opts, CompAsc{}, BoundMakerMax{boundOffset}});
+        } else {
+            ds->_timeSorter.reset(
+                new TimeSorterDescMax{opts, CompDesc{}, BoundMakerMax{boundOffset}});
+        }
+        ds->_requiredMetadata.set(DocumentMetadataFields::MetaType::kTimeseriesBucketMaxTime);
+    } else {
+        MONGO_UNREACHABLE;
+    }
+
+    if (pat.size() > 1) {
+        SortPattern partitionKey =
+            std::vector<SortPattern::SortPatternPart>(pat.begin(), pat.end() - 1);
+        ds->_timeSorterPartitionKeyGen =
+            SortKeyGenerator{std::move(partitionKey), expCtx->getCollator()};
+    }
+
+    return ds;
+}
+
 intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(6369905,
@@ -452,7 +500,7 @@ intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
     uassert(
         6460200, "$_internalBoundedSort bound must be an object", bound && bound.type() == Object);
 
-    BSONElement boundOffsetElem = bound.Obj()["offset"];
+    BSONElement boundOffsetElem = bound.Obj()[DocumentSourceSort::kOffset];
     long long boundOffset = 0;
     if (boundOffsetElem && boundOffsetElem.isNumber()) {
         boundOffset = uassertStatusOK(boundOffsetElem.parseIntegerElementToLong()) *
@@ -470,10 +518,16 @@ intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
             boundBase == kMin || boundBase == kMax);
 
     SortOptions opts;
-    opts.maxMemoryUsageBytes = internalQueryMaxBlockingSortMemoryUsageBytes.load();
+    opts.MaxMemoryUsageBytes(internalQueryMaxBlockingSortMemoryUsageBytes.load());
     if (expCtx->allowDiskUse) {
-        opts.extSortAllowed = true;
-        opts.tempDir = expCtx->tempDir;
+        opts.ExtSortAllowed(true);
+        opts.TempDir(expCtx->tempDir);
+    }
+    if (BSONElement limitElem = args["limit"]) {
+        uassert(6588100,
+                "$_internalBoundedSort limit must be a non-negative number if specified",
+                limitElem.isNumber() && limitElem.numberLong() >= 0);
+        opts.Limit(limitElem.numberLong());
     }
 
     auto ds = DocumentSourceSort::create(expCtx, pat);
@@ -557,6 +611,24 @@ std::pair<Value, Document> DocumentSourceSort::extractSortKey(Document&& doc) co
     } else {
         return std::make_pair(std::move(sortKey), std::move(doc));
     }
+}
+
+std::pair<Date_t, Document> DocumentSourceSort::extractTime(Document&& doc) const {
+    auto time = doc.getField(_sortExecutor->sortPattern().back().fieldPath->fullPath());
+    uassert(6369909, "$_internalBoundedSort only handles Date values", time.getType() == Date);
+    auto date = time.getDate();
+
+    if (pExpCtx->needsMerge) {
+        // If this sort stage is part of a merged pipeline, make sure that each Document's sort key
+        // gets saved with its metadata.
+        Value sortKey = _sortKeyGen->computeSortKeyFromDocument(doc);
+        MutableDocument toBeSorted(std::move(doc));
+        toBeSorted.metadata().setSortKey(sortKey, _sortKeyGen->isSingleElementKey());
+
+        return std::make_pair(date, toBeSorted.freeze());
+    }
+
+    return std::make_pair(date, std::move(doc));
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceSort::distributedPlanLogic() {

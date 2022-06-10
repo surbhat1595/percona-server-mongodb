@@ -1164,7 +1164,7 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     _ruState = opCtx->getWriteUnitOfWork()->release();
     opCtx->setWriteUnitOfWork(nullptr);
 
-    _locker = opCtx->swapLockState(std::make_unique<LockerImpl>(), wl);
+    _locker = opCtx->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()), wl);
     // Inherit the locking setting from the original one.
     opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(
         _locker->shouldConflictWithSecondaryBatchApplication());
@@ -1403,6 +1403,29 @@ void TransactionParticipant::Participant::unstashTransactionResources(OperationC
                                                                       const std::string& cmdName) {
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(opCtx->getTxnNumber());
+
+    uassert(ErrorCodes::NoSuchTransaction,
+            str::stream() << "The requested transaction number is different than the "
+                             "active transaction. Requested: "
+                          << *opCtx->getTxnNumber()
+                          << ". Active: " << o().activeTxnNumberAndRetryCounter.getTxnNumber(),
+            *opCtx->getTxnNumber() == o().activeTxnNumberAndRetryCounter.getTxnNumber());
+
+    if (opCtx->inMultiDocumentTransaction()) {
+        uassert(6611000,
+                str::stream() << "Attempted to use the active transaction number "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " in session "
+                              << _sessionId()
+                              << " for a transaction but it corresponds to a retryable write",
+                !o().txnState.isInRetryableWriteMode());
+    } else {
+        uassert(6611001,
+                str::stream() << "Attempted to use the active transaction number "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " in session "
+                              << _sessionId()
+                              << " for a retryable write but it corresponds to a transaction",
+                o().txnState.isInRetryableWriteMode());
+    }
 
     // If this is not a multi-document transaction, there is nothing to unstash.
     if (o().txnState.isInRetryableWriteMode()) {
@@ -2207,8 +2230,8 @@ void TransactionParticipant::Participant::_checkIsCommandValidWithTxnState(
     uassert(ErrorCodes::TransactionCommitted,
             str::stream() << "Transaction with " << requestTxnNumberAndRetryCounter.toBSON()
                           << " has been committed.",
-            cmdName == "commitTransaction" || !o().txnState.isCommitted() ||
-                (_isInternalSessionForRetryableWrite() && o().txnState.isCommitted()));
+            !o().txnState.isCommitted() || cmdName == "commitTransaction" ||
+                _isInternalSessionForRetryableWrite());
 
     // Disallow operations other than abort, prepare or commit on a prepared transaction
     uassert(ErrorCodes::PreparedTransactionInProgress,

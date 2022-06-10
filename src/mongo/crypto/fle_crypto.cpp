@@ -379,18 +379,6 @@ StatusWith<std::vector<uint8_t>> decryptData(ConstDataRange key, ConstDataRange 
     return {out};
 }
 
-StatusWith<uint64_t> decryptUInt64(ConstDataRange key, ConstDataRange cipherText) {
-    auto swPlainText = decryptData(key, cipherText);
-    if (!swPlainText.isOK()) {
-        return swPlainText.getStatus();
-    }
-
-    ConstDataRange cdr(swPlainText.getValue());
-
-    return cdr.readNoThrow<LittleEndian<uint64_t>>();
-}
-
-
 template <typename T>
 struct FLEStoragePackTypeHelper;
 
@@ -481,6 +469,12 @@ boost::optional<uint64_t> emuBinaryCommon(const FLEStateCollectionReader& reader
 
     // step 4, 5: get document count
     uint64_t rho = reader.getDocumentCount();
+
+    // Since fast count() is not reliable, if it says zero, try 1 instead just to be sure the
+    // collection is empty.
+    if (rho == 0) {
+        rho = 1;
+    }
 
 #ifdef DEBUG_ENUM_BINARY
     std::cout << fmt::format("start: lambda: {}, i: {}, rho: {}", lambda, i, rho) << std::endl;
@@ -1627,7 +1621,7 @@ BSONObj ECCCollection::generateNullDocument(ECCTwiceDerivedTagToken tagToken,
                                             uint64_t count) {
     auto block = ECCCollection::generateId(tagToken, boost::none);
 
-    auto swCipherText = encryptData(valueToken.data, count);
+    auto swCipherText = packAndEncrypt(std::tie(count, count), valueToken);
     uassertStatusOK(swCipherText);
 
     BSONObjBuilder builder;
@@ -1700,7 +1694,7 @@ StatusWith<ECCNullDocument> ECCCollection::decryptNullDocument(ECCTwiceDerivedVa
         return status;
     }
 
-    auto swUnpack = decryptUInt64(valueToken.data, binDataToCDR(encryptedValue));
+    auto swUnpack = decryptAndUnpack<uint64_t, uint64_t>(binDataToCDR(encryptedValue), valueToken);
 
     if (!swUnpack.isOK()) {
         return swUnpack.getStatus();
@@ -1708,7 +1702,7 @@ StatusWith<ECCNullDocument> ECCCollection::decryptNullDocument(ECCTwiceDerivedVa
 
     auto& value = swUnpack.getValue();
 
-    return ECCNullDocument{value};
+    return ECCNullDocument{std::get<0>(value)};
 }
 
 

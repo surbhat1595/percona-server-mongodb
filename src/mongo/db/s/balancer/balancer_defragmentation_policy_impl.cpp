@@ -37,6 +37,7 @@
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 #include <fmt/format.h>
 #include <tuple>
@@ -1610,6 +1611,11 @@ std::unique_ptr<DefragmentationPhase> BalancerDefragmentationPolicyImpl::_transi
     DefragmentationPhaseEnum nextPhase,
     bool shouldPersistPhase) {
     std::unique_ptr<DefragmentationPhase> nextPhaseObject(nullptr);
+    if (nextPhase == DefragmentationPhaseEnum::kSplitChunks &&
+        feature_flags::gNoMoreAutoSplitter.isEnabled(serverGlobalParams.featureCompatibility)) {
+        nextPhase = DefragmentationPhaseEnum::kFinished;
+    }
+
     try {
         if (shouldPersistPhase) {
             _persistPhaseUpdate(opCtx, nextPhase, coll.getUuid());

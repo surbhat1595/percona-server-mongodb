@@ -1350,7 +1350,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
 
     // Prepare the SBE tree for execution.
     stage_builder::prepareSlotBasedExecutableTree(
-        opCtx, root.get(), &data, *cq, collections, yieldPolicy.get());
+        opCtx, root.get(), &data, *cq, collections, yieldPolicy.get(), true);
 
     return plan_executor_factory::make(opCtx,
                                        std::move(cq),
@@ -1374,7 +1374,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     const auto& mainColl = collections.getMainCollection();
     canonicalQuery->setSbeCompatible(
         sbe::isQuerySbeCompatible(&mainColl, canonicalQuery.get(), plannerOptions));
-    return !canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()
+    return canonicalQuery->getEnableSlotBasedExecutionEngine() && canonicalQuery->isSbeCompatible()
         ? getSlotBasedExecutor(opCtx,
                                collections,
                                std::move(canonicalQuery),

@@ -148,8 +148,7 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
     DocumentSourceSort::parseBoundedSort,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::
-        none /* TODO SERVER-52286 feature_flags::gFeatureFlagBucketUnpackWithSort.getVersion() */,
+    feature_flags::gFeatureFlagBucketUnpackWithSort.getVersion(),
     feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabledAndIgnoreFCV());
 
 DocumentSource::GetNextResult::ReturnStatus DocumentSourceSort::timeSorterPeek() {
@@ -273,8 +272,9 @@ DocumentSource::GetNextResult DocumentSourceSort::doGetNext() {
     return GetNextResult{_sortExecutor->getNext().second};
 }
 
-boost::intrusive_ptr<DocumentSource> DocumentSourceSort::clone() const {
-    return create(pExpCtx,
+boost::intrusive_ptr<DocumentSource> DocumentSourceSort::clone(
+    const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const {
+    return create(newExpCtx ? newExpCtx : pExpCtx,
                   getSortKeyPattern(),
                   _sortExecutor->getLimit(),
                   _sortExecutor->getMaxMemoryBytes());
@@ -643,7 +643,7 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceSort::distri
                                  .serialize(SortPattern::SortKeySerialization::kForSortKeyMerging)
                                  .toBson();
     if (auto limit = getLimit()) {
-        split.mergingStage = DocumentSourceLimit::create(pExpCtx, *limit);
+        split.mergingStages = {DocumentSourceLimit::create(pExpCtx, *limit)};
     }
     return split;
 }

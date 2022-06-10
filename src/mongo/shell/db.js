@@ -185,7 +185,7 @@ DB.prototype.runCommand = function(obj, extra, queryOptions) {
         // "error doing query: failed". Even though this message is arguably incorrect
         // for a command failing due to a connection failure, we preserve it for backwards
         // compatibility. See SERVER-18334 for details.
-        if (ex.message.indexOf("network error") >= 0) {
+        if (ex.hasOwnProperty("message") && ex.message.indexOf("network error") >= 0) {
             throw new Error("error doing query: failed: " + ex.message);
         }
         throw ex;
@@ -1829,9 +1829,12 @@ DB.prototype.createEncryptedCollection = function(name, opts) {
 
     assert.commandWorked(this.getCollection(name).createIndex({__safeContent__: 1}));
 
-    assert.commandWorked(this.createCollection(ef.escCollection));
-    assert.commandWorked(this.createCollection(ef.eccCollection));
-    assert.commandWorked(this.createCollection(ef.ecocCollection));
+    assert.commandWorked(
+        this.createCollection(ef.escCollection, {clusteredIndex: {key: {_id: 1}, unique: true}}));
+    assert.commandWorked(
+        this.createCollection(ef.eccCollection, {clusteredIndex: {key: {_id: 1}, unique: true}}));
+    assert.commandWorked(
+        this.createCollection(ef.ecocCollection, {clusteredIndex: {key: {_id: 1}, unique: true}}));
 
     return res;
 };
@@ -1853,12 +1856,3 @@ DB.prototype.dropEncryptedCollection = function(name) {
     return this.getCollection(name).drop();
 };
 }());
-
-DB.prototype._sbe = function(query) {
-    const res = this.runCommand({sbe: query});
-    if (!res.ok) {
-        throw _getErrorWithCode(res, "sbe failed: " + tojson(res));
-    }
-
-    return new DBCommandCursor(this, res);
-};

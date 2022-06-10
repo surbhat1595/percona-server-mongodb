@@ -102,8 +102,6 @@ last-continuous:
       test_file: jstests/aggregation/range.js
     - ticket: SERVER-59923
       test_file: jstests/sharding/test_resharding_test_fixture_shutdown_retry_needed.js
-    - ticket: SERVER-60567
-      test_file: jstests/core/sbe/sbe_cmd.js
     - ticket: SERVER-61087
       test_file: jstests/core/sbe/sbe_ixscan_explain.js
     - ticket: SERVER-56127
@@ -214,6 +212,14 @@ last-continuous:
       test_file: jstests/core/sbe_plan_cache_autoparameterize_collscan.js
     - ticket: SERVER-64315
       test_file: jstests/core/wildcard_index_cached_plans.js
+    - ticket: SERVER-65821
+      test_file: jstests/replsets/dbhash_lock_acquisition.js
+    - ticket: SERVER-66389
+      test_file: jstests/core/where_multiple_plans.js
+    - ticket: SERVER-66089
+      test_file: jstests/replsets/initial_sync_with_partial_transaction.js
+    - ticket: SERVER-65947
+      test_file: jstests/sharding/migration_retries_on_write_conflict_exceptions.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -459,8 +465,6 @@ last-lts:
       test_file: jstests/aggregation/range.js
     - ticket: SERVER-59923
       test_file: jstests/sharding/test_resharding_test_fixture_shutdown_retry_needed.js
-    - ticket: SERVER-60567
-      test_file: jstests/core/sbe/sbe_cmd.js
     - ticket: SERVER-61087
       test_file: jstests/core/sbe/sbe_ixscan_explain.js
     - ticket: SERVER-56127
@@ -563,6 +567,14 @@ last-lts:
       test_file: jstests/core/sbe_plan_cache_autoparameterize_collscan.js
     - ticket: SERVER-64315
       test_file: jstests/core/wildcard_index_cached_plans.js
+    - ticket: SERVER-65821
+      test_file: jstests/replsets/dbhash_lock_acquisition.js
+    - ticket: SERVER-66389
+      test_file: jstests/core/where_multiple_plans.js
+    - ticket: SERVER-66089
+      test_file: jstests/replsets/initial_sync_with_partial_transaction.js
+    - ticket: SERVER-65947
+      test_file: jstests/sharding/migration_retries_on_write_conflict_exceptions.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

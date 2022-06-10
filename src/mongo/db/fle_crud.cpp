@@ -190,7 +190,9 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
 
     auto documents = insertRequest.getDocuments();
     // TODO - how to check if a document will be too large???
-    uassert(6371202, "Only single insert batches are supported in FLE2", documents.size() == 1);
+    uassert(6371202,
+            "Only single insert batches are supported in Queryable Encryption",
+            documents.size() == 1);
 
     auto document = documents[0];
     EDCServerCollection::validateEncryptedFieldInfo(document, efc);
@@ -241,7 +243,8 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
             // does not try to commit the transaction.
             if (reply->getWriteErrors().has_value() && !reply->getWriteErrors().value().empty()) {
                 return SemiFuture<void>::makeReady(
-                    Status(ErrorCodes::FLETransactionAbort, "FLE2 write errors on insert"));
+                    Status(ErrorCodes::FLETransactionAbort,
+                           "Queryable Encryption write errors on insert"));
             }
 
             return SemiFuture<void>::makeReady();
@@ -268,29 +271,36 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
 write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
                                             const write_ops::DeleteCommandRequest& deleteRequest,
                                             GetTxnCallback getTxns) {
+    {
+        auto deletes = deleteRequest.getDeletes();
+        uassert(6371302, "Only single document deletes are permitted", deletes.size() == 1);
 
-    auto deletes = deleteRequest.getDeletes();
-    uassert(6371302, "Only single document deletes are permitted", deletes.size() == 1);
+        auto deleteOpEntry = deletes[0];
 
-    auto deleteOpEntry = deletes[0];
-
-    uassert(
-        6371303, "FLE only supports single document deletes", deleteOpEntry.getMulti() == false);
+        uassert(6371303,
+                "FLE only supports single document deletes",
+                deleteOpEntry.getMulti() == false);
+    }
 
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
     auto reply = std::make_shared<write_ops::DeleteCommandReply>();
 
-    auto expCtx = makeExpCtx(opCtx, deleteRequest, deleteOpEntry);
+    auto ownedRequest = deleteRequest.serialize({});
+    auto ownedDeleteRequest =
+        write_ops::DeleteCommandRequest::parse(IDLParserErrorContext("delete"), ownedRequest);
+    auto ownedDeleteOpEntry = ownedDeleteRequest.getDeletes()[0];
+
+    auto expCtx = makeExpCtx(opCtx, ownedDeleteRequest, ownedDeleteOpEntry);
     // The function that handles the transaction may outlive this function so we need to use
     // shared_ptrs
-    auto deleteBlock = std::make_tuple(deleteRequest, expCtx);
+    auto deleteBlock = std::make_tuple(ownedDeleteRequest, expCtx);
     auto sharedDeleteBlock = std::make_shared<decltype(deleteBlock)>(deleteBlock);
 
     auto swResult = trun->runNoThrow(
         opCtx,
-        [sharedDeleteBlock, reply](const txn_api::TransactionClient& txnClient,
-                                   ExecutorPtr txnExec) {
+        [sharedDeleteBlock, ownedRequest, reply](const txn_api::TransactionClient& txnClient,
+                                                 ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, getGlobalServiceContext());
 
             auto [deleteRequest2, expCtx2] = *sharedDeleteBlock.get();
@@ -313,7 +323,8 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
             // does not try to commit the transaction.
             if (reply->getWriteErrors().has_value() && !reply->getWriteErrors().value().empty()) {
                 return SemiFuture<void>::makeReady(
-                    Status(ErrorCodes::FLETransactionAbort, "FLE2 write errors on delete"));
+                    Status(ErrorCodes::FLETransactionAbort,
+                           "Queryable Encryption write errors on delete"));
             }
 
             return SemiFuture<void>::makeReady();
@@ -339,19 +350,23 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                                             const write_ops::UpdateCommandRequest& updateRequest,
                                             GetTxnCallback getTxns) {
 
-    auto updates = updateRequest.getUpdates();
-    uassert(6371502, "Only single document updates are permitted", updates.size() == 1);
+    {
+        auto updates = updateRequest.getUpdates();
+        uassert(6371502, "Only single document updates are permitted", updates.size() == 1);
 
-    auto updateOpEntry = updates[0];
+        auto updateOpEntry = updates[0];
 
-    uassert(
-        6371503, "FLE only supports single document updates", updateOpEntry.getMulti() == false);
+        uassert(6371503,
+                "FLE only supports single document updates",
+                updateOpEntry.getMulti() == false);
 
-    // pipeline - is agg specific, delta is oplog, transform is internal (timeseries)
-    uassert(6371517,
-            "FLE only supports modifier and replacement style updates",
-            updateOpEntry.getU().type() == write_ops::UpdateModification::Type::kModifier ||
-                updateOpEntry.getU().type() == write_ops::UpdateModification::Type::kReplacement);
+        // pipeline - is agg specific, delta is oplog, transform is internal (timeseries)
+        uassert(6371517,
+                "FLE only supports modifier and replacement style updates",
+                updateOpEntry.getU().type() == write_ops::UpdateModification::Type::kModifier ||
+                    updateOpEntry.getU().type() ==
+                        write_ops::UpdateModification::Type::kReplacement);
+    }
 
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
@@ -359,14 +374,19 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
     // shared_ptrs
     auto reply = std::make_shared<write_ops::UpdateCommandReply>();
 
-    auto expCtx = makeExpCtx(opCtx, updateRequest, updateOpEntry);
-    auto updateBlock = std::make_tuple(updateRequest, expCtx);
+    auto ownedRequest = updateRequest.serialize({});
+    auto ownedUpdateRequest =
+        write_ops::UpdateCommandRequest::parse(IDLParserErrorContext("update"), ownedRequest);
+    auto ownedUpdateOpEntry = ownedUpdateRequest.getUpdates()[0];
+
+    auto expCtx = makeExpCtx(opCtx, ownedUpdateRequest, ownedUpdateOpEntry);
+    auto updateBlock = std::make_tuple(ownedUpdateRequest, expCtx);
     auto sharedupdateBlock = std::make_shared<decltype(updateBlock)>(updateBlock);
 
     auto swResult = trun->runNoThrow(
         opCtx,
-        [sharedupdateBlock, reply](const txn_api::TransactionClient& txnClient,
-                                   ExecutorPtr txnExec) {
+        [sharedupdateBlock, reply, ownedRequest](const txn_api::TransactionClient& txnClient,
+                                                 ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, getGlobalServiceContext());
 
             auto [updateRequest2, expCtx2] = *sharedupdateBlock.get();
@@ -388,7 +408,8 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
             // does not try to commit the transaction.
             if (reply->getWriteErrors().has_value() && !reply->getWriteErrors().value().empty()) {
                 return SemiFuture<void>::makeReady(
-                    Status(ErrorCodes::FLETransactionAbort, "FLE2 write errors on delete"));
+                    Status(ErrorCodes::FLETransactionAbort,
+                           "Queryable Encryption write errors on delete"));
             }
 
             return SemiFuture<void>::makeReady();
@@ -595,7 +616,7 @@ std::shared_ptr<write_ops::FindAndModifyCommandRequest> constructDefaultReply() 
 }  // namespace
 
 template <typename ReplyType>
-StatusWith<ReplyType> processFindAndModifyRequest(
+StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
     OperationContext* opCtx,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
     GetTxnCallback getTxns,
@@ -627,18 +648,22 @@ StatusWith<ReplyType> processFindAndModifyRequest(
 
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
-    auto expCtx = makeExpCtx(opCtx, findAndModifyRequest, findAndModifyRequest);
-
     // The function that handles the transaction may outlive this function so we need to use
     // shared_ptrs
     std::shared_ptr<ReplyType> reply = constructDefaultReply<ReplyType>();
-    auto findAndModifyBlock = std::make_tuple(findAndModifyRequest, expCtx);
+
+    auto ownedRequest = findAndModifyRequest.serialize({});
+    auto ownedFindAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
+        IDLParserErrorContext("findAndModify"), ownedRequest);
+
+    auto expCtx = makeExpCtx(opCtx, ownedFindAndModifyRequest, ownedFindAndModifyRequest);
+    auto findAndModifyBlock = std::make_tuple(ownedFindAndModifyRequest, expCtx);
     auto sharedFindAndModifyBlock =
         std::make_shared<decltype(findAndModifyBlock)>(findAndModifyBlock);
 
     auto swResult = trun->runNoThrow(
         opCtx,
-        [sharedFindAndModifyBlock, reply, processCallback](
+        [sharedFindAndModifyBlock, ownedRequest, reply, processCallback](
             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, getGlobalServiceContext());
 
@@ -665,8 +690,22 @@ StatusWith<ReplyType> processFindAndModifyRequest(
         return swResult.getValue().getEffectiveStatus();
     }
 
-    return *reply;
+    return std::pair<ReplyType, OpMsgRequest>{*reply, ownedRequest};
 }
+
+template StatusWith<std::pair<write_ops::FindAndModifyCommandReply, OpMsgRequest>>
+processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
+    OperationContext* opCtx,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
+    GetTxnCallback getTxns,
+    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandReply> processCallback);
+
+template StatusWith<std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>>
+processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
+    OperationContext* opCtx,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
+    GetTxnCallback getTxns,
+    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandRequest> processCallback);
 
 FLEQueryInterface::~FLEQueryInterface() {}
 
@@ -709,6 +748,7 @@ write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
 
     auto [deleteReply, deletedDocument] =
         queryImpl->deleteWithPreimage(edcNss, ei, newDeleteRequest);
+    checkWriteErrors(deleteReply);
 
     // If the delete did not actually delete anything, we are done
     if (deletedDocument.isEmpty()) {
@@ -850,7 +890,7 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
 
     // TODO (SERVER-65077): Remove FCV check once 6.0 is released
     uassert(6371209,
-            "FLE 2 is only supported when FCV supports 6.0",
+            "Queryable Encryption is only supported when FCV supports 6.0",
             gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Insert) {
@@ -928,6 +968,7 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
                                            newDeleteOp.getQ(),
                                            &getTransactionWithRetriesForMongoS));
         deleteRequest.setDeletes({newDeleteOp});
+        deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(boost::none);
         return std::make_unique<BatchedCommandRequest>(deleteRequest);
     } else if (request.getBatchType() == BatchedCommandRequest::BatchType_Update) {
         auto updateRequest = request.getUpdateRequest();
@@ -939,6 +980,7 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
                                            newUpdateOp.getQ(),
                                            &getTransactionWithRetriesForMongoS));
         updateRequest.setUpdates({newUpdateOp});
+        updateRequest.getWriteCommandRequestBase().setEncryptionInformation(boost::none);
         return std::make_unique<BatchedCommandRequest>(updateRequest);
     }
     MONGO_UNREACHABLE;
@@ -1106,7 +1148,7 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
 
     // TODO (SERVER-65077): Remove FCV check once 6.0 is released
     if (!gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) {
-        uasserted(6371405, "FLE 2 is only supported when FCV supports 6.0");
+        uasserted(6371405, "Queryable Encryption is only supported when FCV supports 6.0");
     }
 
     // FLE2 Mongos CRUD operations loopback through MongoS with EncryptionInformation as
@@ -1119,15 +1161,16 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
     auto swReply = processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
         opCtx, request, &getTransactionWithRetriesForMongoS);
 
-    auto reply = uassertStatusOK(swReply);
+    auto reply = uassertStatusOK(swReply).first;
 
     reply.serialize(&result);
 
     return FLEBatchResult::kProcessed;
 }
 
-write_ops::FindAndModifyCommandRequest processFLEFindAndModifyExplainMongos(
-    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& request) {
+std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
+processFLEFindAndModifyExplainMongos(OperationContext* opCtx,
+                                     const write_ops::FindAndModifyCommandRequest& request) {
     tassert(6513400,
             "Missing encryptionInformation for findAndModify",
             request.getEncryptionInformation().has_value());
@@ -1233,19 +1276,24 @@ std::pair<write_ops::DeleteCommandReply, BSONObj> FLEQueryInterfaceImpl::deleteW
     auto response = _txnClient.runCommand(nss.db(), findAndModifyRequest.toBSON({})).get();
     auto status = getStatusFromWriteCommandReply(response);
 
-    auto reply =
-        write_ops::FindAndModifyCommandReply::parse(IDLParserErrorContext("reply"), response);
-
+    BSONObj returnObj;
     write_ops::DeleteCommandReply deleteReply;
 
     if (!status.isOK()) {
         deleteReply.getWriteCommandReplyBase().setN(0);
         deleteReply.getWriteCommandReplyBase().setWriteErrors(singleStatusToWriteErrors(status));
-    } else if (reply.getLastErrorObject().getNumDocs() > 0) {
-        deleteReply.getWriteCommandReplyBase().setN(1);
+    } else {
+        auto reply =
+            write_ops::FindAndModifyCommandReply::parse(IDLParserErrorContext("reply"), response);
+
+        if (reply.getLastErrorObject().getNumDocs() > 0) {
+            deleteReply.getWriteCommandReplyBase().setN(1);
+        }
+
+        returnObj = reply.getValue().value_or(BSONObj());
     }
 
-    return {deleteReply, reply.getValue().value_or(BSONObj())};
+    return {deleteReply, returnObj};
 }
 
 std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceImpl::updateWithPreimage(
@@ -1337,6 +1385,8 @@ write_ops::FindAndModifyCommandReply FLEQueryInterfaceImpl::findAndModify(
     auto ei2 = ei;
     ei2.setCrudProcessed(true);
     newFindAndModifyRequest.setEncryptionInformation(ei2);
+    // WriteConcern is set at the transaction level so strip it out
+    newFindAndModifyRequest.setWriteConcern(boost::none);
 
     auto response = _txnClient.runCommand(nss.db(), newFindAndModifyRequest.toBSON({})).get();
     auto status = getStatusFromWriteCommandReply(response);

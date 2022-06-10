@@ -899,6 +899,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/query/command_request_response',
         '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/executor/task_executor_interface',
         '$BUILD_DIR/mongo/rpc/command_status',
         '$BUILD_DIR/mongo/rpc/rpc',
         '$BUILD_DIR/mongo/transport/service_entry_point',
@@ -945,7 +946,9 @@ env.Library(
         '$BUILD_DIR/mongo/crypto/fle_crypto',
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/executor/task_executor_pool',
+        '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
         "$BUILD_DIR/mongo/util/concurrency/thread_pool",
         'fle_crud',
         'logical_session_id',
@@ -2100,7 +2103,8 @@ env.Library(
 env.Library(
     target='vector_clock_mongod',
     source=[
-        'vector_clock_mongod.cpp',
+        's/topology_time_ticker.cpp',
+        'vector_clock_mongod.cpp'
     ],
     LIBDEPS=[
         'vector_clock_mutable',
@@ -2630,12 +2634,13 @@ env.Program(
     AIB_COMPONENTS_EXTRA=[
         "core",
         "default",
+        "devcore",
         "dist",
         "dist-test",
+        "integration-tests",
         "serverless",
         "serverless-test",
         "servers",
-        "integration-tests",
     ],
 )
 

@@ -51,11 +51,21 @@ if platform_family? 'debian'
   ENV['DEBIAN_FRONTEND'] = 'noninteractive'
   package 'openssl'
 
-  # the ubuntu 16.04 image does not have some dependencies installed by default
+  # the ubuntu image does not have some dependencies installed by default
   # and it is required for the install_compass script
-  execute 'install dependencies' do
-    command 'apt-get install -y python libsasl2-modules-gssapi-mit'
-    live_stream true
+  if node['platform'] == 'ubuntu' and node['platform_version'] == '20.04'
+    execute 'install dependencies ubuntu 20.04' do
+      command 'apt-get install -y python3 libsasl2-modules-gssapi-mit'
+      live_stream true
+    end
+    link '/usr/bin/python' do
+      to '/usr/bin/python3'
+    end
+  else
+    execute 'install dependencies' do
+      command 'apt-get install -y python libsasl2-modules-gssapi-mit'
+      live_stream true
+    end
   end
 
   # dpkg returns 1 if dependencies are not satisfied, which they will not be
@@ -82,12 +92,6 @@ if platform_family? 'debian'
     command 'apt update && apt -y -f install'
     live_stream true
   end
-
-  execute 'install mongo shell' do
-    command 'dpkg -i `find . -name "*shell*.deb"`'
-    live_stream true
-    cwd homedir
-  end
 end
 
 if platform_family? 'rhel' or platform_family? 'amazon'
@@ -105,12 +109,6 @@ if platform_family? 'rhel' or platform_family? 'amazon'
   # install the tools so we can test install_compass
   execute 'install mongo tools' do
     command 'yum install -y `find . -name "*tools-extra*.rpm"`'
-    live_stream true
-    cwd homedir
-  end
-
-  execute 'install mongo shell' do
-    command 'yum install -y `find . -name "*shell*.rpm"`'
     live_stream true
     cwd homedir
   end
@@ -145,32 +143,4 @@ if platform_family? 'suse'
     live_stream true
     cwd homedir
   end
-
-  execute 'install mongo' do
-    command 'zypper --no-gpg-checks -n install `find . -name "*shell*.rpm"`'
-    live_stream true
-    cwd homedir
-  end
-end
-
-inspec_wait = <<HEREDOC
-#!/bin/bash -x
-ulimit -v unlimited
-for i in {1..60}
-do
-  mongo --eval "db.smoke.insert({answer: 42})"
-  if [ $? -eq 0 ]
-  then
-    exit 0
-  else
-    echo "sleeping"
-    sleep 1
-  fi
-done
-exit 1
-HEREDOC
-
-file '/inspec_wait.sh' do
-  content inspec_wait
-  mode '0755'
 end

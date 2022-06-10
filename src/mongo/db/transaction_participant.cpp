@@ -331,25 +331,16 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
 
 /**
  * Returns the highest txnNumber in the given session that has corresponding internal sessions as
- * found in the session catalog and the config.transactions collection.
+ * found in the config.transactions collection.
  */
 TxnNumber fetchHighestTxnNumberWithInternalSessions(OperationContext* opCtx,
                                                     const LogicalSessionId& parentLsid) {
-    TxnNumber highestTxnNumber{kUninitializedTxnNumber};
-
-    const auto sessionCatalog = SessionCatalog::get(opCtx);
-    sessionCatalog->scanSession(parentLsid, [&](const ObservableSession& osession) {
-        highestTxnNumber = osession.getHighestTxnNumberWithChildSessions();
-    });
-
+    TxnNumber highestTxnNumber = kUninitializedTxnNumber;
     try {
         performReadWithNoTimestampDBDirectClient(opCtx, [&](DBDirectClient* client) {
             FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
-            findRequest.setFilter(BSON(SessionTxnRecord::kParentSessionIdFieldName
-                                       << parentLsid.toBSON()
-                                       << (SessionTxnRecord::kSessionIdFieldName + "." +
-                                           LogicalSessionId::kTxnNumberFieldName)
-                                       << BSON("$gte" << highestTxnNumber)));
+            findRequest.setFilter(
+                BSON(SessionTxnRecord::kParentSessionIdFieldName << parentLsid.toBSON()));
             findRequest.setSort(BSON((SessionTxnRecord::kSessionIdFieldName + "." +
                                       LogicalSessionId::kTxnNumberFieldName)
                                      << -1));
@@ -363,8 +354,14 @@ TxnNumber fetchHighestTxnNumberWithInternalSessions(OperationContext* opCtx,
                 const auto doc = cursor->next();
                 const auto childLsid = LogicalSessionId::parse(
                     IDLParserErrorContext("LogicalSessionId"), doc.getObjectField("_id"));
-                highestTxnNumber = std::max(highestTxnNumber, *childLsid.getTxnNumber());
+
                 invariant(!cursor->more());
+                // All config.transactions entries with the parentLsid field should have a txnNumber
+                // in their sessionId, but users may manually modify that collection so we can't
+                // assume that.
+                if (childLsid.getTxnNumber().has_value()) {
+                    highestTxnNumber = *childLsid.getTxnNumber();
+                }
             }
         });
     } catch (const ExceptionFor<ErrorCodes::BadValue>& ex) {
@@ -623,7 +620,7 @@ const LogicalSessionId& TransactionParticipant::Observer::_sessionId() const {
 }
 
 bool TransactionParticipant::Observer::_isInternalSession() const {
-    return getParentSessionId(_sessionId()).has_value();
+    return isChildSession(_sessionId());
 }
 
 bool TransactionParticipant::Observer::_isInternalSessionForRetryableWrite() const {
@@ -2737,6 +2734,14 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
 
     // Reset the transactional state
     _resetTransactionStateAndUnlock(&lk, TransactionState::kNone);
+
+    invariant(!lk);
+    if (isParentSessionId(_sessionId())) {
+        // Only observe parent sessions because retryable transactions begin the same txnNumber on
+        // their parent session.
+        OperationContextSession::observeNewTxnNumberStarted(
+            opCtx, _sessionId(), txnNumberAndRetryCounter.getTxnNumber());
+    }
 }
 
 void RetryableWriteTransactionParticipantCatalog::addParticipant(
@@ -2926,13 +2931,14 @@ void TransactionParticipant::Participant::_refreshActiveTransactionParticipantsF
                                 << "transaction number " << *childLsid.getTxnNumber(),
                             *childLsid.getTxnNumber() == *activeRetryableWriteTxnNumber);
                         auto sessionCatalog = SessionCatalog::get(opCtx);
-                        sessionCatalog->createSessionIfDoesNotExist(childLsid);
                         sessionCatalog->scanSession(
-                            childLsid, [&](const ObservableSession& osession) {
+                            childLsid,
+                            [&](const ObservableSession& osession) {
                                 auto childTxnParticipant =
                                     TransactionParticipant::get(opCtx, osession.get());
                                 childTxnParticipants.push_back(childTxnParticipant);
-                            });
+                            },
+                            SessionCatalog::ScanSessionCreateSession::kYes);
                     }
                 });
             } catch (const ExceptionFor<ErrorCodes::BadValue>& ex) {

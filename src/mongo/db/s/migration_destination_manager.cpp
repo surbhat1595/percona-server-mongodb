@@ -562,6 +562,10 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
 
         try {
             while (true) {
+                DisableDocumentValidation documentValidationDisabler(
+                    applicationOpCtx.get(),
+                    DocumentValidationSettings::kDisableSchemaValidation |
+                        DocumentValidationSettings::kDisableInternalValidation);
                 auto nextBatch = batches.pop(applicationOpCtx.get());
                 if (!applyBatchFn(applicationOpCtx.get(), nextBatch)) {
                     return;
@@ -731,6 +735,10 @@ Status MigrationDestinationManager::exitCriticalSection(OperationContext* opCtx,
                         "Request to exit recipient critical section does not match current session",
                         "requested"_attr = sessionId,
                         "current"_attr = _sessionId);
+
+            // No need to hold _mutex from here on. Release it because the lines below will acquire
+            // other locks and holding the mutex could lead to deadlocks.
+            lock.unlock();
 
             if (migrationRecipientRecoveryDocumentExists(opCtx, sessionId)) {
                 // This node may have stepped down and interrupted the migrateThread, which reset
@@ -1369,14 +1377,22 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                         return toInsert;
                     }());
 
-                    const auto reply = write_ops_exec::performInserts(
-                        opCtx, insertOp, OperationSource::kFromMigrate);
-
-                    for (unsigned long i = 0; i < reply.results.size(); ++i) {
-                        uassertStatusOKWithContext(reply.results[i],
-                                                   str::stream()
-                                                       << "Insert of " << insertOp.getDocuments()[i]
-                                                       << " failed.");
+                    {
+                        // Disable the schema validation (during document inserts and updates)
+                        // and any internal validation for opCtx for performInserts()
+                        DisableDocumentValidation documentValidationDisabler(
+                            opCtx,
+                            DocumentValidationSettings::kDisableSchemaValidation |
+                                DocumentValidationSettings::kDisableInternalValidation);
+                        const auto reply = write_ops_exec::performInserts(
+                            opCtx, insertOp, OperationSource::kFromMigrate);
+                        for (unsigned long i = 0; i < reply.results.size(); ++i) {
+                            uassertStatusOKWithContext(reply.results[i],
+                                                       str::stream() << "Insert of "
+                                                                     << insertOp.getDocuments()[i]
+                                                                     << " failed.");
+                        }
+                        // Revert to the original DocumentValidationSettings for opCtx
                     }
 
                     migrationutil::persistUpdatedNumOrphans(

@@ -43,9 +43,11 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/multi_iterator.h"
+#include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/exec/sample_from_timeseries_bucket.h"
 #include "mongo/db/exec/shard_filter.h"
@@ -81,10 +83,12 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/stage_types.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/top.h"
@@ -165,6 +169,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
         internalQuerySlotBasedExecutionDisableLookupPushdown.load() || isMainCollectionSharded ||
         collections.isAnySecondaryNamespaceAViewOrSharded();
 
+    std::map<NamespaceString, SecondaryCollectionInfo> secondaryCollInfo;
     for (auto itr = sources.begin(); itr != sources.end();) {
         const bool isLastSource = itr->get() == sources.back().get();
 
@@ -192,10 +197,31 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
             // Note that 'lookupStage->sbeCompatible()' encodes whether the foreign collection is a
             // view.
             if (lookupStage->sbeCompatible()) {
-                stagesForPushdown.push_back(
-                    std::make_unique<InnerPipelineStageImpl>(lookupStage, isLastSource));
-                sources.erase(itr++);
-                continue;
+                // Fill out secondary collection information to assist in deciding whether we should
+                // push down any $lookup stages into SBE.
+                // TODO SERVER-67024: This should be removed once NLJ is re-enabled by default.
+                if (secondaryCollInfo.empty()) {
+                    secondaryCollInfo =
+                        fillOutSecondaryCollectionsInformation(expCtx->opCtx, collections, cq);
+                }
+
+                auto [strategy, _] = QueryPlannerAnalysis::determineLookupStrategy(
+                    lookupStage->getFromNs().toString(),
+                    lookupStage->getForeignField()->fullPath(),
+                    secondaryCollInfo,
+                    cq->getExpCtx()->allowDiskUse,
+                    cq->getCollator());
+
+                // While we do support executing NLJ in SBE, this join algorithm does not currently
+                // perform as well as executing $lookup in the classic engine, so fall back to
+                // classic unless 'gFeatureFlagSbeFull' is enabled.
+                if (strategy != EqLookupNode::LookupStrategy::kNestedLoopJoin ||
+                    feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
+                    stagesForPushdown.push_back(
+                        std::make_unique<InnerPipelineStageImpl>(lookupStage, isLastSource));
+                    sources.erase(itr++);
+                    continue;
+                }
             }
             break;
         }
@@ -1169,13 +1195,37 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
 
             // Get source stage
             PlanStage* rootStage = execImpl->getRootStage();
-            while (rootStage && rootStage->getChildren().size() == 1) {
+            while (rootStage &&
+                   (rootStage->getChildren().size() == 1 ||
+                    rootStage->stageType() == STAGE_MULTI_PLAN)) {
                 switch (rootStage->stageType()) {
                     case STAGE_FETCH:
                         rootStage = rootStage->child().get();
                         break;
                     case STAGE_SHARDING_FILTER:
                         rootStage = rootStage->child().get();
+                        break;
+                    case STAGE_MULTI_PLAN:
+                        if (auto mps = static_cast<MultiPlanStage*>(rootStage)) {
+                            if (mps->bestPlanChosen() && mps->bestPlanIdx()) {
+                                rootStage = (mps->getChildren())[*(mps->bestPlanIdx())].get();
+                            } else {
+                                rootStage = nullptr;
+                                tasserted(6655801,
+                                          "Expected multiplanner to have selected a bestPlan.");
+                            }
+                        }
+                        break;
+                    case STAGE_CACHED_PLAN:
+                        if (auto cp = static_cast<CachedPlanStage*>(rootStage)) {
+                            if (cp->bestPlanChosen()) {
+                                rootStage = rootStage->child().get();
+                            } else {
+                                rootStage = nullptr;
+                                tasserted(6655802,
+                                          "Expected cached plan to have selected a bestPlan.");
+                            }
+                        }
                         break;
                     default:
                         rootStage = nullptr;

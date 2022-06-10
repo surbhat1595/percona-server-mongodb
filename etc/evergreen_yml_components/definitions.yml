@@ -891,6 +891,7 @@ functions:
 
   "do multiversion setup":
   - *f_expansions_write
+  - *set_up_venv
   - *do_multiversion_setup
 
   # Used by generator
@@ -5710,6 +5711,14 @@ tasks:
     vars:
       use_large_distro: "true"
 
+- <<: *gen_task_template
+  name: sharding_opportunistic_secondary_targeting_gen
+  tags: ["sharding", "common"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
 - <<: *task_template
   name: snmp
   tags: []
@@ -6289,7 +6298,6 @@ tasks:
   - func: "set up remote credentials"
   - *f_expansions_write
   - func: "configure evergreen api credentials"
-  - func: "do multiversion setup"
   - func: "run tests"
     vars:
       resmoke_jobs_max: 1

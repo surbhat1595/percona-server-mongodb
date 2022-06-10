@@ -356,7 +356,7 @@ Status Balancer::rebalanceSingleChunk(OperationContext* opCtx,
     auto response =
         _commandScheduler
             ->requestMoveChunk(opCtx, *migrateInfo, settings, true /* issuedByRemoteUser */)
-            .getNoThrow();
+            .getNoThrow(opCtx);
     return processManualMigrationOutcome(opCtx, chunk.getMin(), nss, migrateInfo->to, response);
 }
 
@@ -385,7 +385,7 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
     auto response =
         _commandScheduler
             ->requestMoveChunk(opCtx, migrateInfo, settings, true /* issuedByRemoteUser */)
-            .getNoThrow();
+            .getNoThrow(opCtx);
     return processManualMigrationOutcome(opCtx, chunk.getMin(), nss, newShardId, response);
 }
 
@@ -415,10 +415,11 @@ Status Balancer::moveRange(OperationContext* opCtx,
     const auto [secondaryThrottle, wc] =
         getSecondaryThrottleAndWriteConcern(request.getSecondaryThrottle());
     shardSvrRequest.setSecondaryThrottle(secondaryThrottle);
+    shardSvrRequest.setForceJumbo(request.getForceJumbo());
 
     auto response =
         _commandScheduler->requestMoveRange(opCtx, shardSvrRequest, wc, issuedByRemoteUser)
-            .getNoThrow();
+            .getNoThrow(opCtx);
     return processManualMigrationOutcome(
         opCtx, min, nss, shardSvrRequest.getToShard(), std::move(response));
 }
@@ -1010,7 +1011,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
 
     int numChunksProcessed = 0;
     for (const auto& [migrateInfo, futureStatus] : rebalanceMigrationsAndResponses) {
-        auto status = futureStatus.getNoThrow();
+        auto status = futureStatus.getNoThrow(opCtx);
         if (status.isOK()) {
             ++numChunksProcessed;
             continue;
@@ -1047,7 +1048,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
     }
 
     for (const auto& [migrateInfo, futureStatus] : defragmentationMigrationsAndResponses) {
-        auto status = futureStatus.getNoThrow();
+        auto status = futureStatus.getNoThrow(opCtx);
         if (status.isOK()) {
             ++numChunksProcessed;
         }

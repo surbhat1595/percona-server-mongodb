@@ -5533,12 +5533,13 @@ tasks:
     vars:
       use_large_distro: "true"
 
-- <<: *task_template
-  name: cwrwc_wc_majority_passthrough
-  tags: ["read_write_concern", "large", "write"]
+- <<: *gen_task_template
+  name: cwrwc_wc_majority_passthrough_gen
+  tags: ["read_write_concern", "write"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
 
 - <<: *gen_task_template
   name: secondary_reads_passthrough_gen
@@ -6159,6 +6160,7 @@ tasks:
 - name: selinux_rhel8_org
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6166,6 +6168,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       distro: rhel80-selinux
@@ -6174,6 +6178,7 @@ tasks:
 - name: selinux_rhel8_enterprise
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6181,6 +6186,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       distro: rhel80-selinux
@@ -6189,6 +6196,7 @@ tasks:
 - name: selinux_rhel7_org
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6196,6 +6204,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       user: root
@@ -6205,6 +6215,7 @@ tasks:
 - name: selinux_rhel7_enterprise
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6212,6 +6223,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       user: root

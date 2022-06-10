@@ -537,8 +537,6 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     LOGV2(4280506, "Reconstructing prepared transactions");
     reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
 
-    ReplicaSetAwareServiceRegistry::get(_service).onStartupRecoveryComplete(opCtx);
-
     const auto lastOpTimeAndWallTimeResult = _externalState->loadLastOpTimeAndWallTime(opCtx);
 
     // Use a callback here, because _finishLoadLocalConfig calls isself() which requires
@@ -723,6 +721,9 @@ void ReplicationCoordinatorImpl::_startInitialSync(
     InitialSyncerInterface::OnCompletionFn onCompletion,
     bool fallbackToLogical) {
     std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
+
+    // Initial sync may take locks during startup; make sure there is no possibility of conflict.
+    dassert(!opCtx->lockState()->isLocked());
     try {
         {
             // Must take the lock to set _initialSyncer, but not call it.
@@ -831,6 +832,9 @@ void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
         _topCoord->resetMaintenanceCount();
     }
 
+    ReplicaSetAwareServiceRegistry::get(_service).onInitialDataAvailable(
+        cc().makeOperationContext().get(), false /* isMajorityDataAvailable */);
+
     // Transition from STARTUP2 to RECOVERING and start the producer and the applier.
     // If the member state is REMOVED, this will do nothing until we receive a config with
     // ourself in it.
@@ -848,6 +852,10 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
         // This is not the first call.
         return;
     }
+
+    // Make sure we're not holding any locks; existing locks might conflict with operations
+    // we take during initial sync or replication steady state startup.
+    dassert(!opCtx->lockState()->isLocked());
 
     // Check to see if we need to do an initial sync.
     const auto lastOpTime = getMyLastAppliedOpTime();

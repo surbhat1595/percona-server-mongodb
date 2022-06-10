@@ -74,18 +74,17 @@ public:
                                     Base::request().kCommandName,
                                     Base::request().getUseClusterClient());
 
-            // Swallow errors and let clients inspect the responses array to determine success /
-            // failure.
-            (void)txn.runSyncNoThrow(
+            txn.run(
                 opCtx,
                 [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                    sharedBlock->responses.clear();
+
                     // Iterate through commands and record responses for each. Return immediately if
                     // we encounter a response with a retriedStmtId. This field indicates that the
                     // command and everything following it have already been executed.
                     for (const auto& commandInfo : sharedBlock->commandInfos) {
                         const auto& dbName = commandInfo.getDbName();
                         const auto& command = commandInfo.getCommand();
-                        auto assertSucceeds = commandInfo.getAssertSucceeds();
                         auto exhaustCursor = commandInfo.getExhaustCursor();
 
                         if (exhaustCursor == boost::optional<bool>(true)) {
@@ -110,12 +109,7 @@ public:
                             CommandHelpers::filterCommandReplyForPassthrough(
                                 res.removeField("recoveryToken")));
 
-                        // TODO SERVER-64986: Remove assert check.
-                        if (assertSucceeds) {
-                            // Note this only inspects the top level ok field for non-write
-                            // commands.
-                            uassertStatusOK(getStatusFromWriteCommandReply(res));
-                        }
+                        uassertStatusOK(getStatusFromWriteCommandReply(res));
 
                         // Exit if we are reexecuting commands in a retryable write, identified by a
                         // populated retriedStmtId. eoo() is false if field is found.
@@ -127,6 +121,7 @@ public:
                     }
                     return SemiFuture<void>::makeReady();
                 });
+
             return TestInternalTransactionsCommandReply(std::move(sharedBlock->responses));
         };
 
@@ -135,7 +130,7 @@ public:
         }
 
         bool supportsWriteConcern() const override {
-            return false;
+            return true;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {

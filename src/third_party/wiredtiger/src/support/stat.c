@@ -229,7 +229,6 @@ static const char *const __stats_dsrc_desc[] = {
   "session: tiered operations dequeued and processed",
   "session: tiered operations scheduled",
   "session: tiered storage local retention time (secs)",
-  "session: tiered storage object size",
   "transaction: race to read prepared update retry",
   "transaction: rollback to stable history store records with stop timestamps older than newer "
   "records",
@@ -501,7 +500,6 @@ __wt_stat_dsrc_clear_single(WT_DSRC_STATS *stats)
     stats->tiered_work_units_dequeued = 0;
     stats->tiered_work_units_created = 0;
     /* not clearing tiered_retention */
-    /* not clearing tiered_object_size */
     stats->txn_read_race_prepare_update = 0;
     stats->txn_rts_hs_stop_older_than_newer_start = 0;
     stats->txn_rts_inconsistent_ckpt = 0;
@@ -762,7 +760,6 @@ __wt_stat_dsrc_aggregate_single(WT_DSRC_STATS *from, WT_DSRC_STATS *to)
     to->tiered_work_units_dequeued += from->tiered_work_units_dequeued;
     to->tiered_work_units_created += from->tiered_work_units_created;
     to->tiered_retention += from->tiered_retention;
-    to->tiered_object_size += from->tiered_object_size;
     to->txn_read_race_prepare_update += from->txn_read_race_prepare_update;
     to->txn_rts_hs_stop_older_than_newer_start += from->txn_rts_hs_stop_older_than_newer_start;
     to->txn_rts_inconsistent_ckpt += from->txn_rts_inconsistent_ckpt;
@@ -1030,7 +1027,6 @@ __wt_stat_dsrc_aggregate(WT_DSRC_STATS **from, WT_DSRC_STATS *to)
     to->tiered_work_units_dequeued += WT_STAT_READ(from, tiered_work_units_dequeued);
     to->tiered_work_units_created += WT_STAT_READ(from, tiered_work_units_created);
     to->tiered_retention += WT_STAT_READ(from, tiered_retention);
-    to->tiered_object_size += WT_STAT_READ(from, tiered_object_size);
     to->txn_read_race_prepare_update += WT_STAT_READ(from, txn_read_race_prepare_update);
     to->txn_rts_hs_stop_older_than_newer_start +=
       WT_STAT_READ(from, txn_rts_hs_stop_older_than_newer_start);
@@ -1486,7 +1482,6 @@ static const char *const __stats_connection_desc[] = {
   "session: tiered operations dequeued and processed",
   "session: tiered operations scheduled",
   "session: tiered storage local retention time (secs)",
-  "session: tiered storage object size",
   "thread-state: active filesystem fsync calls",
   "thread-state: active filesystem read calls",
   "thread-state: active filesystem write calls",
@@ -1559,7 +1554,6 @@ static const char *const __stats_connection_desc[] = {
   "transaction: transaction checkpoint prepare min time (msecs)",
   "transaction: transaction checkpoint prepare most recent time (msecs)",
   "transaction: transaction checkpoint prepare total time (msecs)",
-  "transaction: transaction checkpoint prepare wait time (msecs)",
   "transaction: transaction checkpoint scrub dirty target",
   "transaction: transaction checkpoint scrub time (msecs)",
   "transaction: transaction checkpoint total time (msecs)",
@@ -2046,7 +2040,6 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->tiered_work_units_dequeued = 0;
     stats->tiered_work_units_created = 0;
     /* not clearing tiered_retention */
-    /* not clearing tiered_object_size */
     /* not clearing thread_fsync_active */
     /* not clearing thread_read_active */
     /* not clearing thread_write_active */
@@ -2117,7 +2110,6 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     /* not clearing txn_checkpoint_prep_min */
     /* not clearing txn_checkpoint_prep_recent */
     /* not clearing txn_checkpoint_prep_total */
-    /* not clearing txn_checkpoint_prep_wait */
     /* not clearing txn_checkpoint_scrub_target */
     /* not clearing txn_checkpoint_scrub_time */
     /* not clearing txn_checkpoint_time_total */
@@ -2619,7 +2611,6 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->tiered_work_units_dequeued += WT_STAT_READ(from, tiered_work_units_dequeued);
     to->tiered_work_units_created += WT_STAT_READ(from, tiered_work_units_created);
     to->tiered_retention += WT_STAT_READ(from, tiered_retention);
-    to->tiered_object_size += WT_STAT_READ(from, tiered_object_size);
     to->thread_fsync_active += WT_STAT_READ(from, thread_fsync_active);
     to->thread_read_active += WT_STAT_READ(from, thread_read_active);
     to->thread_write_active += WT_STAT_READ(from, thread_write_active);
@@ -2695,7 +2686,6 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->txn_checkpoint_prep_min += WT_STAT_READ(from, txn_checkpoint_prep_min);
     to->txn_checkpoint_prep_recent += WT_STAT_READ(from, txn_checkpoint_prep_recent);
     to->txn_checkpoint_prep_total += WT_STAT_READ(from, txn_checkpoint_prep_total);
-    to->txn_checkpoint_prep_wait += WT_STAT_READ(from, txn_checkpoint_prep_wait);
     to->txn_checkpoint_scrub_target += WT_STAT_READ(from, txn_checkpoint_scrub_target);
     to->txn_checkpoint_scrub_time += WT_STAT_READ(from, txn_checkpoint_scrub_time);
     to->txn_checkpoint_time_total += WT_STAT_READ(from, txn_checkpoint_time_total);

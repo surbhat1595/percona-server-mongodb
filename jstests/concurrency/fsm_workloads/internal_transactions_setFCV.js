@@ -21,9 +21,6 @@ load('jstests/libs/override_methods/retry_on_killed_session.js');
 var $config = extendWorkload($config, function($config, $super) {
     $config.data.retryOnKilledSession = true;
 
-    // TODO (SERVER-66213): Use the default transactionLifetimeLimitSeconds.
-    $config.data.originalTransactionLifetimeLimitSeconds = {};
-
     $config.data.expectDirtyDocs = {
         // The client is either not using a session or is using a session without retryable writes
         // enabled. Therefore, when a write is interrupted, they cannot retry the write to verify if
@@ -76,38 +73,23 @@ var $config = extendWorkload($config, function($config, $super) {
     };
 
     $config.setup = function(db, collName, cluster) {
-        $super.setup.apply(this, arguments);
-
         if (cluster.isSharded()) {
             // Set the transactionLifetimeLimitSeconds to 60 seconds so that cross-shard
             // transactions that start between when setFCV aborts unprepared transactions and when
             // setFCV starts waiting for the global lock do not get stuck trying to enter the
             // "prepared" state (since persisting the participant list requires the IX lock on the
             // config.transaction_coordinators collection).
-            cluster.executeOnMongodNodes((db) => {
-                const res = assert.commandWorked(
-                    db.adminCommand({setParameter: 1, transactionLifetimeLimitSeconds: 60}));
-                this.originalTransactionLifetimeLimitSeconds[db.getMongo().host] = res.was;
-            });
+            // TODO (SERVER-66213): Use the default transactionLifetimeLimitSeconds.
+            this.lowerTransactionLifetimeLimitSeconds = true;
         }
+        $super.setup.apply(this, arguments);
     };
 
     const fcvValues = [lastLTSFCV, lastContinuousFCV, latestFCV];
 
     $config.teardown = function(db, collName, cluster) {
         $super.teardown.apply(this, arguments);
-
         assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
-
-        if (cluster.isSharded()) {
-            cluster.executeOnMongodNodes((db) => {
-                const res = assert.commandWorked(db.adminCommand({
-                    setParameter: 1,
-                    transactionLifetimeLimitSeconds:
-                        this.originalTransactionLifetimeLimitSeconds[db.getMongo().host]
-                }));
-            });
-        }
     };
 
     $config.states.setFCV = function(db, collName) {
@@ -131,6 +113,31 @@ var $config = extendWorkload($config, function($config, $super) {
         }
     };
 
+    // Runs concurrent retryable writes to verify they always observe the partial index after
+    // upgrade.
+    $config.states.retryableWrite = function(db, collName) {
+        const retryableWriteSession = db.getMongo().startSession(
+            {causalConsistency: this.shouldUseCausalConsistency, retryWrites: true});
+        const retryableWriteDB = retryableWriteSession.getDatabase(db.getName());
+
+        print("Starting retryable write state, session: " +
+              tojsononeline(retryableWriteSession.getSessionId()));
+
+        const docId = UUID();
+        for (let i = 0; i < 10; ++i) {
+            const res = assert.commandWorked(
+                retryableWriteDB[collName].update({_id: docId, forRetryableWriteState: true},
+                                                  {$inc: {counter: 1}, $set: {idx: i}},
+                                                  {upsert: true}));
+            if (i === 0) {
+                assert.eq(res.nUpserted, 1, tojson(res));
+            } else {
+                assert.eq(res.nModified, 1, tojson(res));
+            }
+        }
+        print("Finished retryable write state");
+    };
+
     if ($config.passConnectionCache) {
         // If 'passConnectionCache' is true, every state function must accept 3 parameters: db,
         // collName and connCache. This workload does not set 'passConnectionCache' since it doesn't
@@ -143,58 +150,74 @@ var $config = extendWorkload($config, function($config, $super) {
 
     $config.transitions = {
         init: {
-            setFCV: 0.2,
-            internalTransactionForInsert: 0.2,
-            internalTransactionForUpdate: 0.2,
-            internalTransactionForDelete: 0.2,
-            internalTransactionForFindAndModify: 0.2,
+            setFCV: 0.18,
+            internalTransactionForInsert: 0.18,
+            internalTransactionForUpdate: 0.18,
+            internalTransactionForDelete: 0.18,
+            internalTransactionForFindAndModify: 0.18,
+            retryableWrite: 0.1,
         },
         setFCV: {
-            setFCV: 0.2,
+            setFCV: 0.15,
             internalTransactionForInsert: 0.15,
             internalTransactionForUpdate: 0.15,
             internalTransactionForDelete: 0.15,
             internalTransactionForFindAndModify: 0.15,
-            verifyDocuments: 0.2
+            retryableWrite: 0.1,
+            verifyDocuments: 0.15
         },
         internalTransactionForInsert: {
-            setFCV: 0.4,
+            setFCV: 0.3,
             internalTransactionForInsert: 0.1,
             internalTransactionForUpdate: 0.1,
             internalTransactionForDelete: 0.1,
             internalTransactionForFindAndModify: 0.1,
+            retryableWrite: 0.1,
             verifyDocuments: 0.2
         },
         internalTransactionForUpdate: {
-            setFCV: 0.4,
+            setFCV: 0.3,
             internalTransactionForInsert: 0.1,
             internalTransactionForUpdate: 0.1,
             internalTransactionForDelete: 0.1,
             internalTransactionForFindAndModify: 0.1,
+            retryableWrite: 0.1,
             verifyDocuments: 0.2
         },
         internalTransactionForDelete: {
-            setFCV: 0.4,
+            setFCV: 0.3,
             internalTransactionForInsert: 0.1,
             internalTransactionForUpdate: 0.1,
             internalTransactionForDelete: 0.1,
             internalTransactionForFindAndModify: 0.1,
+            retryableWrite: 0.1,
             verifyDocuments: 0.2
         },
         internalTransactionForFindAndModify: {
-            setFCV: 0.4,
+            setFCV: 0.3,
             internalTransactionForInsert: 0.1,
             internalTransactionForUpdate: 0.1,
             internalTransactionForDelete: 0.1,
             internalTransactionForFindAndModify: 0.1,
+            retryableWrite: 0.1,
             verifyDocuments: 0.2
         },
         verifyDocuments: {
-            setFCV: 0.4,
+            setFCV: 0.3,
             internalTransactionForInsert: 0.1,
             internalTransactionForUpdate: 0.1,
             internalTransactionForDelete: 0.1,
             internalTransactionForFindAndModify: 0.1,
+            retryableWrite: 0.1,
+            verifyDocuments: 0.2
+        },
+        retryableWrite: {
+            setFCV: 0.3,
+            internalTransactionForInsert: 0.1,
+            internalTransactionForUpdate: 0.1,
+            internalTransactionForDelete: 0.1,
+            internalTransactionForFindAndModify: 0.1,
+            retryableWrite: 0.1,
             verifyDocuments: 0.2
         }
     };

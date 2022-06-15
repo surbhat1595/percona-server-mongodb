@@ -34,6 +34,7 @@
 #include <set>
 #include <vector>
 
+#include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/index/expression_params.h"
@@ -336,9 +337,9 @@ void geoSkipValidationOn(const std::set<StringData>& twoDSphereFields,
 /**
  * If any field is missing from the list of fields the projection wants, we are not covered.
  */
-auto providesAllFields(const vector<std::string>& fields, const QuerySolutionNode& solnRoot) {
-    for (size_t i = 0; i < fields.size(); ++i) {
-        if (!solnRoot.hasField(fields[i]))
+auto providesAllFields(const std::set<std::string>& fields, const QuerySolutionNode& solnRoot) {
+    for (auto&& field : fields) {
+        if (!solnRoot.hasField(field))
             return false;
     }
     return true;
@@ -554,6 +555,20 @@ bool canUseSimpleSort(const QuerySolutionNode& solnRoot,
         !(plannerParams.options & QueryPlannerParams::PRESERVE_RECORD_ID);
 }
 
+/**
+ * Returns true if 'setS' is a non-strict subset of 'setT'.
+ *
+ * The types of the sets are permitted to be different to allow checking something with compatible
+ * but different types e.g. std::set<std::string> and StringDataUnorderedMap.
+ */
+template <typename SetL, typename SetR>
+bool isSubset(const SetL& setL, const SetR& setR) {
+    return setL.size() <= setR.size() &&
+        std::all_of(setL.begin(), setL.end(), [&setR](auto&& lElem) {
+               return setR.find(lElem) != setR.end();
+           });
+}
+
 void removeProjectSimpleBelowGroupRecursive(QuerySolutionNode* solnRoot) {
     if (solnRoot == nullptr) {
         return;
@@ -576,16 +591,12 @@ void removeProjectSimpleBelowGroupRecursive(QuerySolutionNode* solnRoot) {
             // projection, it would have type PROJECTION_DEFAULT.
             return;
         }
-
+        auto* projectNode = checked_cast<ProjectionNodeSimple*>(projectNodeCandidate);
         // Check to see if the projectNode's field set is a super set of the groupNodes.
-        auto projectNode = static_cast<ProjectionNodeSimple*>(projectNodeCandidate);
-        auto projectFields = projectNode->proj.getRequiredFields();
-        if (!std::any_of(projectFields.begin(), projectFields.end(), [groupNode](auto&& fld) {
-                return groupNode->requiredFields.contains(fld);
-            })) {
+        if (!isSubset(groupNode->requiredFields, projectNode->proj.getRequiredFields())) {
             // The dependency set of the GROUP stage is wider than the projectNode field set.
             return;
-        };
+        }
 
         // Attach the projectNode's child to the groupNode's child.
         groupNode->children[0] = projectNode->children[0];
@@ -883,6 +894,41 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
     return true;
 }
 
+// This function is used to check if the given index pattern and direction in the traversal
+// preference can be used to satisfy the given sort pattern (specifically for time series
+// collections).
+bool sortMatchesTraversalPreference(const TraversalPreference& traversalPreference,
+                                    const BSONObj& indexPattern) {
+    BSONObjIterator sortIter(traversalPreference.sortPattern);
+    BSONObjIterator indexIter(indexPattern);
+    while (sortIter.more() && indexIter.more()) {
+        BSONElement sortPart = sortIter.next();
+        BSONElement indexPart = indexIter.next();
+
+        if (!sortPart.isNumber() || !indexPart.isNumber()) {
+            return false;
+        }
+
+        // If the field doesn't match or the directions don't match, we return false.
+        if (strcmp(sortPart.fieldName(), indexPart.fieldName()) != 0 ||
+            (sortPart.safeNumberInt() > 0) != (indexPart.safeNumberInt() > 0)) {
+            return false;
+        }
+    }
+
+    if (!indexIter.more() && sortIter.more()) {
+        // The sort still has more, so it cannot be a prefix of the index.
+        return false;
+    }
+    return true;
+}
+
+bool isShardedCollScan(QuerySolutionNode* solnRoot) {
+    return solnRoot->getType() == StageType::STAGE_SHARDING_FILTER &&
+        solnRoot->children.size() == 1 &&
+        solnRoot->children[0]->getType() == StageType::STAGE_COLLSCAN;
+}
+
 // static
 QuerySolutionNode* QueryPlannerAnalysis::analyzeSort(const CanonicalQuery& query,
                                                      const QueryPlannerParams& params,
@@ -894,6 +940,28 @@ QuerySolutionNode* QueryPlannerAnalysis::analyzeSort(const CanonicalQuery& query
     tassert(5746105,
             "ntoreturn on the find command should not be set",
             findCommand.getNtoreturn() == boost::none);
+
+    if (params.traversalPreference) {
+        // If we've been passed a traversal preference, we might want to reverse the order we scan
+        // the data to avoid a blocking sort later in the pipeline.
+        auto providedSorts = solnRoot->providedSorts();
+
+        BSONObj solnSortPattern;
+        if (solnRoot->getType() == StageType::STAGE_COLLSCAN || isShardedCollScan(solnRoot)) {
+            BSONObjBuilder builder;
+            builder.append(params.traversalPreference->clusterField, 1);
+            solnSortPattern = builder.obj();
+        } else {
+            solnSortPattern = providedSorts.getBaseSortPattern();
+        }
+
+        if (sortMatchesTraversalPreference(params.traversalPreference.get(), solnSortPattern) &&
+            QueryPlannerCommon::scanDirectionsEqual(solnRoot,
+                                                    -params.traversalPreference->direction)) {
+            QueryPlannerCommon::reverseScans(solnRoot, true);
+            return solnRoot;
+        }
+    }
 
     const BSONObj& sortObj = findCommand.getSort();
 

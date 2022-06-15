@@ -49,8 +49,8 @@ struct DepsAnalysisData {
         fieldDependencyTracker.fields.insert(fieldName);
     }
 
-    std::vector<std::string> requiredFields() const {
-        return {fieldDependencyTracker.fields.begin(), fieldDependencyTracker.fields.end()};
+    std::set<std::string> requiredFields() const {
+        return fieldDependencyTracker.fields;
     }
 };
 
@@ -104,6 +104,7 @@ public:
     void visit(const ProjectionElemMatchASTNode* node) final {
         _deps->requiresDocument = true;
         _deps->hasExpressions = true;
+        _deps->containsElemMatch = true;
     }
 
     void visit(const ExpressionASTNode* node) final {

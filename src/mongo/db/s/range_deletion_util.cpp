@@ -29,14 +29,11 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingRangeDeleter
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/range_deletion_util.h"
 
 #include <algorithm>
-#include <utility>
-
 #include <boost/optional.hpp>
+#include <utility>
 
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
@@ -56,6 +53,7 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/shard_key_index_util.h"
+#include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/remove_saver.h"
@@ -67,11 +65,7 @@
 #include "mongo/util/future_util.h"
 
 namespace mongo {
-
 namespace {
-const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
-                                                WriteConcernOptions::SyncMode::UNSET,
-                                                WriteConcernOptions::kWriteConcernTimeoutSharding);
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeDoingDeletion);
 MONGO_FAIL_POINT_DEFINE(hangAfterDoingDeletion);
@@ -230,7 +224,6 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
     return numDeleted;
 }
 
-
 template <typename Callable>
 auto withTemporaryOperationContext(Callable&& callable, const NamespaceString& nss) {
     ThreadClient tc(migrationutil::kRangeDeletionThreadName, getGlobalServiceContext());
@@ -284,9 +277,18 @@ void ensureRangeDeletionTaskStillExists(OperationContext* opCtx, const UUID& mig
     // holding any locks.
 }
 
+void markRangeDeletionTaskAsProcessing(OperationContext* opCtx, const UUID& migrationId) {
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
+    static const auto update =
+        BSON("$set" << BSON(RangeDeletionTask::kProcessingFieldName << true));
+
+    store.update(opCtx, query, update, WriteConcerns::kLocalWriteConcern);
+}
+
 /**
- * Delete the range in a sequence of batches until there are no more documents to
- * delete or deletion returns an error.
+ * Delete the range in a sequence of batches until there are no more documents to delete or deletion
+ * returns an error.
  */
 ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskExecutor>& executor,
                                           const NamespaceString& nss,
@@ -296,83 +298,98 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                                           const UUID& migrationId,
                                           int numDocsToRemovePerBatch,
                                           Milliseconds delayBetweenBatches) {
-    return AsyncTry([=] {
-               return withTemporaryOperationContext(
-                   [=](OperationContext* opCtx) {
-                       LOGV2_DEBUG(5346200,
-                                   1,
-                                   "Starting batch deletion",
-                                   "namespace"_attr = nss,
-                                   "range"_attr = redact(range.toString()),
-                                   "numDocsToRemovePerBatch"_attr = numDocsToRemovePerBatch,
-                                   "delayBetweenBatches"_attr = delayBetweenBatches);
+    return ExecutorFuture<void>(executor)
+        .then([=] {
+            bool allDocsRemoved = false;
+            // Delete all batches in this range unless a stepdown error occurs. Do not yield the
+            // executor to ensure that this range is fully deleted before another range is
+            // processed.
+            while (!allDocsRemoved) {
+                try {
+                    allDocsRemoved = withTemporaryOperationContext(
+                        [=](OperationContext* opCtx) {
+                            LOGV2_DEBUG(5346200,
+                                        1,
+                                        "Starting batch deletion",
+                                        "namespace"_attr = nss,
+                                        "range"_attr = redact(range.toString()),
+                                        "numDocsToRemovePerBatch"_attr = numDocsToRemovePerBatch,
+                                        "delayBetweenBatches"_attr = delayBetweenBatches);
 
-                       ensureRangeDeletionTaskStillExists(opCtx, migrationId);
+                            ensureRangeDeletionTaskStillExists(opCtx, migrationId);
 
-                       AutoGetCollection collection(opCtx, nss, MODE_IX);
+                            int numDeleted;
 
-                       // Ensure the collection exists and has not been dropped or dropped and
-                       // recreated.
-                       uassert(
-                           ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist,
-                           "Collection has been dropped since enqueuing this range "
-                           "deletion task. No need to delete documents.",
-                           !collectionUuidHasChanged(
-                               nss, collection.getCollection(), collectionUuid));
+                            {
+                                AutoGetCollection collection(opCtx, nss, MODE_IX);
 
-                       markAsProcessingRangeDeletionTask(opCtx, migrationId);
+                                // Ensure the collection exists and has not been dropped or dropped
+                                // and recreated
+                                uassert(
+                                    ErrorCodes::
+                                        RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist,
+                                    "Collection has been dropped since enqueuing this range "
+                                    "deletion task. No need to delete documents.",
+                                    !collectionUuidHasChanged(
+                                        nss, collection.getCollection(), collectionUuid));
 
-                       int numDeleted;
-                       {
-                           ScopedRangeDeleterLock rangeDeleterLock(opCtx, collectionUuid);
-                           numDeleted = uassertStatusOK(deleteNextBatch(opCtx,
+                                markRangeDeletionTaskAsProcessing(opCtx, migrationId);
+
+                                {
+                                    ScopedRangeDeleterLock rangeDeleterLock(opCtx, collectionUuid);
+
+                                    numDeleted =
+                                        uassertStatusOK(deleteNextBatch(opCtx,
                                                                         collection.getCollection(),
                                                                         keyPattern,
                                                                         range,
                                                                         numDocsToRemovePerBatch));
-                           migrationutil::persistUpdatedNumOrphans(
-                               opCtx, migrationId, collectionUuid, -numDeleted);
-                       }
 
-                       if (MONGO_unlikely(hangAfterDoingDeletion.shouldFail())) {
-                           hangAfterDoingDeletion.pauseWhileSet(opCtx);
-                       }
+                                    migrationutil::persistUpdatedNumOrphans(
+                                        opCtx, migrationId, collectionUuid, -numDeleted);
+                                }
 
-                       LOGV2_DEBUG(
-                           23769,
-                           1,
-                           "Deleted {numDeleted} documents in pass in namespace {namespace} with "
-                           "UUID  {collectionUUID} for range {range}",
-                           "Deleted documents in pass",
-                           "numDeleted"_attr = numDeleted,
-                           "namespace"_attr = nss.ns(),
-                           "collectionUUID"_attr = collectionUuid,
-                           "range"_attr = range.toString());
+                                if (MONGO_unlikely(hangAfterDoingDeletion.shouldFail())) {
+                                    hangAfterDoingDeletion.pauseWhileSet(opCtx);
+                                }
+                            }
 
-                       if (numDeleted > 0) {
-                           // (SERVER-62368) The range-deleter executor is mono-threaded, so
-                           // sleeping synchronously for `delayBetweenBatches` ensures that no other
-                           // batch is going to be cleared up before the expected delay.
-                           opCtx->sleepFor(delayBetweenBatches);
-                       }
+                            LOGV2_DEBUG(23769,
+                                        1,
+                                        "Deleted documents in pass",
+                                        "numDeleted"_attr = numDeleted,
+                                        "namespace"_attr = nss.ns(),
+                                        "collectionUUID"_attr = collectionUuid,
+                                        "range"_attr = range.toString());
 
-                       return numDeleted;
-                   },
-                   nss);
-           })
-        .until([=](StatusWith<int> swNumDeleted) {
-            // Continue iterating until there are no more documents to delete, retrying on
-            // any error that doesn't indicate that this node is stepping down.
-            return (swNumDeleted.isOK() && swNumDeleted.getValue() < numDocsToRemovePerBatch) ||
-                swNumDeleted.getStatus() ==
-                ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist ||
-                swNumDeleted.getStatus() ==
-                ErrorCodes::RangeDeletionAbandonedBecauseTaskDocumentDoesNotExist ||
-                swNumDeleted.getStatus().code() == ErrorCodes::KeyPatternShorterThanBound ||
-                ErrorCodes::isShutdownError(swNumDeleted.getStatus()) ||
-                ErrorCodes::isNotPrimaryError(swNumDeleted.getStatus());
+                            if (numDeleted > 0) {
+                                // (SERVER-62368) The range-deleter executor is mono-threaded, so
+                                // sleeping synchronously for `delayBetweenBatches` ensures that no
+                                // other batch is going to be cleared up before the expected delay.
+                                opCtx->sleepFor(delayBetweenBatches);
+                            }
+
+                            return numDeleted < numDocsToRemovePerBatch;
+                        },
+                        nss);
+                } catch (const DBException& ex) {
+                    // Errors other than those indicating stepdown and those that indicate that the
+                    // range deletion can no longer occur should be retried.
+                    auto errorCode = ex.code();
+                    if (errorCode ==
+                            ErrorCodes::
+                                RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist ||
+                        errorCode ==
+                            ErrorCodes::RangeDeletionAbandonedBecauseTaskDocumentDoesNotExist ||
+                        errorCode == ErrorCodes::KeyPatternShorterThanBound ||
+                        ErrorCodes::isShutdownError(errorCode) ||
+                        ErrorCodes::isNotPrimaryError(errorCode)) {
+                        return ex.toStatus();
+                    };
+                }
+            }
+            return Status::OK();
         })
-        .on(executor, CancellationToken::uncancelable())
         .ignoreValue();
 }
 
@@ -500,15 +517,6 @@ void deleteRangeDeletionTasksForRename(OperationContext* opCtx,
         NamespaceString::kRangeDeletionForRenameNamespace);
     rangeDeletionsForRenameStore.remove(opCtx,
                                         BSON(RangeDeletionTask::kNssFieldName << toNss.ns()));
-}
-
-void markAsProcessingRangeDeletionTask(OperationContext* opCtx, const UUID& migrationId) {
-    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
-    static const auto update =
-        BSON("$set" << BSON(RangeDeletionTask::kProcessingFieldName << true));
-
-    store.update(opCtx, query, update, WriteConcerns::kLocalWriteConcern);
 }
 
 SharedSemiFuture<void> removeDocumentsInRange(

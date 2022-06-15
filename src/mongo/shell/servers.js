@@ -1479,7 +1479,7 @@ function appendSetParameterArgs(argArray) {
             }
 
             // Since options may not be backward compatible, mongod options are not
-            // set on older versions, e.g., mongod-3.0.
+            // set on older versions, e.g., mongod-4.4.
             if (baseProgramName === 'mongod' &&
                 programMajorMinorVersion == lastestMajorMinorVersion) {
                 if (jsTest.options().storageEngine === "wiredTiger" ||

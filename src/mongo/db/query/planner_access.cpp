@@ -379,7 +379,9 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     const BSONObj& hint = query.getFindCommandRequest().getHint();
     if (!hint.isEmpty()) {
         BSONElement natural = hint[query_request_helper::kNaturalSortField];
-        if (natural) {
+        // If we have a natural hint and a time series traversal preference, let the traversal
+        // preference decide what order to scan, so that we can avoid a blocking sort.
+        if (natural && !params.traversalPreference) {
             // If the hint is {$natural: +-1} this changes the direction of the collection scan.
             csn->direction = natural.safeNumberInt() >= 0 ? 1 : -1;
         }
@@ -1173,7 +1175,7 @@ bool isCoveredNullQuery(const CanonicalQuery& query,
         // Note that it is not possible to project onto dotted paths of _id here, since they may be
         // null or missing, and the index cannot differentiate between the two cases, so we would
         // still need a FETCH stage.
-        return projFields.size() == 1 && projFields[0] == "_id";
+        return projFields.size() == 1 && *projFields.begin() == "_id";
     }
 
     return false;

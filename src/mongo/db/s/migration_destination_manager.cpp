@@ -962,6 +962,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
     // 1. Ensure any data which might have been left orphaned in the range being moved has been
     // deleted.
     if (_useFCV44RangeDeleterProtocol) {
+        const auto rangeDeletionWaitDeadline =
+            outerOpCtx->getServiceContext()->getFastClockSource()->now() +
+            Milliseconds(receiveChunkWaitForRangeDeleterTimeoutMS.load());
+
         while (migrationutil::checkForConflictingDeletions(
             outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid)) {
             uassert(ErrorCodes::ResumableRangeDeleterDisabled,
@@ -987,6 +991,11 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
                 _setStateFail(redact(status.toString()));
                 return;
             }
+
+            uassert(ErrorCodes::ExceededTimeLimit,
+                    "Exceeded deadline waiting for overlapping range deletion to finish",
+                    outerOpCtx->getServiceContext()->getFastClockSource()->now() <
+                        rangeDeletionWaitDeadline);
 
             // If the filtering metadata was cleared while the range deletion task was ongoing, then
             // 'waitForClean' would return immediately even though there really is an ongoing range
@@ -1162,15 +1171,20 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
                     }
                     return toInsert;
                 }());
+                {
+                    // Disable the schema validation for opCtx for performInserts()
+                    DisableDocumentValidation documentValidationDisabler(opCtx);
 
-                const WriteResult reply = performInserts(opCtx, insertOp, true);
+                    const WriteResult reply = performInserts(opCtx, insertOp, true);
 
-                for (unsigned long i = 0; i < reply.results.size(); ++i) {
-                    uassertStatusOKWithContext(
-                        reply.results[i],
-                        str::stream() << "Insert of " << insertOp.getDocuments()[i] << " failed.");
+                    for (unsigned long i = 0; i < reply.results.size(); ++i) {
+                        uassertStatusOKWithContext(reply.results[i],
+                                                   str::stream()
+                                                       << "Insert of " << insertOp.getDocuments()[i]
+                                                       << " failed.");
+                    }
+                    // Revert to the original validation settings for opCtx
                 }
-
                 {
                     stdx::lock_guard<Latch> statsLock(_mutex);
                     _numCloned += batchNumCloned;
@@ -1417,6 +1431,8 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx,
     invariant(lastOpApplied);
 
     bool didAnything = false;
+
+    DisableDocumentValidation documentValidationDisabler(opCtx);
 
     // Deleted documents
     if (xfer["deleted"].isABSONObj()) {

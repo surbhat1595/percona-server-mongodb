@@ -31,9 +31,11 @@ const primary = replTest.getPrimary();
 const secondary = replTest.getSecondary();
 
 const testDB = primary.getDB('test');
+let docs = [];
 for (let i = 0; i < 100; i++) {
-    assert.commandWorked(testDB.foo.insert({a: i}));
+    docs.push({a: i});
 }
+assert.commandWorked(testDB.foo.insert(docs));
 
 const sleepMs = 3000;
 const fp = configureFailPoint(primary, 'SleepDbCheckInBatch', {sleepMs: sleepMs});
@@ -41,10 +43,15 @@ const fp = configureFailPoint(primary, 'SleepDbCheckInBatch', {sleepMs: sleepMs}
 // Returns immediately and starts a background task.
 assert.commandWorked(testDB.getSiblingDB('test').runCommand({dbCheck: 1}));
 
+// Wait for dbCheck hasher to acquire snapshot.
+fp.wait();
+
 // Write some data to advance the durable timestamp while we're waiting for dbCheck to run.
+docs = [];
 for (let i = 0; i < 100; i++) {
-    assert.commandWorked(testDB.foo.insert({_id: i}));
+    docs.push({_id: i});
 }
+assert.commandWorked(testDB.foo.insert(docs));
 
 fp.off();
 

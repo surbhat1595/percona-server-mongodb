@@ -41,6 +41,10 @@ ignore:
 ## Some variables for convenience:
 variables:
 
+- &batchtime_one_day 1440
+- &batchtime_one_week 10080
+- &batchtime_one_year 525600
+
 # Used when the tests it runs depend only on mongod, mongos, the mongo shell and the tools.
 - &task_template
   name: template
@@ -1551,7 +1555,7 @@ functions:
           # Multiversion exclusions can be used when selecting tests.
           $python buildscripts/evergreen_gen_multiversion_tests.py generate-exclude-tags --task-path-suffix=/data/multiversion --output=multiversion_exclude_tags.yml
 
-          PATH=$PATH:$HOME $python buildscripts/burn_in_tags.py --expansion-file expansions.yml
+          PATH=$PATH:$HOME $python buildscripts/burn_in_tags.py --expansion-file expansions.yml --install-dir "${install_dir}"
     - command: archive.targz_pack
       params:
         target: burn_in_tags_gen.tgz
@@ -4051,6 +4055,7 @@ tasks:
     - func: "run tests"
       vars:
         resmoke_args: --suites=sdam_json_test
+        install_dir: build/install/bin
 
 - name: server_selection_json_test
   commands:
@@ -4063,6 +4068,7 @@ tasks:
     - func: "run tests"
       vars:
         resmoke_args: --suites=server_selection_json_test
+        install_dir: build/install/bin
 
 ## dbtest ##
 - name: dbtest
@@ -4534,7 +4540,7 @@ tasks:
         fi
         burn_in_args="$burn_in_args --repeat-tests-min=2 --repeat-tests-max=1000 --repeat-tests-secs=600"
         # Evergreen executable is in $HOME.
-        PATH=$PATH:$HOME $python buildscripts/burn_in_tests.py --project=${project} $build_variant_opts --distro=${distro_id} --generate-tasks-file=burn_in_tests_gen.json --task_id ${task_id} $burn_in_args --verbose
+        PATH=$PATH:$HOME $python buildscripts/burn_in_tests.py --project=${project} $build_variant_opts --distro=${distro_id} --generate-tasks-file=burn_in_tests_gen.json --task_id ${task_id} $burn_in_args --verbose --install-dir "${install_dir}"
   - command: archive.targz_pack
     params:
       target: src/burn_in_tests_gen.tgz
@@ -7235,6 +7241,16 @@ tasks:
       resmoke_args: --tagFile=generated_resmoke_config/multiversion_exclude_tags.yml
       fallback_num_sub_suites: 24
 
+- name: sharding_opportunistic_secondary_targeting_gen
+  # The following line is commented out because Evergreen file size limit requires new suites to be added explicitly to variants
+  # tags: ["sharding", "common"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_args: --storageEngine=wiredTiger
+      fallback_num_sub_suites: 32
+
 - <<: *task_template
   name: snmp
   commands:
@@ -8823,7 +8839,7 @@ buildvariants:
 - &linux-64-debug-template
   name: linux-64-debug
   display_name: "! Linux DEBUG"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   run_on:
   - rhel62-large
   expansions:
@@ -8861,6 +8877,7 @@ buildvariants:
   - name: sharded_multi_stmt_txn_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot
   - name: sharding_gen
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: .stitch
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
@@ -9709,7 +9726,7 @@ buildvariants:
 
 - name: windows-debug
   display_name: "* Windows DEBUG"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -9770,13 +9787,14 @@ buildvariants:
     - windows-vsCurrent-large
   - name: session_jscore_passthrough
   - name: sharding_gen
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: .stitch
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
 
 - name: enterprise-windows-required
   display_name: "! Enterprise Windows"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -9819,7 +9837,7 @@ buildvariants:
 
 - name: enterprise-windows
   display_name: "* Enterprise Windows"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
     - enterprise
   run_on:
@@ -9877,6 +9895,7 @@ buildvariants:
     - name: sharding_auth_gen
     - name: sharding_auth_audit_gen
     - name: sharding_ese_gen
+    - name: sharding_opportunistic_secondary_targeting_gen
     - name: snmp
     - name: unittest_shell_hang_analyzer_gen
     - name: push
@@ -10079,7 +10098,7 @@ buildvariants:
 
 - name: macos-debug
   display_name: "* macOS DEBUG"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   run_on:
   - macos-1014
   expansions:
@@ -10143,7 +10162,7 @@ buildvariants:
   display_name: "Embedded SDK - macOS"
   run_on:
   - macos-1014
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   expansions:
     test_flags: --excludeWithAnyTags=uses_transactions
     cmake_path: /Applications/cmake-3.11.0-Darwin-x86_64/CMake.app/Contents/bin/cmake
@@ -10194,7 +10213,7 @@ buildvariants:
 
 - name: enterprise-rhel-62-64-bit
   display_name: "! Enterprise RHEL 6.2"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -10299,6 +10318,7 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
   - name: .sharding .common
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: snmp
   - name: .stitch
   - name: .updatefuzzer
@@ -10314,7 +10334,7 @@ buildvariants:
 
 - name: enterprise-rhel-62-64-bit-store-fam-images-in-side-coll
   display_name: "Enterprise RHEL 6.2 (storeFindAndModifyImagesInSideCollection=True)"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -10419,7 +10439,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel62-small
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     compile_flags: >-
@@ -10599,7 +10619,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel62-small
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   expansions: &enterprise-rhel-62-64-bit-flow-control-off
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: >-
@@ -10712,7 +10732,7 @@ buildvariants:
     - enterprise
   run_on:
     - rhel62-large
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -10773,7 +10793,7 @@ buildvariants:
 - &enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit
   display_name: "* Enterprise RHEL 7.0"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -10942,7 +10962,7 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: hot_backups-rhel-70-64-bit
   display_name: "hot_backups RHEL 7.0"
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   run_on:
   - rhel70
   expansions:
@@ -10958,7 +10978,7 @@ buildvariants:
 - <<: *enterprise-rhel-70-64-bit-template
   name: enterprise-rhel-70-64-bit-no-libunwind
   display_name: "~ Enterprise RHEL 7.0 (no-libunwind)"
-  batchtime: 10080  # 1 week
+  batchtime: *batchtime_one_week
   run_on:
   - rhel70
   expansions:
@@ -11001,7 +11021,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel81-power8-small
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -11048,7 +11068,7 @@ buildvariants:
 
 - name: ubuntu1604-debug
   display_name: "* Ubuntu 16.04 DEBUG"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   run_on:
   - ubuntu1604-test
   expansions:
@@ -11307,7 +11327,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel71-power8-test
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -11358,7 +11378,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -11460,7 +11480,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1604-clang
   display_name: "! Shared Library Enterprise Ubuntu 16.04 (Clang)"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -11488,7 +11508,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1604-clang-tidy
   display_name: "* Enterprise Clang Tidy"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -11509,7 +11529,7 @@ buildvariants:
 
 - name: ubuntu-dynamic-1604-clang
   display_name: "* Shared Library Ubuntu 16.04 (Clang)"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   run_on:
    - ubuntu1604-test
   expansions:
@@ -12033,7 +12053,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel71-power8-test
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -12069,7 +12089,7 @@ buildvariants:
   - enterprise
   run_on:
   - rhel72-zseries-test
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
@@ -12262,7 +12282,7 @@ buildvariants:
 
 - name: ubuntu1804-debug-aubsan-lite
   display_name: "! {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   run_on:
@@ -12311,7 +12331,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1604-64-bit
   display_name: "* Shared Library Enterprise Ubuntu 16.04"
-  batchtime: 1440 # 1 day
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   expansions:
@@ -12332,7 +12352,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-no-latch-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (without Diagnostic Latches)"
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   expansions:
@@ -12344,7 +12364,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-no-latch-1804-64-bit
   display_name: "~ Enterprise Ubuntu 18.04 DEBUG (Unoptimized)"
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   modules:
   - enterprise
   expansions:
@@ -12357,7 +12377,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-scanning-replica-set-monitor-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (with ScanningReplicaSetMonitor)"
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   run_on:
     - ubuntu1604-test
   modules:
@@ -12389,7 +12409,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-sdam-replica-set-monitor-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (with SdamReplicaSetMonitor)"
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   run_on:
     - ubuntu1604-test
   modules:
@@ -12420,7 +12440,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-task-executor-pool-size-1604-64-bit
   display_name: "~ Enterprise Ubuntu 16.04 (with {taskExecutorPoolSize: 4})"
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   run_on:
     - ubuntu1604-test
   modules:
@@ -12470,7 +12490,7 @@ buildvariants:
     - enterprise
   run_on:
     - rhel62-small
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     selected_tests_buildvariants: enterprise-rhel-62-64-bit enterprise-windows-required linux-64-debug enterprise-ubuntu-dynamic-1604-clang ubuntu1804-debug-aubsan-lite
@@ -12483,7 +12503,7 @@ buildvariants:
   - enterprise
   run_on:
     - rhel62-small
-  batchtime: 10080 # 7 days
+  batchtime: *batchtime_one_week
   stepback: false
   expansions:
     additional_package_targets: archive-mh archive-mh-debug

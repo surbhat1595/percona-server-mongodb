@@ -15,7 +15,7 @@ variables:
     - variant: linux-wt-standalone
       name: compile
   _real_expansions: &_expansion_updates
-    []
+      []
   ###
 
   ###
@@ -166,10 +166,6 @@ functions:
       params:
         script: ./src/dsi/run-dsi determine_failure -m TEST
   f_dsi_post_run:
-    - command: json.send
-      params:
-        name: perf
-        file: ./build/LegacyPerfJson/perf.json
     - command: shell.exec
       params:
         script: ./src/dsi/run-dsi post_run
@@ -777,7 +773,7 @@ tasks:
 buildvariants:
   - name: linux-wt-standalone
     display_name: Standalone Linux inMemory
-    batchtime: 240  # 4 hours
+    batchtime: 10080
     modules: *modules
     expansions:
       # We are explicitly tracking the rhel62 variant compile options from evergreen.yml for
@@ -830,7 +826,7 @@ buildvariants:
 
   - name: linux-wt-repl
     display_name: 1-Node ReplSet Linux inMemory
-    batchtime: 240  # 4 hours
+    batchtime: 10080
     modules: *modules
     expansions:
       mongod_exec_wrapper: *exec_wrapper

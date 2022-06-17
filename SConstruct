@@ -1500,7 +1500,7 @@ use_system_libunwind = use_system_version_of_library("libunwind")
 # Assume system libunwind works if it's installed and selected.
 # Vendored libunwind, however, works only on linux-x86_64.
 can_use_libunwind = (use_system_libunwind or
-    env.TargetOSIs('linux') and env['TARGET_ARCH'] == 'x86_64')
+    env.TargetOSIs('linux') and (env['TARGET_ARCH'] == 'x86_64' or env['TARGET_ARCH'] == 'aarch64'))
 
 if use_libunwind == "off":
     use_libunwind = False
@@ -3629,7 +3629,7 @@ def doConfigure(myenv):
         conf.FindSysLibDep("unwind", ["unwind"])
 
     if use_libunwind:
-        if not conf.CheckLib("lzma"):
+        if not conf.FindSysLibDep("lzma", ["lzma"]):
             myenv.ConfError("Cannot find system library 'lzma' required for use with libunwind")
 
     if use_system_version_of_library("intel_decimal128"):
@@ -4252,6 +4252,8 @@ if get_option('ninja') != 'disabled':
     )
     env.NinjaRegisterFunctionHandler("test_list_builder_action", ninja_test_list_builder)
 
+    env['NINJA_GENERATED_SOURCE_ALIAS_NAME'] = 'generated-sources'
+
 
 # TODO: Later, this should live somewhere more graceful.
 if get_option('install-mode') == 'hygienic':
@@ -4778,24 +4780,6 @@ if has_option("cache"):
         addNoCacheEmitter(env['BUILDERS']['StaticLibrary'])
         addNoCacheEmitter(env['BUILDERS']['SharedLibrary'])
         addNoCacheEmitter(env['BUILDERS']['LoadableModule'])
-
-
-# We need to be explicit about including $DESTDIR here, unlike most
-# other places. Normally, auto_install_binaries will take care of
-# injecting DESTDIR for us, but we aren't using that now.
-resmoke_install_dir = env.subst("$DESTDIR/$PREFIX_BINDIR") if get_option("install-mode") == "hygienic" else env.Dir("#").abspath
-resmoke_install_dir = os.path.normpath(resmoke_install_dir).replace("\\", r"\\")
-
-# Much blood sweat and tears were shed getting to this point. Any version of
-# this that uses SCons builders and a scanner will either not regenerate when it
-# should, cause everything to rebuild, or conflict with ninja. Sometimes all
-# three. So we've decieded it's best to just write this file here every time
-# because it's the only solution that always works.
-with open("resmoke.ini", "w") as resmoke_config:
-    resmoke_config.write("""
-[resmoke]
-install_dir = {install_dir}
-""".format(install_dir=resmoke_install_dir))
 
 env.SConscript(
     dirs=[

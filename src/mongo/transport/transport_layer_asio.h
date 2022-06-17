@@ -69,12 +69,13 @@ class ServiceEntryPoint;
 
 namespace transport {
 
-// This fail point simulates reads and writes that always return 1 byte and fail with EAGAIN
+// Simulates reads and writes that always return 1 byte and fail with EAGAIN
 extern FailPoint transportLayerASIOshortOpportunisticReadWrite;
 
-// This fail point will cause an asyncConnect to timeout after it's successfully connected
-// to the remote peer
+// Cause an asyncConnect to timeout after it's successfully connected to the remote peer
 extern FailPoint transportLayerASIOasyncConnectTimesOut;
+
+extern FailPoint transportLayerASIOhangBeforeAccept;
 
 /**
  * A TransportLayer implementation based on ASIO networking primitives.
@@ -116,7 +117,64 @@ public:
 
     TransportLayerASIO(const Options& opts, ServiceEntryPoint* sep);
 
-    virtual ~TransportLayerASIO();
+    /**
+     * A service, internal to `TransportLayerASIO`, that allows creating timers and running `Future`
+     * continuations when a timeout occurs. This allows setting up timeouts for synchronous
+     * operations, such as a synchronous SSL handshake. A separate thread is assigned to run these
+     * timers to:
+     * - Ensure there is always a thread running the timers, regardless of using a synchronous or
+     *   asynchronous listener.
+     * - Avoid any performance implications on other reactors (e.g., the `egressReactor`).
+     * The public visibility is only for testing purposes and this service is not intended to be
+     * used outside `TransportLayerASIO`.
+     */
+    class TimerService {
+    public:
+        using Spawn = std::function<stdx::thread(std::function<void()>)>;
+        struct Options {
+            Spawn spawn;
+        };
+        explicit TimerService(Options opt);
+        TimerService() : TimerService(Options{}) {}
+        ~TimerService();
+
+        /**
+         * Spawns a thread to run the reactor.
+         * Immediately returns if the service has already started.
+         * May be called more than once, and concurrently.
+         */
+        void start();
+
+        /**
+         * Stops the reactor and joins the thread.
+         * Immediately returns if the service is not started, or already stopped.
+         * May be called more than once, and concurrently.
+         */
+        void stop();
+
+        std::unique_ptr<ReactorTimer> makeTimer();
+
+        Date_t now();
+
+    private:
+        Reactor* _getReactor();
+
+        const std::shared_ptr<Reactor> _reactor;
+
+        // Serializes invocations of `start()` and `stop()`, and allows updating `_state` and
+        // `_thread` as a single atomic operation.
+        Mutex _mutex = MONGO_MAKE_LATCH("TransportLayerASIO::TimerService::_mutex");
+
+        // State transitions: `kInitialized` --> `kStarted` --> `kStopped`
+        //                          |_______________________________^
+        enum class State { kInitialized, kStarted, kStopped };
+        AtomicWord<State> _state;
+
+        Spawn _spawn = [](std::function<void()> f) { return stdx::thread{std::move(f)}; };
+        stdx::thread _thread;
+    };
+
+    ~TransportLayerASIO() override;
 
     StatusWith<SessionHandle> connect(HostAndPort peer,
                                       ConnectSSLMode sslMode,
@@ -215,6 +273,8 @@ private:
     int _listenerPort = 0;
 
     bool _isShutdown = false;
+
+    const std::unique_ptr<TimerService> _timerService;
 };
 
 }  // namespace transport

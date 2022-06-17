@@ -28,361 +28,488 @@
  */
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/transport/transport_layer_asio.h"
 
+#include <fstream>
+#include <queue>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#include <asio.hpp>
+
+#include "mongo/client/dbclient_connection.h"
+#include "mongo/config.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/logv2/log.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/basic.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/notification.h"
 #include "mongo/util/net/sock.h"
-
-#include "asio.hpp"
+#include "mongo/util/static_immortal.h"
+#include "mongo/util/synchronized_value.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace {
 
-class ServiceEntryPointUtil : public ServiceEntryPoint {
+#ifdef _WIN32
+using SetsockoptPtr = char*;
+#else
+using SetsockoptPtr = void*;
+#endif
+
+template <typename T>
+class BlockingQueue {
 public:
-    void startSession(transport::SessionHandle session) override {
-        stdx::unique_lock<Latch> lk(_mutex);
-        _sessions.push_back(std::move(session));
-        LOGV2(23032, "started session");
+    void push(T t) {
+        stdx::unique_lock lk(_mu);
+        _q.push(std::move(t));
+        lk.unlock();
         _cv.notify_one();
     }
 
-    void endAllSessions(transport::Session::TagMask tags) override {
-        LOGV2(23033, "end all sessions");
-        std::vector<transport::SessionHandle> old_sessions;
-        {
-            stdx::unique_lock<Latch> lock(_mutex);
-            old_sessions.swap(_sessions);
+    T pop() {
+        stdx::unique_lock lk(_mu);
+        _cv.wait(lk, [&] { return !_q.empty(); });
+        T r = std::move(_q.front());
+        _q.pop();
+        return r;
+    }
+
+private:
+    mutable Mutex _mu;
+    mutable stdx::condition_variable _cv;
+    std::queue<T> _q;
+};
+
+class ConnectionThread {
+public:
+    explicit ConnectionThread(int port) : ConnectionThread(port, nullptr) {}
+    ConnectionThread(int port, std::function<void(ConnectionThread&)> onConnect)
+        : _port{port}, _onConnect{std::move(onConnect)}, _thr{[this] { _run(); }} {}
+
+    ~ConnectionThread() {
+        LOGV2(6109500, "connection: Tx stop request");
+        _stopRequest.set(true);
+        _thr.join();
+        LOGV2(6109501, "connection: joined");
+    }
+
+    void close() {
+        _s.close();
+    }
+
+    Socket& socket() {
+        return _s;
+    }
+
+private:
+    void _run() {
+        _s.connect(SockAddr("localhost", _port, AF_INET));
+        LOGV2(6109502, "connected", "port"_attr = _port);
+        if (_onConnect)
+            _onConnect(*this);
+        _stopRequest.get();
+        LOGV2(6109503, "connection: Rx stop request");
+    }
+
+    int _port;
+    std::function<void(ConnectionThread&)> _onConnect;
+    stdx::thread _thr;
+    Socket _s;
+    Notification<bool> _stopRequest;
+};
+
+class SyncClient {
+public:
+    explicit SyncClient(int port) {
+        std::error_code ec;
+        _sock.connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port), ec);
+        ASSERT_EQ(ec, std::error_code());
+        LOGV2(6109504, "sync client connected");
+    }
+
+    std::error_code write(const char* buf, size_t bufSize) {
+        std::error_code ec;
+        asio::write(_sock, asio::buffer(buf, bufSize), ec);
+        return ec;
+    }
+
+private:
+    asio::io_context _ctx{};
+    asio::ip::tcp::socket _sock{_ctx};
+};
+
+void ping(SyncClient& client) {
+    OpMsgBuilder builder;
+    builder.setBody(BSON("ping" << 1));
+    Message msg = builder.finish();
+    msg.header().setResponseToMsgId(0);
+    msg.header().setId(0);
+    OpMsg::appendChecksum(&msg);
+    ASSERT_EQ(client.write(msg.buf(), msg.size()), std::error_code{});
+}
+
+struct SessionThread {
+    struct StopException {};
+
+    explicit SessionThread(std::shared_ptr<transport::Session> s)
+        : _session{std::move(s)}, _thread{[this] { run(); }} {}
+
+    ~SessionThread() {
+        _join();
+    }
+
+    void schedule(std::function<void(transport::Session&)> task) {
+        _tasks.push(std::move(task));
+    }
+
+    void run() {
+        while (true) {
+            try {
+                LOGV2(6109508, "SessionThread: pop and execute a task");
+                _tasks.pop()(*_session);
+            } catch (const StopException&) {
+                LOGV2(6109509, "SessionThread: stopping");
+                return;
+            }
         }
-        old_sessions.clear();
+    }
+
+    transport::Session& session() const {
+        return *_session;
+    }
+
+private:
+    void _join() {
+        if (!_thread.joinable())
+            return;
+        schedule([](auto&&) { throw StopException{}; });
+        _thread.join();
+    }
+
+    std::shared_ptr<transport::Session> _session;
+    stdx::thread _thread;
+    BlockingQueue<std::function<void(transport::Session&)>> _tasks;
+};
+
+class MockSEP : public ServiceEntryPoint {
+public:
+    MockSEP() = default;
+    explicit MockSEP(std::function<void(SessionThread&)> onStartSession)
+        : _onStartSession(std::move(onStartSession)) {}
+
+    ~MockSEP() override {
+        _join();
     }
 
     Status start() override {
         return Status::OK();
     }
 
-    bool shutdown(Milliseconds timeout) override {
-        return true;
-    }
-
     void appendStats(BSONObjBuilder*) const override {}
-
-    size_t numOpenSessions() const override {
-        stdx::unique_lock<Latch> lock(_mutex);
-        return _sessions.size();
-    }
 
     DbResponse handleRequest(OperationContext* opCtx, const Message& request) override {
         MONGO_UNREACHABLE;
     }
 
-    void setTransportLayer(transport::TransportLayer* tl) {
-        _transport = tl;
+    void startSession(std::shared_ptr<transport::Session> session) override {
+        LOGV2(6109510, "Accepted connection", "remote"_attr = session->remote());
+        auto& newSession = [&]() -> SessionThread& {
+            auto vec = *_sessions;
+            vec->push_back(std::make_unique<SessionThread>(std::move(session)));
+            return *vec->back();
+        }();
+        if (_onStartSession)
+            _onStartSession(newSession);
+        LOGV2(6109511, "started session");
     }
 
-    void waitForConnect() {
-        stdx::unique_lock<Latch> lock(_mutex);
-        _cv.wait(lock, [&] { return !_sessions.empty(); });
+    void endAllSessions(transport::Session::TagMask tags) override {
+        _join();
     }
 
-private:
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("::_mutex");
-    stdx::condition_variable _cv;
-    std::vector<transport::SessionHandle> _sessions;
-    transport::TransportLayer* _transport = nullptr;
-};
-
-class SimpleConnectionThread {
-public:
-    explicit SimpleConnectionThread(int port) : _port(port) {
-        _thr = stdx::thread{[&] {
-            Socket s;
-            SockAddr sa{"localhost", _port, AF_INET};
-            s.connect(sa);
-            LOGV2(23034, "connection: port {port}", "port"_attr = _port);
-            stdx::unique_lock<Latch> lk(_mutex);
-            _cv.wait(lk, [&] { return _stop; });
-            LOGV2(23035, "connection: Rx stop request");
-        }};
+    bool shutdown(Milliseconds timeout) override {
+        _join();
+        return true;
     }
 
-    void stop() {
-        {
-            stdx::unique_lock<Latch> lk(_mutex);
-            _stop = true;
-        }
-        LOGV2(23036, "connection: Tx stop request");
-        _cv.notify_one();
-        _thr.join();
-        LOGV2(23037, "connection: stopped");
+    size_t numOpenSessions() const override {
+        MONGO_UNREACHABLE;
+    }
+
+    void setOnStartSession(std::function<void(SessionThread&)> cb) {
+        _onStartSession = std::move(cb);
     }
 
 private:
-    Mutex _mutex = MONGO_MAKE_LATCH("SimpleConnectionThread::_mutex");
-    stdx::condition_variable _cv;
-    stdx::thread _thr;
-    bool _stop = false;
-    int _port;
+    void _join() {
+        LOGV2(6109513, "Joining all session threads");
+        _sessions->clear();
+    }
+
+    std::function<void(SessionThread&)> _onStartSession;
+    synchronized_value<std::vector<std::unique_ptr<SessionThread>>> _sessions;
 };
 
-TEST(TransportLayerASIO, PortZeroConnect) {
-    ServiceEntryPointUtil sepu;
-
+std::unique_ptr<transport::TransportLayerASIO> makeTLA(ServiceEntryPoint* sep) {
     auto options = [] {
         ServerGlobalParams params;
         params.noUnixSocket = true;
         transport::TransportLayerASIO::Options opts(&params);
-
         // TODO SERVER-30212 should clean this up and assign a port from the supplied port range
         // provided by resmoke.
         opts.port = 0;
         return opts;
     }();
-
-    transport::TransportLayerASIO tla(options, &sepu);
-    sepu.setTransportLayer(&tla);
-
-    ASSERT_OK(tla.setup());
-    ASSERT_OK(tla.start());
-    int port = tla.listenerPort();
-    ASSERT_GT(port, 0);
-    LOGV2(23038, "TransportLayerASIO.listenerPort() is {port}", "port"_attr = port);
-
-    SimpleConnectionThread connect_thread(port);
-    sepu.waitForConnect();
-    connect_thread.stop();
-    sepu.endAllSessions({});
-    tla.shutdown();
-}
-
-class TimeoutSEP : public ServiceEntryPoint {
-public:
-    ~TimeoutSEP() override {
-        // This should shutdown immediately, so give the maximum timeout
-        shutdown(Milliseconds::max());
-    }
-
-    void endAllSessions(transport::Session::TagMask tags) override {
-        MONGO_UNREACHABLE;
-    }
-
-    bool shutdown(Milliseconds timeout) override {
-        LOGV2(23039, "Joining all worker threads");
-        for (auto& thread : _workerThreads) {
-            thread.join();
-        }
-        return true;
-    }
-
-    Status start() override {
-        return Status::OK();
-    }
-
-    void appendStats(BSONObjBuilder*) const override {}
-
-    size_t numOpenSessions() const override {
-        return 0;
-    }
-
-    DbResponse handleRequest(OperationContext* opCtx, const Message& request) override {
-        MONGO_UNREACHABLE;
-    }
-
-    bool waitForTimeout(boost::optional<Milliseconds> timeout = boost::none) {
-        stdx::unique_lock<Latch> lk(_mutex);
-        bool ret = true;
-        if (timeout) {
-            ret = _cond.wait_for(lk, timeout->toSystemDuration(), [this] { return _finished; });
-        } else {
-            _cond.wait(lk, [this] { return _finished; });
-        }
-
-        _finished = false;
-        return ret;
-    }
-
-protected:
-    void notifyComplete() {
-        stdx::unique_lock<Latch> lk(_mutex);
-        _finished = true;
-        _cond.notify_one();
-    }
-
-    template <typename FunT>
-    void startWorkerThread(FunT&& fun) {
-        _workerThreads.emplace_back(std::forward<FunT>(fun));
-    }
-
-private:
-    Mutex _mutex = MONGO_MAKE_LATCH("TimeoutSEP::_mutex");
-
-    stdx::condition_variable _cond;
-    bool _finished = false;
-
-    std::vector<stdx::thread> _workerThreads;
-};
-
-class TimeoutSyncSEP : public TimeoutSEP {
-public:
-    enum Mode { kShouldTimeout, kNoTimeout };
-    TimeoutSyncSEP(Mode mode) : _mode(mode) {}
-
-    void startSession(transport::SessionHandle session) override {
-        LOGV2(23040,
-              "Accepted connection from {session_remote}",
-              "session_remote"_attr = session->remote());
-        startWorkerThread([this, session = std::move(session)]() mutable {
-            LOGV2(23041, "waiting for message");
-            session->setTimeout(Milliseconds{500});
-            auto status = session->sourceMessage().getStatus();
-            if (_mode == kShouldTimeout) {
-                ASSERT_EQ(status, ErrorCodes::NetworkTimeout);
-                LOGV2(23042, "message timed out");
-            } else {
-                ASSERT_OK(status);
-                LOGV2(23043, "message received okay");
-            }
-
-            session.reset();
-            notifyComplete();
-        });
-    }
-
-private:
-    Mode _mode;
-};
-
-class TimeoutConnector {
-public:
-    TimeoutConnector(int port, bool sendRequest)
-        : _ctx(), _sock(_ctx), _endpoint(asio::ip::address_v4::loopback(), port) {
-        std::error_code ec;
-        _sock.connect(_endpoint, ec);
-        ASSERT_EQ(ec, std::error_code());
-
-        if (sendRequest) {
-            sendMessage();
-        }
-    }
-
-    void sendMessage() {
-        OpMsgBuilder builder;
-        builder.setBody(BSON("ping" << 1));
-        Message msg = builder.finish();
-        msg.header().setResponseToMsgId(0);
-        msg.header().setId(0);
-        OpMsg::appendChecksum(&msg);
-
-        std::error_code ec;
-        asio::write(_sock, asio::buffer(msg.buf(), msg.size()), ec);
-        ASSERT_FALSE(ec);
-    }
-
-private:
-    asio::io_context _ctx;
-    asio::ip::tcp::socket _sock;
-    asio::ip::tcp::endpoint _endpoint;
-};
-
-std::unique_ptr<transport::TransportLayerASIO> makeAndStartTL(ServiceEntryPoint* sep) {
-    auto options = [] {
-        ServerGlobalParams params;
-        params.noUnixSocket = true;
-        transport::TransportLayerASIO::Options opts(&params);
-        opts.port = 0;
-        return opts;
-    }();
-
     auto tla = std::make_unique<transport::TransportLayerASIO>(options, sep);
     ASSERT_OK(tla->setup());
     ASSERT_OK(tla->start());
-
     return tla;
+}
+
+/**
+ * Properly setting up and tearing down the MockSEP and TransportLayerASIO is
+ * tricky. Most tests can delegate the details to this TestFixture.
+ */
+class TestFixture {
+public:
+    TestFixture() : _tla{makeTLA(&_sep)} {}
+
+    ~TestFixture() {
+        _sep.endAllSessions({});
+        _tla->shutdown();
+    }
+
+    MockSEP& sep() {
+        return _sep;
+    }
+
+    transport::TransportLayerASIO& tla() {
+        return *_tla;
+    }
+
+private:
+    MockSEP _sep;
+    std::unique_ptr<transport::TransportLayerASIO> _tla;
+};
+
+TEST(TransportLayerASIO, ListenerPortZeroTreatedAsEphemeral) {
+    Notification<bool> connected;
+    TestFixture tf;
+    tf.sep().setOnStartSession([&](auto&&) { connected.set(true); });
+
+    int port = tf.tla().listenerPort();
+    ASSERT_GT(port, 0);
+    LOGV2(6109514, "TransportLayerASIO listening", "port"_attr = port);
+
+    ConnectionThread connectThread(port);
+    connected.get();
 }
 
 /* check that timeouts actually time out */
 TEST(TransportLayerASIO, SourceSyncTimeoutTimesOut) {
-    TimeoutSyncSEP sep(TimeoutSyncSEP::kShouldTimeout);
-    auto tla = makeAndStartTL(&sep);
-
-    TimeoutConnector connector(tla->listenerPort(), false);
-
-    sep.waitForTimeout();
-    tla->shutdown();
+    TestFixture tf;
+    Notification<StatusWith<Message>> received;
+    tf.sep().setOnStartSession([&](SessionThread& st) {
+        st.session().setTimeout(Milliseconds{500});
+        st.schedule([&](auto& session) { received.set(session.sourceMessage()); });
+    });
+    SyncClient conn(tf.tla().listenerPort());
+    ASSERT_EQ(received.get().getStatus(), ErrorCodes::NetworkTimeout);
 }
 
 /* check that timeouts don't time out unless there's an actual timeout */
 TEST(TransportLayerASIO, SourceSyncTimeoutSucceeds) {
-    TimeoutSyncSEP sep(TimeoutSyncSEP::kNoTimeout);
-    auto tla = makeAndStartTL(&sep);
-
-    TimeoutConnector connector(tla->listenerPort(), true);
-
-    sep.waitForTimeout();
-    tla->shutdown();
+    TestFixture tf;
+    Notification<StatusWith<Message>> received;
+    tf.sep().setOnStartSession([&](SessionThread& st) {
+        st.session().setTimeout(Milliseconds{500});
+        st.schedule([&](auto& session) { received.set(session.sourceMessage()); });
+    });
+    SyncClient conn(tf.tla().listenerPort());
+    ping(conn);  // This time we send a message
+    ASSERT_OK(received.get().getStatus());
 }
 
-/* check that switching from timeouts to no timeouts correctly resets the timeout to unlimited */
-class TimeoutSwitchModesSEP : public TimeoutSEP {
-public:
-    void startSession(transport::SessionHandle session) override {
-        LOGV2(23044,
-              "Accepted connection from {session_remote}",
-              "session_remote"_attr = session->remote());
-        startWorkerThread([this, session = std::move(session)]() mutable {
-            LOGV2(23045, "waiting for message");
-            auto sourceMessage = [&] { return session->sourceMessage().getStatus(); };
+/** Switching from timeouts to no timeouts must reset the timeout to unlimited. */
+TEST(TransportLayerASIO, SwitchTimeoutModes) {
+    TestFixture tf;
+    Notification<SessionThread*> mockSessionCreated;
+    tf.sep().setOnStartSession([&](SessionThread& st) { mockSessionCreated.set(&st); });
 
-            // the first message we source should time out.
-            session->setTimeout(Milliseconds{500});
-            ASSERT_EQ(sourceMessage(), ErrorCodes::NetworkTimeout);
-            notifyComplete();
+    SyncClient conn(tf.tla().listenerPort());
+    auto& st = *mockSessionCreated.get();
 
-            LOGV2(23046, "timed out successfully");
-
-            // get the session back in a known state with the timeout still in place
-            ASSERT_OK(sourceMessage());
-            notifyComplete();
-
-            LOGV2(23047, "waiting for message without a timeout");
-
-            // this should block and timeout the waitForComplete mutex, and the session should wait
-            // for a while to make sure this isn't timing out and then send a message to unblock
-            // the this call to recv
-            session->setTimeout(boost::none);
-            ASSERT_OK(sourceMessage());
-
-            session.reset();
-            notifyComplete();
-            LOGV2(23048, "ending test");
+    {
+        LOGV2(6109525, "The first message we source should time out");
+        Notification<StatusWith<Message>> done;
+        st.schedule([&](auto& session) {
+            session.setTimeout(Milliseconds{500});
+            done.set(session.sourceMessage());
         });
+        ASSERT_EQ(done.get().getStatus(), ErrorCodes::NetworkTimeout);
+        LOGV2(6109526, "timed out successfully");
+    }
+    {
+        LOGV2(6109527, "Verify a message can be successfully received");
+        Notification<StatusWith<Message>> done;
+        st.schedule([&](auto& session) { done.set(session.sourceMessage()); });
+        ping(conn);
+        ASSERT_OK(done.get().getStatus());
+    }
+    {
+        LOGV2(6109528, "Clear the timeout and verify reception of a late message.");
+        Notification<StatusWith<Message>> done;
+        st.schedule([&](auto& session) {
+            LOGV2(6109529, "waiting for message without a timeout");
+            session.setTimeout({});
+            done.set(session.sourceMessage());
+        });
+        sleepFor(Seconds{1});
+        ping(conn);
+        ASSERT_OK(done.get().getStatus());
+    }
+}
+
+class TransportLayerASIOWithServiceContextTest : public ServiceContextTest {
+public:
+    class ThreadCounter {
+    public:
+        std::function<stdx::thread(std::function<void()>)> makeSpawnFunc() {
+            return [core = _core](std::function<void()> cb) {
+                {
+                    stdx::lock_guard lk(core->mutex);
+                    ++core->created;
+                    core->cv.notify_all();
+                }
+                return stdx::thread{[core, cb = std::move(cb)]() mutable {
+                    {
+                        stdx::lock_guard lk(core->mutex);
+                        ++core->started;
+                        core->cv.notify_all();
+                    }
+                    cb();
+                }};
+            };
+        }
+
+        int64_t created() const {
+            stdx::lock_guard lk(_core->mutex);
+            return _core->created;
+        }
+
+        int64_t started() const {
+            stdx::lock_guard lk(_core->mutex);
+            return _core->started;
+        }
+
+        template <typename Pred>
+        void waitForStarted(const Pred& pred) const {
+            stdx::unique_lock lk(_core->mutex);
+            _core->cv.wait(lk, [&] { return pred(_core->started); });
+        }
+
+    private:
+        struct Core {
+            mutable stdx::mutex mutex;  // NOLINT
+            mutable stdx::condition_variable cv;
+            int64_t created = 0;
+            int64_t started = 0;
+        };
+        std::shared_ptr<Core> _core = std::make_shared<Core>();
+    };
+
+    void setUp() override {
+        auto sep = std::make_unique<MockSEP>();
+        auto tl = makeTLA(sep.get());
+        getServiceContext()->setServiceEntryPoint(std::move(sep));
+        getServiceContext()->setTransportLayer(std::move(tl));
+    }
+
+    void tearDown() override {
+        getServiceContext()->getTransportLayer()->shutdown();
+    }
+
+    transport::TransportLayerASIO& tla() {
+        auto tl = getServiceContext()->getTransportLayer();
+        return *dynamic_cast<transport::TransportLayerASIO*>(tl);
     }
 };
 
-TEST(TransportLayerASIO, SwitchTimeoutModes) {
-    TimeoutSwitchModesSEP sep;
-    auto tla = makeAndStartTL(&sep);
-
-    TimeoutConnector connector(tla->listenerPort(), false);
-
-    ASSERT_TRUE(sep.waitForTimeout());
-
-    connector.sendMessage();
-    ASSERT_TRUE(sep.waitForTimeout());
-
-    ASSERT_FALSE(sep.waitForTimeout(Milliseconds{1000}));
-    connector.sendMessage();
-    ASSERT_TRUE(sep.waitForTimeout());
-
-    tla->shutdown();
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceDoesNotSpawnThreadsBeforeStart) {
+    ThreadCounter counter;
+    { transport::TransportLayerASIO::TimerService service{{counter.makeSpawnFunc()}}; }
+    ASSERT_EQ(counter.created(), 0);
 }
+
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceOneShotStart) {
+    ThreadCounter counter;
+    transport::TransportLayerASIO::TimerService service{{counter.makeSpawnFunc()}};
+    service.start();
+    LOGV2(5490004, "Awaiting timer thread start", "threads"_attr = counter.started());
+    counter.waitForStarted([](auto n) { return n > 0; });
+    LOGV2(5490005, "Awaited timer thread start", "threads"_attr = counter.started());
+
+    service.start();
+    service.start();
+    service.start();
+    ASSERT_EQ(counter.created(), 1) << "Redundant start should spawn only once";
+}
+
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceDoesNotStartAfterStop) {
+    ThreadCounter counter;
+    transport::TransportLayerASIO::TimerService service{{counter.makeSpawnFunc()}};
+    service.stop();
+    service.start();
+    ASSERT_EQ(counter.created(), 0) << "Stop then start should not spawn";
+}
+
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceCanStopMoreThanOnce) {
+    // Verifying that it is safe to have multiple calls to `stop()`.
+    {
+        transport::TransportLayerASIO::TimerService service;
+        service.start();
+        service.stop();
+        service.stop();
+    }
+    {
+        transport::TransportLayerASIO::TimerService service;
+        service.stop();
+        service.stop();
+    }
+}
+
+#ifdef MONGO_CONFIG_SSL
+#ifndef _WIN32
+// TODO SERVER-62035: enable the following on Windows.
+TEST_F(TransportLayerASIOWithServiceContextTest, ShutdownDuringSSLHandshake) {
+    /**
+     * Creates a server and a client thread:
+     * - The server listens for incoming connections, but doesn't participate in SSL handshake.
+     * - The client connects to the server, and is configured to perform SSL handshake.
+     * The server never writes on the socket in response to the handshake request, thus the client
+     * should block until it is timed out.
+     * The goal is to simulate a server crash, and verify the behavior of the client, during the
+     * handshake process.
+     */
+    int port = tla().listenerPort();
+
+    auto uri = uassertStatusOK(MongoURI::parse("mongodb://localhost/?ssl=true"));
+    DBClientConnection conn(false, 1 /* this is ignored */, std::move(uri));
+    conn.setSoTimeout(1);  // 1 second timeout
+
+    auto status = conn.connectSocketOnly({"localhost", port});
+    ASSERT_EQ(status, ErrorCodes::HostUnreachable);
+}
+#endif  // _WIN32
+#endif  // MONGO_CONFIG_SSL
 
 }  // namespace
 }  // namespace mongo

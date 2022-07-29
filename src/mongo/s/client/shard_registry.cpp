@@ -139,12 +139,8 @@ ShardRegistry::Cache::LookupResult ShardRegistry::_lookup(OperationContext* opCt
     // Check if we need to refresh from the configsvrs.  If so, then do that and get the results,
     // otherwise (this is a lookup only to incorporate updated connection strings from the RSM),
     // then get the equivalent values from the previously cached data.
-    auto [returnData,
-          returnTopologyTime,
-          returnForceReloadIncrement,
-          removedShards,
-          fetchedFromConfigServers] = [&]()
-        -> std::tuple<ShardRegistryData, Timestamp, Increment, ShardRegistryData::ShardMap, bool> {
+    auto [returnData, returnTopologyTime, returnForceReloadIncrement, removedShards] =
+        [&]() -> std::tuple<ShardRegistryData, Timestamp, Increment, ShardRegistryData::ShardMap> {
         if (timeInStore.topologyTime > cachedData.getTime().topologyTime ||
             timeInStore.forceReloadIncrement > cachedData.getTime().forceReloadIncrement) {
             auto [reloadedData, maxTopologyTime] =
@@ -160,14 +156,12 @@ ShardRegistry::Cache::LookupResult ShardRegistry::_lookup(OperationContext* opCt
             auto [mergedData, removedShards] =
                 ShardRegistryData::mergeExisting(*cachedData, reloadedData);
 
-            return {
-                mergedData, maxTopologyTime, timeInStore.forceReloadIncrement, removedShards, true};
+            return {mergedData, maxTopologyTime, timeInStore.forceReloadIncrement, removedShards};
         } else {
             return {*cachedData,
                     cachedData.getTime().topologyTime,
                     cachedData.getTime().forceReloadIncrement,
-                    {},
-                    false};
+                    {}};
         }
     }();
 
@@ -202,11 +196,6 @@ ShardRegistry::Cache::LookupResult ShardRegistry::_lookup(OperationContext* opCt
         }
     }
 
-    // The registry is "up" once there has been a successful lookup from the config servers.
-    if (fetchedFromConfigServers) {
-        _isUp.store(true);
-    }
-
     Time returnTime{returnTopologyTime, rsmIncrementForConnStrings, returnForceReloadIncrement};
     LOGV2_DEBUG(4620251,
                 2,
@@ -227,26 +216,33 @@ void ShardRegistry::startupPeriodicReloader(OperationContext* opCtx) {
     // construct task executor
     auto net = executor::makeNetworkInterface("ShardRegistryUpdater", nullptr, std::move(hookList));
     auto netPtr = net.get();
-    _executor = std::make_unique<executor::ThreadPoolTaskExecutor>(
+    _executor = std::make_shared<executor::ThreadPoolTaskExecutor>(
         std::make_unique<executor::NetworkInterfaceThreadPool>(netPtr), std::move(net));
     LOGV2_DEBUG(22724, 1, "Starting up task executor for periodic reloading of ShardRegistry");
     _executor->startup();
 
-    auto status =
-        _executor->scheduleWork([this](const CallbackArgs& cbArgs) { _periodicReload(cbArgs); });
-
-    if (status.getStatus() == ErrorCodes::ShutdownInProgress) {
-        LOGV2_DEBUG(
-            22725, 1, "Can't schedule Shard Registry reload. Executor shutdown in progress");
-        return;
-    }
-
-    if (!status.isOK()) {
-        LOGV2_FATAL(40252,
-                    "Error scheduling shard registry reload caused by {error}",
-                    "Error scheduling shard registry reload",
-                    "error"_attr = redact(status.getStatus()));
-    }
+    AsyncTry([this] {
+        LOGV2_DEBUG(22726, 1, "Reloading shardRegistry");
+        return _reloadAsyncNoRetry();
+    })
+        .until([](auto&& sw) {
+            if (!sw.isOK()) {
+                LOGV2(22727,
+                      "Error running periodic reload of shard registry",
+                      "error"_attr = redact(sw.getStatus()),
+                      "shardRegistryReloadInterval"_attr = kRefreshPeriod);
+            }
+            // Continue until the _executor will shutdown
+            return false;
+        })
+        .withDelayBetweenIterations(kRefreshPeriod)  // This call is optional.
+        .on(_executor, CancellationToken::uncancelable())
+        .getAsync([](auto&& sw) {
+            LOGV2_DEBUG(22725,
+                        1,
+                        "Exiting periodic shard registry reloader",
+                        "reason"_attr = redact(sw.getStatus()));
+        });
 }
 
 void ShardRegistry::shutdownPeriodicReloader() {
@@ -259,59 +255,14 @@ void ShardRegistry::shutdownPeriodicReloader() {
 }
 
 void ShardRegistry::shutdown() {
-    shutdownPeriodicReloader();
-
     if (!_isShutdown.load()) {
         LOGV2_DEBUG(4620235, 1, "Shutting down shard registry");
         _threadPool.shutdown();
+
+        shutdownPeriodicReloader();
+
         _threadPool.join();
         _isShutdown.store(true);
-    }
-}
-
-void ShardRegistry::_periodicReload(const CallbackArgs& cbArgs) {
-    LOGV2_DEBUG(22726, 1, "Reloading shardRegistry");
-    if (!cbArgs.status.isOK()) {
-        LOGV2_WARNING(22734,
-                      "Error reloading shard registry caused by {error}",
-                      "Error reloading shard registry",
-                      "error"_attr = redact(cbArgs.status));
-        return;
-    }
-
-    ThreadClient tc("shard-registry-reload", getGlobalServiceContext());
-
-    auto opCtx = tc->makeOperationContext();
-
-    auto refreshPeriod = kRefreshPeriod;
-
-    try {
-        reload(opCtx.get());
-    } catch (const DBException& e) {
-        LOGV2(22727,
-              "Error running periodic reload of shard registry caused by {error}; will retry after "
-              "{shardRegistryReloadInterval}",
-              "Error running periodic reload of shard registry",
-              "error"_attr = redact(e),
-              "shardRegistryReloadInterval"_attr = refreshPeriod);
-    }
-
-    // reschedule itself
-    auto status =
-        _executor->scheduleWorkAt(_executor->now() + refreshPeriod,
-                                  [this](const CallbackArgs& cbArgs) { _periodicReload(cbArgs); });
-
-    if (status.getStatus() == ErrorCodes::ShutdownInProgress) {
-        LOGV2_DEBUG(
-            22728, 1, "Error scheduling shard registry reload. Executor shutdown in progress");
-        return;
-    }
-
-    if (!status.isOK()) {
-        LOGV2_FATAL(40253,
-                    "Error scheduling shard registry reload caused by {error}",
-                    "Error scheduling shard registry reload",
-                    "error"_attr = redact(status.getStatus()));
     }
 }
 
@@ -347,6 +298,49 @@ StatusWith<std::shared_ptr<Shard>> ShardRegistry::getShard(OperationContext* opC
     }
 
     return {ErrorCodes::ShardNotFound, str::stream() << "Shard " << shardId << " not found"};
+}
+
+SemiFuture<std::shared_ptr<Shard>> ShardRegistry::getShard(ExecutorPtr executor,
+                                                           const ShardId& shardId) noexcept {
+
+    // Fetch the shard registry data associated to the latest known topology time
+    return _getDataAsync()
+        .thenRunOn(executor)
+        .then([this, executor, shardId](auto&& cachedData) {
+            // First check if this is a non config shard lookup
+            if (auto shard = cachedData->findShard(shardId)) {
+                return SemiFuture<std::shared_ptr<Shard>>::makeReady(std::move(shard));
+            }
+
+            // then check if this is a config shard (this call is blocking in any case)
+            {
+                stdx::lock_guard<Latch> lk(_mutex);
+                if (auto shard = _configShardData.findShard(shardId)) {
+                    return SemiFuture<std::shared_ptr<Shard>>::makeReady(std::move(shard));
+                }
+            }
+
+            // If the shard was not found, force reload the shard regitry data and try again.
+            //
+            // This is to cover the following scenario:
+            // 1. Primary of the replicaset fetch the list of shards and store it on disk
+            // 2. Primary crash before the latest VectorClock topology time is majority written to
+            //    disk
+            // 3. A new primary with a stale ShardRegistry is elected and read the set of shards
+            //    from disk and calls ShardRegistry::getShard
+
+            return _reloadAsync()
+                .thenRunOn(executor)
+                .then([this, executor, shardId](auto&& cachedData) -> std::shared_ptr<Shard> {
+                    auto shard = cachedData->findShard(shardId);
+                    uassert(ErrorCodes::ShardNotFound,
+                            str::stream() << "Shard " << shardId << " not found",
+                            shard);
+                    return shard;
+                })
+                .semi();
+        })
+        .semi();
 }
 
 std::vector<ShardId> ShardRegistry::getAllShardIds(OperationContext* opCtx) {
@@ -434,8 +428,18 @@ std::unique_ptr<Shard> ShardRegistry::createConnection(const ConnectionString& c
     return _shardFactory->createUniqueShard(ShardId("<unnamed>"), connStr);
 }
 
-bool ShardRegistry::isUp() const {
-    return _isUp.load();
+bool ShardRegistry::isUp() {
+    if (_isUp.load())
+        return true;
+
+    // Before the first lookup is completed, the latest cached value is either empty or it is
+    // associated to the default constructed time
+    const auto latestCached = _cache->peekLatestCached(_kSingleton);
+    if (latestCached && latestCached.getTime() != Time()) {
+        _isUp.store(true);
+        return true;
+    }
+    return false;
 }
 
 void ShardRegistry::toBSON(BSONObjBuilder* result) const {
@@ -454,35 +458,33 @@ void ShardRegistry::toBSON(BSONObjBuilder* result) const {
 }
 
 void ShardRegistry::reload(OperationContext* opCtx) {
+    _reloadAsync().get(opCtx);
+}
+
+SharedSemiFuture<ShardRegistry::Cache::ValueHandle> ShardRegistry::_reloadAsync() {
     if (MONGO_unlikely(TestingProctor::instance().isEnabled())) {
         // TODO SERVER-62152 investigate hang on reload in unit tests
         // Some unit tests don't support running the reload's AsyncTry on the fixed executor.
-        _reloadInternal(opCtx);
+        return _reloadAsyncNoRetry();
     } else {
-        AsyncTry([=]() mutable {
-            ThreadClient tc("ShardRegistry::reload", getGlobalServiceContext());
-            auto opCtx = tc->makeOperationContext();
-
-            _reloadInternal(opCtx.get());
-        })
-            .until([](Status status) mutable {
-                return status != ErrorCodes::ReadConcernMajorityNotAvailableYet;
+        return AsyncTry([=]() mutable { return _reloadAsyncNoRetry(); })
+            .until([](auto sw) mutable {
+                return sw.getStatus() != ErrorCodes::ReadConcernMajorityNotAvailableYet;
             })
             .withBackoffBetweenIterations(kExponentialBackoff)
-            .on(Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
+            .on(Grid::get(getGlobalServiceContext())->getExecutorPool()->getFixedExecutor(),
                 CancellationToken::uncancelable())
-            .semi()
-            .get(opCtx);
+            .share();
     }
 }
 
-void ShardRegistry::_reloadInternal(OperationContext* opCtx) {
+SharedSemiFuture<ShardRegistry::Cache::ValueHandle> ShardRegistry::_reloadAsyncNoRetry() {
     // Make the next acquire do a lookup.
     auto value = _forceReloadIncrement.addAndFetch(1);
     LOGV2_DEBUG(4620253, 2, "Forcing ShardRegistry reload", "newForceReloadIncrement"_attr = value);
 
     // Force it to actually happen now.
-    _getData(opCtx);
+    return _getDataAsync();
 }
 
 void ShardRegistry::clearEntries() {

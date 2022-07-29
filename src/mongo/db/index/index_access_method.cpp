@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_consistency.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_build_interceptor.h"
@@ -53,6 +54,7 @@
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/stacktrace.h"
@@ -72,6 +74,49 @@ MONGO_FAIL_POINT_DEFINE(hangDuringIndexBuildBulkLoadYieldSecond);
 namespace {
 
 /**
+ * Metrics for index bulk builder operations. Intended to support index build diagnostics
+ * during the following scenarios:
+ * - createIndex commands;
+ * - collection cloning during initial sync; and
+ * - resuming index builds at startup.
+ *
+ * Also includes statistics for disk usage (by the external sorter) for index builds that
+ * do not fit in memory.
+ */
+class IndexBulkBuilderSSS : public ServerStatusSection {
+public:
+    IndexBulkBuilderSSS() : ServerStatusSection("indexBulkBuilder") {}
+
+    bool includeByDefault() const final {
+        return true;
+    }
+
+    void addRequiredPrivileges(std::vector<Privilege>* out) final {}
+
+    BSONObj generateSection(OperationContext* opCtx, const BSONElement& configElement) const final {
+        BSONObjBuilder builder;
+        builder.append("count", count.loadRelaxed());
+        builder.append("resumed", resumed.loadRelaxed());
+        builder.append("filesOpenedForExternalSort", sorterFileStats.opened.loadRelaxed());
+        builder.append("filesClosedForExternalSort", sorterFileStats.closed.loadRelaxed());
+        return builder.obj();
+    }
+
+    // Number of instances of the bulk builder created.
+    AtomicWord<long long> count;
+
+    // Number of times the bulk builder was created for a resumable index build.
+    // This value should not exceed 'count'.
+    AtomicWord<long long> resumed;
+
+    // Number of times the external sorter opened/closed a file handle to spill data to disk.
+    // This pair of counters in aggregate indicate the number of open file handles used by
+    // the external sorter and may be useful in diagnosing situations where the process is
+    // close to exhausting this finite resource.
+    SorterFileStats sorterFileStats;
+} indexBulkBuilderSSS;
+
+/**
  * Returns true if at least one prefix of any of the indexed fields causes the index to be
  * multikey, and returns false otherwise. This function returns false if the 'multikeyPaths'
  * vector is empty.
@@ -87,6 +132,7 @@ SortOptions makeSortOptions(size_t maxMemoryUsageBytes, StringData dbName) {
         .TempDir(storageGlobalParams.dbpath + "/_tmp")
         .ExtSortAllowed()
         .MaxMemoryUsageBytes(maxMemoryUsageBytes)
+        .FileStats(&indexBulkBuilderSSS.sorterFileStats)
         .DBName(dbName.toString());
 }
 
@@ -562,7 +608,9 @@ std::unique_ptr<IndexAccessMethod::BulkBuilder> AbstractIndexAccessMethod::initi
 AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEntry* index,
                                                             size_t maxMemoryUsageBytes,
                                                             StringData dbName)
-    : _indexCatalogEntry(index), _sorter(_makeSorter(maxMemoryUsageBytes, dbName)) {}
+    : _indexCatalogEntry(index), _sorter(_makeSorter(maxMemoryUsageBytes, dbName)) {
+    indexBulkBuilderSSS.count.addAndFetch(1);
+}
 
 AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEntry* index,
                                                             size_t maxMemoryUsageBytes,
@@ -573,7 +621,10 @@ AbstractIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEn
           _makeSorter(maxMemoryUsageBytes, dbName, stateInfo.getFileName(), stateInfo.getRanges())),
       _keysInserted(stateInfo.getNumKeys().value_or(0)),
       _isMultiKey(stateInfo.getIsMultikey()),
-      _indexMultikeyPaths(createMultikeyPaths(stateInfo.getMultikeyPaths())) {}
+      _indexMultikeyPaths(createMultikeyPaths(stateInfo.getMultikeyPaths())) {
+    indexBulkBuilderSSS.count.addAndFetch(1);
+    indexBulkBuilderSSS.resumed.addAndFetch(1);
+}
 
 Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(
     OperationContext* opCtx,

@@ -982,6 +982,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
 
     // 1. Ensure any data which might have been left orphaned in the range being moved has been
     // deleted.
+    const auto rangeDeletionWaitDeadline =
+        outerOpCtx->getServiceContext()->getFastClockSource()->now() +
+        Milliseconds(receiveChunkWaitForRangeDeleterTimeoutMS.load());
+
     while (migrationutil::checkForConflictingDeletions(
         outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid)) {
         uassert(ErrorCodes::ResumableRangeDeleterDisabled,
@@ -1007,6 +1011,11 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
             _setStateFail(redact(status.toString()));
             return;
         }
+
+        uassert(ErrorCodes::ExceededTimeLimit,
+                "Exceeded deadline waiting for overlapping range deletion to finish",
+                outerOpCtx->getServiceContext()->getFastClockSource()->now() <
+                    rangeDeletionWaitDeadline);
 
         // If the filtering metadata was cleared while the range deletion task was ongoing, then
         // 'waitForClean' would return immediately even though there really is an ongoing range
@@ -1131,13 +1140,23 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx) {
                     return toInsert;
                 }());
 
-                const auto reply =
-                    write_ops_exec::performInserts(opCtx, insertOp, OperationSource::kFromMigrate);
+                {
+                    // Disable the schema validation (during document inserts and updates)
+                    //  and any internal validation for opCtx for performInserts()
+                    DisableDocumentValidation documentValidationDisabler(
+                        opCtx,
+                        DocumentValidationSettings::kDisableSchemaValidation |
+                            DocumentValidationSettings::kDisableInternalValidation);
+                    const auto reply = write_ops_exec::performInserts(
+                        opCtx, insertOp, OperationSource::kFromMigrate);
 
-                for (unsigned long i = 0; i < reply.results.size(); ++i) {
-                    uassertStatusOKWithContext(
-                        reply.results[i],
-                        str::stream() << "Insert of " << insertOp.getDocuments()[i] << " failed.");
+                    for (unsigned long i = 0; i < reply.results.size(); ++i) {
+                        uassertStatusOKWithContext(reply.results[i],
+                                                   str::stream()
+                                                       << "Insert of " << insertOp.getDocuments()[i]
+                                                       << " failed.");
+                    }
+                    // Revert to the original DocumentValidationSettings for opCtx
                 }
 
                 {
@@ -1380,6 +1399,11 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx,
     invariant(lastOpApplied);
 
     bool didAnything = false;
+
+    DisableDocumentValidation documentValidationDisabler(
+        opCtx,
+        DocumentValidationSettings::kDisableSchemaValidation |
+            DocumentValidationSettings::kDisableInternalValidation);
 
     // Deleted documents
     if (xfer["deleted"].isABSONObj()) {

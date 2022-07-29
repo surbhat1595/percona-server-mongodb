@@ -239,6 +239,9 @@ public:
      */
     StatusWith<std::shared_ptr<Shard>> getShard(OperationContext* opCtx, const ShardId& shardId);
 
+    SemiFuture<std::shared_ptr<Shard>> getShard(ExecutorPtr executor,
+                                                const ShardId& shardId) noexcept;
+
     /**
      * Returns a vector containing all known shard IDs.
      * The order of the elements is not guaranteed.
@@ -272,7 +275,7 @@ public:
      * The ShardRegistry is "up" once a successful lookup from the config servers has been
      * completed.
      */
-    bool isUp() const;
+    bool isUp();
 
     void toBSON(BSONObjBuilder* result) const;
 
@@ -438,9 +441,8 @@ private:
 
     void _initializeCacheIfNecessary() const;
 
-    void _periodicReload(const executor::TaskExecutor::CallbackArgs& cbArgs);
-
-    void _reloadInternal(OperationContext* opCtx);
+    SharedSemiFuture<Cache::ValueHandle> _reloadAsync();
+    SharedSemiFuture<Cache::ValueHandle> _reloadAsyncNoRetry();
 
     /**
      * Factory to create shards.  Never changed after startup so safe to access outside of _mutex.
@@ -463,7 +465,7 @@ private:
     ThreadPool _threadPool;
 
     // Executor for periodically reloading the registry (ie. in which _periodicReload() runs).
-    std::unique_ptr<executor::TaskExecutor> _executor{};
+    std::shared_ptr<executor::TaskExecutor> _executor{};
 
     mutable Mutex _cacheMutex = MONGO_MAKE_LATCH("ShardRegistry::_cacheMutex");
     std::unique_ptr<Cache> _cache;

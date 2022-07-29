@@ -1081,6 +1081,7 @@ ReshardingCoordinatorService::ReshardingCoordinator::_tellAllParticipantsReshard
                        _cancelableOpCtxFactory.emplace(_ctHolder->getStepdownToken(),
                                                        _markKilledExecutor);
                    })
+                   .then([this] { return _waitForMajority(_ctHolder->getStepdownToken()); })
                    .then([this, executor]() {
                        pauseBeforeTellDonorToRefresh.pauseWhileSet();
                        _establishAllDonorsAsParticipants(executor);
@@ -1111,8 +1112,7 @@ ExecutorFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::_initi
     return resharding::WithAutomaticRetry([this, executor] {
                return ExecutorFuture<void>(**executor)
                    .then([this, executor] { _insertCoordDocAndChangeOrigCollEntry(); })
-                   .then([this, executor] { _calculateParticipantsAndChunksThenWriteToDisk(); })
-                   .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); });
+                   .then([this, executor] { _calculateParticipantsAndChunksThenWriteToDisk(); });
            })
         .onTransientError([](const Status& status) {
             LOGV2(5093703,
@@ -1674,9 +1674,22 @@ ReshardingCoordinatorService::ReshardingCoordinator::_awaitAllRecipientsFinished
             _startCommitMonitor(executor);
 
             LOGV2(5391602, "Resharding operation waiting for an okay to enter critical section");
-            return future_util::withCancellation(_canEnterCritical.getFuture(),
-                                                 _ctHolder->getAbortToken())
+
+            // The _reshardingCoordinatorObserver->awaitAllRecipientsInStrictConsistency() future is
+            // used for reporting recipient shard errors encountered during the Applying phase and
+            // in turn aborting the resharding operation.
+            // For all other cases, the _canEnterCritical.getFuture() resolves first and the
+            // operation can then proceed to entering the critical section depending on the status
+            // returned.
+            return future_util::withCancellation(
+                       whenAny(
+                           _canEnterCritical.getFuture().thenRunOn(**executor),
+                           _reshardingCoordinatorObserver->awaitAllRecipientsInStrictConsistency()
+                               .thenRunOn(**executor)
+                               .ignoreValue()),
+                       _ctHolder->getAbortToken())
                 .thenRunOn(**executor)
+                .then([](auto result) { return result.result; })
                 .onCompletion([this](Status status) {
                     _ctHolder->cancelCommitMonitor();
                     if (status.isOK()) {

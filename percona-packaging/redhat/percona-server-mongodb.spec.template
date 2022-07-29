@@ -395,5 +395,5 @@ fi
 #
 %changelog
 
-* Thu Feb 27 2020 Oleksandr Miroshnychenko <alex.miroshnychenko@percona.com> - 4.4
-- Initial RPM release for Percona Server for MongoDB 4.4
+* Fri Jul 29 2022 Oleksandr Miroshnychenko <alex.miroshnychenko@percona.com> - 6.0
+- Initial RPM release for Percona Server for MongoDB 6.0

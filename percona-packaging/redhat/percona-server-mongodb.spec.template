@@ -104,7 +104,7 @@ Group:          Applications/Databases
 Summary:        The tools package for Percona Server for MongoDB
 %description tools
 This package contains various tools from MongoDB project, recompiled for Percona Server for MongoDB
-Conflicts: Percona-Server-MongoDB-tools Percona-Server-MongoDB-32-tools Percona-Server-MongoDB-34-tools Percona-Server-MongoDB-36-tools mongodb-org-tools
+Conflicts: Percona-Server-MongoDB-tools Percona-Server-MongoDB-32-tools Percona-Server-MongoDB-34-tools Percona-Server-MongoDB-36-tools mongodb-org-tools mongodb-database-tools
 
 %prep
 
@@ -385,15 +385,9 @@ fi
 %if 0%{?rhel} >= 7
 %systemd_postun mongod.service
 %endif
-if [ $1 == 0 ]; then
-  if /usr/bin/id -g mongod > /dev/null 2>&1; then
-    /usr/sbin/userdel mongod > /dev/null 2>&1
-    /usr/sbin/groupdel mongod > /dev/null 2>&1 || true
-  fi
-fi
 
 #
 %changelog
 
-* Thu Feb 27 2020 Oleksandr Miroshnychenko <alex.miroshnychenko@percona.com> - 4.4
-- Initial RPM release for Percona Server for MongoDB 4.4
+* Fri Jul 29 2022 Oleksandr Miroshnychenko <alex.miroshnychenko@percona.com> - 6.0
+- Initial RPM release for Percona Server for MongoDB 6.0

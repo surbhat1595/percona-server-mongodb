@@ -226,11 +226,11 @@ switch_to_vault_repo() {
 }
 
 install_golang() {
-    wget https://golang.org/dl/go1.15.7.linux-amd64.tar.gz -O /tmp/golang1.15.tar.gz
-    tar --transform=s,go,go1.15, -zxf /tmp/golang1.15.tar.gz
-    rm -rf /usr/local/go1.15 /usr/local/go1.11  /usr/local/go1.8 /usr/local/go1.9 /usr/local/go1.9.2 /usr/local/go
-    mv go1.15 /usr/local/
-    ln -s /usr/local/go1.15 /usr/local/go
+    wget https://golang.org/dl/go1.18.4.linux-amd64.tar.gz -O /tmp/golang1.18.tar.gz
+    tar --transform=s,go,go1.18, -zxf /tmp/golang1.18.tar.gz
+    rm -rf /usr/local/go1.18 /usr/local/go1.11  /usr/local/go1.8 /usr/local/go1.9 /usr/local/go1.9.2 /usr/local/go
+    mv go1.18 /usr/local/
+    ln -s /usr/local/go1.18 /usr/local/go
 }
 
 install_gcc_8_centos(){
@@ -707,7 +707,7 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
-    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xjammy" ]; then
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
     fi
     #
@@ -775,9 +775,8 @@ build_deb(){
     cp -av percona-packaging/debian/rules debian/
     set_compiler
     fix_rules
-    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xjammy" ]; then
         sed -i 's:dh-systemd,::' debian/control
-        sed -i 's:etc/:/etc/:g' debian/percona-server-mongodb-server.conffiles
     fi
     sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh
     sed -i 's|GitCommit="$(git rev-parse HEAD)"|GitCommit="$PSMDB_TOOLS_COMMIT_HASH"|' mongo-tools/set_goenv.sh
@@ -969,7 +968,7 @@ build_tarball(){
     cd mongo-tools
     . ./set_tools_revision.sh
     sed -i '12d' buildscript/build.go
-    sed -i '167,176d' buildscript/build.go
+    sed -i '168,177d' buildscript/build.go
     sed -i "s:versionStr,:\"$PSMDB_TOOLS_REVISION\",:" buildscript/build.go
     sed -i "s:gitCommit):\"$PSMDB_TOOLS_COMMIT_HASH\"):" buildscript/build.go
     ./make build

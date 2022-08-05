@@ -383,6 +383,13 @@ install_deps() {
         yum -y install centos-release-scl
         yum-config-manager --enable centos-sclo-rh-testing
         yum -y install rh-python38-python rh-python38-python-devel rh-python38-python-pip
+        yum -y install https://jenkins.percona.com/downloads/rpm-4.13.0.2-1.el7.c8/rpm-4.13.0.2-1.el7.c8.x86_64.rpm \
+                       https://jenkins.percona.com/downloads/rpm-4.13.0.2-1.el7.c8/rpm-libs-4.13.0.2-1.el7.c8.x86_64.rpm \
+                       https://jenkins.percona.com/downloads/rpm-4.13.0.2-1.el7.c8/rpm-build-4.13.0.2-1.el7.c8.x86_64.rpm \
+                       https://jenkins.percona.com/downloads/rpm-4.13.0.2-1.el7.c8/rpm-build-libs-4.13.0.2-1.el7.c8.x86_64.rpm \
+                       https://jenkins.percona.com/downloads/rpm-4.13.0.2-1.el7.c8/rpm-plugin-selinux-4.13.0.2-1.el7.c8.x86_64.rpm \
+                       https://jenkins.percona.com/downloads/rpm-4.13.0.2-1.el7.c8/python2-rpm-4.13.0.2-1.el7.c8.x86_64.rpm
+        yum -y install devtoolset-11-elfutils
         source /opt/rh/rh-python38/enable
 
         pip install --upgrade pip
@@ -641,6 +648,12 @@ build_rpm(){
     if [ -f /opt/rh/devtoolset-8/enable ]; then
         source /opt/rh/devtoolset-8/enable
         source /opt/rh/rh-python38/enable
+    fi
+
+    if [ "x${RHEL}" == "x7" ]; then
+        if [ -f /opt/rh/devtoolset-11/enable ]; then
+            source /opt/rh/devtoolset-11/enable
+        fi
     fi
 
     echo "CC and CXX should be modified once correct compiller would be installed on Centos"

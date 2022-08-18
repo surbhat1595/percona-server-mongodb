@@ -193,15 +193,6 @@ std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandToShards(
     const BSONObj& command,
     const std::vector<ShardId>& shardIds,
     const std::shared_ptr<executor::TaskExecutor>& executor) {
-    // TODO SERVER-57519: remove the following scope
-    {
-        // Ensure ShardRegistry is initialized before using the AsyncRequestsSender that relies on
-        // unsafe functions (SERVER-57280)
-        auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-        if (!shardRegistry->isUp()) {
-            shardRegistry->reload(opCtx);
-        }
-    }
 
     // The AsyncRequestsSender ignore impersonation metadata so we need to manually attach them to
     // the command
@@ -514,6 +505,12 @@ void sendDropCollectionParticipantCommandToShards(OperationContext* opCtx,
         sharding_ddl_util::sendAuthenticatedCommandToShards(
             opCtx, nss.db(), cmdObj, shardIds, executor);
     }
+}
+
+BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const NamespaceString& to) {
+    return BSON("command"
+                << "rename"
+                << "from" << from.toString() << "to" << to.toString());
 }
 
 }  // namespace sharding_ddl_util

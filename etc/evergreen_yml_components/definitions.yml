@@ -2157,6 +2157,14 @@ tasks:
         archive-dist-test
       task_compile_flags: >-
         PREFIX=dist-test
+  - command: subprocess.exec
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/macos_notary.py"
+      - "mongodb-binaries.${ext|tgz}"
 
   - command: s3.put
     params:
@@ -2280,8 +2288,6 @@ tasks:
         default
       task_compile_flags: >-
         --ninja
-      targets:
-        generate-ninja
   - *f_expansions_write
   - command: subprocess.exec
     params:
@@ -2301,8 +2307,6 @@ tasks:
       task_compile_flags: >-
         --build-tools=next
         --ninja
-      targets:
-        generate-ninja
   - *f_expansions_write
   - command: subprocess.exec
     params:
@@ -5512,12 +5516,13 @@ tasks:
     vars:
       use_large_distro: "true"
 
-- <<: *task_template
-  name: write_concern_majority_passthrough
+- <<: *gen_task_template
+  name: write_concern_majority_passthrough_gen
   tags: ["read_write_concern", "large", "write"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
 
 - <<: *task_template
   name: cwrwc_passthrough
@@ -5829,12 +5834,16 @@ tasks:
   tags: ["multiversion_passthrough", "multiversion", "no_version_combination"]
   commands:
   - func: "generate resmoke tasks"
+    vars:
+      multiversion_exclude_tags_version: last_continuous
 
 - <<: *gen_task_template
   name: retryable_writes_downgrade_last_lts_gen
   tags: ["multiversion_passthrough", "multiversion", "no_version_combination"]
   commands:
   - func: "generate resmoke tasks"
+    vars:
+      multiversion_exclude_tags_version: last_lts
 
 - <<: *gen_task_template
   name: sharded_retryable_writes_downgrade_gen

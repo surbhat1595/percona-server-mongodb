@@ -937,6 +937,7 @@ env.Library(
         '$BUILD_DIR/mongo/executor/task_executor_pool',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sharding_router_api',
+        'dbdirectclient',
         'logical_session_id',
     ],
 )
@@ -2317,6 +2318,7 @@ env.Library(
         'update/update_driver',
     ],
     LIBDEPS_PRIVATE=[
+        'curop',
         'repl/image_collection_entry',
     ],
 )

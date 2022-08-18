@@ -292,6 +292,7 @@ InitialSyncerInterface::Options createInitialSyncerOptions(
                                externalState](const OpTimeAndWallTime& opTimeAndWallTime) {
         // Note that setting the last applied opTime forward also advances the global timestamp.
         replCoord->setMyLastAppliedOpTimeAndWallTimeForward(opTimeAndWallTime);
+        signalOplogWaiters();
         // The oplog application phase of initial sync starts timestamping writes, causing
         // WiredTiger to pin this data in memory. Advancing the oldest timestamp in step with the
         // last applied optime here will permit WiredTiger to evict this data as it sees fit.
@@ -336,6 +337,16 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _readWriteAbility(std::make_unique<ReadWriteAbility>(!settings.usingReplSets())),
       _replicationProcess(replicationProcess),
       _storage(storage),
+      _handleLivenessTimeoutCallback(_replExecutor.get(),
+                                     [this](const executor::TaskExecutor::CallbackArgs& args) {
+                                         _handleLivenessTimeout(args);
+                                     }),
+      _handleElectionTimeoutCallback(
+          _replExecutor.get(),
+          [this](const executor::TaskExecutor::CallbackArgs&) {
+              _startElectSelfIfEligibleV1(StartElectionReasonEnum::kElectionTimeout);
+          },
+          [this](int64_t limit) { return _nextRandomInt64_inlock(limit); }),
       _random(prngSeed) {
 
     _termShadow.store(OpTime::kUninitializedTerm);
@@ -382,10 +393,7 @@ ReplSetConfig ReplicationCoordinatorImpl::getReplicaSetConfig_forTest() {
 
 Date_t ReplicationCoordinatorImpl::getElectionTimeout_forTest() const {
     stdx::lock_guard<Latch> lk(_mutex);
-    if (!_handleElectionTimeoutCbh.isValid()) {
-        return Date_t();
-    }
-    return _handleElectionTimeoutWhen;
+    return _handleElectionTimeoutCallback.getNextCall();
 }
 
 Milliseconds ReplicationCoordinatorImpl::getRandomizedElectionOffset_forTest() {
@@ -828,6 +836,7 @@ void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
 
         const auto lastApplied = opTimeStatus.getValue();
         _setMyLastAppliedOpTimeAndWallTime(lock, lastApplied, false);
+        signalOplogWaiters();
 
         _topCoord->resetMaintenanceCount();
     }
@@ -1399,6 +1408,7 @@ void ReplicationCoordinatorImpl::setMyLastAppliedOpTimeAndWallTime(
     stdx::unique_lock<Latch> lock(_mutex);
     // The optime passed to this function is required to represent a consistent database state.
     _setMyLastAppliedOpTimeAndWallTime(lock, opTimeAndWallTime, false);
+    signalOplogWaiters();
     _reportUpstream_inlock(std::move(lock));
 }
 
@@ -1471,9 +1481,6 @@ void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
             return waitOpTime <= opTime;
         },
         opTime);
-
-    // Notify the oplog waiters after updating the local snapshot.
-    signalOplogWaiters();
 
     if (opTime.isNull()) {
         return;
@@ -1858,7 +1865,7 @@ Status ReplicationCoordinatorImpl::_setLastOptime(WithLock lk,
         _wakeReadyWaiters(lk, std::max(args.appliedOpTime, args.durableOpTime));
     }
 
-    _cancelAndRescheduleLivenessUpdate_inlock(args.memberId);
+    _rescheduleLivenessUpdate_inlock(args.memberId);
     return Status::OK();
 }
 

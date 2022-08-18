@@ -33,6 +33,7 @@
 
 #include "mongo/db/s/rename_collection_coordinator.h"
 
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database_holder.h"
@@ -40,6 +41,7 @@
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
+#include "mongo/db/s/recoverable_critical_section_service.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
@@ -175,6 +177,9 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 const auto& fromNss = nss();
                 const auto& toNss = _request.getTo();
 
+                const auto criticalSectionReason =
+                    sharding_ddl_util::getCriticalSectionReasonForRename(fromNss, toNss);
+
                 try {
                     uassert(ErrorCodes::InvalidOptions,
                             "Cannot provide an expected collection UUID when renaming between "
@@ -190,7 +195,8 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
 
                         uassert(ErrorCodes::IllegalOperation,
                                 "Cannot rename an encrypted collection",
-                                !coll || !coll->getCollectionOptions().encryptedFieldConfig);
+                                !coll || !coll->getCollectionOptions().encryptedFieldConfig ||
+                                    _doc.getAllowEncryptedCollectionRename().value_or(false));
                     }
 
                     // Make sure the source collection exists
@@ -209,6 +215,28 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         sharding_ddl_util::checkDbPrimariesOnTheSameShard(opCtx, fromNss, toNss);
                     }
 
+                    const auto optTargetCollType = getShardedCollection(opCtx, toNss);
+                    const bool targetIsSharded = (bool)optTargetCollType;
+                    _doc.setTargetIsSharded(targetIsSharded);
+                    _doc.setTargetUUID(getCollectionUUID(
+                        opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
+
+                    auto criticalSection = RecoverableCriticalSectionService::get(opCtx);
+                    if (!targetIsSharded) {
+                        // (SERVER-67325) Acquire critical section on the target collection in order
+                        // to disallow concurrent `createCollection`
+                        criticalSection->acquireRecoverableCriticalSectionBlockWrites(
+                            opCtx,
+                            toNss,
+                            criticalSectionReason,
+                            ShardingCatalogClient::kLocalWriteConcern);
+                        criticalSection->promoteRecoverableCriticalSectionToBlockAlsoReads(
+                            opCtx,
+                            toNss,
+                            criticalSectionReason,
+                            ShardingCatalogClient::kLocalWriteConcern);
+                    }
+
                     // Make sure the target namespace is not a view
                     {
                         uassert(ErrorCodes::CommandNotSupportedOnView,
@@ -217,10 +245,22 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                 !CollectionCatalog::get(opCtx)->lookupView(opCtx, toNss));
                     }
 
-                    const auto optTargetCollType = getShardedCollection(opCtx, toNss);
-                    _doc.setTargetIsSharded((bool)optTargetCollType);
-                    _doc.setTargetUUID(getCollectionUUID(
-                        opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
+                    const bool targetExists = [&]() {
+                        if (targetIsSharded) {
+                            return true;
+                        }
+                        auto collectionCatalog = CollectionCatalog::get(opCtx);
+                        auto targetColl =
+                            collectionCatalog->lookupCollectionByNamespace(opCtx, toNss);
+                        return (bool)targetColl;  // true if exists and is unsharded
+                    }();
+
+                    if (targetExists) {
+                        // Release the critical section because the target collection
+                        // already exists, hence no risk of concurrent `createCollection`
+                        criticalSection->releaseRecoverableCriticalSection(
+                            opCtx, toNss, criticalSectionReason, WriteConcerns::kLocalWriteConcern);
+                    }
 
                     sharding_ddl_util::checkRenamePreconditions(
                         opCtx, sourceIsSharded, toNss, _doc.getDropTarget());
@@ -231,10 +271,14 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                             opCtx, toNss, *coll, _doc.getExpectedTargetUUID());
                         uassert(ErrorCodes::IllegalOperation,
                                 "Cannot rename to an existing encrypted collection",
-                                !coll || !coll->getCollectionOptions().encryptedFieldConfig);
+                                !coll || !coll->getCollectionOptions().encryptedFieldConfig ||
+                                    _doc.getAllowEncryptedCollectionRename().value_or(false));
                     }
 
                 } catch (const DBException&) {
+                    auto criticalSection = RecoverableCriticalSectionService::get(opCtx);
+                    criticalSection->releaseRecoverableCriticalSection(
+                        opCtx, toNss, criticalSectionReason, WriteConcerns::kLocalWriteConcern);
                     _completeOnError = true;
                     throw;
                 }

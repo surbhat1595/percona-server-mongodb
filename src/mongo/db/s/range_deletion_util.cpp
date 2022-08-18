@@ -281,7 +281,9 @@ void markRangeDeletionTaskAsProcessing(OperationContext* opCtx, const UUID& migr
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
     auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
     static const auto update =
-        BSON("$set" << BSON(RangeDeletionTask::kProcessingFieldName << true));
+        BSON("$set" << BSON(RangeDeletionTask::kProcessingFieldName
+                            << true << RangeDeletionTask::kWhenToCleanFieldName
+                            << CleanWhen_serializer(CleanWhenEnum::kNow)));
 
     store.update(opCtx, query, update, WriteConcerns::kLocalWriteConcern);
 }
@@ -716,20 +718,5 @@ void clearOrphanCountersFromRangeDeletionTasks(OperationContext* opCtx) {
         // There may be no range deletion tasks, so it is possible no document is updated
     }
 }
-
-ScopedRangeDeleterLock::ScopedRangeDeleterLock(OperationContext* opCtx)
-    : _configLock(opCtx, NamespaceString::kConfigDb, MODE_IX),
-      _rangeDeletionLock(opCtx, NamespaceString::kRangeDeletionNamespace, MODE_X) {}
-
-// Take DB and Collection lock in mode IX as well as collection UUID lock to serialize with
-// operations that take the above version of the ScopedRangeDeleterLock such as FCV downgrade and
-// BalancerStatsRegistry initialization.
-ScopedRangeDeleterLock::ScopedRangeDeleterLock(OperationContext* opCtx, const UUID& collectionUuid)
-    : _configLock(opCtx, NamespaceString::kConfigDb, MODE_IX),
-      _rangeDeletionLock(opCtx, NamespaceString::kRangeDeletionNamespace, MODE_IX),
-      _collectionUuidLock(Lock::ResourceLock(
-          opCtx->lockState(),
-          ResourceId(RESOURCE_MUTEX, "RangeDeleterCollLock::" + collectionUuid.toString()),
-          MODE_X)) {}
 
 }  // namespace mongo

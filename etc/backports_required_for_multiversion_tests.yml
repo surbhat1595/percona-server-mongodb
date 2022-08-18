@@ -226,6 +226,20 @@ last-continuous:
       test_file: jstests/sharding/timeseries_multiple_mongos.js
     - ticket: SERVER-66379
       test_file: jstests/core/or_to_in.js
+    - ticket: SERVER-67800
+      test_file: jstests/core/clustered_collection_create_index_clustered.js
+    - ticket: SERVER-67800
+      test_file: jstests/core/clustered_collection_creation.js
+    - ticket: SERVER-63255
+      test_file: jstests/core/dbstats.js
+    - ticket: SERVER-67532
+      test_file: jstests/replsets/optime.js
+    - ticket: SERVER-66072
+      test_file: jstests/aggregation/match_no_swap_rand.js
+    - ticket: SERVER-63049
+      test_file: jstests/noPassthrough/operator_counters_accumulators.js
+    - ticket: SERVER-67492
+      test_file: jstests/sharding/move_chunk_interrupt_postimage.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -587,6 +601,18 @@ last-lts:
       test_file: jstests/sharding/timeseries_multiple_mongos.js
     - ticket: SERVER-66379
       test_file: jstests/core/or_to_in.js
+    - ticket: SERVER-67800
+      test_file: jstests/core/clustered_collection_create_index_clustered.js
+    - ticket: SERVER-67800
+      test_file: jstests/core/clustered_collection_creation.js
+    - ticket: SERVER-63255
+      test_file: jstests/core/dbstats.js
+    - ticket: SERVER-67532
+      test_file: jstests/replsets/optime.js
+    - ticket: SERVER-66072
+      test_file: jstests/aggregation/match_no_swap_rand.js
+    - ticket: SERVER-67492
+      test_file: jstests/sharding/move_chunk_interrupt_postimage.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

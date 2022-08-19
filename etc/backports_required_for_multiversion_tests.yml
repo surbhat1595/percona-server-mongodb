@@ -90,6 +90,20 @@ last-continuous:
       test_file: jstests/sharding/chunk_migration_with_schema_validation.js
     - ticket: SERVER-66379
       test_file: jstests/core/or_to_in.js
+    - ticket: SERVER-61894
+      test_file: jstests/change_streams/show_raw_update_description.js
+    - ticket: SERVER-61894
+      test_file: jstests/change_streams/show_raw_update_description_v1_oplog.js
+    - ticket: SERVER-63159
+      test_file: jstests/core/internal_apply_oplog_update.js
+    - ticket: SERVER-67532
+      test_file: jstests/replsets/optime.js
+    - ticket: SERVER-66072
+      test_file: jstests/aggregation/match_no_swap_rand.js
+    - ticket: SERVER-67492
+      test_file: jstests/sharding/move_chunk_interrupt_postimage.js
+    - ticket: SERVER-68628
+      test_file: jstests/sharding/resharding_temp_ns_routing_info_unsharded.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -340,6 +354,20 @@ last-lts:
       test_file: jstests/sharding/chunk_migration_with_schema_validation.js
     - ticket: SERVER-66379
       test_file: jstests/core/or_to_in.js
+    - ticket: SERVER-61894
+      test_file: jstests/change_streams/show_raw_update_description.js
+    - ticket: SERVER-61894
+      test_file: jstests/change_streams/show_raw_update_description_v1_oplog.js
+    - ticket: SERVER-63159
+      test_file: jstests/core/internal_apply_oplog_update.js
+    - ticket: SERVER-67532
+      test_file: jstests/replsets/optime.js
+    - ticket: SERVER-66072
+      test_file: jstests/aggregation/match_no_swap_rand.js
+    - ticket: SERVER-67492
+      test_file: jstests/sharding/move_chunk_interrupt_postimage.js
+    - ticket: SERVER-68628
+      test_file: jstests/sharding/resharding_temp_ns_routing_info_unsharded.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

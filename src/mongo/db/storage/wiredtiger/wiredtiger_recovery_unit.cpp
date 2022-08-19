@@ -422,27 +422,22 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
 
     int wtRet;
     if (commit) {
-        StringBuilder conf;
         if (!_commitTimestamp.isNull()) {
             // There is currently no scenario where it is intentional to commit before the current
             // read timestamp.
             invariant(_readAtTimestamp.isNull() || _commitTimestamp >= _readAtTimestamp);
 
             if (MONGO_likely(!doUntimestampedWritesForIdempotencyTests.shouldFail())) {
-                conf << "commit_timestamp=" << unsignedHex(_commitTimestamp.asULL()) << ",";
+                s->timestamp_transaction_uint(s, WT_TS_TXN_TYPE_COMMIT, _commitTimestamp.asULL());
             }
             _isTimestamped = true;
         }
 
         if (!_durableTimestamp.isNull()) {
-            conf << "durable_timestamp=" << unsignedHex(_durableTimestamp.asULL());
+            s->timestamp_transaction_uint(s, WT_TS_TXN_TYPE_DURABLE, _durableTimestamp.asULL());
         }
 
-        if (_mustBeTimestamped) {
-            invariant(_isTimestamped);
-        }
-
-        wtRet = s->commit_transaction(s, conf.str().c_str());
+        wtRet = s->commit_transaction(s, nullptr);
 
         LOGV2_DEBUG(
             22412, 3, "WT commit_transaction", "snapshotId"_attr = getSnapshotId().toNumber());
@@ -520,11 +515,16 @@ boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp(
             // The read timestamp is set by the user and does not require a transaction to be open.
             invariant(!_readAtTimestamp.isNull());
             return _readAtTimestamp;
-
+        case ReadSource::kLastApplied:
+            // The lastApplied timestamp is not always available if the system has not accepted
+            // writes, so it is not possible to invariant that it exists.
+            if (_readAtTimestamp.isNull()) {
+                return boost::none;
+            }
+            return _readAtTimestamp;
         // The following ReadSources can only establish a read timestamp when a transaction is
         // opened.
         case ReadSource::kNoOverlap:
-        case ReadSource::kLastApplied:
         case ReadSource::kAllDurableSnapshot:
         case ReadSource::kMajorityCommitted:
             break;
@@ -585,7 +585,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
             break;
         }
         case ReadSource::kLastApplied: {
-            _readAtTimestamp = _beginTransactionAtLastAppliedTimestamp(session);
+            _beginTransactionAtLastAppliedTimestamp(session);
             break;
         }
         case ReadSource::kNoOverlap: {
@@ -653,9 +653,8 @@ namespace {
 Mutex _lastAppliedTxnMutex = MONGO_MAKE_LATCH("lastAppliedTxnMutex");
 }  // namespace
 
-Timestamp WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION* session) {
-    auto lastApplied = _sessionCache->snapshotManager().getLastApplied();
-    if (!lastApplied) {
+void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION* session) {
+    if (_readAtTimestamp.isNull()) {
         // When there is not a lastApplied timestamp available, read without a timestamp. Do not
         // round up the read timestamp to the oldest timestamp.
 
@@ -669,7 +668,7 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SES
             session, _prepareConflictBehavior, _roundUpPreparedTimestamps);
         LOGV2_DEBUG(4847500, 2, "no read timestamp available for kLastApplied");
         txnOpen.done();
-        return Timestamp();
+        return;
     }
 
     {
@@ -678,14 +677,14 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SES
                                         _prepareConflictBehavior,
                                         _roundUpPreparedTimestamps,
                                         RoundUpReadTimestamp::kRound);
-        auto status = txnOpen.setReadSnapshot(*lastApplied);
+        auto status = txnOpen.setReadSnapshot(_readAtTimestamp);
         fassert(4847501, status);
         txnOpen.done();
     }
 
     // We might have rounded to oldest between calling getLastApplied and setReadSnapshot. We
     // need to get the actual read timestamp we used.
-    return _getTransactionReadTimestamp(session);
+    _readAtTimestamp = _getTransactionReadTimestamp(session);
 }
 
 Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSION* session) {
@@ -923,7 +922,16 @@ void WiredTigerRecoveryUnit::setTimestampReadSource(ReadSource readSource,
     invariant(!(provided && provided->isNull()));
 
     _timestampReadSource = readSource;
-    _readAtTimestamp = (provided) ? *provided : Timestamp();
+    if (readSource == kLastApplied) {
+        // The lastApplied timestamp is not always available if the system has not accepted writes.
+        if (auto lastApplied = _sessionCache->snapshotManager().getLastApplied()) {
+            _readAtTimestamp = *lastApplied;
+        } else {
+            _readAtTimestamp = Timestamp();
+        }
+    } else {
+        _readAtTimestamp = (provided) ? *provided : Timestamp();
+    }
 }
 
 RecoveryUnit::ReadSource WiredTigerRecoveryUnit::getTimestampReadSource() const {

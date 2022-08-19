@@ -1271,8 +1271,15 @@ __split_parent_climb(WT_SESSION_IMPL *session, WT_PAGE *page)
      * to a different part of the tree where it will be written; in other words, in one part of the
      * tree we'll skip the newly created insert split chunk, but we'll write it upon finding it in a
      * different part of the tree.
+     *
+     * Historically we allowed checkpoint itself to trigger an internal split here. That wasn't
+     * correct, since if that split climbs the tree above the immediate parent the checkpoint walk
+     * will potentially miss some internal pages. This is wrong as checkpoint needs to reconcile the
+     * entire internal tree structure. Non checkpoint cursor traversal doesn't care the internal
+     * tree structure as they just want to get the next leaf page correctly. Therefore, it is OK to
+     * split concurrently to cursor operations.
      */
-    if (!__wt_btree_can_evict_dirty(session)) {
+    if (WT_BTREE_SYNCING(S2BT(session))) {
         __split_internal_unlock(session, page);
         return (0);
     }
@@ -1357,7 +1364,7 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
     WT_PAGE *page;
     WT_PAGE_MODIFY *mod;
     WT_SAVE_UPD *supd;
-    WT_UPDATE *prev_onpage, *upd;
+    WT_UPDATE *prev_onpage, *upd, *tmp;
     uint64_t recno;
     uint32_t i, slot;
     bool prepare;
@@ -1440,19 +1447,39 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
         if (supd->onpage_upd != NULL && !F_ISSET(S2C(session), WT_CONN_IN_MEMORY) &&
           orig->type != WT_PAGE_COL_FIX) {
             /*
+             * If there is an on-page tombstone we need to remove it as well while performing update
+             * restore eviction.
+             */
+            tmp = supd->onpage_tombstone != NULL ? supd->onpage_tombstone : supd->onpage_upd;
+
+            /*
              * We have decided to restore this update chain so it must have newer updates than the
              * onpage value on it.
              */
-            WT_ASSERT(session, upd != supd->onpage_upd);
+            WT_ASSERT(session, upd != tmp);
+            WT_ASSERT(session, F_ISSET(tmp, WT_UPDATE_DS));
+
             /*
              * Move the pointer to the position before the onpage value and truncate all the updates
              * starting from the onpage value.
              */
-            for (prev_onpage = upd;
-                 prev_onpage->next != NULL && prev_onpage->next != supd->onpage_upd;
+            for (prev_onpage = upd; prev_onpage->next != NULL && prev_onpage->next != tmp;
                  prev_onpage = prev_onpage->next)
                 ;
-            WT_ASSERT(session, prev_onpage->next == supd->onpage_upd);
+            WT_ASSERT(session, prev_onpage->next == tmp);
+#ifdef HAVE_DIAGNOSTIC
+            /*
+             * During update restore eviction we remove anything older than the on-page update,
+             * including the on-page update. However it is possible a tombstone is also written as
+             * the stop time of the on-page value. To handle this we also need to remove the
+             * tombstone from the update chain.
+             *
+             * This assertion checks that there aren't any unexpected updates between that tombstone
+             * and the subsequent value which both make up the on-page value.
+             */
+            for (; tmp != NULL && tmp != supd->onpage_upd; tmp = tmp->next)
+                WT_ASSERT(session, tmp == supd->onpage_tombstone || tmp->txnid == WT_TXN_ABORTED);
+#endif
             prev_onpage->next = NULL;
         }
 
@@ -1535,6 +1562,7 @@ static void
 __split_multi_inmem_final(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi)
 {
     WT_SAVE_UPD *supd;
+    WT_UPDATE **tmp;
     uint32_t i, slot;
 
     /* If we have saved updates, we must have decided to restore them to the new page. */
@@ -1558,10 +1586,18 @@ __split_multi_inmem_final(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *mul
         } else
             supd->ins->upd = NULL;
 
-        /* Free the updates written to the data store and the history store. */
+        /*
+         * Free the updates written to the data store and the history store when there exists an
+         * onpage value. It is possible that there can be an onpage tombstone without an onpage
+         * value when the tombstone is globally visible. Do not free them here as it is possible
+         * that the globally visible tombstone is already freed as part of update obsolete check.
+         */
         if (supd->onpage_upd != NULL && !F_ISSET(S2C(session), WT_CONN_IN_MEMORY) &&
-          orig->type != WT_PAGE_COL_FIX)
-            __wt_free_update_list(session, &supd->onpage_upd);
+          orig->type != WT_PAGE_COL_FIX) {
+            tmp = supd->onpage_tombstone != NULL ? &supd->onpage_tombstone : &supd->onpage_upd;
+            __wt_free_update_list(session, tmp);
+            supd->onpage_tombstone = supd->onpage_upd = NULL;
+        }
     }
 }
 
@@ -1574,7 +1610,7 @@ static void
 __split_multi_inmem_fail(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT_REF *ref)
 {
     WT_SAVE_UPD *supd;
-    WT_UPDATE *upd;
+    WT_UPDATE *upd, *tmp;
     uint32_t i, slot;
 
     if (!F_ISSET(S2C(session), WT_CONN_IN_MEMORY) && orig->type != WT_PAGE_COL_FIX)
@@ -1595,11 +1631,11 @@ __split_multi_inmem_fail(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *mult
                 upd = supd->ins->upd;
 
             WT_ASSERT(session, upd != NULL);
-
-            for (; upd->next != NULL && upd->next != supd->onpage_upd; upd = upd->next)
+            tmp = supd->onpage_tombstone != NULL ? supd->onpage_tombstone : supd->onpage_upd;
+            for (; upd->next != NULL && upd->next != tmp; upd = upd->next)
                 ;
             if (upd->next == NULL)
-                upd->next = supd->onpage_upd;
+                upd->next = tmp;
         }
 
     /*

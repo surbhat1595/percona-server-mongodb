@@ -755,9 +755,12 @@ void IndexBuildsCoordinator::applyCommitIndexBuild(OperationContext* opCtx,
             !opCtx->recoveryUnit()->getCommitTimestamp().isNull());
 
     // There is a possibility that we cannot find an active index build with the given build UUID.
-    // This can be the case when the index already exists or was dropped on the sync source before
-    // the collection was cloned during initial sync. The oplog code will ignore the NoSuchKey
-    // error code.
+    // This can be the case when:
+    //   - The index already exists during initial sync.
+    //   - The index was dropped on the sync source before the collection was cloned during initial
+    //   sync.
+    //   - A node is restarted with unfinished index builds and --recoverFromOplogAsStandalone.
+    // The oplog code will ignore the NoSuchKey error code.
     //
     // Case 1: Index already exists:
     // +-----------------------------------------+--------------------------------+
@@ -789,7 +792,42 @@ void IndexBuildsCoordinator::applyCommitIndexBuild(OperationContext* opCtx,
     // | Apply commitIndexBuild 'x'.    |                                |
     // | --- Index build not found ---  |                                |
     // +--------------------------------+--------------------------------+
-    auto replState = uassertStatusOK(_getIndexBuild(buildUUID));
+    //
+    // Case 3: Node has unfinished index builds that are not restarted:
+    // +--------------------------------+-------------------------------------------------+
+    // |         Before Shutdown        |        After restart in standalone with         |
+    // |                                |         --recoverFromOplogAsStandalone          |
+    // +--------------------------------+-------------------------------------------------+
+    // | startIndexBuild 'x' at TS: 1.  | Recovery at TS: 1.                              |
+    // |                                | - Unfinished index build is not restarted.      |
+    // | ***** Checkpoint taken *****   |                                                 |
+    // |                                | Oplog replay operations starting with TS: 2.    |
+    // | commitIndexBuild 'x' at TS: 2. | Apply commitIndexBuild 'x' oplog entry at TS: 2.|
+    // |                                |                                                 |
+    // |                                | ------------ Index build not found ------------ |
+    // +--------------------------------+-------------------------------------------------+
+
+    auto swReplState = _getIndexBuild(buildUUID);
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+
+    // Index builds are not restarted in standalone mode. If the node is started with
+    // recoverFromOplogAsStandalone and when replaying the commitIndexBuild oplog entry for a paused
+    // index, there is no active index build thread to commit.
+    if (!swReplState.isOK() && replCoord->getSettings().shouldRecoverFromOplogAsStandalone()) {
+        // Restart the 'paused' index build in the background.
+        IndexBuilds buildsToRestart;
+        IndexBuildDetails details{collUUID};
+        for (auto spec : oplogEntry.indexSpecs) {
+            details.indexSpecs.emplace_back(spec.getOwned());
+        }
+        buildsToRestart.insert({buildUUID, details});
+
+        restartIndexBuildsForRecovery(opCtx, buildsToRestart);
+
+        // Get the builder.
+        swReplState = _getIndexBuild(buildUUID);
+    }
+    auto replState = uassertStatusOK(swReplState);
 
     // Retry until we are able to put the index build in the kPrepareCommit state. None of the
     // conditions for retrying are common or expected to be long-lived, so we believe this to be
@@ -1756,6 +1794,16 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
         indexCatalogStats.numIndexesAfter = numIndexes;
         return SharedSemiFuture(indexCatalogStats);
     }
+
+    // Ensure we can support two phase index builds when the two phase IndexBuildProtocol is
+    // specified. 'protocol' is evaluated outside of a global lock in an earlier call so there is a
+    // potential race when downgrading to a FCV version which invalidates the protocol (i.e.,
+    // downgrading from a version >= 4.4 to a version <= 4.2).
+    uassert(ErrorCodes::CannotCreateIndex,
+            "Two phase index build protocol was specified but we only support single phase index "
+            "builds.",
+            protocol != IndexBuildProtocol::kTwoPhase ||
+                IndexBuildsCoordinator::supportsTwoPhaseIndexBuild());
 
     // Bypass the thread pool if we are building indexes on an empty collection.
     if (shouldBuildIndexesOnEmptyCollectionSinglePhased(opCtx, collection, protocol)) {

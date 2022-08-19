@@ -209,6 +209,14 @@ all:
     test_file: jstests/replsets/dbhash_lock_acquisition.js
   - ticket: SERVER-62272
     test_file: jstests/sharding/chunk_migration_with_schema_validation.js
+  - ticket: SERVER-61894
+    test_file: jstests/change_streams/show_raw_update_description_v1_oplog.js
+  - ticket: SERVER-63159
+    test_file: jstests/change_streams/show_raw_update_description_v1_oplog.js
+  - ticket: SERVER-63159
+    test_file: jstests/core/internal_apply_oplog_update.js
+  - ticket: SERVER-67532
+    test_file: jstests/replsets/optime.js
 
 
 suites:
@@ -234,6 +242,8 @@ suites:
     test_file: jstests/replsets/read_concern_uninitated_set.js
   - ticket: SERVER-47568
     test_file: jstests/replsets/disable_cluster_time_gossiping_in_unreadable_state.js
+  - ticket: SERVER-67302
+    test_file: jstests/replsets/reads_during_catchup.js
 
   concurrency_sharded_replication_multiversion:
 

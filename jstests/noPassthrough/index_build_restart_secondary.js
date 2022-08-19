@@ -1,58 +1,49 @@
 /**
- * Starts a replica set with arbiter, builds an index in background.
- * Kills the secondary once the index build starts with a failpoint.
- * The index build should resume when the secondary is restarted.
+ * Tests restarting a secondary once an index build starts. The index build should complete when the
+ * node starts back up.
  *
  * @tags: [
- *   requires_persistence,
  *   requires_journaling,
+ *   requires_persistence,
  *   requires_replication,
  * ]
  */
-
 (function() {
 'use strict';
 
 load('jstests/noPassthrough/libs/index_build.js');
 
-// Set up replica set
 const replTest = new ReplSetTest({
     nodes: [
         {},
         {
-            // Disallow elections on secondary.
+            // Disallow elections on the secondary.
             rsConfig: {
                 priority: 0,
                 votes: 0,
             },
-            slowms: 30000,  // Don't log slow operations on secondary. See SERVER-44821.
+            slowms: 30000,  // Don't log slow operations on the secondary. See SERVER-44821.
         },
     ]
 });
 
-// We need an arbiter to ensure that the primary doesn't step down
-// when we restart the secondary.
-const nodes = replTest.startSet();
+replTest.startSet();
 replTest.initiate();
 
-var primary = replTest.getPrimary();
-var second = replTest.getSecondary();
+const primary = replTest.getPrimary();
+const secondary = replTest.getSecondary();
 
-var primaryDB = primary.getDB('bgIndexSec');
-var secondDB = second.getDB('bgIndexSec');
+const primaryDB = primary.getDB('test');
+const secondaryDB = secondary.getDB('test');
 
-var collectionName = 'jstests_bgsec';
+const collectionName = jsTestName();
+const coll = primaryDB.getCollection(collectionName);
 
-var coll = primaryDB.getCollection(collectionName);
-
-var size = 100;
-
-var bulk = primaryDB.jstests_bgsec.initializeUnorderedBulkOp();
-for (var i = 0; i < size; ++i) {
+const bulk = coll.initializeUnorderedBulkOp();
+for (let i = 0; i < 100; ++i) {
     bulk.insert({i: i, x: i, y: i});
 }
 assert.commandWorked(bulk.execute({j: true}));
-assert.eq(size, coll.count(), 'unexpected number of documents after bulk insert.');
 
 // Make sure the documents make it to the secondary.
 replTest.awaitReplication();
@@ -66,9 +57,11 @@ if (IndexBuildTest.supportsTwoPhaseIndexBuild(primary)) {
 
     // Wait for build to start on the secondary.
     jsTestLog("waiting for all index builds to start on secondary");
-    IndexBuildTest.waitForIndexBuildToStart(secondDB, coll.getName(), "y_1");
+    IndexBuildTest.waitForIndexBuildToStart(secondaryDB, coll.getName(), "i_1");
+    IndexBuildTest.waitForIndexBuildToStart(secondaryDB, coll.getName(), "x_1");
+    IndexBuildTest.waitForIndexBuildToStart(secondaryDB, coll.getName(), "y_1");
 } else {
-    assert.commandWorked(secondDB.adminCommand(
+    assert.commandWorked(secondaryDB.adminCommand(
         {configureFailPoint: 'leaveIndexBuildUnfinishedForShutdown', mode: 'alwaysOn'}));
 
     try {
@@ -85,18 +78,18 @@ if (IndexBuildTest.supportsTwoPhaseIndexBuild(primary)) {
         // applied the oplog entry so it isn't replayed. If (A) is present without (B), then there
         // are two ways that the index can be rebuilt on startup and this test is only for the one
         // triggered by (A).
-        secondDB.adminCommand({fsync: 1});
+        secondaryDB.adminCommand({fsync: 1});
     } finally {
-        assert.commandWorked(secondDB.adminCommand(
+        assert.commandWorked(secondaryDB.adminCommand(
             {configureFailPoint: 'leaveIndexBuildUnfinishedForShutdown', mode: 'off'}));
     }
 }
 
-MongoRunner.stopMongod(second);
+MongoRunner.stopMongod(secondary);
 
 if (IndexBuildTest.supportsTwoPhaseIndexBuild(primary)) {
     replTest.start(
-        second,
+        secondary,
         {
             setParameter:
                 {"failpoint.hangAfterSettingUpIndexBuildUnlocked": tojson({mode: "alwaysOn"})}
@@ -104,7 +97,7 @@ if (IndexBuildTest.supportsTwoPhaseIndexBuild(primary)) {
         /*restart=*/true,
         /*wait=*/true);
 } else {
-    replTest.start(second,
+    replTest.start(secondary,
                    {},
                    /*restart=*/true,
                    /*wait=*/true);
@@ -114,7 +107,7 @@ if (IndexBuildTest.supportsTwoPhaseIndexBuild(primary)) {
 try {
     assert.soon(function() {
         try {
-            secondDB.isMaster();  // trigger a reconnect if needed
+            secondaryDB.isMaster();  // trigger a reconnect if needed
             return true;
         } catch (e) {
             return false;
@@ -123,18 +116,18 @@ try {
 
     if (IndexBuildTest.supportsTwoPhaseIndexBuild(primary)) {
         // Verify that we do not wait for the index build to complete on startup.
-        assert.eq(size, secondDB.getCollection(collectionName).find({}).itcount());
+        assert.eq(100, secondaryDB.getCollection(collectionName).find({}).itcount());
 
         // Verify that only the _id index is ready.
-        checkLog.containsJson(second, 4585201);
-        IndexBuildTest.assertIndexes(secondDB.getCollection(collectionName),
+        checkLog.containsJson(secondary, 4585201);
+        IndexBuildTest.assertIndexes(secondaryDB.getCollection(collectionName),
                                      4,
                                      ["_id_"],
                                      ["i_1", "x_1", "y_1"],
                                      {includeBuildUUIDS: true});
     }
 } finally {
-    assert.commandWorked(second.adminCommand(
+    assert.commandWorked(secondary.adminCommand(
         {configureFailPoint: 'hangAfterSettingUpIndexBuildUnlocked', mode: 'off'}));
 
     // Let index build complete on primary, which replicates a commitIndexBuild to the secondary.
@@ -142,7 +135,7 @@ try {
 }
 
 assert.soonNoExcept(function() {
-    return 4 == secondDB.getCollection(collectionName).getIndexes().length;
+    return 4 == secondaryDB.getCollection(collectionName).getIndexes().length;
 }, "Index build not resumed after restart", 30000, 50);
 replTest.stopSet();
 }());

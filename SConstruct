@@ -30,6 +30,7 @@ import mongo.platform as mongo_platform
 import mongo.toolchain as mongo_toolchain
 import mongo.generators as mongo_generators
 import mongo.install_actions as install_actions
+from mongo.build_profiles import BUILD_PROFILES
 
 EnsurePythonVersion(3, 6)
 EnsureSConsVersion(3, 1, 1)
@@ -105,9 +106,23 @@ SetOption('random', 1)
 #   using the nargs='const' mechanism.
 #
 
-add_option('ninja',
+add_option(
+    'build-profile',
+    choices=list(BUILD_PROFILES.keys()),
+    default='default',
+    type='choice',
+    help='''Short hand for common build options. These profiles are well supported by SDP and are 
+    kept up to date. Unless you need something specific, it is recommended that you only build with 
+    these. san is the recommeneded profile since it exposes bugs before they are found in patch 
+    builds. Check out site_scons/mongo/build_profiles.py to see each profile.''',
+)
+
+build_profile = BUILD_PROFILES[get_option('build-profile')]
+
+add_option(
+    'ninja',
     choices=['enabled', 'disabled'],
-    default='disabled',
+    default=build_profile.ninja,
     nargs='?',
     const='enabled',
     type='choice',
@@ -273,7 +288,7 @@ add_option('safeshell',
 add_option('dbg',
     choices=['on', 'off'],
     const='on',
-    default='off',
+    default=build_profile.dbg,
     help='Enable runtime debugging checks',
     nargs='?',
     type='choice',
@@ -308,6 +323,7 @@ add_option('opt',
 add_option('sanitize',
     help='enable selected sanitizers',
     metavar='san1,san2,...sanN',
+    default=build_profile.sanitize,
 )
 
 add_option('sanitize-coverage',
@@ -322,7 +338,7 @@ add_option('durableDefaultOn',
 
 add_option('allocator',
     choices=["auto", "system", "tcmalloc", "tcmalloc-experimental"],
-    default="auto",
+    default=build_profile.allocator,
     help='allocator to use (use "auto" for best choice for current platform)',
     type='choice',
 )
@@ -485,8 +501,9 @@ def find_mongo_custom_variables():
             files.append(probe)
     return files
 
-add_option('variables-files',
-    default=[],
+add_option(
+    'variables-files',
+    default=build_profile.variables_files,
     action="append",
     help="Specify variables files to load.",
 )
@@ -494,7 +511,7 @@ add_option('variables-files',
 link_model_choices = ['auto', 'object', 'static', 'dynamic', 'dynamic-strict', 'dynamic-sdk']
 add_option('link-model',
     choices=link_model_choices,
-    default='auto',
+    default=build_profile.link_model,
     help='Select the linking model for the project',
     type='choice'
 )
@@ -731,8 +748,11 @@ env_vars.Add('ARFLAGS',
     help='Sets flags for the archiver',
     converter=variable_shlex_converter)
 
-env_vars.Add('CCACHE',
-    help='Tell SCons where the ccache binary is')
+env_vars.Add(
+    'CCACHE',
+    help='Tells SCons where the ccache binary is',
+    default=build_profile.CCACHE,
+)
 
 env_vars.Add(
     'CACHE_SIZE',
@@ -820,8 +840,11 @@ env_vars.Add('HOST_ARCH',
     converter=variable_arch_converter,
     default=None)
 
-env_vars.Add('ICECC',
-    help='Tell SCons where icecream icecc tool is')
+env_vars.Add(
+    'ICECC',
+    help='Tells SCons where icecream icecc tool is',
+    default=build_profile.ICECC,
+)
 
 env_vars.Add('ICERUN',
     help='Tell SCons where icecream icerun tool is')
@@ -911,8 +934,15 @@ env_vars.Add('MSVC_VERSION',
     help='Sets the version of Visual C++ to use (e.g. 14.1 for VS2017, 14.2 for VS2019)',
     default="14.2")
 
-env_vars.Add('NINJA_PREFIX',
-    default="build",
+env_vars.Add(
+    'NINJA_BUILDDIR',
+    help="Location for shared Ninja state",
+    default="$BUILD_DIR/ninja",
+)
+
+env_vars.Add(
+    'NINJA_PREFIX',
+    default=build_profile.NINJA_PREFIX,
     help="""A prefix to add to the beginning of generated ninja
 files. Useful for when compiling multiple build ninja files for
 different configurations, for instance:
@@ -925,7 +955,7 @@ Will generate the files (respectively):
     asan.ninja
     tsan.ninja
 
-Defaults to build, best used with the generate-ninja alias so you don't have to
+Defaults to build. Best used with the --ninja flag so you don't have to
 reiterate the prefix in the target name and variable.
 """)
 
@@ -1009,7 +1039,7 @@ env_vars.Add('TOOLS',
 
 env_vars.Add('VARIANT_DIR',
     help='Sets the name (or generator function) for the variant directory',
-    default=mongo_generators.default_variant_dir_generator,
+    default=build_profile.VARIANT_DIR,
 )
 
 env_vars.Add('VERBOSE',
@@ -2260,13 +2290,25 @@ if get_option("system-boost-lib-search-suffixes") is not None:
 # discover modules, and load the (python) module for each module's build.py
 mongo_modules = moduleconfig.discover_modules('src/mongo/db/modules', get_option('modules'))
 
-if get_option('ninja') != 'disabled':
-    for module in mongo_modules:
-        if hasattr(module, 'NinjaFile'):
-            env.FatalError(textwrap.dedent("""\
-                ERROR: Ninja tool option '--ninja' should not be used with the ninja module.
-                    Remove the ninja module directory or use '--modules= ' to select no modules.
-                    If using enterprise module, explicitly set '--modules=<name-of-enterprise-module>' to exclude the ninja module."""))
+has_ninja_module = False
+for module in mongo_modules:
+    if hasattr(module, 'NinjaFile'):
+        has_ninja_module = True
+        break
+
+if get_option('ninja') != 'disabled' and has_ninja_module:
+    env.FatalError(
+        textwrap.dedent("""\
+        ERROR: Ninja tool option '--ninja' should not be used with the ninja module.
+            Using both options simultaneously may clobber build.ninja files.
+            Remove the ninja module directory or use '--modules= ' to select no modules.
+            If using enterprise module, explicitly set '--modules=<name-of-enterprise-module>' to exclude the ninja module."""
+                        ))
+
+if has_ninja_module:
+    print(
+        "WARNING: You are attempting to use the unsupported/legacy ninja module, instead of the integrated ninja generator. You are strongly encouraged to remove the ninja module from your module list and invoke scons with --ninja generate-ninja"
+    )
 
 # --- check system ---
 ssl_provider = None

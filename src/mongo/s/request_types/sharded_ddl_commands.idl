@@ -126,6 +126,15 @@ structs:
                 type: object_owned
                 description: "The collation to use for the shard key index."
                 optional: true
+            implicitlyCreateIndex:
+                description: "Creates an index on the shard key pattern if the collection is empty."
+                type: optionalBool
+            enforceUniquenessCheck:
+                description: >-
+                    Controls whether this command verifies that any unique indexes are prefixed by
+                    the shard key pattern if unique is true. If true then it will verify and if
+                    false then it won't.
+                type: optionalBool
 
     CreateCollectionResponse:
         description: "Response of the create collection command"
@@ -298,6 +307,12 @@ commands:
                 type: KeyPattern
                 description: "The index specification document to use as the new shard key."
                 optional: false
+            enforceUniquenessCheck:
+                description: >-
+                    Controls whether this command verifies that any unique indexes are prefixed by
+                    the shard key pattern if unique is true. If true then it will verify and if
+                    false then it won't.
+                type: optionalBool
 
     _configsvrCreateDatabase:
         description: "The internal createDatabase command on the config server"

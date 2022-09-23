@@ -982,7 +982,6 @@ void WiredTigerKVEngine::cleanShutdown() {
     LOGV2(22317, "WiredTigerKVEngine shutting down");
     // Ensure that key db is destroyed on exit
     ON_BLOCK_EXIT([&] { _encryptionKeyDB.reset(nullptr); });
-    WiredTigerUtil::resetTableLoggingInfo();
 
     if (!_conn) {
         return;

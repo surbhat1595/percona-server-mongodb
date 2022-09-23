@@ -679,13 +679,27 @@ void CreateCollectionCoordinator::_createCollectionAndIndexes(OperationContext* 
         }
     }
 
-    const auto indexCreated = shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
-        opCtx,
-        nss(),
-        *_shardKeyPattern,
-        _collationBSON,
-        _request.getUnique().value_or(false),
-        shardkeyutil::ValidationBehaviorsShardCollection(opCtx));
+    auto indexCreated = false;
+    if (_doc.getImplicitlyCreateIndex().value_or(true)) {
+        indexCreated = shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
+            opCtx,
+            nss(),
+            *_shardKeyPattern,
+            _collationBSON,
+            _doc.getUnique().value_or(false),
+            _doc.getEnforceUniquenessCheck().value_or(true),
+            shardkeyutil::ValidationBehaviorsShardCollection(opCtx));
+    } else {
+        uassert(6373200,
+                "Must have an index compatible with the proposed shard key",
+                validShardKeyIndexExists(opCtx,
+                                         nss(),
+                                         *_shardKeyPattern,
+                                         _collationBSON,
+                                         _doc.getUnique().value_or(false) &&
+                                             _doc.getEnforceUniquenessCheck().value_or(true),
+                                         shardkeyutil::ValidationBehaviorsShardCollection(opCtx)));
+    }
 
     auto replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());
 

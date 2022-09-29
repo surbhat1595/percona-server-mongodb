@@ -283,6 +283,11 @@ var ReshardingTest = class {
         return sourceCollection;
     }
 
+    get tempNs() {
+        assert.neq(undefined, this._tempNs, "createShardedCollection must be called first");
+        return this._tempNs;
+    }
+
     /**
      * Reshards an existing collection using the specified new shard key and new chunk ranges.
      *
@@ -324,8 +329,10 @@ var ReshardingTest = class {
                 configureFailPoint(configServer, "reshardingPauseCoordinatorBeforeBlockingWrites"));
             this._pauseCoordinatorBeforeDecisionPersistedFailpoints.push(configureFailPoint(
                 configServer, "reshardingPauseCoordinatorBeforeDecisionPersisted"));
-            this._pauseCoordinatorBeforeCompletionFailpoints.push(configureFailPoint(
-                configServer, "reshardingPauseCoordinatorBeforeCompletion", {}, {times: 1}));
+            this._pauseCoordinatorBeforeCompletionFailpoints.push(
+                configureFailPoint(configServer,
+                                   "reshardingPauseCoordinatorBeforeCompletion",
+                                   {"sourceNamespace": this._ns}));
         });
 
         this._commandDoneSignal = new CountDownLatch(1);
@@ -620,7 +627,11 @@ var ReshardingTest = class {
 
     /** @private */
     _checkConsistency() {
-        const nsCursor = this._st.s.getCollection(this._ns).find().sort({_id: 1});
+        // The "available" read concern level won't block this find cmd behind the critical section.
+        // Tests for resharding are not expected to have unowned documents in the collection being
+        // resharded.
+        const nsCursor =
+            this._st.s.getCollection(this._ns).find().readConcern("available").sort({_id: 1});
         const tempNsCursor = this._st.s.getCollection(this._tempNs).find().sort({_id: 1});
 
         const diff = ((diff) => {

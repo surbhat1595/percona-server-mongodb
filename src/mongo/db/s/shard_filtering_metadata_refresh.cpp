@@ -62,6 +62,10 @@ void onDbVersionMismatch(OperationContext* opCtx,
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
+    tassert(ErrorCodes::IllegalOperation,
+            "Can't check version of {} database"_format(dbName),
+            dbName != NamespaceString::kAdminDb && dbName != NamespaceString::kConfigDb);
+
     {
         // Take the DBLock directly rather than using AutoGetDb, to prevent a recursive call into
         // checkDbVersion().
@@ -115,8 +119,7 @@ bool joinShardVersionOperation(OperationContext* opCtx,
             try {
                 inRecoverOrRefresh->get(opCtx);
             } catch (const ExceptionFor<ErrorCodes::ShardVersionRefreshCanceled>&) {
-                // The ongoing refresh has finished, although it was canceled by a
-                // 'clearFilteringMetadata'.
+                // The ongoing refresh has finished, although it was interrupted.
             }
         }
 
@@ -223,7 +226,8 @@ SharedSemiFuture<void> recoverRefreshShardVersion(ServiceContext* serviceContext
             if (cancellationToken.isCanceled() &&
                 (status.isOK() || status == ErrorCodes::Interrupted)) {
                 uasserted(ErrorCodes::ShardVersionRefreshCanceled,
-                          "Shard version refresh canceled by a 'clearFilteringMetadata'");
+                          "Shard version refresh canceled by an interruption, probably due to a "
+                          "'clearFilteringMetadata'");
             }
             return status;
         })

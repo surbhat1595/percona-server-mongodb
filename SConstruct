@@ -855,16 +855,11 @@ env_vars.Add('CXXFLAGS',
     help='Sets flags for the C++ compiler',
     converter=variable_shlex_converter)
 
-default_destdir = '$BUILD_ROOT/install'
-if get_option('ninja') != 'disabled':
-    # Workaround for SERVER-53952 where issues wih different
-    # ninja files building to the same install dir. Different
-    # ninja files need to build to different install dirs.
-    default_destdir = '$BUILD_DIR/install'
-
-env_vars.Add('DESTDIR',
+env_vars.Add(
+    'DESTDIR',
     help='Where builds will install files',
-    default=default_destdir)
+    default='$BUILD_ROOT/install',
+)
 
 env_vars.Add('DSYMUTIL',
     help='Path to the dsymutil utility',
@@ -996,7 +991,7 @@ env_vars.Add('MSVC_VERSION',
 
 env_vars.Add('NINJA_BUILDDIR',
     help="Location for shared Ninja state",
-    default="$BUILD_DIR/ninja",
+    default="$BUILD_ROOT/ninja",
 )
 
 env_vars.Add(
@@ -2121,6 +2116,15 @@ for suboption in get_option('experimental-runtime-hardening'):
         selected_experimental_runtime_hardenings.discard(suboption[1:])
     elif suboption.startswith('+'):
         selected_experimental_runtime_hardenings.add(suboption[1:])
+
+# Disable floating-point contractions such as forming of fused multiply-add operations.
+if env.ToolchainIs('clang', 'gcc'):
+    env.Append(CCFLAGS=["-ffp-contract=off"])
+else:
+    # msvc defaults to /fp:precise. Visual Studio 2022 does not emit floating-point contractions
+    # with /fp:precise, but previous versions can. Disable contractions altogether by using
+    # /fp:strict.
+    env.Append(CCFLAGS=["/fp:strict"])
 
 if env.TargetOSIs('linux'):
     env.Append( LIBS=["m"] )

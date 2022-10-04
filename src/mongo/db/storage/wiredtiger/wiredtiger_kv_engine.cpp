@@ -1164,10 +1164,7 @@ void WiredTigerKVEngine::cleanShutdown() {
     LOGV2(22317, "WiredTigerKVEngine shutting down");
     // Ensure that key db is destroyed on exit
     ON_BLOCK_EXIT([&] { _encryptionKeyDB.reset(nullptr); });
-    WiredTigerUtil::resetTableLoggingInfo();
 
-    if (!_readOnly)
-        syncSizeInfo(true);
     if (!_conn) {
         return;
     }
@@ -1190,8 +1187,17 @@ void WiredTigerKVEngine::cleanShutdown() {
                        "stableTimestamp_load"_attr = _stableTimestamp.load(),
                        "initialDataTimestamp_load"_attr = _initialDataTimestamp.load());
 
-    _sizeStorer.reset();
     _sessionCache->shuttingDown();
+
+    if (!_readOnly) {
+        syncSizeInfo(/*syncToDisk=*/true);
+    }
+
+    // The size storer has to be destructed after the session cache has shut down. This sets the
+    // shutdown flag internally in the session cache. As operations get interrupted during shutdown,
+    // they release their session back to the session cache. If the shutdown flag has been set,
+    // released sessions will skip flushing the size storer.
+    _sizeStorer.reset();
 
     // We want WiredTiger to leak memory for faster shutdown except when we are running tools to
     // look for memory leaks.

@@ -313,8 +313,9 @@ add_option('spider-monkey-dbg',
 )
 
 add_option('opt',
-    choices=['on', 'size', 'off'],
+    choices=['on', 'size', 'off', 'auto'],
     const='on',
+    default=build_profile.opt,
     help='Enable compile-time optimization',
     nargs='?',
     type='choice',
@@ -1128,6 +1129,8 @@ dbg_opt_mapping = {
     ( "off", "off" ) : ( False, False ),
     ( "on",  "size"  ) : ( True,  True ),
     ( "off", "size"  ) : ( False, True ),
+    ( "on",  "auto"  ) : ( True,  False ),
+    ( "off", "auto"  ) : ( False, True ),
 }
 debugBuild, optBuild = dbg_opt_mapping[(get_option('dbg'), get_option('opt'))]
 optBuildForSize = True if optBuild and get_option('opt') == "size" else False
@@ -1855,6 +1858,15 @@ if debugBuild:
     env.SetConfigHeaderDefine("MONGO_CONFIG_DEBUG_BUILD")
 else:
     env.AppendUnique( CPPDEFINES=[ 'NDEBUG' ] )
+
+# Disable floating-point contractions such as forming of fused multiply-add operations.
+if env.ToolchainIs('clang', 'gcc'):
+    env.Append(CCFLAGS=["-ffp-contract=off"])
+else:
+    # msvc defaults to /fp:precise. Visual Studio 2022 does not emit floating-point contractions
+    # with /fp:precise, but previous versions can. Disable contractions altogether by using
+    # /fp:strict.
+    env.Append(CCFLAGS=["/fp:strict"])
 
 if env.TargetOSIs('linux'):
     env.Append( LIBS=["m"] )

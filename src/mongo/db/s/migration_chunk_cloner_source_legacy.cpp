@@ -55,6 +55,7 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/balancer_configuration.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/elapsed_tracker.h"
@@ -1109,6 +1110,11 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
         }
         iteration++;
 
+        const auto sessionCatalogSourceInCatchupPhase = _sessionCatalogSource->inCatchupPhase();
+        const auto estimateUntransferredSessionsSize = sessionCatalogSourceInCatchupPhase
+            ? _sessionCatalogSource->untransferredCatchUpDataSize()
+            : std::numeric_limits<int64_t>::max();
+
         stdx::lock_guard<Latch> sl(_mutex);
 
         const std::size_t cloneLocsRemaining = _cloneLocs.size();
@@ -1131,7 +1137,8 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
                   "docsRemainingToClone"_attr = cloneLocsRemaining);
         }
 
-        if (res["state"].String() == "steady") {
+        if (res["state"].String() == "steady" && sessionCatalogSourceInCatchupPhase &&
+            estimateUntransferredSessionsSize == 0) {
             if (cloneLocsRemaining != 0 ||
                 (_jumboChunkCloneState && _forceJumbo &&
                  PlanExecutor::IS_EOF != _jumboChunkCloneState->clonerState)) {
@@ -1156,14 +1163,18 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
             supportsCriticalSectionDuringCatchUp = true;
         }
 
-        if (res["state"].String() == "catchup" && supportsCriticalSectionDuringCatchUp) {
+        if ((res["state"].String() == "steady" || res["state"].String() == "catchup") &&
+            sessionCatalogSourceInCatchupPhase && supportsCriticalSectionDuringCatchUp) {
             int64_t estimatedUntransferredModsSize =
                 _untransferredDeletesCounter * _averageObjectIdSize +
                 _untransferredUpsertsCounter * _averageObjectSizeForCloneLocs;
             auto estimatedUntransferredChunkPercentage =
                 (std::min(_args.getMaxChunkSizeBytes(), estimatedUntransferredModsSize) * 100) /
                 _args.getMaxChunkSizeBytes();
-            if (estimatedUntransferredChunkPercentage < maxCatchUpPercentageBeforeBlockingWrites) {
+            int64_t maxUntransferredSessionsSize = BSONObjMaxUserSize *
+                _args.getMaxChunkSizeBytes() / ChunkSizeSettingsType::kDefaultMaxChunkSizeBytes;
+            if (estimatedUntransferredChunkPercentage < maxCatchUpPercentageBeforeBlockingWrites &&
+                estimateUntransferredSessionsSize < maxUntransferredSessionsSize) {
                 // The recipient is sufficiently caught-up with the writes on the donor.
                 // Block writes, so that it can drain everything.
                 LOGV2_DEBUG(5630700,
@@ -1173,6 +1184,8 @@ Status MigrationChunkClonerSourceLegacy::_checkRecipientCloningStatus(OperationC
                             "_untransferredDeletesCounter"_attr = _untransferredDeletesCounter,
                             "_averageObjectSizeForCloneLocs"_attr = _averageObjectSizeForCloneLocs,
                             "_averageObjectIdSize"_attr = _averageObjectIdSize,
+                            "untransferredSessionDataInBytes"_attr =
+                                estimateUntransferredSessionsSize,
                             "maxChunksSizeBytes"_attr = _args.getMaxChunkSizeBytes(),
                             "_sessionId"_attr = _sessionId.toString());
                 return Status::OK();

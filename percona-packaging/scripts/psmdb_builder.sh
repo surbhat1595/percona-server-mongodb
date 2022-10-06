@@ -178,6 +178,10 @@ get_sources(){
                 git reset --hard
                 git clean -xdf
                 git checkout 1.8.56
+                if [ x"${RHEL}" = x9 ]; then
+                    sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
+                    sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
+                fi
                 mkdir build
     cd ../../
     tar --owner=0 --group=0 --exclude=.* -czf ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
@@ -276,18 +280,23 @@ aws_sdk_build(){
             git reset --hard
             git clean -xdf
             git checkout 1.8.56
+            if [ x"${RHEL}" = x9 ]; then
+                sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
+                sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
+            fi
             mkdir build
             cd build
             CMAKE_CMD="cmake"
             set_compiler
             CMAKE_CXX_FLAGS=""
-            if [ x"${DEBIAN}" = xjammy -o x"${RHEL}" = x9 ]; then
-                CMAKE_CXX_FLAGS="-Wno-maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized -Wno-error=maybe-uninitialized"
+            if [ x"${DEBIAN}" = xjammy ]; then
+                CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
+                CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
             fi
             if [ -z "${CC}" -a -z "${CXX}" ]; then
-                ${CMAKE_CMD} .. -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
+                ${CMAKE_CMD} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
             else
-                ${CMAKE_CMD} CC=${CC} CXX=${CXX} .. -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
+                ${CMAKE_CMD} CC=${CC} CXX=${CXX} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
             fi
             make -j${NCPU} || exit $?
             make install
@@ -354,11 +363,11 @@ install_deps() {
         yum -y install openldap-devel krb5-devel xz-devel
         /usr/bin/pip install --user typing pyyaml regex Cheetah3
       fi
-      wget https://curl.se/download/curl-7.66.0.tar.gz
-      tar -xvzf curl-7.66.0.tar.gz
-      cd curl-7.66.0
-        ./configure
-        make
+      wget https://curl.se/download/curl-7.77.0.tar.gz -O curl-7.77.0.tar.gz
+      tar -xvzf curl-7.77.0.tar.gz
+      cd curl-7.77.0
+        ./configure --with-openssl
+        make -j${NCPU}
         make install
       cd ../
 #
@@ -557,6 +566,10 @@ build_rpm(){
         pip install --upgrade pip
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
+    elif [ "x${RHEL}" == "x9" ]; then
+        pip install --upgrade pip
+        pip install --user -r etc/pip/dev-requirements.txt
+        pip install --user -r etc/pip/evgtest-requirements.txt
     else
         pip3.8 install --upgrade pip
         pip3.8 install --user -r etc/pip/dev-requirements.txt
@@ -577,11 +590,11 @@ build_rpm(){
 
     echo "CC and CXX should be modified once correct compiller would be installed on Centos"
     if [ "x${RHEL}" == "x8" ]; then
-        export CC=/usr/bin/gcc
-        export CXX=/usr/bin/g++
-    else
         export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
         export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
+    else
+        export CC=/usr/bin/gcc
+        export CXX=/usr/bin/g++
     fi
     #
     echo "RHEL=${RHEL}" >> percona-server-mongodb-60.properties
@@ -839,16 +852,21 @@ build_tarball(){
             git reset --hard
             git clean -xdf
             git checkout 1.8.56
+            if [ x"${RHEL}" = x9 ]; then
+                sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
+                sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
+            fi
             mkdir build
             cd build
             set_compiler
             if [ x"${DEBIAN}" = xjammy ]; then
-                CMAKE_CXX_FLAGS="-Wno-maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
+                CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
+                CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
             fi
             if [ -z "${CC}" -a -z "${CXX}" ]; then
-                cmake .. -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
+                cmake .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
             else
-                cmake CC=${CC} CXX=${CXX} .. -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
+                cmake CC=${CC} CXX=${CXX} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
             fi
             make -j${NCPU} || exit $?
             make install

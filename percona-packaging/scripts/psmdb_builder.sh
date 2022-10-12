@@ -178,7 +178,7 @@ get_sources(){
                 git reset --hard
                 git clean -xdf
                 git checkout 1.8.56
-                if [ x"${RHEL}" = x9 ]; then
+                if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
                     sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
                     sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
                 fi
@@ -186,8 +186,8 @@ get_sources(){
     cd ../../
     tar --owner=0 --group=0 --exclude=.* -czf ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
     echo "UPLOAD=UPLOAD/experimental/BUILDS/${PRODUCT}-6.0/${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/${PSM_BRANCH}/${REVISION}/${BUILD_ID}" >> percona-server-mongodb-60.properties
-    mkdir $WORKDIR/source_tarball
-    mkdir $CURDIR/source_tarball
+    mkdir -p $WORKDIR/source_tarball
+    mkdir -p $CURDIR/source_tarball
     cp ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz $WORKDIR/source_tarball
     cp ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz $CURDIR/source_tarball
     cd $CURDIR
@@ -253,8 +253,11 @@ set_compiler(){
         fi
     else
         if [ "x${RHEL}" == "x7" ]; then
-            export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-            export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
+            export CC=/opt/rh/devtoolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/devtoolset-9/root/usr/bin/g++
+        elif [ "x${RHEL}" == "x8" ]; then
+            export CC=/opt/rh/gcc-toolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/gcc-toolset-9/root/usr/bin/g++
         else
             export CC=/usr/bin/gcc
             export CXX=/usr/bin/g++
@@ -280,7 +283,7 @@ aws_sdk_build(){
             git reset --hard
             git clean -xdf
             git checkout 1.8.56
-            if [ x"${RHEL}" = x9 ]; then
+            if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
                 sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
                 sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
             fi
@@ -337,7 +340,8 @@ install_deps() {
         yum -y install centos-release-scl
         yum-config-manager --enable centos-sclo-rh-testing
         yum -y install rh-python38-python rh-python38-python-devel rh-python38-python-pip
-        yum -y install devtoolset-11-elfutils
+        yum -y install devtoolset-9
+        yum -y install devtoolset-11-elfutils devtoolset-11-dwz
         source /opt/rh/rh-python38/enable
 
         pip install --upgrade pip
@@ -345,17 +349,20 @@ install_deps() {
         pip3.8 install --user typing pyyaml regex Cheetah3
         pip2.7 install --user typing pyyaml regex Cheetah Cheetah3
       elif [ x"$RHEL" = x8 ]; then
-        yum -y install bzip2-devel libpcap-devel snappy-devel gcc gcc-c++ rpm-build rpmlint
+        yum -y install epel-release
+        yum -y install bzip2-devel libpcap-devel snappy-devel rpm-build rpmlint
         yum -y install cmake cyrus-sasl-devel make openssl-devel zlib-devel libcurl-devel git
         yum -y install python2-scons python2-pip which
         yum -y install redhat-rpm-config python2-devel e2fsprogs-devel expat-devel lz4-devel
         yum -y install openldap-devel krb5-devel xz-devel
+        yum -y install gcc-toolset-9 gcc-c++
+        yum -y install gcc-toolset-11-dwz gcc-toolset-11-elfutils
         yum -y install python38 python38-devel python38-pip
         /usr/bin/pip3.8 install --user typing pyyaml regex Cheetah3
       elif [ x"$RHEL" = x9 ]; then
-	dnf config-manager --enable ol9_codeready_builder
+        dnf config-manager --enable ol9_codeready_builder
 
-	yum -y install oracle-epel-release-el9
+        yum -y install oracle-epel-release-el9
         yum -y install bzip2-devel libpcap-devel snappy-devel gcc gcc-c++ rpm-build rpmlint
         yum -y install cmake cyrus-sasl-devel make openssl-devel zlib-devel libcurl-devel git
         yum -y install python3 python3-scons python3-pip python3-devel
@@ -372,11 +379,17 @@ install_deps() {
       cd ../
 #
       install_golang
-      if [ "$RHEL" -lt 9 ]; then
+      if [ x"$RHEL" = x7 ]; then
         install_gcc_8_centos
-        if [ -f /opt/rh/devtoolset-8/enable ]; then
-          source /opt/rh/devtoolset-8/enable
+        if [ -f /opt/rh/devtoolset-9/enable ]; then
+          source /opt/rh/devtoolset-9/enable
           source /opt/rh/rh-python38/enable
+          source /opt/rh/devtoolset-11/enable
+        fi
+      elif [ x"$RHEL" = x8 ]; then
+        if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+          source /opt/rh/gcc-toolset-9/enable
+          source /opt/rh/gcc-toolset-11/enable
         fi
       fi
       pip install --upgrade pip
@@ -509,9 +522,17 @@ build_srpm(){
     -e "s:@@SRC_DIR@@:$SRC_DIR:g" \
     ${SPEC_TMPL} > rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
     mv -fv ${TARFILE} ${WORKDIR}/rpmbuild/SOURCES
-    if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
+    if [ x"$RHEL" = x7 ]; then
+      if [ -f /opt/rh/devtoolset-9/enable ]; then
+        source /opt/rh/devtoolset-9/enable
         source /opt/rh/rh-python38/enable
+        source /opt/rh/devtoolset-11/enable
+      fi
+    elif [ x"$RHEL" = x8 ]; then
+      if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+        source /opt/rh/gcc-toolset-9/enable
+        source /opt/rh/gcc-toolset-11/enable
+      fi
     fi
     rpmbuild -bs --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .generic" rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
     mkdir -p ${WORKDIR}/srpm
@@ -556,13 +577,21 @@ build_rpm(){
     rpm2cpio ${SRC_RPM} | cpio -id
     TARF=$(find . -name 'percona-server-mongodb*.tar.gz' | sort | tail -n1)
     tar vxzf ${TARF} --wildcards '*/etc' --strip=1
-    if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
+    if [ x"$RHEL" = x7 ]; then
+      if [ -f /opt/rh/devtoolset-9/enable ]; then
+        source /opt/rh/devtoolset-9/enable
         source /opt/rh/rh-python38/enable
+        source /opt/rh/devtoolset-11/enable
+      fi
+    elif [ x"$RHEL" = x8 ]; then
+      if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+        source /opt/rh/gcc-toolset-9/enable
+        source /opt/rh/gcc-toolset-11/enable
+      fi
     fi
     RHEL=$(rpm --eval %rhel)
     ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-    if [ "x${RHEL}" == "x6" ]; then
+    if [ "x${RHEL}" == "x9" ]; then
         pip install --upgrade pip
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
@@ -577,21 +606,14 @@ build_rpm(){
     fi
     #
     cd $WORKDIR
-    if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
-        source /opt/rh/rh-python38/enable
-    fi
-
-    if [ "x${RHEL}" == "x7" ]; then
-        if [ -f /opt/rh/devtoolset-11/enable ]; then
-            source /opt/rh/devtoolset-11/enable
-        fi
-    fi
 
     echo "CC and CXX should be modified once correct compiller would be installed on Centos"
-    if [ "x${RHEL}" == "x8" ]; then
-        export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-        export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
+    if [ "x${RHEL}" == "x7" ]; then
+        export CC=/opt/rh/devtoolset-9/root/usr/bin/gcc
+        export CXX=/opt/rh/devtoolset-9/root/usr/bin/g++
+    elif [ "x${RHEL}" == "x8" ]; then
+        export CC=/opt/rh/gcc-toolset-9/root/usr/bin/gcc
+        export CXX=/opt/rh/gcc-toolset-9/root/usr/bin/g++
     else
         export CC=/usr/bin/gcc
         export CXX=/usr/bin/g++
@@ -788,17 +810,28 @@ build_tarball(){
     if [ -f /etc/redhat-release ]; then
     #export OS_RELEASE="centos$(lsb_release -sr | awk -F'.' '{print $1}')"
         RHEL=$(rpm --eval %rhel)
-        if [ -f /opt/rh/devtoolset-8/enable ]; then
-            source /opt/rh/devtoolset-8/enable
-            source /opt/rh/rh-python38/enable
+        if [ x"$RHEL" = x7 ]; then
+            if [ -f /opt/rh/devtoolset-9/enable ]; then
+              source /opt/rh/devtoolset-9/enable
+              source /opt/rh/rh-python38/enable
+              source /opt/rh/devtoolset-11/enable
+            fi
+        elif [ x"$RHEL" = x8 ]; then
+            if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+              source /opt/rh/gcc-toolset-9/enable
+              source /opt/rh/gcc-toolset-11/enable
+            fi
         fi
         echo "CC and CXX should be modified once correct compiller would be installed on Centos"
-        if [ "x${RHEL}" == "x8" ]; then
+        if [ "x${RHEL}" == "x7" ]; then
+            export CC=/opt/rh/devtoolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/devtoolset-9/root/usr/bin/g++
+        elif [ "x${RHEL}" == "x8" ]; then
+            export CC=/opt/rh/gcc-toolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/gcc-toolset-9/root/usr/bin/g++
+        else
             export CC=/usr/bin/gcc
             export CXX=/usr/bin/g++
-        else
-            export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-            export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
         fi
     fi
     #
@@ -852,7 +885,7 @@ build_tarball(){
             git reset --hard
             git clean -xdf
             git checkout 1.8.56
-            if [ x"${RHEL}" = x9 ]; then
+            if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
                 sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
                 sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
             fi

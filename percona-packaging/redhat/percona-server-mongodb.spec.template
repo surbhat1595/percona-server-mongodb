@@ -34,18 +34,20 @@ BuildRoot:      /var/tmp/%{name}-%{version}-%{release}
 %define         _unpackaged_files_terminate_build 0
 
 %if 0%{?rhel} > 6
-%global _dwz_low_mem_die_limit 0
+%global _dwz_low_mem_die_limit    0
+%global _dwz_max_die_limit_x86_64 550000000
 %endif
 
 %define         src_dir @@SRC_DIR@@
 
 BuildRequires: gcc, make, cmake, gcc-c++, openssl-devel, cyrus-sasl-devel
 BuildRequires: snappy-devel, zlib-devel, bzip2-devel, libpcap-devel, openldap-devel, xz-devel
+%if 0%{?rhel} == 7
 BuildRequires: /usr/bin/scons
-
-# %if 0%{?rhel} >= 6
-# BuildRequires: policycoreutils-python
-# %endif
+%endif
+%if 0%{?rhel} >= 8
+BuildRequires: /usr/bin/scons-3
+%endif
 
 Requires: %{name}-mongos = %{version}-%{release}
 Requires: %{name}-server = %{version}-%{release}
@@ -148,7 +150,9 @@ rm -fr resmoke.ini
 popd
 
 #dirty hack for centos:7 + rpm 4.11(rpmlib absence of (LargeFiles)
+%if 0%{?rhel} == 7
 eu-strip build/install/bin/mongod
+%endif
 
 # Mongo Tools compilation
 mkdir -p $RPM_BUILD_DIR/%{src_dir}/bin
@@ -259,7 +263,6 @@ install -m 644 $RPM_BUILD_DIR/%{src_dir}/manpages/* %{buildroot}/%{_mandir}/man1
 %{_mandir}/man1/mongodump.1.gz
 %{_bindir}/mongotop
 %{_mandir}/man1/mongotop.1.gz
-#%{_bindir}/mongoreplay
 
 %pre server
 if [ $1 == 1 ]; then

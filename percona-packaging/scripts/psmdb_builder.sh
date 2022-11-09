@@ -167,6 +167,15 @@ get_sources(){
     echo "export PSMDB_TOOLS_COMMIT_HASH=\"$(git rev-parse HEAD)\"" > set_tools_revision.sh
     echo "export PSMDB_TOOLS_REVISION=\"${PSM_VER}-${PSM_RELEASE}\"" >> set_tools_revision.sh
     chmod +x set_tools_revision.sh
+    export GOROOT="/usr/local/go/"
+    export GOPATH=$PWD/../
+    export PATH="/usr/local/go/bin:$PATH:$GOPATH"
+    export GOBINPATH="/usr/local/go/bin"
+    go mod edit \
+	    -replace golang.org/x/text@v0.3.0=golang.org/x/text@v0.3.8 \
+	    -replace golang.org/x/text@v0.3.7=golang.org/x/text@v0.3.8
+    go mod tidy
+    go mod vendor
     cd ${WORKDIR}
     source percona-server-mongodb-44.properties
     #

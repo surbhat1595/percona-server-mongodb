@@ -467,6 +467,7 @@ void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
     builder->append("mode", BalancerSettingsType::kBalancerModes[mode]);
     builder->append("inBalancerRound", _inBalancerRound);
     builder->append("numBalancerRounds", _numBalancerRounds);
+    builder->append("term", repl::ReplicationCoordinator::get(opCtx)->getTerm());
 }
 
 void Balancer::_consumeActionStreamLoop() {
@@ -1012,10 +1013,15 @@ int Balancer::_moveChunks(OperationContext* opCtx,
     std::vector<std::pair<const MigrateInfo&, SemiFuture<void>>> rebalanceMigrationsAndResponses,
         defragmentationMigrationsAndResponses;
     auto requestMigration = [&](const MigrateInfo& migrateInfo) -> SemiFuture<void> {
-        auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
-            opCtx, migrateInfo.nss, repl::ReadConcernLevel::kMajorityReadConcern);
-        auto maxChunkSizeBytes =
-            coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
+        auto maxChunkSizeBytes = [&]() {
+            if (migrateInfo.optMaxChunkSizeBytes.has_value()) {
+                return *migrateInfo.optMaxChunkSizeBytes;
+            }
+
+            auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
+                opCtx, migrateInfo.nss, repl::ReadConcernLevel::kMajorityReadConcern);
+            return coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
+        }();
 
         if (serverGlobalParams.featureCompatibility.isLessThan(
                 multiversion::FeatureCompatibilityVersion::kVersion_6_0)) {
@@ -1029,18 +1035,14 @@ int Balancer::_moveChunks(OperationContext* opCtx,
         MoveRangeRequestBase requestBase(migrateInfo.to);
         requestBase.setWaitForDelete(balancerConfig->waitForDelete());
         requestBase.setMin(migrateInfo.minKey);
-        if (!feature_flags::gNoMoreAutoSplitter.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
-            // Issue the equivalent of a `moveChunk` if the auto-splitter is enabled
-            requestBase.setMax(migrateInfo.maxKey);
-        }
+        requestBase.setMax(migrateInfo.maxKey);
 
         ShardsvrMoveRange shardSvrRequest(migrateInfo.nss);
         shardSvrRequest.setDbName(NamespaceString::kAdminDb);
         shardSvrRequest.setMoveRangeRequestBase(requestBase);
         shardSvrRequest.setMaxChunkSizeBytes(maxChunkSizeBytes);
         shardSvrRequest.setFromShard(migrateInfo.from);
-        shardSvrRequest.setEpoch(coll.getEpoch());
+        shardSvrRequest.setEpoch(migrateInfo.version.epoch());
         const auto [secondaryThrottle, wc] =
             getSecondaryThrottleAndWriteConcern(balancerConfig->getSecondaryThrottle());
         shardSvrRequest.setSecondaryThrottle(secondaryThrottle);
@@ -1123,6 +1125,20 @@ void Balancer::abortCollectionDefragmentation(OperationContext* opCtx, const Nam
 
 SharedSemiFuture<void> Balancer::applyLegacyChunkSizeConstraintsOnClusterData(
     OperationContext* opCtx) {
+    // Remove the maxChunkSizeBytes from config.system.collections to make it compatible with
+    // the balancing strategy based on the number of collection chunks
+    try {
+        ShardingCatalogManager::get(opCtx)->configureCollectionBalancing(
+            opCtx,
+            NamespaceString::kLogicalSessionsNamespace,
+            0,
+            boost::none /*defragmentCollection*/,
+            boost::none /*enableAutoSplitter*/);
+    } catch (const ExceptionFor<ErrorCodes::NamespaceNotSharded>&) {
+        // config.system.collections does not appear in config.collections; continue.
+    }
+
+    // Ensure now that each collection in the cluster complies with its "maxChunkSize" constraint
     const auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
     uassertStatusOK(balancerConfig->refreshAndCheck(opCtx));
     auto futureOutcome =

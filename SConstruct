@@ -167,8 +167,9 @@ add_option('install-mode',
 
 add_option('install-action',
     choices=([*install_actions.available_actions] + ['default']),
-    default='default',
-    help='select mechanism to use to install files (advanced option to reduce disk IO and utilization)',
+    default='hardlink',
+    help=
+    'select mechanism to use to install files (advanced option to reduce disk IO and utilization)',
     nargs=1,
     type='choice',
 )
@@ -462,8 +463,9 @@ add_option("disable-warnings-as-errors",
     action="append",
     choices=["configure", "source"],
     const="source",
-    default=[],
-    help="Don't add a warnings-as-errors flag to compiler command lines in selected contexts; defaults to 'source' if no argument is provided",
+    default=build_profile.disable_warnings_as_errors,
+    help=
+    "Don't add a warnings-as-errors flag to compiler command lines in selected contexts; defaults to 'source' if no argument is provided",
     nargs="?",
     type="choice",
 )
@@ -1364,8 +1366,6 @@ unknown_vars = env_vars.UnknownVariables()
 if unknown_vars:
     env.FatalError("Unknown variables specified: {0}", ", ".join(list(unknown_vars.keys())))
 
-if get_option('install-action') != 'default' and get_option('ninja') != "disabled":
-    env.FatalError("Cannot use non-default install actions when generating Ninja.")
 install_actions.setup(env, get_option('install-action'))
 
 def set_config_header_define(env, varname, varval = 1):
@@ -4821,6 +4821,54 @@ if get_option('ninja') != 'disabled':
 
     env['NINJA_REGENERATE_DEPS'] = ninja_generate_deps
 
+    if env.TargetOSIs('windows'):
+        # The /b option here will make sure that windows updates the mtime
+        # when copying the file. This allows to not need to use restat for windows
+        # copy commands.
+        copy_install_cmd = "cmd.exe /c copy /b $in $out 1>NUL"
+    else:
+        copy_install_cmd = "install $in $out"
+
+    if env.GetOption('install-action') == 'hardlink':
+        if env.TargetOSIs('windows'):
+            install_cmd = f"cmd.exe /c mklink /h $out $in 1>nul || {copy_install_cmd}"
+        else:
+            install_cmd = f"ln $in $out || {copy_install_cmd}"
+
+    elif env.GetOption('install-action') == 'symlink':
+
+        # macOS's ln and Windows mklink command do not support relpaths
+        # out of the box so we will  precompute during generation in a
+        # custom handler.
+        def symlink_install_action_function(_env, node):
+            # should only be one output and input for this case
+            output_file = _env.NinjaGetOutputs(node)[0]
+            input_file = _env.NinjaGetDependencies(node)[0]
+            try:
+                relpath = os.path.relpath(input_file, os.path.dirname(output_file))
+            except ValueError:
+                relpath = os.path.abspath(input_file)
+
+            return {
+                "outputs": [output_file],
+                "rule": "INSTALL",
+                "inputs": [input_file],
+                "implicit": _env.NinjaGetDependencies(node),
+                "variables": {"precious": node.precious, "relpath": relpath},
+            }
+
+        env.NinjaRegisterFunctionHandler("installFunc", symlink_install_action_function)
+
+        if env.TargetOSIs('windows'):
+            install_cmd = "cmd.exe /c mklink $out $relpath 1>nul"
+        else:
+            install_cmd = "ln -s $relpath $out"
+
+    else:
+        install_cmd = copy_install_cmd
+
+    env.NinjaRule("INSTALL", install_cmd, description="Installed $out", pool="install_pool")
+
     if env.TargetOSIs("windows"):
         # This is a workaround on windows for SERVER-48691 where the line length
         # in response files is too long:
@@ -5140,7 +5188,10 @@ env.AddPackageNameAlias(
     name="mh-debugsymbols",
 )
 
-def rpath_generator(env, source, target, for_signature):
+env['RPATH_ESCAPED_DOLLAR_ORIGIN'] = '\\$$$$ORIGIN'
+
+
+def prefix_libdir_rpath_generator(env, source, target, for_signature):
     # If the PREFIX_LIBDIR has an absolute path, we will use that directly as
     # RPATH because that indicates the final install destination of the libraries.
     prefix_libdir = env.subst('$PREFIX_LIBDIR')
@@ -5152,16 +5203,18 @@ def rpath_generator(env, source, target, for_signature):
     lib_rel = os.path.relpath(prefix_libdir, env.subst('$PREFIX_BINDIR'))
 
     if env['PLATFORM'] == 'posix':\
-        return [env.Literal(f"\\$$ORIGIN/{lib_rel}")]
+        return f"$RPATH_ESCAPED_DOLLAR_ORIGIN/{lib_rel}"
 
     if env['PLATFORM'] == 'darwin':
-        return [f"@loader_path/{lib_rel}",]
+        return f"@loader_path/{lib_rel}"
 
-env['RPATH_GENERATOR'] = rpath_generator
+
+if get_option('link-model').startswith('dynamic'):
+    env['PREFIX_LIBDIR_RPATH_GENERATOR'] = prefix_libdir_rpath_generator
 
 if env['PLATFORM'] == 'posix':
     env.AppendUnique(
-        RPATH='$RPATH_GENERATOR',
+        RPATH=['$PREFIX_LIBDIR_RPATH_GENERATOR'],
         LINKFLAGS=[
             # Most systems *require* -z,origin to make origin work, but android
             # blows up at runtime if it finds DF_ORIGIN_1 in DT_FLAGS_1.
@@ -5182,12 +5235,12 @@ elif env['PLATFORM'] == 'darwin':
     # so we setup RPATH and LINKFLAGS ourselves.
     env['RPATHPREFIX'] = '-Wl,-rpath,'
     env['RPATHSUFFIX'] = ''
-    env['RPATH'] = '$RPATH_GENERATOR'
     env.AppendUnique(
         LINKFLAGS="${_concat(RPATHPREFIX, RPATH, RPATHSUFFIX, __env__)}",
         SHLINKFLAGS=[
             "-Wl,-install_name,@rpath/${TARGET.file}",
         ],
+        RPATH=['$PREFIX_LIBDIR_RPATH_GENERATOR'],
     )
 
 env.Default(env.Alias("install-default"))

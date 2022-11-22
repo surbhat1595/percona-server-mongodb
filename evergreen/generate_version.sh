@@ -6,9 +6,7 @@ cd src
 set -o errexit
 set -o verbose
 
-curl -L https://github.com/mongodb/mongo-task-generator/releases/download/v0.5.3/mongo-task-generator --output mongo-task-generator
-chmod +x mongo-task-generator
-
+setup_mongo_task_generator
 activate_venv
 PATH=$PATH:$HOME:/ ./mongo-task-generator \
   --expansion-file ../expansions.yml \

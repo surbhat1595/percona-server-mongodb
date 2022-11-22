@@ -37,6 +37,7 @@
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
@@ -55,6 +56,7 @@ namespace {
 
 using ChunkDistributionMap = stdx::unordered_map<ShardId, size_t>;
 using ZoneShardMap = StringMap<std::vector<ShardId>>;
+using boost::intrusive_ptr;
 
 std::vector<ShardId> getAllShardIdsSorted(OperationContext* opCtx) {
     // Many tests assume that chunks will be placed on shards
@@ -267,7 +269,8 @@ std::unique_ptr<InitialSplitPolicy> InitialSplitPolicy::calculateOptimizationStr
     const boost::optional<std::vector<BSONObj>>& initialSplitPoints,
     const std::vector<TagsType>& tags,
     size_t numShards,
-    bool collectionIsEmpty) {
+    bool collectionIsEmpty,
+    bool useAutoSplitter) {
     uassert(ErrorCodes::InvalidOptions,
             str::stream() << "numInitialChunks is only supported when the collection is empty "
                              "and has a hashed field in the shard key pattern",
@@ -311,7 +314,11 @@ std::unique_ptr<InitialSplitPolicy> InitialSplitPolicy::calculateOptimizationStr
         return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
     }
 
-    return std::make_unique<UnoptimizedSplitPolicy>();
+    if (useAutoSplitter) {
+        return std::make_unique<AutoSplitInChunksOnPrimaryPolicy>();
+    }
+
+    return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
 }
 
 InitialSplitPolicy::ShardCollectionConfig SingleChunkOnPrimarySplitPolicy::createFirstChunks(
@@ -335,7 +342,7 @@ InitialSplitPolicy::ShardCollectionConfig SingleChunkOnPrimarySplitPolicy::creat
     return {std::move(chunks)};
 }
 
-InitialSplitPolicy::ShardCollectionConfig UnoptimizedSplitPolicy::createFirstChunks(
+InitialSplitPolicy::ShardCollectionConfig AutoSplitInChunksOnPrimaryPolicy::createFirstChunks(
     OperationContext* opCtx,
     const ShardKeyPattern& shardKeyPattern,
     const SplitPolicyParams& params) {
@@ -805,11 +812,24 @@ void ReshardingSplitPolicy::_appendSplitPointsFromSample(BSONObjSet* splitPoints
 }
 
 std::unique_ptr<ReshardingSplitPolicy::SampleDocumentSource>
+ReshardingSplitPolicy::makePipelineDocumentSource_forTest(OperationContext* opCtx,
+                                                          const NamespaceString& ns,
+                                                          const ShardKeyPattern& shardKey,
+                                                          int numInitialChunks,
+                                                          int samplesPerChunk) {
+    MakePipelineOptions opts;
+    opts.attachCursorSource = false;
+    return _makePipelineDocumentSource(
+        opCtx, ns, shardKey, numInitialChunks, samplesPerChunk, std::move(opts));
+}
+
+std::unique_ptr<ReshardingSplitPolicy::SampleDocumentSource>
 ReshardingSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
                                                    const NamespaceString& ns,
                                                    const ShardKeyPattern& shardKey,
                                                    int numInitialChunks,
-                                                   int samplesPerChunk) {
+                                                   int samplesPerChunk,
+                                                   MakePipelineOptions opts) {
     auto rawPipeline = createRawPipeline(shardKey, numInitialChunks - 1, samplesPerChunk);
     StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
     resolvedNamespaces[ns.coll()] = {ns, std::vector<BSONObj>{}};
@@ -824,7 +844,7 @@ ReshardingSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
                                                     boost::none, /* explain */
                                                     false,       /* fromMongos */
                                                     false,       /* needsMerge */
-                                                    false,       /* allowDiskUse */
+                                                    true,        /* allowDiskUse */
                                                     true,        /* bypassDocumentValidation */
                                                     false,       /* isMapReduceCommand */
                                                     ns,
@@ -834,8 +854,10 @@ ReshardingSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
                                                     std::move(resolvedNamespaces),
                                                     boost::none); /* collUUID */
 
-    return std::make_unique<PipelineDocumentSource>(Pipeline::makePipeline(rawPipeline, expCtx, {}),
-                                                    samplesPerChunk - 1);
+    expCtx->tempDir = storageGlobalParams.dbpath + "/tmp";
+
+    return std::make_unique<PipelineDocumentSource>(
+        Pipeline::makePipeline(rawPipeline, expCtx, opts), samplesPerChunk - 1);
 }
 
 ReshardingSplitPolicy::PipelineDocumentSource::PipelineDocumentSource(

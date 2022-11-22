@@ -11,7 +11,6 @@ env = env.Clone()
 env.Library(
     target='sharding_api_d',
     source=[
-        'balancer_stats_registry.cpp',
         'collection_metadata.cpp',
         'collection_sharding_state_factory_standalone.cpp',
         'collection_sharding_state.cpp',
@@ -33,15 +32,26 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/index_catalog',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/range_arithmetic',
-        '$BUILD_DIR/mongo/db/repl/replica_set_aware_service',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sharding_routing_table',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/write_block_bypass'
     ]
+)
+
+env.Library(
+    target='balancer_stats_registry',
+    source=[
+        'balancer_stats_registry.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog_raii',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/repl/replica_set_aware_service',
+        '$BUILD_DIR/mongo/s/grid',
+    ],
 )
 
 env.Library(
@@ -156,6 +166,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/query/cluster_aggregate',
         '$BUILD_DIR/mongo/s/sharding_api',
         '$BUILD_DIR/mongo/s/sharding_initialization',
+        'forwardable_operation_metadata',
         'sharding_api_d',
         'sharding_catalog_manager',
         'sharding_logging',
@@ -172,6 +183,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/session_catalog',
         '$BUILD_DIR/mongo/idl/server_parameter',
         '$BUILD_DIR/mongo/util/future_util',
+        'balancer_stats_registry',
     ],
 )
 
@@ -340,6 +352,7 @@ env.Library(
         'config/configsvr_clear_jumbo_flag_command.cpp',
         'config/configsvr_collmod_command.cpp',
         'config/configsvr_commit_chunk_migration_command.cpp',
+        'config/configsvr_commit_move_primary_command.cpp',
         'config/configsvr_commit_reshard_collection_command.cpp',
         'config/configsvr_configure_collection_balancing.cpp',
         'config/configsvr_control_balancer_command.cpp',
@@ -380,7 +393,6 @@ env.Library(
         'flush_routing_table_cache_updates_command.cpp',
         'get_database_version_command.cpp',
         'get_shard_version_command.cpp',
-        'get_stats_for_balancing.idl',
         'migration_chunk_cloner_source_legacy_commands.cpp',
         'migration_destination_manager_legacy_commands.cpp',
         'move_primary_coordinator_document.idl',
@@ -469,6 +481,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/commands/sharded_cluster_sharding_commands',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         '$BUILD_DIR/mongo/s/sharding_router_api',
+        'balancer_stats_registry',
         'forwardable_operation_metadata',
         'sharding_runtime_d',
         'user_writes_recoverable_critical_section',

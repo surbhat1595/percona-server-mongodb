@@ -38,6 +38,9 @@
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
+namespace encryption {
+class KeyId;
+}
 
 /**
  * This reads and write the storage engine metadata file 'storage.bson'
@@ -86,6 +89,8 @@ public:
      */
     const std::string& getKmipMasterKeyId() const noexcept;
 
+    const encryption::KeyId* keyId() const noexcept;
+
     /**
      * Sets name of storage engine in metadata.
      */
@@ -126,6 +131,7 @@ private:
     std::string _storageEngine;
     BSONObj _storageEngineOptions;
     std::string _kmipMasterKeyId;
+    std::unique_ptr<encryption::KeyId> _keyId;
 };
 
 bool fsyncFile(boost::filesystem::path path);

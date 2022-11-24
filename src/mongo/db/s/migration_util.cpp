@@ -42,6 +42,7 @@
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
@@ -983,7 +984,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                 hangInRefreshFilteringMetadataUntilSuccessThenSimulateErrorUninterruptible
                     .pauseWhileSet();
                 uasserted(ErrorCodes::InternalError,
-                          "simulate an error response for forceShardFilteringMetadataRefresh");
+                          "simulate an error response for forceGetCurrentMetadata");
             }
 
             auto setFilteringMetadata = [&opCtx, &currentMetadata, &doc, &cancellationToken]() {

@@ -41,7 +41,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -257,8 +257,9 @@ Status _createTimeseries(OperationContext* opCtx,
             auto expireAfterSeconds = options.expireAfterSeconds;
             if (useClusteredIdIndex) {
                 if (expireAfterSeconds) {
-                    uassertStatusOK(
-                        index_key_validate::validateExpireAfterSeconds(*expireAfterSeconds));
+                    uassertStatusOK(index_key_validate::validateExpireAfterSeconds(
+                        *expireAfterSeconds,
+                        index_key_validate::ValidateExpireAfterSecondsMode::kClusteredTTLIndex));
                     bucketsOptions.expireAfterSeconds = expireAfterSeconds;
                 }
                 bucketsOptions.clusteredIndex = true;

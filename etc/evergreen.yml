@@ -118,7 +118,6 @@ variables:
     vars:
       resmoke_args: --help
       resmoke_jobs_max: 1
-  - func: "send benchmark results"
 
 - &jepsen_config_vars
   jepsen_key_time_limit: --key-time-limit 15
@@ -807,12 +806,6 @@ functions:
       permissions: public-read
       content_type: atext-plain
       display_name: Pip Requirements
-
-  "send benchmark results":
-    command: json.send
-    params:
-      name: perf
-      file: src/perf.json
 
   "cleanup environment": &cleanup_environment
     command: subprocess.exec
@@ -2180,6 +2173,8 @@ tasks:
     - *f_expansions_write
     - func: "scons compile"
       vars:
+        task_compile_flags: >-
+          --build-profile=compiledb
         targets: generated-sources compiledb
         compiling_for_test: true
     - command: subprocess.exec
@@ -2792,7 +2787,6 @@ tasks:
       exec_timeout_secs: 10800  # 3 hour timeout.
       resmoke_args: --suites=benchmarks
       resmoke_jobs_max: 1
-  - func: "send benchmark results"
 
 - <<: *benchmark_template
   name: benchmarks_sharding
@@ -2803,7 +2797,6 @@ tasks:
     vars:
       resmoke_args: --suites=benchmarks_sharding
       resmoke_jobs_max: 1
-  - func: "send benchmark results"
 
 - <<: *benchmark_template
   name: benchmarks_cst
@@ -2814,7 +2807,6 @@ tasks:
     vars:
       resmoke_args: --suites=benchmarks_cst
       resmoke_jobs_max: 1
-  - func: "send benchmark results"
 
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
@@ -4106,6 +4098,8 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
+    vars:
+      resmoke_args: --suites=change_streams_per_shard_cursor_passthrough --storageEngine=wiredTiger
 
 - <<: *task_template
   name: disk_wiredtiger
@@ -9890,6 +9884,59 @@ buildvariants:
   - name: .ssl
   - name: jsCore
   - name: external_auth
+
+- name: enterprise-rhel-71-ppc64le
+  display_name: Enterprise RHEL 7.1 PPC64LE
+  modules:
+  - enterprise
+  run_on:
+  - rhel71-power8-test
+  batchtime: *batchtime_one_week
+  stepback: false
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
+    compile_flags: --ssl MONGO_DISTMOD=rhel71 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    resmoke_jobs_factor: 0.25
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: ppc64le
+    packager_distro: rhel71
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: ppc64le-enterprise-rhel71
+    repo_edition: enterprise
+    multiversion_platform: rhel71
+    multiversion_architecture: ppc64le
+    multiversion_edition: enterprise
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - rhel71-power8-large
+  - name: build_variant_gen
+  - name: .aggregation .common
+  - name: audit
+  - name: .auth !.multiversion !.jscore
+  - name: .misc_js
+  - name: .encrypt
+  - name: .integration !.audit
+    distros:
+    - rhel71-power8-large
+  - name: .jscore .common !.auth
+  - name: jsCore_op_query
+  - name: .read_write_concern
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: sasl
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.multiversion
+  - name: snmp
+  - name: .stitch
+  - name: .publish
+    distros:
+    - rhel70-small
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-81-ppc64le
   display_name: Enterprise RHEL 8.1 PPC64LE

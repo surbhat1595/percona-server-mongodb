@@ -220,8 +220,7 @@ var ReshardingTest = class {
         ];
     }
 
-    /** @private */
-    _getReplSetForShard(shardName) {
+    getReplSetForShard(shardName) {
         const res = this._allReplSetTests().find(shardInfo => shardInfo.shardName === shardName);
         return res.rs;
     }
@@ -565,18 +564,15 @@ var ReshardingTest = class {
             });
         } else {
             this._callFunctionSafely(() => {
-                this.retryOnceOnNetworkError(  //
-                    () => this._pauseCoordinatorBeforeBlockingWritesFailpoints.forEach(
-                        fp => fp.off()));
-
+                this._pauseCoordinatorBeforeBlockingWritesFailpoints.forEach(
+                    fp => this.retryOnceOnNetworkError(fp.off));
                 postCheckConsistencyFn();
-                this.retryOnceOnNetworkError(
-                    () => this._pauseCoordinatorBeforeDecisionPersistedFailpoints.forEach(
-                        fp => fp.off()));
+                this._pauseCoordinatorBeforeDecisionPersistedFailpoints.forEach(
+                    fp => this.retryOnceOnNetworkError(fp.off));
 
                 postDecisionPersistedFn();
-                this.retryOnceOnNetworkError(
-                    () => this._pauseCoordinatorBeforeCompletionFailpoints.forEach(fp => fp.off()));
+                this._pauseCoordinatorBeforeCompletionFailpoints.forEach(
+                    fp => this.retryOnceOnNetworkError(fp.off));
             });
         }
 
@@ -598,7 +594,15 @@ var ReshardingTest = class {
 
     /** @private */
     _checkConsistency() {
-        const nsCursor = this._st.s.getCollection(this._ns).find().sort({_id: 1});
+        // The "available" read concern level won't block this find cmd behind the critical section.
+        // Tests for resharding are not expected to have unowned documents in the collection being
+        // resharded.
+        const nsCollection = this._st.s.getCollection(this._ns);
+        const nsCursor = new DBCommandCursor(nsCollection.getDB(),
+                                             assert.commandWorked(nsCollection.runCommand("find", {
+                                                 sort: {_id: 1},
+                                                 readConcern: {level: "available"},
+                                             })));
         const tempNsCursor = this._st.s.getCollection(this._tempNs).find().sort({_id: 1});
 
         const diff = ((diff) => {
@@ -831,7 +835,7 @@ var ReshardingTest = class {
     stepUpNewPrimaryOnShard(shardName) {
         jsTestLog(`ReshardingTestFixture stepping up new primary on shard ${shardName}`);
 
-        const replSet = this._getReplSetForShard(shardName);
+        const replSet = this.getReplSetForShard(shardName);
         let originalPrimary = replSet.getPrimary();
         let secondaries = replSet.getSecondaries();
 
@@ -878,7 +882,7 @@ var ReshardingTest = class {
     killAndRestartPrimaryOnShard(shardName) {
         jsTestLog(`ReshardingTestFixture killing and restarting primary on shard ${shardName}`);
 
-        const replSet = this._getReplSetForShard(shardName);
+        const replSet = this.getReplSetForShard(shardName);
         const originalPrimaryConn = replSet.getPrimary();
 
         const SIGKILL = 9;
@@ -891,7 +895,7 @@ var ReshardingTest = class {
         jsTestLog(
             `ReshardingTestFixture shutting down and restarting primary on shard ${shardName}`);
 
-        const replSet = this._getReplSetForShard(shardName);
+        const replSet = this.getReplSetForShard(shardName);
         const originalPrimaryConn = replSet.getPrimary();
 
         const SIGTERM = 15;

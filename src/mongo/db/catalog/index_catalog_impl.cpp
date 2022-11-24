@@ -46,7 +46,7 @@
 #include "mongo/db/catalog/uncommitted_collections.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/fts/fts_spec.h"
@@ -128,7 +128,9 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
         }
         auto descriptor = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
 
-        // TTL indexes with NaN 'expireAfterSeconds' cause problems in multiversion settings.
+        // TTL indexes with NaN 'expireAfterSeconds' used to cause problems in multiversion
+        // settings. However, we continue to issue a warning message at startup to draw attention
+        // to the presence of these misconfigured indexes.
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
             if (spec[IndexDescriptor::kExpireAfterSecondsFieldName].isNaN()) {
                 LOGV2_OPTIONS(6852200,
@@ -139,19 +141,6 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
                               "uuid"_attr = collection->uuid(),
                               "index"_attr = indexName,
                               "spec"_attr = spec);
-                using FCV = ServerGlobalParams::FeatureCompatibility;
-                const auto& fcv = serverGlobalParams.featureCompatibility;
-                if (fcv.isVersionInitialized() &&
-                    fcv.isLessThanOrEqualTo(FCV::Version::kFullyDowngradedTo44)) {
-                    LOGV2_ERROR(6852201,
-                                "TTL indexes with NaN 'expireAfterSeconds' are not supported "
-                                "under FCV 4.4 on a 5.0+ binary.",
-                                "ns"_attr = collection->ns(),
-                                "uuid"_attr = collection->uuid(),
-                                "index"_attr = indexName,
-                                "spec"_attr = spec);
-                    fassertFailed(6852202);
-                }
             }
         }
 
@@ -159,7 +148,10 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName) &&
             !collection->isCapped()) {
             TTLCollectionCache::get(opCtx->getServiceContext())
-                .registerTTLInfo(collection->uuid(), indexName);
+                .registerTTLInfo(
+                    collection->uuid(),
+                    TTLCollectionCache::Info{
+                        indexName, spec[IndexDescriptor::kExpireAfterSecondsFieldName].isNaN()});
         }
 
         bool ready = collection->isIndexReady(indexName);
@@ -802,20 +794,6 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
     }
 
-    // TTL indexes with NaN 'expireAfterSeconds' cause problems in multiversion settings.
-    if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
-        if (spec[IndexDescriptor::kExpireAfterSecondsFieldName].isNaN()) {
-            using FCV = ServerGlobalParams::FeatureCompatibility;
-            const auto& fcv = serverGlobalParams.featureCompatibility;
-            if (fcv.isVersionInitialized() &&
-                fcv.isLessThanOrEqualTo(FCV::Version::kFullyDowngradedTo44)) {
-                return Status(ErrorCodes::CannotCreateIndex,
-                              "TTL indexes cannot have NaN 'expireAfterSeconds' under FCV 4.4 "
-                              "on a 5.0+ binary.");
-            }
-        }
-    }
-
     // --- only storage engine checks allowed below this ----
 
     BSONElement storageEngineElement = spec.getField("storageEngine");
@@ -1399,6 +1377,16 @@ Status IndexCatalogImpl::_indexKeys(OperationContext* opCtx,
             *keysInsertedOut += inserted;
         }
     } else {
+        // Ensure that our snapshot is compatible with the index's minimum visibile snapshot.
+        const auto minVisibleTimestamp = index->getMinimumVisibleSnapshot();
+        const auto readTimestamp =
+            opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx).value_or(
+                opCtx->recoveryUnit()->getCatalogConflictingTimestamp());
+        if (minVisibleTimestamp && !readTimestamp.isNull() &&
+            readTimestamp < *minVisibleTimestamp) {
+            throw WriteConflictException();
+        }
+
         int64_t numInserted = 0;
         status = index->accessMethod()->insertKeysAndUpdateMultikeyPaths(
             opCtx,
@@ -1582,6 +1570,14 @@ void IndexCatalogImpl::_unindexKeys(OperationContext* opCtx,
     // for unindex operations, since initial sync can build an index over a collection with
     // duplicates. See SERVER-17487 for more details.
     options.dupsAllowed = options.dupsAllowed || !index->isReady(opCtx, collection);
+
+    // Ensure that our snapshot is compatible with the index's minimum visibile snapshot.
+    const auto minVisibleTimestamp = index->getMinimumVisibleSnapshot();
+    const auto readTimestamp = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx).value_or(
+        opCtx->recoveryUnit()->getCatalogConflictingTimestamp());
+    if (minVisibleTimestamp && !readTimestamp.isNull() && readTimestamp < *minVisibleTimestamp) {
+        throw WriteConflictException();
+    }
 
     int64_t removed = 0;
     Status status = index->accessMethod()->removeKeys(opCtx, keys, loc, options, &removed);

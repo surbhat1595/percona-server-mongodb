@@ -34,8 +34,8 @@
 
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/uncommitted_collections.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot_helper.h"
@@ -586,16 +586,17 @@ void CollectionCatalog::onCloseDatabase(OperationContext* opCtx, std::string dbN
     removeResource(rid, dbName);
 }
 
-void CollectionCatalog::onCloseCatalog(OperationContext* opCtx) {
-    invariant(opCtx->lockState()->isW());
-    invariant(!_shadowCatalog);
+void CollectionCatalog::onCloseCatalog() {
+    if (_shadowCatalog) {
+        return;
+    }
+
     _shadowCatalog.emplace();
     for (auto& entry : _catalog)
         _shadowCatalog->insert({entry.first, entry.second->ns()});
 }
 
-void CollectionCatalog::onOpenCatalog(OperationContext* opCtx) {
-    invariant(opCtx->lockState()->isW());
+void CollectionCatalog::onOpenCatalog() {
     invariant(_shadowCatalog);
     _shadowCatalog.reset();
     ++_epoch;

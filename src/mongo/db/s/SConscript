@@ -123,6 +123,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/multi_index_block',
         '$BUILD_DIR/mongo/db/client_metadata_propagation_egress_hook',
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
+        '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/db_raii',
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/op_observer_impl',
@@ -141,6 +142,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/sharding_api',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         'chunk_splitter',
+        'forwardable_operation_metadata',
         'sharding_api_d',
         'sharding_catalog_manager',
         'sharding_logging',
@@ -201,6 +203,18 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/s/chunk_writes_tracker'
     ],
+)
+
+env.Library(
+    target='forwardable_operation_metadata',
+    source=[
+        'forwardable_operation_metadata.cpp',
+        'forwardable_operation_metadata.idl'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/s/grid',
+    ]
 )
 
 env.Library(
@@ -319,8 +333,6 @@ env.Library(
         'flush_resharding_state_change_command.cpp',
         'flush_routing_table_cache_updates_command.cpp',
         'get_database_version_command.cpp',
-        'forwardable_operation_metadata.cpp',
-        'forwardable_operation_metadata.idl',
         'get_shard_version_command.cpp',
         'merge_chunks_command.cpp',
         'migration_chunk_cloner_source_legacy_commands.cpp',
@@ -385,6 +397,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/commands/shared_cluster_commands',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         '$BUILD_DIR/mongo/s/sharding_router_api',
+        'forwardable_operation_metadata',
         'sharding_runtime_d',
     ],
 )

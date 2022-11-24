@@ -44,8 +44,8 @@
 #include "mongo/base/static_assert.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/catalog/validate_results.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/locker.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -1000,7 +1000,8 @@ long long WiredTigerRecordStore::dataSize(OperationContext* opCtx) const {
 }
 
 long long WiredTigerRecordStore::numRecords(OperationContext* opCtx) const {
-    return _sizeInfo->numRecords.load();
+    auto numRecords = _sizeInfo->numRecords.load();
+    return numRecords > 0 ? numRecords : 0;
 }
 
 int64_t WiredTigerRecordStore::storageSize(OperationContext* opCtx,
@@ -1821,9 +1822,7 @@ public:
     virtual void rollback() {
         LOGV2_DEBUG(
             22404, 3, "WiredTigerRecordStore: rolling back NumRecordsChange", "diff"_attr = -_diff);
-        if (_rs->_sizeInfo->numRecords.addAndFetch(-_diff) < 0) {
-            _rs->_sizeInfo->numRecords.store(0);
-        }
+        _rs->_sizeInfo->numRecords.addAndFetch(-_diff);
     }
 
 private:
@@ -1841,8 +1840,7 @@ void WiredTigerRecordStore::_changeNumRecords(OperationContext* opCtx, int64_t d
     }
 
     opCtx->recoveryUnit()->registerChange(std::make_unique<NumRecordsChange>(this, diff));
-    if (_sizeInfo->numRecords.addAndFetch(diff) < 0)
-        _sizeInfo->numRecords.store(0);
+    _sizeInfo->numRecords.addAndFetch(diff);
 }
 
 class WiredTigerRecordStore::DataSizeChange : public RecoveryUnit::Change {

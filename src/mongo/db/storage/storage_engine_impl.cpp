@@ -738,6 +738,7 @@ void StorageEngineImpl::cleanShutdown() {
     }
 
     CollectionCatalog::write(getGlobalServiceContext(), [](CollectionCatalog& catalog) {
+        catalog.onCloseCatalog();
         catalog.deregisterAllCollectionsAndViews();
     });
 

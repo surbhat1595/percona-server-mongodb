@@ -1,6 +1,6 @@
 /**
  * Tests that a mixed cluster in FCV 4.4 containing a TTL index with NaN for 'expireAfterSeconds'
- * will fail to replicate the TTL index to a secondary running a 5.0+ binary.
+ * will successfully replicate the TTL index to a secondary running a 5.0+ binary.
  *
  * @tags: [
  *     requires_replication,
@@ -24,17 +24,13 @@ const coll = db.t;
 assert.commandWorked(coll.createIndex({t: 1}, {expireAfterSeconds: NaN}));
 assert.commandWorked(coll.insert({_id: 0, t: ISODate()}));
 
-// The secondary should fail to create the TTL index with NaN for 'expireAfterSeconds' during
-// oplog application shut down with a fatal assertion.
-assert.soon(() => {
-    return rawMongoProgramOutput().search(/Fatal assertion/) >= 0;
-});
+rst.awaitReplication();
 const secondary = rst.getSecondary();
-rst.stop(secondary, /*signal=*/undefined, {allowedExitCode: MongoRunner.EXIT_ABRUPT});
-assert.gte(
-    rawMongoProgramOutput().search(
-        /Fatal assertion.*34437.*CannotCreateIndex.*t_1.*TTL indexes cannot have NaN 'expireAfterSeconds'/),
-    0);
+const secondaryColl = secondary.getCollection(coll.getFullName());
+const secondaryIndexes = IndexBuildTest.assertIndexes(secondaryColl, 2, ['_id_', 't_1']);
+const secondaryTTLIndex = secondaryIndexes.t_1;
+assert(secondaryTTLIndex.hasOwnProperty('expireAfterSeconds'), tojson(secondaryTTLIndex));
+assert.gt(secondaryTTLIndex.expireAfterSeconds, 0, tojson(secondaryTTLIndex));
 
 rst.stopSet();
 })();

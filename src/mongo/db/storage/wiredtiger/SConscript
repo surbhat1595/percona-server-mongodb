@@ -96,6 +96,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/db_raii',
             '$BUILD_DIR/mongo/db/catalog/database_holder',
             '$BUILD_DIR/mongo/db/commands/server_status',
+            '$BUILD_DIR/mongo/db/encryption/secret_string',
             '$BUILD_DIR/mongo/db/mongod_options',
             '$BUILD_DIR/mongo/db/snapshot_window_options',
             '$BUILD_DIR/mongo/db/storage/backup_cursor_hooks',

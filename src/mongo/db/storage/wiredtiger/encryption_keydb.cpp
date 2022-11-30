@@ -36,10 +36,10 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include <cstring>  // memcpy
 #include <fstream>
 
+#include "mongo/db/encryption/encryption_kmip.h"
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/encryption_vault.h"
-#include "mongo/db/encryption/encryption_kmip.h"
-#include "mongo/db/server_options.h"
+#include "mongo/db/encryption/secret_string.h"
 #include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
@@ -194,32 +194,6 @@ encryption::Key EncryptionKeyDB::obtain_masterkey(bool pre_existed,
                   "kmipMasterKeyId"_attr = kmipMasterKeyId);
         }
     } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        if (encryptionGlobalParams.vaultToken.empty()) {
-            struct stat stats;
-
-            if (stat(encryptionGlobalParams.vaultTokenFile.c_str(), &stats) == -1) {
-                throw std::runtime_error(str::stream()
-                                         << "cannot read stats of the Vault token file: "
-                                         << encryptionGlobalParams.vaultTokenFile
-                                         << ": " << strerror(errno));
-            }
-            auto prohibited_perms{S_IRWXG | S_IRWXO};
-            if (serverGlobalParams.relaxPermChecks && stats.st_uid == 0) {
-                prohibited_perms = S_IWGRP | S_IXGRP | S_IRWXO;
-            }
-            if ((stats.st_mode & prohibited_perms) != 0) {
-                throw std::runtime_error(str::stream()
-                                         << "permissions on " << encryptionGlobalParams.vaultTokenFile
-                                         << " are too open");
-            }
-            std::ifstream f(encryptionGlobalParams.vaultTokenFile);
-            if (!f.is_open()) {
-                throw std::runtime_error(str::stream()
-                                         << "cannot open specified Vault token file: "
-                                         << encryptionGlobalParams.vaultTokenFile);
-            }
-            f >> encryptionGlobalParams.vaultToken;
-        }
         if (rotation) {
             // generate new key
             masterKey = encryption::Key(srng);
@@ -242,32 +216,8 @@ encryption::Key EncryptionKeyDB::obtain_masterkey(bool pre_existed,
             }
         }
     } else {
-        struct stat stats;
-
-        if (stat(encryptionGlobalParams.encryptionKeyFile.c_str(), &stats) == -1) {
-            throw std::runtime_error(str::stream()
-                                     << "cannot read stats of encryption key file: "
-                                     << encryptionGlobalParams.encryptionKeyFile
-                                     << ": " << strerror(errno));
-        }
-        auto prohibited_perms{S_IRWXG | S_IRWXO};
-        if (serverGlobalParams.relaxPermChecks && stats.st_uid == 0) {
-            prohibited_perms = S_IWGRP | S_IXGRP | S_IRWXO;
-        }
-        if ((stats.st_mode & prohibited_perms) != 0) {
-            throw std::runtime_error(str::stream()
-                                     << "permissions on " << encryptionGlobalParams.encryptionKeyFile
-                                     << " are too open");
-        }
-        std::ifstream f(encryptionGlobalParams.encryptionKeyFile);
-        if (!f.is_open()) {
-            throw std::runtime_error(str::stream()
-                                     << "cannot open specified encryption key file: "
-                                     << encryptionGlobalParams.encryptionKeyFile);
-        }
-        std::string encoded_key;
-        f >> encoded_key;
-        masterKey = encryption::Key(encoded_key);
+        masterKey = encryption::Key(encryption::SecretString::readFromFile(
+            encryptionGlobalParams.encryptionKeyFile, "encryption key"));
     }
 
     return (invariant(masterKey), *masterKey);

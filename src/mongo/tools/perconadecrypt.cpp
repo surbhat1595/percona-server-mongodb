@@ -43,6 +43,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/encryption_vault.h"
 #include "mongo/db/encryption/key.h"
+#include "mongo/db/encryption/secret_string.h"
 #include "mongo/tools/perconadecrypt_options.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/exit_code.h"
@@ -220,35 +221,13 @@ encryption::Key readMasterKey() {
         std::cout << "Loading encryption key from the KMIP server" << std::endl;
         return encryption::Key(kmipReadKey(encryptionGlobalParams.kmipKeyIdentifier));
     } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        if (encryptionGlobalParams.vaultToken.empty()) {
-            if (!boost::filesystem::exists(encryptionGlobalParams.vaultTokenFile)) {
-                throw std::runtime_error(std::string("specified Vault tokne file doesn't exist: ") +
-                                         encryptionGlobalParams.vaultTokenFile);
-            }
-            std::ifstream f{encryptionGlobalParams.vaultTokenFile};
-            if (!f.is_open()) {
-                throw std::runtime_error(std::string("cannot open specified Vault token file: ") +
-                                         encryptionGlobalParams.vaultTokenFile);
-            }
-            f >> encryptionGlobalParams.vaultToken;
-        }
         std::cout << "Loading encryption key from the Vault server" << std::endl;
         return encryption::Key(vaultReadKey());
     } else {
         std::cout << "Loading encryption key from: " << encryptionGlobalParams.encryptionKeyFile
                   << std::endl;
-        if (!boost::filesystem::exists(encryptionGlobalParams.encryptionKeyFile)) {
-            throw std::runtime_error(std::string("specified encryption key file doesn't exist: ") +
-                                     encryptionGlobalParams.encryptionKeyFile);
-        }
-        std::ifstream f{encryptionGlobalParams.encryptionKeyFile};
-        if (!f.is_open()) {
-            throw std::runtime_error(std::string("cannot open specified encryption key file: ") +
-                                     encryptionGlobalParams.encryptionKeyFile);
-        }
-        std::string encoded_key;
-        f >> encoded_key;
-        return encryption::Key(encoded_key);
+        return encryption::Key(encryption::SecretString::readFromFile(
+            encryptionGlobalParams.encryptionKeyFile, "encryption key"));
     }
 }
 }  // namespace

@@ -37,6 +37,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include <boost/multiprecision/cpp_int.hpp>
 #include <wiredtiger.h>
 
+#include "mongo/db/encryption/key.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/platform/mutex.h"
@@ -166,15 +167,15 @@ private:
     int reserve_gcm_iv_range();
     void generate_secure_key_inlock(char key[]);  // uses _srng without locks
 
-    void init_masterkey();
+    static encryption::Key obtain_masterkey(bool pre_existed,
+                                            bool rotation,
+                                            std::string& kmipMasterKeyId,
+                                            SecureRandom& srng);
 
-    static constexpr int _key_len = 32;
-    const bool _pre_existed;
     const bool _rotation;
     const std::string _path;
     std::string _wtOpenConfig;
     std::string _kmipMasterKeyId;
-    unsigned char _masterkey[_key_len];
     WT_CONNECTION *_conn = nullptr;
     stdx::recursive_mutex _lock;  // _prng, _gcm_iv, _gcm_iv_reserved
     Mutex _lock_sess = MONGO_MAKE_LATCH("EncryptionKeyDB::_lock_sess");  // _sess
@@ -182,6 +183,7 @@ private:
     WT_SESSION *_sess = nullptr;
     std::unique_ptr<SecureRandom> _srng;
     std::unique_ptr<PseudoRandom> _prng;
+    encryption::Key _masterkey;
     _gcm_iv_type _gcm_iv{0};
     _gcm_iv_type _gcm_iv_reserved{0};
     static constexpr int _gcm_iv_bytes = (std::numeric_limits<decltype(_gcm_iv)>::digits + 7) / 8;

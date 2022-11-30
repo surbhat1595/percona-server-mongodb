@@ -582,7 +582,6 @@ TEST_F(MongodbCAPITest, RunListCommands) {
                                           "refreshLogicalSessionCacheNow",
                                           "refreshSessions",
                                           "renameCollection",
-                                          "repairDatabase",
                                           "resetError",
                                           "serverStatus",
                                           "setParameter",

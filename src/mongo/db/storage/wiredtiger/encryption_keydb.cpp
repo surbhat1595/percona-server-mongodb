@@ -56,7 +56,6 @@ static EncryptionKeyDB *encryptionKeyDB = nullptr;
 static EncryptionKeyDB *rotationKeyDB = nullptr;
 
 static constexpr const char * gcm_iv_key = "_gcm_iv_reserved";
-constexpr int EncryptionKeyDB::_key_len;
 constexpr int EncryptionKeyDB::_gcm_iv_bytes;
 
 static void dump_key(unsigned char *key, const int _key_len, const char * msg) {
@@ -111,10 +110,12 @@ EncryptionKeyDB::EncryptionKeyDB(const bool pre_existed,
                                  const std::string& path,
                                  const std::string& kmipMasterKeyId,
                                  const bool rotation)
-    : _pre_existed(pre_existed),
-      _rotation(rotation),
+    : _rotation(rotation),
       _path(path),
-      _kmipMasterKeyId(kmipMasterKeyId) {
+      _kmipMasterKeyId(kmipMasterKeyId),
+      _srng(std::make_unique<SecureRandom>()),
+      _prng(std::make_unique<PseudoRandom>(_srng->nextInt64())),
+      _masterkey(obtain_masterkey(pre_existed, _rotation, _kmipMasterKeyId, *_srng)) {
     // single instance is allowed as main keydb
     // and another one for rotation
     if (!_rotation) {
@@ -137,7 +138,7 @@ EncryptionKeyDB::~EncryptionKeyDB() {
 
 void EncryptionKeyDB::close_handles() {
     if (kDebugBuild && _sess)
-        dump_table(_sess, _key_len, "dump_table from destructor");
+        dump_table(_sess, encryption::Key::kLength, "dump_table from destructor");
     _backupSession.reset();
     _backupCursor = nullptr;
     if (_sess) {
@@ -152,38 +153,34 @@ void EncryptionKeyDB::close_handles() {
     }
 }
 
-// this function uses _srng without synchronization
-// caller must ensure it is safe
-void EncryptionKeyDB::generate_secure_key(char key[]) {
-    _srng->fill(key, _key_len);
-}
-
-void EncryptionKeyDB::init_masterkey() {
-    std::string encoded_key;
+encryption::Key EncryptionKeyDB::obtain_masterkey(bool pre_existed,
+                                                  bool rotation,
+                                                  std::string& kmipMasterKeyId,
+                                                  SecureRandom& srng) {
+    std::optional<encryption::Key> masterKey;
     if (!encryptionGlobalParams.kmipServerName.empty()) {
-        if (_kmipMasterKeyId.empty()) {
-            char newkey[_key_len];
-            generate_secure_key(newkey);
-            encoded_key = base64::encode(StringData{newkey, _key_len});
-            if (!_rotation) {
+        if (kmipMasterKeyId.empty()) {
+            masterKey = encryption::Key(srng);
+            if (!rotation) {
                 // @note: please see the `store_masterkey` function for
                 // the key writing during rotation
-                _kmipMasterKeyId = kmipWriteKey(encoded_key);
+                kmipMasterKeyId = kmipWriteKey(masterKey->base64());
                 LOGV2(29107,
                       "Master key has been created on the KMIP server",
-                      "kmipMasterKeyId"_attr = _kmipMasterKeyId);
+                      "kmipMasterKeyId"_attr = kmipMasterKeyId);
             }
         } else {
-            encoded_key = kmipReadKey(_kmipMasterKeyId);
+            std::string encoded_key = kmipReadKey(kmipMasterKeyId);
             if (encoded_key.empty()) {
                 LOGV2_FATAL_NOTRACE(29110,
                                     "Cannot start. Master encryption key is absent in KMIP. "
                                     "Check configuration options.",
-                                    "kmipMasterKeyId"_attr = _kmipMasterKeyId);
+                                    "kmipMasterKeyId"_attr = kmipMasterKeyId);
             }
+            masterKey = encryption::Key(encoded_key);
             LOGV2(29108,
                   "Master key has been read from the KMIP server",
-                  "kmipMasterKeyId"_attr = _kmipMasterKeyId);
+                  "kmipMasterKeyId"_attr = kmipMasterKeyId);
         }
     } else if (!encryptionGlobalParams.vaultServerName.empty()) {
         if (encryptionGlobalParams.vaultToken.empty()) {
@@ -212,26 +209,25 @@ void EncryptionKeyDB::init_masterkey() {
             }
             f >> encryptionGlobalParams.vaultToken;
         }
-        if (_rotation) {
+        if (rotation) {
             // generate new key
-            char newkey[_key_len];
-            generate_secure_key(newkey);
-            encoded_key = base64::encode(StringData{newkey, _key_len});
+            masterKey = encryption::Key(srng);
         } else {
             // read key from the Vault
-            encoded_key = vaultReadKey();
+            std::string encoded_key = vaultReadKey();
+            if (!encoded_key.empty()) {
+                masterKey = encryption::Key(encoded_key);
+            }
             // empty key is returned when there was HTTP error 404
             // if this happens on first run (with empty keydb) then
             // we can generate key here
-            if (encoded_key.empty()) {
-                if (_pre_existed) {
+            if (!masterKey) {
+                if (pre_existed) {
                     throw std::runtime_error("Cannot start. Master encryption key is absent in the Vault. Check configuration options.");
                 }
                 LOGV2(29036, "Master key is absent in the Vault. Generating and writing one.");
-                char newkey[_key_len];
-                generate_secure_key(newkey);
-                encoded_key = base64::encode(StringData{newkey, _key_len});
-                vaultWriteKey(encoded_key);
+                masterKey = encryption::Key(srng);
+                vaultWriteKey(masterKey->base64());
             }
         }
     } else {
@@ -258,15 +254,12 @@ void EncryptionKeyDB::init_masterkey() {
                                      << "cannot open specified encryption key file: "
                                      << encryptionGlobalParams.encryptionKeyFile);
         }
+        std::string encoded_key;
         f >> encoded_key;
+        masterKey = encryption::Key(encoded_key);
     }
 
-    auto key = base64::decode(encoded_key);
-    if (key.length() != _key_len) {
-        throw std::runtime_error(str::stream()
-                                 << "encryption key length should be " << _key_len << " bytes");
-    }
-    memcpy(_masterkey, key.c_str(), _key_len);
+    return (invariant(masterKey), *masterKey);
 }
 
 // Open db with correct compatibility mode
@@ -314,11 +307,7 @@ int EncryptionKeyDB::_openWiredTiger(const std::string& path, const std::string&
 }
 
 void EncryptionKeyDB::init() {
-    _srng = std::make_unique<SecureRandom>();
-    _prng = std::make_unique<PseudoRandom>(_srng->nextInt64());
     try {
-        init_masterkey();
-
         std::stringstream ss;
         ss << "create,";
         ss << "config_base=false,";
@@ -345,14 +334,14 @@ void EncryptionKeyDB::init() {
             throw std::runtime_error(std::string("error opening wiredTiger session: ") + wiredtiger_strerror(res));
         }
 
-        if (kDebugBuild) dump_table(_sess, _key_len, "before create");
+        if (kDebugBuild) dump_table(_sess, encryption::Key::kLength, "before create");
         // try to create 'key' table
         // ignore error if table already exists
         res = _sess->create(_sess, "table:key", "key_format=S,value_format=u,access_pattern_hint=random");
         if (res) {
             throw std::runtime_error(std::string("error creating/opening key table: ") + wiredtiger_strerror(res));
         }
-        if (kDebugBuild) dump_table(_sess, _key_len, "after create");
+        if (kDebugBuild) dump_table(_sess, encryption::Key::kLength, "after create");
 
         // try to create 'parameters' table
         // ignore error if table already exists
@@ -421,7 +410,7 @@ void EncryptionKeyDB::import_data_from(EncryptionKeyDB* proto) {
             if ((res = srcc->get_key(srcc, &k))
                 || (res = srcc->get_value(srcc, &v)))
                 throw std::runtime_error(std::string("clone: error getting key/value from the key table: ") + wiredtiger_strerror(res));
-            invariant(v.size == _key_len);
+            invariant(v.size == encryption::Key::kLength);
             dstc->set_key(dstc, k);
             dstc->set_value(dstc, &v);
             if ((res = dstc->insert(dstc)) != 0)
@@ -436,16 +425,15 @@ void EncryptionKeyDB::import_data_from(EncryptionKeyDB* proto) {
 }
 
 void EncryptionKeyDB::store_masterkey() {
-    auto encodedKey = base64::encode(StringData{(const char*)_masterkey, _key_len});
     if (!encryptionGlobalParams.kmipServerName.empty()) {
         if (_kmipMasterKeyId.empty()) {
-            _kmipMasterKeyId = kmipWriteKey(encodedKey);
+            _kmipMasterKeyId = kmipWriteKey(_masterkey.base64());
             LOGV2(29109,
                   "Master key has been created on the KMIP server",
                   "kmipMasterKeyId"_attr = _kmipMasterKeyId);
         }
     } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        vaultWriteKey(encodedKey);
+        vaultWriteKey(_masterkey.base64());
     } else {
         throw std::logic_error(
             "Can't save master key because neither HashiCorp's Vault nor "
@@ -467,8 +455,8 @@ int EncryptionKeyDB::get_key_by_id(const char *keyid, size_t len, unsigned char 
     LOGV2_DEBUG(29050, 4, "get_key_by_id for keyid: '{id}'", "id"_attr = std::string{keyid, len});
     // return key from keyfile if len == 0
     if (len == 0) {
-        memcpy(key, _masterkey, _key_len);
-        if (kDebugBuild) dump_key(key, _key_len, "returning masterkey");
+        memcpy(key, const_cast<const encryption::Key&>(_masterkey).data(), _masterkey.size());
+        if (kDebugBuild) dump_key(key, _masterkey.size(), "returning masterkey");
         return 0;
     }
 
@@ -500,9 +488,9 @@ int EncryptionKeyDB::get_key_by_id(const char *keyid, size_t len, unsigned char 
     if (res == 0) {
         WT_ITEM v;
         cursor->get_value(cursor, &v);
-        invariant(v.size == _key_len);
-        memcpy(key, v.data, _key_len);
-        if (kDebugBuild) dump_key(key, _key_len, "loaded key from key DB");
+        invariant(v.size == encryption::Key::kLength);
+        memcpy(key, v.data, encryption::Key::kLength);
+        if (kDebugBuild) dump_key(key, encryption::Key::kLength, "loaded key from key DB");
         _encryptors[c_str] = pe;
         return 0;
     }
@@ -514,9 +502,9 @@ int EncryptionKeyDB::get_key_by_id(const char *keyid, size_t len, unsigned char 
 
     // create key if it does not exist
     // call to fill() is protected by _lock_key above
-    _srng->fill(key, _key_len);
+    _srng->fill(key, encryption::Key::kLength);
     WT_ITEM v;
-    v.size = _key_len;
+    v.size = encryption::Key::kLength;
     v.data = key;
     cursor->set_key(cursor, c_str.c_str());
     cursor->set_value(cursor, &v);
@@ -527,7 +515,7 @@ int EncryptionKeyDB::get_key_by_id(const char *keyid, size_t len, unsigned char 
         return res;
     }
 
-    if (kDebugBuild) dump_key(key, _key_len, "generated and stored key");
+    if (kDebugBuild) dump_key(key, encryption::Key::kLength, "generated and stored key");
     _encryptors[c_str] = pe;
     return 0;
 }

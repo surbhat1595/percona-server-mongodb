@@ -4,6 +4,17 @@ Import("env")
 env = env.Clone()
 
 env.Library(
+    target='key',
+    source=[
+        'key.cpp'
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/util/secure_zero_memory'
+    ],
+)
+
+env.Library(
     target='encryption_options',
     source=[
         'encryption_options.cpp',

@@ -66,6 +66,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/curop',
             '$BUILD_DIR/mongo/db/encryption/encryption_kmip',
             '$BUILD_DIR/mongo/db/encryption/encryption_vault',
+            '$BUILD_DIR/mongo/db/encryption/key',
             '$BUILD_DIR/mongo/db/index/index_descriptor',
             '$BUILD_DIR/mongo/db/global_settings',
             '$BUILD_DIR/mongo/db/namespace_string',

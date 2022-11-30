@@ -222,7 +222,7 @@ encryption::Key readMasterKey() {
         return encryption::Key(kmipReadKey(encryptionGlobalParams.kmipKeyIdentifier));
     } else if (!encryptionGlobalParams.vaultServerName.empty()) {
         std::cout << "Loading encryption key from the Vault server" << std::endl;
-        return encryption::Key(vaultReadKey());
+        return encryption::Key(vaultReadKey(encryptionGlobalParams.vaultSecret));
     } else {
         std::cout << "Loading encryption key from: " << encryptionGlobalParams.encryptionKeyFile
                   << std::endl;

@@ -199,7 +199,7 @@ encryption::Key EncryptionKeyDB::obtain_masterkey(bool pre_existed,
             masterKey = encryption::Key(srng);
         } else {
             // read key from the Vault
-            std::string encoded_key = vaultReadKey();
+            std::string encoded_key = vaultReadKey(encryptionGlobalParams.vaultSecret);
             if (!encoded_key.empty()) {
                 masterKey = encryption::Key(encoded_key);
             }
@@ -212,7 +212,7 @@ encryption::Key EncryptionKeyDB::obtain_masterkey(bool pre_existed,
                 }
                 LOGV2(29036, "Master key is absent in the Vault. Generating and writing one.");
                 masterKey = encryption::Key(srng);
-                vaultWriteKey(masterKey->base64());
+                vaultWriteKey(encryptionGlobalParams.vaultSecret, masterKey->base64());
             }
         }
     } else {
@@ -395,7 +395,7 @@ void EncryptionKeyDB::store_masterkey() {
                   "kmipMasterKeyId"_attr = _kmipMasterKeyId);
         }
     } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        vaultWriteKey(_masterkey.base64());
+        vaultWriteKey(encryptionGlobalParams.vaultSecret, _masterkey.base64());
     } else {
         throw std::logic_error(
             "Can't save master key because neither HashiCorp's Vault nor "

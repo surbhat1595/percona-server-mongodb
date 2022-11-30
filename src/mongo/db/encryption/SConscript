@@ -31,6 +31,20 @@ env.Library(
     SYSLIBDEPS=[
         'winhttp' if env.TargetOSIs('windows') else 'curl',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/encryption/secret_string'
+    ],
+)
+
+env.Library(
+    target='secret_string',
+    source=[
+        'secret_string.cpp'
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/util/secure_zero_memory'
+    ],
 )
 
 env.InjectThirdParty(libraries=['kmippp'])

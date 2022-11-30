@@ -31,6 +31,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace mongo {
@@ -40,11 +41,13 @@ namespace mongo {
 /// command line options.
 ///
 /// @param secretPath path to the encryption key on the Vault server
+/// @param secretVersion the version of the key;
+///                      default is zero meaning the most recent version
 ///
 /// @returns encryption key data in base64 encoded form
 ///
 /// @throws std::runtime_error in case of issues
-std::string vaultReadKey(const std::string& secretPath);
+std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVersion = 0);
 
 /// @brief Creates a copy of the key on the Vault server.
 ///
@@ -58,7 +61,9 @@ std::string vaultReadKey(const std::string& secretPath);
 /// @param secretPath path to the encryption key on the Vault server
 /// @param key base64-encoded key data
 ///
+/// @returns the version of created the key as a positive integer
+///
 /// @throws std::runtime_error in case of issues
-void vaultWriteKey(const std::string& secretPath, std::string const& key);
+std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& key);
 
 }  // namespace mongo

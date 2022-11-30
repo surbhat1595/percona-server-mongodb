@@ -34,14 +34,31 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include <string>
 
 namespace mongo {
+/// @brief Reads an encryption key from the Vault server.
+///
+/// The address of the Vault server is specified via configuration file or
+/// command line options.
+///
+/// @param secretPath path to the encryption key on the Vault server
+///
+/// @returns encryption key data in base64 encoded form
+///
+/// @throws std::runtime_error in case of issues
+std::string vaultReadKey(const std::string& secretPath);
 
-// read master key from Vault
-// throw std::runtime_error in case of issues
-// returns base64 encoded value
-std::string vaultReadKey();
-
-// write key to the Vault
-// 'key' should be base64 encoded string
-void vaultWriteKey(std::string const& key);
+/// @brief Creates a copy of the key on the Vault server.
+///
+/// The address of the Vault server is specified via configuration file or
+/// command line options.
+///
+/// The function never overwrites an existing entry on a Vault server,
+/// it always creates a new one.
+/// @todo Consider renaming to better reflect the latter fact.
+///
+/// @param secretPath path to the encryption key on the Vault server
+/// @param key base64-encoded key data
+///
+/// @throws std::runtime_error in case of issues
+void vaultWriteKey(const std::string& secretPath, std::string const& key);
 
 }  // namespace mongo

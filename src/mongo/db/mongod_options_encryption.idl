@@ -87,6 +87,14 @@ configs:
         arg_vartype: String
         requires: 'security.vault.serverName'
 
+    'security.vault.secretVersion':
+        description: >-
+            The version of the Vault secret where the master key is stored.
+            Zero means the most recent version.
+        short_name: vaultSecretVersion
+        arg_vartype: UnsignedLongLong
+        requires: 'security.vault.secret'
+
     'security.vault.rotateMasterKey':
         description: 'Rotate master key and re-encrypt keys db'
         short_name: vaultRotateMasterKey

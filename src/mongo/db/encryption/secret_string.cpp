@@ -40,7 +40,7 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/server_options.h"
 #include "mongo/util/secure_zero_memory.h"
 
-namespace mongo::encryption {
+namespace mongo::encryption::detail {
 SecretString::~SecretString() {
     secureZeroMemory(_data.data(), _data.size());
 }
@@ -76,4 +76,4 @@ SecretString SecretString::readFromFile(const std::string& path, const std::stri
     f >> data;
     return SecretString(std::move(data));
 }
-}  // namespace mongo::encryption
+}  // namespace mongo::encryption::detail

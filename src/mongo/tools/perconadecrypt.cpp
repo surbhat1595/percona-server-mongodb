@@ -39,11 +39,10 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
-#include "mongo/db/encryption/encryption_kmip.h"
 #include "mongo/db/encryption/encryption_options.h"
-#include "mongo/db/encryption/encryption_vault.h"
 #include "mongo/db/encryption/key.h"
-#include "mongo/db/encryption/secret_string.h"
+#include "mongo/db/encryption/key_id.h"
+#include "mongo/db/encryption/key_operations.h"
 #include "mongo/tools/perconadecrypt_options.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/exit_code.h"
@@ -217,18 +216,12 @@ int decryptGCM(const encryption::Key& masterKey,
 }
 
 encryption::Key readMasterKey() {
-    if (!encryptionGlobalParams.kmipServerName.empty()) {
-        std::cout << "Loading encryption key from the KMIP server" << std::endl;
-        return encryption::Key(kmipReadKey(encryptionGlobalParams.kmipKeyIdentifier));
-    } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        std::cout << "Loading encryption key from the Vault server" << std::endl;
-        return encryption::Key(vaultReadKey(encryptionGlobalParams.vaultSecret));
-    } else {
-        std::cout << "Loading encryption key from: " << encryptionGlobalParams.encryptionKeyFile
-                  << std::endl;
-        return encryption::Key(encryption::SecretString::readFromFile(
-            encryptionGlobalParams.encryptionKeyFile, "encryption key"));
-    }
+    using namespace encryption;
+    auto factory = KeyOperationFactory::create(encryptionGlobalParams);
+    std::unique_ptr<ReadKey> read = factory->createProvidedRead();
+    std::cout << "Loading encryption key from the " << read->facilityType() << std::endl;
+    std::optional<Key> k = (*read)();
+    return k ? *k : throw std::runtime_error("No encryption key found for specified params");
 }
 }  // namespace
 

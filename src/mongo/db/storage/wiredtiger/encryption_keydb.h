@@ -50,57 +50,36 @@ class EncryptionKeyDB
 public:
     ~EncryptionKeyDB();
 
-    /// @brief Creates a new encryption key database.
+    /// @brief Open an existing key database or creates a new one.
     ///
-    /// @param path Path to the directory where the key db should be created;
-    ///     the path must point to an existing empty directory
-    /// @param kmipMasterKeyId In the case encryption is enabled and KMIP is used as
-    ///     a key management solution, this is the identifier of the database master key.
-    ///     If it is an empty string, then the function automatically creates a master key.
-    ///     and uploads it to the KMIP server specified in configuration.
-    ///     If KMIP is not used, the parameter is ignored.
+    /// @param path Path to the directory where the existing key database is
+    ///             stored or the new database should be created. In the latter
+    ///             case, the path must point to an existing empty directory.
+    /// @param masterKey The master key for decrypting the existing database
+    ///                  or encrypting the new one.
     ///
-    /// @returns Pointer to the created key database
-    ///
-    /// @throws std::runtime_error if
-    ///     1. the master key can't be read from or written to a KMIP or Vault server
-    ///     2. Vault token file can't be read
-    ///     3. can't create encryption key db at the specified path
+    /// @throws std::runtime_error if can't open the encryption key database
+    /// or craete the new one at the specified path
     static std::unique_ptr<EncryptionKeyDB> create(const std::string& path,
-                                                   const std::string& kmipMasterKeyId);
+                                                   const encryption::Key& masterKey);
 
-    /// @brief Opens an encryption key database.
-    ///
-    /// @param path Path to the directory with the encyption key database
-    /// @param kmipMasterKeyId If the database is encrypted with a key stored using a KMIP-based
-    ///     key management solution, this is the identifier of the database master key.
-    ///     It can't be impty if the database is encrypted in that case. In all other cases,
-    ///     the argument must be an empty string.
-    ///
-    /// @returns Pointer to the opened key database
-    ///
-    /// @throws std::runtime_error if
-    ///     1. the master key can't be read from a KMIP or Vault server
-    ///     2. Vault token file can't be read
-    ///     3. can't open encryption key db at the specified path
-    ///
-    /// @note The function can't encrypt already existing non-encrypted key database.
-    static std::unique_ptr<EncryptionKeyDB> open(const std::string& path,
-                                                 const std::string& kmipMasterKeyId);
-
-    /// @brief Clones the database.
+    /// @brief Clones the database for the purpose of master key rotation.
     ///
     /// Creates a new encryption key database with data identidal to that of this one
     /// and stores it at the specifed path. The difference with this database is that
     /// the new one is encrypted with a new master key. The function is intended to
     /// be used only for master key rotation.
     ///
-    /// Plase see the `create` function for the descriptions of parameters and thrown excepitons.
-    /// Additionally, the function throws `std::runtime_error` if it can't copy this key database.
+    /// @param path Path to the directory where the database should be created;
+    ///             must point to an existing empty directory.
+    /// @param masterKey The master key for encrypting the new database.
     ///
     /// @returns Copy of this encryption key database suitable for master key rotation.
+    ///
+    /// @throws std::runtime_error if can't craete a key database new one at the specified path or
+    /// can't copy the data to the just created database.
     std::unique_ptr<EncryptionKeyDB> clone(const std::string& path,
-                                           const std::string& kmipMasterKeyId);
+                                           const encryption::Key& masterKey);
 
     // returns encryption key from keys DB
     // create key if it does not exists
@@ -131,17 +110,14 @@ public:
 
     StatusWith<std::vector<std::string>> extendBackupCursor();
 
-    const std::string& kmipMasterKeyId() const noexcept {
-        return _kmipMasterKeyId;
+    const encryption::Key& masterKey() const noexcept {
+        return _masterkey;
     }
 
 private:
     typedef boost::multiprecision::uint128_t _gcm_iv_type;
 
-    EncryptionKeyDB(const bool pre_existed,
-                    const std::string& path,
-                    const std::string& kmipMasterKeyId,
-                    const bool rotation);
+    EncryptionKeyDB(const std::string& path, const encryption::Key& masterKey, const bool rotation);
 
     // tries to read master key from specified file
     // then opens WT connection
@@ -153,9 +129,6 @@ private:
     // during rotation copies data from provided instance
     void import_data_from(EncryptionKeyDB* proto);
 
-    // write master key to the Vault (during rotation)
-    void store_masterkey();
-
     StatusWith<StorageEngine::BackupInformation> _disableIncrementalBackup();
 
     void close_handles();
@@ -163,15 +136,9 @@ private:
     int store_gcm_iv_reserved();
     int reserve_gcm_iv_range();
 
-    static encryption::Key obtain_masterkey(bool pre_existed,
-                                            bool rotation,
-                                            std::string& kmipMasterKeyId,
-                                            SecureRandom& srng);
-
     const bool _rotation;
     const std::string _path;
     std::string _wtOpenConfig;
-    std::string _kmipMasterKeyId;
     WT_CONNECTION *_conn = nullptr;
     stdx::recursive_mutex _lock;  // _prng, _gcm_iv, _gcm_iv_reserved
     Mutex _lock_sess = MONGO_MAKE_LATCH("EncryptionKeyDB::_lock_sess");  // _sess

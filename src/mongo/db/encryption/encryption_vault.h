@@ -34,7 +34,9 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include <cstdint>
 #include <string>
 
-namespace mongo {
+/// The code in this namespace is not intended to be called from outside
+/// the `mongo::encryption` namespace
+namespace mongo::encryption::detail {
 /// @brief Reads an encryption key from the Vault server.
 ///
 /// The address of the Vault server is specified via configuration file or
@@ -66,4 +68,4 @@ std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVers
 /// @throws std::runtime_error in case of issues
 std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& key);
 
-}  // namespace mongo
+}  // namespace mongo::encryption::detail

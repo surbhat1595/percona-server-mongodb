@@ -6,7 +6,8 @@ env = env.Clone()
 env.Library(
     target='key',
     source=[
-        'key.cpp'
+        'key.cpp',
+        "key_id.cpp"
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',

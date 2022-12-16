@@ -42,7 +42,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/json.h"
 #include "mongo/logv2/log.h"
 
-namespace mongo {
+namespace mongo::encryption::detail {
 
 namespace {
 
@@ -172,8 +172,7 @@ std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVers
 
     const std::string& vaultToken = !encryptionGlobalParams.vaultToken.empty()
         ? encryptionGlobalParams.vaultToken
-        : encryption::SecretString::readFromFile(encryptionGlobalParams.vaultTokenFile,
-                                                 "Vault token");
+        : SecretString::readFromFile(encryptionGlobalParams.vaultTokenFile, "Vault token");
 
     curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, std::string("X-Vault-Token: ").append(vaultToken).c_str());
@@ -262,8 +261,7 @@ std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& ke
 
     const std::string& vaultToken = !encryptionGlobalParams.vaultToken.empty()
         ? encryptionGlobalParams.vaultToken
-        : encryption::SecretString::readFromFile(encryptionGlobalParams.vaultTokenFile,
-                                                 "Vault token");
+        : SecretString::readFromFile(encryptionGlobalParams.vaultTokenFile, "Vault token");
 
     curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, std::string("X-Vault-Token: ").append(vaultToken).c_str());
@@ -307,4 +305,4 @@ std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& ke
     return parse_version(data.Obj()["version"], "data.version");
 }
 
-}  // namespace mongo
+}  // namespace mongo::encryption::detail

@@ -37,7 +37,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/json.h"
 #include "mongo/logv2/log.h"
 
-namespace mongo {
+namespace mongo::encryption::detail {
 
 namespace {
 kmippp::context kmipCreateContext() {
@@ -93,4 +93,4 @@ std::string kmipWriteKey(std::string const& keyData) {
     return keyId;
 }
 
-}  // namespace mongo
+}  // namespace mongo::encryption::detail

@@ -63,7 +63,7 @@ configs:
         description: 'Hostname or IP address of the Vault server'
         short_name: vaultServerName
         arg_vartype: String
-        requires: [ 'security.enableEncryption', 'security.vault.port', 'security.vault.tokenFile', 'security.vault.secret']
+        requires: [ 'security.enableEncryption', 'security.vault.port', 'security.vault.tokenFile']
         conflicts: ['security.encryptionKeyFile', 'security.kmip.serverName']
 
     'security.vault.port':

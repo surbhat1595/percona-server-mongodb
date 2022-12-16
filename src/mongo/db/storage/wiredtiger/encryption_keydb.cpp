@@ -31,19 +31,13 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-#include <sys/stat.h>
+#include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 
 #include <cstring>  // memcpy
-#include <fstream>
 
-#include "mongo/db/encryption/encryption_kmip.h"
-#include "mongo/db/encryption/encryption_options.h"
-#include "mongo/db/encryption/key_operations.h"
-#include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/base64.h"
 #include "mongo/util/debug_util.h"
 
 #include <third_party/wiredtiger/ext/encryptors/percona/encryption_keydb_c_api.h>
@@ -92,29 +86,20 @@ static void dump_table(WT_SESSION* _sess, const int _key_len, const char* msg) {
 }
 
 std::unique_ptr<EncryptionKeyDB> EncryptionKeyDB::create(const std::string& path,
-                                                         const std::string& kmipMasterKeyId) {
-    std::unique_ptr<EncryptionKeyDB> db(new EncryptionKeyDB(false, path, kmipMasterKeyId, false));
+                                                         const encryption::Key& masterKey) {
+    std::unique_ptr<EncryptionKeyDB> db(new EncryptionKeyDB(path, masterKey, false));
     db->init();
     return db;
 }
 
-std::unique_ptr<EncryptionKeyDB> EncryptionKeyDB::open(const std::string& path,
-                                                       const std::string& kmipMasterKeyId) {
-    std::unique_ptr<EncryptionKeyDB> db(new EncryptionKeyDB(true, path, kmipMasterKeyId, false));
-    db->init();
-    return db;
-}
-
-EncryptionKeyDB::EncryptionKeyDB(const bool pre_existed,
-                                 const std::string& path,
-                                 const std::string& kmipMasterKeyId,
+EncryptionKeyDB::EncryptionKeyDB(const std::string& path,
+                                 const encryption::Key& masterKey,
                                  const bool rotation)
     : _rotation(rotation),
       _path(path),
-      _kmipMasterKeyId(kmipMasterKeyId),
       _srng(std::make_unique<SecureRandom>()),
       _prng(std::make_unique<PseudoRandom>(_srng->nextInt64())),
-      _masterkey(obtain_masterkey(pre_existed, _rotation, _kmipMasterKeyId, *_srng)) {
+      _masterkey(masterKey) {
     // single instance is allowed as main keydb
     // and another one for rotation
     if (!_rotation) {
@@ -161,63 +146,6 @@ void EncryptionKeyDB::generate_secure_key(unsigned char* key) {
 // caller must ensure it is safe
 void EncryptionKeyDB::generate_secure_key_inlock(char key[]) {
     _srng->fill(key, encryption::Key::kLength);
-}
-
-encryption::Key EncryptionKeyDB::obtain_masterkey(bool pre_existed,
-                                                  bool rotation,
-                                                  std::string& kmipMasterKeyId,
-                                                  SecureRandom& srng) {
-    using namespace encryption;
-    std::optional<Key> masterKey;
-    if (!encryptionGlobalParams.kmipServerName.empty()) {
-        if (kmipMasterKeyId.empty()) {
-            masterKey = encryption::Key(srng);
-            if (!rotation) {
-                // @note: please see the `store_masterkey` function for
-                // the key writing during rotation
-                // @note: the call to `detail` namespace will be eliminated
-                // after transitioning to unified approach for key management
-                kmipMasterKeyId = encryption::detail::kmipWriteKey(masterKey->base64());
-                LOGV2(29107,
-                      "Master key has been created on the KMIP server",
-                      "kmipMasterKeyId"_attr = kmipMasterKeyId);
-            }
-        } else {
-            masterKey = ReadKmipKey(KmipKeyId(kmipMasterKeyId))();
-            if (!masterKey) {
-                LOGV2_FATAL_NOTRACE(29110,
-                                    "Cannot start. Master encryption key is absent in KMIP. "
-                                    "Check configuration options.",
-                                    "kmipMasterKeyId"_attr = kmipMasterKeyId);
-            }
-            LOGV2(29108,
-                  "Master key has been read from the KMIP server",
-                  "kmipMasterKeyId"_attr = kmipMasterKeyId);
-        }
-    } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        if (rotation) {
-            // generate new key
-            masterKey = Key(srng);
-        } else {
-            // read key from the Vault
-            masterKey = ReadVaultSecret(VaultSecretId(encryptionGlobalParams.vaultSecret, 0))();
-            // empty key is returned when there was HTTP error 404
-            // if this happens on first run (with empty keydb) then
-            // we can generate key here
-            if (!masterKey) {
-                if (pre_existed) {
-                    throw std::runtime_error("Cannot start. Master encryption key is absent in the Vault. Check configuration options.");
-                }
-                LOGV2(29036, "Master key is absent in the Vault. Generating and writing one.");
-                masterKey = Key(srng);
-                SaveVaultSecret(encryptionGlobalParams.vaultSecret)(*masterKey);
-            }
-        }
-    } else {
-        masterKey = ReadKeyFile(KeyFilePath(encryptionGlobalParams.encryptionKeyFile))();
-    }
-
-    return (invariant(masterKey), *masterKey);
 }
 
 // Open db with correct compatibility mode
@@ -383,32 +311,11 @@ void EncryptionKeyDB::import_data_from(EncryptionKeyDB* proto) {
     }
 }
 
-void EncryptionKeyDB::store_masterkey() {
-    if (!encryptionGlobalParams.kmipServerName.empty()) {
-        if (_kmipMasterKeyId.empty()) {
-            // @note: the call to `detail` namespace will be eliminated
-            // after transitioning to unified approach for key management
-            _kmipMasterKeyId = encryption::detail::kmipWriteKey(_masterkey.base64());
-            LOGV2(29109,
-                  "Master key has been created on the KMIP server",
-                  "kmipMasterKeyId"_attr = _kmipMasterKeyId);
-        }
-    } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-        encryption::SaveVaultSecret(encryptionGlobalParams.vaultSecret)(_masterkey);
-    } else {
-        throw std::logic_error(
-            "Can't save master key because neither HashiCorp's Vault nor "
-            "KMIP server is configured");
-    }
-}
-
 std::unique_ptr<EncryptionKeyDB> EncryptionKeyDB::clone(const std::string& path,
-                                                        const std::string& kmipMasterKeyId) {
-    std::unique_ptr<EncryptionKeyDB> duplicate(
-        new EncryptionKeyDB(false, path, kmipMasterKeyId, true));
+                                                        const encryption::Key& masterKey) {
+    std::unique_ptr<EncryptionKeyDB> duplicate(new EncryptionKeyDB(path, masterKey, true));
     duplicate->init();
     duplicate->import_data_from(this);
-    duplicate->store_masterkey();
     return duplicate;
 }
 

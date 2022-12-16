@@ -33,7 +33,9 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #include <string>
 
-namespace mongo {
+/// The code in this namespace is not intended to be called from outside
+/// the `mongo::encryption` namespace
+namespace mongo::encryption::detail {
 
 /// @brief Reads a key from the KMIP server specified in the configuration
 ///
@@ -56,4 +58,4 @@ std::string kmipReadKey(const std::string& keyId);
 ///     servers listed in the configuration
 std::string kmipWriteKey(std::string const& keyData);
 
-}  // namespace mongo
+}  // namespace mongo::encryption::detail

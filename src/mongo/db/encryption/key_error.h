@@ -31,30 +31,59 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 
 #pragma once
 
+#include <stdexcept>
 #include <string>
-#include <utility>
 
-/// The code in this namespace is not intended to be called from outside
-/// the `mongo::encryption` namespace
-namespace mongo::encryption::detail {
-class SecretString {
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/encryption/key_id.h"
+
+namespace mongo::encryption {
+class KeyError : public std::runtime_error {
 public:
-    ~SecretString();
-    SecretString(const SecretString&) = default;
-    SecretString(SecretString&&) = default;
-    SecretString& operator=(const SecretString&) = default;
-    SecretString& operator=(SecretString&&) = default;
-
-    explicit SecretString(const std::string& data) : _data(data) {}
-    explicit SecretString(std::string&& data) : _data(std::move(data)) {}
-
-    operator const std::string&() const noexcept {
-        return _data;
+    /// @brief Returns more detailed explanatory information about the error
+    /// than the `what` member function does.
+    ///
+    /// @note The member function also makes the class loggable with LOGV2.
+    BSONObj toBSON() const {
+        return _info;
     }
 
-    static SecretString readFromFile(const std::string& path, const std::string& description = "");
+    const char* what() const noexcept override {
+        return _info.getField("reason").valueStringData().rawData();
+    }
 
 private:
-    std::string _data;
+    friend class KeyErrorBuilder;
+    KeyError(BSONObj&& info) : std::runtime_error(""), _info(std::move(info)) {}
+
+    BSONObj _info;
 };
-}  // namespace mongo::encryption::detail
+
+class KeyErrorBuilder {
+public:
+    KeyErrorBuilder(const StringData& reason) {
+        _builder.append("reason", reason.empty() ? StringData("") : reason);
+    }
+
+    KeyErrorBuilder& append(const StringData& name, const StringData& value) {
+        _builder.append(name, value);
+        return *this;
+    }
+
+    KeyErrorBuilder& append(const StringData& name, const KeyId& value) {
+        BSONObjBuilder sb = _builder.subobjStart(name);
+        value.serialize(&sb);
+        sb.done();
+        return *this;
+    }
+
+    KeyError error() {
+        return KeyError(_builder.obj());
+    }
+
+private:
+    BSONObjBuilder _builder;
+};
+}  // namespace mongo::encryption

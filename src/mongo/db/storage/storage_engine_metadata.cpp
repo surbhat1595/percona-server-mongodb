@@ -114,7 +114,6 @@ StorageEngineMetadata::~StorageEngineMetadata() {}
 void StorageEngineMetadata::reset() {
     _storageEngine.clear();
     _storageEngineOptions = BSONObj();
-    _kmipMasterKeyId.clear();
     _keyId.reset();
 }
 
@@ -124,10 +123,6 @@ const std::string& StorageEngineMetadata::getStorageEngine() const {
 
 const BSONObj& StorageEngineMetadata::getStorageEngineOptions() const {
     return _storageEngineOptions;
-}
-
-const std::string& StorageEngineMetadata::getKmipMasterKeyId() const noexcept {
-    return _kmipMasterKeyId;
 }
 
 const encryption::KeyId* StorageEngineMetadata::keyId() const noexcept {
@@ -237,24 +232,6 @@ Status StorageEngineMetadata::read() {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "Invalid 'storage.options': " << e.what());
         }
-    }
-
-    BSONElement kmipMasterKeyIdElement =
-        dps::extractElementAtPath(_storageEngineOptions, "encryption.kmip.keyId");
-    if (!kmipMasterKeyIdElement.eoo()) {
-        if (kmipMasterKeyIdElement.type() != mongo::String) {
-            return Status(ErrorCodes::FailedToParse,
-                          str::stream() << "The 'storage.options.encryption.kmip.keyId' field in "
-                                           "metadata must be a string: "
-                                        << kmipMasterKeyIdElement.toString());
-        }
-        std::string kmipMasterKeyId = kmipMasterKeyIdElement.String();
-        if (kmipMasterKeyId.empty()) {
-            return Status(ErrorCodes::FailedToParse,
-                          "The 'storage.options.kmipMasterKeyId' field in metadata cannot be "
-                          "an empty string.");
-        }
-        _kmipMasterKeyId = std::move(kmipMasterKeyId);
     }
 
     return Status::OK();

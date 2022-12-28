@@ -8,7 +8,8 @@ env.Library(
     source=[
         'key.cpp',
         'key_id.cpp',
-        'key_operations.cpp'
+        'key_operations.cpp',
+        'master_key_provider.cpp'
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',

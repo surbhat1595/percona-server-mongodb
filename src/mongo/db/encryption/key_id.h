@@ -88,12 +88,12 @@ private:
     /// @brief Returns field name under which this key identifier is serialized
     /// to the storage engine encryption opitons.
     ///
-    /// @note sseo stands for storage engine encryption options.
+    /// @note seeo stands for storage engine encryption options.
     virtual const char* _seeoFieldName() const noexcept = 0;
-    /// @breif Serializes the key identifier value itself to the storage engine
+    /// @brief Serializes the key identifier value itself to the storage engine
     /// encrypiton opitons.
     ///
-    /// @note sseo stands for storage engine encryption options.
+    /// @note seeo stands for storage engine encryption options.
     /// @note This seiralization may differ from the serialization for logging.
     virtual void _serializeValueToSeeo(BSONObjBuilder* b) const = 0;
 };

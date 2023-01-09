@@ -51,7 +51,8 @@ class Key;
 /// Examples of a key management facility include an encrytion key file,
 /// a Vault server, and a KMIP server. Individual implementations encapsulate
 /// how a key is read from a particular facility.
-struct ReadKey {
+class ReadKey {
+public:
     virtual ~ReadKey() = default;
     ReadKey() = default;
     ReadKey(const ReadKey&) = default;
@@ -82,7 +83,8 @@ struct ReadKey {
 /// saved to a particular facility. An implementation is not supposed to
 /// overwrite an existing entry on a key management ficility. Instead,
 /// it must always create a new one.
-struct SaveKey {
+class SaveKey {
+public:
     virtual ~SaveKey() = default;
     SaveKey() = default;
     SaveKey(const SaveKey&) = default;
@@ -110,7 +112,7 @@ public:
 
     std::optional<Key> operator()() const override;
 
-    const KeyId& keyId() const noexcept {
+    const KeyId& keyId() const noexcept override {
         return _path;
     }
 
@@ -129,7 +131,7 @@ public:
 
     std::optional<Key> operator()() const override;
 
-    const KeyId& keyId() const noexcept {
+    const KeyId& keyId() const noexcept override {
         return _id;
     }
 
@@ -159,7 +161,7 @@ public:
 
     std::optional<Key> operator()() const override;
 
-    const KeyId& keyId() const noexcept {
+    const KeyId& keyId() const noexcept override {
         return _id;
     }
 
@@ -167,7 +169,8 @@ private:
     KmipKeyId _id;
 };
 
-struct SaveKmipKey : SaveKey {
+class SaveKmipKey : public SaveKey {
+public:
     std::unique_ptr<KeyId> operator()(const Key& k) const override;
 
     const char* facilityType() const noexcept override {
@@ -177,7 +180,8 @@ struct SaveKmipKey : SaveKey {
 
 /// @brief Factory to produce read and save operations for a key management
 /// facility.
-struct KeyOperationFactory {
+class KeyOperationFactory {
+public:
     virtual ~KeyOperationFactory() = default;
     KeyOperationFactory() = default;
     KeyOperationFactory(const KeyOperationFactory&) = default;

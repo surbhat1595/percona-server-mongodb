@@ -56,7 +56,7 @@ public:
     std::optional<Key> operator()() const override {
         return Key("9Ccgjp8dCj1zwb1yv56hFcF1uEA30IRFiMml7EhzUVk=");
     }
-    const KeyId& keyId() const noexcept {
+    const KeyId& keyId() const noexcept override {
         return _id;
     }
 
@@ -72,7 +72,7 @@ public:
     std::unique_ptr<KeyId> operator()(const Key& key) const override {
         return std::make_unique<VaultSecretId>(_secretPath, ++_secretVersion);
     }
-    const char* facilityType() const noexcept {
+    const char* facilityType() const noexcept override {
         return "FAKE VAULT SERVER";
     }
 
@@ -120,7 +120,7 @@ std::string toJsonText(const KeyId& id) {
     return b.obj().jsonString();
 }
 
-struct WiredTigerKVEngineEncryptionKeyTest : ServiceContextTest {};
+class WiredTigerKVEngineEncryptionKeyTest : public ServiceContextTest {};
 
 TEST_F(WiredTigerKVEngineEncryptionKeyTest, Stub) {
     encryptionGlobalParams.enableEncryption = true;

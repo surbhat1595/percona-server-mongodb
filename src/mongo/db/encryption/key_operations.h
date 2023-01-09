@@ -45,7 +45,7 @@ class EncryptionGlobalParams;
 namespace encryption {
 class Key;
 
-/// @breif The operation of reading an encryption key from a key management
+/// @brief The operation of reading an encryption key from a key management
 /// facility.
 ///
 /// Examples of a key management facility include an encrytion key file,

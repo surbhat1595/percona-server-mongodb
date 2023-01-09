@@ -56,14 +56,14 @@ public:
 
 private:
     friend class KeyErrorBuilder;
-    KeyError(BSONObj&& info) : std::runtime_error(""), _info(std::move(info)) {}
+    explicit KeyError(BSONObj&& info) : std::runtime_error(""), _info(std::move(info)) {}
 
     BSONObj _info;
 };
 
 class KeyErrorBuilder {
 public:
-    KeyErrorBuilder(const StringData& reason) {
+    explicit KeyErrorBuilder(const StringData& reason) {
         _builder.append("reason", reason.empty() ? StringData("") : reason);
     }
 

@@ -135,6 +135,10 @@ public:
         return _id;
     }
 
+    const VaultSecretId& vaultSecretId() const noexcept {
+        return _id;
+    }
+
 private:
     VaultSecretId _id;
 };
@@ -150,6 +154,10 @@ public:
         return VaultSecretId::kFacilityType;
     }
 
+    const std::string& secretPath() const noexcept {
+        return _secretPath;
+    }
+
 private:
     std::string _secretPath;
 };
@@ -162,6 +170,10 @@ public:
     std::optional<Key> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
+        return _id;
+    }
+
+    const KmipKeyId& kmipKeyId() const noexcept {
         return _id;
     }
 

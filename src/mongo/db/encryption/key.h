@@ -53,6 +53,10 @@ public:
     explicit Key(SecureRandom& srng);
     explicit Key(const std::string& base64);
 
+    friend bool operator==(const Key& lhs, const Key& rhs) noexcept {
+        return lhs._data == rhs._data;
+    }
+
     const std::uint8_t* data() const noexcept {
         return _data.data();
     }

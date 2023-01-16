@@ -319,6 +319,7 @@ public:
         WtKeyIds::instance().futureConfigured.reset();
         encryptionGlobalParams = EncryptionGlobalParams();
         _vaultServer.clear();
+        _kmipServer.clear();
     }
 
 protected:
@@ -393,6 +394,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest, ConfiguredSecretIdIsUsedIfSameS
     encryptionGlobalParams = encryptionParamsVault("charlie/delta", 3);
     ASSERT_KEY_ID(VaultSecretId("charlie/delta", 3));
 }
+
 #undef ASSERT_KEY_ID
 
 DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
@@ -456,7 +458,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
 }
 
 DEATH_TEST_REGEX_F(WiredTigerKVEngineEncryptionKeyVaultTest,
-                   RotattionDeathIfProvidedSecretIdEqualToConfigured,
+                   RotationDeathIfProvidedSecretIdEqualToConfigured,
                    "rotation.*but the provided.*key identifier is equal to.*configured") {
     encryptionGlobalParams = encryptionParamsVault("charlie/delta", 3);
     encryptionGlobalParams.vaultRotateMasterKey = true;
@@ -482,6 +484,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
 
     ASSERT_ROTATION_NEW_KEY_ID(VaultSecretId("kilo/lima", 2));
 }
+
 #undef ASSERT_ROTATION_NEW_KEY_ID
 
 }  // namespace

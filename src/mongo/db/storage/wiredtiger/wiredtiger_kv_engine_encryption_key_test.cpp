@@ -296,6 +296,139 @@ std::string toJsonText(const KeyId& id) {
     return b.obj().jsonString();
 }
 
+class WiredTigerKVEngineEncryptionKeyFileTest : public ServiceContextTest {
+public:
+    WiredTigerKVEngineEncryptionKeyFileTest() {}
+
+    void setUp() override {
+        _key = std::make_unique<Key>();
+        _tempDir = std::make_unique<unittest::TempDir>("wt_kv_key");
+        _keyFilePath = std::make_unique<KeyFilePath>(_create_key_file("key.txt", *_key));
+        _clockSource = std::make_unique<ClockSourceMock>();
+        encryptionGlobalParams = encryptionParamsKeyFile(_keyFilePath->toString());
+        _engine = _createWiredTigerKVEngine();
+        WtKeyIds::instance().configured = std::move(WtKeyIds::instance().futureConfigured);
+        _engine.reset();
+    }
+
+    void tearDown() override {
+        _engine.reset();
+        _clockSource.reset();
+        _keyFilePath.reset();
+        _tempDir.reset();
+        _key.reset();
+        WtKeyIds::instance().configured.reset();
+        WtKeyIds::instance().decryption.reset();
+        WtKeyIds::instance().futureConfigured.reset();
+        encryptionGlobalParams = EncryptionGlobalParams();
+        _kmipServer.clear();
+        _vaultServer.clear();
+    }
+
+protected:
+    std::string _create_key_file(const std::string& path, const Key& key) {
+        std::string fullpath = _tempDir->path() + "/" + path;
+        std::ofstream f(fullpath);
+        if (f) {
+            f << key.base64();
+        } else {
+            FAIL("Can't create the encryption key file");
+        }
+        f.close();
+        namespace fs = std::filesystem;
+        fs::permissions(fullpath, fs::perms::owner_read | fs::perms::owner_write);
+        return fullpath;
+    }
+
+    std::unique_ptr<WiredTigerKVEngine> _createWiredTigerKVEngine() {
+        return createWiredTigerKVEngine(_tempDir->path(),
+                                        _clockSource.get(),
+                                        FakeMasterKeyProviderFactory(_vaultServer, _kmipServer));
+    }
+
+    FakeVaultServer _vaultServer;
+    FakeKmipServer _kmipServer;
+    std::unique_ptr<Key> _key;
+    std::unique_ptr<unittest::TempDir> _tempDir;
+    std::unique_ptr<KeyFilePath> _keyFilePath;
+    std::unique_ptr<ClockSource> _clockSource;
+    std::unique_ptr<WiredTigerKVEngine> _engine;
+};
+
+TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, SameKeyFileIsOk) {
+    encryptionGlobalParams = encryptionParamsKeyFile(_keyFilePath->toString());
+    _engine = _createWiredTigerKVEngine();
+    ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_key);
+    ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(*_keyFilePath));
+}
+
+TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, SameKeyInAnotherFileIsOk) {
+    KeyFilePath anotherKeyFilePath(_create_key_file("another_key", *_key));
+    encryptionGlobalParams = encryptionParamsKeyFile(anotherKeyFilePath.toString());
+    _engine = _createWiredTigerKVEngine();
+    ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_key);
+    ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(anotherKeyFilePath));
+}
+
+DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
+             DeathIfVaultWithtouSecretIdInParams,
+             "the system was not configured using Vault") {
+    encryptionGlobalParams = encryptionParamsVault();
+    _engine = _createWiredTigerKVEngine();
+}
+
+DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
+             DeathIfVaultWithtouSecretVersionInParams,
+             "the system was not configured using Vault") {
+    encryptionGlobalParams = encryptionParamsVault("charlie/delta");
+    _engine = _createWiredTigerKVEngine();
+}
+
+DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
+             DeathIfVaultRotationInParams,
+             "the system was not configured using Vault") {
+    VaultSecretId id = _vaultServer.saveKey("charlie/delta", *_key);
+    _key.reset();
+    encryptionGlobalParams = encryptionParamsVault(id.path(), id.version());
+    encryptionGlobalParams.vaultRotateMasterKey = true;
+    _engine = _createWiredTigerKVEngine();
+}
+
+TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, VaultSecretIdIsUsedIfItIsInParams) {
+    VaultSecretId id = _vaultServer.saveKey("charlie/delta", *_key);
+    _key.reset();
+    encryptionGlobalParams = encryptionParamsVault(id.path(), id.version());
+    _engine = _createWiredTigerKVEngine();
+
+    ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_vaultServer.readKey(id));
+    ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(id));
+}
+
+DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
+             DeathIfKmipWithtouKeyIdInParams,
+             "the system was not configured using KMIP") {
+    encryptionGlobalParams = encryptionParamsKmip();
+    _engine = _createWiredTigerKVEngine();
+}
+
+DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
+             DeathIfKmipRotationInParams,
+             "the system was not configured using KMIP") {
+    encryptionGlobalParams = encryptionParamsKmip("1");
+    encryptionGlobalParams.kmipRotateMasterKey = true;
+    _engine = _createWiredTigerKVEngine();
+}
+
+TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, KmipKeyIdIsUsedIfItIsInParams) {
+    KmipKeyId id = _kmipServer.saveKey(*_key);
+    _key.reset();
+    encryptionGlobalParams = encryptionParamsKmip(id.toString());
+    _engine = _createWiredTigerKVEngine();
+
+    ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_kmipServer.readKey(id));
+    ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(id));
+}
+
 class WiredTigerKVEngineEncryptionKeyVaultTest : public ServiceContextTest {
 public:
     WiredTigerKVEngineEncryptionKeyVaultTest() {}

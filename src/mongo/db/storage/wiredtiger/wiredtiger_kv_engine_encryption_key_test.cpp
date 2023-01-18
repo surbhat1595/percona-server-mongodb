@@ -67,6 +67,10 @@ EncryptionGlobalParams encryptionParamsKeyFile(const std::string& keyFilePath) {
     return params;
 }
 
+EncryptionGlobalParams encryptionParamsKeyFile(const KeyFilePath& keyFilePath) {
+    return encryptionParamsKeyFile(keyFilePath.toString());
+}
+
 EncryptionGlobalParams encryptionParamsVault(
     const std::string& secretPath = "", std::optional<std::uint64_t> secretVersion = std::nullopt) {
     EncryptionGlobalParams params;
@@ -83,6 +87,10 @@ EncryptionGlobalParams encryptionParamsVault(
     return params;
 }
 
+EncryptionGlobalParams encryptionParamsVault(const VaultSecretId& id) {
+    return encryptionParamsVault(id.path(), id.version());
+}
+
 EncryptionGlobalParams encryptionParamsKmip(const std::string& keyId = "") {
     EncryptionGlobalParams params;
     params.enableEncryption = true;
@@ -92,6 +100,10 @@ EncryptionGlobalParams encryptionParamsKmip(const std::string& keyId = "") {
         params.kmipKeyIdentifier = keyId;
     }
     return params;
+}
+
+EncryptionGlobalParams encryptionParamsKmip(const KmipKeyId& id) {
+    return encryptionParamsKmip(id.toString());
 }
 
 std::unique_ptr<WiredTigerKVEngine> createWiredTigerKVEngine(
@@ -352,7 +364,7 @@ protected:
 };
 
 TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest, KeyFileIsUsedIfItIsInParams) {
-    encryptionGlobalParams = encryptionParamsKeyFile(_keyFilePath->toString());
+    encryptionGlobalParams = encryptionParamsKeyFile(*_keyFilePath);
     _engine = _createWiredTigerKVEngine();
 
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_key);
@@ -363,7 +375,7 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest,
              DeathIfVaultRotation,
              "Master key rotation is in effect but there is no existing encryption key database") {
     VaultSecretId id = _vaultServer.saveKey("charlie/delta", Key());
-    encryptionGlobalParams = encryptionParamsVault(id.path(), id.version());
+    encryptionGlobalParams = encryptionParamsVault(id);
     encryptionGlobalParams.vaultRotateMasterKey = true;
 
     _engine = _createWiredTigerKVEngine();
@@ -390,7 +402,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest, VaultSecretIsGeneratedIfVer
 TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest, VaultSecretVersionIsUsedIfItIsInParams) {
     _vaultServer.saveKey("charlie/delta", Key());
     VaultSecretId id = _vaultServer.saveKey("charlie/delta", Key());
-    encryptionGlobalParams = encryptionParamsVault(id.path(), id.version());
+    encryptionGlobalParams = encryptionParamsVault(id);
 
     _engine = _createWiredTigerKVEngine();
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_vaultServer.readKey(id));
@@ -401,7 +413,7 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest,
              DeathIfKmipRotation,
              "Master key rotation is in effect but there is no existing encryption key database") {
     KmipKeyId id = _kmipServer.saveKey(Key());
-    encryptionGlobalParams = encryptionParamsKmip(id.toString());
+    encryptionGlobalParams = encryptionParamsKmip(id);
     encryptionGlobalParams.kmipRotateMasterKey = true;
 
     _engine = _createWiredTigerKVEngine();
@@ -419,7 +431,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest, KmipKeyIsGeneratedIfNoIdInP
 TEST_F(WiredTigerKVEngineEncryptionKeyNewEngineTest, KmipKeyIdIsUsedIfItIsInParams) {
     _kmipServer.saveKey(Key());
     KmipKeyId id = _kmipServer.saveKey(Key());
-    encryptionGlobalParams = encryptionParamsKmip(id.toString());
+    encryptionGlobalParams = encryptionParamsKmip(id);
 
     _engine = _createWiredTigerKVEngine();
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_kmipServer.readKey(id));
@@ -435,7 +447,7 @@ public:
         _tempDir = std::make_unique<unittest::TempDir>("wt_kv_key");
         _keyFilePath = std::make_unique<KeyFilePath>(_create_key_file("key.txt", *_key));
         _clockSource = std::make_unique<ClockSourceMock>();
-        encryptionGlobalParams = encryptionParamsKeyFile(_keyFilePath->toString());
+        encryptionGlobalParams = encryptionParamsKeyFile(*_keyFilePath);
         _engine = _createWiredTigerKVEngine();
         WtKeyIds::instance().configured = std::move(WtKeyIds::instance().futureConfigured);
         _engine.reset();
@@ -486,7 +498,7 @@ protected:
 };
 
 TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, SameKeyFileIsOk) {
-    encryptionGlobalParams = encryptionParamsKeyFile(_keyFilePath->toString());
+    encryptionGlobalParams = encryptionParamsKeyFile(*_keyFilePath);
     _engine = _createWiredTigerKVEngine();
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_key);
     ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(*_keyFilePath));
@@ -494,7 +506,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, SameKeyFileIsOk) {
 
 TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, SameKeyInAnotherFileIsOk) {
     KeyFilePath anotherKeyFilePath(_create_key_file("another_key", *_key));
-    encryptionGlobalParams = encryptionParamsKeyFile(anotherKeyFilePath.toString());
+    encryptionGlobalParams = encryptionParamsKeyFile(anotherKeyFilePath);
     _engine = _createWiredTigerKVEngine();
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_key);
     ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(anotherKeyFilePath));
@@ -519,7 +531,7 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
              "the system was not configured using Vault") {
     VaultSecretId id = _vaultServer.saveKey("charlie/delta", *_key);
     _key.reset();
-    encryptionGlobalParams = encryptionParamsVault(id.path(), id.version());
+    encryptionGlobalParams = encryptionParamsVault(id);
     encryptionGlobalParams.vaultRotateMasterKey = true;
     _engine = _createWiredTigerKVEngine();
 }
@@ -527,7 +539,7 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
 TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, VaultSecretIdIsUsedIfItIsInParams) {
     VaultSecretId id = _vaultServer.saveKey("charlie/delta", *_key);
     _key.reset();
-    encryptionGlobalParams = encryptionParamsVault(id.path(), id.version());
+    encryptionGlobalParams = encryptionParamsVault(id);
     _engine = _createWiredTigerKVEngine();
 
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_vaultServer.readKey(id));
@@ -552,7 +564,7 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
 TEST_F(WiredTigerKVEngineEncryptionKeyFileTest, KmipKeyIdIsUsedIfItIsInParams) {
     KmipKeyId id = _kmipServer.saveKey(*_key);
     _key.reset();
-    encryptionGlobalParams = encryptionParamsKmip(id.toString());
+    encryptionGlobalParams = encryptionParamsKmip(id);
     _engine = _createWiredTigerKVEngine();
 
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_kmipServer.readKey(id));
@@ -629,7 +641,7 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
              "but the system was configured with a key from a Vault server.") {
     Key key = *_vaultServer.readKey(VaultSecretId("charlie/delta", 3));
     KmipKeyId kmipKeyId = _kmipServer.saveKey(key);
-    encryptionGlobalParams = encryptionParamsKmip(kmipKeyId.toString());
+    encryptionGlobalParams = encryptionParamsKmip(kmipKeyId);
 
     _engine = _createWiredTigerKVEngine();
 }

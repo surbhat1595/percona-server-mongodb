@@ -193,8 +193,6 @@ variables:
     - ubuntu2004-package
   - name: selinux_rhel7_enterprise
   - name: .publish
-    distros:
-    - rhel70-small
   - name: generate_buildid_to_debug_symbols_mapping
 
 
@@ -962,7 +960,7 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --runAllFeatureFlagTests
+      --additionalFeatureFlagsFile all_feature_flags.txt
       --excludeWithAnyTags=incompatible_with_windows_tls
       --excludeWithAnyTags=incompatible_with_shard_merge
   tasks:
@@ -1218,12 +1216,8 @@ buildvariants:
   - name: replica_sets_jscore_passthrough
   - name: sasl
   - name: push
-    distros:
-    - rhel70-small
   - name: .crypt
   - name: .publish_crypt
-    distros:
-    - rhel70-small
 
 ###########################################
 #          Embedded SDK buildvariants     #
@@ -1456,7 +1450,7 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --runAllFeatureFlagTests
+      --additionalFeatureFlagsFile all_feature_flags.txt
       --excludeWithAnyTags=incompatible_with_shard_merge
   tasks: &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-tasks
   - name: cqf
@@ -1810,7 +1804,7 @@ buildvariants:
     <<: *enterprise-rhel-80-64-bit-multiversion-expansions-template
     # No feature flag tests since they aren't compatible with the older binaries.
     test_flags: >-
-      --runAllFeatureFlagsNoTests
+      --runNoFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_shard_merge
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
@@ -2086,6 +2080,8 @@ buildvariants:
     multiversion_architecture: s390x
     multiversion_edition: enterprise
     num_scons_link_jobs_available: 0.99
+    test_flags: >-
+      --excludeWithAnyTags=incompatible_with_s390x
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -2251,7 +2247,7 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     large_distro_name: rhel80-build
     test_flags: >-
-      --runAllFeatureFlagTests
+      --additionalFeatureFlagsFile all_feature_flags.txt
       --excludeWithAnyTags=incompatible_with_shard_merge
     separate_debug: off
   tasks:
@@ -2395,7 +2391,7 @@ buildvariants:
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
       --excludeWithAnyTags=incompatible_with_shard_merge
-      --runAllFeatureFlagTests
+      --additionalFeatureFlagsFile all_feature_flags.txt
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
@@ -2571,14 +2567,7 @@ buildvariants:
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
       --excludeWithAnyTags=incompatible_with_shard_merge
-      --runAllFeatureFlagTests
-    resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
-    hang_analyzer_dump_core: false
-    scons_cache_scope: shared
-    scons_cache_mode: all
-    max_sub_suites: 3
-    num_scons_link_jobs_available: 0.99
-    separate_debug: off
+      --additionalFeatureFlagsFile all_feature_flags.txt
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
@@ -3006,7 +2995,7 @@ buildvariants:
     target_resmoke_time: 30
     max_sub_suites: 3
     test_flags: >-
-      --runAllFeatureFlagTests
+      --additionalFeatureFlagsFile all_feature_flags.txt
       --excludeWithAnyTags=resource_intensive
       --excludeWithAnyTags=incompatible_with_shard_merge
 

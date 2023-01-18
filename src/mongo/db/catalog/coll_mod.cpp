@@ -53,6 +53,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
+#include "mongo/db/s/shard_key_index_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -363,6 +364,28 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
             // are critical to most collection operations.
             if (cmrIndex->idx->isIdIndex()) {
                 return {ErrorCodes::BadValue, "can't hide _id index"};
+            }
+
+            // If the index is not hidden and we are trying to hide it, check if it is possible
+            // to drop the shard key index, so it could be possible to hide it.
+            if (!cmrIndex->idx->hidden() && *cmdIndex.getHidden()) {
+                if (auto catalogClient = Grid::get(opCtx)->catalogClient()) {
+                    try {
+                        auto shardedColl = catalogClient->getCollection(opCtx, nss);
+
+                        if (isLastNonHiddenShardKeyIndex(opCtx,
+                                                         coll,
+                                                         coll->getIndexCatalog(),
+                                                         cmrIndex->idx->indexName(),
+                                                         shardedColl.getKeyPattern().toBSON())) {
+                            return {ErrorCodes::InvalidOptions,
+                                    "Can't hide the only compatible index for this collection's "
+                                    "shard key"};
+                        }
+                    } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                        // The collection is unsharded or doesn't exist.
+                    }
+                }
             }
 
             // Hiding a hidden index or unhiding a visible index should be treated as a no-op.
@@ -985,6 +1008,39 @@ Status _collModInternal(OperationContext* opCtx,
 }
 
 }  // namespace
+
+bool isCollModIndexUniqueConversion(const CollModRequest& request) {
+    auto index = request.getIndex();
+    if (!index) {
+        return false;
+    }
+    if (auto indexUnique = index->getUnique(); !indexUnique) {
+        return false;
+    }
+    // Checks if the request is an actual unique conversion instead of a dry run.
+    if (auto dryRun = request.getDryRun(); dryRun && *dryRun) {
+        return false;
+    }
+    return true;
+}
+
+CollModRequest makeCollModDryRunRequest(const CollModRequest& request) {
+    CollModRequest dryRunRequest;
+    CollModIndex dryRunIndex;
+    const auto& requestIndex = request.getIndex();
+    dryRunIndex.setUnique(true);
+    if (auto keyPattern = requestIndex->getKeyPattern()) {
+        dryRunIndex.setKeyPattern(keyPattern);
+    } else if (auto name = requestIndex->getName()) {
+        dryRunIndex.setName(name);
+    }
+    if (auto uuid = request.getCollectionUUID()) {
+        dryRunRequest.setCollectionUUID(uuid);
+    }
+    dryRunRequest.setIndex(dryRunIndex);
+    dryRunRequest.setDryRun(true);
+    return dryRunRequest;
+}
 
 Status processCollModCommand(OperationContext* opCtx,
                              const NamespaceStringOrUUID& nsOrUUID,

@@ -89,76 +89,6 @@ void appendShortVersion(BufBuilder* out, const ChunkType& chunk) {
     bb.done();
 }
 
-BSONArray buildMergeChunksTransactionUpdates(const std::vector<ChunkType>& chunksToMerge,
-                                             const ChunkVersion& mergeVersion,
-                                             const boost::optional<Timestamp>& validAfter) {
-    BSONArrayBuilder updates;
-
-    // Build an update operation to expand the first chunk into the newly merged chunk
-    {
-        BSONObjBuilder op;
-        op.append("op", "u");
-        op.appendBool("b", false);  // no upsert
-        op.append("ns", ChunkType::ConfigNS.ns());
-
-        // expand first chunk into newly merged chunk
-        ChunkType mergedChunk(chunksToMerge.front());
-        mergedChunk.setMax(chunksToMerge.back().getMax());
-
-        // fill in additional details for sending through transaction
-        mergedChunk.setVersion(mergeVersion);
-        mergedChunk.setEstimatedSizeBytes(boost::none);
-
-        invariant(validAfter);
-        mergedChunk.setHistory({ChunkHistory(validAfter.get(), mergedChunk.getShard())});
-
-        // add the new chunk information as the update object
-        op.append("o", mergedChunk.toConfigBSON());
-
-        // query object
-        op.append("o2", BSON(ChunkType::name(mergedChunk.getName())));
-
-        updates.append(op.obj());
-    }
-
-    // Build update operations to delete the rest of the chunks to be merged. Remember not
-    // to delete the first chunk we're expanding
-    for (size_t i = 1; i < chunksToMerge.size(); ++i) {
-        BSONObjBuilder op;
-        op.append("op", "d");
-        op.append("ns", ChunkType::ConfigNS.ns());
-
-        op.append("o", BSON(ChunkType::name(chunksToMerge[i].getName())));
-
-        updates.append(op.obj());
-    }
-
-    return updates.arr();
-}
-
-BSONArray buildMergeChunksTransactionPrecond(const std::vector<ChunkType>& chunksToMerge,
-                                             const ChunkVersion& collVersion) {
-    BSONArrayBuilder preCond;
-
-    for (const auto& chunk : chunksToMerge) {
-        BSONObj query = BSON(ChunkType::min(chunk.getMin())
-                             << ChunkType::max(chunk.getMax()) << ChunkType::collectionUUID()
-                             << chunk.getCollectionUUID());
-
-        const auto collectionIdentityMatchCondition =
-            BSON(ChunkType::collectionUUID()
-                 << chunk.getCollectionUUID() << ChunkType::shard(chunk.getShard().toString()));
-
-        BSONObjBuilder b;
-        b.append("ns", ChunkType::ConfigNS.ns());
-        b.append("q", BSON("query" << query << "orderby" << BSON(ChunkType::lastmod() << -1)));
-        b.append("res", collectionIdentityMatchCondition);
-
-        preCond.append(b.obj());
-    }
-    return preCond.arr();
-}
-
 /**
  * Check that the chunk still exists and return its metadata.
  */
@@ -166,13 +96,11 @@ StatusWith<ChunkType> findChunkContainingRange(OperationContext* opCtx,
                                                const UUID& uuid,
                                                const OID& epoch,
                                                const Timestamp& timestamp,
-                                               const BSONObj& min,
-                                               const BSONObj& max) {
+                                               const ChunkRange& range) {
     const auto chunkQuery = [&]() {
         BSONObjBuilder queryBuilder;
         queryBuilder << ChunkType::collectionUUID << uuid;
-        queryBuilder << ChunkType::min(BSON("$lte" << min));
-        queryBuilder << ChunkType::max(BSON("$gte" << max));
+        queryBuilder << ChunkType::min(BSON("$lte" << range.getMin()));
         return queryBuilder.obj();
     }();
 
@@ -184,21 +112,26 @@ StatusWith<ChunkType> findChunkContainingRange(OperationContext* opCtx,
             repl::ReadConcernLevel::kLocalReadConcern,
             ChunkType::ConfigNS,
             chunkQuery,
-            BSONObj(),
-            2 /* limit */);
+            BSON(ChunkType::min << -1),
+            1 /* limit */);
 
     if (!findResponseWith.isOK()) {
         return findResponseWith.getStatus();
     }
 
-    if (findResponseWith.getValue().docs.size() != 1) {
-        return {ErrorCodes::Error(40165),
-                str::stream() << "Could not find a chunk including bounds [" << min << ", " << max
-                              << "). Cannot execute the migration commit with invalid chunks."};
+    if (!findResponseWith.getValue().docs.empty()) {
+        const auto containingChunk = uassertStatusOK(ChunkType::parseFromConfigBSON(
+            findResponseWith.getValue().docs.front(), epoch, timestamp));
+
+        if (containingChunk.getRange().covers(range)) {
+            return containingChunk;
+        }
     }
 
-    return uassertStatusOK(
-        ChunkType::parseFromConfigBSON(findResponseWith.getValue().docs.front(), epoch, timestamp));
+    return {ErrorCodes::Error(40165),
+            str::stream() << "Could not find a chunk including bounds [" << range.getMin() << ", "
+                          << range.getMax()
+                          << "). Cannot execute the migration commit with invalid chunks."};
 }
 
 BSONObj makeCommitChunkTransactionCommand(const NamespaceString& nss,
@@ -695,6 +628,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
         newChunk.setMin(startKey);
         newChunk.setMax(endKey);
         newChunk.setEstimatedSizeBytes(boost::none);
+        newChunk.setJumbo(false);
 
         op.append("o", newChunk.toConfigBSON());
 
@@ -789,6 +723,82 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkSplit(
     return response.obj();
 }
 
+void ShardingCatalogManager::_mergeChunksInTransaction(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const UUID& collectionUUID,
+    const ChunkVersion& mergeVersion,
+    const Timestamp& validAfter,
+    const ChunkRange& chunkRange,
+    const ShardId& shardId,
+    std::shared_ptr<std::vector<ChunkType>> chunksToMerge) {
+    withTransaction(
+        opCtx, ChunkType::ConfigNS, [&, this](OperationContext* opCtx, TxnNumber txnNumber) {
+            // Construct the new chunk by taking `min` from the first merged chunk and `max`
+            // from the last.
+            write_ops::UpdateCommandRequest updateOp(ChunkType::ConfigNS);
+            updateOp.setUpdates({[&] {
+                write_ops::UpdateOpEntry entry;
+
+                ChunkType mergedChunk(chunksToMerge->front());
+                entry.setQ(BSON(ChunkType::name(mergedChunk.getName())));
+                mergedChunk.setMax(chunksToMerge->back().getMax());
+
+                // Fill in additional details for sending through transaction.
+                mergedChunk.setVersion(mergeVersion);
+                mergedChunk.setEstimatedSizeBytes(boost::none);
+
+                mergedChunk.setHistory({ChunkHistory(validAfter, mergedChunk.getShard())});
+
+                entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
+                    mergedChunk.toConfigBSON()));
+                entry.setMulti(false);
+
+                return entry;
+            }()});
+
+            const auto updateRes =
+                writeToConfigDocumentInTxn(opCtx, ChunkType::ConfigNS, updateOp, txnNumber);
+
+            const auto numDocsModified = UpdateOp::parseResponse(updateRes).getN();
+            uassert(ErrorCodes::ConflictingOperationInProgress,
+                    str::stream() << "Unexpected number of modified documents during chunks merge "
+                                     "commit. Modified "
+                                  << numDocsModified << " documents instead of 1",
+                    numDocsModified == 1);
+
+            // Delete the rest of the chunks to be merged.
+            // Remember not to delete the first chunk we're expanding.
+            BSONObjBuilder queryBuilder;
+            queryBuilder << ChunkType::collectionUUID << collectionUUID;
+            queryBuilder << ChunkType::shard(shardId.toString());
+            queryBuilder << ChunkType::min(BSON("$gte" << chunksToMerge->front().getMax()));
+            queryBuilder << ChunkType::min(BSON("$lt" << chunksToMerge->back().getMax()));
+
+            write_ops::DeleteCommandRequest deleteOp(ChunkType::ConfigNS);
+            deleteOp.setDeletes({[&] {
+                write_ops::DeleteOpEntry entry;
+                entry.setQ(queryBuilder.obj());
+                entry.setMulti(true);
+                return entry;
+            }()});
+
+            const auto deleteRes =
+                writeToConfigDocumentInTxn(opCtx, ChunkType::ConfigNS, deleteOp, txnNumber);
+
+            const auto numDocsDeleted = DeleteOp::parseResponse(deleteRes).getN();
+            const int expectedNumDocsDeleted = chunksToMerge->size() - 1;
+            uassert(ErrorCodes::ConflictingOperationInProgress,
+                    str::stream() << "Unexpected number of deleted documents during chunks merge "
+                                     "commit. Deleted "
+                                  << numDocsDeleted << " documents instead of "
+                                  << expectedNumDocsDeleted,
+                    numDocsDeleted == expectedNumDocsDeleted);
+
+            LOGV2_DEBUG(6583805, 1, "Finished all transaction operations in merge chunk command");
+        });
+}
+
 StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
     OperationContext* opCtx,
     const NamespaceString& nss,
@@ -796,11 +806,7 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
     const boost::optional<Timestamp>& timestamp,
     const UUID& requestCollectionUUID,
     const ChunkRange& chunkRange,
-    const ShardId& shardId,
-    const boost::optional<Timestamp>& validAfter) {
-    if (!validAfter) {
-        return {ErrorCodes::IllegalOperation, "chunk operation requires validAfter timestamp"};
-    }
+    const ShardId& shardId) {
 
     // Mark opCtx as interruptible to ensure that all reads and writes to the metadata collections
     // under the exclusive _kChunkOpLock happen on the same term.
@@ -880,11 +886,18 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
 
     // 3. Prepare the data for the merge
     //    and ensure that the retrieved list of chunks covers the whole range.
-    std::vector<ChunkType> chunksToMerge;
+
+    // The `validAfter` field must always be set. If not existing, it means the chunk
+    // always belonged to the same shard, hence it's valid to set `0` as the time at
+    // which the chunk started being valid.
+    Timestamp validAfter{0};
+
+    auto chunksToMerge = std::make_shared<std::vector<ChunkType>>();
+    chunksToMerge->reserve(shardChunksInRangeResponse.docs.size());
     for (const auto& chunkDoc : shardChunksInRangeResponse.docs) {
         auto chunk = uassertStatusOK(
             ChunkType::parseFromConfigBSON(chunkDoc, coll.getEpoch(), coll.getTimestamp()));
-        if (chunksToMerge.empty()) {
+        if (chunksToMerge->empty()) {
             uassert(ErrorCodes::IllegalOperation,
                     str::stream()
                         << "could not merge chunks, shard " << shardId
@@ -897,46 +910,55 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunksMerge(
                         << "could not merge chunks, shard " << shardId
                         << " does not contain a sequence of chunks that exactly fills the range "
                         << chunkRange.toString(),
-                    chunk.getMin().woCompare(chunksToMerge.back().getMax()) == 0);
+                    chunk.getMin().woCompare(chunksToMerge->back().getMax()) == 0);
         }
-        chunksToMerge.push_back(std::move(chunk));
+
+        // Get the `validAfter` field from the most recent chunk placed on the shard
+        if (!chunk.getHistory().empty()) {
+            const auto& chunkValidAfter = chunk.getHistory().front().getValidAfter();
+            if (validAfter < chunkValidAfter) {
+                validAfter = chunkValidAfter;
+            }
+        }
+
+        chunksToMerge->push_back(std::move(chunk));
     }
     uassert(ErrorCodes::IllegalOperation,
             str::stream() << "could not merge chunks, shard " << shardId
                           << " does not contain a sequence of chunks that exactly fills the range "
                           << chunkRange.toString(),
-            !chunksToMerge.empty() &&
-                chunksToMerge.back().getMax().woCompare(chunkRange.getMax()) == 0);
+            !chunksToMerge->empty() &&
+                chunksToMerge->back().getMax().woCompare(chunkRange.getMax()) == 0);
 
     ChunkVersion initialVersion = collVersion;
     ChunkVersion mergeVersion = initialVersion;
     mergeVersion.incMinor();
 
-    auto updates = buildMergeChunksTransactionUpdates(chunksToMerge, mergeVersion, validAfter);
-    auto preCond = buildMergeChunksTransactionPrecond(chunksToMerge, initialVersion);
-
     // 4. apply the batch of updates to local metadata
-    uassertStatusOK(Grid::get(opCtx)->catalogClient()->applyChunkOpsDeprecated(
-        opCtx,
-        updates,
-        preCond,
-        coll.getUuid(),
-        nss,
-        mergeVersion,
-        WriteConcernOptions(),
-        repl::ReadConcernLevel::kLocalReadConcern));
+    _mergeChunksInTransaction(
+        opCtx, nss, coll.getUuid(), mergeVersion, validAfter, chunkRange, shardId, chunksToMerge);
 
     // 5. log changes
     BSONObjBuilder logDetail;
     {
+        initialVersion.appendLegacyWithField(&logDetail, "prevShardVersion");
+        mergeVersion.appendLegacyWithField(&logDetail, "mergedVersion");
+        logDetail.append("owningShard", shardId);
         BSONArrayBuilder b(logDetail.subarrayStart("merged"));
-        for (const auto& chunkToMerge : chunksToMerge) {
-            b.append(chunkToMerge.toConfigBSON());
+
+        // Pad some slack to avoid exceeding max BSON size
+        const auto kBSONObjMaxLogDetailSize = BSONObjMaxUserSize - 3 * 1024;
+        for (const auto& chunkToMerge : *chunksToMerge) {
+            auto chunkBSON = chunkToMerge.toConfigBSON();
+
+            // Truncate the log if BSON log size exceeds BSONObjMaxUserSize
+            if (logDetail.len() + chunkBSON.objsize() >= kBSONObjMaxLogDetailSize) {
+                logDetail.append("mergedChunksArrayTruncatedToDontExceedMaxBSONSize", true);
+                break;
+            }
+            b.append(chunkBSON);
         }
     }
-    initialVersion.appendLegacyWithField(&logDetail, "prevShardVersion");
-    mergeVersion.appendLegacyWithField(&logDetail, "mergedVersion");
-    logDetail.append("owningShard", shardId);
 
     ShardingLogging::get(opCtx)->logChange(
         opCtx, "merge", nss.ns(), logDetail.obj(), WriteConcernOptions());
@@ -1054,12 +1076,8 @@ StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
             migratedChunk.isVersionSet() && migratedChunk.getVersion().isSet());
 
     // Check if range still exists and which shard owns it
-    auto swCurrentChunk = findChunkContainingRange(opCtx,
-                                                   coll.getUuid(),
-                                                   coll.getEpoch(),
-                                                   coll.getTimestamp(),
-                                                   migratedChunk.getMin(),
-                                                   migratedChunk.getMax());
+    auto swCurrentChunk = findChunkContainingRange(
+        opCtx, coll.getUuid(), coll.getEpoch(), coll.getTimestamp(), migratedChunk.getRange());
 
     if (!swCurrentChunk.isOK()) {
         return swCurrentChunk.getStatus();
@@ -1757,19 +1775,36 @@ void ShardingCatalogManager::bumpMultipleCollectionVersionsAndChangeMetadataInTx
 
 void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
                                               const NamespaceString& nss,
-                                              const BSONObj& minKey) {
+                                              const BSONObj& minKey,
+                                              boost::optional<int64_t> optMaxChunkSizeBytes) {
     const auto cm = uassertStatusOK(
         Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx, nss));
     auto chunk = cm.findIntersectingChunkWithSimpleCollation(minKey);
 
     try {
-        const auto splitPoints = uassertStatusOK(shardutil::selectChunkSplitPoints(
-            opCtx,
-            chunk.getShardId(),
-            nss,
-            cm.getShardKeyPattern(),
-            ChunkRange(chunk.getMin(), chunk.getMax()),
-            Grid::get(opCtx)->getBalancerConfiguration()->getMaxChunkSizeBytes()));
+        const auto maxChunkSizeBytes = [&]() -> int64_t {
+            if (optMaxChunkSizeBytes.has_value()) {
+                return *optMaxChunkSizeBytes;
+            }
+
+            auto coll = Grid::get(opCtx)->catalogClient()->getCollection(
+                opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
+            return coll.getMaxChunkSizeBytes().value_or(
+                Grid::get(opCtx)->getBalancerConfiguration()->getMaxChunkSizeBytes());
+        }();
+
+        // Limit the search to one split point: this code path is reached when a migration fails due
+        // to ErrorCodes::ChunkTooBig. In case there is a too frequent shard key, only select the
+        // next key in order to split the range in jumbo chunk + remaining range.
+        const int limit = 1;
+        auto splitPoints = uassertStatusOK(
+            shardutil::selectChunkSplitPoints(opCtx,
+                                              chunk.getShardId(),
+                                              nss,
+                                              cm.getShardKeyPattern(),
+                                              ChunkRange(chunk.getMin(), chunk.getMax()),
+                                              maxChunkSizeBytes,
+                                              limit));
 
         if (splitPoints.empty()) {
             LOGV2(21873,
@@ -1823,6 +1858,9 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
             return;
         }
 
+        // Resize the vector because in multiversion scenarios the `autoSplitVector` command may end
+        // up ignoring the `limit` parameter and returning the whole list of split points.
+        splitPoints.resize(limit);
         uassertStatusOK(
             shardutil::splitChunkAtMultiplePoints(opCtx,
                                                   chunk.getShardId(),

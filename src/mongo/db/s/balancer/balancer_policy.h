@@ -59,7 +59,8 @@ struct MigrateInfo {
     MigrateInfo(const ShardId& a_to,
                 const NamespaceString& a_nss,
                 const ChunkType& a_chunk,
-                MoveChunkRequest::ForceJumbo a_forceJumbo);
+                MoveChunkRequest::ForceJumbo a_forceJumbo,
+                boost::optional<int64_t> maxChunkSizeBytes = boost::none);
 
     MigrateInfo(const ShardId& a_to,
                 const ShardId& a_from,
@@ -76,6 +77,8 @@ struct MigrateInfo {
     BSONObj getMigrationTypeQuery() const;
 
     std::string toString() const;
+
+    boost::optional<int64_t> getMaxChunkSizeBytes() const;
 
     NamespaceString nss;
     UUID uuid;
@@ -183,7 +186,8 @@ struct DataSizeInfo {
                  const ChunkRange& chunkRange,
                  const ChunkVersion& version,
                  const KeyPattern& keyPattern,
-                 bool estimatedValue);
+                 bool estimatedValue,
+                 int64_t maxSize);
 
     ShardId shardId;
     NamespaceString nss;
@@ -192,14 +196,16 @@ struct DataSizeInfo {
     ChunkVersion version;
     KeyPattern keyPattern;
     bool estimatedValue;
+    int64_t maxSize;
 };
 
 struct DataSizeResponse {
-    DataSizeResponse(long long sizeBytes, long long numObjects)
-        : sizeBytes(sizeBytes), numObjects(numObjects) {}
+    DataSizeResponse(long long sizeBytes, long long numObjects, bool maxSizeReached)
+        : sizeBytes(sizeBytes), numObjects(numObjects), maxSizeReached(maxSizeReached) {}
 
     long long sizeBytes;
     long long numObjects;
+    bool maxSizeReached;
 };
 
 typedef stdx::
@@ -393,15 +399,15 @@ public:
      * any of the shards have chunks, which are sufficiently higher than this number, suggests
      * moving chunks to shards, which are under this number.
      *
-     * The usedShards parameter is in/out and it contains the set of shards, which have already been
-     * used for migrations. Used so we don't return multiple conflicting migrations for the same
-     * shard.
+     * The availableShards parameter is in/out and it contains the set of shards, which haven't
+     * been used for migrations yet. Used so we don't return multiple conflicting migrations for the
+     * same shard.
      */
     static MigrateInfosWithReason balance(
         const ShardStatisticsVector& shardStats,
         const DistributionStatus& distribution,
         const boost::optional<CollectionDataSizeInfoForBalancing>& collDataSizeInfo,
-        stdx::unordered_set<ShardId>* usedShards,
+        stdx::unordered_set<ShardId>* availableShards,
         bool forceJumbo);
 
     /**
@@ -426,7 +432,7 @@ private:
         const DistributionStatus& distribution,
         const boost::optional<CollectionDataSizeInfoForBalancing>& collDataSizeInfo,
         const std::string& tag,
-        const stdx::unordered_set<ShardId>& excludedShards);
+        const stdx::unordered_set<ShardId>& availableShards);
 
     /**
      * Only considers shards with the specified tag, all shards in case the tag is empty.
@@ -442,12 +448,12 @@ private:
         const DistributionStatus& distribution,
         const boost::optional<CollectionDataSizeInfoForBalancing>& collDataSizeInfo,
         const std::string& chunkTag,
-        const stdx::unordered_set<ShardId>& excludedShards);
+        const stdx::unordered_set<ShardId>& availableShards);
 
     /**
      * Selects one chunk for the specified zone (if appropriate) to be moved in order to bring the
      * deviation of the shards chunk contents closer to even across all shards in the specified
-     * zone. Takes into account and updates the shards, which have already been used for migrations.
+     * zone. Takes into account and updates the shards, which haven't been used for migrations yet.
      *
      * Returns true if a migration was suggested, false otherwise. This method is intented to be
      * called multiple times until all posible migrations for a zone have been selected.
@@ -457,13 +463,13 @@ private:
                                                 const std::string& tag,
                                                 size_t totalNumberOfShardsWithTag,
                                                 std::vector<MigrateInfo>* migrations,
-                                                stdx::unordered_set<ShardId>* usedShards,
+                                                stdx::unordered_set<ShardId>* availableShards,
                                                 MoveChunkRequest::ForceJumbo forceJumbo);
 
     /**
      * Selects one range for the specified zone (if appropriate) to be moved in order to bring the
      * deviation of the collection data size closer to even across all shards in the specified
-     * zone. Takes into account and updates the shards, which have already been used for migrations.
+     * zone. Takes into account and updates the shards, which haven't been used for migrations yet.
      *
      * Returns true if a migration was suggested, false otherwise. This method is intented to be
      * called multiple times until all posible migrations for a zone have been selected.
@@ -474,7 +480,7 @@ private:
         const CollectionDataSizeInfoForBalancing& collDataSizeInfo,
         const std::string& tag,
         std::vector<MigrateInfo>* migrations,
-        stdx::unordered_set<ShardId>* usedShards,
+        stdx::unordered_set<ShardId>* availableShards,
         MoveChunkRequest::ForceJumbo forceJumbo);
 };
 

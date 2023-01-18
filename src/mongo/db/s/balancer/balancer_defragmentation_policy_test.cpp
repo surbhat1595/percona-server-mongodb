@@ -177,6 +177,19 @@ protected:
             ASSERT_FALSE(configDoc.hasField(CollectionType::kDefragmentationPhaseFieldName));
         }
     };
+
+    stdx::unordered_set<ShardId> getAllShardIds(OperationContext* opCtx) {
+        std::vector<ShardStatistics> shardStats = _clusterStats.getStats(opCtx).getValue();
+        stdx::unordered_set<ShardId> shards;
+        std::transform(shardStats.begin(),
+                       shardStats.end(),
+                       std::inserter(shards, shards.end()),
+                       [](const ClusterStatistics::ShardStatistics& shardStatistics) -> ShardId {
+                           return shardStatistics.shardId;
+                       });
+
+        return shards;
+    }
 };
 
 TEST_F(BalancerDefragmentationPolicyTest, TestGetNextActionIsNotReadyWhenNotDefragmenting) {
@@ -236,9 +249,9 @@ TEST_F(BalancerDefragmentationPolicyTest,
     // kMoveAndMergeChunks has no stream actions/migrations to offer, but the condition has to be
     // verified through a sequence of two action requests (the first being selectChunksToMove()) for
     // the phase to complete.
-    stdx::unordered_set<ShardId> usedShards;
+    auto availableShards = getAllShardIds(operationContext());
     auto pendingMigrations =
-        _defragmentationPolicy.selectChunksToMove(operationContext(), &usedShards);
+        _defragmentationPolicy.selectChunksToMove(operationContext(), &availableShards);
     ASSERT_TRUE(pendingMigrations.empty());
     verifyExpectedDefragmentationPhaseOndisk(DefragmentationPhaseEnum::kMoveAndMergeChunks);
 
@@ -257,7 +270,7 @@ TEST_F(BalancerDefragmentationPolicyTest,
     ASSERT_TRUE(nextAction.is_initialized());
     DataSizeInfo dataSizeAction = stdx::get<DataSizeInfo>(*nextAction);
 
-    auto resp = StatusWith(DataSizeResponse(2000, 4));
+    auto resp = StatusWith(DataSizeResponse(2000, 4, false));
     _defragmentationPolicy.applyActionResult(operationContext(), dataSizeAction, resp);
 
     // 1. The outcome of the data size has been stored in the expected document...
@@ -272,6 +285,33 @@ TEST_F(BalancerDefragmentationPolicyTest,
     ASSERT_TRUE(nextAction == boost::none);
     ASSERT_TRUE(_defragmentationPolicy.isDefragmentingCollection(coll.getUuid()));
     verifyExpectedDefragmentationPhaseOndisk(DefragmentationPhaseEnum::kMoveAndMergeChunks);
+}
+
+TEST_F(BalancerDefragmentationPolicyTest,
+       TestPhaseOneDataSizeResponsesWithMaxSizeReachedCausesChunkToBeSkippedByPhaseTwo) {
+    auto coll = setupCollectionWithPhase({makeConfigChunkEntry()});
+    setDefaultClusterStats();
+    _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
+    auto nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
+    ASSERT_TRUE(nextAction.has_value());
+    DataSizeInfo dataSizeAction = stdx::get<DataSizeInfo>(*nextAction);
+
+    auto resp = StatusWith(DataSizeResponse(2000, 4, true));
+    _defragmentationPolicy.applyActionResult(operationContext(), dataSizeAction, resp);
+
+    // 1. The outcome of the data size has been stored in the expected document...
+    auto chunkQuery = BSON(ChunkType::collectionUUID()
+                           << kUuid << ChunkType::min(kKeyAtMin) << ChunkType::max(kKeyAtMax));
+    auto configChunkDoc =
+        findOneOnConfigCollection(operationContext(), ChunkType::ConfigNS, chunkQuery).getValue();
+    ASSERT_EQ(configChunkDoc.getField("estimatedDataSizeBytes").safeNumberLong(),
+              std::numeric_limits<int64_t>::max());
+
+    // No new action is expected - and the algorithm should converge
+    nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
+    ASSERT_TRUE(nextAction == boost::none);
+    ASSERT_FALSE(_defragmentationPolicy.isDefragmentingCollection(coll.getUuid()));
+    verifyExpectedDefragmentationPhaseOndisk(boost::none);
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, TestRetriableFailedDataSizeActionGetsReissued) {
@@ -308,7 +348,7 @@ TEST_F(BalancerDefragmentationPolicyTest, TestRemoveCollectionEndsDefragmentatio
     auto nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
     DataSizeInfo dataSizeAction = stdx::get<DataSizeInfo>(*nextAction);
 
-    auto resp = StatusWith(DataSizeResponse(2000, 4));
+    auto resp = StatusWith(DataSizeResponse(2000, 4, false));
     _defragmentationPolicy.applyActionResult(operationContext(), dataSizeAction, resp);
 
     // Remove collection entry from config.collections
@@ -607,9 +647,9 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseTwoMissingDataSizeRestartsPha
     ASSERT_TRUE(_defragmentationPolicy.isDefragmentingCollection(coll.getUuid()));
     verifyExpectedDefragmentationPhaseOndisk(DefragmentationPhaseEnum::kMergeAndMeasureChunks);
     // There should be a datasize entry and no migrations
-    stdx::unordered_set<ShardId> usedShards;
+    auto availableShards = getAllShardIds(operationContext());
     auto pendingMigrations =
-        _defragmentationPolicy.selectChunksToMove(operationContext(), &usedShards);
+        _defragmentationPolicy.selectChunksToMove(operationContext(), &availableShards);
     ASSERT_EQ(0, pendingMigrations.size());
     auto nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
     ASSERT_TRUE(nextAction.is_initialized());
@@ -639,11 +679,16 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseTwoChunkCanBeMovedAndMergedWi
     _clusterStats.setStats(std::move(clusterStats), std::move(collectionStats));
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
     ASSERT_TRUE(_defragmentationPolicy.isDefragmentingCollection(coll.getUuid()));
-    stdx::unordered_set<ShardId> usedShards;
+
+
+    auto availableShards = getAllShardIds(operationContext());
+    auto numOfShards = availableShards.size();
     auto pendingMigrations =
-        _defragmentationPolicy.selectChunksToMove(operationContext(), &usedShards);
+        _defragmentationPolicy.selectChunksToMove(operationContext(), &availableShards);
+    auto numOfUsedShards = numOfShards - availableShards.size();
     ASSERT_EQ(1, pendingMigrations.size());
-    ASSERT_EQ(2, usedShards.size());
+    ASSERT_EQ(2, numOfUsedShards);
+
     auto moveAction = pendingMigrations.back();
     // The chunk belonging to the "fullest" shard is expected to be moved - even though it is bigger
     // than its sibling.
@@ -658,10 +703,14 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseTwoChunkCanBeMovedAndMergedWi
     _defragmentationPolicy.applyActionResult(operationContext(), moveAction, Status::OK());
     nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
     ASSERT_TRUE(nextAction.is_initialized());
-    usedShards.clear();
-    pendingMigrations = _defragmentationPolicy.selectChunksToMove(operationContext(), &usedShards);
+
+    availableShards = getAllShardIds(operationContext());
+    numOfShards = availableShards.size();
+    pendingMigrations =
+        _defragmentationPolicy.selectChunksToMove(operationContext(), &availableShards);
+    numOfUsedShards = numOfShards - availableShards.size();
     ASSERT_TRUE(pendingMigrations.empty());
-    ASSERT_EQ(0, usedShards.size());
+    ASSERT_EQ(0, numOfUsedShards);
 
     auto mergeAction = stdx::get<MergeInfo>(*nextAction);
     ASSERT_EQ(smallestChunk.getShard(), mergeAction.shardId);
@@ -671,7 +720,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseTwoChunkCanBeMovedAndMergedWi
     _defragmentationPolicy.applyActionResult(operationContext(), mergeAction, Status::OK());
     nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
     ASSERT_TRUE(nextAction == boost::none);
-    pendingMigrations = _defragmentationPolicy.selectChunksToMove(operationContext(), &usedShards);
+    pendingMigrations =
+        _defragmentationPolicy.selectChunksToMove(operationContext(), &availableShards);
     ASSERT_TRUE(pendingMigrations.empty());
 }
 
@@ -734,10 +784,12 @@ TEST_F(BalancerDefragmentationPolicyTest,
 
     // Two move operation should be returned within a single invocation, using all the possible
     // shards
-    stdx::unordered_set<ShardId> usedShards;
+    auto availableShards = getAllShardIds(operationContext());
+    auto numOfShards = availableShards.size();
     auto pendingMigrations =
-        _defragmentationPolicy.selectChunksToMove(operationContext(), &usedShards);
-    ASSERT_EQ(4, usedShards.size());
+        _defragmentationPolicy.selectChunksToMove(operationContext(), &availableShards);
+    auto numOfUsedShards = numOfShards - availableShards.size();
+    ASSERT_EQ(4, numOfUsedShards);
     ASSERT_EQ(2, pendingMigrations.size());
 }
 

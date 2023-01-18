@@ -179,7 +179,7 @@ class MongoDFixture(interface.Fixture):
 
     def get_driver_connection_url(self):
         """Return the driver connection URL."""
-        return "mongodb://" + self.get_internal_connection_string()
+        return "mongodb://" + self.get_internal_connection_string() + "/?directConnection=true"
 
 
 # The below parameters define the default 'logComponentVerbosity' object passed to mongod processes
@@ -191,15 +191,16 @@ class MongoDFixture(interface.Fixture):
 # The default verbosity setting for any tests that are not started with an Evergreen task id. This
 # will apply to any tests run locally.
 DEFAULT_MONGOD_LOG_COMPONENT_VERBOSITY = {
-    "replication": {"rollback": 2}, "sharding": {"migration": 2}, "transaction": 4,
-    "tenantMigration": 4
+    "replication": {"rollback": 2}, "sharding": {"migration": 2, "rangeDeleter": 2},
+    "transaction": 4, "tenantMigration": 4
 }
 
 # The default verbosity setting for any mongod processes running in Evergreen i.e. started with an
 # Evergreen task id.
 DEFAULT_EVERGREEN_MONGOD_LOG_COMPONENT_VERBOSITY = {
-    "replication": {"election": 4, "heartbeats": 2, "initialSync": 2, "rollback": 2},
-    "sharding": {"migration": 2}, "storage": {"recovery": 2}, "transaction": 4, "tenantMigration": 4
+    "replication": {"election": 4, "heartbeats": 2, "initialSync": 2,
+                    "rollback": 2}, "sharding": {"migration": 2, "rangeDeleter": 2},
+    "storage": {"recovery": 2}, "transaction": 4, "tenantMigration": 4
 }
 
 

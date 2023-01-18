@@ -40,6 +40,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/sorter/sorter.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/yieldable.h"
 
@@ -185,7 +186,6 @@ public:
          */
         virtual Status insert(OperationContext* opCtx,
                               const CollectionPtr& collection,
-                              SharedBufferFragmentBuilder& pooledBuilder,
                               const BSONObj& obj,
                               const RecordId& loc,
                               const InsertDeleteOptions& options,
@@ -218,6 +218,12 @@ public:
          * Persists on disk the keys that have been inserted using this BulkBuilder.
          */
         virtual IndexStateInfo persistDataForShutdown() = 0;
+
+    protected:
+        static void countNewBuildInStats();
+        static void countResumedBuildInStats();
+        static SorterFileStats* bulkBuilderFileStats();
+        static SorterTracker* bulkBuilderTracker();
     };
 
     /**

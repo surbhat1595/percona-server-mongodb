@@ -92,6 +92,10 @@ std::unique_ptr<VaultSecretId> VaultSecretId::create(const BSONObj& o) {
     if (pathElem.type() != BSONType::String) {
         throw std::runtime_error("the 'path' field is not a string");
     }
+    std::string path = pathElem.String();
+    if (path.empty()) {
+        throw std::runtime_error("the 'path' field must be a non-empty string");
+    }
 
     BSONElement versionElem = o.getField("version");
     if (versionElem.eoo()) {
@@ -110,7 +114,7 @@ std::unique_ptr<VaultSecretId> VaultSecretId::create(const BSONObj& o) {
             "the 'version' field must be a positive "
             "integer serialized as a string");
     }
-    return std::make_unique<VaultSecretId>(pathElem.String(), version);
+    return std::make_unique<VaultSecretId>(path, version);
 }
 
 std::unique_ptr<KmipKeyId> KmipKeyId::create(const BSONObj& o) {
@@ -121,7 +125,11 @@ std::unique_ptr<KmipKeyId> KmipKeyId::create(const BSONObj& o) {
     if (keyIdElem.type() != BSONType::String) {
         throw std::runtime_error("the 'keyId' field is not a string");
     }
-    return std::make_unique<KmipKeyId>(keyIdElem.String());
+    std::string keyId = keyIdElem.String();
+    if (keyId.empty()) {
+        throw std::runtime_error("the 'keyId' field must be a non-empty string");
+    }
+    return std::make_unique<KmipKeyId>(keyId);
 }
 
 void KeyId::serializeToStorageEngineEncryptionOptions(BSONObjBuilder* b) const {

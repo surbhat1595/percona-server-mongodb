@@ -20,6 +20,17 @@ env.Library(
     ],
 )
 
+env.CppUnitTest(
+    target='db_encryption_key_id_test',
+    source=[
+        'key_id_test.cpp',
+    ],
+    LIBDEPS=[
+        # '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/encryption/key',
+    ],
+)
+
 env.Library(
     target='encryption_options',
     source=[

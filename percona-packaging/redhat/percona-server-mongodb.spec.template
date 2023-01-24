@@ -1,5 +1,8 @@
 #
 %define         mongo_home /var/lib/mongo
+%if 0%{?rhel} == 9
+%undefine _debugsource_packages
+%endif
 #
 Name:           percona-server-mongodb
 Version:        @@VERSION@@

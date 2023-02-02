@@ -101,7 +101,7 @@ public:
     void saveMasterKey(const Key& key) const;
 
 private:
-    KeyKeyIdPair _readMasterKey(const ReadKey& read) const;
+    KeyKeyIdPair _readMasterKey(const ReadKey& read, bool updateKeyIds = true) const;
     std::unique_ptr<KeyId> _saveMasterKey(const SaveKey& save, const Key& key) const;
 
     std::unique_ptr<const KeyOperationFactory> _factory;

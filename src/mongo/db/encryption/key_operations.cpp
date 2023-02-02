@@ -40,13 +40,20 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/util/invariant.h"
 
 namespace mongo::encryption {
-std::optional<Key> ReadKeyFile::operator()() const {
-    return Key(detail::SecretString::readFromFile(_path.toString(), "encryption key"));
+std::optional<KeyKeyIdPair> ReadKeyFile::operator()() const {
+    return KeyKeyIdPair{Key(detail::SecretString::readFromFile(_path.toString(), "encryption key")),
+                        _path.clone()};
 }
 
-std::optional<Key> ReadVaultSecret::operator()() const {
-    std::string encodedKey = detail::vaultReadKey(_id.path(), _id.version());
-    return encodedKey.empty() ? std::optional<Key>() : std::optional<Key>(encodedKey);
+std::pair<std::string, std::uint64_t> ReadVaultSecret::_read(const VaultSecretId& id) const {
+    return detail::vaultReadKey(id.path(), id.version());
+}
+
+std::optional<KeyKeyIdPair> ReadVaultSecret::operator()() const {
+    if (auto [encodedKey, version] = _read(_id); !encodedKey.empty()) {
+        return KeyKeyIdPair{Key(encodedKey), std::make_unique<VaultSecretId>(_id.path(), version)};
+    }
+    return std::nullopt;
 }
 
 std::unique_ptr<KeyId> SaveVaultSecret::operator()(const Key& k) const {
@@ -54,9 +61,11 @@ std::unique_ptr<KeyId> SaveVaultSecret::operator()(const Key& k) const {
                                            detail::vaultWriteKey(_secretPath, k.base64()));
 }
 
-std::optional<Key> ReadKmipKey::operator()() const {
-    std::string encodedKey = detail::kmipReadKey(_id.toString());
-    return encodedKey.empty() ? std::optional<Key>() : std::optional<Key>(encodedKey);
+std::optional<KeyKeyIdPair> ReadKmipKey::operator()() const {
+    if (auto encodedKey = detail::kmipReadKey(_id.toString()); !encodedKey.empty()) {
+        return KeyKeyIdPair{Key(encodedKey), _id.clone()};
+    }
+    return std::nullopt;
 }
 
 std::unique_ptr<KeyId> SaveKmipKey::operator()(const Key& k) const {
@@ -260,8 +269,18 @@ std::unique_ptr<ReadKey> CreateReadImpl<Derived>::_createRead(const KeyId* confi
         return derived->_doCreateRead(*derived->_configured);
     }
 
-    if (derived->_provided) {
-        return derived->_doCreateRead(*derived->_provided);
+    if (auto providedRead = derived->createProvidedRead(); providedRead) {
+        return providedRead;
+    }
+    if constexpr (std::is_same_v<Derived, VaultSecretOperationFactory>) {
+        if (!derived->_providedSecretPath.empty()) {
+            // For Vault, use the latest key version (encoded with the special
+            // value `0`), if `mongod` is about to read existing encrypted data
+            // but there is no configured key identifier nor provided version.
+            // That ensures `mongod` smooth upgrade from the older
+            // versions, which always read the latest key version.
+            return derived->_doCreateRead(VaultSecretId(derived->_providedSecretPath, 0));
+        }
     }
 
     throw KeyErrorBuilder(Messages<Derived>::kNotConfigured).error();

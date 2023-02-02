@@ -55,28 +55,27 @@ std::unique_ptr<MasterKeyProvider> MasterKeyProvider::create(const EncryptionGlo
         KeyOperationFactory::create(params), WtKeyIds::instance(), logComponent);
 }
 
-Key MasterKeyProvider::_readMasterKey(const ReadKey& read) const {
-    const KeyId& keyId = read.keyId();
-    auto key = read();
-    if (!key) {
+KeyKeyIdPair MasterKeyProvider::_readMasterKey(const ReadKey& read) const {
+    auto keyKeyId = read();
+    if (!keyKeyId) {
         KeyErrorBuilder b(
             "Cannot start. Master encryption key is absent on the key management facility. "
             "Check configuration options.");
-        b.append("keyManagementFacilityType", keyId.facilityType());
-        b.append("keyIdentifier", keyId);
+        b.append("keyManagementFacilityType", read.facilityType());
+        b.append("keyIdentifier", read.keyId());
         throw b.error();
     }
-    _wtKeyIds.decryption = keyId.clone();
+    _wtKeyIds.decryption = keyKeyId->keyId->clone();
     if (!_wtKeyIds.configured &&
         _wtKeyIds.decryption->needsSerializationToStorageEngineEncryptionOptions()) {
         _wtKeyIds.futureConfigured = _wtKeyIds.decryption->clone();
     }
     LOGV2_OPTIONS(29115,
                   logv2::LogOptions(_logComponent),
-                  "Master encryption key has been read from the on the key management facility.",
-                  "keyManagementFacilityType"_attr = keyId.facilityType(),
-                  "keyIdentifier"_attr = keyId);
-    return *key;
+                  "Master encryption key has been read from the key management facility.",
+                  "keyManagementFacilityType"_attr = read.facilityType(),
+                  "keyIdentifier"_attr = *keyKeyId->keyId);
+    return KeyKeyIdPair(std::move(*keyKeyId));
 }
 
 std::unique_ptr<KeyId> MasterKeyProvider::_saveMasterKey(const SaveKey& save,
@@ -95,7 +94,7 @@ std::unique_ptr<KeyId> MasterKeyProvider::_saveMasterKey(const SaveKey& save,
 }
 
 Key MasterKeyProvider::readMasterKey() const try {
-    return _readMasterKey(*_factory->createRead(_wtKeyIds.configured.get()));
+    return _readMasterKey(*_factory->createRead(_wtKeyIds.configured.get())).key;
 } catch (const KeyError& e) {
     LOGV2_FATAL_OPTIONS(29117,
                         logv2::LogOptions(_logComponent, logv2::FatalMode::kAssertNoTrace),
@@ -106,12 +105,11 @@ Key MasterKeyProvider::readMasterKey() const try {
 
 std::pair<Key, std::unique_ptr<KeyId>> MasterKeyProvider::obtainMasterKey(bool saveKey) const try {
     if (auto read = _factory->createProvidedRead(); read) {
-        Key key = _readMasterKey(*read);
-        const KeyId& keyId = read->keyId();
-        if (keyId.needsSerializationToStorageEngineEncryptionOptions()) {
-            _wtKeyIds.futureConfigured = keyId.clone();
+        auto keyKeyId = _readMasterKey(*read);
+        if (keyKeyId.keyId->needsSerializationToStorageEngineEncryptionOptions()) {
+            _wtKeyIds.futureConfigured = keyKeyId.keyId->clone();
         }
-        return {key, keyId.clone()};
+        return {keyKeyId.key, std::move(keyKeyId.keyId)};
     }
 
     Key key;

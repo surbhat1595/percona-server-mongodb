@@ -153,7 +153,8 @@ std::uint64_t parse_version(const BSONElement& version, const char* elem_path) {
 
 } // namespace
 
-std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVersion) {
+std::pair<std::string, std::uint64_t> vaultReadKey(const std::string& secretPath,
+                                                   std::uint64_t secretVersion) {
     char curl_errbuf[CURL_ERROR_SIZE]{0}; // should be available until curl_easy_cleanup
     long http_code{0};
     long verifyresult{0};
@@ -207,7 +208,7 @@ std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVers
     LOGV2_DEBUG(29031, 4, "HTTP code (GET): {code}", "code"_attr = http_code);
     if (http_code == 404) {
         // requested value does not exist - return empty string
-        return {};
+        return {std::string(), 0};
     }
     if (http_code / 100 != 2) {
         // not success - throw error
@@ -240,7 +241,7 @@ std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVers
     if (value.eoo() || value.type() != mongo::String) {
         throw std::runtime_error("Error parsing Vault response");
     }
-    return value.String();
+    return {value.String(), versionGot};
 }
 
 std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& key) {

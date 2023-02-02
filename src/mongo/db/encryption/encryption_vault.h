@@ -33,6 +33,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 /// The code in this namespace is not intended to be called from outside
 /// the `mongo::encryption` namespace
@@ -46,10 +47,14 @@ namespace mongo::encryption::detail {
 /// @param secretVersion the version of the key;
 ///                      default is zero meaning the most recent version
 ///
-/// @returns encryption key data in base64 encoded form
+/// @returns If the key was successfully read from the Vault server,
+///          its data (in base64 encoding) and specific version (never `0`)
+///          are returned. Otherwise, the function returns the pair of an
+///          empty string and zero integer.
 ///
 /// @throws std::runtime_error in case of issues
-std::string vaultReadKey(const std::string& secretPath, std::uint64_t secretVersion = 0);
+std::pair<std::string, std::uint64_t> vaultReadKey(const std::string& secretPath,
+                                                   std::uint64_t secretVersion = 0);
 
 /// @brief Creates a copy of the key on the Vault server.
 ///

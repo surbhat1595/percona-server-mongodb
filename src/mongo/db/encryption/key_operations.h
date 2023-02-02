@@ -37,13 +37,18 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include <string>
 #include <string_view>
 
+#include "mongo/db/encryption/key.h"
 #include "mongo/db/encryption/key_id.h"
 
 namespace mongo {
 class EncryptionGlobalParams;
 
 namespace encryption {
-class Key;
+
+struct KeyKeyIdPair {
+    Key key;
+    std::unique_ptr<KeyId> keyId;
+};
 
 /// @brief The operation of reading an encryption key from a key management
 /// facility.
@@ -63,10 +68,18 @@ public:
     /// @brief Read an encryption key from a key management facility.
     ///
     /// @returns the copy of the key if it exists on the key management
-    ///          facility or `nullopt` otherwise
+    ///          facility and specific identifier of that key.
+    ///
+    /// @note In the most cases, the returned identifier is equal to the
+    /// requested one, i.e. passed in the constructor of a specific
+    /// implementation. However, the requested identifier may contain
+    /// a metavalue, e.g. secret version 0 for Vault, which is the
+    /// special value for "the key of the most recent version". In the latter
+    /// case, the returned key identifier has concrete secret version which
+    /// was the latest at the time of reading.
     ///
     /// @throws `std::runtime_error` on failure
-    virtual std::optional<Key> operator()() const = 0;
+    virtual std::optional<KeyKeyIdPair> operator()() const = 0;
 
     const char* facilityType() const noexcept {
         return keyId().facilityType();
@@ -110,7 +123,7 @@ public:
     explicit ReadKeyFile(const KeyFilePath& path) : _path(path) {}
     explicit ReadKeyFile(KeyFilePath&& path) : _path(std::move(path)) {}
 
-    std::optional<Key> operator()() const override;
+    std::optional<KeyKeyIdPair> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
         return _path;
@@ -129,17 +142,16 @@ public:
     explicit ReadVaultSecret(const VaultSecretId& id) : _id(id) {}
     explicit ReadVaultSecret(VaultSecretId&& id) : _id(std::move(id)) {}
 
-    std::optional<Key> operator()() const override;
+    std::optional<KeyKeyIdPair> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
         return _id;
     }
 
-    const VaultSecretId& vaultSecretId() const noexcept {
-        return _id;
-    }
-
 private:
+    // The function is going to be overridden in the tests
+    virtual std::pair<std::string, std::uint64_t> _read(const VaultSecretId& id) const;
+
     VaultSecretId _id;
 };
 
@@ -167,12 +179,13 @@ public:
     explicit ReadKmipKey(const KmipKeyId& id) : _id(id) {}
     explicit ReadKmipKey(KmipKeyId&& id) : _id(std::move(id)) {}
 
-    std::optional<Key> operator()() const override;
+    std::optional<KeyKeyIdPair> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
         return _id;
     }
 
+    /// @note Used in the unit tests
     const KmipKeyId& kmipKeyId() const noexcept {
         return _id;
     }

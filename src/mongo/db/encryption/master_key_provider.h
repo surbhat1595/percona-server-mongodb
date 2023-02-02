@@ -42,6 +42,7 @@ class EncryptionGlobalParams;
 namespace encryption {
 class Key;
 class KeyId;
+class KeyKeyIdPair;
 class KeyOperationFactory;
 class ReadKey;
 class SaveKey;
@@ -100,7 +101,7 @@ public:
     void saveMasterKey(const Key& key) const;
 
 private:
-    Key _readMasterKey(const ReadKey& read) const;
+    KeyKeyIdPair _readMasterKey(const ReadKey& read) const;
     std::unique_ptr<KeyId> _saveMasterKey(const SaveKey& save, const Key& key) const;
 
     std::unique_ptr<const KeyOperationFactory> _factory;

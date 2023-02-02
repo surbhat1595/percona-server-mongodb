@@ -55,7 +55,7 @@ std::unique_ptr<MasterKeyProvider> MasterKeyProvider::create(const EncryptionGlo
         KeyOperationFactory::create(params), WtKeyIds::instance(), logComponent);
 }
 
-KeyKeyIdPair MasterKeyProvider::_readMasterKey(const ReadKey& read) const {
+KeyKeyIdPair MasterKeyProvider::_readMasterKey(const ReadKey& read, bool updateKeyIds) const {
     auto keyKeyId = read();
     if (!keyKeyId) {
         KeyErrorBuilder b(
@@ -65,10 +65,12 @@ KeyKeyIdPair MasterKeyProvider::_readMasterKey(const ReadKey& read) const {
         b.append("keyIdentifier", read.keyId());
         throw b.error();
     }
-    _wtKeyIds.decryption = keyKeyId->keyId->clone();
-    if (!_wtKeyIds.configured &&
-        _wtKeyIds.decryption->needsSerializationToStorageEngineEncryptionOptions()) {
-        _wtKeyIds.futureConfigured = _wtKeyIds.decryption->clone();
+    if (updateKeyIds) {
+        _wtKeyIds.decryption = keyKeyId->keyId->clone();
+        if (!_wtKeyIds.configured &&
+            _wtKeyIds.decryption->needsSerializationToStorageEngineEncryptionOptions()) {
+            _wtKeyIds.futureConfigured = _wtKeyIds.decryption->clone();
+        }
     }
     LOGV2_OPTIONS(29115,
                   logv2::LogOptions(_logComponent),
@@ -105,7 +107,7 @@ Key MasterKeyProvider::readMasterKey() const try {
 
 std::pair<Key, std::unique_ptr<KeyId>> MasterKeyProvider::obtainMasterKey(bool saveKey) const try {
     if (auto read = _factory->createProvidedRead(); read) {
-        auto keyKeyId = _readMasterKey(*read);
+        auto keyKeyId = _readMasterKey(*read, false);
         if (keyKeyId.keyId->needsSerializationToStorageEngineEncryptionOptions()) {
             _wtKeyIds.futureConfigured = keyKeyId.keyId->clone();
         }

@@ -35,6 +35,7 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/key.h"
@@ -127,21 +128,26 @@ std::unique_ptr<WiredTigerKVEngine> createWiredTigerKVEngine(
 
 class FakeVaultServer {
 public:
-    std::optional<Key> readKey(const VaultSecretId& id) const noexcept {
+    std::pair<std::string, std::uint64_t> readRawKey(const VaultSecretId& id) const noexcept {
         auto engine = _keys.find(id.path());
         if (engine == _keys.end() || engine->second.empty() ||
             engine->second.size() < id.version()) {
-            return std::nullopt;
+            return {std::string(), 0};
         }
         if (id.version() == 0) {
-            return *engine->second.rbegin();
+            return {*engine->second.rbegin(), engine->second.size()};
         }
-        return engine->second.at(id.version() - 1);
+        return {engine->second.at(id.version() - 1), id.version()};
+    }
+
+    std::optional<Key> readKey(const VaultSecretId& id) const noexcept {
+        auto [encryptedKey, version] = readRawKey(id);
+        return encryptedKey.empty() ? std::nullopt : std::optional<Key>(Key(encryptedKey));
     }
 
     VaultSecretId saveKey(const std::string& path, const Key& key) {
         auto& v = _keys[path];
-        v.push_back(key);
+        v.push_back(key.base64());
         return VaultSecretId(path, v.size());
     }
 
@@ -150,7 +156,7 @@ public:
     }
 
 private:
-    std::map<std::string, std::vector<Key>> _keys;
+    std::map<std::string, std::vector<std::string>> _keys;
 };
 
 class FakeReadVaultSecret : public ReadVaultSecret {
@@ -158,8 +164,9 @@ public:
     explicit FakeReadVaultSecret(FakeVaultServer& server, const VaultSecretId& id)
         : ReadVaultSecret(id), _server(server) {}
 
-    std::optional<Key> operator()() const override {
-        return _server.readKey(vaultSecretId());
+
+    std::pair<std::string, std::uint64_t> _read(const VaultSecretId& id) const override {
+        return _server.readRawKey(id);
     }
 
 private:
@@ -226,8 +233,11 @@ public:
     FakeReadKmipKey(FakeKmipServer& server, const KmipKeyId& id)
         : ReadKmipKey(id), _server(server) {}
 
-    std::optional<Key> operator()() const override {
-        return _server.readKey(kmipKeyId());
+    std::optional<KeyKeyIdPair> operator()() const override {
+        if (auto key = _server.readKey(kmipKeyId()); key) {
+            return KeyKeyIdPair{*key, kmipKeyId().clone()};
+        }
+        return std::nullopt;
     }
 
 private:
@@ -495,11 +505,18 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
     _engine = _createWiredTigerKVEngine();
 }
 
-DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
-             DeathIfVaultWithtouSecretVersionInParams,
-             "the system was not configured using Vault") {
+TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
+       LatestKeyIsReadIfVaultWithtouSecretVersionInParams) {
+    _vaultServer.saveKey("charlie/delta", Key());
+    _vaultServer.saveKey("charlie/delta", Key());
+    VaultSecretId id = _vaultServer.saveKey("charlie/delta", *_key);
+    _key.reset();
+
     encryptionGlobalParams = encryptionParamsVault("charlie/delta");
     _engine = _createWiredTigerKVEngine();
+
+    ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_vaultServer.readKey(id));
+    ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(id));
 }
 
 DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyFileTest,
@@ -586,7 +603,6 @@ DEATH_TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
     ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), *_vaultServer.readKey(id)); \
     ASSERT_EQ(toJsonText(*WtKeyIds::instance().decryption), toJsonText(id));
 
-
 TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest, ConfiguredSecretIdIsUsedIfNoSecretIdInParams) {
     encryptionGlobalParams = encryptionParamsVault();
     ASSERT_KEY_ID(VaultSecretId("charlie/delta", 3));
@@ -600,6 +616,15 @@ TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
 
 TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest, ConfiguredSecretIdIsUsedIfSameSecretIdInParams) {
     encryptionGlobalParams = encryptionParamsVault("charlie/delta", 3);
+    ASSERT_KEY_ID(VaultSecretId("charlie/delta", 3));
+}
+
+TEST_F(WiredTigerKVEngineEncryptionKeyVaultTest,
+       UpgradeFromOlderMongodVersionWiththouSecretVersionUsesLatestKey) {
+    // there can't be configured key id for the older `mongod` versions
+    WtKeyIds::instance().configured.reset();
+
+    encryptionGlobalParams = encryptionParamsVault("charlie/delta");
     ASSERT_KEY_ID(VaultSecretId("charlie/delta", 3));
 }
 

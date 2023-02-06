@@ -183,10 +183,10 @@ private:
                   "encryption key file path must not be serialized to the storage engine "
                   "metadata and thus must not appear in the configured key identifier");
     }
-    void visit(const VaultSecretId& configured) {
+    void visit(const VaultSecretId& configured) override {
         _visit(_target, configured);
     }
-    void visit(const KmipKeyId& configured) {
+    void visit(const KmipKeyId& configured) override {
         _visit(_target, configured);
     }
 

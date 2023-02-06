@@ -33,6 +33,7 @@
 
 #include <boost/filesystem.hpp>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -488,6 +489,20 @@ Status storeMongodOptions(const moe::Environment& params) {
 
     if (params.count("security.vault.secret")) {
         encryptionGlobalParams.vaultSecret = params["security.vault.secret"].as<std::string>();
+    }
+
+    if (params.count("security.vault.secretVersion")) {
+        auto v = params["security.vault.secretVersion"].as<unsigned long long>();
+        // Since `unsigned long long` is _at least_ 64 bits wide (as stated by
+        // the C++ standard), it definitely embodies the whole `std::uint64_t`
+        // range and potentially (in some imaginary data models) can have
+        // even greater values.
+        if (static_cast<unsigned long long>(std::numeric_limits<std::uint64_t>::max()) < v) {
+            return Status(ErrorCodes::BadValue,
+                          str::stream()
+                              << "The 'security.vault.secretVersion' field value is too high");
+        }
+        encryptionGlobalParams.vaultSecretVersion = static_cast<std::uint64_t>(v);
     }
 
     if (params.count("security.vault.rotateMasterKey")) {

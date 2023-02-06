@@ -59,8 +59,7 @@ wtEnv.Library(
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
         '$BUILD_DIR/mongo/db/curop',
-        '$BUILD_DIR/mongo/db/encryption/encryption_kmip',
-        '$BUILD_DIR/mongo/db/encryption/encryption_vault',
+        '$BUILD_DIR/mongo/db/encryption/key',
         '$BUILD_DIR/mongo/db/global_settings',
         '$BUILD_DIR/mongo/db/index/index_descriptor',
         '$BUILD_DIR/mongo/db/namespace_string',
@@ -155,6 +154,20 @@ wtEnv.CppUnitTest(
         'wiredtiger_encryption_test.cpp',
     ],
     LIBDEPS=[
+        'storage_wiredtiger_core',
+    ],
+)
+
+wtEnv.CppUnitTest(
+    target='storage_wiredtiger_kv_engine_encryption_key_test',
+    source=[
+        'wiredtiger_kv_engine_encryption_key_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/encryption/key',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        '$BUILD_DIR/mongo/util/clock_source_mock',
         'storage_wiredtiger_core',
     ],
 )

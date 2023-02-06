@@ -63,7 +63,7 @@ configs:
         description: 'Hostname or IP address of the Vault server'
         short_name: vaultServerName
         arg_vartype: String
-        requires: [ 'security.enableEncryption', 'security.vault.port', 'security.vault.tokenFile', 'security.vault.secret']
+        requires: [ 'security.enableEncryption', 'security.vault.port', 'security.vault.tokenFile']
         conflicts: ['security.encryptionKeyFile', 'security.kmip.serverName']
 
     'security.vault.port':
@@ -86,6 +86,14 @@ configs:
         short_name: vaultSecret
         arg_vartype: String
         requires: 'security.vault.serverName'
+
+    'security.vault.secretVersion':
+        description: >-
+            The version of the Vault secret where the master key is stored.
+            Zero means the most recent version.
+        short_name: vaultSecretVersion
+        arg_vartype: UnsignedLongLong
+        requires: 'security.vault.secret'
 
     'security.vault.rotateMasterKey':
         description: 'Rotate master key and re-encrypt keys db'

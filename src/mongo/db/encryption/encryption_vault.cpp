@@ -33,13 +33,16 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #include "mongo/db/encryption/encryption_vault.h"
 
+#include <sstream>
+
 #include <curl/curl.h>
 
 #include "mongo/db/encryption/encryption_options.h"
+#include "mongo/db/encryption/secret_string.h"
 #include "mongo/db/json.h"
 #include "mongo/logv2/log.h"
 
-namespace mongo {
+namespace mongo::encryption::detail {
 
 namespace {
 
@@ -131,9 +134,27 @@ void throw_CURL_error(CURLcode curl_res, const char curl_errbuf[], const char* m
     throw std::runtime_error(ss);
 }
 
+std::uint64_t parse_version(const BSONElement& version, const char* elem_path) {
+    auto message = [elem_path](const char* reason) {
+        std::ostringstream msg;
+        msg << "Ivalid Vault response: '" << elem_path << "'' " << reason
+            << ". Please make sure the secret is stored in the engine of the `kv-v2` type.";
+        return msg.str();
+    };
+    if (version.eoo()) {
+        throw std::runtime_error(message("is missing"));
+    }
+    long long v = version.type() == mongo::NumberInt || version.type() == mongo::NumberLong
+        ? version.numberLong()
+        : throw std::runtime_error(message("is not an integer"));
+    return v > 0 ? static_cast<std::uint64_t>(v)
+                 : throw std::runtime_error(message("does not have a positive value"));
+}
+
 } // namespace
 
-std::string vaultReadKey() {
+std::pair<std::string, std::uint64_t> vaultReadKey(const std::string& secretPath,
+                                                   std::uint64_t secretVersion) {
     char curl_errbuf[CURL_ERROR_SIZE]{0}; // should be available until curl_easy_cleanup
     long http_code{0};
     long verifyresult{0};
@@ -150,9 +171,17 @@ std::string vaultReadKey() {
     CURLcode curl_res = CURLE_OK;
     str::stream response;
 
+    const std::string& vaultToken = !encryptionGlobalParams.vaultToken.empty()
+        ? encryptionGlobalParams.vaultToken
+        : SecretString::readFromFile(encryptionGlobalParams.vaultTokenFile, "Vault token");
+
     curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, std::string(str::stream() << "X-Vault-Token: " << encryptionGlobalParams.vaultToken).c_str());
+    headers = curl_slist_append(headers, std::string("X-Vault-Token: ").append(vaultToken).c_str());
     Curl_slist_guard curl_slist_guard(headers);
+
+    auto url_query = [](std::uint64_t version) {
+        return version > 0 ? std::string(str::stream() << "?version=" << version) : std::string();
+    };
 
     if ((curl_res = setup_curl_options(curl)) != CURLE_OK ||
         (curl_res = curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_errbuf)) != CURLE_OK ||
@@ -163,7 +192,8 @@ std::string vaultReadKey() {
                                      << (encryptionGlobalParams.vaultDisableTLS ? "http://" : "https://")
                                      << encryptionGlobalParams.vaultServerName
                                      << ':'       << encryptionGlobalParams.vaultPort
-                                     << "/v1/"    << encryptionGlobalParams.vaultSecret).c_str())) != CURLE_OK ||
+                                     << "/v1/"    << secretPath
+                                     << url_query(secretVersion)).c_str())) != CURLE_OK ||
         (curl_res = curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers)) != CURLE_OK ||
         (curl_res = curl_easy_perform(curl)) != CURLE_OK ||
         (curl_res = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code)) != CURLE_OK ||
@@ -178,7 +208,7 @@ std::string vaultReadKey() {
     LOGV2_DEBUG(29031, 4, "HTTP code (GET): {code}", "code"_attr = http_code);
     if (http_code == 404) {
         // requested value does not exist - return empty string
-        return {};
+        return {std::string(), 0};
     }
     if (http_code / 100 != 2) {
         // not success - throw error
@@ -191,6 +221,18 @@ std::string vaultReadKey() {
     if (data1.eoo() || !data1.isABSONObj()) {
         throw std::runtime_error("Error parsing Vault response");
     }
+    BSONElement metadata = data1.Obj()["metadata"];
+    if (metadata.eoo() || metadata.type() != BSONType::Object) {
+        throw std::runtime_error(
+            "Invalid Vault response: 'data.metadata' is "
+            "missing or is not an object.");
+    }
+    std::uint64_t versionGot = parse_version(metadata.Obj()["version"], "data.metadata.version");
+    if (secretVersion > 0 && versionGot != secretVersion) {
+        throw std::runtime_error(str::stream()
+                                 << "Invalid Vault response: requested the key of version "
+                                 << secretVersion << " but got version " << versionGot);
+    }
     BSONElement data2 = data1.Obj()["data"];
     if (data2.eoo() || !data2.isABSONObj()) {
         throw std::runtime_error("Error parsing Vault response");
@@ -199,10 +241,10 @@ std::string vaultReadKey() {
     if (value.eoo() || value.type() != mongo::String) {
         throw std::runtime_error("Error parsing Vault response");
     }
-    return value.String();
+    return {value.String(), versionGot};
 }
 
-void vaultWriteKey(std::string const& key) {
+std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& key) {
     char curl_errbuf[CURL_ERROR_SIZE]{0}; // should be available until curl_easy_cleanup
     long http_code{0};
     CURLGuard guard;
@@ -218,15 +260,19 @@ void vaultWriteKey(std::string const& key) {
     CURLcode curl_res = CURLE_OK;
     str::stream response;
 
+    const std::string& vaultToken = !encryptionGlobalParams.vaultToken.empty()
+        ? encryptionGlobalParams.vaultToken
+        : SecretString::readFromFile(encryptionGlobalParams.vaultTokenFile, "Vault token");
+
     curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, std::string(str::stream() << "X-Vault-Token: " << encryptionGlobalParams.vaultToken).c_str());
+    headers = curl_slist_append(headers, std::string("X-Vault-Token: ").append(vaultToken).c_str());
     Curl_slist_guard curl_slist_guard(headers);
 
     std::string urlstr = std::string(str::stream()
                                      << (encryptionGlobalParams.vaultDisableTLS ? "http://" : "https://")
                                      << encryptionGlobalParams.vaultServerName
                                      << ':'       << encryptionGlobalParams.vaultPort
-                                     << "/v1/"    << encryptionGlobalParams.vaultSecret);
+                                     << "/v1/"    << secretPath);
     std::string postdata = std::string(str::stream()
                                        << "{\"data\": "
                                        << "{\"value\": \"" << key
@@ -251,6 +297,13 @@ void vaultWriteKey(std::string const& key) {
                                  << "Error writing key to the Vault; HTTP code: "
                                  << http_code);
     }
+
+    BSONObj bson = fromjson(response);
+    BSONElement data = bson["data"];
+    if (data.eoo() || data.type() != BSONType::Object) {
+        throw std::runtime_error("Invalid Vault response: 'data' is misssing or is not an object");
+    }
+    return parse_version(data.Obj()["version"], "data.version");
 }
 
-}  // namespace mongo
+}  // namespace mongo::encryption::detail

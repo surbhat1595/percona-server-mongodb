@@ -1,7 +1,7 @@
 /*======
 This file is part of Percona Server for MongoDB.
 
-Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
+Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the Server Side Public License, version 1,
@@ -32,30 +32,29 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #pragma once
 
 #include <string>
+#include <utility>
 
 /// The code in this namespace is not intended to be called from outside
 /// the `mongo::encryption` namespace
 namespace mongo::encryption::detail {
+class SecretString {
+public:
+    ~SecretString();
+    SecretString(const SecretString&) = default;
+    SecretString(SecretString&&) = default;
+    SecretString& operator=(const SecretString&) = default;
+    SecretString& operator=(SecretString&&) = default;
 
-/// @brief Reads a key from the KMIP server specified in the configuration
-///
-/// @param keyId Identifier of the key to read
-///
-/// @returns Key data if the reading succeeds or an empty string if no key data
-///     is associated with the key identifier
-///
-/// @throws std::runtime_error if the server can't connect to any of the KMIP
-///     servers listed in the configuration
-std::string kmipReadKey(const std::string& keyId);
+    explicit SecretString(const std::string& data) : _data(data) {}
+    explicit SecretString(std::string&& data) : _data(std::move(data)) {}
 
-/// @brief Writes the key to the KMIP server specified in the configuration.
-///
-/// @param keyData The key data, should be base64-encoded
-///
-/// @returns Key identifier if the writing succeeds or an empty string otherwise.
-///
-/// @throws std::runtime_error if the server can't connect to any of the KMIP
-///     servers listed in the configuration
-std::string kmipWriteKey(std::string const& keyData);
+    operator const std::string&() const noexcept {
+        return _data;
+    }
 
+    static SecretString readFromFile(const std::string& path, const std::string& description = "");
+
+private:
+    std::string _data;
+};
 }  // namespace mongo::encryption::detail

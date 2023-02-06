@@ -40,6 +40,7 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/encryption/master_key_provider.h"
 #include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/kv/kv_engine.h"
@@ -48,12 +49,13 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/elapsed_tracker.h"
 
-namespace mongo {
 
+namespace mongo {
 class ClockSource;
 class JournalListener;
 class WiredTigerRecordStore;
@@ -111,7 +113,9 @@ public:
                        bool durable,
                        bool ephemeral,
                        bool repair,
-                       bool readOnly);
+                       bool readOnly,
+                       const encryption::MasterKeyProviderFactory& keyProviderFactory =
+                           encryption::MasterKeyProvider::create);
 
     ~WiredTigerKVEngine();
 

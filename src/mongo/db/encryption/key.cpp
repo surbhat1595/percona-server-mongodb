@@ -1,7 +1,7 @@
 /*======
 This file is part of Percona Server for MongoDB.
 
-Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
+Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the Server Side Public License, version 1,
@@ -29,33 +29,40 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#pragma once
+#include "mongo/db/encryption/key.h"
 
-#include <string>
+#include <cstring>
+#include <sstream>
+#include <stdexcept>
 
-/// The code in this namespace is not intended to be called from outside
-/// the `mongo::encryption` namespace
-namespace mongo::encryption::detail {
+#include "mongo/platform/random.h"
+#include "mongo/util/base64.h"
+#include "mongo/util/secure_zero_memory.h"
 
-/// @brief Reads a key from the KMIP server specified in the configuration
-///
-/// @param keyId Identifier of the key to read
-///
-/// @returns Key data if the reading succeeds or an empty string if no key data
-///     is associated with the key identifier
-///
-/// @throws std::runtime_error if the server can't connect to any of the KMIP
-///     servers listed in the configuration
-std::string kmipReadKey(const std::string& keyId);
+namespace mongo::encryption {
+Key::~Key() {
+    secureZeroMemory(data(), size());
+}
 
-/// @brief Writes the key to the KMIP server specified in the configuration.
-///
-/// @param keyData The key data, should be base64-encoded
-///
-/// @returns Key identifier if the writing succeeds or an empty string otherwise.
-///
-/// @throws std::runtime_error if the server can't connect to any of the KMIP
-///     servers listed in the configuration
-std::string kmipWriteKey(std::string const& keyData);
+Key::Key(SecureRandom& srng) {
+    srng.fill(data(), size());
+}
 
-}  // namespace mongo::encryption::detail
+Key::Key() {
+    SecureRandom().fill(data(), size());
+}
+
+Key::Key(const std::string& base64EncodedKey) {
+    std::string decodedKey = base64::decode(base64EncodedKey);
+    if (decodedKey.size() != size()) {
+        std::ostringstream msg;
+        msg << "encryption key length should be " << size() << " bytes";
+        throw std::runtime_error(msg.str());
+    }
+    std::memcpy(data(), decodedKey.c_str(), size());
+}
+
+std::string Key::base64() const {
+    return base64::encode(data(), size());
+}
+}  // namespace mongo::encryption

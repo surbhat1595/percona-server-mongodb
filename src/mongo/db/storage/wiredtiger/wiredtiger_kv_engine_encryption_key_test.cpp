@@ -42,6 +42,8 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/encryption/key_id.h"
 #include "mongo/db/encryption/key_operations.h"
 #include "mongo/db/encryption/master_key_provider.h"
+#include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/master_key_rotation_completed.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
@@ -320,6 +322,12 @@ std::string toJsonText(const KeyId& id) {
 
 class WiredTigerKVEngineEncryptionKeyTest : public ServiceContextTest {
 public:
+    WiredTigerKVEngineEncryptionKeyTest() {
+        ServiceContext* ctx = getServiceContext();
+        repl::ReplicationCoordinator::set(
+            ctx, std::make_unique<repl::ReplicationCoordinatorMock>(ctx, repl::ReplSettings()));
+    }
+
     void setUp() override {
         _tempDir = std::make_unique<unittest::TempDir>("wt_kv_key");
 

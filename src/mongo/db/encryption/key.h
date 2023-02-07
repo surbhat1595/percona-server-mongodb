@@ -1,7 +1,7 @@
 /*======
 This file is part of Percona Server for MongoDB.
 
-Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
+Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the Server Side Public License, version 1,
@@ -31,31 +31,48 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #pragma once
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
-/// The code in this namespace is not intended to be called from outside
-/// the `mongo::encryption` namespace
-namespace mongo::encryption::detail {
+namespace mongo {
+class SecureRandom;
+namespace encryption {
 
-/// @brief Reads a key from the KMIP server specified in the configuration
-///
-/// @param keyId Identifier of the key to read
-///
-/// @returns Key data if the reading succeeds or an empty string if no key data
-///     is associated with the key identifier
-///
-/// @throws std::runtime_error if the server can't connect to any of the KMIP
-///     servers listed in the configuration
-std::string kmipReadKey(const std::string& keyId);
+class Key {
+public:
+    ~Key();
 
-/// @brief Writes the key to the KMIP server specified in the configuration.
-///
-/// @param keyData The key data, should be base64-encoded
-///
-/// @returns Key identifier if the writing succeeds or an empty string otherwise.
-///
-/// @throws std::runtime_error if the server can't connect to any of the KMIP
-///     servers listed in the configuration
-std::string kmipWriteKey(std::string const& keyData);
+    Key(const Key&) = default;
+    Key& operator=(const Key&) = default;
+    Key(Key&&) = default;
+    Key& operator=(Key&&) = default;
 
-}  // namespace mongo::encryption::detail
+    Key();
+    explicit Key(SecureRandom& srng);
+    explicit Key(const std::string& base64);
+
+    friend bool operator==(const Key& lhs, const Key& rhs) noexcept {
+        return lhs._data == rhs._data;
+    }
+
+    const std::uint8_t* data() const noexcept {
+        return _data.data();
+    }
+    constexpr std::size_t size() const noexcept {
+        return _data.size();
+    }
+    std::string base64() const;
+
+    static constexpr std::size_t kLength = 32;
+
+private:
+    std::uint8_t* data() noexcept {
+        return _data.data();
+    }
+
+    std::array<std::uint8_t, kLength> _data;
+};
+}  // namespace encryption
+}  // namespace mongo

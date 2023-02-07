@@ -40,8 +40,9 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
 #include "mongo/db/encryption/encryption_options.h"
-#include "mongo/db/encryption/encryption_vault.h"
-#include "mongo/db/encryption/encryption_kmip.h"
+#include "mongo/db/encryption/key.h"
+#include "mongo/db/encryption/key_id.h"
+#include "mongo/db/encryption/key_operations.h"
 #include "mongo/tools/perconadecrypt_options.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/exit_code.h"
@@ -56,10 +57,6 @@ MONGO_INITIALIZER(SetupOpenSSL)(InitializerContext*) {
 }
 
 namespace {
-
-constexpr int _key_len = 32;
-unsigned char _masterkey[_key_len];
-
 class EVPCipherCtx {
 public:
     EVPCipherCtx() {
@@ -110,7 +107,10 @@ int printErrorMsg(char const* msg) {
     return 1;
 }
 
-int decryptCBC(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
+int decryptCBC(const encryption::Key& masterKey,
+               boost::uintmax_t fsize,
+               std::ifstream& src,
+               std::ofstream& dst) {
     boost::crc_optimal<32, 0x1EDC6F41, 0xFFFFFFFF, 0xFFFFFFFF, true, true> crc32c;
     auto _cipher = EVP_aes_256_cbc();
     auto _iv_len = EVP_CIPHER_iv_length(_cipher);
@@ -128,7 +128,8 @@ int decryptCBC(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
         if (!src.read(iv, _iv_len))
             return printErrorMsg("Cannot read from encrypted file");
         fsize -= _iv_len;
-        if (1 != EVP_DecryptInit_ex(ctx, _cipher, nullptr, _masterkey, (const unsigned char*)iv))
+        if (1 !=
+            EVP_DecryptInit_ex(ctx, _cipher, nullptr, masterKey.data(), (const unsigned char*)iv))
             return handleCryptoErrors();
     }
 
@@ -161,7 +162,10 @@ int decryptCBC(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
     return EXIT_SUCCESS;
 }
 
-int decryptGCM(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
+int decryptGCM(const encryption::Key& masterKey,
+               boost::uintmax_t fsize,
+               std::ifstream& src,
+               std::ofstream& dst) {
     auto _cipher = EVP_aes_256_gcm();
     auto _iv_len = EVP_CIPHER_iv_length(_cipher);
     const size_t block_size = 8 * 1024;
@@ -178,7 +182,8 @@ int decryptGCM(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
         if (!src.read(iv, _iv_len))
             return printErrorMsg("Cannot read from encrypted file");
         fsize -= _iv_len;
-        if (1 != EVP_DecryptInit_ex(ctx, _cipher, nullptr, _masterkey, (const unsigned char*)iv))
+        if (1 !=
+            EVP_DecryptInit_ex(ctx, _cipher, nullptr, masterKey.data(), (const unsigned char*)iv))
             return handleCryptoErrors();
     }
 
@@ -210,7 +215,16 @@ int decryptGCM(boost::uintmax_t fsize, std::ifstream& src, std::ofstream& dst) {
     return EXIT_SUCCESS;
 }
 
+encryption::Key readMasterKey() {
+    using namespace encryption;
+    auto factory = KeyOperationFactory::create(encryptionGlobalParams);
+    std::unique_ptr<ReadKey> read = factory->createProvidedRead();
+    std::cout << "Loading encryption key from the " << read->facilityType() << std::endl;
+    std::optional<KeyKeyIdPair> keyKeyId = (*read)();
+    return keyKeyId ? keyKeyId->key
+                    : throw std::runtime_error("No encryption key found for specified params");
 }
+}  // namespace
 
 
 int decryptMain(int argc, char** argv, char** envp) {
@@ -218,49 +232,8 @@ int decryptMain(int argc, char** argv, char** envp) {
     runGlobalInitializersOrDie(std::vector<std::string>(argv, argv + argc));
 
     try{
-        std::string encoded_key;
-        if (!encryptionGlobalParams.kmipServerName.empty()) {
-            std::cout << "Loading encryption key from the KMIP server" << std::endl;
-            encoded_key = kmipReadKey(encryptionGlobalParams.kmipKeyIdentifier);
-        } else if (!encryptionGlobalParams.vaultServerName.empty()) {
-            if (encryptionGlobalParams.vaultToken.empty()) {
-                if (!boost::filesystem::exists(encryptionGlobalParams.vaultTokenFile)) {
-                    throw std::runtime_error(std::string("specified Vault tokne file doesn't exist: ")
-                                                         + encryptionGlobalParams.vaultTokenFile);
-                }
-                std::ifstream f{encryptionGlobalParams.vaultTokenFile};
-                if (!f.is_open()) {
-                    throw std::runtime_error(std::string("cannot open specified Vault token file: ")
-                                                         + encryptionGlobalParams.vaultTokenFile);
-                }
-                f >> encryptionGlobalParams.vaultToken;
-            }
-            std::cout << "Loading encryption key from the Vault server" << std::endl;
-            encoded_key = vaultReadKey();
-        } else {
-            std::cout << "Loading encryption key from: " << encryptionGlobalParams.encryptionKeyFile << std::endl;
-            if (!boost::filesystem::exists(encryptionGlobalParams.encryptionKeyFile)) {
-                throw std::runtime_error(std::string("specified encryption key file doesn't exist: ")
-                                                     + encryptionGlobalParams.encryptionKeyFile);
-            }
-            std::ifstream f{encryptionGlobalParams.encryptionKeyFile};
-            if (!f.is_open()) {
-                throw std::runtime_error(std::string("cannot open specified encryption key file: ")
-                                                     + encryptionGlobalParams.encryptionKeyFile);
-            }
-            f >> encoded_key;
-        }
-        auto key = base64::decode(encoded_key);
-        if (key.length() != _key_len) {
-            throw std::runtime_error(str::stream() << "encryption key length should be " << _key_len << " bytes");
-        }
-        memcpy(_masterkey, key.c_str(), _key_len);
-    } catch (std::exception& e) {
-        std::cerr << e.what() << std::endl;
-        return EXIT_BADOPTIONS;
-    }
+        encryption::Key masterKey = readMasterKey();
 
-    try{
         std::cout << "Input (encrypted) file: " << perconaDecryptGlobalParams.inputPath << std::endl;
         if (!boost::filesystem::exists(perconaDecryptGlobalParams.inputPath)) {
             throw std::runtime_error(std::string("specified encrypted file doesn't exist: ")
@@ -286,9 +259,9 @@ int decryptMain(int argc, char** argv, char** envp) {
 
         std::cout << "Executing decryption with cipher mode: " << encryptionGlobalParams.encryptionCipherMode << std::endl;
         if (encryptionGlobalParams.encryptionCipherMode == "AES256-CBC")
-            ret = decryptCBC(fsize, src, dst);
+            ret = decryptCBC(masterKey, fsize, src, dst);
         else if ((encryptionGlobalParams.encryptionCipherMode == "AES256-GCM"))
-            ret = decryptGCM(fsize, src, dst);
+            ret = decryptGCM(masterKey, fsize, src, dst);
 
         if (ret)
             std::cerr << "Decryption failed. Decrypted data is not trustworthy." << std::endl;

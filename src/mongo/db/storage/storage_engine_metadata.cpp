@@ -50,6 +50,7 @@
 
 #include "mongo/base/data_type_validated.h"
 #include "mongo/db/bson/dotted_path_support.h"
+#include "mongo/db/encryption/key_id.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/object_check.h"
@@ -113,7 +114,7 @@ StorageEngineMetadata::~StorageEngineMetadata() {}
 void StorageEngineMetadata::reset() {
     _storageEngine.clear();
     _storageEngineOptions = BSONObj();
-    _kmipMasterKeyId.clear();
+    _keyId.reset();
 }
 
 const std::string& StorageEngineMetadata::getStorageEngine() const {
@@ -124,8 +125,8 @@ const BSONObj& StorageEngineMetadata::getStorageEngineOptions() const {
     return _storageEngineOptions;
 }
 
-const std::string& StorageEngineMetadata::getKmipMasterKeyId() const noexcept {
-    return _kmipMasterKeyId;
+const encryption::KeyId* StorageEngineMetadata::keyId() const noexcept {
+    return _keyId.get();
 }
 
 void StorageEngineMetadata::setStorageEngine(const std::string& storageEngine) {
@@ -134,6 +135,18 @@ void StorageEngineMetadata::setStorageEngine(const std::string& storageEngine) {
 
 void StorageEngineMetadata::setStorageEngineOptions(const BSONObj& storageEngineOptions) {
     _storageEngineOptions = storageEngineOptions.getOwned();
+
+    BSONElement encryptionElem = _storageEngineOptions.getField("encryption");
+    if (!encryptionElem.eoo()) {
+        if (encryptionElem.type() != BSONType::Object) {
+            throw std::runtime_error("The 'encryption' field is not an object");
+        }
+        try {
+            _keyId = encryption::KeyId::fromStorageEngineEncryptionOptions(encryptionElem.Obj());
+        } catch (const std::runtime_error& e) {
+            throw std::runtime_error(str::stream() << "Invalid 'encryption': " << e.what());
+        }
+    }
 }
 
 Status StorageEngineMetadata::read() {
@@ -213,25 +226,12 @@ Status StorageEngineMetadata::read() {
                               << "The 'storage.options' field in metadata must be a string: "
                               << storageEngineOptionsElement.toString());
         }
-        setStorageEngineOptions(storageEngineOptionsElement.Obj());
-    }
-
-    BSONElement kmipMasterKeyIdElement =
-        dps::extractElementAtPath(_storageEngineOptions, "encryption.kmip.keyId");
-    if (!kmipMasterKeyIdElement.eoo()) {
-        if (kmipMasterKeyIdElement.type() != mongo::String) {
+        try {
+            setStorageEngineOptions(storageEngineOptionsElement.Obj());
+        } catch (const std::runtime_error& e) {
             return Status(ErrorCodes::FailedToParse,
-                          str::stream() << "The 'storage.options.encryption.kmip.keyId' field in "
-                                           "metadata must be a string: "
-                                        << kmipMasterKeyIdElement.toString());
+                          str::stream() << "Invalid 'storage.options': " << e.what());
         }
-        std::string kmipMasterKeyId = kmipMasterKeyIdElement.String();
-        if (kmipMasterKeyId.empty()) {
-            return Status(ErrorCodes::FailedToParse,
-                          "The 'storage.options.kmipMasterKeyId' field in metadata cannot be "
-                          "an empty string.");
-        }
-        _kmipMasterKeyId = std::move(kmipMasterKeyId);
     }
 
     return Status::OK();

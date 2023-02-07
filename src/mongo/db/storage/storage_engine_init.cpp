@@ -42,6 +42,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/encryption/encryption_options.h"
+#include "mongo/db/encryption/key_id.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/master_key_rotation_completed.h"
@@ -67,7 +68,7 @@ void createLockFile(ServiceContext* service);
 void writeMetadata(std::unique_ptr<StorageEngineMetadata> metadata,
                    const StorageEngine::Factory* factory,
                    const StorageGlobalParams& params,
-                   const std::string& kmipEncryptionKeyId,
+                   const encryption::KeyId* futureConfigured,
                    StorageEngineInitFlags initFlags) {
     if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) != StorageEngineInitFlags{}) {
         return;
@@ -80,24 +81,13 @@ void writeMetadata(std::unique_ptr<StorageEngineMetadata> metadata,
         metadata = std::make_unique<StorageEngineMetadata>(storageGlobalParams.dbpath);
         metadata->setStorageEngine(factory->getCanonicalName().toString());
     }
-    if (!kmipEncryptionKeyId.empty() && kmipEncryptionKeyId != metadata->getKmipMasterKeyId()) {
+    if (futureConfigured) {
         metadataNeedsWriting = true;
-        // Presence of the "encryption" field means that the data at rest is encypted.
-        // The value of the field is an object whose fields are methods of encryption, e.g.
-        // "keyFile", "vault" or "kmip". For now, only "kmip" is supported.
-        // An object is associated with each encryption type (even though this object is empty
-        // at present) in order to preserve backward and _forward_ compatibility in case when
-        // encryption type needs more parameters.
-        // Examples:
-        // 1. `encryption: {keyFile: {}}`
-        // 2. `encryption: {vault: {}}`
-        // 3. `encryption: {kmip: {keyId: "42"}}`
-        // @note: the "keyFile", "vault" and "kmip" encryption methods are mutually exclusive.
-        options = options.removeField("encryption");
-        BSONObj encryptionObj =
-            BSON("encryption" << BSON("kmip" << BSON("keyId" << kmipEncryptionKeyId)));
-        BSONElement encryptionElem = encryptionObj.firstElement();
-        options = options.addField(encryptionElem);
+        BSONObjBuilder bob(options.removeField("encryption"));
+        BSONObjBuilder sub = bob.subobjStart("encryption");
+        futureConfigured->serializeToStorageEngineEncryptionOptions(&sub);
+        sub.done();
+        options = bob.obj();
     }
     metadata->setStorageEngineOptions(options);
     if (metadataNeedsWriting) {
@@ -205,35 +195,6 @@ LastStorageEngineShutdownState initializeStorageEngine(ServiceContext* service,
             lockFile->close();
         }
     });
-
-    if (!encryptionGlobalParams.kmipServerName.empty()) {
-        const std::string& configuredId = metadata ? metadata->getKmipMasterKeyId() : "";
-        const std::string& providedId = encryptionGlobalParams.kmipKeyIdentifier;
-        if (encryptionGlobalParams.kmipRotateMasterKey && configuredId.empty()) {
-            LOGV2_FATAL_NOTRACE(
-                29112,
-                "The system is not configured with a KMIP-managed key but the command line opiton "
-                "or the configuration file asks to rotate the KMIP master key.");
-        }
-        bool keyIdMisconfig = !encryptionGlobalParams.kmipRotateMasterKey &&
-            !configuredId.empty() && !providedId.empty() && configuredId != providedId;
-        if (keyIdMisconfig) {
-            LOGV2_FATAL_NOTRACE(
-                29113,
-                "The provided (via the command line option or the configuration file) KMIP "
-                "keyIdentifier is not equal to that the system is already configured with. "
-                "If it was intended to rotate the master key, please add the "
-                "`--kmipRotateMasterKey` command line option or the "
-                "`security.kmip.rotateMasterKey` configuration file parameter. "
-                "Otherwise, please omit the `--kmipMasterKeyId` command line option and "
-                "the `security.kmip.keyIdentifier` configuration parameter.",
-                "providedKmipKeyIdentifier"_attr = providedId,
-                "configuredKmipKeyIdentifier"_attr = configuredId);
-        }
-        encryptionGlobalParams.kmipKeyIds.encryption = providedId;
-        encryptionGlobalParams.kmipKeyIds.decryption =
-            configuredId.empty() ? providedId : configuredId;
-    }
     auto& lockFile = StorageEngineLockFile::get(service);
     try {
         service->setStorageEngine(std::unique_ptr<StorageEngine>(
@@ -244,16 +205,14 @@ LastStorageEngineShutdownState initializeStorageEngine(ServiceContext* service,
         writeMetadata(std::move(metadata),
                       factory,
                       storageGlobalParams,
-                      encryptionGlobalParams.kmipKeyIds.encryption,
+                      encryption::WtKeyIds::instance().futureConfigured.get(),
                       initFlags);
-        if (!encryptionGlobalParams.kmipServerName.empty()) {
-            LOGV2(29111,
-                  "Rotated master encryption key",
-                  "oldMasterKeyId"_attr = encryptionGlobalParams.kmipKeyIds.decryption,
-                  "newMasterKeyId"_attr = encryptionGlobalParams.kmipKeyIds.encryption);
-        } else {
-            LOGV2(29111, "Rotated master encryption key");
-        }
+        const encryption::WtKeyIds& keyIds = encryption::WtKeyIds::instance();
+        invariant(keyIds.decryption && keyIds.futureConfigured);
+        LOGV2(29111,
+              "Rotated master encryption key",
+              "oldKeyIdentifier"_attr = *keyIds.decryption,
+              "newKeyIdentifier"_attr = *keyIds.futureConfigured);
         quickExit(EXIT_SUCCESS);
     }
 
@@ -265,7 +224,7 @@ LastStorageEngineShutdownState initializeStorageEngine(ServiceContext* service,
     writeMetadata(std::move(metadata),
                   factory,
                   storageGlobalParams,
-                  encryptionGlobalParams.kmipKeyIds.encryption,
+                  encryption::WtKeyIds::instance().futureConfigured.get(),
                   initFlags);
 
     guard.dismiss();

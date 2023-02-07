@@ -64,8 +64,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/concurrency/lock_manager',
             '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
             '$BUILD_DIR/mongo/db/curop',
-            '$BUILD_DIR/mongo/db/encryption/encryption_kmip',
-            '$BUILD_DIR/mongo/db/encryption/encryption_vault',
+            '$BUILD_DIR/mongo/db/encryption/key',
             '$BUILD_DIR/mongo/db/index/index_descriptor',
             '$BUILD_DIR/mongo/db/global_settings',
             '$BUILD_DIR/mongo/db/namespace_string',
@@ -95,6 +94,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/db_raii',
             '$BUILD_DIR/mongo/db/catalog/database_holder',
             '$BUILD_DIR/mongo/db/commands/server_status',
+            '$BUILD_DIR/mongo/db/encryption/secret_string',
             '$BUILD_DIR/mongo/db/mongod_options',
             '$BUILD_DIR/mongo/db/snapshot_window_options',
             '$BUILD_DIR/mongo/db/storage/backup_cursor_hooks',
@@ -145,6 +145,22 @@ if wiredtiger:
             'wiredtiger_encryption_test.cpp',
         ],
         LIBDEPS=[
+            'storage_wiredtiger_core',
+        ],
+    )
+
+    wtEnv.CppUnitTest(
+        target='storage_wiredtiger_kv_engine_encryption_key_test',
+        source=[
+            'wiredtiger_kv_engine_encryption_key_test.cpp',
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/db/auth/authmocks',
+            '$BUILD_DIR/mongo/db/encryption/key',
+            '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+            '$BUILD_DIR/mongo/db/repl/replmocks',
+            '$BUILD_DIR/mongo/db/service_context_test_fixture',
+            '$BUILD_DIR/mongo/util/clock_source_mock',
             'storage_wiredtiger_core',
         ],
     )

@@ -31,17 +31,46 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <utility>
 
-namespace mongo {
+/// The code in this namespace is not intended to be called from outside
+/// the `mongo::encryption` namespace
+namespace mongo::encryption::detail {
+/// @brief Reads an encryption key from the Vault server.
+///
+/// The address of the Vault server is specified via configuration file or
+/// command line options.
+///
+/// @param secretPath path to the encryption key on the Vault server
+/// @param secretVersion the version of the key;
+///                      default is zero meaning the most recent version
+///
+/// @returns If the key was successfully read from the Vault server,
+///          its data (in base64 encoding) and specific version (never `0`)
+///          are returned. Otherwise, the function returns the pair of an
+///          empty string and zero integer.
+///
+/// @throws std::runtime_error in case of issues
+std::pair<std::string, std::uint64_t> vaultReadKey(const std::string& secretPath,
+                                                   std::uint64_t secretVersion = 0);
 
-// read master key from Vault
-// throw std::runtime_error in case of issues
-// returns base64 encoded value
-std::string vaultReadKey();
+/// @brief Creates a copy of the key on the Vault server.
+///
+/// The address of the Vault server is specified via configuration file or
+/// command line options.
+///
+/// The function never overwrites an existing entry on a Vault server,
+/// it always creates a new one.
+/// @todo Consider renaming to better reflect the latter fact.
+///
+/// @param secretPath path to the encryption key on the Vault server
+/// @param key base64-encoded key data
+///
+/// @returns the version of created the key as a positive integer
+///
+/// @throws std::runtime_error in case of issues
+std::uint64_t vaultWriteKey(const std::string& secretPath, std::string const& key);
 
-// write key to the Vault
-// 'key' should be base64 encoded string
-void vaultWriteKey(std::string const& key);
-
-}  // namespace mongo
+}  // namespace mongo::encryption::detail

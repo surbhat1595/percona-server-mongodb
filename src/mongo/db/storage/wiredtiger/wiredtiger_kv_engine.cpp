@@ -79,6 +79,9 @@
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/encryption/encryption_options.h"
+#include "mongo/db/encryption/key.h"
+#include "mongo/db/encryption/key_id.h"
+#include "mongo/db/encryption/master_key_provider.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/mongod_options_storage_gen.h"
@@ -650,6 +653,32 @@ StatusWith<StorageEngine::BackupInformation> getBackupInformationFromBackupCurso
     return backupInformation;
 }
 
+void validateRotationIsPossible(const std::string& keyDbPath,
+                                bool keyDbPathIsJustCreated,
+                                bool vaultRotateMasterKey,
+                                bool kmipRotateMasterKey) {
+    const char* kDbPathMsg =
+        "For opening an existing encrypted database, check correctness of the `--dbPath` command "
+        "line option or the `storage.dbPath` configuration parameter";
+    const char* kRemoveVaultRotatationMsg =
+        "For creating a new empty encrypted database, remove the `--vaultRotateMasterKey` command "
+        "line option and the `security.vault.rotateMasterKey` configuration parameter.";
+    const char* kRemoveKmipRotationMsg =
+        "For creating a new empty encrypted database, remove the `--kmipRotateMasterKey` command "
+        "line option and the `security.kmip.rotateMasterKey` configuration parameter.";
+
+    if (keyDbPathIsJustCreated && (vaultRotateMasterKey || kmipRotateMasterKey)) {
+        std::array<const char*, 2u> actions = {
+            {kDbPathMsg,
+             (vaultRotateMasterKey ? kRemoveVaultRotatationMsg : kRemoveKmipRotationMsg)}};
+        LOGV2_FATAL_NOTRACE(
+            29114,
+            "Master key rotation is in effect but there is no existing encryption key database.",
+            "encryptionKeyDatabasePath"_attr = keyDbPath,
+            "possibleRemediationActions"_attr = actions);
+    }
+}
+
 }  // namespace
 
 // Copy files and fill vectors for remove copied files and empty dirs
@@ -696,16 +725,18 @@ static void copy_keydb_files(const boost::filesystem::path& from,
 
 StringData WiredTigerKVEngine::kTableUriPrefix = "table:"_sd;
 
-WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
-                                       const std::string& path,
-                                       ClockSource* cs,
-                                       const std::string& extraOpenOptions,
-                                       size_t cacheSizeMB,
-                                       size_t maxHistoryFileSizeMB,
-                                       bool durable,
-                                       bool ephemeral,
-                                       bool repair,
-                                       bool readOnly)
+WiredTigerKVEngine::WiredTigerKVEngine(
+    const std::string& canonicalName,
+    const std::string& path,
+    ClockSource* cs,
+    const std::string& extraOpenOptions,
+    size_t cacheSizeMB,
+    size_t maxHistoryFileSizeMB,
+    bool durable,
+    bool ephemeral,
+    bool repair,
+    bool readOnly,
+    const encryption::MasterKeyProviderFactory& keyProviderFactory)
     : _clockSource(cs),
       _oplogManager(std::make_unique<WiredTigerOplogManager>()),
       _canonicalName(canonicalName),
@@ -791,11 +822,16 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                 }
             }
         }
-        auto encryptionKeyDB = just_created
-            ? EncryptionKeyDB::create(keyDBPath.string(),
-                                      encryptionGlobalParams.kmipKeyIds.encryption)
-            : EncryptionKeyDB::open(keyDBPath.string(),
-                                    encryptionGlobalParams.kmipKeyIds.decryption);
+
+        validateRotationIsPossible(keyDBPath.string(),
+                                   just_created,
+                                   encryptionGlobalParams.vaultRotateMasterKey,
+                                   encryptionGlobalParams.kmipRotateMasterKey);
+        auto keyProvider =
+            keyProviderFactory(encryptionGlobalParams, logv2::LogComponent::kStorage);
+        auto encryptionKeyDB = EncryptionKeyDB::create(
+            keyDBPath.string(),
+            just_created ? keyProvider->obtainMasterKey().first : keyProvider->readMasterKey());
         keyDBPathGuard.dismiss();
         // do master key rotation if necessary
         if (encryptionGlobalParams.shouldRotateMasterKey()) {
@@ -815,10 +851,12 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                       "what"_attr = e.what());
                 throw;
             }
-            auto rotationKeyDB =
-                encryptionKeyDB->clone(newKeyDBPath.string(),
-                                       encryptionGlobalParams.kmipKeyIds.encryption);
-            encryptionGlobalParams.kmipKeyIds.encryption = rotationKeyDB->kmipMasterKeyId();
+
+            auto [masterKey, masterKeyId] = keyProvider->obtainMasterKey(/* saveKey = */ false);
+            auto rotationKeyDB = encryptionKeyDB->clone(newKeyDBPath.string(), masterKey);
+            if (!masterKeyId) {
+                keyProvider->saveMasterKey(masterKey);
+            }
             // close key db instances and rename dirs
             encryptionKeyDB.reset(nullptr);
             rotationKeyDB.reset(nullptr);
@@ -830,7 +868,6 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
             throw MasterKeyRotationCompleted("master key rotation finished successfully");
         }
         _encryptionKeyDB = std::move(encryptionKeyDB);
-        encryptionGlobalParams.kmipKeyIds.encryption = _encryptionKeyDB->kmipMasterKeyId();
         // add Percona encryption extension
         std::stringstream ss;
         ss << "local=(entry=percona_encryption_extension_init,early_load=true,config=(cipher=" << encryptionGlobalParams.encryptionCipherMode << "))";

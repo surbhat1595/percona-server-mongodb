@@ -56,7 +56,7 @@ public:
         string config = ss.str();
         _fastClockSource = std::make_unique<SystemClockSource>();
         int ret = wiredtiger_open(dbpath.toString().c_str(), nullptr, config.c_str(), &_conn);
-        ASSERT_OK(wtRCToStatus(ret));
+        ASSERT_OK(wtRCToStatus(ret, nullptr));
         ASSERT(_conn);
     }
     ~WiredTigerConnection() {
@@ -127,7 +127,7 @@ protected:
     void createSession(const char* config) {
         WT_SESSION* wtSession =
             WiredTigerRecoveryUnit::get(_opCtx.get())->getSession()->getSession();
-        ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, getURI(), config)));
+        ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, getURI(), config), wtSession));
     }
 
 private:
@@ -306,7 +306,7 @@ TEST(WiredTigerUtilTest, GetStatisticsValueStatisticsDisabled) {
                                         harnessHelper.getOplogManager());
     WiredTigerSession* session = recoveryUnit.getSession();
     WT_SESSION* wtSession = session->getSession();
-    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:mytable", nullptr)));
+    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:mytable", nullptr), wtSession));
     auto result = WiredTigerUtil::getStatisticsValue(session->getSession(),
                                                      "statistics:table:mytable",
                                                      "statistics=(fast)",
@@ -321,7 +321,7 @@ TEST(WiredTigerUtilTest, GetStatisticsValueInvalidKey) {
                                         harnessHelper.getOplogManager());
     WiredTigerSession* session = recoveryUnit.getSession();
     WT_SESSION* wtSession = session->getSession();
-    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:mytable", nullptr)));
+    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:mytable", nullptr), wtSession));
     // Use connection statistics key which does not apply to a table.
     auto result = WiredTigerUtil::getStatisticsValue(session->getSession(),
                                                      "statistics:table:mytable",
@@ -337,7 +337,7 @@ TEST(WiredTigerUtilTest, GetStatisticsValueValidKey) {
                                         harnessHelper.getOplogManager());
     WiredTigerSession* session = recoveryUnit.getSession();
     WT_SESSION* wtSession = session->getSession();
-    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:mytable", nullptr)));
+    ASSERT_OK(wtRCToStatus(wtSession->create(wtSession, "table:mytable", nullptr), wtSession));
     // Use connection statistics key which does not apply to a table.
     auto result = WiredTigerUtil::getStatisticsValue(session->getSession(),
                                                      "statistics:table:mytable",
@@ -348,4 +348,67 @@ TEST(WiredTigerUtilTest, GetStatisticsValueValidKey) {
     ASSERT_EQUALS(0U, result.getValue());
 }
 
+TEST(WiredTigerUtilTest, RemoveEncryptionFromConfigString) {
+    {  // Found at the middle.
+        std::string input{
+            "debug_mode=(table_logging=true,checkpoint_retention=4),encryption=(name=AES256-CBC,"
+            "keyid="
+            "\".system\"),extensions=[local={entry=mongo_addWiredTigerEncryptors,early_load=true},,"
+            "],"};
+        const std::string expectedOutput{
+            "debug_mode=(table_logging=true,checkpoint_retention=4),extensions=[local={entry=mongo_"
+            "addWiredTigerEncryptors,early_load=true},,],"};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // Found at start.
+        std::string input{
+            "encryption=(name=AES256-CBC,keyid=\".system\"),extensions=[local={entry=mongo_"
+            "addWiredTigerEncryptors,early_load=true},,],"};
+        const std::string expectedOutput{
+            "extensions=[local={entry=mongo_addWiredTigerEncryptors,early_load=true},,],"};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // Found at the end.
+        std::string input{
+            "debug_mode=(table_logging=true,checkpoint_retention=4),encryption=(name=AES256-CBC,"
+            "keyid=\".system\")"};
+        const std::string expectedOutput{"debug_mode=(table_logging=true,checkpoint_retention=4),"};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // Matches full configString.
+        std::string input{"encryption=(name=AES256-CBC,keyid=\".system\")"};
+        const std::string expectedOutput{""};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // Matches full configString, trailing comma.
+        std::string input{"encryption=(name=AES256-CBC,keyid=\".system\"),"};
+        const std::string expectedOutput{""};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // No match.
+        std::string input{"debug_mode=(table_logging=true,checkpoint_retention=4)"};
+        const std::string expectedOutput{"debug_mode=(table_logging=true,checkpoint_retention=4)"};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // No match, empty.
+        std::string input{""};
+        const std::string expectedOutput{""};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+    {  // Removes multiple instances.
+        std::string input{
+            "encryption=(name=AES256-CBC,keyid=\".system\"),debug_mode=(table_logging=true,"
+            "checkpoint_retention=4),encryption=(name=AES256-CBC,keyid=\".system\")"};
+        const std::string expectedOutput{"debug_mode=(table_logging=true,checkpoint_retention=4),"};
+        WiredTigerUtil::removeEncryptionFromConfigString(&input);
+        ASSERT_EQUALS(input, expectedOutput);
+    }
+}
 }  // namespace mongo

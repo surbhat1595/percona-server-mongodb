@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2019-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,27 +27,35 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#pragma once
 
-#include "mongo/db/index/index_access_method.h"
+#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
-namespace {
-const auto getFactory =
-    ServiceContext::declareDecoration<std::unique_ptr<IndexAccessMethodFactory>>();
-}  // namespace
 
-IndexAccessMethodFactory* IndexAccessMethodFactory::get(ServiceContext* service) {
-    return getFactory(service).get();
-}
+/**
+ * Manages statistics from the storage engine, allowing addition of statistics and serialization to
+ * BSON.
+ */
+class StorageStats {
+public:
+    // This is a pure virtual class, so the constructors will never be called directly, and slicing
+    // should not be an issue.
+    StorageStats() = default;
+    StorageStats(const StorageStats&) = default;
+    StorageStats(StorageStats&&) = default;
 
-IndexAccessMethodFactory* IndexAccessMethodFactory::get(OperationContext* opCtx) {
-    return getFactory(opCtx->getServiceContext()).get();
-}
+    StorageStats& operator=(const StorageStats&) = delete;
+    StorageStats& operator=(StorageStats&&) = delete;
 
-void IndexAccessMethodFactory::set(ServiceContext* service,
-                                   std::unique_ptr<IndexAccessMethodFactory> newFactory) {
-    auto& factory = getFactory(service);
-    factory = std::move(newFactory);
-}
+    virtual ~StorageStats() = default;
+
+    virtual BSONObj toBSON() const = 0;
+
+    virtual std::unique_ptr<StorageStats> clone() const = 0;
+
+    virtual StorageStats& operator+=(const StorageStats&) = 0;
+    virtual StorageStats& operator-=(const StorageStats&) = 0;
+};
+
 }  // namespace mongo

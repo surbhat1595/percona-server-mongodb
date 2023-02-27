@@ -188,7 +188,7 @@ int EncryptionKeyDB::_openWiredTiger(const std::string& path, const std::string&
 
     LOGV2_FATAL_NOTRACE(29056,
                         "Reason: {wtRCToStatus_ret_reason}",
-                        "wtRCToStatus_ret_reason"_attr = wtRCToStatus(ret).reason());
+                        "wtRCToStatus_ret_reason"_attr = wtRCToStatus(ret, nullptr).reason());
 
     return ret;
 }
@@ -503,12 +503,13 @@ void EncryptionKeyDB::reconfigure(const char *newCfg) {
     LOGV2(29076, "KeyDB closed", "duration"_attr = Date_t::now() - startTime);
 
     startTime = Date_t::now();
-    invariantWTOK(wiredtiger_open(_path.c_str(), wtEventHandler, _wtOpenConfig.c_str(), &_conn));
+    invariantWTOK(wiredtiger_open(_path.c_str(), wtEventHandler, _wtOpenConfig.c_str(), &_conn),
+                  nullptr);
     LOGV2(29077, "KeyDB re-opened", "duration"_attr = Date_t::now() - startTime);
 
     startTime = Date_t::now();
     LOGV2(29078, "Reconfiguring KeyDB", "newConfig"_attr = newCfg);
-    invariantWTOK(_conn->reconfigure(_conn, newCfg));
+    invariantWTOK(_conn->reconfigure(_conn, newCfg), nullptr);
     LOGV2(29079, "KeyDB reconfigure complete", "duration"_attr = Date_t::now() - startTime);
 }
 

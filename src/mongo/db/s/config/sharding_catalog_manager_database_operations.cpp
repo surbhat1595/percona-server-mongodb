@@ -94,9 +94,14 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
             dbName.toString(), ShardId::kConfigServerId, true, DatabaseVersion::makeFixed());
     }
 
+    // It is not allowed to create the 'admin' or 'local' databases, including any alternative
+    // casing. It is allowed to create the 'config' database (handled by the early return above),
+    // but only with that exact casing.
     uassert(ErrorCodes::InvalidOptions,
             str::stream() << "Cannot manually create or shard database '" << dbName << "'",
-            dbName != NamespaceString::kAdminDb && dbName != NamespaceString::kLocalDb);
+            !dbName.equalCaseInsensitive(NamespaceString::kAdminDb) &&
+                !dbName.equalCaseInsensitive(NamespaceString::kLocalDb) &&
+                !dbName.equalCaseInsensitive(NamespaceString::kConfigDb));
 
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid db name specified: " << dbName,
@@ -146,7 +151,7 @@ DatabaseType ShardingCatalogManager::createDatabase(OperationContext* opCtx,
         // Do another loop, with the db lock held in order to avoid taking the expensive path on
         // concurrent create database operations
         dbLock.emplace(DistLockManager::get(opCtx)->lockDirectLocally(
-            opCtx, dbName, DistLockManager::kDefaultLockTimeout));
+            opCtx, str::toLower(dbName), DistLockManager::kDefaultLockTimeout));
     }
 
     // Expensive createDatabase code path

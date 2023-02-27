@@ -30,6 +30,7 @@
 
 #include "mongo/transport/transport_layer_asio.h"
 
+#include <fstream>
 #include <queue>
 #include <system_error>
 #include <utility>
@@ -38,6 +39,8 @@
 #include <asio.hpp>
 #include <fmt/format.h>
 
+#include "mongo/client/dbclient_connection.h"
+#include "mongo/config.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/logv2/log.h"
@@ -55,6 +58,7 @@
 #include "mongo/util/concurrency/notification.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/static_immortal.h"
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/time_support.h"
 
@@ -306,8 +310,8 @@ public:
     }
 
 private:
-    std::unique_ptr<transport::TransportLayerASIO> _tla;
     MockSEP _sep;
+    std::unique_ptr<transport::TransportLayerASIO> _tla;
 };
 
 TEST(TransportLayerASIO, ListenerPortZeroTreatedAsEphemeral) {
@@ -563,6 +567,52 @@ TEST(TransportLayerASIO, ConfirmSocketSetOptionOnResetConnections) {
 
 class TransportLayerASIOWithServiceContextTest : public ServiceContextTest {
 public:
+    class ThreadCounter {
+    public:
+        std::function<stdx::thread(std::function<void()>)> makeSpawnFunc() {
+            return [core = _core](std::function<void()> cb) {
+                {
+                    stdx::lock_guard lk(core->mutex);
+                    ++core->created;
+                    core->cv.notify_all();
+                }
+                return stdx::thread{[core, cb = std::move(cb)]() mutable {
+                    {
+                        stdx::lock_guard lk(core->mutex);
+                        ++core->started;
+                        core->cv.notify_all();
+                    }
+                    cb();
+                }};
+            };
+        }
+
+        int64_t created() const {
+            stdx::lock_guard lk(_core->mutex);
+            return _core->created;
+        }
+
+        int64_t started() const {
+            stdx::lock_guard lk(_core->mutex);
+            return _core->started;
+        }
+
+        template <typename Pred>
+        void waitForStarted(const Pred& pred) const {
+            stdx::unique_lock lk(_core->mutex);
+            _core->cv.wait(lk, [&] { return pred(_core->started); });
+        }
+
+    private:
+        struct Core {
+            mutable stdx::mutex mutex;  // NOLINT
+            mutable stdx::condition_variable cv;
+            int64_t created = 0;
+            int64_t started = 0;
+        };
+        std::shared_ptr<Core> _core = std::make_shared<Core>();
+    };
+
     void setUp() override {
         auto sep = std::make_unique<MockSEP>();
         auto tl = makeTLA(sep.get());
@@ -580,10 +630,85 @@ public:
     }
 };
 
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceDoesNotSpawnThreadsBeforeStart) {
+    ThreadCounter counter;
+    { transport::TransportLayerASIO::TimerService service{{counter.makeSpawnFunc()}}; }
+    ASSERT_EQ(counter.created(), 0);
+}
+
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceOneShotStart) {
+    ThreadCounter counter;
+    transport::TransportLayerASIO::TimerService service{{counter.makeSpawnFunc()}};
+    service.start();
+    LOGV2(5490004, "Awaiting timer thread start", "threads"_attr = counter.started());
+    counter.waitForStarted([](auto n) { return n > 0; });
+    LOGV2(5490005, "Awaited timer thread start", "threads"_attr = counter.started());
+
+    service.start();
+    service.start();
+    service.start();
+    ASSERT_EQ(counter.created(), 1) << "Redundant start should spawn only once";
+}
+
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceDoesNotStartAfterStop) {
+    ThreadCounter counter;
+    transport::TransportLayerASIO::TimerService service{{counter.makeSpawnFunc()}};
+    service.stop();
+    service.start();
+    ASSERT_EQ(counter.created(), 0) << "Stop then start should not spawn";
+}
+
+TEST_F(TransportLayerASIOWithServiceContextTest, TimerServiceCanStopMoreThanOnce) {
+    // Verifying that it is safe to have multiple calls to `stop()`.
+    {
+        transport::TransportLayerASIO::TimerService service;
+        service.start();
+        service.stop();
+        service.stop();
+    }
+    {
+        transport::TransportLayerASIO::TimerService service;
+        service.stop();
+        service.stop();
+    }
+}
+
 TEST_F(TransportLayerASIOWithServiceContextTest, TransportStartAfterShutDown) {
     tla().shutdown();
     ASSERT_EQ(tla().start(), transport::TransportLayer::ShutdownStatus);
 }
+
+#ifdef MONGO_CONFIG_SSL
+#ifndef _WIN32
+// TODO SERVER-62035: enable the following on Windows.
+TEST_F(TransportLayerASIOWithServiceContextTest, ShutdownDuringSSLHandshake) {
+    /**
+     * Creates a server and a client thread:
+     * - The server listens for incoming connections, but doesn't participate in SSL handshake.
+     * - The client connects to the server, and is configured to perform SSL handshake.
+     * The server never writes on the socket in response to the handshake request, thus the client
+     * should block until it is timed out.
+     * The goal is to simulate a server crash, and verify the behavior of the client, during the
+     * handshake process.
+     */
+    int port = tla().listenerPort();
+
+    DBClientConnection conn;
+    conn.setSoTimeout(1);  // 1 second timeout
+
+    TransientSSLParams params;
+    params.sslClusterPEMPayload = [] {
+        std::ifstream input("jstests/libs/client.pem");
+        std::string str((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        return str;
+    }();
+    params.targetedClusterConnectionString = ConnectionString::forLocal();
+
+    auto status = conn.connectSocketOnly({"localhost", port}, std::move(params));
+    ASSERT_EQ(status, ErrorCodes::HostUnreachable);
+}
+#endif  // _WIN32
+#endif  // MONGO_CONFIG_SSL
 
 }  // namespace
 }  // namespace mongo

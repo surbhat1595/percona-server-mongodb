@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2019-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -29,17 +29,30 @@
 
 #pragma once
 
-#include "mongo/db/index/index_access_method.h"
+#include "fmt/core.h"
+#include "mongo/base/status.h"
+#include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/util/processinfo.h"
 
 namespace mongo {
 
-class IndexAccessMethodFactoryImpl : public IndexAccessMethodFactory {
-public:
-    IndexAccessMethodFactoryImpl() = default;
-    ~IndexAccessMethodFactoryImpl() = default;
+inline Status validateChunkMigrationConcurrency(const int& chunkMigrationConcurrency) {
+    const int maxConcurrency = 500;
+    if (!mongo::feature_flags::gConcurrencyInChunkMigration.isEnabledAndIgnoreFCV()) {
+        return Status{ErrorCodes::InvalidOptions,
+                      "Cannot set migration concurrency number without enabling migration "
+                      "concurrency feature flag"};
+    }
 
-    std::unique_ptr<IndexAccessMethod> make(
-        IndexCatalogEntry* entry, std::unique_ptr<SortedDataInterface> SortedDataInterface) final;
-};
+    if (chunkMigrationConcurrency <= 0 ||
+        (chunkMigrationConcurrency > maxConcurrency && !getTestCommandsEnabled())) {
+        return Status{
+            ErrorCodes::InvalidOptions,
+            fmt::format("Chunk migration concurrency level must be positive and less than {}.",
+                        maxConcurrency)};
+    }
+    return Status::OK();
+}
 
 }  // namespace mongo

@@ -53,12 +53,22 @@ __rollback_delete_hs(WT_SESSION_IMPL *session, WT_ITEM *key, wt_timestamp_t ts)
     for (; ret == 0; ret = hs_cursor->prev(hs_cursor)) {
         /* Retrieve the time window from the history cursor. */
         __wt_hs_upd_time_window(hs_cursor, &hs_tw);
-        if (hs_tw->start_ts < ts)
+
+        /*
+         * Remove all history store versions with a stop timestamp greater than the start/stop
+         * timestamp of a stable update in the data store.
+         */
+        if (hs_tw->stop_ts <= ts)
             break;
 
         WT_ERR(hs_cursor->remove(hs_cursor));
         WT_STAT_CONN_DATA_INCR(session, txn_rts_hs_removed);
-        if (hs_tw->start_ts == ts)
+
+        /*
+         * The globally visible start time window's are cleared during history store reconciliation.
+         * Treat them also as a stable entry removal from the history store.
+         */
+        if (hs_tw->start_ts == ts || hs_tw->start_ts == WT_TS_NONE)
             WT_STAT_CONN_DATA_INCR(session, cache_hs_key_truncate_rts);
         else
             WT_STAT_CONN_DATA_INCR(session, cache_hs_key_truncate_rts_unstable);
@@ -110,13 +120,12 @@ __rollback_abort_update(WT_SESSION_IMPL *session, WT_ITEM *key, WT_UPDATE *first
     }
 
     /*
-     * Clear the history store flag for the stable update to indicate that this update should not be
-     * written into the history store later, when all the aborted updates are removed from the
-     * history store. The next time when this update is moved into the history store, it will have a
-     * different stop time point.
+     * Clear the history store flags for the stable update to indicate that this update should be
+     * written to the history store later. The next time when this update is moved into the history
+     * store, it will have a different stop time point.
      */
     if (stable_upd != NULL) {
-        if (F_ISSET(stable_upd, WT_UPDATE_HS)) {
+        if (F_ISSET(stable_upd, WT_UPDATE_HS | WT_UPDATE_TO_DELETE_FROM_HS)) {
             /* Find the update following a stable tombstone. */
             if (stable_upd->type == WT_UPDATE_TOMBSTONE) {
                 tombstone = stable_upd;
@@ -125,7 +134,7 @@ __rollback_abort_update(WT_SESSION_IMPL *session, WT_ITEM *key, WT_UPDATE *first
                     if (stable_upd->txnid != WT_TXN_ABORTED) {
                         WT_ASSERT(session,
                           stable_upd->type != WT_UPDATE_TOMBSTONE &&
-                            F_ISSET(stable_upd, WT_UPDATE_HS));
+                            F_ISSET(stable_upd, WT_UPDATE_HS | WT_UPDATE_TO_DELETE_FROM_HS));
                         break;
                     }
                 }
@@ -141,13 +150,13 @@ __rollback_abort_update(WT_SESSION_IMPL *session, WT_ITEM *key, WT_UPDATE *first
               session, key, stable_upd == NULL ? tombstone->start_ts : stable_upd->start_ts));
 
             /*
-             * Clear the history store flag for the first stable update. Otherwise, it will not be
+             * Clear the history store flags for the first stable update. Otherwise, it will not be
              * moved to history store again.
              */
             if (stable_upd != NULL)
-                F_CLR(stable_upd, WT_UPDATE_HS);
+                F_CLR(stable_upd, WT_UPDATE_HS | WT_UPDATE_TO_DELETE_FROM_HS);
             if (tombstone != NULL)
-                F_CLR(tombstone, WT_UPDATE_HS);
+                F_CLR(tombstone, WT_UPDATE_HS | WT_UPDATE_TO_DELETE_FROM_HS);
         }
         if (stable_update_found != NULL)
             *stable_update_found = true;

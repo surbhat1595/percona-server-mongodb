@@ -105,6 +105,7 @@ void checkOplogFormatVersion(OperationContext* opCtx, const std::string& uri) {
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(WTCompactRecordStoreEBUSY);
+MONGO_FAIL_POINT_DEFINE(WTRecordStoreUassertOutOfOrder);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictException);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForReads);
 MONGO_FAIL_POINT_DEFINE(slowOplogSamplingReads);
@@ -645,7 +646,7 @@ void WiredTigerRecordStore::OplogStones::adjust(int64_t maxSize) {
 StatusWith<std::string> WiredTigerRecordStore::parseOptionsField(const BSONObj options) {
     StringBuilder ss;
     BSONForEach(elem, options) {
-        if (elem.fieldNameStringData() == "configString") {
+        if (elem.fieldNameStringData() == WiredTigerUtil::kConfigStringField) {
             Status status = WiredTigerUtil::checkTableCreationOptions(elem);
             if (!status.isOK()) {
                 return status;
@@ -2194,20 +2195,23 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
         return {};
     }
 
-    if (_forward && _lastReturnedId >= id) {
-        LOGV2(22406,
-              "WTCursor::next -- c->next_key ( {next}) was not greater than _lastReturnedId "
-              "({last}) which is a bug.",
-              "WTCursor::next -- next was not greater than last which is a bug",
-              "next"_attr = id,
-              "last"_attr = _lastReturnedId);
+    const bool failWithOutOfOrderForTest = WTRecordStoreUassertOutOfOrder.shouldFail();
+    if ((_forward && _lastReturnedId >= id) || MONGO_unlikely(failWithOutOfOrderForTest)) {
+        if (!failWithOutOfOrderForTest) {
+            // Crash when testing diagnostics are enabled and not explicitly uasserting on
+            // out-of-order keys.
+            invariant(!TestingProctor::instance().isEnabled(), "cursor returned out-of-order keys");
+        }
 
-        // Crash when testing diagnostics are enabled.
-        invariant(!TestingProctor::instance().isEnabled());
-
-        // Force a retry of the operation from our last known position by acting as-if
-        // we received a WT_ROLLBACK error.
-        throw WriteConflictException();
+        // uassert with 'DataCorruptionDetected' after logging.
+        LOGV2_ERROR_OPTIONS(22406,
+                            {logv2::UserAssertAfterLog(ErrorCodes::DataCorruptionDetected)},
+                            "WT_Cursor::next -- returned out-of-order keys",
+                            "forward"_attr = _forward,
+                            "next"_attr = id,
+                            "last"_attr = _lastReturnedId,
+                            "ident"_attr = _rs._ident,
+                            "ns"_attr = _rs.ns());
     }
 
     WT_ITEM value;

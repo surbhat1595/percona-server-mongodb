@@ -1851,11 +1851,42 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
     std::shared_ptr<ReplIndexBuildState> replState,
     Timestamp startTimestamp,
     const IndexBuildOptions& indexBuildOptions) {
-    const NamespaceStringOrUUID nssOrUuid{replState->dbName, replState->collectionUUID};
+    auto [dbLock, collLock, rstl] = [&] {
+        while (true) {
+            Lock::DBLock dbLock{opCtx, replState->dbName, MODE_IX};
 
-    AutoGetCollection autoColl(opCtx, nssOrUuid, MODE_X);
+            // Unlock the RSTL to avoid deadlocks with prepared transactions and replication state
+            // transitions. See SERVER-71191.
+            unlockRSTL(opCtx);
 
-    auto collection = autoColl.getCollection();
+            Lock::CollectionLock collLock{
+                opCtx, {replState->dbName, replState->collectionUUID}, MODE_X};
+            repl::ReplicationStateTransitionLockGuard rstl{
+                opCtx, MODE_IX, repl::ReplicationStateTransitionLockGuard::EnqueueOnly{}};
+
+            try {
+                // Since this thread is not killable by state transitions, this deadline is
+                // effectively the longest period of time we can block a state transition. State
+                // transitions are infrequent, but need to happen quickly. It should be okay to set
+                // this to a low value because the RSTL is rarely contended and, if this does time
+                // out, we will retry and reacquire the RSTL again without a deadline.
+                rstl.waitForLockUntil(Date_t::now() + Milliseconds{10});
+            } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
+                // We weren't able to re-acquire the RSTL within the timeout, which means there is
+                // an active state transition. Release our locks and try again from the beginning.
+                LOGV2(7119100,
+                      "Unable to acquire RSTL for index build setup within deadline, releasing "
+                      "locks and trying again",
+                      "buildUUID"_attr = replState->buildUUID);
+                continue;
+            }
+
+            return std::make_tuple(std::move(dbLock), std::move(collLock), std::move(rstl));
+        }
+    }();
+
+    auto collection =
+        CollectionCatalog::get(opCtx).lookupCollectionByUUID(opCtx, replState->collectionUUID);
     const auto& nss = collection->ns();
     CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
 
@@ -2688,15 +2719,34 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
 
     // During secondary oplog application, the index specs have already been normalized in the
     // oplog entries read from the primary. We should not be modifying the specs any further.
+    auto indexCatalog = collection->getIndexCatalog();
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     if (replCoord->getSettings().usingReplSets() && !replCoord->canAcceptWritesFor(opCtx, nss)) {
+        // A secondary node with a subset of the indexes already built will not vote for the commit
+        // quorum, which can stall the index build indefinitely on a replica set.
+        try {
+            auto specsToBuild = indexCatalog->removeExistingIndexes(
+                opCtx, indexSpecs, /*removeIndexBuildsToo=*/true);
+            if (indexSpecs.size() != specsToBuild.size()) {
+                LOGV2_WARNING(
+                    7176900,
+                    "Secondary node already has a subset of indexes built and will not "
+                    "participate in voting towards the commit quorum. Use the "
+                    "'setIndexCommitQuorum' command to adjust the commit quorum accordingly",
+                    logAttrs(nss),
+                    logAttrs(collection->uuid()),
+                    "requestedSpecs"_attr = indexSpecs,
+                    "specsToBuild"_attr = specsToBuild);
+            }
+        } catch (const AssertionException&) {
+            // Skip check.
+        }
         return indexSpecs;
     }
 
     auto specsWithCollationDefaults =
         uassertStatusOK(collection->addCollationDefaultsToIndexSpecsForCreate(opCtx, indexSpecs));
 
-    auto indexCatalog = collection->getIndexCatalog();
     std::vector<BSONObj> resultSpecs;
 
     resultSpecs = indexCatalog->removeExistingIndexes(

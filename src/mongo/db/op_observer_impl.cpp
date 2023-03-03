@@ -528,6 +528,13 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             operation.setPreImage(args.updateArgs.preImageDoc->getOwned());
         }
 
+        auto collectionDescription =
+            CollectionShardingState::get(opCtx, args.nss)->getCollectionDescription();
+        if (collectionDescription.isSharded()) {
+            operation.setPostImageDocumentKey(
+                collectionDescription.extractDocumentKey(args.updateArgs.updatedDoc).getOwned());
+        }
+
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
@@ -1321,6 +1328,12 @@ void OpObserverImpl::onTransactionPrepare(OperationContext* opCtx,
     }
 
     shardObserveTransactionPrepareOrUnpreparedCommit(opCtx, *statements, prepareOpTime);
+}
+
+void OpObserverImpl::onTransactionPrepareNonPrimary(OperationContext* opCtx,
+                                                    const std::vector<repl::OplogEntry>& statements,
+                                                    const repl::OpTime& prepareOpTime) {
+    shardObserveNonPrimaryTransactionPrepare(opCtx, statements, prepareOpTime);
 }
 
 void OpObserverImpl::onTransactionAbort(OperationContext* opCtx,

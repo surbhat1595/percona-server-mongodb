@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2019-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -29,17 +29,33 @@
 
 #pragma once
 
-#include "mongo/db/index/index_access_method.h"
+#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
 
-class IndexAccessMethodFactoryImpl : public IndexAccessMethodFactory {
+/**
+ * Manages statistics from the storage engine, allowing addition of statistics and serialization to
+ * BSON.
+ */
+class StorageStats {
 public:
-    IndexAccessMethodFactoryImpl() = default;
-    ~IndexAccessMethodFactoryImpl() = default;
+    // This is a pure virtual class, so the constructors will never be called directly, and slicing
+    // should not be an issue.
+    StorageStats() = default;
+    StorageStats(const StorageStats&) = default;
+    StorageStats(StorageStats&&) = default;
 
-    std::unique_ptr<IndexAccessMethod> make(
-        IndexCatalogEntry* entry, std::unique_ptr<SortedDataInterface> SortedDataInterface) final;
+    StorageStats& operator=(const StorageStats&) = delete;
+    StorageStats& operator=(StorageStats&&) = delete;
+
+    virtual ~StorageStats() = default;
+
+    virtual BSONObj toBSON() const = 0;
+
+    virtual std::unique_ptr<StorageStats> clone() const = 0;
+
+    virtual StorageStats& operator+=(const StorageStats&) = 0;
+    virtual StorageStats& operator-=(const StorageStats&) = 0;
 };
 
 }  // namespace mongo

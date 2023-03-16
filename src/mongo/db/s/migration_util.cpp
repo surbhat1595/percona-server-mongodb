@@ -42,7 +42,7 @@
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
@@ -720,7 +720,7 @@ void persistUpdatedNumOrphans(OperationContext* opCtx,
     try {
         PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
         ScopedRangeDeleterLock rangeDeleterLock(opCtx, MODE_IX);
-        // TODO (SERVER-54284) Remove writeConflictRetry loop
+        // TODO (SERVER-65996) Remove writeConflictRetry loop
         writeConflictRetry(
             opCtx, "updateOrphanCount", NamespaceString::kRangeDeletionNamespace.ns(), [&] {
                 store.update(opCtx,
@@ -999,11 +999,6 @@ void markAsReadyRangeDeletionTaskLocally(OperationContext* opCtx, const UUID& mi
 }
 
 void deleteMigrationCoordinatorDocumentLocally(OperationContext* opCtx, const UUID& migrationId) {
-    // Before deleting the migration coordinator document, ensure that in the case of a crash, the
-    // node will start-up from at least the configTime, which it obtained as part of recovery of the
-    // shardVersion, which will ensure that it will see at least the same shardVersion.
-    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
-
     PersistentTaskStore<MigrationCoordinatorDocument> store(
         NamespaceString::kMigrationCoordinatorsNamespace);
     store.remove(opCtx,
@@ -1178,6 +1173,15 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                               currentMetadata.getChunkManager()->getUUID(),
                           "coordinatorDocumentUUID"_attr = doc.getCollectionUuid());
                 }
+
+                // TODO SERVER-71918 once the drop collection coordinator starts persisting the
+                // config time we can remove this. Since the collection has been dropped,
+                // persist config time inclusive of the drop collection event before deleting
+                // leftover migration metadata.
+                // This will ensure that in case of stepdown the new
+                // primary won't read stale data from config server and think that the sharded
+                // collection still exists.
+                VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
 
                 deleteRangeDeletionTaskOnRecipient(opCtx, doc.getRecipientShardId(), doc.getId());
                 deleteRangeDeletionTaskLocally(opCtx, doc.getId());

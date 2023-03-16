@@ -83,6 +83,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(WTCompactIndexEBUSY);
 MONGO_FAIL_POINT_DEFINE(WTIndexPauseAfterSearchNear);
+MONGO_FAIL_POINT_DEFINE(WTValidateIndexStructuralDamage);
 
 static const WiredTigerItem emptyItem(nullptr, 0);
 }  // namespace
@@ -102,7 +103,7 @@ void WiredTigerIndex::getKey(OperationContext* opCtx, WT_CURSOR* cursor, WT_ITEM
 StatusWith<std::string> WiredTigerIndex::parseIndexOptions(const BSONObj& options) {
     StringBuilder ss;
     BSONForEach(elem, options) {
-        if (elem.fieldNameStringData() == "configString") {
+        if (elem.fieldNameStringData() == WiredTigerUtil::kConfigStringField) {
             Status status = WiredTigerUtil::checkTableCreationOptions(elem);
             if (!status.isOK()) {
                 return status;
@@ -329,6 +330,15 @@ void WiredTigerIndex::fullValidate(OperationContext* opCtx,
                                    IndexValidateResults* fullResults) const {
     dassert(opCtx->lockState()->isReadLocked());
     if (fullResults && !WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->isEphemeral()) {
+        if (WTValidateIndexStructuralDamage.shouldFail()) {
+            std::string msg = str::stream() << "verify() returned an error. "
+                                            << "This indicates structural damage. "
+                                            << "Not examining individual index entries.";
+            fullResults->errors.push_back(msg);
+            fullResults->valid = false;
+            return;
+        }
+
         int err = WiredTigerUtil::verifyTable(opCtx, _uri, &(fullResults->errors));
         if (err == EBUSY) {
             std::string msg = str::stream()

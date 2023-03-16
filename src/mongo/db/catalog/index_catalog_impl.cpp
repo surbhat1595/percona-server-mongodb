@@ -47,7 +47,6 @@
 #include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/fts/fts_spec.h"
@@ -556,7 +555,7 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
         opCtx, collection->ns(), collOptions, ident, desc);
 
     std::unique_ptr<IndexAccessMethod> accessMethod =
-        IndexAccessMethodFactory::get(opCtx)->make(entry.get(), std::move(sdi));
+        IndexAccessMethod::make(entry.get(), std::move(sdi));
 
     entry->init(std::move(accessMethod));
 
@@ -890,10 +889,11 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
         const std::unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
-        Status status =
-            _checkValidFilterExpressions(filterExpr.get(),
-                                         feature_flags::gTimeseriesMetricIndexes.isEnabled(
-                                             serverGlobalParams.featureCompatibility));
+        Status status = _checkValidFilterExpressions(
+            filterExpr.get(),
+            !serverGlobalParams.featureCompatibility.isVersionInitialized() ||
+                feature_flags::gTimeseriesMetricIndexes.isEnabled(
+                    serverGlobalParams.featureCompatibility));
         if (!status.isOK()) {
             return status;
         }

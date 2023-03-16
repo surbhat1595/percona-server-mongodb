@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2019-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,27 +27,31 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#pragma once
 
-#include "mongo/db/index/index_access_method.h"
+#include "fmt/core.h"
+#include "mongo/base/status.h"
+#include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/util/processinfo.h"
 
 namespace mongo {
-namespace {
-const auto getFactory =
-    ServiceContext::declareDecoration<std::unique_ptr<IndexAccessMethodFactory>>();
-}  // namespace
 
-IndexAccessMethodFactory* IndexAccessMethodFactory::get(ServiceContext* service) {
-    return getFactory(service).get();
+inline Status validateMigrationConcurrency(const int& migrationConcurrency) {
+    if (!mongo::feature_flags::gConcurrencyInChunkMigration.isEnabledAndIgnoreFCV()) {
+        return Status{ErrorCodes::InvalidOptions,
+                      "Cannot set migration concurrency number without enabling migration "
+                      "concurrency feature flag"};
+    }
+    int maxConcurrency = ProcessInfo::getNumCores();
+    if (migrationConcurrency <= 0 ||
+        (migrationConcurrency > maxConcurrency && !getTestCommandsEnabled())) {
+        return Status{
+            ErrorCodes::InvalidOptions,
+            fmt::format(
+                "Migration concurrency level must be positive and less than the number of cores.")};
+    }
+    return Status::OK();
 }
 
-IndexAccessMethodFactory* IndexAccessMethodFactory::get(OperationContext* opCtx) {
-    return getFactory(opCtx->getServiceContext()).get();
-}
-
-void IndexAccessMethodFactory::set(ServiceContext* service,
-                                   std::unique_ptr<IndexAccessMethodFactory> newFactory) {
-    auto& factory = getFactory(service);
-    factory = std::move(newFactory);
-}
 }  // namespace mongo

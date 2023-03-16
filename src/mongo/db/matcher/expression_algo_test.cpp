@@ -181,6 +181,14 @@ TEST(ExpressionAlgoIsSubsetOf, CompareAnd_GT) {
     ASSERT_FALSE(expression::isSubsetOf(filter.get(), query.get()));
 }
 
+TEST(ExpressionAlgoIsSubsetOf, CompareAnd_SingleField) {
+    ParsedMatchExpression filter("{a: {$gt: 5, $lt: 7}}");
+    ParsedMatchExpression query("{a: {$gt: 5, $lt: 6}}");
+
+    ASSERT_TRUE(expression::isSubsetOf(query.get(), filter.get()));
+    ASSERT_FALSE(expression::isSubsetOf(filter.get(), query.get()));
+}
+
 TEST(ExpressionAlgoIsSubsetOf, CompareOr_LT) {
     ParsedMatchExpression lt5("{a: {$lt: 5}}");
     ParsedMatchExpression eq2OrEq3("{$or: [{a: 2}, {a: 3}]}");
@@ -929,6 +937,15 @@ TEST(IsIndependent, NonRenameableExpressionIsNotIndependent) {
         ASSERT_FALSE(expression::isIndependentOf(*matchExpression.get(), {"c"}));
         ASSERT_FALSE(expression::isOnlyDependentOn(*matchExpression.get(), {"a", "b"}));
     }
+}
+
+TEST(IsIndependent, EmptyDependencySetsPassIsOnlyDependentOn) {
+    BSONObj matchPredicate = fromjson("{}");
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
+    ASSERT_OK(swMatchExpression.getStatus());
+    auto matchExpression = std::move(swMatchExpression.getValue());
+    ASSERT_TRUE(expression::isOnlyDependentOn(*matchExpression.get(), {}));
 }
 
 TEST(SplitMatchExpression, AndWithSplittableChildrenIsSplittable) {

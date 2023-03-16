@@ -2384,7 +2384,7 @@ std::tuple<sbe::value::SlotVector, EvalStage> generateAccumulator(
     const PlanStageSlots& childOutputs,
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator,
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>>& accSlotToExprMap) {
+    sbe::SlotExprPairVector& accSlotExprPairs) {
     // Input fields may need field traversal which ends up being a complex tree.
     auto evalStage = optimizeFieldPaths(
         state, accStmt.expr.argument, std::move(childEvalStage), childOutputs, nodeId);
@@ -2395,17 +2395,54 @@ std::tuple<sbe::value::SlotVector, EvalStage> generateAccumulator(
     // One accumulator may be translated to multiple accumulator expressions. For example, The
     // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
     // as sum(1).
-    auto [accExprs, accProjEvalStage] = stage_builder::buildAccumulator(
-        state, accStmt, std::move(accArgEvalStage), std::move(argExpr), nodeId);
+    auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
+    auto accExprs = stage_builder::buildAccumulator(
+        accStmt, std::move(argExpr), collatorSlot, *state.frameIdGenerator);
 
     sbe::value::SlotVector aggSlots;
     for (auto& accExpr : accExprs) {
         auto slot = slotIdGenerator->generate();
         aggSlots.push_back(slot);
-        accSlotToExprMap.emplace(slot, std::move(accExpr));
+        accSlotExprPairs.push_back({slot, std::move(accExpr)});
     }
 
-    return {std::move(aggSlots), std::move(accProjEvalStage)};
+    return {std::move(aggSlots), std::move(accArgEvalStage)};
+}
+
+/**
+ * Generate a vector of (inputSlot, mergingExpression) pairs. The slot (whose id is allocated by
+ * this function) will be used to store spilled partial aggregate values that have been recovered
+ * from disk and deserialized. The merging expression is an agg function which combines these
+ * partial aggregates.
+ *
+ * Usually the returned vector will be of length 1, but in some cases the MQL accumulation statement
+ * is implemented by calculating multiple separate aggregates in the SBE plan, which are finalized
+ * by a subsequent project stage to produce the ultimate value.
+ */
+sbe::SlotExprPairVector generateMergingExpressions(StageBuilderState& state,
+                                                   const AccumulationStatement& accStmt,
+                                                   int numInputSlots) {
+    tassert(7039555, "'numInputSlots' must be positive", numInputSlots > 0);
+    auto slotIdGenerator = state.slotIdGenerator;
+    tassert(7039556, "expected non-null 'slotIdGenerator' pointer", slotIdGenerator);
+    auto frameIdGenerator = state.frameIdGenerator;
+    tassert(7039557, "expected non-null 'frameIdGenerator' pointer", frameIdGenerator);
+
+    auto spillSlots = slotIdGenerator->generateMultiple(numInputSlots);
+    auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
+    auto mergingExprs =
+        buildCombinePartialAggregates(accStmt, spillSlots, collatorSlot, *frameIdGenerator);
+
+    // Zip the slot vector and expression vector into a vector of pairs.
+    tassert(7039550,
+            "expected same number of slots and input exprs",
+            spillSlots.size() == mergingExprs.size());
+    sbe::SlotExprPairVector result;
+    result.reserve(spillSlots.size());
+    for (size_t i = 0; i < spillSlots.size(); ++i) {
+        result.push_back({spillSlots[i], std::move(mergingExprs[i])});
+    }
+    return result;
 }
 
 std::tuple<std::vector<std::string>, sbe::value::SlotVector, EvalStage> generateGroupFinalStage(
@@ -2442,13 +2479,11 @@ std::tuple<std::vector<std::string>, sbe::value::SlotVector, EvalStage> generate
 
     auto finalSlots{sbe::value::SlotVector{finalGroupBySlot}};
     std::vector<std::string> fieldNames{"_id"};
-    auto groupFinalEvalStage = std::move(groupEvalStage);
     size_t idxAccFirstSlot = dedupedGroupBySlots.size();
     for (size_t idxAcc = 0; idxAcc < accStmts.size(); ++idxAcc) {
         // Gathers field names for the output object from accumulator statements.
         fieldNames.push_back(accStmts[idxAcc].fieldName);
-        auto [finalExpr, tempEvalStage] = stage_builder::buildFinalize(
-            state, accStmts[idxAcc], aggSlotsVec[idxAcc], std::move(groupFinalEvalStage), nodeId);
+        auto finalExpr = stage_builder::buildFinalize(state, accStmts[idxAcc], aggSlotsVec[idxAcc]);
 
         // The final step may not return an expression if it's trivial. For example, $first and
         // $last's final steps are trivial.
@@ -2463,15 +2498,13 @@ std::tuple<std::vector<std::string>, sbe::value::SlotVector, EvalStage> generate
         // Some accumulator(s) like $avg generate multiple expressions and slots. So, need to
         // advance this index by the number of those slots for each accumulator.
         idxAccFirstSlot += aggSlotsVec[idxAcc].size();
-
-        groupFinalEvalStage = std::move(tempEvalStage);
     }
 
     // Gathers all accumulator results. If there're no project expressions, does not add a project
     // stage.
     auto retEvalStage = prjSlotToExprMap.empty()
-        ? std::move(groupFinalEvalStage)
-        : makeProject(std::move(groupFinalEvalStage), std::move(prjSlotToExprMap), nodeId);
+        ? std::move(groupEvalStage)
+        : makeProject(std::move(groupEvalStage), std::move(prjSlotToExprMap), nodeId);
 
     return {std::move(fieldNames), std::move(finalSlots), std::move(retEvalStage)};
 }
@@ -2554,17 +2587,28 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Translates accumulators which are executed inside the group stage and gets slots for
     // accumulators.
     stage_builder::EvalStage accProjEvalStage = std::move(groupByEvalStage);
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> accSlotToExprMap;
+    sbe::SlotExprPairVector accSlotExprPairs;
     std::vector<sbe::value::SlotVector> aggSlotsVec;
+    // Since partial accumulator state may be spilled to disk and then merged, we must construct not
+    // only the basic agg expressions for each accumulator, but also agg expressions that are used
+    // to combine partial aggregates that have been spilled to disk.
+    sbe::SlotExprPairVector mergingExprs;
     for (const auto& accStmt : accStmts) {
-        auto [aggSlots, tempEvalStage] = generateAccumulator(_state,
-                                                             accStmt,
-                                                             std::move(accProjEvalStage),
-                                                             childOutputs,
-                                                             nodeId,
-                                                             &_slotIdGenerator,
-                                                             accSlotToExprMap);
-        aggSlotsVec.emplace_back(std::move(aggSlots));
+        auto [curAggSlots, tempEvalStage] = generateAccumulator(_state,
+                                                                accStmt,
+                                                                std::move(accProjEvalStage),
+                                                                childOutputs,
+                                                                nodeId,
+                                                                &_slotIdGenerator,
+                                                                accSlotExprPairs);
+
+        sbe::SlotExprPairVector curMergingExprs =
+            generateMergingExpressions(_state, accStmt, curAggSlots.size());
+
+        aggSlotsVec.emplace_back(std::move(curAggSlots));
+        mergingExprs.insert(mergingExprs.end(),
+                            std::make_move_iterator(curMergingExprs.begin()),
+                            std::make_move_iterator(curMergingExprs.end()));
         accProjEvalStage = std::move(tempEvalStage);
     }
 
@@ -2575,9 +2619,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Builds a group stage with accumulator expressions and group-by slot(s).
     auto groupEvalStage = makeHashAgg(std::move(accProjEvalStage),
                                       dedupedGroupBySlots,
-                                      std::move(accSlotToExprMap),
+                                      std::move(accSlotExprPairs),
                                       _state.data->env->getSlotIfExists("collator"_sd),
                                       _cq.getExpCtx()->allowDiskUse,
+                                      std::move(mergingExprs),
                                       nodeId);
 
     tassert(

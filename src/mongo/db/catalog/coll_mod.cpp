@@ -33,6 +33,7 @@
 
 #include "mongo/db/catalog/coll_mod.h"
 
+#include "mongo/db/stats/counters.h"
 #include <boost/optional.hpp>
 #include <memory>
 
@@ -44,7 +45,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/coll_mod_gen.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -473,6 +474,11 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                                                     validatorObj.getOwned(),
                                                     MatchExpressionParser::kDefaultSpecialFeatures,
                                                     maxFeatureCompatibilityVersion);
+
+        // Increment counters to track the usage of schema validators.
+        validatorCounters.incrementCounters(
+            cmd.kCommandName, parsed.collValidator->validatorDoc, parsed.collValidator->isOK());
+
         if (!parsed.collValidator->isOK()) {
             return parsed.collValidator->getStatus();
         }

@@ -33,7 +33,7 @@
 
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -546,6 +546,26 @@ void resumeMigrations(OperationContext* opCtx,
                       const NamespaceString& nss,
                       const boost::optional<UUID>& expectedCollectionUUID) {
     setAllowMigrations(opCtx, nss, expectedCollectionUUID, true);
+}
+
+bool checkAllowMigrations(OperationContext* opCtx, const NamespaceString& nss) {
+    auto collDoc =
+        uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
+                            opCtx,
+                            ReadPreferenceSetting(ReadPreference::PrimaryOnly, TagSet{}),
+                            repl::ReadConcernLevel::kMajorityReadConcern,
+                            CollectionType::ConfigNS,
+                            BSON(CollectionType::kNssFieldName << nss.ns()),
+                            BSONObj(),
+                            1))
+            .docs;
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "collection " << nss.ns() << " not found",
+            !collDoc.empty());
+
+    auto coll = CollectionType(collDoc[0]);
+    return coll.getAllowMigrations();
 }
 
 boost::optional<UUID> getCollectionUUID(OperationContext* opCtx,

@@ -39,7 +39,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/create_gen.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
@@ -513,7 +513,8 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                             opCtx,
                             nss(),
                             _getCriticalSectionReason(),
-                            ShardingCatalogClient::kMajorityWriteConcern);
+                            ShardingCatalogClient::kMajorityWriteConcern,
+                            false /* throwIfReasonDiffers */);
 
                     _result = createCollectionResponseOpt;
                     return;
@@ -619,7 +620,8 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                     opCtx,
                     nss(),
                     _getCriticalSectionReason(),
-                    ShardingCatalogClient::kMajorityWriteConcern);
+                    ShardingCatalogClient::kMajorityWriteConcern,
+                    false /* throwIfReasonDiffers */);
             }
             return status;
         });

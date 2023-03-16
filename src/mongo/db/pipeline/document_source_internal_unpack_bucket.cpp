@@ -244,6 +244,7 @@ DocumentSourceInternalUnpackBucket::DocumentSourceInternalUnpackBucket(
     bool assumeNoMixedSchemaData)
     : DocumentSource(kStageNameInternal, expCtx),
       _assumeNoMixedSchemaData(assumeNoMixedSchemaData),
+
       _bucketUnpacker(std::move(bucketUnpacker)),
       _bucketMaxSpanSeconds{bucketMaxSpanSeconds} {}
 
@@ -258,6 +259,11 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
     // if that's the case, no field will be added to 'bucketSpec.fieldSet' in the for-loop below.
     BucketUnpacker::Behavior unpackerBehavior = BucketUnpacker::Behavior::kExclude;
     BucketSpec bucketSpec;
+    // Use extended-range support if any individual collection requires it, even if 'specElem'
+    // doesn't mention this flag.
+    if (expCtx->getRequiresTimeseriesExtendedRangeSupport()) {
+        bucketSpec.setUsesExtendedRange(true);
+    }
     auto hasIncludeExclude = false;
     auto hasTimeField = false;
     auto hasBucketMaxSpanSeconds = false;
@@ -351,6 +357,12 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
                                   << " field must be a bool, got: " << elem.type(),
                     elem.type() == BSONType::Bool);
             bucketSpec.includeMaxTimeAsMetadata = elem.boolean();
+        } else if (fieldName == kUsesExtendedRange) {
+            uassert(6646901,
+                    str::stream() << kUsesExtendedRange
+                                  << " field must be a bool, got: " << elem.type(),
+                    elem.type() == BSONType::Bool);
+            bucketSpec.setUsesExtendedRange(elem.boolean());
         } else {
             uasserted(5346506,
                       str::stream()
@@ -448,6 +460,14 @@ void DocumentSourceInternalUnpackBucket::serializeToArray(
     out.addField(kBucketMaxSpanSeconds, Value{_bucketMaxSpanSeconds});
     if (_assumeNoMixedSchemaData)
         out.addField(kAssumeNoMixedSchemaData, Value(_assumeNoMixedSchemaData));
+
+    if (spec.usesExtendedRange()) {
+        // Include this flag so that 'explain' is more helpful.
+        // But this is not so useful for communicating from one process to another,
+        // because mongos and/or the primary shard don't know whether any other shard
+        // has extended-range data.
+        out.addField(kUsesExtendedRange, Value{true});
+    }
 
     if (!spec.computedMetaProjFields().empty())
         out.addField("computedMetaProjFields", Value{[&] {
@@ -1208,8 +1228,8 @@ DocumentSource::GetModPathsReturn DocumentSourceInternalUnpackBucket::getModifie
         StringMap<std::string> renames;
         renames.emplace(*_bucketUnpacker.bucketSpec().metaField(),
                         timeseries::kBucketMetaFieldName);
-        return {GetModPathsReturn::Type::kAllExcept, std::set<std::string>{}, std::move(renames)};
+        return {GetModPathsReturn::Type::kAllExcept, OrderedPathSet{}, std::move(renames)};
     }
-    return {GetModPathsReturn::Type::kAllPaths, std::set<std::string>{}, {}};
+    return {GetModPathsReturn::Type::kAllPaths, OrderedPathSet{}, {}};
 }
 }  // namespace mongo

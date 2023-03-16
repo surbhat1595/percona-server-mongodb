@@ -28,20 +28,21 @@ DEFAULT_TIMEOUT_OVERRIDES = "etc/evergreen_timeouts.yml"
 DEFAULT_EVERGREEN_CONFIG = "etc/evergreen.yml"
 DEFAULT_EVERGREEN_AUTH_CONFIG = "~/.evergreen.yml"
 COMMIT_QUEUE_ALIAS = "__commit_queue"
-UNITTEST_TASK = "run_unittests"
 IGNORED_SUITES = {
-    "integration_tests_replset", "integration_tests_replset_ssl_auth", "integration_tests_sharded",
-    "integration_tests_standalone", "integration_tests_standalone_audit", "mongos_test",
-    "server_selection_json_test"
+    "integration_tests_replset",
+    "integration_tests_replset_ssl_auth",
+    "integration_tests_sharded",
+    "integration_tests_standalone",
+    "integration_tests_standalone_audit",
+    "mongos_test",
+    "server_selection_json_test",
+    "sdam_json_test",
 }
 HISTORY_LOOKBACK = timedelta(weeks=2)
 
-COMMIT_QUEUE_TIMEOUT = timedelta(minutes=40)
+COMMIT_QUEUE_TIMEOUT = timedelta(minutes=20)
 DEFAULT_REQUIRED_BUILD_TIMEOUT = timedelta(hours=1, minutes=20)
 DEFAULT_NON_REQUIRED_BUILD_TIMEOUT = timedelta(hours=2)
-# 2x the longest "run tests" phase for unittests as of c9bf1dbc9cc46e497b2f12b2d6685ef7348b0726,
-# which is 5 mins 47 secs, excluding outliers below
-UNITTESTS_TIMEOUT = timedelta(minutes=12)
 
 
 class TimeoutOverride(BaseModel):
@@ -222,11 +223,6 @@ class TaskTimeoutOrchestrator:
             LOGGER.info("Overriding configured timeout", exec_timeout_secs=override.total_seconds())
             determined_timeout = override
 
-        elif task_name == UNITTEST_TASK and override is None:
-            LOGGER.info("Overriding unittest timeout",
-                        exec_timeout_secs=UNITTESTS_TIMEOUT.total_seconds())
-            determined_timeout = UNITTESTS_TIMEOUT
-
         elif _is_required_build_variant(
                 variant) and determined_timeout > DEFAULT_REQUIRED_BUILD_TIMEOUT:
             LOGGER.info("Overriding required-builder timeout",
@@ -273,11 +269,12 @@ class TaskTimeoutOrchestrator:
 
         return determined_timeout
 
-    def determine_historic_timeout(self, task: str, variant: str, suite_name: str,
+    def determine_historic_timeout(self, project: str, task: str, variant: str, suite_name: str,
                                    exec_timeout_factor: Optional[float]) -> TimeoutOverride:
         """
         Calculate the timeout based on historic test results.
 
+        :param project: Name of project to query.
         :param task: Name of task to query.
         :param variant: Name of build variant to query.
         :param suite_name: Name of test suite being run.
@@ -287,7 +284,7 @@ class TaskTimeoutOrchestrator:
             return TimeoutOverride(task=task, exec_timeout=None, idle_timeout=None)
 
         timeout_params = TimeoutParams(
-            evg_project="mongodb-mongo-master",
+            evg_project=project,
             build_variant=variant,
             task_name=task,
             suite_name=suite_name,
@@ -315,8 +312,8 @@ class TaskTimeoutOrchestrator:
         return bv.is_asan_build()
 
     def determine_timeouts(self, cli_idle_timeout: Optional[timedelta],
-                           cli_exec_timeout: Optional[timedelta], outfile: Optional[str], task: str,
-                           variant: str, evg_alias: str, suite_name: str,
+                           cli_exec_timeout: Optional[timedelta], outfile: Optional[str],
+                           project: str, task: str, variant: str, evg_alias: str, suite_name: str,
                            exec_timeout_factor: Optional[float]) -> None:
         """
         Determine the timeouts to use for the given task and write timeouts to expansion file.
@@ -324,12 +321,14 @@ class TaskTimeoutOrchestrator:
         :param cli_idle_timeout: Idle timeout specified by the CLI.
         :param cli_exec_timeout: Exec timeout specified by the CLI.
         :param outfile: File to write timeout expansions to.
+        :param project: Evergreen project task is being run on.
+        :param task: Name of task.
         :param variant: Build variant task is being run on.
         :param evg_alias: Evergreen alias that triggered task.
         :param suite_name: Name of evergreen suite being run.
         :param exec_timeout_factor: Scaling factor to use when determining timeout.
         """
-        historic_timeout = self.determine_historic_timeout(task, variant, suite_name,
+        historic_timeout = self.determine_historic_timeout(project, task, variant, suite_name,
                                                            exec_timeout_factor)
 
         idle_timeout = self.determine_idle_timeout(task, variant, cli_idle_timeout,
@@ -351,6 +350,8 @@ def main():
                         help="Resmoke suite being run against.")
     parser.add_argument("--build-variant", dest="variant", required=True,
                         help="Build variant task is being executed on.")
+    parser.add_argument("--project", dest="project", required=True,
+                        help="Evergreen project task is being executed on.")
     parser.add_argument("--evg-alias", dest="evg_alias", required=True,
                         help="Evergreen alias used to trigger build.")
     parser.add_argument("--timeout", dest="timeout", type=int, help="Timeout to use (in sec).")
@@ -378,6 +379,7 @@ def main():
         os.path.expanduser(options.timeout_overrides_file))
 
     enable_logging(verbose=False)
+    LOGGER.info("Determining timeouts", cli_args=options)
 
     def dependencies(binder: inject.Binder) -> None:
         binder.bind(
@@ -394,8 +396,8 @@ def main():
 
     task_timeout_orchestrator = inject.instance(TaskTimeoutOrchestrator)
     task_timeout_orchestrator.determine_timeouts(
-        timeout_override, exec_timeout_override, options.outfile, task_name, options.variant,
-        options.evg_alias, options.suite_name, options.exec_timeout_factor)
+        timeout_override, exec_timeout_override, options.outfile, options.project, task_name,
+        options.variant, options.evg_alias, options.suite_name, options.exec_timeout_factor)
 
 
 if __name__ == "__main__":

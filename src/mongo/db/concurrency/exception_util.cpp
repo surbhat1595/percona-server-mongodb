@@ -29,19 +29,31 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
-#include "mongo/db/concurrency/temporarily_unavailable_exception.h"
-#include "mongo/base/string_data.h"
+#include "mongo/db/concurrency/exception_util.h"
+
+#include "mongo/base/counter.h"
 #include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
-#include "mongo/db/server_options_general_gen.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/log_and_backoff.h"
 
 namespace mongo {
 
-// These are initialized by IDL as server parameters.
-AtomicWord<long long> TemporarilyUnavailableException::maxRetryAttempts;
-AtomicWord<long long> TemporarilyUnavailableException::retryBackoffBaseMs;
+MONGO_FAIL_POINT_DEFINE(skipWriteConflictRetries);
+
+void logWriteConflictAndBackoff(int attempt, StringData operation, StringData ns) {
+    logAndBackoff(4640401,
+                  logv2::LogComponent::kWrite,
+                  logv2::LogSeverity::Debug(1),
+                  static_cast<size_t>(attempt),
+                  "Caught WriteConflictException",
+                  "operation"_attr = operation,
+                  logAttrs(NamespaceString(ns)));
+}
+
+namespace {
 
 Counter64 temporarilyUnavailableErrors;
 Counter64 temporarilyUnavailableErrorsEscaped;
@@ -55,14 +67,23 @@ ServerStatusMetricField<Counter64> displayTemporarilyUnavailableErrorsConverted(
     "operation.temporarilyUnavailableErrorsConvertedToWriteConflict",
     &temporarilyUnavailableErrorsConvertedToWriteConflict);
 
-TemporarilyUnavailableException::TemporarilyUnavailableException(StringData context)
-    : DBException(Status(ErrorCodes::TemporarilyUnavailable, context)) {}
+Counter64 transactionTooLargeForCacheErrors;
+Counter64 transactionTooLargeForCacheErrorsConvertedToWriteConflict;
+ServerStatusMetricField<Counter64> displayTransactionTooLargeForCacheErrors(
+    "operation.transactionTooLargeForCacheErrors", &transactionTooLargeForCacheErrors);
+ServerStatusMetricField<Counter64> displayTransactionTooLargeForCacheErrorsConvertedToWriteConflict(
+    "operation.transactionTooLargeForCacheErrorsConvertedToWriteConflict",
+    &transactionTooLargeForCacheErrorsConvertedToWriteConflict);
 
-void TemporarilyUnavailableException::handle(OperationContext* opCtx,
-                                             int attempts,
-                                             StringData opStr,
-                                             StringData ns,
-                                             const TemporarilyUnavailableException& e) {
+}  // namespace
+
+void handleTemporarilyUnavailableException(OperationContext* opCtx,
+                                           int attempts,
+                                           StringData opStr,
+                                           StringData ns,
+                                           const TemporarilyUnavailableException& e) {
+    CurOp::get(opCtx)->debug().additiveMetrics.incrementTemporarilyUnavailableErrors(1);
+
     opCtx->recoveryUnit()->abandonSnapshot();
     temporarilyUnavailableErrors.increment(1);
     if (opCtx->getClient()->isFromUserConnection() &&
@@ -92,17 +113,39 @@ void TemporarilyUnavailableException::handle(OperationContext* opCtx,
     opCtx->sleepFor(sleepFor);
 }
 
-void TemporarilyUnavailableException::handleInTransaction(
-    OperationContext* opCtx,
-    StringData opStr,
-    StringData ns,
-    const TemporarilyUnavailableException& e) {
+void handleTemporarilyUnavailableExceptionInTransaction(OperationContext* opCtx,
+                                                        StringData opStr,
+                                                        StringData ns,
+                                                        const TemporarilyUnavailableException& e) {
     // Since WriteConflicts are tagged as TransientTransactionErrors and TemporarilyUnavailable
     // errors are not, we convert the error to a WriteConflict to allow users of multi-document
     // transactions to retry without changing any behavior. Otherwise, we let the error escape as
     // usual.
     temporarilyUnavailableErrorsConvertedToWriteConflict.increment(1);
     throw WriteConflictException(e.reason());
+}
+
+void handleTransactionTooLargeForCacheException(OperationContext* opCtx,
+                                                int* writeConflictAttempts,
+                                                StringData opStr,
+                                                StringData ns,
+                                                const TransactionTooLargeForCacheException& e) {
+    transactionTooLargeForCacheErrors.increment(1);
+    if (opCtx->writesAreReplicated()) {
+        // Surface error on primaries.
+        throw e;
+    }
+    // If an operation succeeds on primary, it should always be retried on secondaries. Secondaries
+    // always retry TemporarilyUnavailableExceptions and WriteConflictExceptions indefinitely, the
+    // only difference being the rate of retry. We prefer retrying faster, by converting to
+    // WriteConflictException, to avoid stalling replication longer than necessary.
+    transactionTooLargeForCacheErrorsConvertedToWriteConflict.increment(1);
+
+    // Handle as write conflict.
+    CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
+    logWriteConflictAndBackoff(*writeConflictAttempts, opStr, ns);
+    ++(*writeConflictAttempts);
+    opCtx->recoveryUnit()->abandonSnapshot();
 }
 
 }  // namespace mongo

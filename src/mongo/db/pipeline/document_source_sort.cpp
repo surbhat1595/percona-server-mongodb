@@ -151,7 +151,10 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
                                       : AllowedWithApiStrict::kInternal,
     ::mongo::getTestCommandsEnabled() ? AllowedWithClientType::kAny
                                       : AllowedWithClientType::kInternal,
-    feature_flags::gFeatureFlagBucketUnpackWithSort.getVersion(),
+    // We don't expect mongos or clients to produce this stage:
+    // We only generate it after multiplanning, which means only within one mongod process.
+    // So, we should be allowed to parse this stage regardless of FCV.
+    boost::none /*minVersion*/,
     feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabledAndIgnoreFCV());
 
 DocumentSource::GetNextResult::ReturnStatus DocumentSourceSort::timeSorterPeek() {
@@ -656,7 +659,7 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceSort::distri
 }
 
 bool DocumentSourceSort::canRunInParallelBeforeWriteStage(
-    const std::set<std::string>& nameOfShardKeyFieldsUponEntryToStage) const {
+    const OrderedPathSet& nameOfShardKeyFieldsUponEntryToStage) const {
     // This is an interesting special case. If there are no further stages which require merging the
     // streams into one, a $sort should not require it. This is only the case because the sort order
     // doesn't matter for a pipeline ending with a write stage. We may encounter it here as an

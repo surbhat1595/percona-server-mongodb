@@ -156,5 +156,22 @@ TEST_F(ReshardingMetricsTest, RestoresFromCoordinatorStateDocument) {
               CoordinatorState_serializer(state));
 }
 
+TEST_F(ReshardingMetricsTest, RestoresFromReshardingApplierProgressDocument) {
+    ReshardingOplogApplierProgress progressDoc;
+    progressDoc.setInsertsApplied(123);
+    progressDoc.setUpdatesApplied(456);
+    progressDoc.setDeletesApplied(789);
+    progressDoc.setWritesToStashCollections(800);
+
+    auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kRecipient);
+    metrics->accumulateFrom(progressDoc);
+    auto report = metrics->reportForCurrentOp();
+
+    ASSERT_EQ(report.getIntField("insertsApplied"), 123);
+    ASSERT_EQ(report.getIntField("updatesApplied"), 456);
+    ASSERT_EQ(report.getIntField("deletesApplied"), 789);
+    ASSERT_EQ(report.getIntField("countWritesToStashCollections"), 800);
+}
+
 }  // namespace
 }  // namespace mongo

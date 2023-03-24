@@ -35,6 +35,7 @@
 
 #include <fmt/format.h>
 
+#include "mongo/db/exec/sbe/stages/branch.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_lookup.h"
 #include "mongo/db/exec/sbe/stages/ix_scan.h"
@@ -248,7 +249,36 @@ std::pair<SlotId /* keyValueSlot */, std::unique_ptr<sbe::PlanStage>> buildForei
     // For the terminal field part, both the array elements and the array itself are considered as
     // keys. To implement this, we use a "union" stage, where the first branch produces array
     // elements and the second branch produces the array itself. To avoid re-traversing the path, we
-    // pass the already traversed path to the "union" via "nlj" stage.
+    // pass the already traversed path to the "union" via "nlj" stage. However, for scalars 'unwind'
+    // produces the scalar itself and we don't want to add it to the stream twice -- this is handled
+    // by the 'branch' stage.
+    // For example, for foreignField = "a.b" this part of the tree would look like:
+    // [2] nlj [] [s17]
+    //     left
+    //         # Get the terminal value on the path, it will be placed in s17, it might be a scalar
+    //         # or it might be an array.
+    //         [2] project [s17 = if (
+    //               isObject (s15) || ! isArray (s14), fillEmpty (getField (s15, "b"), null),
+    //               Nothing)]
+    //         [2] unwind s15 s16 s14 true
+    //         [2] project [s14 = fillEmpty (getField (s7 = inputSlot, "a"), null)]
+    //         [2] limit 1
+    //         [2] coscan
+    //     right
+    //         # Process the terminal value depending on whether it's an array or a scalar/object.
+    //         [2] branch {isArray (s17)} [s21]
+    //           # If s17 is an array, unwind it and union with the value of the array itself.
+    //           [s20] [2] union [s20] [
+    //                 [s18] [2] unwind s18 s19 s17 true
+    //                       [2] limit 1
+    //                       [2] coscan ,
+    //                 [s17] [2] limit 1
+    //                       [2] coscan
+    //                 ]
+    //           # If s17 isn't an array, don't need to do anything and simply return s17.
+    //           [s17] [2] limit 1
+    //                 [2] coscan
+
     SlotId terminalUnwindOutputSlot = slotIdGenerator.generate();
     std::unique_ptr<sbe::PlanStage> terminalUnwind =
         makeS<UnwindStage>(makeLimitCoScanTree(nodeId, 1) /* child stage */,
@@ -269,13 +299,22 @@ std::pair<SlotId /* keyValueSlot */, std::unique_ptr<sbe::PlanStage>> buildForei
                           makeSV(unionOutputSlot),
                           nodeId);
 
+    SlotId maybeUnionOutputSlot = slotIdGenerator.generate();
+    unionStage = makeS<BranchStage>(std::move(unionStage),
+                                    makeLimitCoScanTree(nodeId, 1),
+                                    makeFunction("isArray", makeVariable(keyValueSlot)),
+                                    SlotVector{unionOutputSlot},
+                                    SlotVector{keyValueSlot},
+                                    SlotVector{maybeUnionOutputSlot},
+                                    nodeId);
+
     currentStage = makeS<LoopJoinStage>(std::move(currentStage),
                                         std::move(unionStage),
                                         makeSV() /* outerProjects */,
                                         makeSV(keyValueSlot) /* outerCorrelated */,
                                         nullptr /* predicate */,
                                         nodeId);
-    keyValueSlot = unionOutputSlot;
+    keyValueSlot = maybeUnionOutputSlot;
 
     return {keyValueSlot, std::move(currentStage)};
 }
@@ -300,7 +339,8 @@ std::pair<SlotId /* keyValuesSetSlot */, std::unique_ptr<sbe::PlanStage>> buildK
         ? buildLocalKeysStream(recordSlot, fp, nodeId, slotIdGenerator)
         : buildForeignKeysStream(recordSlot, fp, nodeId, slotIdGenerator);
 
-    // Re-pack the individual key values into a set.
+    // Re-pack the individual key values into a set. We don't cap "addToSet" here because its size
+    // is bounded by the size of the record.
     SlotId keyValuesSetSlot = slotIdGenerator.generate();
     EvalStage packedKeyValuesStage = makeHashAgg(
         EvalStage{std::move(keyValuesStage), SlotVector{}},
@@ -361,14 +401,31 @@ std::pair<SlotId /* resultSlot */, std::unique_ptr<sbe::PlanStage>> buildForeign
     // that could do this grouping _after_ Nlj, so we achieve it by having a hash_agg inside the
     // inner branch that aggregates all matched records into a single accumulator. When there
     // are no matches, return an empty array.
+    const int sizeCap = internalLookupStageIntermediateDocumentMaxSizeBytes.load();
     SlotId accumulatorSlot = slotIdGenerator.generate();
     innerBranch = makeHashAgg(
         std::move(innerBranch),
         makeSV(), /* groupBy slots */
-        makeEM(accumulatorSlot, makeFunction("addToArray"_sd, makeVariable(foreignRecordSlot))),
+        makeEM(accumulatorSlot,
+               makeFunction("addToArrayCapped"_sd,
+                            makeVariable(foreignRecordSlot),
+                            makeConstant(TypeTags::NumberInt32, sizeCap))),
         {} /* collatorSlot, no collation here because we want to return all matches "as is" */,
         allowDiskUse,
         nodeId);
+
+    // 'accumulatorSlot' is either Nothing or contains an array of size two, where the front element
+    // is the array of matched records and the back element is their cumulative size (in bytes).
+    SlotId matchedRecordsSlot = slotIdGenerator.generate();
+    innerBranch =
+        makeProject(std::move(innerBranch),
+                    nodeId,
+                    matchedRecordsSlot,
+                    makeFunction("getElement",
+                                 makeVariable(accumulatorSlot),
+                                 makeConstant(sbe::value::TypeTags::NumberInt32,
+                                              static_cast<int>(vm::AggArrayWithSize::kValues))));
+
 
     // $lookup is an _outer_ left join that returns an empty array for "as" field rather than
     // dropping the unmatched local records. The branch that accumulates the matched records into an
@@ -388,7 +445,7 @@ std::pair<SlotId /* resultSlot */, std::unique_ptr<sbe::PlanStage>> buildForeign
     EvalStage unionStage =
         makeUnion(makeVector(EvalStage{std::move(innerBranch.stage), SlotVector{}},
                              EvalStage{std::move(emptyArrayStage), SlotVector{}}),
-                  {makeSV(accumulatorSlot), makeSV(emptyArraySlot)} /* inputs */,
+                  {makeSV(matchedRecordsSlot), makeSV(emptyArraySlot)} /* inputs */,
                   makeSV(unionOutputSlot),
                   nodeId);
 
@@ -992,7 +1049,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     _shouldProduceRecordIdSlot = false;
 
     auto localReqs = reqs.copy().set(kResult);
-    auto [localStage, localOutputs] = build(eqLookupNode->children[0], localReqs);
+    auto [localStage, localOutputs] = build(eqLookupNode->children[0].get(), localReqs);
     SlotId localDocumentSlot = localOutputs.get(PlanStageSlots::kResult);
 
     auto [matchedDocumentsSlot, foreignStage] = [&, localStage = std::move(localStage)]() mutable

@@ -392,6 +392,13 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     auto runner = makePeriodicRunner(serviceContext);
     serviceContext->setPeriodicRunner(std::move(runner));
 
+    // When starting the server with --queryableBackupMode or --recoverFromOplogAsStandalone, we are
+    // in read-only mode and don't allow user-originating operations to perform writes
+    if (storageGlobalParams.queryableBackupMode ||
+        repl::ReplSettings::shouldRecoverFromOplogAsStandalone()) {
+        serviceContext->disallowUserWrites();
+    }
+
 #ifdef MONGO_CONFIG_SSL
     OCSPManager::start(serviceContext);
     CertificateExpirationMonitor::get()->start(serviceContext);
@@ -658,7 +665,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     readWriteConcernDefaultsMongodStartupChecks(startupOpCtx.get());
 
     // Perform replication recovery for queryable backup mode if needed.
-    if (storageGlobalParams.readOnly) {
+    if (storageGlobalParams.queryableBackupMode) {
         uassert(ErrorCodes::BadValue,
                 str::stream() << "Cannot specify both queryableBackupMode and "
                               << "recoverFromOplogAsStandalone at the same time",
@@ -681,7 +688,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         replCoord->startup(startupOpCtx.get(), lastShutdownState);
     }
 
-    if (!storageGlobalParams.readOnly) {
+    if (!storageGlobalParams.queryableBackupMode) {
 
         if (storageEngine->supportsCappedCollections()) {
             logStartup(startupOpCtx.get());
@@ -1430,7 +1437,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     // of this function to prevent any operations from running that need a lock.
     //
     LOGV2(4784929, "Acquiring the global lock for shutdown");
-    LockerImpl* globalLocker = new LockerImpl();
+    LockerImpl* globalLocker = new LockerImpl(serviceContext);
     globalLocker->lockGlobal(nullptr, MODE_X);
 
     // Global storage engine may not be started in all cases before we exit

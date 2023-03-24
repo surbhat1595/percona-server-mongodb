@@ -182,13 +182,14 @@ plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution
                 } else {
                     secondaryStats.collectionScans++;
                 }
+                [[fallthrough]];
             }
             default:
                 break;
         }
 
         for (auto&& child : node->children) {
-            queue.push(child);
+            queue.push(child.get());
         }
     }
 

@@ -34,6 +34,7 @@
 #include "mongo/db/s/resharding/resharding_data_replication.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics_new.h"
+#include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -70,6 +71,11 @@ public:
 
     std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
         BSONObj initialState) override;
+
+    inline std::vector<std::shared_ptr<PrimaryOnlyService::Instance>> getAllReshardingInstances(
+        OperationContext* opCtx) {
+        return getAllInstances(opCtx);
+    }
 };
 
 /**
@@ -151,6 +157,15 @@ public:
      */
     SharedSemiFuture<void> getCompletionFuture() const {
         return _completionPromise.getFuture();
+    }
+
+    inline const CommonReshardingMetadata& getMetadata() const {
+        return _metadata;
+    }
+
+    inline const ReshardingMetricsNew& getMetrics() const {
+        invariant(_metricsNew);
+        return *_metricsNew;
     }
 
     boost::optional<BSONObj> reportForCurrentOp(
@@ -277,6 +292,7 @@ private:
     const ReshardingRecipientService* const _recipientService;
 
     std::unique_ptr<ReshardingMetricsNew> _metricsNew;
+    ReshardingApplierMetricsMap _applierMetricsMap;
 
     // The in-memory representation of the immutable portion of the document in
     // config.localReshardingOperations.recipient.

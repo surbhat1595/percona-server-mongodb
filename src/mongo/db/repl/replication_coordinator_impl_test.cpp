@@ -469,6 +469,7 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     ASSERT_EQUALS("admin", noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
+    hbResp.setSetName("mySet");
     hbResp.setConfigVersion(0);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
@@ -1242,6 +1243,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigMajorit
     ASSERT_EQUALS("admin", noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
+    hbResp.setSetName("mySet");
     hbResp.setConfigVersion(0);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
@@ -1302,6 +1304,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     ASSERT_EQUALS("admin", noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
+    hbResp.setSetName("mySet");
     hbResp.setConfigVersion(0);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
@@ -2200,7 +2203,8 @@ TEST_F(StepDownTest,
     // locker to test this, or otherwise stepDown will be granted the lock automatically.
     ReplicationStateTransitionLockGuard transitionGuard(opCtx.get(), MODE_X);
     ASSERT_TRUE(opCtx->lockState()->isRSTLExclusive());
-    auto locker = getClient()->swapLockState(std::make_unique<LockerImpl>());
+    auto locker =
+        getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
 
     ASSERT_THROWS_CODE(
         getReplCoord()->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(1000)),
@@ -8086,6 +8090,7 @@ TEST_F(ReplCoordTest, ShouldChooseNearestNodeAsSyncSourceWhenSecondaryAndChainin
     hbResp.setTerm(1);
     hbResp.setConfigVersion(2);
     hbResp.setConfigTerm(1);
+    hbResp.setSetName("mySet");
 
     const OpTime lastAppliedOpTime = OpTime(Timestamp(50, 0), 1);
     const auto now = getNet()->now();
@@ -8136,6 +8141,7 @@ TEST_F(ReplCoordTest, ShouldChoosePrimaryAsSyncSourceWhenSecondaryAndChainingNot
     hbResp.setTerm(1);
     hbResp.setConfigVersion(2);
     hbResp.setConfigTerm(1);
+    hbResp.setSetName("mySet");
 
     const OpTime lastAppliedOpTime = OpTime(Timestamp(50, 0), 1);
     const auto now = getNet()->now();
@@ -8195,7 +8201,7 @@ TEST_F(ReplCoordTest, ShouldChooseNearestNodeAsSyncSourceWhenPrimaryAndChainingA
     hbResp.setTerm(1);
     hbResp.setConfigVersion(2);
     hbResp.setConfigTerm(1);
-
+    hbResp.setSetName("mySet");
     const OpTime lastAppliedOpTime = OpTime(Timestamp(50, 0), 1);
     const auto now = getNet()->now();
     hbResp.setAppliedOpTimeAndWallTime({lastAppliedOpTime, now});

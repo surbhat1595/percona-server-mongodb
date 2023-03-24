@@ -126,7 +126,7 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
     ShardId donorShardId,
     ChunkManager sourceChunkMgr,
     ReshardingMetrics* metrics,
-    ReshardingMetricsNew* metricsNew)
+    ReshardingOplogApplierMetrics* applierMetrics)
     : _outputNss(std::move(outputNss)),
       _allStashNss(std::move(allStashNss)),
       _myStashIdx(myStashIdx),
@@ -134,7 +134,7 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
       _donorShardId(std::move(donorShardId)),
       _sourceChunkMgr(std::move(sourceChunkMgr)),
       _metrics(metrics),
-      _metricsNew(metricsNew) {}
+      _applierMetrics(applierMetrics) {}
 
 Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
                                                        const repl::OplogEntry& op) const {
@@ -175,21 +175,21 @@ Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
                     _applyInsert_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
                     if (ShardingDataTransformMetrics::isEnabled()) {
-                        _metricsNew->onInsertApplied();
+                        _applierMetrics->onInsertApplied();
                     }
                     break;
                 case repl::OpTypeEnum::kUpdate:
                     _applyUpdate_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
                     if (ShardingDataTransformMetrics::isEnabled()) {
-                        _metricsNew->onUpdateApplied();
+                        _applierMetrics->onUpdateApplied();
                     }
                     break;
                 case repl::OpTypeEnum::kDelete:
                     _applyDelete_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
                     if (ShardingDataTransformMetrics::isEnabled()) {
-                        _metricsNew->onDeleteApplied();
+                        _applierMetrics->onDeleteApplied();
                     }
                     break;
                 default:
@@ -271,6 +271,10 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
         UpdateResult ur = update(opCtx, db, request);
         invariant(ur.numMatched != 0);
 
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            _applierMetrics->onWriteToStashCollections();
+        }
+
         return;
     }
 
@@ -311,6 +315,10 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
     // and insert the contents of 'op' to the stash collection.
     uassertStatusOK(stashColl->insertDocument(
         opCtx, InsertStatement(oField), nullptr /* nullOpDebug */, false /* fromMigrate */));
+
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _applierMetrics->onWriteToStashCollections();
+    }
 }
 
 void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCtx,
@@ -363,6 +371,10 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
         UpdateResult ur = update(opCtx, db, request);
 
         invariant(ur.numMatched != 0);
+
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            _applierMetrics->onWriteToStashCollections();
+        }
 
         return;
     }
@@ -437,6 +449,11 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
     if (!stashCollDoc.isEmpty()) {
         auto nDeleted = deleteObjects(opCtx, stashColl, _myStashNss, idQuery, true /* justOne */);
         invariant(nDeleted != 0);
+
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            _applierMetrics->onWriteToStashCollections();
+        }
+
         return;
     }
 
@@ -520,6 +537,11 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
                                                           boost::none /* verbosity */));
             BSONObj res;
             auto state = exec->getNext(&res, nullptr);
+
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _applierMetrics->onWriteToStashCollections();
+            }
+
             if (PlanExecutor::ADVANCED == state) {
                 // We matched a document and deleted it, so break.
                 doc = std::move(res);

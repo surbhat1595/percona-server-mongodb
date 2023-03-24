@@ -791,24 +791,23 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     // for workloads where updates increase the size of documents.
     ss << "split_pct=90,";
     ss << "leaf_value_max=64MB,";
-    if (TestingProctor::instance().isEnabled()) {
-        if (nss.isOplog()) {
-            // For the above clauses we do not assert any particular `write_timestamp_usage`. In
-            // particular for the oplog, WT removes all timestamp information. There's nothing in
-            // MDB's control to assert against.
-        } else if (
-            // Side table drains are not timestamped.
-            ident.startsWith("internal-") ||
-            // TODO (SERVER-60753): Remove special handling for index build during recovery. This
-            // includes the following _mdb_catalog ident.
-            nss == NamespaceString::kIndexBuildEntryNamespace || ident.startsWith("_mdb_catalog")) {
-            ss << "write_timestamp_usage=mixed_mode,";
-        } else {
-            ss << "write_timestamp_usage=ordered,";
-        }
-        ss << "assert=(write_timestamp=on),";
-        ss << "verbose=[write_timestamp],";
+
+    if (nss.isOplog()) {
+        // For the above clauses we do not assert any particular `write_timestamp_usage`. In
+        // particular for the oplog, WT removes all timestamp information. There's nothing in
+        // MDB's control to assert against.
+    } else if (
+        // Side table drains are not timestamped.
+        ident.startsWith("internal-") ||
+        // TODO (SERVER-60753): Remove special handling for index build during recovery. This
+        // includes the following _mdb_catalog ident.
+        nss == NamespaceString::kIndexBuildEntryNamespace || ident.startsWith("_mdb_catalog")) {
+        ss << "write_timestamp_usage=mixed_mode,";
+    } else {
+        ss << "write_timestamp_usage=ordered,";
     }
+    ss << "assert=(write_timestamp=on),";
+    ss << "verbose=[write_timestamp],";
 
     ss << "checksum=on,";
     if (wiredTigerGlobalOptions.useCollectionPrefixCompression) {
@@ -928,9 +927,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
         }
     }
 
-    if (!params.isReadOnly) {
-        uassertStatusOK(WiredTigerUtil::setTableLogging(ctx, _uri, _isLogged));
-    }
+    uassertStatusOK(WiredTigerUtil::setTableLogging(ctx, _uri, _isLogged));
 
     if (_isOplog) {
         invariant(_keyFormat == KeyFormat::Long);
@@ -1007,14 +1004,10 @@ void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
 }
 
 void WiredTigerRecordStore::postConstructorInit(OperationContext* opCtx) {
-    // When starting up with recoverFromOplogAsStandalone=true, the readOnly flag is initially set
-    // to false to allow oplog recovery to run and perform its necessary writes. After recovery is
-    // complete, the readOnly flag gets flipped to true. Because of this subtlety, we avoid
-    // calculating the oplog stones when recoverFromOplogAsStandalone=true as the RecordStore
-    // construction for the oplog happens before the readOnly flag gets flipped to true.
-    if (NamespaceString::oplog(ns()) &&
-        !(storageGlobalParams.repair || storageGlobalParams.readOnly ||
-          repl::ReplSettings::shouldRecoverFromOplogAsStandalone())) {
+    // If the server was started in read-only mode, skip calculating the oplog stones. The
+    // OplogCapMaintainerThread does not get started in this instance.
+    if (NamespaceString::oplog(ns()) && opCtx->getServiceContext()->userWritesAllowed() &&
+        !storageGlobalParams.repair) {
         _oplogStones = std::make_shared<OplogStones>(opCtx, this);
     }
 

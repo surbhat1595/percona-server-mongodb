@@ -41,6 +41,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/resharding/resharding_metrics_helpers.h"
 #include "mongo/db/s/scoped_operation_completion_sharding_actions.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_state.h"
@@ -254,6 +255,11 @@ public:
             .isOK();
     }
 
+    void handleReshardingCriticalSectionMetrics(OperationContext* opCtx,
+                                                const StaleConfigInfo& se) const noexcept override {
+        resharding_metrics::onCriticalSectionError(opCtx, se);
+    }
+
     // The refreshDatabase, refreshCollection, and refreshCatalogCache methods may have modified the
     // locker state, in particular the flags which say if the operation took a write lock or shared
     // lock.  This will cause mongod to perhaps erroneously check for write concern when no writes
@@ -263,7 +269,7 @@ public:
         // It is necessary to lock the client to change the Locker on the OperationContext.
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         invariant(!opCtx->lockState()->isLocked());
-        opCtx->swapLockState(std::make_unique<LockerImpl>(), lk);
+        opCtx->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()), lk);
     }
 
     std::unique_ptr<PolymorphicScoped> scopedOperationCompletionShardingActions(

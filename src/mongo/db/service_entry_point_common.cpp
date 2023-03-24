@@ -77,6 +77,7 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/resharding/resharding_metrics_helpers.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/transaction_coordinator_factory.h"
@@ -122,6 +123,7 @@ MONGO_FAIL_POINT_DEFINE(waitAfterNewStatementBlocksBehindOpenInternalTransaction
 MONGO_FAIL_POINT_DEFINE(waitAfterCommandFinishesExecution);
 MONGO_FAIL_POINT_DEFINE(failWithErrorCodeInRunCommand);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSessionCheckOut);
+MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 
@@ -861,6 +863,7 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
     hangBeforeSessionCheckOut.pauseWhileSet();
     _sessionTxnState = std::make_unique<MongoDOperationContextSession>(opCtx);
     _txnParticipant.emplace(TransactionParticipant::get(opCtx));
+    hangAfterSessionCheckOut.pauseWhileSet();
 
     // Used for waiting for an in-progress transaction to transition out of the conflicting state.
     auto waitForInProgressTxn = [](OperationContext* opCtx, auto& stateTransitionFuture) {
@@ -1686,6 +1689,8 @@ Future<void> ExecCommandDatabase::_commandExec() {
                 !_refreshedCollection) {
                 if (auto sce = s.extraInfo<StaleConfigInfo>()) {
                     if (sce->getCriticalSectionSignal()) {
+                        _execContext->behaviors->handleReshardingCriticalSectionMetrics(opCtx,
+                                                                                        *sce);
                         // The shard is in a critical section, so we cannot retry locally
                         OperationShardingState::waitForCriticalSectionToComplete(
                             opCtx, *sce->getCriticalSectionSignal())
@@ -2098,9 +2103,10 @@ std::unique_ptr<HandleRequest::OpRunner> HandleRequest::makeOpRunner() {
         case dbQuery:
             if (!executionContext->nsString().isCommand())
                 return std::make_unique<QueryOpRunner>(this);
-            // FALLTHROUGH: it's a query containing a command. Ideally, we'd like to let through
-            // only hello|isMaster commands but at this point the command hasn't been parsed yet, so
-            // we don't know what it is.
+            // Fallthrough because it's a query containing a command. Ideally, we'd like to let
+            // through only hello|isMaster commands but at this point the command hasn't been parsed
+            // yet, so we don't know what it is.
+            [[fallthrough]];
         case dbMsg:
             return std::make_unique<CommandOpRunner>(this);
         case dbGetMore:
@@ -2178,7 +2184,7 @@ void HandleRequest::completeOperation(DbResponse& response) {
             // TODO SERVER-26825: Fix race condition where fsyncLock is acquired post
             // lockedForWriting() call but prior to profile collection lock acquisition.
             LOGV2_DEBUG(21972, 1, "Note: not profiling because doing fsync+lock");
-        } else if (storageGlobalParams.readOnly) {
+        } else if (opCtx->readOnly()) {
             LOGV2_DEBUG(21973, 1, "Note: not profiling because server is read-only");
         } else {
             invariant(!opCtx->lockState()->inAWriteUnitOfWork());

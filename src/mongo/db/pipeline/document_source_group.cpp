@@ -211,6 +211,7 @@ DocumentSource::GetNextResult DocumentSourceGroup::getNextSpilled() {
         switch (numAccumulators) {  // mirrors switch in spill()
             case 1:                 // Single accumulators serialize as a single Value.
                 _currentAccumulators[0]->process(_firstPartOfNextGroup.second, true);
+                [[fallthrough]];
             case 0:  // No accumulators so no Values.
                 break;
             default: {  // Multiple accumulators serialize as an array of Values.
@@ -609,7 +610,7 @@ MONGO_COMPILER_NOINLINE DocumentSource::GetNextResult DocumentSourceGroup::initi
             }
         }
 
-        if (kDebugBuild && !storageGlobalParams.readOnly) {
+        if (kDebugBuild && !pExpCtx->opCtx->readOnly()) {
             // In debug mode, spill every time we have a duplicate id to stress merge logic.
             if (!inserted &&           // is a dup
                 !pExpCtx->inMongos &&  // can't spill to disk in mongos

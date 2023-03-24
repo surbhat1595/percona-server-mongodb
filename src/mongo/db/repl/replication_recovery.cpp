@@ -46,6 +46,7 @@
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_interface_local.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
@@ -363,16 +364,6 @@ void ReplicationRecoveryImpl::recoverFromOplogAsStandalone(OperationContext* opC
     if (!_duringInitialSync) {
         // Initial sync will reconstruct prepared transactions when it is completely done.
         reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
-
-        // Two-phase index builds are built in the background, which may still be in-progress after
-        // recovering from the oplog. To prevent crashing the server, skip enabling read-only mode.
-        if (IndexBuildsCoordinator::get(opCtx)->noIndexBuildInProgress()) {
-            LOGV2_WARNING(21558,
-                          "Setting mongod to readOnly mode as a result of specifying "
-                          "'recoverFromOplogAsStandalone'");
-
-            storageGlobalParams.readOnly = true;
-        }
     }
 }
 
@@ -470,6 +461,12 @@ void ReplicationRecoveryImpl::recoverFromOplog(OperationContext* opCtx,
     _truncateOplogIfNeededAndThenClearOplogTruncateAfterPoint(opCtx, &stableTimestamp);
 
     hangAfterOplogTruncationInRollback.pauseWhileSet();
+
+    // Truncation may need to adjust the initialDataTimestamp so we let it complete first.
+    if (!isRollbackRecovery) {
+        ReplicaSetAwareServiceRegistry::get(getGlobalServiceContext())
+            .onInitialDataAvailable(opCtx, true /* isMajorityDataAvailable */);
+    }
 
     auto topOfOplogSW = _getTopOfOplog(opCtx);
     if (topOfOplogSW.getStatus() == ErrorCodes::CollectionIsEmpty ||

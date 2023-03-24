@@ -36,7 +36,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
-#include "mongo/db/s/resharding/resharding_metrics_new.h"
+#include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/shard_id.h"
@@ -60,6 +60,9 @@ namespace executor {
 class TaskExecutor;
 
 }  // namespace executor
+
+using ReshardingApplierMetricsMap =
+    std::map<ShardId, std::unique_ptr<ReshardingOplogApplierMetrics>>;
 
 /**
  * Manages the full sequence of data replication in resharding on the recipient.
@@ -140,6 +143,7 @@ public:
         OperationContext* opCtx,
         ReshardingMetrics* metrics,
         ReshardingMetricsNew* metricsNew,
+        ReshardingApplierMetricsMap* applierMetricsMap,
         CommonReshardingMetadata metadata,
         const std::vector<DonorShardFetchTimestamp>& donorShards,
         Timestamp cloneTimestamp,
@@ -195,6 +199,7 @@ public:
 private:
     static std::unique_ptr<ReshardingCollectionCloner> _makeCollectionCloner(
         ReshardingMetrics* metrics,
+        ReshardingMetricsNew* metricsNew,
         const CommonReshardingMetadata& metadata,
         const ShardId& myShardId,
         Timestamp cloneTimestamp);
@@ -206,6 +211,7 @@ private:
     static std::vector<std::unique_ptr<ReshardingOplogFetcher>> _makeOplogFetchers(
         OperationContext* opCtx,
         ReshardingMetrics* metrics,
+        ReshardingMetricsNew* metricsNew,
         const CommonReshardingMetadata& metadata,
         const std::vector<DonorShardFetchTimestamp>& donorShards,
         const ShardId& myShardId);
@@ -215,7 +221,7 @@ private:
     static std::vector<std::unique_ptr<ReshardingOplogApplier>> _makeOplogAppliers(
         OperationContext* opCtx,
         ReshardingMetrics* metrics,
-        ReshardingMetricsNew* metricsNew,
+        ReshardingApplierMetricsMap* applierMetricsMap,
         const CommonReshardingMetadata& metadata,
         const std::vector<DonorShardFetchTimestamp>& donorShards,
         Timestamp cloneTimestamp,

@@ -377,17 +377,17 @@ private:
 };
 
 /**
- * Creates a new TransactionWithRetries object that runs a transaction on the
+ * Creates a new SyncTransactionWithRetries object that runs a transaction on the
  * sharding fixed task executor.
  */
-std::shared_ptr<txn_api::TransactionWithRetries> getTransactionWithRetriesForMongoS(
+std::shared_ptr<txn_api::SyncTransactionWithRetries> getTransactionWithRetriesForMongoS(
     OperationContext* opCtx);
 
 /**
- * Creates a new TransactionWithRetries object that runs a transaction on a
+ * Creates a new SyncTransactionWithRetries object that runs a transaction on a
  * thread pool local to mongod.
  */
-std::shared_ptr<txn_api::TransactionWithRetries> getTransactionWithRetriesForMongoD(
+std::shared_ptr<txn_api::SyncTransactionWithRetries> getTransactionWithRetriesForMongoD(
     OperationContext* opCtx);
 
 /**
@@ -437,10 +437,10 @@ write_ops::FindAndModifyCommandRequest processFindAndModifyExplain(
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
 /**
- * Callback function to get a TransactionWithRetries with the appropiate Executor
+ * Callback function to get a SyncTransactionWithRetries with the appropiate Executor
  */
 using GetTxnCallback =
-    std::function<std::shared_ptr<txn_api::TransactionWithRetries>(OperationContext*)>;
+    std::function<std::shared_ptr<txn_api::SyncTransactionWithRetries>(OperationContext*)>;
 
 std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     OperationContext* opCtx,
@@ -464,6 +464,19 @@ StatusWith<ReplyType> processFindAndModifyRequest(
     GetTxnCallback getTxns,
     ProcessFindAndModifyCallback<ReplyType> processCallback = processFindAndModify);
 
+extern template StatusWith<write_ops::FindAndModifyCommandReply>
+processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
+    OperationContext* opCtx,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
+    GetTxnCallback getTxns,
+    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandReply> processCallback);
+
+extern template StatusWith<write_ops::FindAndModifyCommandRequest>
+processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
+    OperationContext* opCtx,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
+    GetTxnCallback getTxns,
+    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandRequest> processCallback);
 
 write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                                             const write_ops::UpdateCommandRequest& updateRequest,

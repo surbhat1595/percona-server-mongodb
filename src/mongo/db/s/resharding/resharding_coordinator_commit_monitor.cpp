@@ -87,12 +87,14 @@ boost::optional<Milliseconds> extractOperationRemainingTime(const BSONObj& obj) 
 }  // namespace
 
 CoordinatorCommitMonitor::CoordinatorCommitMonitor(
+    std::shared_ptr<ReshardingMetricsNew> metricsNew,
     NamespaceString ns,
     std::vector<ShardId> recipientShards,
     CoordinatorCommitMonitor::TaskExecutorPtr executor,
     CancellationToken cancelToken,
     Milliseconds maxDelayBetweenQueries)
-    : _ns(std::move(ns)),
+    : _metricsNew{std::move(metricsNew)},
+      _ns(std::move(ns)),
       _recipientShards(std::move(recipientShards)),
       _executor(std::move(executor)),
       _cancelToken(std::move(cancelToken)),
@@ -209,6 +211,10 @@ ExecutorFuture<void> CoordinatorCommitMonitor::_makeFuture() const {
             auto metrics = ReshardingMetrics::get(cc().getServiceContext());
             metrics->setMinRemainingOperationTime(remainingTimes.min);
             metrics->setMaxRemainingOperationTime(remainingTimes.max);
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _metricsNew->setCoordinatorHighEstimateRemainingTimeMillis(remainingTimes.max);
+                _metricsNew->setCoordinatorLowEstimateRemainingTimeMillis(remainingTimes.min);
+            }
 
             // Check if all recipient shards are within the commit threshold.
             if (remainingTimes.max <= _threshold)

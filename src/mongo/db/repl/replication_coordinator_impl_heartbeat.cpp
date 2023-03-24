@@ -220,6 +220,17 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
             "target"_attr = target,
             "response"_attr = resp);
 
+        if (responseStatus.isOK() && _rsConfig.isInitialized() &&
+            _rsConfig.getReplSetName() != hbResponse.getReplicaSetName()) {
+            responseStatus =
+                Status(ErrorCodes::InconsistentReplicaSetNames,
+                       str::stream()
+                           << "replica set names do not match, ours: " << _rsConfig.getReplSetName()
+                           << "; remote node's: " << hbResponse.getReplicaSetName());
+            // Ignore metadata.
+            replMetadata = responseStatus;
+        }
+
         // Reject heartbeat responses (and metadata) from nodes with mismatched replica set IDs.
         // It is problematic to perform this check in the heartbeat reconfiguring logic because it
         // is possible for two mismatched replica sets to have the same replica set name and
@@ -849,9 +860,11 @@ void ReplicationCoordinatorImpl::_heartbeatReconfigStore(
                 auto opCtx = cc().makeOperationContext();
                 // Initializing minvalid is not allowed to be interrupted.  Make sure it
                 // can't be interrupted by a storage change by taking the global lock first.
-                Lock::GlobalLock lk(opCtx.get(), MODE_IX);
-                _replicationProcess->getConsistencyMarkers()->initializeMinValidDocument(
-                    opCtx.get());
+                {
+                    Lock::GlobalLock lk(opCtx.get(), MODE_IX);
+                    _replicationProcess->getConsistencyMarkers()->initializeMinValidDocument(
+                        opCtx.get());
+                }
                 _externalState->startThreads();
                 _startDataReplication(opCtx.get());
                 break;

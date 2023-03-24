@@ -499,6 +499,10 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::
                 cloneDetails, (*executor)->now() + _minimumOperationDuration, factory);
             _metrics()->setDocumentsToCopy(cloneDetails.approxDocumentsToCopy,
                                            cloneDetails.approxBytesToCopy);
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _metricsNew->setDocumentsToCopyCounts(cloneDetails.approxDocumentsToCopy,
+                                                      cloneDetails.approxBytesToCopy);
+            }
         });
 }
 
@@ -547,9 +551,21 @@ ReshardingRecipientService::RecipientStateMachine::_makeDataReplication(Operatio
     auto sourceChunkMgr =
         _externalState->getShardedCollectionRoutingInfo(opCtx, _metadata.getSourceNss());
 
+    // The metrics map can already be pre-populated if it was recovered from disk.
+    if (_applierMetricsMap.empty()) {
+        for (const auto& donor : _donorShards) {
+            _applierMetricsMap.emplace(
+                donor.getShardId(),
+                std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), boost::none));
+        }
+    } else {
+        invariant(_applierMetricsMap.size() == _donorShards.size());
+    }
+
     return _dataReplicationFactory(opCtx,
                                    _metrics(),
                                    _metricsNew.get(),
+                                   &_applierMetricsMap,
                                    _metadata,
                                    _donorShards,
                                    *_cloneTimestamp,
@@ -800,6 +816,9 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionToCloning(
     newRecipientCtx.setState(RecipientStateEnum::kCloning);
     _transitionState(std::move(newRecipientCtx), boost::none, boost::none, factory);
     _metrics()->startCopyingDocuments(getCurrentTime());
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->onCopyingBegin();
+    }
 }
 
 void ReshardingRecipientService::RecipientStateMachine::_transitionToApplying(
@@ -810,6 +829,10 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionToApplying(
     auto currentTime = getCurrentTime();
     _metrics()->endCopyingDocuments(currentTime);
     _metrics()->startApplyingOplogEntries(currentTime);
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->onCopyingEnd();
+        _metricsNew->onApplyingBegin();
+    }
 }
 
 void ReshardingRecipientService::RecipientStateMachine::_transitionToStrictConsistency(
@@ -819,6 +842,9 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionToStrictConsi
     _transitionState(std::move(newRecipientCtx), boost::none, boost::none, factory);
     auto currentTime = getCurrentTime();
     _metrics()->endApplyingOplogEntries(currentTime);
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->onApplyingEnd();
+    }
 }
 
 void ReshardingRecipientService::RecipientStateMachine::_transitionToError(
@@ -1096,6 +1122,8 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
     reshardingOpCtxKilledWhileRestoringMetrics.execute(
         [&opCtx](const BSONObj& data) { opCtx->markKilled(); });
 
+    std::vector<std::pair<ShardId, boost::optional<ReshardingOplogApplierProgress>>>
+        progressDocList;
     for (const auto& donor : _donorShards) {
         {
             AutoGetCollection oplogBufferColl(
@@ -1121,12 +1149,38 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
                     result);
 
                 if (!result.isEmpty()) {
-                    oplogEntriesApplied +=
-                        result.getField(ReshardingOplogApplierProgress::kNumEntriesAppliedFieldName)
-                            .Long();
+                    auto progressDoc = ReshardingOplogApplierProgress::parse(
+                        IDLParserErrorContext("resharding-recipient-service-progress-doc"), result);
+                    oplogEntriesApplied += progressDoc.getNumEntriesApplied();
+
+                    if (ShardingDataTransformMetrics::isEnabled()) {
+                        progressDocList.emplace_back(donor.getShardId(), progressDoc);
+                    }
                 }
+            } else {
+                progressDocList.emplace_back(donor.getShardId(), boost::none);
             }
         }
+    }
+
+    // Restore stats here where interrupts will never occur, this is to ensure we will only update
+    // the metrics only once.
+    for (const auto& shardIdDocPair : progressDocList) {
+        const auto& shardId = shardIdDocPair.first;
+        const auto& progressDoc = shardIdDocPair.second;
+
+        if (!progressDoc) {
+            _applierMetricsMap.emplace(
+                shardId,
+                std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), boost::none));
+            continue;
+        }
+
+        _metricsNew->accumulateFrom(*progressDoc);
+
+        auto applierMetrics =
+            std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), progressDoc);
+        _applierMetricsMap.emplace(shardId, std::move(applierMetrics));
     }
 
     _metrics()->restoreForCurrentOp(

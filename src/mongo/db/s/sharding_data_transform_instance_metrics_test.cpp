@@ -85,6 +85,43 @@ public:
             &_cumulativeMetrics,
             std::move(mock));
     }
+
+    using MetricsMutator = std::function<void(ShardingDataTransformInstanceMetrics*)>;
+    void runTimeReportTest(const std::string& testName,
+                           const std::initializer_list<Role>& roles,
+                           const std::string& timeField,
+                           const MetricsMutator& beginTimedSection,
+                           const MetricsMutator& endTimedSection) {
+        constexpr auto kIncrement = Milliseconds(5000);
+        const auto kIncrementInSeconds = durationCount<Seconds>(kIncrement);
+        for (const auto& role : roles) {
+            LOGV2(6437400, "", "TestName"_attr = testName, "Role"_attr = role);
+            auto uuid = UUID::gen();
+            const auto& clock = getClockSource();
+            auto metrics = std::make_unique<ShardingDataTransformInstanceMetrics>(
+                uuid, kTestCommand, kTestNamespace, role, clock->now(), clock, &_cumulativeMetrics);
+
+            // Reports 0 before timed section entered.
+            clock->advance(kIncrement);
+            auto report = metrics->reportForCurrentOp();
+            ASSERT_EQ(report.getIntField(timeField), 0);
+
+            // Reports time so far during critical section.
+            beginTimedSection(metrics.get());
+            clock->advance(kIncrement);
+            report = metrics->reportForCurrentOp();
+            ASSERT_EQ(report.getIntField(timeField), kIncrementInSeconds);
+            clock->advance(kIncrement);
+            report = metrics->reportForCurrentOp();
+            ASSERT_EQ(report.getIntField(timeField), kIncrementInSeconds * 2);
+
+            // Still reports total time after critical section ends.
+            endTimedSection(metrics.get());
+            clock->advance(kIncrement);
+            report = metrics->reportForCurrentOp();
+            ASSERT_EQ(report.getIntField(timeField), kIncrementInSeconds * 2);
+        }
+    }
 };
 
 TEST_F(ShardingDataTransformInstanceMetricsTest, RegisterAndDeregisterMetrics) {
@@ -178,7 +215,6 @@ TEST_F(ShardingDataTransformInstanceMetricsTest, OnDeleteAppliedShouldIncrementD
     ASSERT_EQ(report.getIntField("deletesApplied"), 1);
 }
 
-
 TEST_F(ShardingDataTransformInstanceMetricsTest,
        OnOplogsEntriesAppliedShouldIncrementOplogsEntriesApplied) {
     auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
@@ -189,6 +225,150 @@ TEST_F(ShardingDataTransformInstanceMetricsTest,
 
     report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("oplogEntriesApplied"), 100);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, DonorIncrementWritesDuringCriticalSection) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kDonor);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("countWritesDuringCriticalSection"), 0);
+    metrics->onWriteDuringCriticalSection();
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("countWritesDuringCriticalSection"), 1);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, DonorIncrementReadsDuringCriticalSection) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kDonor);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("countReadsDuringCriticalSection"), 0);
+    metrics->onReadDuringCriticalSection();
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("countReadsDuringCriticalSection"), 1);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, RecipientIncrementFetchedOplogEntries) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("oplogEntriesFetched"), 0);
+    metrics->onOplogEntriesFetched(50);
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("oplogEntriesFetched"), 50);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, CurrentOpReportsCriticalSectionTime) {
+    runTimeReportTest(
+        "CurrentOpReportsCriticalSectionTime",
+        {Role::kDonor, Role::kCoordinator},
+        "totalCriticalSectionTimeElapsedSecs",
+        [](ShardingDataTransformInstanceMetrics* metrics) { metrics->onCriticalSectionBegin(); },
+        [](ShardingDataTransformInstanceMetrics* metrics) { metrics->onCriticalSectionEnd(); });
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, RecipientSetsDocumentsAndBytesToCopy) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("approxDocumentsToCopy"), 0);
+    ASSERT_EQ(report.getIntField("approxBytesToCopy"), 0);
+    metrics->setDocumentsToCopyCounts(5, 1000);
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("approxDocumentsToCopy"), 5);
+    ASSERT_EQ(report.getIntField("approxBytesToCopy"), 1000);
+
+    metrics->setDocumentsToCopyCounts(3, 750);
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("approxDocumentsToCopy"), 3);
+    ASSERT_EQ(report.getIntField("approxBytesToCopy"), 750);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, RecipientIncrementsDocumentsAndBytesCopied) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("documentsCopied"), 0);
+    ASSERT_EQ(report.getIntField("bytesCopied"), 0);
+    metrics->onDocumentsCopied(5, 1000);
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("documentsCopied"), 5);
+    ASSERT_EQ(report.getIntField("bytesCopied"), 1000);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, RecipientReportsRemainingTime) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+    const auto& clock = getClockSource();
+    constexpr auto kIncrement = Milliseconds(5000);
+    constexpr auto kOpsPerIncrement = 25;
+    const auto kIncrementSecs = durationCount<Seconds>(kIncrement);
+    const auto kExpectedTotal = kIncrementSecs * 8;
+    metrics->setDocumentsToCopyCounts(0, kOpsPerIncrement * 4);
+    metrics->onOplogEntriesFetched(kOpsPerIncrement * 4);
+
+    // Before cloning.
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"), 0);
+
+    // During cloning.
+    metrics->onCopyingBegin();
+    metrics->onDocumentsCopied(0, kOpsPerIncrement);
+    clock->advance(kIncrement);
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"),
+              kExpectedTotal - kIncrementSecs);
+
+    metrics->onDocumentsCopied(0, kOpsPerIncrement * 2);
+    clock->advance(kIncrement * 2);
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"),
+              kExpectedTotal - (kIncrementSecs * 3));
+
+    // During applying.
+    metrics->onDocumentsCopied(0, kOpsPerIncrement);
+    clock->advance(kIncrement);
+    metrics->onCopyingEnd();
+    metrics->onApplyingBegin();
+    metrics->onOplogEntriesApplied(kOpsPerIncrement);
+    clock->advance(kIncrement);
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"),
+              kExpectedTotal - (kIncrementSecs * 5));
+
+    metrics->onOplogEntriesApplied(kOpsPerIncrement * 2);
+    clock->advance(kIncrement * 2);
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"),
+              kExpectedTotal - (kIncrementSecs * 7));
+
+    // Done.
+    metrics->onOplogEntriesApplied(kOpsPerIncrement);
+    clock->advance(kIncrement);
+    metrics->onApplyingEnd();
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"), 0);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, CurrentOpReportsCopyingTime) {
+    runTimeReportTest(
+        "CurrentOpReportsCopyingTime",
+        {Role::kRecipient, Role::kCoordinator},
+        "totalCopyTimeElapsedSecs",
+        [](ShardingDataTransformInstanceMetrics* metrics) { metrics->onCopyingBegin(); },
+        [](ShardingDataTransformInstanceMetrics* metrics) { metrics->onCopyingEnd(); });
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, CurrentOpReportsApplyingTime) {
+    runTimeReportTest(
+        "CurrentOpReportsApplyingTime",
+        {Role::kRecipient, Role::kCoordinator},
+        "totalApplyTimeElapsedSecs",
+        [](ShardingDataTransformInstanceMetrics* metrics) { metrics->onApplyingBegin(); },
+        [](ShardingDataTransformInstanceMetrics* metrics) { metrics->onApplyingEnd(); });
 }
 
 TEST_F(ShardingDataTransformInstanceMetricsTest, CurrentOpReportsRunningTime) {
@@ -205,6 +385,41 @@ TEST_F(ShardingDataTransformInstanceMetricsTest, CurrentOpReportsRunningTime) {
                                                                           &_cumulativeMetrics);
     auto report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("totalOperationTimeElapsedSecs"), kTimeElapsed);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest, OnWriteToStasheddShouldIncrementCurOpFields) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kRecipient);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("countWritesToStashCollections"), 0);
+    metrics->onWriteToStashedCollections();
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("countWritesToStashCollections"), 1);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest,
+       SetLowestOperationTimeShouldBeReflectedInCurrentOp) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kCoordinator);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("allShardsLowestRemainingOperationTimeEstimatedSecs"), 0);
+    metrics->setCoordinatorLowEstimateRemainingTimeMillis(Milliseconds(2000));
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("allShardsLowestRemainingOperationTimeEstimatedSecs"), 2);
+}
+
+TEST_F(ShardingDataTransformInstanceMetricsTest,
+       SetHighestOperationTimeShouldBeReflectedInCurrentOp) {
+    auto metrics = createInstanceMetrics(UUID::gen(), Role::kCoordinator);
+
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("allShardsHighestRemainingOperationTimeEstimatedSecs"), 0);
+    metrics->setCoordinatorHighEstimateRemainingTimeMillis(Milliseconds(12000));
+
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("allShardsHighestRemainingOperationTimeEstimatedSecs"), 12);
 }
 
 }  // namespace

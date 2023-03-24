@@ -1161,7 +1161,7 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     _ruState = opCtx->getWriteUnitOfWork()->release();
     opCtx->setWriteUnitOfWork(nullptr);
 
-    _locker = opCtx->swapLockState(std::make_unique<LockerImpl>(), wl);
+    _locker = opCtx->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()), wl);
     // Inherit the locking setting from the original one.
     opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(
         _locker->shouldConflictWithSecondaryBatchApplication());
@@ -2698,7 +2698,11 @@ void RetryableWriteTransactionParticipantCatalog::addParticipant(
         _activeTxnNumber = *txnNumber;
         _participants.clear();
     }
-    _participants.emplace(participant._sessionId(), participant);
+    if (auto it = _participants.find(participant._sessionId()); it != _participants.end()) {
+        invariant(it->second._tp == participant._tp);
+    } else {
+        _participants.emplace(participant._sessionId(), participant);
+    }
 }
 
 void RetryableWriteTransactionParticipantCatalog::reset() {

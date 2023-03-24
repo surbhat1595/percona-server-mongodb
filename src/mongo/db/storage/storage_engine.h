@@ -68,9 +68,9 @@ public:
     /**
      * This is the minimum valid timestamp; it can be used for reads that need to see all
      * untimestamped data but no timestamped data. We cannot use 0 here because 0 means see all
-     * timestamped data.
+     * timestamped data. The high-order 4 bytes are for the seconds field in a Timestamp object.
      */
-    static const uint64_t kMinimumTimestamp = 1;
+    static const unsigned long long kMinimumTimestamp = 1ULL << 32;
 
     /**
      * When the storage engine needs to know how much oplog to preserve for the sake of active
@@ -101,8 +101,7 @@ public:
         virtual ~Factory() {}
 
         /**
-         * Return a new instance of the StorageEngine. The lockFile parameter may be null if
-         * params.readOnly is set. Caller owns the returned pointer.
+         * Return a new instance of the StorageEngine. Caller owns the returned pointer.
          */
         virtual std::unique_ptr<StorageEngine> create(
             OperationContext* opCtx,
@@ -162,13 +161,11 @@ public:
         virtual BSONObj createMetadataOptions(const StorageGlobalParams& params) const = 0;
 
         /**
-         * Returns whether the engine supports read-only mode. If read-only mode is enabled, the
-         * engine may be started on a read-only filesystem (either mounted read-only or with
-         * read-only permissions). If readOnly mode is enabled, it is undefined behavior to call
-         * methods that write data (e.g. insertRecord). This method is provided on the Factory
-         * because it must be called before the storageEngine is instantiated.
+         * Returns whether the engine supports queryable backup mode. If queryable backup mode is
+         * enabled, user writes are not permitted but internally generated writes are still
+         * permitted.
          */
-        virtual bool supportsReadOnly() const {
+        virtual bool supportsQueryableBackupMode() const {
             return false;
         }
     };

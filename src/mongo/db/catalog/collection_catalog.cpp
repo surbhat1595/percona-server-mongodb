@@ -157,6 +157,7 @@ public:
                         catalog.registerCollection(opCtx, uuid, std::move(collection));
                     });
                     // Fallthrough to the createCollection case to finish committing the collection.
+                    [[fallthrough]];
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kCreatedCollection: {
                     auto collPtr = entry.collection.get();
@@ -178,7 +179,7 @@ public:
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kReplacedViewsForDatabase: {
                     writeJobs.push_back(
-                        [dbName = entry.nss.db(),
+                        [dbName = TenantDatabaseName(boost::none, entry.nss.db()),
                          &viewsForDb = entry.viewsForDb.get()](CollectionCatalog& catalog) {
                             catalog._replaceViewsForDatabase(dbName, std::move(viewsForDb));
                         });
@@ -469,19 +470,25 @@ void CollectionCatalog::write(OperationContext* opCtx,
     write(opCtx->getServiceContext(), std::move(job));
 }
 
-Status CollectionCatalog::createView(
-    OperationContext* opCtx,
-    const NamespaceString& viewName,
-    const NamespaceString& viewOn,
-    const BSONArray& pipeline,
-    const BSONObj& collation,
-    const ViewsForDatabase::PipelineValidatorFn& pipelineValidator) const {
+Status CollectionCatalog::createView(OperationContext* opCtx,
+                                     const NamespaceString& viewName,
+                                     const NamespaceString& viewOn,
+                                     const BSONArray& pipeline,
+                                     const BSONObj& collation,
+                                     const ViewsForDatabase::PipelineValidatorFn& pipelineValidator,
+                                     const bool updateDurableViewCatalog) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    invariant(_viewsForDatabase.contains(viewName.db()));
-    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.db());
+    TenantDatabaseName tenantDbName(boost::none, viewName.db());
+    invariant(_viewsForDatabase.contains(tenantDbName));
+    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, tenantDbName);
+
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+    if (uncommittedCatalogUpdates.shouldIgnoreExternalViewChanges(viewName.db())) {
+        return Status::OK();
+    }
 
     if (viewName.db() != viewOn.db())
         return Status(ErrorCodes::BadValue,
@@ -508,7 +515,8 @@ Status CollectionCatalog::createView(
                                      pipeline,
                                      pipelineValidator,
                                      std::move(collator.getValue()),
-                                     ViewsForDatabase{viewsForDb});
+                                     ViewsForDatabase{viewsForDb},
+                                     ViewUpsertMode::kCreateView);
     }
 
     return result;
@@ -524,8 +532,9 @@ Status CollectionCatalog::modifyView(
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    invariant(_viewsForDatabase.contains(viewName.db()));
-    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.db());
+    TenantDatabaseName tenantDbName(boost::none, viewName.db());
+    invariant(_viewsForDatabase.contains(tenantDbName));
+    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, tenantDbName);
 
     if (viewName.db() != viewOn.db())
         return Status(ErrorCodes::BadValue,
@@ -550,7 +559,8 @@ Status CollectionCatalog::modifyView(
                                      pipeline,
                                      pipelineValidator,
                                      CollatorInterface::cloneCollator(viewPtr->defaultCollator()),
-                                     ViewsForDatabase{viewsForDb});
+                                     ViewsForDatabase{viewsForDb},
+                                     ViewUpsertMode::kUpdateView);
     }
 
     return result;
@@ -561,8 +571,9 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    invariant(_viewsForDatabase.contains(viewName.db()));
-    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.db());
+    TenantDatabaseName tenantDbName(boost::none, viewName.db());
+    invariant(_viewsForDatabase.contains(tenantDbName));
+    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, tenantDbName);
     viewsForDb.requireValidCatalog();
 
     // Make sure the view exists before proceeding.
@@ -597,16 +608,17 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
     return result;
 }
 
-Status CollectionCatalog::reloadViews(OperationContext* opCtx, StringData dbName) const {
+Status CollectionCatalog::reloadViews(OperationContext* opCtx,
+                                      const TenantDatabaseName& dbName) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(dbName, NamespaceString::kSystemDotViewsCollectionName), MODE_IS));
+        NamespaceString(dbName.dbName(), NamespaceString::kSystemDotViewsCollectionName), MODE_IS));
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
-    if (uncommittedCatalogUpdates.shouldIgnoreExternalViewChanges(dbName)) {
+    if (uncommittedCatalogUpdates.shouldIgnoreExternalViewChanges(dbName.dbName())) {
         return Status::OK();
     }
 
-    LOGV2_DEBUG(22546, 1, "Reloading view catalog for database", "db"_attr = dbName);
+    LOGV2_DEBUG(22546, 1, "Reloading view catalog for database", "db"_attr = dbName.toString());
 
     // Create a copy of the ViewsForDatabase instance to modify it. Reset the views for this
     // database, but preserve the DurableViewCatalog pointer.
@@ -672,9 +684,9 @@ void CollectionCatalog::dropCollection(OperationContext* opCtx, Collection* coll
 }
 
 void CollectionCatalog::onOpenDatabase(OperationContext* opCtx,
-                                       StringData dbName,
+                                       const TenantDatabaseName& dbName,
                                        ViewsForDatabase&& viewsForDb) {
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(dbName.dbName(), MODE_IS));
     uassert(ErrorCodes::AlreadyInitialized,
             str::stream() << "Database " << dbName << " is already initialized",
             _viewsForDatabase.find(dbName) == _viewsForDatabase.end());
@@ -686,7 +698,7 @@ void CollectionCatalog::onCloseDatabase(OperationContext* opCtx, TenantDatabaseN
     invariant(opCtx->lockState()->isDbLockedForMode(tenantDbName.dbName(), MODE_X));
     auto rid = ResourceId(RESOURCE_DATABASE, tenantDbName.dbName());
     removeResource(rid, tenantDbName.dbName());
-    _viewsForDatabase.erase(tenantDbName.dbName());
+    _viewsForDatabase.erase(tenantDbName);
 }
 
 void CollectionCatalog::onCloseCatalog(OperationContext* opCtx) {
@@ -947,7 +959,7 @@ boost::optional<UUID> CollectionCatalog::lookupUUIDByNSS(OperationContext* opCtx
 }
 
 void CollectionCatalog::iterateViews(OperationContext* opCtx,
-                                     StringData dbName,
+                                     const TenantDatabaseName& dbName,
                                      ViewIteratorCallback callback,
                                      ViewCatalogLookupBehavior lookupBehavior) const {
     auto viewsForDb = _getViewsForDatabase(opCtx, dbName);
@@ -968,7 +980,7 @@ void CollectionCatalog::iterateViews(OperationContext* opCtx,
 
 std::shared_ptr<const ViewDefinition> CollectionCatalog::lookupView(
     OperationContext* opCtx, const NamespaceString& ns) const {
-    auto viewsForDb = _getViewsForDatabase(opCtx, ns.db());
+    auto viewsForDb = _getViewsForDatabase(opCtx, TenantDatabaseName(boost::none, ns.db()));
     if (!viewsForDb) {
         return nullptr;
     }
@@ -990,7 +1002,7 @@ std::shared_ptr<const ViewDefinition> CollectionCatalog::lookupView(
 
 std::shared_ptr<const ViewDefinition> CollectionCatalog::lookupViewWithoutValidatingDurable(
     OperationContext* opCtx, const NamespaceString& ns) const {
-    auto viewsForDb = _getViewsForDatabase(opCtx, ns.db());
+    auto viewsForDb = _getViewsForDatabase(opCtx, TenantDatabaseName(boost::none, ns.db()));
     if (!viewsForDb) {
         return nullptr;
     }
@@ -1110,7 +1122,7 @@ CollectionCatalog::Stats CollectionCatalog::getStats() const {
 }
 
 boost::optional<ViewsForDatabase::Stats> CollectionCatalog::getViewStatsForDatabase(
-    OperationContext* opCtx, StringData dbName) const {
+    OperationContext* opCtx, const TenantDatabaseName& dbName) const {
     auto viewsForDb = _getViewsForDatabase(opCtx, dbName);
     if (!viewsForDb) {
         return boost::none;
@@ -1122,8 +1134,7 @@ CollectionCatalog::ViewCatalogSet CollectionCatalog::getViewCatalogDbNames(
     OperationContext* opCtx) const {
     ViewCatalogSet results;
     for (const auto& dbNameViewSetPair : _viewsForDatabase) {
-        // TODO (SERVER-63206): Return stored TenantDatabaseName
-        results.insert(TenantDatabaseName{boost::none, dbNameViewSetPair.first});
+        results.insert(dbNameViewSetPair.first);
     }
 
     return results;
@@ -1253,7 +1264,8 @@ void CollectionCatalog::_ensureNamespaceDoesNotExist(OperationContext* opCtx,
             throw WriteConflictException();
         }
 
-        if (auto viewsForDb = _getViewsForDatabase(opCtx, nss.db())) {
+        if (auto viewsForDb =
+                _getViewsForDatabase(opCtx, TenantDatabaseName(boost::none, nss.db()))) {
             if (viewsForDb->lookup(nss) != nullptr) {
                 LOGV2(
                     5725003,
@@ -1285,9 +1297,10 @@ void CollectionCatalog::deregisterAllCollectionsAndViews() {
     _resourceInformation.clear();
 }
 
-void CollectionCatalog::clearViews(OperationContext* opCtx, StringData dbName) const {
+void CollectionCatalog::clearViews(OperationContext* opCtx,
+                                   const TenantDatabaseName& dbName) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(dbName, NamespaceString::kSystemDotViewsCollectionName), MODE_X));
+        NamespaceString(dbName.dbName(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
     auto it = _viewsForDatabase.find(dbName);
     invariant(it != _viewsForDatabase.end());
@@ -1376,9 +1389,9 @@ void CollectionCatalog::invariantHasExclusiveAccessToCollection(OperationContext
 }
 
 boost::optional<const ViewsForDatabase&> CollectionCatalog::_getViewsForDatabase(
-    OperationContext* opCtx, StringData dbName) const {
+    OperationContext* opCtx, const TenantDatabaseName& dbName) const {
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
-    auto uncommittedViews = uncommittedCatalogUpdates.getViewsForDatabase(dbName);
+    auto uncommittedViews = uncommittedCatalogUpdates.getViewsForDatabase(dbName.dbName());
     if (uncommittedViews) {
         return uncommittedViews;
     }
@@ -1390,7 +1403,8 @@ boost::optional<const ViewsForDatabase&> CollectionCatalog::_getViewsForDatabase
     return it->second;
 }
 
-void CollectionCatalog::_replaceViewsForDatabase(StringData dbName, ViewsForDatabase&& views) {
+void CollectionCatalog::_replaceViewsForDatabase(const TenantDatabaseName& dbName,
+                                                 ViewsForDatabase&& views) {
     _viewsForDatabase[dbName] = std::move(views);
 }
 
@@ -1401,15 +1415,16 @@ Status CollectionCatalog::_createOrUpdateView(
     const BSONArray& pipeline,
     const ViewsForDatabase::PipelineValidatorFn& pipelineValidator,
     std::unique_ptr<CollatorInterface> collator,
-    ViewsForDatabase&& viewsForDb) const {
+    ViewsForDatabase&& viewsForDb,
+    ViewUpsertMode mode) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
     viewsForDb.requireValidCatalog();
 
-    // Build the BSON definition for this view to be saved in the durable view catalog. If the
-    // collation is empty, omit it from the definition altogether.
+    // Build the BSON definition for this view to be saved in the durable view catalog and/or to
+    // insert in the viewMap. If the collation is empty, omit it from the definition altogether.
     BSONObjBuilder viewDefBuilder;
     viewDefBuilder.append("_id", viewName.ns());
     viewDefBuilder.append("viewOn", viewOn.coll());
@@ -1418,25 +1433,42 @@ Status CollectionCatalog::_createOrUpdateView(
         viewDefBuilder.append("collation", collator->getSpec().toBSON());
     }
 
+    BSONObj viewDef = viewDefBuilder.obj();
     BSONObj ownedPipeline = pipeline.getOwned();
-    auto view = std::make_shared<ViewDefinition>(
+    ViewDefinition view(
         viewName.db(), viewName.coll(), viewOn.coll(), ownedPipeline, std::move(collator));
 
-    // Check that the resulting dependency graph is acyclic and within the maximum depth.
-    Status graphStatus = viewsForDb.upsertIntoGraph(opCtx, *(view.get()), pipelineValidator);
+    // If the view is already in the durable view catalog, we don't need to validate the graph. If
+    // we need to update the durable view catalog, we need to check that the resulting dependency
+    // graph is acyclic and within the maximum depth.
+    const bool viewGraphNeedsValidation = mode != ViewUpsertMode::kAlreadyDurableView;
+    Status graphStatus =
+        viewsForDb.upsertIntoGraph(opCtx, view, pipelineValidator, viewGraphNeedsValidation);
     if (!graphStatus.isOK()) {
         return graphStatus;
     }
 
-    viewsForDb.durable->upsert(opCtx, viewName, viewDefBuilder.obj());
+    if (mode != ViewUpsertMode::kAlreadyDurableView) {
+        viewsForDb.durable->upsert(opCtx, viewName, viewDef);
+    }
 
-    viewsForDb.viewMap.clear();
     viewsForDb.valid = false;
-    viewsForDb.viewGraphNeedsRefresh = true;
-    viewsForDb.stats = {};
+    auto res = [&] {
+        switch (mode) {
+            case ViewUpsertMode::kCreateView:
+            case ViewUpsertMode::kAlreadyDurableView:
+                return viewsForDb.insert(opCtx, viewDef);
+            case ViewUpsertMode::kUpdateView:
+                viewsForDb.viewMap.clear();
+                viewsForDb.viewGraphNeedsRefresh = true;
+                viewsForDb.stats = {};
 
-    // Reload the view catalog with the changes applied.
-    auto res = viewsForDb.reload(opCtx);
+                // Reload the view catalog with the changes applied.
+                return viewsForDb.reload(opCtx);
+        }
+        MONGO_UNREACHABLE;
+    }();
+
     if (res.isOK()) {
         auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
         uncommittedCatalogUpdates.addView(opCtx, viewName);

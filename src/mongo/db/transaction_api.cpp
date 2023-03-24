@@ -36,6 +36,7 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/internal_session_pool.h"
@@ -47,6 +48,7 @@
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
@@ -57,6 +59,8 @@
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/stdx/future.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/util/cancellation.h"
+#include "mongo/util/future_util.h"
 
 // TODO SERVER-65395: Remove failpoint when fle2 tests can reliably support internal transaction
 // retry limit.
@@ -64,42 +68,49 @@ MONGO_FAIL_POINT_DEFINE(skipTransactionApiRetryCheckInHandleError);
 
 namespace mongo::txn_api {
 
-namespace {
-
-/**
- * Accepts a callback that returns a future. Yields the ResourceYielder before constructing and
- * waiting on the future and then unyields before returning the ready future's result. Unyield will
- * always be called if yield is successful. Errors from the callback are returned if it and unyield
- * return errors.
- *
- * Notably, the futures are constructed after yielding so a future made with an inline executor
- * will still run after the yield.
- */
-template <typename Callback>
-StatusOrStatusWith<typename std::invoke_result_t<Callback>::value_type> getWithYields(
+SyncTransactionWithRetries::SyncTransactionWithRetries(
     OperationContext* opCtx,
-    Callback&& cb,
-    const std::unique_ptr<ResourceYielder>& resourceYielder) {
-    auto yieldStatus = resourceYielder ? resourceYielder->yieldNoThrow(opCtx) : Status::OK();
+    ExecutorPtr executor,
+    std::unique_ptr<ResourceYielder> resourceYielder,
+    std::unique_ptr<TransactionClient> txnClient)
+    : _resourceYielder(std::move(resourceYielder)),
+      _txn(std::make_shared<details::TransactionWithRetries>(
+          opCtx,
+          executor,
+          txnClient ? std::move(txnClient)
+                    : std::make_unique<details::SEPTransactionClient>(
+                          opCtx,
+                          executor,
+                          std::make_unique<details::DefaultSEPTransactionClientBehaviors>()))) {
+    // Callers should always provide a yielder when using the API with a session checked out,
+    // otherwise commands run by the API won't be able to check out that session.
+    invariant(!OperationContextSession::get(opCtx) || _resourceYielder);
+}
+
+StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext* opCtx,
+                                                                Callback callback) noexcept {
+    // Pre transaction processing, which must happen inline because it uses the caller's opCtx.
+    auto yieldStatus = _resourceYielder ? _resourceYielder->yieldNoThrow(opCtx) : Status::OK();
     if (!yieldStatus.isOK()) {
         return yieldStatus;
     }
 
-    auto fut = std::forward<Callback>(cb)();
-    auto futureStatus = fut.getNoThrow(opCtx);
+    auto txnResult = _txn->run(std::move(callback)).getNoThrow(opCtx);
 
-    auto unyieldStatus = resourceYielder ? resourceYielder->unyieldNoThrow(opCtx) : Status::OK();
+    // Post transaction processing, which must also happen inline.
+    OperationTimeTracker::get(opCtx)->updateOperationTime(_txn->getOperationTime());
+    repl::ReplClientInfo::forClient(opCtx->getClient())
+        .setLastProxyWriteTimestampForward(_txn->getOperationTime().asTimestamp());
+    auto unyieldStatus = _resourceYielder ? _resourceYielder->unyieldNoThrow(opCtx) : Status::OK();
 
-    if (!futureStatus.isOK()) {
-        return futureStatus;
+    if (!txnResult.isOK()) {
+        return txnResult;
     } else if (!unyieldStatus.isOK()) {
         return unyieldStatus;
     }
 
-    return futureStatus;
+    return txnResult;
 }
-
-}  // namespace
 
 namespace details {
 
@@ -131,17 +142,19 @@ std::string errorHandlingStepToString(Transaction::ErrorHandlingStep nextStep) {
     MONGO_UNREACHABLE;
 }
 
-std::string transactionStateToString(Transaction::TransactionState txnState) {
+std::string Transaction::_transactionStateToString(TransactionState txnState) const {
     switch (txnState) {
-        case Transaction::TransactionState::kInit:
+        case TransactionState::kInit:
             return "init";
-        case Transaction::TransactionState::kStarted:
+        case TransactionState::kStarted:
             return "started";
-        case Transaction::TransactionState::kStartedCommit:
+        case TransactionState::kStartedCommit:
             return "started commit";
-        case Transaction::TransactionState::kStartedAbort:
+        case TransactionState::kRetryingCommit:
+            return "retrying commit";
+        case TransactionState::kStartedAbort:
             return "started abort";
-        case Transaction::TransactionState::kDone:
+        case TransactionState::kDone:
             return "done";
     }
     MONGO_UNREACHABLE;
@@ -154,99 +167,103 @@ void logNextStep(Transaction::ErrorHandlingStep nextStep, const BSONObj& txnInfo
           "txnInfo"_attr = txnInfo);
 }
 
-}  // namespace details
+SemiFuture<CommitResult> TransactionWithRetries::run(Callback callback) noexcept {
+    _internalTxn->setCallback(std::move(callback));
 
-TransactionWithRetries::TransactionWithRetries(OperationContext* opCtx,
-                                               ExecutorPtr executor,
-                                               std::unique_ptr<ResourceYielder> resourceYielder)
-    : _internalTxn(std::make_shared<details::Transaction>(opCtx, executor)),
-      _resourceYielder(std::move(resourceYielder)) {
-    // Callers should always provide a yielder when using the API with a session checked out,
-    // otherwise commands run by the API won't be able to check out that session.
-    invariant(!OperationContextSession::get(opCtx) || _resourceYielder);
+    return AsyncTry([this, bodyAttempts = 0]() mutable {
+               bodyAttempts++;
+               return _runBodyHandleErrors(bodyAttempts).then([this] {
+                   return _runCommitWithRetries();
+               });
+           })
+        .until([](StatusOrStatusWith<CommitResult> txnStatus) {
+            // Commit retries should be handled within _runCommitWithRetries().
+            invariant(txnStatus != ErrorCodes::TransactionAPIMustRetryCommit);
+            return txnStatus.isOK() || txnStatus != ErrorCodes::TransactionAPIMustRetryTransaction;
+        })
+        // Cancellation happens by interrupting the caller's opCtx.
+        .on(_executor, CancellationToken::uncancelable())
+        // Safe to inline because the continuation only holds state.
+        .unsafeToInlineFuture()
+        .tapAll([anchor = shared_from_this()](auto&&) {})
+        .semi();
 }
 
-StatusWith<CommitResult> TransactionWithRetries::runSyncNoThrow(OperationContext* opCtx,
-                                                                Callback callback) noexcept {
-    ON_BLOCK_EXIT([opCtx, this] {
-        OperationTimeTracker::get(opCtx)->updateOperationTime(_internalTxn->getOperationTime());
-    });
-
-    _internalTxn->setCallback(std::move(callback));
-    int bodyAttempts = 0;
-    while (true) {
-        bodyAttempts++;
-        {
-            auto bodyStatus =
-                getWithYields(opCtx, [&] { return _internalTxn->runCallback(); }, _resourceYielder);
-
-            if (!bodyStatus.isOK()) {
-                auto nextStep = _internalTxn->handleError(bodyStatus, bodyAttempts);
-                logNextStep(nextStep, _internalTxn->reportStateForLog());
-
-                if (nextStep == details::Transaction::ErrorHandlingStep::kDoNotRetry) {
-                    return bodyStatus;
-                } else if (nextStep ==
-                           details::Transaction::ErrorHandlingStep::kAbortAndDoNotRetry) {
-                    _bestEffortAbort(opCtx);
-                    return bodyStatus;
-                } else if (nextStep == details::Transaction::ErrorHandlingStep::kRetryTransaction) {
-                    _bestEffortAbort(opCtx);
-                    _internalTxn->primeForTransactionRetry();
-                    continue;
-                } else {
-                    MONGO_UNREACHABLE;
-                }
-            }
-        }
-
-        int commitAttempts = 0;
-        while (true) {
-            commitAttempts++;
-            auto swResult =
-                getWithYields(opCtx, [&] { return _internalTxn->commit(); }, _resourceYielder);
-
-            if (swResult.isOK() && swResult.getValue().getEffectiveStatus().isOK()) {
-                // Commit succeeded so return to the caller.
-                return swResult;
-            }
-
-            auto nextStep = _internalTxn->handleError(swResult, commitAttempts);
+ExecutorFuture<void> TransactionWithRetries::_runBodyHandleErrors(int bodyAttempts) {
+    return _internalTxn->runCallback().thenRunOn(_executor).onError(
+        [this, bodyAttempts](Status bodyStatus) {
+            auto nextStep = _internalTxn->handleError(bodyStatus, bodyAttempts);
             logNextStep(nextStep, _internalTxn->reportStateForLog());
 
-            if (nextStep == details::Transaction::ErrorHandlingStep::kDoNotRetry) {
-                return swResult;
-            } else if (nextStep == details::Transaction::ErrorHandlingStep::kAbortAndDoNotRetry) {
-                _bestEffortAbort(opCtx);
-                return swResult;
-            } else if (nextStep == details::Transaction::ErrorHandlingStep::kRetryTransaction) {
-                _bestEffortAbort(opCtx);
-                _internalTxn->primeForTransactionRetry();
-                break;
-            } else if (nextStep == details::Transaction::ErrorHandlingStep::kRetryCommit) {
-                _internalTxn->primeForCommitRetry();
-                continue;
-            } else {
-                MONGO_UNREACHABLE;
+            if (nextStep == Transaction::ErrorHandlingStep::kDoNotRetry) {
+                iassert(bodyStatus);
+            } else if (nextStep == Transaction::ErrorHandlingStep::kAbortAndDoNotRetry) {
+                return _bestEffortAbort().then([bodyStatus] { return bodyStatus; });
+            } else if (nextStep == Transaction::ErrorHandlingStep::kRetryTransaction) {
+                return _bestEffortAbort().then([this, bodyStatus] {
+                    _internalTxn->primeForTransactionRetry();
+                    iassert(Status(ErrorCodes::TransactionAPIMustRetryTransaction,
+                                   str::stream() << "Must retry body loop on internal body error: "
+                                                 << bodyStatus));
+                });
             }
-        }
-    }
-    MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE;
+        });
 }
 
-void TransactionWithRetries::_bestEffortAbort(OperationContext* opCtx) {
-    try {
-        uassertStatusOK(
-            getWithYields(opCtx, [&] { return _internalTxn->abort(); }, _resourceYielder));
-    } catch (const DBException& e) {
+ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitHandleErrors(int commitAttempts) {
+    return _internalTxn->commit().thenRunOn(_executor).onCompletion(
+        [this, commitAttempts](StatusWith<CommitResult> swCommitResult) {
+            if (swCommitResult.isOK() && swCommitResult.getValue().getEffectiveStatus().isOK()) {
+                // Commit succeeded so return to the caller.
+                return ExecutorFuture<CommitResult>(_executor, swCommitResult);
+            }
+
+            auto nextStep = _internalTxn->handleError(swCommitResult, commitAttempts);
+            logNextStep(nextStep, _internalTxn->reportStateForLog());
+
+            if (nextStep == Transaction::ErrorHandlingStep::kDoNotRetry) {
+                return ExecutorFuture<CommitResult>(_executor, swCommitResult);
+            } else if (nextStep == Transaction::ErrorHandlingStep::kAbortAndDoNotRetry) {
+                return _bestEffortAbort().then([swCommitResult] { return swCommitResult; });
+            } else if (nextStep == Transaction::ErrorHandlingStep::kRetryTransaction) {
+                return _bestEffortAbort().then([this, swCommitResult]() -> CommitResult {
+                    _internalTxn->primeForTransactionRetry();
+                    iassert(Status(ErrorCodes::TransactionAPIMustRetryTransaction,
+                                   str::stream() << "Must retry body loop on commit error: "
+                                                 << swCommitResult.getStatus()));
+                    MONGO_UNREACHABLE;
+                });
+            } else if (nextStep == Transaction::ErrorHandlingStep::kRetryCommit) {
+                _internalTxn->primeForCommitRetry();
+                iassert(Status(ErrorCodes::TransactionAPIMustRetryCommit,
+                               str::stream() << "Must retry commit loop on internal commit error: "
+                                             << swCommitResult.getStatus()));
+            }
+            MONGO_UNREACHABLE;
+        });
+}
+
+ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitWithRetries() {
+    return AsyncTry([this, commitAttempts = 0]() mutable {
+               commitAttempts++;
+               return _runCommitHandleErrors(commitAttempts);
+           })
+        .until([](StatusWith<CommitResult> swResult) {
+            return swResult.isOK() || swResult != ErrorCodes::TransactionAPIMustRetryCommit;
+        })
+        // Cancellation happens by interrupting the caller's opCtx.
+        .on(_executor, CancellationToken::uncancelable());
+}
+
+ExecutorFuture<void> TransactionWithRetries::_bestEffortAbort() {
+    return _internalTxn->abort().thenRunOn(_executor).onError([this](Status abortStatus) {
         LOGV2(5875900,
               "Unable to abort internal transaction",
-              "reason"_attr = e.toStatus(),
+              "reason"_attr = abortStatus,
               "txnInfo"_attr = _internalTxn->reportStateForLog());
-    }
+    });
 }
-
-namespace details {
 
 // Sets the appropriate options on the given client and operation context for running internal
 // commands.
@@ -316,31 +333,50 @@ SemiFuture<BatchedCommandResponse> SEPTransactionClient::runCRUDOp(
 
 SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
     const FindCommandRequest& cmd) const {
-    // TODO SERVER-64793: Make exhaustiveFind asynchronous
     return runCommand(cmd.getDbName(), cmd.toBSON({}))
         .thenRunOn(_executor)
         .then([this, batchSize = cmd.getBatchSize()](BSONObj reply) {
-            std::vector<BSONObj> response;
-            auto cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(reply));
-            while (true) {
-                auto releasedBatch = cursorResponse.releaseBatch();
-                response.insert(response.end(), releasedBatch.begin(), releasedBatch.end());
+            auto cursorResponse = std::make_shared<CursorResponse>(
+                uassertStatusOK(CursorResponse::parseFromBSON(reply)));
+            auto response = std::make_shared<std::vector<BSONObj>>();
+            return AsyncTry([this,
+                             batchSize = batchSize,
+                             cursorResponse = std::move(cursorResponse),
+                             response]() mutable {
+                       auto releasedBatch = cursorResponse->releaseBatch();
+                       response->insert(
+                           response->end(), releasedBatch.begin(), releasedBatch.end());
 
-                // We keep issuing getMores until the cursorId signifies that there are no more
-                // documents to fetch.
-                if (!cursorResponse.getCursorId()) {
-                    break;
-                }
+                       // If we've fetched all the documents, we can return the response vector
+                       // wrapped in an OK status.
+                       if (!cursorResponse->getCursorId()) {
+                           return SemiFuture<void>(Status::OK());
+                       }
 
-                GetMoreCommandRequest getMoreRequest(cursorResponse.getCursorId(),
-                                                     cursorResponse.getNSS().coll().toString());
-                getMoreRequest.setBatchSize(batchSize);
+                       GetMoreCommandRequest getMoreRequest(
+                           cursorResponse->getCursorId(),
+                           cursorResponse->getNSS().coll().toString());
+                       getMoreRequest.setBatchSize(batchSize);
 
-                // We block until we get the response back from runCommand().
-                cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(
-                    runCommand(cursorResponse.getNSS().db(), getMoreRequest.toBSON({})).get()));
-            }
-            return response;
+                       return runCommand(cursorResponse->getNSS().db(), getMoreRequest.toBSON({}))
+                           .thenRunOn(_executor)
+                           .then([response, cursorResponse](BSONObj reply) {
+                               // We keep the state of cursorResponse to be able to check the
+                               // cursorId in the next iteration.
+                               *cursorResponse =
+                                   uassertStatusOK(CursorResponse::parseFromBSON(reply));
+                               uasserted(ErrorCodes::InternalTransactionsExhaustiveFindHasMore,
+                                         "More documents to fetch");
+                           })
+                           .semi();
+                   })
+                .until([&](Status result) {
+                    // We stop execution if there is either no more documents to fetch or there was
+                    // an error upon fetching more documents.
+                    return result != ErrorCodes::InternalTransactionsExhaustiveFindHasMore;
+                })
+                .on(_executor, CancellationToken::uncancelable())
+                .then([response = std::move(response)] { return std::move(*response); });
         })
         .semi();
 }
@@ -383,14 +419,20 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(StringData dbName, StringData cm
             return BSON("ok" << 1);
         }
         uassert(5875902,
-                "Internal transaction not in progress",
+                "Internal transaction not in progress, state: {}"_format(
+                    _transactionStateToString(_state)),
                 _state == TransactionState::kStarted ||
-                    // Allows the best effort abort to run.
-                    (_state == TransactionState::kStartedCommit &&
-                     cmdName == AbortTransaction::kCommandName));
+                    // Allows retrying commit and the best effort abort after failing to commit.
+                    (_isInCommit() &&
+                     (cmdName == AbortTransaction::kCommandName ||
+                      cmdName == CommitTransaction::kCommandName)));
 
         if (cmdName == CommitTransaction::kCommandName) {
-            _state = TransactionState::kStartedCommit;
+            if (!_isInCommit()) {
+                // Only transition if we aren't already retrying commit.
+                _state = TransactionState::kStartedCommit;
+            }
+
             if (_execContext == ExecutionContext::kClientTransaction) {
                 // Don't commit if we're nested in a client's transaction.
                 return SemiFuture<BSONObj>::makeReady(BSON("ok" << 1));
@@ -405,7 +447,15 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(StringData dbName, StringData cm
 
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(cmdName, 1);
-    cmdBuilder.append(WriteConcernOptions::kWriteConcernField, _writeConcern);
+    if (_state == TransactionState::kRetryingCommit) {
+        // Per the drivers transaction spec, retrying commitTransaction uses majority write concern
+        // to avoid double applying a transaction due to a transient NoSuchTransaction error
+        // response.
+        cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
+                          CommandHelpers::kMajorityWriteConcern.toBSON());
+    } else {
+        cmdBuilder.append(WriteConcernOptions::kWriteConcernField, _writeConcern);
+    }
     auto cmdObj = cmdBuilder.obj();
 
     return ExecutorFuture<void>(_executor)
@@ -429,7 +479,7 @@ SemiFuture<void> Transaction::runCallback() {
 }
 
 Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitResult>& swResult,
-                                                        int attemptCounter) const {
+                                                        int attemptCounter) const noexcept {
     stdx::lock_guard<Latch> lg(_mutex);
 
     LOGV2_DEBUG(5875905,
@@ -462,8 +512,6 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
         return ErrorHandlingStep::kRetryTransaction;
     }
 
-    auto hasStartedCommit = _state == TransactionState::kStartedCommit;
-
     const auto& clientStatus = swResult.getStatus();
     if (!clientStatus.isOK()) {
         if (ErrorCodes::isNetworkError(clientStatus)) {
@@ -471,7 +519,7 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
             // entire transaction. If there is a network error after a commit is sent, we can retry
             // the commit command to either recommit if the operation failed or get the result of
             // the successful commit.
-            if (hasStartedCommit) {
+            if (_isInCommit()) {
                 return ErrorHandlingStep::kRetryCommit;
             }
             return ErrorHandlingStep::kRetryTransaction;
@@ -479,7 +527,7 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
         return ErrorHandlingStep::kAbortAndDoNotRetry;
     }
 
-    if (hasStartedCommit) {
+    if (_isInCommit()) {
         const auto& commitStatus = swResult.getValue().cmdStatus;
         const auto& commitWCStatus = swResult.getValue().wcError.toStatus();
 
@@ -558,7 +606,7 @@ void Transaction::processResponse(const BSONObj& reply) {
     }
 }
 
-void Transaction::primeForTransactionRetry() {
+void Transaction::primeForTransactionRetry() noexcept {
     stdx::lock_guard<Latch> lg(_mutex);
     _lastOperationTime = LogicalTime();
     _latestResponseHasTransientTransactionErrorLabel = false;
@@ -577,11 +625,11 @@ void Transaction::primeForTransactionRetry() {
     }
 }
 
-void Transaction::primeForCommitRetry() {
+void Transaction::primeForCommitRetry() noexcept {
     stdx::lock_guard<Latch> lg(_mutex);
-    invariant(_state == TransactionState::kStartedCommit);
+    invariant(_isInCommit());
     _latestResponseHasTransientTransactionErrorLabel = false;
-    _state = TransactionState::kStarted;
+    _state = TransactionState::kRetryingCommit;
 }
 
 BSONObj Transaction::reportStateForLog() const {
@@ -592,7 +640,7 @@ BSONObj Transaction::reportStateForLog() const {
 BSONObj Transaction::_reportStateForLog(WithLock) const {
     return BSON("execContext" << execContextToString(_execContext) << "sessionInfo"
                               << _sessionInfo.toBSON() << "state"
-                              << transactionStateToString(_state));
+                              << _transactionStateToString(_state));
 }
 
 void Transaction::_setSessionInfo(WithLock,

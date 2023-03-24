@@ -106,6 +106,11 @@ function isNetworkError(errorOrResponse) {
  *     representing an error
  */
 function isRetryableError(errorOrResponse) {
+    // Network errors are retryable
+    if (isNetworkError(errorOrResponse)) {
+        return true;
+    }
+
     // First check if this is a command response, if so determine retryability by error code
     if (errorOrResponse.code) {
         if (ErrorCodes.isRetriableError(errorOrResponse.code)) {
@@ -418,6 +423,7 @@ jsTestOptions = function() {
             // is shut down.
             alwaysUseLogFiles: TestData.alwaysUseLogFiles || false,
             skipCheckOrphans: TestData.skipCheckOrphans || false,
+            skipCheckRoutingTableConsistency: TestData.skipCheckRoutingTableConsistency || false,
             inEvergreen: TestData.inEvergreen || false,
 
             undoRecorderPath: TestData.undoRecorderPath,

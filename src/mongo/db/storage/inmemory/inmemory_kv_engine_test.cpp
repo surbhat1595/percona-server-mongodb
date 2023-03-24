@@ -49,16 +49,20 @@ namespace {
 class InMemoryKVHarnessHelper : public KVHarnessHelper {
 public:
     InMemoryKVHarnessHelper(ServiceContext* svcCtx) : _dbpath("inmem-kv-harness") {
-        const bool readOnly = false;
         if (!hasGlobalServiceContext())
             setGlobalServiceContext(ServiceContext::make());
-        _engine.reset(new WiredTigerKVEngine(
-            kInMemoryEngineName, _dbpath.path(), _cs.get(),
-            "in_memory=true,"
-            "log=(enabled=false),"
-            "file_manager=(close_idle_time=0),"
-            "checkpoint=(wait=0,log_size=0)",
-            100, 0, false, true, false, readOnly));
+        _engine.reset(new WiredTigerKVEngine(kInMemoryEngineName,
+                                             _dbpath.path(),
+                                             _cs.get(),
+                                             "in_memory=true,"
+                                             "log=(enabled=false),"
+                                             "file_manager=(close_idle_time=0),"
+                                             "checkpoint=(wait=0,log_size=0)",
+                                             100,
+                                             0,
+                                             false,
+                                             true,
+                                             false));
         repl::ReplicationCoordinator::set(
             svcCtx,
             std::unique_ptr<repl::ReplicationCoordinator>(

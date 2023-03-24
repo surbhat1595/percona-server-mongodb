@@ -116,6 +116,8 @@ public:
                                                    ShardingDataTransformMetrics::Role::kRecipient,
                                                    serviceContext->getFastClockSource()->now(),
                                                    serviceContext);
+            _applierMetrics =
+                std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), boost::none);
             _crudApplication = std::make_unique<ReshardingOplogApplicationRules>(
                 _outputNss,
                 std::vector<NamespaceString>{_myStashNss, _otherStashNss},
@@ -123,7 +125,7 @@ public:
                 _myDonorId,
                 makeChunkManagerForSourceCollection(),
                 _metrics.get(),
-                _metricsNew.get());
+                _applierMetrics.get());
 
             _sessionApplication =
                 std::make_unique<ReshardingOplogSessionApplication>(_myOplogBufferNss);
@@ -196,7 +198,18 @@ public:
 
         // The transaction machinery cannot store an empty locker.
         { Lock::GlobalLock globalLock(opCtx, MODE_IX); }
-        auto opTime = repl::getNextOpTime(opCtx);
+        auto opTime = [opCtx] {
+            TransactionParticipant::SideTransactionBlock sideTxn{opCtx};
+
+            WriteUnitOfWork wuow{opCtx};
+            auto opTime = repl::getNextOpTime(opCtx);
+            wuow.release();
+
+            opCtx->recoveryUnit()->abortUnitOfWork();
+            opCtx->lockState()->endWriteUnitOfWork();
+
+            return opTime;
+        }();
         txnParticipant.prepareTransaction(opCtx, opTime);
         txnParticipant.stashTransactionResources(opCtx);
 
@@ -298,11 +311,6 @@ public:
             << sessionTxnRecord.toBSON() << ", " << foundOp;
     }
 
-protected:
-    // TODO (SERVER-65307): Use wiredTiger.
-    ReshardingOplogBatchApplierTest()
-        : ServiceContextMongoDTest(Options{}.engine("ephemeralForTest")) {}
-
 private:
     ChunkManager makeChunkManagerForSourceCollection() {
         const OID epoch = OID::gen();
@@ -355,6 +363,7 @@ private:
 
     std::unique_ptr<ReshardingMetrics> _metrics;
     std::unique_ptr<ReshardingMetricsNew> _metricsNew;
+    std::unique_ptr<ReshardingOplogApplierMetrics> _applierMetrics;
 
     std::unique_ptr<ReshardingOplogApplicationRules> _crudApplication;
     std::unique_ptr<ReshardingOplogSessionApplication> _sessionApplication;

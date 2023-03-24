@@ -380,6 +380,7 @@ var ShardingTest = function(params) {
         this.checkUUIDsConsistentAcrossCluster();
         this.checkIndexesConsistentAcrossCluster();
         this.checkOrphansAreDeleted();
+        this.checkRoutingTableConsistency();
 
         if (jsTestOptions().alwaysUseLogFiles) {
             if (opts.noCleanData === false) {
@@ -468,18 +469,42 @@ var ShardingTest = function(params) {
     };
 
     this.getChunksString = function(ns) {
-        var q = {};
         if (ns) {
-            q.ns = ns;
+            let query = {};
+            let sorting_criteria = {};
+            const collection = this.config.collections.findOne({_id: ns});
+            if (!collection) {
+                return "";
+            }
+
+            if (collection.timestamp) {
+                const collectionUUID = collection.uuid;
+                assert.neq(collectionUUID, null);
+
+                query.uuid = collectionUUID;
+                sorting_criteria = {uuid: 1, min: 1};
+            } else {
+                query.ns = ns;
+                sorting_criteria = {ns: 1, min: 1};
+            }
+
+            let s = "";
+            this.config.chunks.find(query).sort(sorting_criteria).forEach(function(z) {
+                s += " \t" + z._id + "\t" + z.lastmod.t + "|" + z.lastmod.i + "\t" + tojson(z.min) +
+                    " -> " + tojson(z.max) + " " + z.shard + " " + ns + "\n";
+            });
+
+            return s;
+        } else {
+            // call get chunks String for every namespace in the collections
+            let collections_cursor = this.config.collections.find();
+            let s = "";
+            while (collections_cursor.hasNext()) {
+                var ns = collections_cursor.next()._id;
+                s += this.getChunksString(ns);
+            }
+            return s;
         }
-
-        var s = "";
-        this.config.chunks.find(q).sort({ns: 1, min: 1}).forEach(function(z) {
-            s += "  " + z._id + "\t" + z.lastmod.t + "|" + z.lastmod.i + "\t" + tojson(z.min) +
-                " -> " + tojson(z.max) + " " + z.shard + "  " + z.ns + "\n";
-        });
-
-        return s;
     };
 
     this.printChunks = function(ns) {
@@ -1728,4 +1753,8 @@ ShardingTest.prototype.checkIndexesConsistentAcrossCluster = function() {};
 
 ShardingTest.prototype.checkOrphansAreDeleted = function() {
     print("Unhooked function");
+};
+
+ShardingTest.prototype.checkRoutingTableConsistency = function() {
+    print("Unhooked checkRoutingTableConsistency function");
 };

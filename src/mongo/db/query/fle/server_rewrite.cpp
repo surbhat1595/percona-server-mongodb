@@ -293,7 +293,7 @@ void doFLERewriteInTxn(OperationContext* opCtx,
                        GetTxnCallback getTxn) {
     auto txn = getTxn(opCtx);
 
-    auto swCommitResult = txn->runSyncNoThrow(
+    auto swCommitResult = txn->runNoThrow(
         opCtx, [sharedBlock](const txn_api::TransactionClient& txnClient, auto txnExec) {
             auto makeCollectionReader = [sharedBlock](FLEQueryInterface* queryImpl,
                                                       const StringData& coll) {
@@ -463,6 +463,7 @@ std::unique_ptr<MatchExpression> FLEQueryRewriter::_rewrite(MatchExpression* exp
             if (rewritten) {
                 return std::make_unique<ExprMatchExpression>(rewritten.release(), expCtx());
             }
+            [[fallthrough]];
         }
         default:
             return nullptr;

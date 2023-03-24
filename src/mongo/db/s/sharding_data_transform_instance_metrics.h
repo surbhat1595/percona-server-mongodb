@@ -60,19 +60,45 @@ public:
     virtual ~ShardingDataTransformInstanceMetrics();
 
     BSONObj reportForCurrentOp() const noexcept;
-    int64_t getHighEstimateRemainingTimeMillis() const;
-    int64_t getLowEstimateRemainingTimeMillis() const;
+    Milliseconds getHighEstimateRemainingTimeMillis() const;
+    Milliseconds getLowEstimateRemainingTimeMillis() const;
     Date_t getStartTimestamp() const;
     const UUID& getInstanceId() const;
+    void onCopyingBegin();
+    void onCopyingEnd();
+    void onApplyingBegin();
+    void onApplyingEnd();
+    void onDocumentsCopied(int64_t documentCount, int64_t totalDocumentsSizeBytes);
+    void setDocumentsToCopyCounts(int64_t documentCount, int64_t totalDocumentsSizeBytes);
+    void setCoordinatorHighEstimateRemainingTimeMillis(Milliseconds milliseconds);
+    void setCoordinatorLowEstimateRemainingTimeMillis(Milliseconds milliseconds);
     void onInsertApplied();
     void onUpdateApplied();
     void onDeleteApplied();
+    void onOplogEntriesFetched(int64_t numEntries);
     void onOplogEntriesApplied(int64_t numEntries);
+    void onWriteToStashedCollections();
+
+    void onReadDuringCriticalSection();
+    void onWriteDuringCriticalSection();
+    void onCriticalSectionBegin();
+    void onCriticalSectionEnd();
+
     Role getRole() const;
+    Seconds getOperationRunningTimeSecs() const;
+    Seconds getCopyingElapsedTimeSecs() const;
+    Seconds getApplyingElapsedTimeSecs() const;
+    Seconds getCriticalSectionElapsedTimeSecs() const;
 
 protected:
     virtual std::string createOperationDescription() const noexcept;
     virtual StringData getStateString() const noexcept;
+
+    void accumulateValues(int64_t insertsApplied,
+                          int64_t updatesApplied,
+                          int64_t deletesApplied,
+                          int64_t writesToStashCollections);
+
     const UUID _instanceId;
     const BSONObj _originalCommand;
     const NamespaceString _sourceNs;
@@ -108,18 +134,37 @@ protected:
         "allShardsHighestRemainingOperationTimeEstimatedSecs";
 
 private:
-    inline int64_t getOperationRunningTimeSecs() const;
-
     ClockSource* _clockSource;
     ObserverPtr _observer;
     ShardingDataTransformCumulativeMetrics* _cumulativeMetrics;
     ShardingDataTransformCumulativeMetrics::DeregistrationFunction _deregister;
 
     const Date_t _startTime;
+
+    AtomicWord<Date_t> _copyingStartTime;
+    AtomicWord<Date_t> _copyingEndTime;
+    AtomicWord<int32_t> _approxDocumentsToCopy;
+    AtomicWord<int32_t> _documentsCopied;
+    AtomicWord<int32_t> _approxBytesToCopy;
+    AtomicWord<int32_t> _bytesCopied;
+
+    AtomicWord<Date_t> _applyingStartTime;
+    AtomicWord<Date_t> _applyingEndTime;
+    AtomicWord<int64_t> _oplogEntriesFetched;
+
     AtomicWord<int64_t> _insertsApplied;
     AtomicWord<int64_t> _updatesApplied;
     AtomicWord<int64_t> _deletesApplied;
     AtomicWord<int64_t> _oplogEntriesApplied;
+    AtomicWord<int64_t> _writesToStashCollections;
+
+    AtomicWord<Milliseconds> _coordinatorHighEstimateRemainingTimeMillis;
+    AtomicWord<Milliseconds> _coordinatorLowEstimateRemainingTimeMillis;
+
+    AtomicWord<Date_t> _criticalSectionStartTime;
+    AtomicWord<Date_t> _criticalSectionEndTime;
+    AtomicWord<int64_t> _readsDuringCriticalSection;
+    AtomicWord<int64_t> _writesDuringCriticalSection;
 };
 
 }  // namespace mongo

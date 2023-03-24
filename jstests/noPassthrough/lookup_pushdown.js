@@ -132,6 +132,20 @@ assert.commandWorked(foreignColl.insert(foreignDocs));
 assert.commandWorked(db.createView(viewName, foreignCollName, [{$match: {b: {$gte: 0}}}]));
 let view = db[viewName];
 
+function setLookupPushdownDisabled(value) {
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, internalQuerySlotBasedExecutionDisableLookupPushdown: value}));
+}
+
+(function testLookupPushdownQueryKnob() {
+    const pipeline =
+        [{$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}];
+    setLookupPushdownDisabled(true);
+    runTest(coll, pipeline, JoinAlgorithm.Classic /* expectedJoinAlgorithm */);
+    setLookupPushdownDisabled(false);
+    runTest(coll, pipeline, JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
+}());
+
 (function testLookupPushdownBasicCases() {
     // Basic $lookup.
     runTest(coll,
@@ -289,6 +303,16 @@ let view = db[viewName];
             [{$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}],
             JoinAlgorithm.INLJ /* expectedJoinAlgorithm */,
             {b: 1} /* indexKeyPattern */);
+    assert.commandWorked(foreignColl.dropIndexes());
+})();
+
+// Construct an index with a partial filter expression. In this case, we should NOT use INLJ.
+(function testPartialFilterExpressionIndexesAreIgnored() {
+    assert.commandWorked(foreignColl.dropIndexes());
+    assert.commandWorked(foreignColl.createIndex({b: 1}, {partialFilterExpression: {b: 1}}));
+    runTest(coll,
+            [{$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}],
+            JoinAlgorithm.NLJ /* expectedJoinAlgorithm */);
     assert.commandWorked(foreignColl.dropIndexes());
 })();
 

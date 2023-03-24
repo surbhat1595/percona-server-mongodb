@@ -174,6 +174,8 @@ last-continuous:
       test_file: jstests/replsets/tenant_migration_recipient_initial_sync_recovery.js
     - ticket: SERVER-63122
       test_file: jstests/replsets/tenant_migration_recipient_startup_recovery.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_network_error_via_rollback.js
     - ticket: SERVER-63129
       test_file: jstests/replsets/tenant_migration_resume_collection_cloner_after_recipient_failover_with_dropped_views.js
     - ticket: SERVER-61864
@@ -202,6 +204,10 @@ last-continuous:
       test_file: jstests/sharding/resharding_change_stream_namespace_filtering.js
     - ticket: SERVER-65261
       test_file: jstests/replsets/capped_deletes.js
+    - ticket: SERVER-65022
+      test_file: jstests/sharding/change_stream_shard_failover.js
+    - ticket: SERVER-63049
+      test_file: jstests/noPassthrough/operator_counters_accumulators.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -527,6 +533,8 @@ last-lts:
       test_file: jstests/replsets/tenant_migration_recipient_initial_sync_recovery.js
     - ticket: SERVER-63122
       test_file: jstests/replsets/tenant_migration_recipient_startup_recovery.js
+    - ticket: SERVER-63122
+      test_file: jstests/replsets/tenant_migration_network_error_via_rollback.js
     - ticket: SERVER-63732
       test_file: jstests/sharding/shard_collection_basic.js
     - ticket: SERVER-6491
@@ -539,6 +547,8 @@ last-lts:
       test_file: jstests/sharding/refine_collection_shard_key_basic.js
     - ticket: SERVER-65261
       test_file: jstests/replsets/capped_deletes.js
+    - ticket: SERVER-65022
+      test_file: jstests/sharding/change_stream_shard_failover.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

@@ -537,8 +537,6 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     LOGV2(4280506, "Reconstructing prepared transactions");
     reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
 
-    ReplicaSetAwareServiceRegistry::get(_service).onStartupRecoveryComplete(opCtx);
-
     const auto lastOpTimeAndWallTimeResult = _externalState->loadLastOpTimeAndWallTime(opCtx);
 
     // Use a callback here, because _finishLoadLocalConfig calls isself() which requires
@@ -723,6 +721,9 @@ void ReplicationCoordinatorImpl::_startInitialSync(
     InitialSyncerInterface::OnCompletionFn onCompletion,
     bool fallbackToLogical) {
     std::shared_ptr<InitialSyncerInterface> initialSyncerCopy;
+
+    // Initial sync may take locks during startup; make sure there is no possibility of conflict.
+    dassert(!opCtx->lockState()->isLocked());
     try {
         {
             // Must take the lock to set _initialSyncer, but not call it.
@@ -831,6 +832,9 @@ void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
         _topCoord->resetMaintenanceCount();
     }
 
+    ReplicaSetAwareServiceRegistry::get(_service).onInitialDataAvailable(
+        cc().makeOperationContext().get(), false /* isMajorityDataAvailable */);
+
     // Transition from STARTUP2 to RECOVERING and start the producer and the applier.
     // If the member state is REMOVED, this will do nothing until we receive a config with
     // ourself in it.
@@ -848,6 +852,10 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
         // This is not the first call.
         return;
     }
+
+    // Make sure we're not holding any locks; existing locks might conflict with operations
+    // we take during initial sync or replication steady state startup.
+    dassert(!opCtx->lockState()->isLocked());
 
     // Check to see if we need to do an initial sync.
     const auto lastOpTime = getMyLastAppliedOpTime();
@@ -890,7 +898,7 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
             _replicationProcess->getReplicationRecovery()->recoverFromOplogAsStandalone(opCtx);
         }
 
-        if (storageGlobalParams.readOnly && !recoverToOplogTimestamp.empty()) {
+        if (storageGlobalParams.queryableBackupMode && !recoverToOplogTimestamp.empty()) {
             BSONObj recoverToTimestampObj = fromjson(recoverToOplogTimestamp);
             uassert(ErrorCodes::BadValue,
                     str::stream() << "'recoverToOplogTimestamp' needs to have a 'timestamp' field",
@@ -909,9 +917,6 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
                     cfg.isOK());
 
             // Need to perform replication recovery up to and including the given timestamp.
-            // Temporarily turn off read-only mode for this procedure as we'll have to do writes.
-            storageGlobalParams.readOnly = false;
-            ON_BLOCK_EXIT([&] { storageGlobalParams.readOnly = true; });
             _replicationProcess->getReplicationRecovery()->recoverFromOplogUpTo(opCtx,
                                                                                 recoverToTimestamp);
         }
@@ -3604,7 +3609,8 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
                           "Node not yet initialized; use the replSetInitiate command");
         case kConfigReplicationDisabled:
             invariant(
-                false);  // should be unreachable due to !_settings.usingReplSets() check above
+                false);       // should be unreachable due to !_settings.usingReplSets() check above
+            [[fallthrough]];  // Placate clang.
         case kConfigInitiating:
         case kConfigReconfiguring:
         case kConfigHBReconfiguring:
@@ -4575,7 +4581,7 @@ void ReplicationCoordinatorImpl::_performPostMemberStateUpdateAction(
             break;
         case kActionRollbackOrRemoved:
             _externalState->closeConnections();
-        /* FALLTHROUGH */
+            [[fallthrough]];
         case kActionSteppedDown:
             _externalState->onStepDownHook();
             ReplicaSetAwareServiceRegistry::get(_service).onStepDown();

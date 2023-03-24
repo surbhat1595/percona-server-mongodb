@@ -417,13 +417,14 @@ void _validateCatalogEntry(OperationContext* opCtx,
         const std::string indexName = indexEntry->descriptor()->indexName();
 
         Status status =
-            index_key_validate::validateIndexSpecFieldNames(indexEntry->descriptor()->infoObj());
+            index_key_validate::validateIndexSpec(opCtx, indexEntry->descriptor()->infoObj())
+                .getStatus();
         if (!status.isOK()) {
             results->valid = false;
             results->errors.push_back(
-                fmt::format("The index specification for index '{}' contains invalid field names. "
-                            "{}. Run the 'collMod' command on the collection without any arguments "
-                            "to remove the invalid index options",
+                fmt::format("The index specification for index '{}' contains invalid fields. {}. "
+                            "Run the 'collMod' command on the collection without any arguments "
+                            "to fix the invalid index options",
                             indexName,
                             status.reason()));
         }
@@ -468,18 +469,13 @@ void _validateBSONColumnRoundtrip(OperationContext* opCtx,
     constexpr size_t kMaxMemoryUsageBytes = 25 * 1024 * 1024;
     size_t currentMemoryUsageBytes = 0;
 
-    BSONColumnBuilder columnBuilder("",
-                                    feature_flags::gTimeseriesBucketCompressionWithArrays.isEnabled(
-                                        serverGlobalParams.featureCompatibility));
+    BSONColumnBuilder columnBuilder("", /*arrayCompression=*/true);
 
     auto doBSONColumnRoundtrip = [&]() {
         ON_BLOCK_EXIT([&] {
             // Reset the in-memory state to prepare for the next round of BSONColumn roundtripping.
             original.clear();
-            columnBuilder =
-                BSONColumnBuilder("",
-                                  feature_flags::gTimeseriesBucketCompressionWithArrays.isEnabled(
-                                      serverGlobalParams.featureCompatibility));
+            columnBuilder = BSONColumnBuilder("", /*arrayCompression=*/true);
             currentMemoryUsageBytes = 0;
         });
 

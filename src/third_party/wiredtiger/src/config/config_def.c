@@ -355,8 +355,7 @@ static const WT_CONFIG_CHECK confchk_WT_SESSION_drop[] = {
   {NULL, NULL, NULL, NULL, NULL, 0}};
 
 static const WT_CONFIG_CHECK confchk_WT_SESSION_flush_tier[] = {
-  {"flush_timestamp", "string", NULL, NULL, NULL, 0}, {"force", "boolean", NULL, NULL, NULL, 0},
-  {"lock_wait", "boolean", NULL, NULL, NULL, 0},
+  {"force", "boolean", NULL, NULL, NULL, 0}, {"lock_wait", "boolean", NULL, NULL, NULL, 0},
   {"sync", "string", NULL, "choices=[\"off\",\"on\"]", NULL, 0},
   {"timeout", "int", NULL, NULL, NULL, 0}, {NULL, NULL, NULL, NULL, NULL, 0}};
 
@@ -374,6 +373,7 @@ static const WT_CONFIG_CHECK confchk_WT_SESSION_log_flush[] = {
   {"sync", "string", NULL, "choices=[\"off\",\"on\"]", NULL, 0}, {NULL, NULL, NULL, NULL, NULL, 0}};
 
 static const WT_CONFIG_CHECK confchk_WT_SESSION_open_cursor_debug_subconfigs[] = {
+  {"checkpoint_read_timestamp", "string", NULL, NULL, NULL, 0},
   {"dump_version", "boolean", NULL, NULL, NULL, 0},
   {"release_evict", "boolean", NULL, NULL, NULL, 0}, {NULL, NULL, NULL, NULL, NULL, 0}};
 
@@ -387,8 +387,9 @@ static const WT_CONFIG_CHECK confchk_WT_SESSION_open_cursor_incremental_subconfi
 static const WT_CONFIG_CHECK confchk_WT_SESSION_open_cursor[] = {
   {"append", "boolean", NULL, NULL, NULL, 0}, {"bulk", "string", NULL, NULL, NULL, 0},
   {"checkpoint", "string", NULL, NULL, NULL, 0},
+  {"checkpoint_use_history", "boolean", NULL, NULL, NULL, 0},
   {"checkpoint_wait", "boolean", NULL, NULL, NULL, 0},
-  {"debug", "category", NULL, NULL, confchk_WT_SESSION_open_cursor_debug_subconfigs, 2},
+  {"debug", "category", NULL, NULL, confchk_WT_SESSION_open_cursor_debug_subconfigs, 3},
   {"dump", "string", NULL,
     "choices=[\"hex\",\"json\",\"pretty\",\"pretty_hex\","
     "\"print\"]",
@@ -1278,8 +1279,8 @@ static const WT_CONFIG_ENTRY config_entries[] = {{"WT_CONNECTION.add_collator", 
     "checkpoint_wait=true,force=false,lock_wait=true,"
     "remove_files=true",
     confchk_WT_SESSION_drop, 4},
-  {"WT_SESSION.flush_tier", "flush_timestamp=,force=false,lock_wait=true,sync=on,timeout=0",
-    confchk_WT_SESSION_flush_tier, 5},
+  {"WT_SESSION.flush_tier", "force=false,lock_wait=true,sync=on,timeout=0",
+    confchk_WT_SESSION_flush_tier, 4},
   {"WT_SESSION.join",
     "bloom_bit_count=16,bloom_false_positives=false,"
     "bloom_hash_count=8,compare=\"eq\",count=,operation=\"and\","
@@ -1288,14 +1289,15 @@ static const WT_CONFIG_ENTRY config_entries[] = {{"WT_CONNECTION.add_collator", 
   {"WT_SESSION.log_flush", "sync=on", confchk_WT_SESSION_log_flush, 1},
   {"WT_SESSION.log_printf", "", NULL, 0},
   {"WT_SESSION.open_cursor",
-    "append=false,bulk=false,checkpoint=,checkpoint_wait=true,"
-    "debug=(dump_version=false,release_evict=false),dump=,"
+    "append=false,bulk=false,checkpoint=,checkpoint_use_history=true,"
+    "checkpoint_wait=true,debug=(checkpoint_read_timestamp=,"
+    "dump_version=false,release_evict=false),dump=,"
     "incremental=(consolidate=false,enabled=false,file=,"
     "force_stop=false,granularity=16MB,src_id=,this_id=),"
     "next_random=false,next_random_sample_size=0,overwrite=true,"
     "prefix_search=false,raw=false,read_once=false,readonly=false,"
     "skip_sort_check=false,statistics=,target=",
-    confchk_WT_SESSION_open_cursor, 17},
+    confchk_WT_SESSION_open_cursor, 18},
   {"WT_SESSION.prepare_transaction", "prepare_timestamp=", confchk_WT_SESSION_prepare_transaction,
     1},
   {"WT_SESSION.query_timestamp", "get=read", confchk_WT_SESSION_query_timestamp, 1},
@@ -1314,7 +1316,8 @@ static const WT_CONFIG_ENTRY config_entries[] = {{"WT_CONNECTION.add_collator", 
     "commit_timestamp=,durable_timestamp=,prepare_timestamp=,"
     "read_timestamp=",
     confchk_WT_SESSION_timestamp_transaction, 4},
-  {"WT_SESSION.truncate", "", NULL, 0}, {"WT_SESSION.upgrade", "", NULL, 0},
+  {"WT_SESSION.timestamp_transaction_uint", "", NULL, 0}, {"WT_SESSION.truncate", "", NULL, 0},
+  {"WT_SESSION.upgrade", "", NULL, 0},
   {"WT_SESSION.verify",
     "do_not_clear_txn_id=false,dump_address=false,dump_blocks=false,"
     "dump_layout=false,dump_offsets=,dump_pages=false,"

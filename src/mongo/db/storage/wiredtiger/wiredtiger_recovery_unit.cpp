@@ -228,7 +228,7 @@ void WiredTigerRecoveryUnit::_abort() {
     _setState(State::kInactive);
 }
 
-void WiredTigerRecoveryUnit::beginUnitOfWork(OperationContext* opCtx) {
+void WiredTigerRecoveryUnit::doBeginUnitOfWork() {
     invariant(!_inUnitOfWork(), toString(_getState()));
     invariant(!_isCommittingOrAborting(),
               str::stream() << "cannot begin unit of work while commit or rollback handlers are "
@@ -634,7 +634,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
                 _readAtTimestamp = _beginTransactionAtAllDurableTimestamp(session);
                 break;
             }
-            // Intentionally continue to the next case to read at the _readAtTimestamp.
+            [[fallthrough]];  // Continue to the next case to read at the _readAtTimestamp.
         }
         case ReadSource::kProvided: {
             WiredTigerBeginTxnBlock txnOpen(

@@ -988,7 +988,7 @@ functions:
       args:
       - "./src/evergreen/extract_generated_test_configuration.sh"
 
-  "minimize jstestfuzz": &minimize_jstestfuzz
+  "minimize jstestfuzz":
     command: subprocess.exec
     type: test
     params:
@@ -1162,7 +1162,6 @@ functions:
       args:
       - "./src/evergreen/multiversion_exclude_tags_generate.sh"
   - *execute_resmoke_tests
-  - *minimize_jstestfuzz
     # The existence of the "run_tests_infrastructure_failure" file indicates this failure isn't
     # directly actionable. We use type=setup rather than type=system or type=test for this command
   # because we don't intend for any human to look at this failure.
@@ -5073,6 +5072,15 @@ tasks:
 - <<: *gen_task_template
   name: multi_shard_multi_stmt_txn_stepdown_primary_jscore_passthrough_gen
   tags: ["multi_shard"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+# TODO(SERVER-65178): Add "serverless" tag to shard split passthrough when no longer feature flagged
+- <<: *gen_task_template
+  name: shard_split_jscore_passthrough_gen
+  tags: ["shard_split"]
   commands:
   - func: "generate resmoke tasks"
     vars:

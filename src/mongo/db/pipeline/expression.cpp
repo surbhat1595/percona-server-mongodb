@@ -183,7 +183,7 @@ void Expression::registerExpression(
     parserMap[key] =
         ParserRegistration{parser, allowedWithApiStrict, allowedWithClientType, requiredMinVersion};
     // Add this expression to the global map of operator counters for expressions.
-    operatorCountersAggExpressions.addAggExpressionCounter(key);
+    operatorCountersAggExpressions.addCounter(key);
 }
 
 intrusive_ptr<Expression> Expression::parseExpression(ExpressionContext* const expCtx,
@@ -398,11 +398,11 @@ Value ExpressionAdd::evaluate(const Document& root, Variables* variables) const 
             dassert(nonDecimalTotal.isInteger());
             if (nonDecimalTotal.fitsLong())
                 return Value(nonDecimalTotal.getLong());
-        // Fallthrough.
+            [[fallthrough]];
         case NumberInt:
             if (nonDecimalTotal.fitsLong())
                 return Value::createIntOrLong(nonDecimalTotal.getLong());
-        // Fallthrough.
+            [[fallthrough]];
         case NumberDouble:
             return Value(nonDecimalTotal.getDouble());
         default:

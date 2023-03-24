@@ -80,8 +80,7 @@ public:
                                                  0,
                                                  durable,
                                                  ephemeral,
-                                                 params.repair,
-                                                 readOnly);
+                                                 params.repair);
         kv->setRecordStoreExtraOptions(wiredTigerGlobalOptions.collectionConfig);
         kv->setSortedDataInterfaceExtraOptions(wiredTigerGlobalOptions.indexConfig);
 
@@ -141,11 +140,6 @@ public:
         builder.appendBool("directoryPerDB", params.directoryperdb);
         builder.appendBool("directoryForIndexes", wiredTigerGlobalOptions.directoryForIndexes);
         return builder.obj();
-    }
-
-    // explicitly specify that inMemory does not support readOnly mode
-    bool supportsReadOnly() const final {
-        return false;
     }
 
 private:

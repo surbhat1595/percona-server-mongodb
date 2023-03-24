@@ -52,6 +52,7 @@
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/s/sharding_data_transform_cumulative_metrics.h"
 #include "mongo/db/s/sharding_data_transform_metrics.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
@@ -977,6 +978,10 @@ ReshardingCoordinatorService::ReshardingCoordinator::ReshardingCoordinator(
     : PrimaryOnlyService::TypedInstance<ReshardingCoordinator>(),
       _id(coordinatorDoc.getReshardingUUID().toBSON()),
       _coordinatorService(coordinatorService),
+      _metricsNew{
+          ShardingDataTransformMetrics::isEnabled()
+              ? ReshardingMetricsNew::initializeFrom(coordinatorDoc, getGlobalServiceContext())
+              : nullptr},
       _metadata(coordinatorDoc.getCommonReshardingMetadata()),
       _coordinatorDoc(coordinatorDoc),
       _markKilledExecutor(std::make_shared<ThreadPool>([] {
@@ -1037,6 +1042,11 @@ void markCompleted(const Status& status) {
 
     metrics->onCompletion(
         ReshardingMetrics::Role::kCoordinator, metricsOperationStatus, getCurrentTime());
+
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        ShardingDataTransformCumulativeMetrics::getForResharding(cc().getServiceContext())
+            ->onCompletion(metricsOperationStatus);
+    }
 }
 
 BSONObj createFlushReshardingStateChangeCommand(const NamespaceString& nss,
@@ -1259,6 +1269,9 @@ ReshardingCoordinatorService::ReshardingCoordinator::_commitAndFinishReshardOper
                    })
                    .then([this, executor] { return _awaitAllParticipantShardsDone(executor); })
                    .then([this, executor] {
+                       if (ShardingDataTransformMetrics::isEnabled()) {
+                           _metricsNew->onCriticalSectionEnd();
+                       }
                        // Best-effort attempt to trigger a refresh on the participant shards so
                        // they see the collection metadata without reshardingFields and no longer
                        // throw ReshardCollectionInProgress. There is no guarantee this logic ever
@@ -1520,6 +1533,11 @@ void ReshardingCoordinatorService::ReshardingCoordinator::_insertCoordDocAndChan
         // TODO SERVER-53914 to accommodate loading metrics for the coordinator.
         ReshardingMetrics::get(cc().getServiceContext())
             ->onStart(ReshardingMetrics::Role::kCoordinator, getCurrentTime());
+
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            ShardingDataTransformCumulativeMetrics::getForResharding(cc().getServiceContext())
+                ->onStarted();
+        }
     }
 
     pauseBeforeInsertCoordinatorDoc.pauseWhileSet();
@@ -1610,6 +1628,9 @@ ReshardingCoordinatorService::ReshardingCoordinator::_awaitAllDonorsReadyToDonat
                 coordinatorDocChangedOnDisk,
                 highestMinFetchTimestamp,
                 computeApproxCopySize(coordinatorDocChangedOnDisk));
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _metricsNew->onCopyingBegin();
+            }
         })
         .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); });
 }
@@ -1628,6 +1649,10 @@ ReshardingCoordinatorService::ReshardingCoordinator::_awaitAllRecipientsFinished
         .then([this](ReshardingCoordinatorDocument coordinatorDocChangedOnDisk) {
             this->_updateCoordinatorDocStateAndCatalogEntries(CoordinatorStateEnum::kApplying,
                                                               coordinatorDocChangedOnDisk);
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _metricsNew->onCopyingEnd();
+                _metricsNew->onApplyingBegin();
+            }
         })
         .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); });
 }
@@ -1639,6 +1664,7 @@ void ReshardingCoordinatorService::ReshardingCoordinator::_startCommitMonitor(
     }
 
     _commitMonitor = std::make_shared<resharding::CoordinatorCommitMonitor>(
+        _metricsNew,
         _coordinatorDoc.getSourceNss(),
         extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards()),
         **executor,
@@ -1685,6 +1711,10 @@ ReshardingCoordinatorService::ReshardingCoordinator::_awaitAllRecipientsFinished
 
             this->_updateCoordinatorDocStateAndCatalogEntries(CoordinatorStateEnum::kBlockingWrites,
                                                               _coordinatorDoc);
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _metricsNew->onApplyingEnd();
+                _metricsNew->onCriticalSectionBegin();
+            }
         })
         .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); })
         .thenRunOn(**executor)
@@ -1982,6 +2012,10 @@ void ReshardingCoordinatorService::ReshardingCoordinator::_updateChunkImbalanceM
 
         ReshardingMetrics::get(opCtx->getServiceContext())
             ->setLastReshardChunkImbalanceCount(imbalanceCount);
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            ShardingDataTransformCumulativeMetrics::getForResharding(opCtx->getServiceContext())
+                ->setLastOpEndingChunkImbalance(imbalanceCount);
+        }
     } catch (const DBException& ex) {
         LOGV2_WARNING(5543000,
                       "Encountered error while trying to update resharding chunk imbalance metrics",

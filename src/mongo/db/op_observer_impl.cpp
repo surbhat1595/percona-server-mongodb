@@ -76,6 +76,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 
@@ -313,8 +314,15 @@ void writeToImageCollection(OperationContext* opCtx,
     AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
     AutoGetCollection imageCollectionRaii(
         opCtx, NamespaceString::kConfigImagesNamespace, LockMode::MODE_IX);
+    auto curOp = CurOp::get(opCtx);
+    const std::string existingNs = curOp->getNS();
     UpdateResult res = Helpers::upsert(
         opCtx, NamespaceString::kConfigImagesNamespace.toString(), imageEntry.toBSON());
+    {
+        stdx::lock_guard<Client> clientLock(*opCtx->getClient());
+        curOp->setNS_inlock(existingNs);
+    }
+
     invariant(res.numDocsModified == 1 || !res.upsertedId.isEmpty());
 }
 
@@ -512,7 +520,18 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
 
     ShardingWriteRouter shardingWriteRouter(opCtx, nss, Grid::get(opCtx)->catalogCache());
 
-    if (inMultiDocumentTransaction) {
+    auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
+    const bool inBatchedWrite = batchedWriteContext.writesAreBatched();
+
+    if (inBatchedWrite) {
+        for (auto iter = first; iter != last; iter++) {
+            const auto docKey = repl::getDocumentKey(opCtx, nss, iter->doc).getShardKeyAndId();
+            auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
+            operation.setDestinedRecipient(
+                shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
+            batchedWriteContext.addBatchedOperation(opCtx, operation);
+        }
+    } else if (inMultiDocumentTransaction) {
         // Do not add writes to the profile collection to the list of transaction operations, since
         // these are done outside the transaction. There is no top-level WriteUnitOfWork when we are
         // in a SideTransactionBlock.
@@ -583,7 +602,15 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     if (nss.coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
     } else if (nss.coll() == DurableViewCatalog::viewsCollectionName()) {
-        DurableViewCatalog::onExternalChange(opCtx, nss);
+        try {
+            for (auto it = first; it != last; it++) {
+                uassertStatusOK(DurableViewCatalog::onExternalInsert(opCtx, it->doc, nss));
+            }
+        } catch (const DBException&) {
+            // If a previous operation left the view catalog in an invalid state, our inserts can
+            // fail even if all the definitions are valid. Reloading may help us reset the state.
+            DurableViewCatalog::onExternalChange(opCtx, nss);
+        }
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace && !lastOpTime.isNull()) {
         for (auto it = first; it != last; it++) {
             MongoDSessionCatalog::observeDirectWriteToConfigTransactions(opCtx, it->doc);
@@ -635,7 +662,16 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
     ShardingWriteRouter shardingWriteRouter(opCtx, args.nss, Grid::get(opCtx)->catalogCache());
 
     OpTimeBundle opTime;
-    if (inMultiDocumentTransaction) {
+    auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
+    const bool inBatchedWrite = batchedWriteContext.writesAreBatched();
+
+    if (inBatchedWrite) {
+        auto operation = MutableOplogEntry::makeUpdateOperation(
+            args.nss, args.uuid, args.updateArgs->update, args.updateArgs->criteria);
+        operation.setDestinedRecipient(
+            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
+        batchedWriteContext.addBatchedOperation(opCtx, operation);
+    } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
 
@@ -839,6 +875,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     if (inBatchedWrite) {
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
+        operation.setDestinedRecipient(destinedRecipientDecoration(opCtx));
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -1629,7 +1666,9 @@ OpTimeBundle logApplyOps(OperationContext* opCtx,
 
     oplogEntry->setOpType(repl::OpTypeEnum::kCommand);
     oplogEntry->setNss({"admin", "$cmd"});
-    oplogEntry->setSessionId(opCtx->getLogicalSessionId());
+    // Batched writes (that is, WUOWs with 'groupOplogEntries') are not associated with a txnNumber,
+    // so do not emit an lsid either.
+    oplogEntry->setSessionId(opCtx->getTxnNumber() ? opCtx->getLogicalSessionId() : boost::none);
     oplogEntry->setTxnNumber(opCtx->getTxnNumber());
     if (txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
         oplogEntry->getOperationSessionInfo().setTxnRetryCounter(*txnRetryCounter);

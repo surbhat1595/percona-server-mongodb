@@ -43,6 +43,7 @@
 namespace mongo {
 namespace {
 constexpr auto checkValueType = &DocumentSourceChangeStream::checkValueType;
+constexpr auto checkValueTypeOrMissing = &DocumentSourceChangeStream::checkValueTypeOrMissing;
 
 Document copyDocExceptFields(const Document& source, const std::set<StringData>& fieldNames) {
     MutableDocument doc(source);
@@ -385,13 +386,12 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
 
     // Add some additional fields only relevant to transactions.
     if (!txnOpIndex.missing()) {
+        // The lsid and txnNumber may be missing if this is a batched write.
         auto lsid = input[DocumentSourceChangeStream::kLsidField];
-        checkValueType(lsid, DocumentSourceChangeStream::kLsidField, BSONType::Object);
-
+        checkValueTypeOrMissing(lsid, DocumentSourceChangeStream::kLsidField, BSONType::Object);
         auto txnNumber = input[DocumentSourceChangeStream::kTxnNumberField];
-        checkValueType(
+        checkValueTypeOrMissing(
             txnNumber, DocumentSourceChangeStream::kTxnNumberField, BSONType::NumberLong);
-
         doc.addField(DocumentSourceChangeStream::kTxnNumberField, txnNumber);
         doc.addField(DocumentSourceChangeStream::kLsidField, lsid);
     }
@@ -408,11 +408,11 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
         // Note: If the UUID is a missing value (which can be true for events like 'dropDatabase'),
         // 'addField' will not add anything to the document.
         doc.addField(DocumentSourceChangeStream::kCollectionUuidField, uuid);
-
-        const auto wallTime = input[repl::OplogEntry::kWallClockTimeFieldName];
-        checkValueType(wallTime, repl::OplogEntry::kWallClockTimeFieldName, BSONType::Date);
-        doc.addField(DocumentSourceChangeStream::kWallTimeField, wallTime);
     }
+
+    const auto wallTime = input[repl::OplogEntry::kWallClockTimeFieldName];
+    checkValueType(wallTime, repl::OplogEntry::kWallClockTimeFieldName, BSONType::Date);
+    doc.addField(DocumentSourceChangeStream::kWallTimeField, wallTime);
 
     // Invalidation, topology change, and resharding events have fewer fields.
     if (operationType == DocumentSourceChangeStream::kInvalidateOpType ||

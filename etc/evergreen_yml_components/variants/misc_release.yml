@@ -27,8 +27,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - amazon1-2018-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -83,8 +82,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - amazon1-2018-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.multiversion
   - name: audit
@@ -137,8 +135,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - amazon2-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -197,8 +194,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - amazon2-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: audit
   - name: .auth !.multiversion
@@ -251,7 +247,6 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - amazon2-arm64-large
-  - name: build_variant_gen
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -306,32 +301,90 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - amazon2-arm64-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer !.multiversion # Disabled for FCV 5.3
+  - name: test_api_version_compatibility
+  - name: .aggfuzzer
+  - name: .aggregation
   - name: audit
-  - name: auth_audit_gen
-  - name: auth_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
-  - name: external_auth
-  - name: external_auth_aws
-  - name: .jscore .common !.decimal !.sharding
+  - name: .auth
+  - name: .causally_consistent !.sharding
+  - name: .change_streams
+  - name: .change_stream_fuzzer
+  - name: .misc_js
+  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+    distros:
+    - amazon2-arm64-large
+  - name: config_fuzzer_concurrency
+  - name: config_fuzzer_simulate_crash_concurrency_replication
+    distros:
+    - amazon2-arm64-large
+  - name: config_fuzzer_concurrency_replication
+    distros:
+    - amazon2-arm64-large
+  - name: config_fuzzer_jsCore
+  - name: config_fuzzer_replica_sets_jscore_passthrough
+    distros:
+    - amazon2-arm64-large
+  - name: disk_wiredtiger
+  - name: .encrypt
+  - name: idl_tests
+  - name: initial_sync_fuzzer_gen
+  - name: .integration
+    distros:
+    - amazon2-arm64-large
+  - name: jsCore
+    distros:
+    - amazon2-arm64-large
+  - name: .jscore .common !jsCore
+  - name: jsCore_minimum_batch_size
   - name: jsCore_txns_large_txns_format
-  - name: .jstestfuzz .common
-  - name: .logical_session_cache .one_sec
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog
+  - name: json_schema
+  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
+  - name: libunwind_tests
+  - name: mqlrun
+  - name: .multi_shard
+  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+  - name: .query_fuzzer
+  - name: .read_write_concern .large
+    distros:
+    - amazon2-arm64-large
+  - name: .read_write_concern !.large
+  - name: .replica_sets !.encrypt !.auth
+    distros:
+    - amazon2-arm64-large
+  - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_passthrough_gen
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
+    distros:
+    - amazon2-arm64-large
+  - name: .read_only
+  - name: .rollbackfuzzer
   - name: sasl
   - name: search
   - name: search_auth
   - name: search_ssl
-  - name: sharding_auth_audit_gen
-  - name: sharding_auth_gen
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
+  - name: .sharding .txns
+  - name: .sharding .common
   - name: snmp
   - name: .stitch
   - name: .csfle
+    distros:
+    - amazon2-arm64-large
   - name: .publish_csfle
+    distros:
+    - amazon2-arm64-large
+  - name: secondary_reads_passthrough_gen
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: .serverless
+    distros:
+    - amazon2-arm64-large
+  - name: server_selection_json_test_TG
+    distros:
+    - amazon2-arm64-large
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -366,8 +419,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - debian10-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: aggregation_auth
   - name: .auth !.audit !.multiversion
@@ -425,8 +477,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - debian10-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
@@ -478,8 +529,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - debian11-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: aggregation_auth
   - name: .auth !.audit !.multiversion
@@ -537,8 +587,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - debian11-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
@@ -589,8 +638,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - debian92-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: aggregation_auth
   - name: .auth !.audit !.multiversion
@@ -647,8 +695,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - debian92-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
@@ -695,7 +742,6 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel70
-  - name: build_variant_gen
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -737,7 +783,6 @@ buildvariants:
   - name: compile_and_archive_dist_test_then_package_TG
     distros:
     - rhel70
-  - name: build_variant_gen
   - name: .ssl
   - name: jsCore
   - name: external_auth
@@ -759,7 +804,6 @@ buildvariants:
   - name: compile_and_archive_dist_test_then_package_TG
     distros:
     - rhel80-large
-  - name: build_variant_gen
   - name: jsCore
   - name: sharding_gen
   - name: replica_sets_gen
@@ -788,7 +832,6 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -831,6 +874,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-rhel80
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    csfle_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     has_packages: true
@@ -848,8 +892,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel80-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation
   - name: audit
   - name: .auth
@@ -914,6 +957,10 @@ buildvariants:
   - name: .sharding .common
   - name: snmp
   - name: .stitch
+  - name: .csfle
+    distros:
+    - rhel80-large
+  - name: .publish_csfle
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
@@ -951,7 +998,6 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel82-arm64-large
-  - name: build_variant_gen
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -1004,8 +1050,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel82-arm64-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer !.multiversion # Disabled for FCV 5.3
+  - name: .aggfuzzer !.multiversion
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -1030,7 +1075,7 @@ buildvariants:
   - name: .stitch
   - name: .csfle
     distros:
-    - rhel80-large
+    - rhel82-arm64-large
   - name: .publish_csfle
   - name: test_packages
     distros:
@@ -1064,8 +1109,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - suse12-sp5-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -1119,8 +1163,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - suse12-sp5-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
@@ -1168,8 +1211,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - suse15-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common !.multiversion # Disabled for FCV 5.3
+  - name: .aggfuzzer .common !.multiversion
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
@@ -1215,8 +1257,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - suse15-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common !.multiversion # Disabled for FCV 5.3
+  - name: .aggfuzzer .common !.multiversion
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -1266,8 +1307,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - ubuntu1804-build
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: .misc_js
@@ -1336,10 +1376,9 @@ buildvariants:
   - name: libdeps_graph_linting_TG
     distros:
     - ubuntu1804-build
-  - name: build_variant_gen
   - name: .csfle
   - name: .publish_csfle
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
@@ -1400,7 +1439,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: aggregation
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
@@ -1456,7 +1494,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
@@ -1492,8 +1529,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - ubuntu2004-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common !.multiversion # Disabled for FCV 5.3
+  - name: .aggfuzzer .common !.multiversion
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: .misc_js
@@ -1550,10 +1586,9 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - ubuntu2004-large
-  - name: build_variant_gen
   - name: .csfle
   - name: .publish_csfle
-  #  - name: .aggfuzzer .common !.multiversion # Disabled for FCV 5.3
+  - name: .aggfuzzer .common !.multiversion
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
@@ -1606,7 +1641,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: aggregation
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
@@ -1659,7 +1693,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
@@ -1699,8 +1732,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - windows-vsCurrent-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1764,8 +1796,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - windows-vsCurrent-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1823,7 +1854,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: build_variant_gen
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: .causally_consistent !.sharding
@@ -1875,7 +1905,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: build_variant_gen
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: .causally_consistent !.sharding
@@ -1930,7 +1959,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1970,7 +1998,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough

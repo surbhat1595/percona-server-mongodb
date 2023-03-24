@@ -93,6 +93,20 @@ __curfile_check_cbt_txn(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt)
 }
 
 /*
+ * __wt_cursor_checkpoint_id --
+ *     Return the checkpoint ID for checkpoint cursors, otherwise 0.
+ */
+uint64_t
+__wt_cursor_checkpoint_id(WT_CURSOR *cursor)
+{
+    WT_CURSOR_BTREE *cbt;
+
+    cbt = (WT_CURSOR_BTREE *)cursor;
+
+    return (cbt->checkpoint_id);
+}
+
+/*
  * __curfile_compare --
  *     WT_CURSOR->compare method for the btree cursor type.
  */
@@ -165,6 +179,7 @@ __curfile_next(WT_CURSOR *cursor)
 
     cbt = (WT_CURSOR_BTREE *)cursor;
     CURSOR_API_CALL(cursor, session, next, CUR2BT(cbt));
+    CURSOR_REPOSITION_ENTER(cursor, session);
     WT_ERR(__cursor_copy_release(cursor));
 
     WT_ERR(__curfile_check_cbt_txn(session, cbt));
@@ -178,6 +193,7 @@ __curfile_next(WT_CURSOR *cursor)
         F_MASK(cursor, WT_CURSTD_VALUE_SET) == WT_CURSTD_VALUE_INT);
 
 err:
+    CURSOR_REPOSITION_END(cursor, session);
     API_END_RET(session, ret);
 }
 
@@ -224,6 +240,7 @@ __curfile_prev(WT_CURSOR *cursor)
 
     cbt = (WT_CURSOR_BTREE *)cursor;
     CURSOR_API_CALL(cursor, session, prev, CUR2BT(cbt));
+    CURSOR_REPOSITION_ENTER(cursor, session);
     WT_ERR(__cursor_copy_release(cursor));
 
     WT_ERR(__curfile_check_cbt_txn(session, cbt));
@@ -237,6 +254,7 @@ __curfile_prev(WT_CURSOR *cursor)
         F_MASK(cursor, WT_CURSTD_VALUE_SET) == WT_CURSTD_VALUE_INT);
 
 err:
+    CURSOR_REPOSITION_END(cursor, session);
     API_END_RET(session, ret);
 }
 
@@ -280,6 +298,7 @@ __curfile_search(WT_CURSOR *cursor)
 
     cbt = (WT_CURSOR_BTREE *)cursor;
     CURSOR_API_CALL(cursor, session, search, CUR2BT(cbt));
+    CURSOR_REPOSITION_ENTER(cursor, session);
     WT_ERR(__cursor_copy_release(cursor));
     WT_ERR(__cursor_checkkey(cursor));
 
@@ -297,6 +316,7 @@ __curfile_search(WT_CURSOR *cursor)
         F_MASK(cursor, WT_CURSTD_VALUE_SET) == WT_CURSTD_VALUE_INT);
 
 err:
+    CURSOR_REPOSITION_END(cursor, session);
     API_END_RET(session, ret);
 }
 
@@ -314,6 +334,7 @@ __curfile_search_near(WT_CURSOR *cursor, int *exact)
 
     cbt = (WT_CURSOR_BTREE *)cursor;
     CURSOR_API_CALL(cursor, session, search_near, CUR2BT(cbt));
+    CURSOR_REPOSITION_ENTER(cursor, session);
     WT_ERR(__cursor_copy_release(cursor));
     WT_ERR(__cursor_checkkey(cursor));
 
@@ -331,6 +352,7 @@ __curfile_search_near(WT_CURSOR *cursor, int *exact)
         F_MASK(cursor, WT_CURSTD_VALUE_SET) == WT_CURSTD_VALUE_INT);
 
 err:
+    CURSOR_REPOSITION_END(cursor, session);
     API_END_RET(session, ret);
 }
 
@@ -843,6 +865,9 @@ __curfile_setup_checkpoint(WT_CURSOR_BTREE *cbt, const char *cfg[], WT_DATA_HAND
      */
     cbt->checkpoint_write_gen = ckpt_snapshot->snapshot_write_gen;
 
+    /* Remember the checkpoint ID so it can be returned to the application. */
+    cbt->checkpoint_id = ckpt_snapshot->ckpt_id;
+
     /*
      * Override the read timestamp if explicitly provided. Otherwise it's the stable timestamp from
      * the checkpoint. Replace it in the snapshot info if necessary.
@@ -919,6 +944,7 @@ __curfile_create(WT_SESSION_IMPL *session, WT_CURSOR *owner, const char *cfg[], 
       __wt_cursor_largest_key,                        /* largest_key */
       __curfile_cache,                                /* cache */
       __curfile_reopen,                               /* reopen */
+      __wt_cursor_checkpoint_id,                      /* checkpoint ID */
       __curfile_close);                               /* close */
     WT_BTREE *btree;
     WT_CONFIG_ITEM cval;
@@ -1126,6 +1152,7 @@ __wt_curfile_open(WT_SESSION_IMPL *session, const char *uri, WT_CURSOR *owner, c
      * and furthermore any internally opened history store cursors come through here, so this case
      * does matter.)
      */
+    ckpt_snapshot.ckpt_id = 0;
     ckpt_snapshot.oldest_ts = WT_TS_NONE;
     ckpt_snapshot.stable_ts = WT_TS_NONE;
     ckpt_snapshot.snapshot_write_gen = 0;

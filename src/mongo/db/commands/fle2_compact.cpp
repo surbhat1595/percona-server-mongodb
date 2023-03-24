@@ -33,6 +33,8 @@
 
 #include "mongo/db/commands/fle2_compact.h"
 
+#include <memory>
+
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/commands/fle2_compact_gen.h"
@@ -117,7 +119,7 @@ private:
 template <typename FLECollection, typename TagToken>
 void deleteDocumentByPos(FLEQueryInterface* queryImpl,
                          const NamespaceString& nss,
-                         boost::optional<uint64_t> pos,
+                         uint64_t pos,
                          const TagToken& tagToken,
                          ECStats* stats) {
     CompactStatsCounter<ECStats> statsCtr(stats);
@@ -177,7 +179,7 @@ void upsertNullDocument(FLEQueryInterface* queryImpl,
  */
 void deleteESCDocument(FLEQueryInterface* queryImpl,
                        const NamespaceString& nss,
-                       boost::optional<uint64_t> pos,
+                       uint64_t pos,
                        const ESCTwiceDerivedTagToken& tagToken,
                        ECStats* escStats) {
     deleteDocumentByPos<ESCCollection, ESCTwiceDerivedTagToken>(
@@ -189,16 +191,23 @@ void deleteESCDocument(FLEQueryInterface* queryImpl,
  */
 void deleteECCDocument(FLEQueryInterface* queryImpl,
                        const NamespaceString& nss,
-                       boost::optional<uint64_t> pos,
+                       uint64_t pos,
                        const ECCTwiceDerivedTagToken& tagToken,
                        ECStats* eccStats) {
     deleteDocumentByPos<ECCCollection, ECCTwiceDerivedTagToken>(
         queryImpl, nss, pos, tagToken, eccStats);
 }
 
+/**
+ * Result of preparing the ESC collection for a single field/value pair
+ * before compaction.
+ */
 struct ESCPreCompactState {
+    // total insertions of this field/value pair into EDC
     uint64_t count{0};
+    // position of the lowest entry
     uint64_t ipos{0};
+    // position of the highest entry
     uint64_t pos{0};
 };
 
@@ -222,9 +231,9 @@ ESCPreCompactState prepareESCForCompaction(FLEQueryInterface* queryImpl,
 
     auto alpha = ESCCollection::emuBinary(reader, tagToken, valueToken);
     if (alpha.has_value() && alpha.value() == 0) {
-        // No null doc & no entries yet for this field/value pair so nothing to compact.
-        // This can happen if a previous compact command deleted all ESC entries for this
-        // field/value pair, but failed before the renamed ECOC collection could be dropped.
+        // No null doc & no entries found for this field/value pair so nothing to compact.
+        // This can happen if the tag and value tokens were derived from a bogus ECOC
+        // document, or from an ECOC document decrypted with bogus compaction tokens.
         // Skip inserting the compaction placeholder.
         return state;
     } else if (!alpha.has_value()) {
@@ -287,11 +296,20 @@ ESCPreCompactState prepareESCForCompaction(FLEQueryInterface* queryImpl,
     return state;
 }
 
+/**
+ * Result of preparing the ECC collection for a single field/value pair
+ * before compaction.
+ */
 struct ECCPreCompactState {
+    // total deletions of this field/value pair from EDC
     uint64_t count{0};
+    // position of the lowest entry
     uint64_t ipos{0};
+    // position of the highest entry
     uint64_t pos{0};
+    // result of merging all ECC entries for this field/value pair
     std::vector<ECCDocument> g_prime;
+    // whether the merge reduced the number of ECC entries
     bool merged{false};
 };
 
@@ -333,7 +351,7 @@ ECCPreCompactState prepareECCForCompaction(FLEQueryInterface* queryImpl,
     }
 
     if (g.empty()) {
-        // if there's a null doc, then there must be at least one entry
+        // if there are no entries, there must not be a null doc and ipos must be 1
         uassert(6346901, "Found ECC null doc, but no ECC entries", state.ipos == 1);
 
         // no null doc & no entries found, so nothing to compact
@@ -541,74 +559,52 @@ void compactOneFieldValuePair(FLEQueryInterface* queryImpl,
 
     // PART 3
     // A. compact the ECC
-    bool allEntriesDeleted = (escState.count == eccState.count);
     StmtId stmtId = kUninitializedStmtId;
 
     if (eccState.count != 0) {
-        bool hasNullDoc = (eccState.ipos > 1);
-
-        if (!allEntriesDeleted) {
+        if (eccState.merged) {
             CompactStatsCounter<ECStats> stats(eccStats);
 
-            if (eccState.merged) {
-                // a. for each entry in g_prime at index k, insert
-                //  {_id: F(eccTagToken, pos'+ k), value: Enc(eccValueToken, g_prime[k])}
-                for (auto k = eccState.g_prime.size(); k > 0; k--) {
-                    const auto& range = eccState.g_prime[k - 1];
-                    auto insertReply = uassertStatusOK(queryImpl->insertDocument(
-                        namespaces.eccNss,
-                        ECCCollection::generateDocument(
-                            eccTagToken, eccValueToken, eccState.pos + k, range.start, range.end),
-                        &stmtId,
-                        true));
-                    checkWriteErrors(insertReply);
-                    stats.addInserts(1);
-                }
-
-                // b & c. update or insert the ECC null doc
-                auto newNullDoc = ECCCollection::generateNullDocument(
-                    eccTagToken, eccValueToken, eccState.pos - 1);
-                upsertNullDocument(queryImpl, hasNullDoc, newNullDoc, namespaces.eccNss, eccStats);
-
-                // d. delete entries between ipos' and pos', inclusive
-                for (auto k = eccState.ipos; k <= eccState.pos; k++) {
-                    deleteECCDocument(queryImpl, namespaces.eccNss, k, eccTagToken, eccStats);
-                }
+            // a. for each entry in g_prime at index k, insert
+            //  {_id: F(eccTagToken, pos'+ k), value: Enc(eccValueToken, g_prime[k])}
+            for (auto k = eccState.g_prime.size(); k > 0; k--) {
+                const auto& range = eccState.g_prime[k - 1];
+                auto insertReply = uassertStatusOK(queryImpl->insertDocument(
+                    namespaces.eccNss,
+                    ECCCollection::generateDocument(
+                        eccTagToken, eccValueToken, eccState.pos + k, range.start, range.end),
+                    &stmtId,
+                    true));
+                checkWriteErrors(insertReply);
+                stats.addInserts(1);
             }
-        } else {
-            // delete ECC entries between ipos' and pos', inclusive
+
+            // b & c. update or insert the ECC null doc
+            bool hasNullDoc = (eccState.ipos > 1);
+            auto newNullDoc =
+                ECCCollection::generateNullDocument(eccTagToken, eccValueToken, eccState.pos - 1);
+            upsertNullDocument(queryImpl, hasNullDoc, newNullDoc, namespaces.eccNss, eccStats);
+
+            // d. delete entries between ipos' and pos', inclusive
             for (auto k = eccState.ipos; k <= eccState.pos; k++) {
                 deleteECCDocument(queryImpl, namespaces.eccNss, k, eccTagToken, eccStats);
-            }
-
-            // delete the ECC null doc
-            if (hasNullDoc) {
-                deleteECCDocument(queryImpl, namespaces.eccNss, boost::none, eccTagToken, eccStats);
             }
         }
     }
 
     // B. compact the ESC
     if (escState.count != 0) {
-        bool hasNullDoc = (escState.ipos > 1);
-
         // Delete ESC entries between ipos and pos, inclusive.
         // The compaction placeholder is at index pos, so it will be deleted as well.
         for (auto k = escState.ipos; k <= escState.pos; k++) {
             deleteESCDocument(queryImpl, namespaces.escNss, k, escTagToken, escStats);
         }
 
-        if (!allEntriesDeleted) {
-            // update or insert the ESC null doc
-            auto newNullDoc = ESCCollection::generateNullDocument(
-                escTagToken, escValueToken, escState.pos - 1, escState.count);
-            upsertNullDocument(queryImpl, hasNullDoc, newNullDoc, namespaces.escNss, escStats);
-        } else {
-            // delete the ESC null doc
-            if (hasNullDoc) {
-                deleteESCDocument(queryImpl, namespaces.escNss, boost::none, escTagToken, escStats);
-            }
-        }
+        // update or insert the ESC null doc
+        bool hasNullDoc = (escState.ipos > 1);
+        auto newNullDoc = ESCCollection::generateNullDocument(
+            escTagToken, escValueToken, escState.pos - 1, escState.count);
+        upsertNullDocument(queryImpl, hasNullDoc, newNullDoc, namespaces.escNss, escStats);
     }
 }
 
@@ -616,9 +612,10 @@ CompactStats processFLECompact(OperationContext* opCtx,
                                const CompactStructuredEncryptionData& request,
                                GetTxnCallback getTxn,
                                const EncryptedStateCollectionsNamespaces& namespaces) {
-    ECOCStats ecocStats;
-    ECStats escStats, eccStats;
-    stdx::unordered_set<ECOCCompactionDocument> c;
+    auto ecocStats = std::make_shared<ECOCStats>();
+    auto escStats = std::make_shared<ECStats>();
+    auto eccStats = std::make_shared<ECStats>();
+    auto c = std::make_shared<stdx::unordered_set<ECOCCompactionDocument>>();
 
     // Read the ECOC documents in a transaction
     {
@@ -626,17 +623,19 @@ CompactStats processFLECompact(OperationContext* opCtx,
 
         // The function that handles the transaction may outlive this function so we need to use
         // shared_ptrs
-        auto argsBlock = std::tie(c, request, namespaces, ecocStats);
+        auto argsBlock = std::make_tuple(request, namespaces);
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
 
         auto swResult = trun->runNoThrow(
-            opCtx, [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            opCtx,
+            [sharedBlock, c, ecocStats](const txn_api::TransactionClient& txnClient,
+                                        ExecutorPtr txnExec) {
                 FLEQueryInterfaceImpl queryImpl(txnClient);
 
-                auto [c2, request2, namespaces2, ecocStats2] = *sharedBlock.get();
+                auto [request2, namespaces2] = *sharedBlock.get();
 
-                c2 = getUniqueCompactionDocuments(
-                    &queryImpl, request2, namespaces2.ecocRenameNss, &ecocStats2);
+                *c = getUniqueCompactionDocuments(
+                    &queryImpl, request2, namespaces2.ecocRenameNss, ecocStats.get());
 
                 return SemiFuture<void>::makeReady();
             });
@@ -647,22 +646,25 @@ CompactStats processFLECompact(OperationContext* opCtx,
 
     // Each entry in 'C' represents a unique field/value pair. For each field/value pair,
     // compact the ESC & ECC entries for that field/value pair in one transaction.
-    for (auto& ecocDoc : c) {
+    for (auto& ecocDoc : *c) {
         // start a new transaction
         std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx);
 
         // The function that handles the transaction may outlive this function so we need to use
         // shared_ptrs
-        auto argsBlock = std::tie(ecocDoc, namespaces, escStats, eccStats);
+        auto argsBlock = std::make_tuple(ecocDoc, namespaces);
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
 
         auto swResult = trun->runNoThrow(
-            opCtx, [sharedBlock](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            opCtx,
+            [sharedBlock, escStats, eccStats](const txn_api::TransactionClient& txnClient,
+                                              ExecutorPtr txnExec) {
                 FLEQueryInterfaceImpl queryImpl(txnClient);
 
-                auto [ecocDoc2, namespaces2, escStats2, eccStats2] = *sharedBlock.get();
+                auto [ecocDoc2, namespaces2] = *sharedBlock.get();
 
-                compactOneFieldValuePair(&queryImpl, ecocDoc2, namespaces2, &escStats2, &eccStats2);
+                compactOneFieldValuePair(
+                    &queryImpl, ecocDoc2, namespaces2, escStats.get(), eccStats.get());
 
                 return SemiFuture<void>::makeReady();
             });
@@ -671,7 +673,7 @@ CompactStats processFLECompact(OperationContext* opCtx,
         uassertStatusOK(swResult.getValue().getEffectiveStatus());
     }
 
-    CompactStats stats(ecocStats, eccStats, escStats);
+    CompactStats stats(*ecocStats, *eccStats, *escStats);
     _fleCompactStatsStatusSection.updateStats(stats);
 
     return stats;

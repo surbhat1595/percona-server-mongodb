@@ -72,6 +72,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/string_map.h"
@@ -98,6 +99,11 @@ namespace audit {
 #else
         ::_exit( rc );
 #endif
+    }
+
+    /** A system error code's error message. */
+    inline static std::string errnoWithDescription(int e) {
+        return errorMessage(systemError(e));
     }
 
     // Adapter
@@ -218,15 +224,16 @@ namespace audit {
                 std::string s = _fileName + renameSuffix;
                 int r = std::rename(_fileName.c_str(), s.c_str());
                 if (r != 0) {
+                    auto ec = lastSystemError();
                     if (onMinorError) {
                         onMinorError({ErrorCodes::FileRenameFailed,
                                       "Failed to rename {} to {}: {}"_format(
-                                          _fileName, s, errnoWithDescription())});
+                                          _fileName, s, errorMessage(ec))});
                     }
                     LOGV2_ERROR(29016,
                                 "Could not rotate audit log, but continuing normally "
                                 "(error desc: {err_desc})",
-                                "err_desc"_attr = errnoWithDescription());
+                                "err_desc"_attr = errorMessage(ec));
                 }
             }
 
@@ -288,12 +295,12 @@ namespace audit {
                 writeRet = errno;
                 if (!ioErrorShouldRetry(writeRet)) {
                     LOGV2_ERROR(29017,
-                        "Audit system cannot write {datalen} bytes to log file {file}. "
-                        "Write failed with fatal error {err_desc}. "
-                        "As audit cannot make progress, the server will now shut down.",
-                        "datalen"_attr = data.length(),
-                        "file"_attr = _fileName,
-                        "err_desc"_attr = errnoWithDescription(writeRet));
+                                "Audit system cannot write {datalen} bytes to log file {file}. "
+                                "Write failed with fatal error {err_desc}. "
+                                "As audit cannot make progress, the server will now shut down.",
+                                "datalen"_attr = data.length(),
+                                "file"_attr = _fileName,
+                                "err_desc"_attr = errnoWithDescription(writeRet));
                     realexit(EXIT_AUDIT_ERROR);
                 }
                 LOGV2_WARNING(29018,

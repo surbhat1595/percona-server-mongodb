@@ -32,7 +32,7 @@
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
 
 #include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
@@ -419,7 +419,6 @@ OplogEntry makeOplogEntry(OpTime opTime,
     return {DurableOplogEntry(opTime,                     // optime
                               boost::none,                // hash
                               opType,                     // opType
-                              boost::none,                // tenant id
                               std::move(nss),             // namespace
                               uuid,                       // uuid
                               fromMigrate,                // fromMigrate
@@ -462,9 +461,11 @@ void createCollection(OperationContext* opCtx,
     writeConflictRetry(opCtx, "createCollection", nss.ns(), [&] {
         Lock::DBLock dbLk(opCtx, nss.db(), MODE_IX);
         Lock::CollectionLock collLk(opCtx, nss, MODE_X);
+
         OldClientContext ctx(opCtx, nss.ns());
         auto db = ctx.db();
         ASSERT_TRUE(db);
+
         mongo::WriteUnitOfWork wuow(opCtx);
         auto coll = db->createCollection(opCtx, nss, options);
         ASSERT_TRUE(coll);

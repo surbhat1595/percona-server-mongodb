@@ -27,18 +27,19 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/s/sharding_data_transform_cumulative_metrics.h"
 #include "mongo/db/s/sharding_data_transform_metrics_test_fixture.h"
+#include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/future.h"
 #include "mongo/util/static_immortal.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
@@ -65,6 +66,20 @@ private:
 };
 
 class ShardingDataTransformCumulativeMetricsTest : public ShardingDataTransformMetricsTestFixture {
+public:
+    static BSONObj getLatencySection(const ShardingDataTransformCumulativeMetrics& metrics) {
+        BSONObjBuilder bob;
+        metrics.reportForServerStatus(&bob);
+        auto report = bob.done();
+        return report.getObjectField(kTestMetricsName).getObjectField("latencies").getOwned();
+    }
+
+    static BSONObj getActiveSection(const ShardingDataTransformCumulativeMetrics& metrics) {
+        BSONObjBuilder bob;
+        metrics.reportForServerStatus(&bob);
+        auto report = bob.done();
+        return report.getObjectField(kTestMetricsName).getObjectField("active").getOwned();
+    }
 };
 
 TEST_F(ShardingDataTransformCumulativeMetricsTest, AddAndRemoveMetrics) {
@@ -295,6 +310,497 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsLastChunkImbala
         ASSERT_EQ(report.getObjectField(kTestMetricsName).getIntField("lastOpEndingChunkImbalance"),
                   777);
     }
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringCloning) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInserts"), 0);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 0);
+
+    _cumulativeMetrics.onInsertsDuringCloning(140, Milliseconds(15));
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInserts"), 140);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 15);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsBatchRetrievedDuringFetching) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchesRetrieved"), 0);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchRetrievalTimeMillis"), 0);
+
+    _cumulativeMetrics.onRemoteBatchRetrievedDuringOplogFetching(200, Milliseconds(5));
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchesRetrieved"), 200);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchRetrievalTimeMillis"), 5);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringFetching) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalLocalInserts"), 0);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalLocalInsertTimeMillis"), 0);
+
+    _cumulativeMetrics.onLocalInsertDuringOplogFetching(Milliseconds(17));
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalLocalInserts"), 1);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalLocalInsertTimeMillis"), 17);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsBatchRetrievedDuringApplying) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesRetrieved"), 0);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchRetrievalTimeMillis"), 0);
+
+    _cumulativeMetrics.onBatchRetrievedDuringOplogApplying(707, Milliseconds(39));
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesRetrieved"), 707);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchRetrievalTimeMillis"), 39);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsReadDuringCriticalSection) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&donor);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("countReadsDuringCriticalSection"), 0);
+
+    _cumulativeMetrics.onReadDuringCriticalSection();
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("countReadsDuringCriticalSection"), 1);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsWriteDuringCriticalSection) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&donor);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("countWritesDuringCriticalSection"), 0);
+
+    _cumulativeMetrics.onWriteDuringCriticalSection();
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("countWritesDuringCriticalSection"), 1);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsWriteToStashedCollection) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("countWritesToStashCollections"), 0);
+
+    _cumulativeMetrics.onWriteToStashedCollections();
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("countWritesToStashCollections"), 1);
+}
+
+class ShardingDataTransformCumulativeStateTest : public ShardingDataTransformCumulativeMetricsTest {
+public:
+    using CoordinatorStateEnum = ShardingDataTransformCumulativeMetrics::CoordinatorStateEnum;
+    using DonorStateEnum = ShardingDataTransformCumulativeMetrics::DonorStateEnum;
+    using RecipientStateEnum = ShardingDataTransformCumulativeMetrics::RecipientStateEnum;
+
+    BSONObj getStateSubObj(const ShardingDataTransformCumulativeMetrics& metrics) {
+        BSONObjBuilder bob;
+        metrics.reportForServerStatus(&bob);
+        auto report = bob.done();
+        return report.getObjectField(kTestMetricsName).getObjectField("currentInSteps").getOwned();
+    }
+
+    bool checkCoordinateStateField(const ShardingDataTransformCumulativeMetrics& metrics,
+                                   boost::optional<CoordinatorStateEnum> expectedState) {
+        auto serverStatusSubObj = getStateSubObj(metrics);
+        std::map<std::string, int> expectedStateFieldCount;
+
+        auto addExpectedField = [&](CoordinatorStateEnum stateToPopulate) {
+            expectedStateFieldCount.emplace(
+                ShardingDataTransformCumulativeMetrics::fieldNameFor(stateToPopulate),
+                ((expectedState && (stateToPopulate == expectedState)) ? 1 : 0));
+        };
+
+        addExpectedField(CoordinatorStateEnum::kInitializing);
+        addExpectedField(CoordinatorStateEnum::kPreparingToDonate);
+        addExpectedField(CoordinatorStateEnum::kCloning);
+        addExpectedField(CoordinatorStateEnum::kApplying);
+        addExpectedField(CoordinatorStateEnum::kBlockingWrites);
+        addExpectedField(CoordinatorStateEnum::kAborting);
+        addExpectedField(CoordinatorStateEnum::kCommitting);
+
+        for (const auto& expectedState : expectedStateFieldCount) {
+            const auto actualValue = serverStatusSubObj.getIntField(expectedState.first);
+            if (actualValue != expectedState.second) {
+                LOGV2_DEBUG(6438600,
+                            0,
+                            "coordinator state field value does not match expected value",
+                            "field"_attr = expectedState.first,
+                            "serverStatus"_attr = serverStatusSubObj);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool checkDonorStateField(const ShardingDataTransformCumulativeMetrics& metrics,
+                              boost::optional<DonorStateEnum> expectedState) {
+        auto serverStatusSubObj = getStateSubObj(metrics);
+        std::map<std::string, int> expectedStateFieldCount;
+
+        auto addExpectedField = [&](DonorStateEnum stateToPopulate) {
+            expectedStateFieldCount.emplace(
+                ShardingDataTransformCumulativeMetrics::fieldNameFor(stateToPopulate),
+                ((expectedState && (stateToPopulate == expectedState)) ? 1 : 0));
+        };
+
+        addExpectedField(DonorStateEnum::kPreparingToDonate);
+        addExpectedField(DonorStateEnum::kDonatingInitialData);
+        addExpectedField(DonorStateEnum::kDonatingOplogEntries);
+        addExpectedField(DonorStateEnum::kPreparingToBlockWrites);
+        addExpectedField(DonorStateEnum::kError);
+        addExpectedField(DonorStateEnum::kBlockingWrites);
+        addExpectedField(DonorStateEnum::kDone);
+
+        for (const auto& expectedState : expectedStateFieldCount) {
+            const auto actualValue = serverStatusSubObj.getIntField(expectedState.first);
+            if (actualValue != expectedState.second) {
+                LOGV2_DEBUG(6438701,
+                            0,
+                            "Donor state field value does not match expected value",
+                            "field"_attr = expectedState.first,
+                            "serverStatus"_attr = serverStatusSubObj);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool checkRecipientStateField(const ShardingDataTransformCumulativeMetrics& metrics,
+                                  boost::optional<RecipientStateEnum> expectedState) {
+        auto serverStatusSubObj = getStateSubObj(metrics);
+        std::map<std::string, int> expectedStateFieldCount;
+
+        auto addExpectedField = [&](RecipientStateEnum stateToPopulate) {
+            expectedStateFieldCount.emplace(
+                ShardingDataTransformCumulativeMetrics::fieldNameFor(stateToPopulate),
+                ((expectedState && (stateToPopulate == expectedState)) ? 1 : 0));
+        };
+
+        addExpectedField(RecipientStateEnum::kAwaitingFetchTimestamp);
+        addExpectedField(RecipientStateEnum::kCreatingCollection);
+        addExpectedField(RecipientStateEnum::kCloning);
+        addExpectedField(RecipientStateEnum::kApplying);
+        addExpectedField(RecipientStateEnum::kError);
+        addExpectedField(RecipientStateEnum::kStrictConsistency);
+        addExpectedField(RecipientStateEnum::kDone);
+
+        for (const auto& expectedState : expectedStateFieldCount) {
+            const auto actualValue = serverStatusSubObj.getIntField(expectedState.first);
+            if (actualValue != expectedState.second) {
+                LOGV2_DEBUG(6438901,
+                            0,
+                            "Recipient state field value does not match expected value",
+                            "field"_attr = expectedState.first,
+                            "serverStatus"_attr = serverStatusSubObj);
+                return false;
+            }
+        }
+
+        return true;
+    }
+};
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedNormalCoordinatorStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&coordinator);
+
+    ASSERT(checkCoordinateStateField(_cumulativeMetrics, CoordinatorStateEnum::kUnused));
+
+    boost::optional<CoordinatorStateEnum> prevState;
+    boost::optional<CoordinatorStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<CoordinatorStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkCoordinateStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kInitializing));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kPreparingToDonate));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kCloning));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kBlockingWrites));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kCommitting));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kDone));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedAbortedCoordinatorStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&coordinator);
+
+    ASSERT(checkCoordinateStateField(_cumulativeMetrics, CoordinatorStateEnum::kUnused));
+
+    boost::optional<CoordinatorStateEnum> prevState;
+    boost::optional<CoordinatorStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<CoordinatorStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkCoordinateStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kInitializing));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kPreparingToDonate));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kAborting));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedSteppedDownCoordinatorStateFromUnusedReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&coordinator);
+
+    boost::optional<CoordinatorStateEnum> initState = CoordinatorStateEnum::kUnused;
+    ASSERT(checkCoordinateStateField(_cumulativeMetrics, initState));
+
+    _cumulativeMetrics.onStateTransition(initState, {boost::none});
+    ASSERT(checkCoordinateStateField(_cumulativeMetrics, initState));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedSteppedDownCoordinatorStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&coordinator);
+
+    ASSERT(checkCoordinateStateField(_cumulativeMetrics, CoordinatorStateEnum::kUnused));
+
+    boost::optional<CoordinatorStateEnum> prevState;
+    boost::optional<CoordinatorStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<CoordinatorStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkCoordinateStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kInitializing));
+    ASSERT(simulateTransitionTo(CoordinatorStateEnum::kPreparingToDonate));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedNormalDonorStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&donor);
+
+    ASSERT(checkDonorStateField(_cumulativeMetrics, DonorStateEnum::kUnused));
+
+    boost::optional<DonorStateEnum> prevState;
+    boost::optional<DonorStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<DonorStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkDonorStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(DonorStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kPreparingToDonate));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kDonatingInitialData));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kDonatingOplogEntries));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kPreparingToBlockWrites));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kBlockingWrites));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kDone));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedAbortedDonorStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&donor);
+
+    ASSERT(checkDonorStateField(_cumulativeMetrics, DonorStateEnum::kUnused));
+
+    boost::optional<DonorStateEnum> prevState;
+    boost::optional<DonorStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<DonorStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkDonorStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(DonorStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kPreparingToDonate));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kError));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kDone));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedSteppedDownDonorStateFromUnusedReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&donor);
+
+    boost::optional<DonorStateEnum> initState = DonorStateEnum::kUnused;
+    ASSERT(checkDonorStateField(_cumulativeMetrics, initState));
+
+    _cumulativeMetrics.onStateTransition(initState, {boost::none});
+    ASSERT(checkDonorStateField(_cumulativeMetrics, initState));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedSteppedDownDonorStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&donor);
+
+    ASSERT(checkDonorStateField(_cumulativeMetrics, DonorStateEnum::kUnused));
+
+    boost::optional<DonorStateEnum> prevState;
+    boost::optional<DonorStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<DonorStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkDonorStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(DonorStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kPreparingToDonate));
+    ASSERT(simulateTransitionTo(DonorStateEnum::kDonatingInitialData));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedNormalRecipientStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    ASSERT(checkRecipientStateField(_cumulativeMetrics, RecipientStateEnum::kUnused));
+
+    boost::optional<RecipientStateEnum> prevState;
+    boost::optional<RecipientStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<RecipientStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkRecipientStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kAwaitingFetchTimestamp));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kCreatingCollection));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kCloning));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kApplying));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kStrictConsistency));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kDone));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedAbortedRecipientStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    ASSERT(checkRecipientStateField(_cumulativeMetrics, RecipientStateEnum::kUnused));
+
+    boost::optional<RecipientStateEnum> prevState;
+    boost::optional<RecipientStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<RecipientStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkRecipientStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kAwaitingFetchTimestamp));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kError));
+    ASSERT(simulateTransitionTo(boost::none));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedSteppedDownRecipientStateFromUnusedReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    boost::optional<RecipientStateEnum> initState = RecipientStateEnum::kUnused;
+    ASSERT(checkRecipientStateField(_cumulativeMetrics, initState));
+
+    _cumulativeMetrics.onStateTransition(initState, {boost::none});
+    ASSERT(checkRecipientStateField(_cumulativeMetrics, initState));
+}
+
+TEST_F(ShardingDataTransformCumulativeStateTest,
+       SimulatedSteppedDownRecipientStateTransitionReportsStateCorrectly) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    ASSERT(checkRecipientStateField(_cumulativeMetrics, RecipientStateEnum::kUnused));
+
+    boost::optional<RecipientStateEnum> prevState;
+    boost::optional<RecipientStateEnum> nextState;
+
+    auto simulateTransitionTo = [&](boost::optional<RecipientStateEnum> newState) {
+        prevState = nextState;
+        nextState = newState;
+        _cumulativeMetrics.onStateTransition(prevState, nextState);
+        return checkRecipientStateField(_cumulativeMetrics, nextState);
+    };
+
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kUnused));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kAwaitingFetchTimestamp));
+    ASSERT(simulateTransitionTo(RecipientStateEnum::kCreatingCollection));
+    ASSERT(simulateTransitionTo(boost::none));
 }
 
 }  // namespace

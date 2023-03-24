@@ -43,16 +43,6 @@ var RetryableWritesUtil = (function() {
         return kRetryableWriteCommands.has(cmdName);
     }
 
-    const kStorageEnginesWithoutDocumentLocking = new Set(["ephemeralForTest"]);
-
-    /**
-     * Returns true if the given storage engine supports retryable writes (i.e. supports
-     * document-level locking).
-     */
-    function storageEngineSupportsRetryableWrites(storageEngineName) {
-        return !kStorageEnginesWithoutDocumentLocking.has(storageEngineName);
-    }
-
     /**
      * Asserts the connection has a document in its transaction collection that has the given
      * sessionId, txnNumber, and lastWriteOptimeTs.
@@ -101,7 +91,6 @@ var RetryableWritesUtil = (function() {
         isRetryableCode,
         errmsgContainsRetryableCodeName,
         isRetryableWriteCmdName,
-        storageEngineSupportsRetryableWrites,
         checkTransactionTable,
         assertSameRecordOnBothConnections,
         runRetryableWrite,

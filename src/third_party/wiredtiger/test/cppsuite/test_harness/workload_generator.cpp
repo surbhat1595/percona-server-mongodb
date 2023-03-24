@@ -56,6 +56,8 @@ operation_config::get_func(database_operation *dbo)
         return (std::bind(&database_operation::insert_operation, dbo, std::placeholders::_1));
     case thread_type::READ:
         return (std::bind(&database_operation::read_operation, dbo, std::placeholders::_1));
+    case thread_type::REMOVE:
+        return (std::bind(&database_operation::remove_operation, dbo, std::placeholders::_1));
     case thread_type::UPDATE:
         return (std::bind(&database_operation::update_operation, dbo, std::placeholders::_1));
     default:
@@ -68,7 +70,7 @@ operation_config::get_func(database_operation *dbo)
 workload_generator::workload_generator(configuration *configuration,
   database_operation *db_operation, timestamp_manager *timestamp_manager,
   workload_tracking *tracking, database &database)
-    : component("workload_generator", configuration), _database(database),
+    : component(WORKLOAD_GENERATOR, configuration), _database(database),
       _database_operation(db_operation), _timestamp_manager(timestamp_manager), _tracking(tracking)
 {
 }
@@ -93,6 +95,8 @@ workload_generator::run()
       operation_config(_config->get_subconfig(INSERT_OP_CONFIG), thread_type::INSERT));
     operation_configs.push_back(
       operation_config(_config->get_subconfig(READ_OP_CONFIG), thread_type::READ));
+    operation_configs.push_back(
+      operation_config(_config->get_subconfig(REMOVE_OP_CONFIG), thread_type::REMOVE));
     operation_configs.push_back(
       operation_config(_config->get_subconfig(UPDATE_OP_CONFIG), thread_type::UPDATE));
     populate_config = _config->get_subconfig(POPULATE_CONFIG);

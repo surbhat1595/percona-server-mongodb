@@ -3,7 +3,6 @@
  * reproduce the retryable writes oplog chain.
  *
  * @tags: [
- *   incompatible_with_eft,
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
@@ -14,13 +13,7 @@
 (function() {
 "use strict";
 
-load("jstests/libs/retryable_writes_util.js");
 load("jstests/replsets/libs/tenant_migration_test.js");
-
-if (!RetryableWritesUtil.storageEngineSupportsRetryableWrites(jsTest.options().storageEngine)) {
-    jsTestLog("Retryable writes are not supported, skipping test");
-    return;
-}
 
 const kGarbageCollectionDelayMS = 5 * 1000;
 const donorRst = new ReplSetTest({

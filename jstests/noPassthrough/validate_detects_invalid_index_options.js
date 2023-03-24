@@ -1,7 +1,5 @@
 /**
  * Tests that the validate command detects invalid index options.
- *
- * @tags: [incompatible_with_eft]
  */
 (function() {
 "use strict";
@@ -39,9 +37,7 @@ assert(!validateRes.valid);
 // Validation of metadata complete for collection. Problems detected.
 checkLog.containsJson(conn, 5980501);
 
-// Cannot use { metadata: true } with any other options. Background validation is converted into a
-// foreground validation on the ephemeralForTest storage engine, making it incompatible with this
-// test.
+// Cannot use { metadata: true } with any other options.
 assert.commandFailedWithCode(db.runCommand({validate: collName, metadata: true, background: true}),
                              ErrorCodes.InvalidOptions);
 assert.commandFailedWithCode(db.runCommand({validate: collName, metadata: true, repair: true}),

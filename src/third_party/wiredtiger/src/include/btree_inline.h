@@ -92,6 +92,36 @@ __wt_page_is_empty(WT_PAGE *page)
 }
 
 /*
+ * __wt_page_evict_soon_check --
+ *     Check whether the page should be evicted urgently.
+ */
+static inline bool
+__wt_page_evict_soon_check(WT_SESSION_IMPL *session, WT_REF *ref, bool *inmem_split)
+{
+    WT_BTREE *btree;
+    WT_PAGE *page;
+
+    btree = S2BT(session);
+    page = ref->page;
+
+    /*
+     * Attempt to evict pages with the special "oldest" read generation. This is set for pages that
+     * grow larger than the configured memory_page_max setting, when we see many deleted items, and
+     * when we are attempting to scan without trashing the cache.
+     *
+     * Checkpoint should not queue pages for urgent eviction if they require dirty eviction: there
+     * is a special exemption that allows checkpoint to evict dirty pages in a tree that is being
+     * checkpointed, and no other thread can help with that. Checkpoints don't rely on this code for
+     * dirty eviction: that is handled explicitly in __wt_sync_file.
+     */
+    if (WT_READGEN_EVICT_SOON(page->read_gen) && btree->evict_disabled == 0 &&
+      __wt_page_can_evict(session, ref, inmem_split) &&
+      (!WT_SESSION_IS_CHECKPOINT(session) || __wt_page_evict_clean(page)))
+        return (true);
+    return (false);
+}
+
+/*
  * __wt_page_evict_clean --
  *     Return if the page can be evicted without dirtying the tree.
  */
@@ -1509,11 +1539,20 @@ __wt_page_del_active(WT_SESSION_IMPL *session, WT_REF *ref, bool visible_all)
         return (false);
     if (page_del->txnid == WT_TXN_ABORTED)
         return (false);
+    /*
+     * If we are reading from a checkpoint, visible_all checks don't work (they check the current
+     * state of the world and not the checkpoint) so operate under the assumption that if the
+     * truncate operation appears in the checkpoint, it must have been visible to somebody, and
+     * because the checkpoint is immutable, that won't ever change.
+     */
+    if (WT_READING_CHECKPOINT(session) && visible_all)
+        return (true);
     WT_ORDERED_READ(prepare_state, page_del->prepare_state);
     if (prepare_state == WT_PREPARE_INPROGRESS || prepare_state == WT_PREPARE_LOCKED)
         return (true);
-    return (visible_all ? !__wt_txn_visible_all(session, page_del->txnid, page_del->timestamp) :
-                          !__wt_txn_visible(session, page_del->txnid, page_del->timestamp));
+    return (visible_all ?
+        !__wt_txn_visible_all(session, page_del->txnid, page_del->durable_timestamp) :
+        !__wt_txn_visible(session, page_del->txnid, page_del->timestamp));
 }
 
 /*
@@ -1768,7 +1807,6 @@ __wt_page_release(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t flags)
 {
     WT_BTREE *btree;
     WT_DECL_RET;
-    WT_PAGE *page;
     bool inmem_split;
 
     btree = S2BT(session);
@@ -1795,24 +1833,12 @@ __wt_page_release(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t flags)
         return (0);
     }
 
-    /*
-     * Attempt to evict pages with the special "oldest" read generation. This is set for pages that
-     * grow larger than the configured memory_page_max setting, when we see many deleted items, and
-     * when we are attempting to scan without trashing the cache.
-     *
-     * Checkpoint should not queue pages for urgent eviction if they require dirty eviction: there
-     * is a special exemption that allows checkpoint to evict dirty pages in a tree that is being
-     * checkpointed, and no other thread can help with that. Checkpoints don't rely on this code for
-     * dirty eviction: that is handled explicitly in __wt_sync_file.
-     *
-     * If the operation has disabled eviction or splitting, or the session is preventing from
-     * reconciling, then just queue the page for urgent eviction. Otherwise, attempt to release and
-     * evict it.
-     */
-    page = ref->page;
-    if (WT_READGEN_EVICT_SOON(page->read_gen) && btree->evict_disabled == 0 &&
-      __wt_page_can_evict(session, ref, &inmem_split) &&
-      (!WT_SESSION_IS_CHECKPOINT(session) || __wt_page_evict_clean(page))) {
+    if (__wt_page_evict_soon_check(session, ref, &inmem_split)) {
+        /*
+         * If the operation has disabled eviction or splitting, or the session is preventing from
+         * reconciling, then just queue the page for urgent eviction. Otherwise, attempt to release
+         * and evict it.
+         */
         if (LF_ISSET(WT_READ_NO_EVICT) ||
           (inmem_split ? LF_ISSET(WT_READ_NO_SPLIT) : F_ISSET(session, WT_SESSION_NO_RECONCILE)))
             WT_IGNORE_RET_BOOL(__wt_page_evict_urgent(session, ref));

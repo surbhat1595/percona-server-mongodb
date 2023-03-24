@@ -43,6 +43,7 @@ const string IndexNames::TEXT = "text";
 const string IndexNames::HASHED = "hashed";
 const string IndexNames::BTREE = "";
 const string IndexNames::WILDCARD = "wildcard";
+const string IndexNames::COLUMN = "columnstore";
 // We no longer support geo haystack indexes. We use this value to reject creating them.
 const string IndexNames::GEO_HAYSTACK = "geoHaystack";
 
@@ -53,6 +54,7 @@ const StringMap<IndexType> kIndexNameToType = {
     {IndexNames::GEO_2DSPHERE_BUCKET, INDEX_2DSPHERE_BUCKET},
     {IndexNames::TEXT, INDEX_TEXT},
     {IndexNames::HASHED, INDEX_HASHED},
+    {IndexNames::COLUMN, INDEX_COLUMN},
     {IndexNames::WILDCARD, INDEX_WILDCARD},
 };
 

@@ -20,8 +20,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: .aggregation !.unwind !.encrypt
   - name: audit
   - name: .auth !.multiversion
@@ -89,8 +88,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - windows-vsCurrent-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough

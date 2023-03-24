@@ -46,7 +46,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
@@ -873,6 +873,10 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
     OpTimeBundle opTime;
     if (inBatchedWrite) {
+        if (nss == NamespaceString::kSessionTransactionsTableNamespace) {
+            MongoDSessionCatalog::observeDirectWriteToConfigTransactions(opCtx,
+                                                                         documentKey.getId());
+        }
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
         operation.setDestinedRecipient(destinedRecipientDecoration(opCtx));

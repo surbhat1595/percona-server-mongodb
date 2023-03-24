@@ -118,11 +118,11 @@ public:
      */
     static Status isValidNormalized(const MatchExpression* root);
 
-    const NamespaceString nss() const {
+    NamespaceString nss() const {
         invariant(_findCommand->getNamespaceOrUUID().nss());
         return *_findCommand->getNamespaceOrUUID().nss();
     }
-    const std::string ns() const {
+    std::string ns() const {
         return nss().ns();
     }
 
@@ -293,6 +293,8 @@ private:
 
     boost::optional<SortPattern> _sortPattern;
 
+    // A query can include a post-processing pipeline here. Logically it is applied after all the
+    // other operations (filter, sort, project, skip, limit).
     std::vector<std::unique_ptr<InnerPipelineStageInterface>> _pipeline;
 
     // Keeps track of what metadata has been explicitly requested.

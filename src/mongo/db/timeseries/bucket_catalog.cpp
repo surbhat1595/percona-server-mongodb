@@ -275,12 +275,6 @@ public:
     bool schemaIncompatible(const BSONObj& input,
                             boost::optional<StringData> metaField,
                             const StringData::ComparatorInterface* comparator) {
-        // (Generic FCV reference): TODO (SERVER-60912): Update once kLastLTS is 6.0
-        if (serverGlobalParams.featureCompatibility.getVersion() ==
-            multiversion::GenericFCV::kLastLTS) {
-            return false;
-        }
-
         auto result = _schema.update(input, metaField, comparator);
         return (result == timeseries::Schema::UpdateStatus::Failed);
     }
@@ -1159,7 +1153,7 @@ std::shared_ptr<BucketCatalog::ExecutionStats> BucketCatalog::_getExecutionStats
     return res.first->second;
 }
 
-const std::shared_ptr<BucketCatalog::ExecutionStats> BucketCatalog::_getExecutionStats(
+std::shared_ptr<BucketCatalog::ExecutionStats> BucketCatalog::_getExecutionStats(
     const NamespaceString& ns) const {
     static const auto kEmptyStats{std::make_shared<ExecutionStats>()};
 

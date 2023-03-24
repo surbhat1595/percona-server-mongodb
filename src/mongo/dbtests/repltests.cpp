@@ -36,7 +36,7 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
@@ -69,7 +69,6 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         repl::DurableOplogEntry(opTime,                     // optime
                                 0,                          // hash
                                 opType,                     // opType
-                                boost::none,                // tenant id
                                 nss,                        // namespace
                                 boost::none,                // uuid
                                 boost::none,                // fromMigrate

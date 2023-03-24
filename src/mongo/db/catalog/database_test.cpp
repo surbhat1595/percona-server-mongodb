@@ -39,7 +39,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
@@ -147,12 +147,6 @@ TEST_F(DatabaseTest, CreateCollectionThrowsExceptionWhenDatabaseIsInADropPending
             db->setDropPending(_opCtx.get(), true);
 
             WriteUnitOfWork wuow(_opCtx.get());
-
-            // If createCollection() unexpectedly succeeds, we need to commit the collection
-            // creation to
-            // avoid leaving the ephemeralForTest storage engine in a bad state for subsequent
-            // tests.
-            ON_BLOCK_EXIT([&wuow] { wuow.commit(); });
 
             ASSERT_THROWS_CODE_AND_WHAT(db->createCollection(_opCtx.get(), _nss),
                                         AssertionException,

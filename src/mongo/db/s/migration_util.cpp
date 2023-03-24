@@ -42,7 +42,7 @@
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
@@ -701,8 +701,8 @@ void persistUpdatedNumOrphans(OperationContext* opCtx,
                                << BSON("$exists" << true));
     try {
         PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-        ScopedRangeDeleterLock rangeDeleterLock(opCtx);
-        // TODO (SERVER-54284) Remove writeConflictRetry loop
+        ScopedRangeDeleterLock rangeDeleterLock(opCtx, collectionUuid);
+        // TODO SERVER-65996 Remove writeConflictRetry loop
         writeConflictRetry(
             opCtx, "updateOrphanCount", NamespaceString::kRangeDeletionNamespace.ns(), [&] {
                 store.update(opCtx,
@@ -820,12 +820,17 @@ void persistCommitDecision(OperationContext* opCtx,
               *migrationDoc.getDecision() == DecisionEnum::kCommitted);
 
     hangInPersistMigrateCommitDecisionInterruptible.pauseWhileSet(opCtx);
-
-    PersistentTaskStore<MigrationCoordinatorDocument> store(
-        NamespaceString::kMigrationCoordinatorsNamespace);
-    store.upsert(opCtx,
-                 BSON(MigrationCoordinatorDocument::kIdFieldName << migrationDoc.getId()),
-                 migrationDoc.toBSON());
+    try {
+        PersistentTaskStore<MigrationCoordinatorDocument> store(
+            NamespaceString::kMigrationCoordinatorsNamespace);
+        store.update(opCtx,
+                     BSON(MigrationCoordinatorDocument::kIdFieldName << migrationDoc.getId()),
+                     migrationDoc.toBSON());
+    } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
+        LOGV2_ERROR(6439800,
+                    "No coordination doc found on disk for migration",
+                    "migration"_attr = redact(migrationDoc.toBSON()));
+    }
 
     if (hangInPersistMigrateCommitDecisionThenSimulateErrorUninterruptible.shouldFail()) {
         hangInPersistMigrateCommitDecisionThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);
@@ -839,12 +844,17 @@ void persistAbortDecision(OperationContext* opCtx,
     invariant(migrationDoc.getDecision() && *migrationDoc.getDecision() == DecisionEnum::kAborted);
 
     hangInPersistMigrateAbortDecisionInterruptible.pauseWhileSet(opCtx);
-
-    PersistentTaskStore<MigrationCoordinatorDocument> store(
-        NamespaceString::kMigrationCoordinatorsNamespace);
-    store.upsert(opCtx,
-                 BSON(MigrationCoordinatorDocument::kIdFieldName << migrationDoc.getId()),
-                 migrationDoc.toBSON());
+    try {
+        PersistentTaskStore<MigrationCoordinatorDocument> store(
+            NamespaceString::kMigrationCoordinatorsNamespace);
+        store.update(opCtx,
+                     BSON(MigrationCoordinatorDocument::kIdFieldName << migrationDoc.getId()),
+                     migrationDoc.toBSON());
+    } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
+        LOGV2(6439801,
+              "No coordination doc found on disk for migration",
+              "migration"_attr = redact(migrationDoc.toBSON()));
+    }
 
     if (hangInPersistMigrateAbortDecisionThenSimulateErrorUninterruptible.shouldFail()) {
         hangInPersistMigrateAbortDecisionThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);

@@ -44,7 +44,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/coll_mod_gen.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -174,7 +174,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
             parsed.cappedMax = cmr.getCappedMax();
         }
 
-        if (auto& cappedSize = cmr.getCappedSize()) {
+        if (const auto& cappedSize = cmr.getCappedSize()) {
             static constexpr long long minCappedSize = 4096;
             auto swCappedSize = CollectionOptions::checkAndAdjustCappedSize(*cappedSize);
             if (!swCappedSize.isOK()) {
@@ -184,7 +184,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                 (swCappedSize.getValue() < minCappedSize) ? minCappedSize : swCappedSize.getValue();
             oplogEntryBuilder.append(CollMod::kCappedSizeFieldName, *cappedSize);
         }
-        if (auto& cappedMax = cmr.getCappedMax()) {
+        if (const auto& cappedMax = cmr.getCappedMax()) {
             auto swCappedMaxDocs = CollectionOptions::checkAndAdjustCappedMaxDocs(*cappedMax);
             if (!swCappedMaxDocs.isOK()) {
                 return swCappedMaxDocs.getStatus();
@@ -376,7 +376,8 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         if (cmdIndex.getPrepareUnique()) {
             parsed.numModifications++;
             // Attempting to modify with the same value should be treated as a no-op.
-            if (cmrIndex->idx->prepareUnique() == *cmdIndex.getPrepareUnique()) {
+            if (cmrIndex->idx->prepareUnique() == *cmdIndex.getPrepareUnique() ||
+                cmrIndex->idx->unique()) {
                 indexForOplog->setPrepareUnique(boost::none);
             } else {
                 cmrIndex->indexPrepareUnique = cmdIndex.getPrepareUnique();
@@ -437,7 +438,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         oplogEntryBuilder.append(CollMod::kValidatorFieldName, validatorObj);
     }
 
-    if (auto& validationLevel = cmr.getValidationLevel()) {
+    if (const auto& validationLevel = cmr.getValidationLevel()) {
         if (isView) {
             return getNotSupportedOnViewError(CollMod::kValidationLevelFieldName);
         }
@@ -450,7 +451,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                                  ValidationLevel_serializer(*validationLevel));
     }
 
-    if (auto& validationAction = cmr.getValidationAction()) {
+    if (const auto& validationAction = cmr.getValidationAction()) {
         if (isView) {
             return getNotSupportedOnViewError(CollMod::kValidationActionFieldName);
         }
@@ -471,7 +472,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         oplogEntryBuilder.append(CollMod::kPipelineFieldName, *pipeline);
     }
 
-    if (auto& viewOn = cmr.getViewOn()) {
+    if (const auto& viewOn = cmr.getViewOn()) {
         parsed.numModifications++;
         if (!isView) {
             return getOnlySupportedOnViewError(CollMod::kViewOnFieldName);
@@ -480,7 +481,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         oplogEntryBuilder.append(CollMod::kViewOnFieldName, *viewOn);
     }
 
-    if (auto& recordPreImages = cmr.getRecordPreImages()) {
+    if (const auto& recordPreImages = cmr.getRecordPreImages()) {
         if (isView) {
             return getNotSupportedOnViewError(CollMod::kRecordPreImagesFieldName);
         }
@@ -553,7 +554,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         timeseries->serialize(&subObjBuilder);
     }
 
-    if (auto& dryRun = cmr.getDryRun()) {
+    if (const auto& dryRun = cmr.getDryRun()) {
         parsed.dryRun = *dryRun;
         // The dry run option should never be included in a collMod oplog entry.
     }
@@ -925,29 +926,6 @@ Status _collModInternal(OperationContext* opCtx,
             // Notify the index catalog that the definition of this index changed.
             coll.getWritableCollection(opCtx)->getIndexCatalog()->refreshEntry(
                 opCtx, coll.getWritableCollection(opCtx), desc, CreateIndexEntryFlags::kIsReady);
-        }
-
-        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
-        // upgrade/downgrade code.
-        const auto currentVersion = serverGlobalParams.featureCompatibility.getVersion();
-        if (coll->getTimeseriesOptions() && !coll->getTimeseriesBucketsMayHaveMixedSchemaData() &&
-            (currentVersion == multiversion::GenericFCV::kUpgradingFromLastLTSToLatest ||
-             currentVersion == multiversion::GenericFCV::kLatest)) {
-            // (Generic FCV reference): While upgrading the FCV from kLastLTS to kLatest, collMod is
-            // called as part of the upgrade process to add the
-            // 'timeseriesBucketsMayHaveMixedSchemaData=true' catalog entry flag for time-series
-            // collections that are missing the flag. This indicates that the time-series collection
-            // existed in earlier server versions and may have mixed-schema data.
-            coll.getWritableCollection(opCtx)->setTimeseriesBucketsMayHaveMixedSchemaData(opCtx,
-                                                                                          true);
-        } else if (coll->getTimeseriesBucketsMayHaveMixedSchemaData() &&
-                   (currentVersion == multiversion::GenericFCV::kDowngradingFromLatestToLastLTS ||
-                    currentVersion == multiversion::GenericFCV::kLastLTS)) {
-            // (Generic FCV reference): While downgrading the FCV to kLastLTS, collMod is called as
-            // part of the downgrade process to remove the 'timeseriesBucketsMayHaveMixedSchemaData'
-            // catalog entry flag for time-series collections that have the flag.
-            coll.getWritableCollection(opCtx)->setTimeseriesBucketsMayHaveMixedSchemaData(
-                opCtx, boost::none);
         }
 
         // Only observe non-view collMods, as view operations are observed as operations on the

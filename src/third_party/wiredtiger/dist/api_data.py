@@ -219,10 +219,6 @@ tiered_config = [
             time in seconds to retain data on tiered storage on the local tier
             for faster read access''',
             min='0', max='10000'),
-        Config('object_target_size', '10M', r'''
-            the approximate size of objects before creating them on the
-            tiered storage tier''',
-            min='100K', max='10TB'),
         ]),
 ]
 
@@ -273,10 +269,6 @@ file_runtime_config = common_runtime_config + [
         the file is read-only. All methods that may modify a file are
         disabled. See @ref readonly for more information''',
         type='boolean'),
-    Config('tiered_object', 'false', r'''
-        this file is a tiered object. When opened on its own, it is marked as
-        readonly and may be restricted in other ways''',
-        type='boolean', undoc=True),
 ]
 
 # Per-file configuration
@@ -440,6 +432,10 @@ file_meta = file_config + [
         LSN of the last checkpoint'''),
     Config('id', '', r'''
         the file's ID number'''),
+    Config('tiered_object', 'false', r'''
+        this file is a tiered object. When opened on its own, it is marked as
+        readonly and may be restricted in other ways''',
+        type='boolean', undoc=True),
     Config('version', '(major=0,minor=0)', r'''
         the file version'''),
 ]
@@ -467,6 +463,7 @@ tiered_meta = file_meta + tiered_config + [
 ]
 
 tier_meta = file_meta + tiered_tree_config
+
 # Objects need to have the readonly setting set and bucket_prefix.
 # The file_meta already contains those pieces.
 object_meta = file_meta + [
@@ -834,24 +831,6 @@ connection_runtime_config = [
         @ref statistics for more information''',
         type='list',
         choices=['all', 'cache_walk', 'fast', 'none', 'clear', 'tree_walk']),
-    Config('tiered_manager', '', r'''
-        tiered storage manager configuration options''',
-        type='category', undoc=True, subconfig=[
-            Config('threads_max', '8', r'''
-                maximum number of threads WiredTiger will start to help manage
-                tiered storage maintenance. Each worker thread uses a session
-                from the configured session_max''',
-                min=1, max=20),
-            Config('threads_min', '1', r'''
-                minimum number of threads WiredTiger will start to help manage
-                tiered storage maintenance.''',
-                min=1, max=20),
-            Config('wait', '0', r'''
-                seconds to wait between each periodic housekeeping of
-                tiered storage. Setting this value above 0 configures periodic
-                management inside WiredTiger''',
-                min='0', max='100000'),
-            ]),
     Config('timing_stress_for_test', '', r'''
         enable code that interrupts the usual timing of operations with a goal
         of uncovering race conditions and unexpected blocking. This option is
@@ -859,7 +838,7 @@ connection_runtime_config = [
         type='list', undoc=True,
         choices=[
         'aggressive_sweep', 'backup_rename', 'checkpoint_reserved_txnid_delay', 'checkpoint_slow',
-        'compact_slow', 'failpoint_history_store_delete_key_from_ts',
+        'compact_slow', 'evict_reposition', 'failpoint_history_store_delete_key_from_ts',
         'history_store_checkpoint_delay', 'history_store_search', 'history_store_sweep_race',
         'prepare_checkpoint_delay', 'split_1', 'split_2', 'split_3', 'split_4', 'split_5',
         'split_6', 'split_7', 'tiered_flush_finish']),
@@ -1073,6 +1052,9 @@ wiredtiger_open_tiered_storage_configuration = [
             a directory to store locally cached versions of files in the storage source.  By
             default, it is named with \c "-cache" appended to the bucket name.  A relative
             directory name is relative to the home directory'''),
+        Config('interval', '60', r'''
+            interval in seconds at which to check for tiered storage related work to
+            perform''', min=1, max=1000),
         Config('name', 'none', r'''
             Permitted values are \c "none"
             or custom storage name created with
@@ -1962,14 +1944,15 @@ methods = {
 
 'WT_CONNECTION.query_timestamp' : Method([
     Config('get', 'all_durable', r'''
-        specify which timestamp to query: \c all_durable returns the largest timestamp such that
-        all timestamps up to that value have been made durable; \c last_checkpoint returns the
+        specify which timestamp to query: \c all_durable returns the largest timestamp such
+        that all timestamps up to and including that value have been committed (possibly
+        bounded by the application-set \c durable timestamp); \c last_checkpoint returns the
         timestamp of the most recent stable checkpoint; \c oldest_timestamp returns the most
         recent \c oldest_timestamp set with WT_CONNECTION::set_timestamp; \c oldest_reader
         returns the minimum of the read timestamps of all active readers; \c pinned returns
         the minimum of the \c oldest_timestamp and the read timestamps of all active readers;
-        \c recovery returns the timestamp of the most recent stable checkpoint taken prior
-        to a shutdown; \c stable_timestamp returns the most recent \c stable_timestamp set with
+        \c recovery returns the timestamp of the most recent stable checkpoint taken prior to
+        a shutdown; \c stable_timestamp returns the most recent \c stable_timestamp set with
         WT_CONNECTION::set_timestamp. (The \c oldest and \c stable arguments are deprecated
         short-hand for \c oldest_timestamp and \c stable_timestamp, respectively.) See @ref
         timestamp_global_api''',
@@ -1979,17 +1962,14 @@ methods = {
 
 'WT_CONNECTION.set_timestamp' : Method([
     Config('durable_timestamp', '', r'''
-        reset the maximum durable timestamp tracked by WiredTiger.  This will
-        cause future calls to WT_CONNECTION::query_timestamp to ignore durable
-        timestamps greater than the specified value until the next durable
-        timestamp moves the tracked durable timestamp forwards.  This is only
-        intended for use where the application is rolling back locally committed
-        transactions. The value must not be older than the current
-        oldest and stable timestamps.  See @ref timestamp_global_api'''),
+        temporarily set the system's maximum durable timestamp, bounding the timestamp returned
+        by WT_CONNECTION::query_timestamp with the \c all_durable configuration. Calls to
+        WT_CONNECTION::query_timestamp will ignore durable timestamps greater than the specified
+        value until a subsequent transaction commit advances the maximum durable timestamp, or
+        rollback-to-stable resets the value. See @ref timestamp_global_api'''),
     Config('force', 'false', r'''
-        set timestamps even if they violate normal ordering requirements.
-        For example allow the \c oldest_timestamp to move backwards''',
-        type='boolean'),
+        set the oldest and stable timestamps even if it violates normal ordering constraints.''',
+        type='boolean', undoc=True),
     Config('oldest_timestamp', '', r'''
         future commits and queries will be no earlier than the specified
         timestamp. Values must be monotonically increasing, any

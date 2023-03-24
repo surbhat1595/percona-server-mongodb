@@ -109,7 +109,6 @@
 
 namespace mongo {
 MONGO_FAIL_POINT_DEFINE(includeFakeColumnarIndex);
-MONGO_FAIL_POINT_DEFINE(batchDeletesByDefault);
 
 boost::intrusive_ptr<ExpressionContext> makeExpressionContextForGetExecutor(
     OperationContext* opCtx, const BSONObj& requestCollation, const NamespaceString& nss) {
@@ -714,7 +713,14 @@ protected:
     /**
      * Fills out planner parameters if not already filled.
      */
-    virtual void initializePlannerParamsIfNeeded() = 0;
+    void initializePlannerParamsIfNeeded() {
+        if (_plannerParamsInitialized) {
+            return;
+        }
+        fillOutPlannerParams(_opCtx, getMainCollection(), _cq, &_plannerParams);
+
+        _plannerParamsInitialized = true;
+    }
 
     /**
      * Constructs a PlanStage tree from the given query 'solution'.
@@ -780,15 +786,6 @@ public:
     }
 
 protected:
-    void initializePlannerParamsIfNeeded() final {
-        if (_plannerParamsInitialized) {
-            return;
-        }
-        fillOutPlannerParams(_opCtx, _collection, _cq, &_plannerParams);
-
-        _plannerParamsInitialized = true;
-    }
-
     std::unique_ptr<PlanStage> buildExecutableTree(const QuerySolution& solution) const final {
         return stage_builder::buildClassicExecutableTree(_opCtx, _collection, *_cq, solution, _ws);
     }
@@ -988,15 +985,6 @@ public:
     }
 
 protected:
-    void initializePlannerParamsIfNeeded() final {
-        if (_plannerParamsInitialized) {
-            return;
-        }
-        fillOutPlannerParams(_opCtx, _collections, _cq, &_plannerParams);
-
-        _plannerParamsInitialized = true;
-    }
-
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildIdHackPlan() {
         // When the SBE plan cache is enabled we rely on it for fast find-by-_id queries rather than
         // having a special implementation of the idhack. Therefore, this function returns nullptr
@@ -1354,11 +1342,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
         roots[0] = helper.buildExecutableTree(*(solutions[0]));
     }
     auto&& [root, data] = roots[0];
-    // TODO SERVER-64315: re-enable caching of single solution plans
-    // if (!planningResult->recoveredPinnedCacheEntry()) {
-    //    plan_cache_util::updatePlanCache(
-    //        opCtx, collections.getMainCollection(), *cq, *solutions[0], *root, data);
-    // }
+    if (!planningResult->recoveredPinnedCacheEntry()) {
+        plan_cache_util::updatePlanCache(
+            opCtx, collections.getMainCollection(), *cq, *solutions[0], *root, data);
+    }
 
     // Prepare the SBE tree for execution.
     stage_builder::prepareSlotBasedExecutableTree(
@@ -1663,13 +1650,18 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
 
     deleteStageParams->canonicalQuery = cq.get();
 
-    const bool batchDelete =
-        (deleteStageParams->isMulti && !deleteStageParams->fromMigrate &&
-         !deleteStageParams->returnDeleted && deleteStageParams->sort.isEmpty() &&
-         !deleteStageParams->numStatsForDoc) &&
-        ((gInternalBatchUserMultiDeletesForTest.load() &&
-          nss.ns() == "__internalBatchedDeletesTesting.Collection0") ||
-         (batchDeletesByDefault.shouldFail()));
+    // TODO (SERVER-64506): support change streams' pre- and post-images.
+    // TODO (SERVER-66071): support sharding.
+    // TODO (SERVER-66079): allow batched deletions in the config.* namespace.
+    const bool batchDelete = feature_flags::gBatchMultiDeletes.isEnabledAndIgnoreFCV() &&
+        gBatchUserMultiDeletes.load() &&
+        (opCtx->recoveryUnit()->getState() == RecoveryUnit::State::kInactive ||
+         opCtx->recoveryUnit()->getState() == RecoveryUnit::State::kActiveNotInUnitOfWork) &&
+        !opCtx->inMultiDocumentTransaction() && !opCtx->isRetryableWrite() &&
+        !collection->isChangeStreamPreAndPostImagesEnabled() && !collection.isSharded() &&
+        !collection->ns().isConfigDB() && deleteStageParams->isMulti &&
+        !deleteStageParams->fromMigrate && !deleteStageParams->returnDeleted &&
+        deleteStageParams->sort.isEmpty() && !deleteStageParams->numStatsForDoc;
 
     if (batchDelete) {
         root =

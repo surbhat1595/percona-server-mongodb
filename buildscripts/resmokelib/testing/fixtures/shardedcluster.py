@@ -357,6 +357,9 @@ class ShardedClusterFixture(interface.Fixture):  # pylint: disable=too-many-inst
         """Return options that may be passed to a mongos."""
         mongos_options = self.mongos_options.copy()
         mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
+        mongos_options["set_parameters"] = mongos_options.get("set_parameters",
+                                                              self.fixturelib.make_historic(
+                                                                  {})).copy()
         return {"dbpath_prefix": self._dbpath_prefix, "mongos_options": mongos_options}
 
     def install_mongos(self, mongos):
@@ -546,9 +549,8 @@ class MongosLauncher(object):
             return DEFAULT_EVERGREEN_MONGOS_LOG_COMPONENT_VERBOSITY
         return DEFAULT_MONGOS_LOG_COMPONENT_VERBOSITY
 
-    def launch_mongos_program(  # pylint: disable=too-many-arguments
-            self, logger, job_num, test_id=None, executable=None, process_kwargs=None,
-            mongos_options=None):
+    def launch_mongos_program(self, logger, job_num, executable=None, process_kwargs=None,
+                              mongos_options=None):
         """Return a Process instance that starts a mongos with arguments constructed from 'kwargs'."""
 
         executable = self.fixturelib.default_if_none(executable,
@@ -573,7 +575,7 @@ class MongosLauncher(object):
 
         _add_testing_set_parameters(suite_set_parameters)
 
-        return self.fixturelib.mongos_program(logger, job_num, test_id, executable, process_kwargs,
+        return self.fixturelib.mongos_program(logger, job_num, executable, process_kwargs,
                                               mongos_options)
 
 

@@ -3,7 +3,6 @@
  * command followed by multiple inserts onto that collection.
  *
  * @tags: [
- *   incompatible_with_eft,
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
@@ -31,8 +30,8 @@ const transactionsNS = "config.transactions";
 const donorPrimary = tenantMigrationTest.getDonorPrimary();
 const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 
-const hangAfterStartingOplogApplier = configureFailPoint(
-    recipientPrimary, "fpAfterStartingOplogApplierMigrationRecipientInstance", {action: "hang"});
+const pauseTenantMigrationBeforeLeavingDataSyncState =
+    configureFailPoint(donorPrimary, "pauseTenantMigrationBeforeLeavingDataSyncState");
 
 jsTestLog("Starting a migration");
 const migrationId = UUID();
@@ -42,7 +41,7 @@ const migrationOpts = {
 };
 assert.commandWorked(tenantMigrationTest.startMigration(migrationOpts));
 
-hangAfterStartingOplogApplier.wait();
+pauseTenantMigrationBeforeLeavingDataSyncState.wait();
 
 jsTestLog("Running transaction while the migration is running");
 const session = donorPrimary.startSession();
@@ -60,7 +59,7 @@ assert.commandWorked(sessionColl.insert(doc3));
 assert.commandWorked(session.commitTransaction_forTesting());
 session.endSession();
 
-hangAfterStartingOplogApplier.off();
+pauseTenantMigrationBeforeLeavingDataSyncState.off();
 
 jsTestLog("Waiting for migration to complete");
 TenantMigrationTest.assertCommitted(tenantMigrationTest.waitForMigrationToComplete(migrationOpts));

@@ -396,6 +396,7 @@ for pack in [
     ('intel_decimal128', 'intel decimal128'),
     ('kms-message',),
     ('pcre',),
+    ('pcre2',),
     ('snappy',),
     ('stemmer',),
     ('tcmalloc',),
@@ -4270,6 +4271,11 @@ def doConfigure(myenv):
     else:
         conf.env.Prepend(CPPDEFINES=['PCRE_STATIC'])
 
+    if use_system_version_of_library("pcre2"):
+        conf.FindSysLibDep("pcre2", ["pcre2-8"])
+    else:
+        conf.env.Prepend(CPPDEFINES=['PCRE2_STATIC'])
+
     if use_system_version_of_library("snappy"):
         conf.FindSysLibDep("snappy", ["snappy"])
 
@@ -5378,7 +5384,10 @@ env.AddMethod(injectModule, 'InjectModule')
 
 if get_option('ninja') == 'disabled':
     compileCommands = env.CompilationDatabase('compile_commands.json')
-    compileDb = env.Alias("compiledb", compileCommands)
+    # Initialize generated-sources Alias as a placeholder so that it can be used as a
+    # dependency for compiledb. This Alias will be properly updated in other SConscripts.
+    generatedSources = env.Alias("generated-sources")
+    compileDb = env.Alias("compiledb", [compileCommands, generatedSources])
 
 
 msvc_version = ""

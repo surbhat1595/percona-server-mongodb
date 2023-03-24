@@ -34,7 +34,7 @@
 #include <memory>
 
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
@@ -149,13 +149,10 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 const OperationSessionInfo& sessionInfo,
                                 Date_t wallClockTime,
                                 const std::vector<StmtId>& statementIds) {
-    // This code is never expected to run in Serverless, since Serverless does not use chunk
-    // migration, and therefore is never expected to pass a tenant id
     return {
         repl::DurableOplogEntry(opTime,                           // optime
                                 hash,                             // hash
                                 opType,                           // op type
-                                boost::none,                      // tenant id
                                 {},                               // namespace
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate

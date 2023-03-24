@@ -99,7 +99,8 @@ variables:
 - &gen_task_template
   name: gen_task_template
   depends_on:
-  - name: build_variant_gen
+  - name: version_gen
+    variant: generate-tasks-for-version
   - name: archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
@@ -164,7 +165,8 @@ variables:
   name: jstestfuzz_template
   exec_timeout_secs: 14400 # Time out the task if it runs for more than 4 hours.
   depends_on:
-  - build_variant_gen
+  - name: version_gen
+    variant: generate-tasks-for-version
   - archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
@@ -749,6 +751,7 @@ functions:
     command: timeout.update
     params:
       exec_timeout_secs: ${exec_timeout_secs}
+      timeout_secs: ${timeout_secs}
 
   ### Set expansion macros used in each task.
   "set task expansion macros": &set_task_expansion_macros
@@ -973,11 +976,7 @@ functions:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       bucket: mciuploads
-      # This expansion's name was shortened to reduce the overall size of
-      # the generated configuration file
-      # gtcl = gen_task_config_location
-      # gtcl expansion is a variable included in the call of the parent function.
-      remote_file: ${project}/${gtcl}
+      remote_file: ${project}/${revision}/generate_tasks/generated-config-${version_id}.tgz
       local_file: "generate_tasks_config.tgz"
 
   "extract generated test configuration": &extract_generated_test_configuration
@@ -1006,11 +1005,6 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/selected_tests_generate.sh"
-  # this sets the gtcl expansion
-  - command: expansions.update
-    params:
-      ignore_missing_file: false
-      file: src/gtcl_update_expansions.yml
   - *f_expansions_write
   - command: archive.targz_pack
     params:
@@ -1023,7 +1017,7 @@ functions:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: generate_tasks_config.tgz
-      remote_file: ${project}/${gtcl}
+      remote_file: ${project}/${revision}/generate_tasks/generated-config-${version_id}.tgz
       bucket: mciuploads
       permissions: public-read
       content_type: ${content_type|application/gzip}
@@ -1035,7 +1029,7 @@ functions:
       files:
       - src/generated_resmoke_config/*.json
 
-  "generate build variant":
+  "generate version":
   - *f_expansions_write
   - *configure_evergreen_api_credentials
   - command: subprocess.exec
@@ -1043,13 +1037,7 @@ functions:
     params:
       binary: bash
       args:
-      - "./src/evergreen/generate_build_variant.sh"
-  # this sets the gtcl expansion
-  - command: expansions.update
-    params:
-      ignore_missing_file: false
-      file: src/gtcl_update_expansions.yml
-  - *f_expansions_write
+      - "./src/evergreen/generate_version.sh"
   - command: archive.targz_pack
     params:
       target: generate_tasks_config.tgz
@@ -1061,7 +1049,7 @@ functions:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: generate_tasks_config.tgz
-      remote_file: ${project}/${gtcl}
+      remote_file: ${project}/${revision}/generate_tasks/generated-config-${version_id}.tgz
       bucket: mciuploads
       permissions: public-read
       content_type: ${content_type|application/gzip}
@@ -1155,6 +1143,7 @@ functions:
   - *configure_evergreen_api_credentials
   - *determine_task_timeout
   - *update_task_timeout_expansions
+  - *update_task_timeout
   - *f_expansions_write
   - command: subprocess.exec
     params:
@@ -2286,7 +2275,7 @@ tasks:
   tags: []
   commands:
   - func: "scons compile"
-    vars:
+    vars: &compile-ninja-vars
       generating_for_ninja: true
       separate_debug: off
       task_install_action:
@@ -2332,6 +2321,49 @@ tasks:
         --build-tools=next
       targets:
         install-core
+
+- name: ninja_determinism
+  tags: []
+  commands:
+  - command: expansions.update
+    params:
+      updates:
+      - key: generating_for_ninja
+        value: "true"
+      - key: separate_debug
+        value: off
+      - key: task_install_action
+        value: default
+      - key: task_compile_flags
+        value: --ninja
+      - key: targets
+        value: generate-ninja
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/ninja_determinism_test.sh"
+      env:
+        repeat: "5"
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/ninja.tgz
+      remote_file: ${project}/${build_variant}/${revision}/artifacts/ninja-determinism-${build_id}-${task_name}-${execution}.tgz
+      bucket: mciuploads
+      permissions: private
+      content_type: application/gzip
+      display_name: Ninja Determinism Test Artifacts
+      visibility: signed
+      optional: true
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/ninja_determinism_status.sh"
 
 - name: libdeps_graph_linting
   tags: []
@@ -2398,7 +2430,7 @@ tasks:
   - *f_expansions_write
   - func: "scons compile"
     vars:
-      targets: generated-sources compiledb
+      targets: compiledb
       compiling_for_test: true
   - command: subprocess.exec
     type: test
@@ -2815,6 +2847,8 @@ tasks:
         --enterprise-features=fle
         --js-engine=none
         --link-model=dynamic-sdk
+        --enable-http-client=off
+        --ssl=off
         ${csfle_task_compile_flags}
         DESTDIR='$BUILD_ROOT/csfle-lib-$MONGO_VERSION'
   - command: subprocess.exec
@@ -4176,7 +4210,7 @@ tasks:
       repeat_tests_min: 2
       repeat_tests_max: 1000
 
-- name: build_variant_gen
+- name: version_gen
   commands:
   - command: manifest.load
   - *git_get_project
@@ -4186,7 +4220,7 @@ tasks:
   - *cleanup_environment
   - func: "set up venv"
   - func: "upload pip requirements"
-  - func: "generate build variant"
+  - func: "generate version"
 
 - name: selected_tests_gen
   tags: []
@@ -4214,7 +4248,7 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
-  name: change_streams_v2_resume_token_passthrough
+  name: change_streams_v1_resume_token_passthrough
   tags: ["change_streams"]
   commands:
   - func: "do setup"
@@ -4278,7 +4312,7 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
-  name: change_streams_v2_resume_token_sharded_collections_passthrough
+  name: change_streams_v1_resume_token_sharded_collections_passthrough
   tags: ["change_streams"]
   depends_on:
   - name: change_streams
@@ -5163,38 +5197,6 @@ tasks:
 - <<: *gen_task_template
   name: sharding_clustered_collections_gen
   tags: ["large", "clustered_collections"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: replica_sets_batched_deletes_passthrough_gen
-  tags: ["large", "batched_deletes"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: sharding_batched_deletes_passthrough_gen
-  tags: ["sharding", "large", "batched_deletes"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: change_streams_batched_deletes_passthrough_gen
-  tags: ["change_streams", "large", "batched_deletes"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: concurrency_replication_batched_deletes_passthrough_gen
-  tags: ["large", "batched_deletes"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -7432,6 +7434,11 @@ task_groups:
       permissions: public-read
       content_type: text/plain
       display_name: build.ninja
+
+- <<: *compile_task_group_template
+  name: ninja_determinism_TG
+  tasks:
+  - ninja_determinism
 
 - <<: *compile_task_group_template
   name: server_discovery_and_monitoring_json_test_TG

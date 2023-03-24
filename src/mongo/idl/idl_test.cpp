@@ -217,7 +217,7 @@ void TestLoopback(TestT test_value) {
 /// Type tests:
 // Positive: Test we can serialize the type out and back again
 TEST(IDLOneTypeTests, TestLoopbackTest) {
-    TestLoopback<One_string, const StringData, String>("test_value");
+    TestLoopback<One_string, StringData, String>("test_value");
     TestLoopback<One_int, std::int32_t, NumberInt>(123);
     TestLoopback<One_long, std::int64_t, NumberLong>(456);
     TestLoopback<One_double, double, NumberDouble>(3.14159);
@@ -1238,22 +1238,17 @@ TEST(IDLFieldTests, TestDefaultFields) {
 TEST(IDLFieldTests, TestOptionalFields) {
     IDLParserErrorContext ctxt("root");
 
-
     // Positive: Test document with only string field
     {
         auto testDoc = BSON("field1"
                             << "Foo");
         auto testStruct = Optional_field::parse(ctxt, testDoc);
-
-        assert_same_types<decltype(testStruct.getField2()), const boost::optional<std::int32_t>>();
-        assert_same_types<decltype(testStruct.getField1()),
-                          const boost::optional<mongo::StringData>>();
-        assert_same_types<decltype(testStruct.getField3()),
-                          const boost::optional<mongo::BSONObj>&>();
-        assert_same_types<decltype(testStruct.getField4()),
-                          const boost::optional<ConstDataRange>>();
+        assert_same_types<decltype(testStruct.getField1()), boost::optional<StringData>>();
+        assert_same_types<decltype(testStruct.getField2()), boost::optional<int>>();
+        assert_same_types<decltype(testStruct.getField3()), const boost::optional<BSONObj>&>();
+        assert_same_types<decltype(testStruct.getField4()), boost::optional<ConstDataRange>>();
         assert_same_types<decltype(testStruct.getField5()),
-                          const boost::optional<std::array<std::uint8_t, 16>>>();
+                          boost::optional<std::array<std::uint8_t, 16>>>();
 
         ASSERT_EQUALS("Foo", testStruct.getField1().get());
         ASSERT_FALSE(testStruct.getField2().is_initialized());
@@ -1302,8 +1297,8 @@ TEST(IDLFieldTests, TestAlwaysSerializeFields) {
                         << "field3" << BSON("a" << 1234));
     auto testStruct = Always_serialize_field::parse(ctxt, testDoc);
 
-    assert_same_types<decltype(testStruct.getField1()), const boost::optional<mongo::StringData>>();
-    assert_same_types<decltype(testStruct.getField2()), const boost::optional<std::int32_t>>();
+    assert_same_types<decltype(testStruct.getField1()), boost::optional<mongo::StringData>>();
+    assert_same_types<decltype(testStruct.getField2()), boost::optional<std::int32_t>>();
     assert_same_types<decltype(testStruct.getField3()), const boost::optional<mongo::BSONObj>&>();
     assert_same_types<decltype(testStruct.getField4()), const boost::optional<mongo::BSONObj>&>();
     assert_same_types<decltype(testStruct.getField5()), const boost::optional<mongo::BSONObj>&>();
@@ -1361,7 +1356,7 @@ TEST(IDLNestedStruct, TestDuplicateTypes) {
 
     assert_same_types<decltype(testStruct.getField1()), RequiredStrictField3&>();
     assert_same_types<decltype(testStruct.getField2()),
-                      const boost::optional<RequiredNonStrictField3>&>();
+                      boost::optional<RequiredNonStrictField3>&>();
     assert_same_types<decltype(testStruct.getField3()), RequiredStrictField3&>();
 
     ASSERT_EQUALS(1, testStruct.getField1().getField1());
@@ -1427,10 +1422,10 @@ TEST(IDLArrayTests, TestSimpleArrays) {
                                                << BSONBinData(array16, 16, newUUID)));
     auto testStruct = Simple_array_fields::parse(ctxt, testDoc);
 
-    assert_same_types<decltype(testStruct.getField1()), const std::vector<mongo::StringData>>();
+    assert_same_types<decltype(testStruct.getField1()), std::vector<StringData>>();
     assert_same_types<decltype(testStruct.getField2()), const std::vector<std::int32_t>&>();
     assert_same_types<decltype(testStruct.getField3()), const std::vector<double>&>();
-    assert_same_types<decltype(testStruct.getField4()), const std::vector<ConstDataRange>>();
+    assert_same_types<decltype(testStruct.getField4()), std::vector<ConstDataRange>>();
     assert_same_types<decltype(testStruct.getField5()),
                       const std::vector<std::array<std::uint8_t, 16>>&>();
 
@@ -1488,14 +1483,13 @@ TEST(IDLArrayTests, TestSimpleOptionalArrays) {
     );
     auto testStruct = Optional_array_fields::parse(ctxt, testDoc);
 
-    assert_same_types<decltype(testStruct.getField1()),
-                      const boost::optional<std::vector<mongo::StringData>>>();
+    assert_same_types<decltype(testStruct.getField1()), boost::optional<std::vector<StringData>>>();
     assert_same_types<decltype(testStruct.getField2()),
                       const boost::optional<std::vector<std::int32_t>>&>();
     assert_same_types<decltype(testStruct.getField3()),
                       const boost::optional<std::vector<double>>&>();
     assert_same_types<decltype(testStruct.getField4()),
-                      const boost::optional<std::vector<ConstDataRange>>>();
+                      boost::optional<std::vector<ConstDataRange>>>();
     assert_same_types<decltype(testStruct.getField5()),
                       const boost::optional<std::vector<std::array<std::uint8_t, 16>>>&>();
 
@@ -1662,8 +1656,7 @@ TEST(IDLArrayTests, TestArraysOfComplexTypes) {
     assert_same_types<decltype(testStruct.getField4()),
                       const std::vector<mongo::ObjectBasicType>&>();
     assert_same_types<decltype(testStruct.getField5()), const std::vector<mongo::BSONObj>&>();
-    assert_same_types<decltype(testStruct.getField6()),
-                      const std::vector<mongo::idl::import::One_string>&>();
+    assert_same_types<decltype(testStruct.getField6()), std::vector<idl::import::One_string>&>();
 
     assert_same_types<decltype(testStruct.getField1o()),
                       const boost::optional<std::vector<std::int64_t>>&>();
@@ -1676,7 +1669,7 @@ TEST(IDLArrayTests, TestArraysOfComplexTypes) {
     assert_same_types<decltype(testStruct.getField5o()),
                       const boost::optional<std::vector<mongo::BSONObj>>&>();
     assert_same_types<decltype(testStruct.getField6o()),
-                      const boost::optional<std::vector<mongo::idl::import::One_string>>&>();
+                      boost::optional<std::vector<idl::import::One_string>>&>();
 
     std::vector<std::int64_t> field1{1, 2, 3};
     ASSERT_TRUE(field1 == testStruct.getField1());
@@ -1700,7 +1693,7 @@ void TestBinDataVector() {
     auto testDoc = BSON("value" << BSONBinData(testData, 3, bindata_type));
     auto testStruct = ParserT::parse(ctxt, testDoc);
 
-    assert_same_types<decltype(testStruct.getValue()), const ConstDataRange>();
+    assert_same_types<decltype(testStruct.getValue()), ConstDataRange>();
 
     std::vector<std::uint8_t> expected{1, 2, 3};
 
@@ -1748,7 +1741,7 @@ void TestBinDataArray() {
     auto testDoc = BSON("value" << BSONBinData(testData, 16, bindata_type));
     auto testStruct = ParserT::parse(ctxt, testDoc);
 
-    assert_same_types<decltype(testStruct.getValue()), const std::array<uint8_t, 16>>();
+    assert_same_types<decltype(testStruct.getValue()), std::array<uint8_t, 16>>();
 
     std::array<std::uint8_t, 16> expected{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 
@@ -2183,9 +2176,9 @@ TEST(IDLEnum, TestEnum) {
     ASSERT_TRUE(testStruct.getFieldDefault() == StringEnumEnum::s1);
 
     assert_same_types<decltype(testStruct.getField1()), IntEnum>();
-    assert_same_types<decltype(testStruct.getField1o()), const boost::optional<IntEnum>>();
+    assert_same_types<decltype(testStruct.getField1o()), boost::optional<IntEnum>>();
     assert_same_types<decltype(testStruct.getField2()), StringEnumEnum>();
-    assert_same_types<decltype(testStruct.getField2o()), const boost::optional<StringEnumEnum>>();
+    assert_same_types<decltype(testStruct.getField2o()), boost::optional<StringEnumEnum>>();
     assert_same_types<decltype(testStruct.getFieldDefault()), StringEnumEnum>();
 
     auto testSerializedDoc = BSON("field1" << 2 << "field2"
@@ -3129,8 +3122,8 @@ TEST(IDLChainedStruct, TestInline) {
     ASSERT_EQUALS(testStruct.getField3(), "foo");
 
     assert_same_types<decltype(testStruct.getChained_string_inline_basic_type().getStringField()),
-                      const StringData>();
-    assert_same_types<decltype(testStruct.getField3()), const StringData>();
+                      StringData>();
+    assert_same_types<decltype(testStruct.getField3()), StringData>();
 
     // Positive: Test we can round trip to a document from the just parsed document
     {
@@ -3351,6 +3344,67 @@ TEST(IDLValidatedField, Callback_validators) {
     ASSERT_THROWS(obj1.setOne_int(One_int(7)), AssertionException);
 }
 
+// Test validation of integer array
+TEST(IDLValidatedArray, IntArrayValidation) {
+
+    const auto tryPass = [](std::vector<std::int32_t> int_even) {
+        IDLParserErrorContext ctxt("root");
+        auto doc = BSON("int_even" << int_even);
+        auto obj = Int_array_validators::parse(ctxt, doc);
+
+        ASSERT_EQUALS(obj.getInt_even().size(), int_even.size());
+        for (size_t i = 0; i < int_even.size(); ++i) {
+            ASSERT_EQ(obj.getInt_even()[i], int_even[i]);
+        }
+    };
+
+    tryPass({2, 4, 6, 10, 100, 200, 2456});
+    tryPass({});
+    tryPass({344});
+
+    const auto tryFail = [](std::vector<std::int32_t> int_uneven) {
+        IDLParserErrorContext ctxt("root");
+        auto doc = BSON("int_even" << int_uneven);
+        ASSERT_THROWS(Int_array_validators::parse(ctxt, doc), AssertionException);
+    };
+
+    tryFail({1, 3, 5, 7});
+    tryFail({9, 35, 4});
+    tryFail({90, 22, 33});
+    tryFail({122, 44, 101, 64});
+}
+
+// Test validation of string array
+TEST(IDLValidatedArray, StringArrayValidation) {
+
+    const auto tryPass = [](std::vector<std::string> valid) {
+        IDLParserErrorContext ctxt("root");
+        auto doc = BSON("caps_strings" << valid);
+        auto obj = String_array_validators::parse(ctxt, doc);
+
+        ASSERT_EQUALS(obj.getCaps_strings().size(), valid.size());
+        for (size_t i = 0; i < valid.size(); ++i) {
+            ASSERT_EQ(obj.getCaps_strings()[i], valid[i]);
+        }
+    };
+
+    tryPass({"HELLO"});
+    tryPass({});
+    tryPass({"ABC", "DEF", "XYZ"});
+
+    const auto tryFail = [](std::vector<std::string> invalid) {
+        IDLParserErrorContext ctxt("root");
+        auto doc = BSON("caps_strings" << invalid);
+        ASSERT_THROWS(String_array_validators::parse(ctxt, doc), AssertionException);
+    };
+
+    tryFail({"hello"});
+    tryFail({"AB1"});
+    tryFail({"MONGO", "car", "QWERTY"});
+    tryFail({"SLD", "SLA", "KS D"});
+    tryFail({"S3LD", "SLA", "ED"});
+}
+
 // Positive: verify a command a string arg
 TEST(IDLTypeCommand, TestString) {
     IDLParserErrorContext ctxt("root");
@@ -3363,7 +3417,7 @@ TEST(IDLTypeCommand, TestString) {
     ASSERT_EQUALS(testStruct.getField1(), 3);
     ASSERT_EQUALS(testStruct.getCommandParameter(), "foo");
 
-    assert_same_types<decltype(testStruct.getCommandParameter()), const StringData>();
+    assert_same_types<decltype(testStruct.getCommandParameter()), StringData>();
 
     // Positive: Test we can roundtrip from the just parsed document
     ASSERT_BSONOBJ_EQ(testDoc, serializeCmd(testStruct));
@@ -3471,7 +3525,7 @@ TEST(IDLTypeCommand, TestStructArray) {
     ASSERT_EQUALS(testStruct.getCommandParameter().size(), 1UL);
 
     assert_same_types<decltype(testStruct.getCommandParameter()),
-                      const std::vector<mongo::idl::import::One_string>&>();
+                      std::vector<mongo::idl::import::One_string>&>();
 
     // Positive: Test we can roundtrip from the just parsed document
     ASSERT_BSONOBJ_EQ(testDoc, serializeCmd(testStruct));
@@ -3500,7 +3554,7 @@ TEST(IDLTypeCommand, TestUnderscoreCommand) {
     ASSERT_EQUALS(testStruct.getField1(), 3);
     ASSERT_EQUALS(testStruct.getCommandParameter(), "foo");
 
-    assert_same_types<decltype(testStruct.getCommandParameter()), const StringData>();
+    assert_same_types<decltype(testStruct.getCommandParameter()), StringData>();
 
     // Positive: Test we can roundtrip from the just parsed document
     ASSERT_BSONOBJ_EQ(testDoc, serializeCmd(testStruct));
@@ -3802,6 +3856,55 @@ TEST(IDLFieldTests, TestOptionalBoolField) {
         auto testDoc = BSON("optBoolField"
                             << "abc");
         ASSERT_THROWS(OptionalBool::parseFromBSON(testDoc.firstElement()), AssertionException);
+    }
+}
+
+TEST(IDLFieldTests, TenantOverrideField) {
+    const auto mkdoc = [](boost::optional<TenantId> tenantId) {
+        BSONObjBuilder doc;
+        doc.append("BasicIgnoredCommand", 1);
+        doc.append("$db", "admin");
+        if (tenantId) {
+            tenantId->serializeToBSON("$tenant", &doc);
+        }
+        doc.append("field1", 42);
+        doc.append("field2", "foo");
+        return doc.obj();
+    };
+
+    // Test optionality of $tenant arg.
+    {
+        auto obj = BasicIgnoredCommand::parse({"nil"}, mkdoc(boost::none));
+        auto tenant = obj.getDollarTenant();
+        ASSERT(tenant == boost::none);
+    }
+
+    // Test passing an tenant id (acting on behalf of a specific tenant)
+    {
+        auto id = TenantId(OID::gen());
+        auto obj = BasicIgnoredCommand::parse({"oid"}, mkdoc(id));
+        auto tenant = obj.getDollarTenant();
+        ASSERT(tenant == id);
+    }
+}
+
+TEST(IDLFieldTests, TenantOverrideFieldWithInvalidValue) {
+    const auto mkdoc = [](auto tenantId) {
+        BSONObjBuilder doc;
+        doc.append("BasicIgnoredCommand", 1);
+        doc.append("$db", "admin");
+        doc.append("$tenant", tenantId);
+        doc.append("field1", 42);
+        doc.append("field2", "foo");
+        return doc.obj();
+    };
+
+    // Negative: Parse invalid types.
+    {
+        ASSERT_THROWS(BasicIgnoredCommand::parse({"int"}, mkdoc(123)), DBException);
+        ASSERT_THROWS(BasicIgnoredCommand::parse({"float"}, mkdoc(3.14)), DBException);
+        ASSERT_THROWS(BasicIgnoredCommand::parse({"string"}, mkdoc("bar")), DBException);
+        ASSERT_THROWS(BasicIgnoredCommand::parse({"object"}, mkdoc(BSONObj())), DBException);
     }
 }
 

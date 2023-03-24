@@ -45,10 +45,10 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -885,7 +885,10 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
     }
 
     // TODO: (SERVER-62375): Remove upgrade/downgrade code for internal transactions
-    if (_isInternalSession()) {
+    if (_isInternalSession() && opCtx->writesAreReplicated()) {
+        // Don't check the FCV and feature flag when starting an internal transaction on secondaries
+        // since they must apply transaction oplog entries replicated from the primary whether or
+        // not there have been changes to the FCV or feature flag.
         uassert(ErrorCodes::InternalTransactionNotSupported,
                 "Internal transactions are not enabled",
                 feature_flags::gFeatureFlagInternalTransactions.isEnabled(
@@ -1680,7 +1683,7 @@ void TransactionParticipant::Participant::setPrepareOpTimeForRecovery(OperationC
     o(lk).recoveryPrepareOpTime = prepareOpTime;
 }
 
-const repl::OpTime TransactionParticipant::Participant::getPrepareOpTimeForRecovery() const {
+repl::OpTime TransactionParticipant::Participant::getPrepareOpTimeForRecovery() const {
     return o().recoveryPrepareOpTime;
 }
 

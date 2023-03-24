@@ -38,7 +38,7 @@
 #include "mongo/db/catalog/index_build_entry_gen.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
@@ -305,11 +305,8 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
     // exceptions and we must protect it from unanticipated write conflicts from reads.
     bool foundObj = writeConflictRetry(
         opCtx, "getIndexBuildEntry", NamespaceString::kIndexBuildEntryNamespace.ns(), [&]() {
-            return Helpers::findOne(opCtx,
-                                    collection.getCollection(),
-                                    BSON("_id" << indexBuildUUID),
-                                    obj,
-                                    /*requireIndex=*/true);
+            return Helpers::findOne(
+                opCtx, collection.getCollection(), BSON("_id" << indexBuildUUID), obj);
         });
 
     if (!foundObj) {

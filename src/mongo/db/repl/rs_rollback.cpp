@@ -49,8 +49,8 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/working_set_common.h"
@@ -1747,7 +1747,7 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
 
                 if (collection && removeSaver) {
                     BSONObj obj;
-                    bool found = Helpers::findOne(opCtx, collection.get(), pattern, obj, false);
+                    bool found = Helpers::findOne(opCtx, collection.get(), pattern, obj);
                     if (found) {
                         auto status = removeSaver->goingToDelete(obj);
                         if (!status.isOK()) {
@@ -1798,8 +1798,7 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
 
                                 const auto clock = opCtx->getServiceContext()->getFastClockSource();
                                 const auto findOneStart = clock->now();
-                                RecordId loc =
-                                    Helpers::findOne(opCtx, collection.get(), pattern, false);
+                                RecordId loc = Helpers::findOne(opCtx, collection.get(), pattern);
                                 if (clock->now() - findOneStart > Milliseconds(200))
                                     LOGV2_WARNING(
                                         21726,

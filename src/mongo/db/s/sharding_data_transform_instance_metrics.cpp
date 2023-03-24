@@ -30,6 +30,7 @@
 #include "mongo/db/s/sharding_data_transform_instance_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/sharding_data_transform_metrics_observer.h"
+#include "mongo/util/duration.h"
 
 namespace mongo {
 
@@ -240,10 +241,42 @@ void ShardingDataTransformInstanceMetrics::onApplyingEnd() {
     _applyingEndTime.store(_clockSource->now());
 }
 
+void ShardingDataTransformInstanceMetrics::restoreCopyingBegin(Date_t date) {
+    _copyingStartTime.store(date);
+}
+
+void ShardingDataTransformInstanceMetrics::restoreCopyingEnd(Date_t date) {
+    _copyingEndTime.store(date);
+}
+
+Date_t ShardingDataTransformInstanceMetrics::getCopyingBegin() const {
+    return _copyingStartTime.load();
+}
+
+Date_t ShardingDataTransformInstanceMetrics::getCopyingEnd() const {
+    return _copyingEndTime.load();
+}
+
 void ShardingDataTransformInstanceMetrics::onDocumentsCopied(int64_t documentCount,
-                                                             int64_t totalDocumentsSizeBytes) {
+                                                             int64_t totalDocumentsSizeBytes,
+                                                             Milliseconds elapsed) {
     _documentsCopied.addAndFetch(documentCount);
     _bytesCopied.addAndFetch(totalDocumentsSizeBytes);
+    _cumulativeMetrics->onInsertsDuringCloning(documentCount, elapsed);
+}
+
+int64_t ShardingDataTransformInstanceMetrics::getDocumentsCopiedCount() const {
+    return _documentsCopied.load();
+}
+
+int64_t ShardingDataTransformInstanceMetrics::getBytesCopiedCount() const {
+    return _bytesCopied.load();
+}
+
+void ShardingDataTransformInstanceMetrics::restoreDocumentsCopied(int64_t documentCount,
+                                                                  int64_t totalDocumentsSizeBytes) {
+    _documentsCopied.store(documentCount);
+    _bytesCopied.store(totalDocumentsSizeBytes);
 }
 
 void ShardingDataTransformInstanceMetrics::setDocumentsToCopyCounts(
@@ -274,8 +307,19 @@ void ShardingDataTransformInstanceMetrics::onDeleteApplied() {
     _deletesApplied.addAndFetch(1);
 }
 
-void ShardingDataTransformInstanceMetrics::onOplogEntriesFetched(int64_t numEntries) {
+void ShardingDataTransformInstanceMetrics::onOplogEntriesFetched(int64_t numEntries,
+                                                                 Milliseconds elapsed) {
     _oplogEntriesFetched.addAndFetch(numEntries);
+    _cumulativeMetrics->onRemoteBatchRetrievedDuringOplogFetching(numEntries, elapsed);
+}
+
+void ShardingDataTransformInstanceMetrics::onLocalInsertDuringOplogFetching(Milliseconds elapsed) {
+    _cumulativeMetrics->onLocalInsertDuringOplogFetching(elapsed);
+}
+
+void ShardingDataTransformInstanceMetrics::onBatchRetrievedDuringOplogApplying(
+    int64_t numEntries, Milliseconds elapsed) {
+    _cumulativeMetrics->onBatchRetrievedDuringOplogApplying(numEntries, elapsed);
 }
 
 void ShardingDataTransformInstanceMetrics::onOplogEntriesApplied(int64_t numEntries) {
@@ -284,6 +328,7 @@ void ShardingDataTransformInstanceMetrics::onOplogEntriesApplied(int64_t numEntr
 
 void ShardingDataTransformInstanceMetrics::onWriteDuringCriticalSection() {
     _writesDuringCriticalSection.addAndFetch(1);
+    _cumulativeMetrics->onWriteDuringCriticalSection();
 }
 
 void ShardingDataTransformInstanceMetrics::onCriticalSectionBegin() {
@@ -312,10 +357,12 @@ Seconds ShardingDataTransformInstanceMetrics::getCriticalSectionElapsedTimeSecs(
 
 void ShardingDataTransformInstanceMetrics::onWriteToStashedCollections() {
     _writesToStashCollections.fetchAndAdd(1);
+    _cumulativeMetrics->onWriteToStashedCollections();
 }
 
 void ShardingDataTransformInstanceMetrics::onReadDuringCriticalSection() {
     _readsDuringCriticalSection.fetchAndAdd(1);
+    _cumulativeMetrics->onWriteDuringCriticalSection();
 }
 
 void ShardingDataTransformInstanceMetrics::accumulateValues(int64_t insertsApplied,

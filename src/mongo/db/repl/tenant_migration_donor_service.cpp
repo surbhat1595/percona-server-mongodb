@@ -36,7 +36,7 @@
 #include "mongo/config.h"
 #include "mongo/db/commands/tenant_migration_donor_cmds_gen.h"
 #include "mongo/db/commands/tenant_migration_recipient_cmds_gen.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds_coordinator.h"
@@ -544,10 +544,8 @@ ExecutorFuture<repl::OpTime> TenantMigrationDonorService::Instance::_updateState
                    opCtx, "TenantMigrationDonorUpdateStateDoc", _stateDocumentsNS.ns(), [&] {
                        WriteUnitOfWork wuow(opCtx);
 
-                       const auto originalRecordId = Helpers::findOne(opCtx,
-                                                                      collection.getCollection(),
-                                                                      originalStateDocBson,
-                                                                      false /* requireIndex */);
+                       const auto originalRecordId = Helpers::findOne(
+                           opCtx, collection.getCollection(), originalStateDocBson);
                        const auto originalSnapshot = Snapshotted<BSONObj>(
                            opCtx->recoveryUnit()->getSnapshotId(), originalStateDocBson);
                        invariant(!originalRecordId.isNull());

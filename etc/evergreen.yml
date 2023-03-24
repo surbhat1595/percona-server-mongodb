@@ -54,6 +54,7 @@
 
 include:
 - filename: etc/evergreen_yml_components/definitions.yml
+- filename: etc/evergreen_yml_components/variants/task_generation.yml
 - filename: etc/evergreen_yml_components/variants/sanitizer.yml
 - filename: etc/evergreen_yml_components/variants/in_memory.yml
 
@@ -91,9 +92,8 @@ variables:
   - name: compile_test_and_package_serial_TG
     distros:
     - windows-vsCurrent-large
-  - name: build_variant_gen
   - name: burn_in_tests_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: audit
   - name: auth_audit_gen
   - name: buildscripts_test
@@ -148,8 +148,7 @@ variables:
   - name: compile_build_tools_next_TG
     distros:
     - rhel70
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -238,10 +237,8 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: .aggregation !.encrypt
   - name: .auth !.audit !.multiversion
-  - name: .batched_deletes
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams !.secondary_reads
   - name: .clustered_collections
@@ -318,8 +315,7 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common # Disabled for FCV 5.3
+  - name: .aggfuzzer .common
   - name: aggregation
   - name: aggregation_auth
   - name: auth_gen
@@ -362,6 +358,7 @@ buildvariants:
   - name: compile_ninja_TG
     distros:
     - rhel80-build
+  - name: ninja_determinism_TG
 
 - &enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-dynamic-v4gcc-debug-experimental
@@ -389,9 +386,8 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: test_api_version_compatibility
-  #  - name: .aggfuzzer !.multiversion # Disabled for FCV 5.3
+  - name: .aggfuzzer !.multiversion
   - name: .aggregation !.multiversion
   - name: audit
   - name: .auth !.multiversion
@@ -508,11 +504,10 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-large
-  - name: build_variant_gen
   # to reduce the overall size of the generated configuration, most of the
   # tasks we would normally include have been disabled. See revert of
   # SERVER-60832
-  #    - name: .aggfuzzer # Disabled for FCV 5.3
+  #- name: .aggfuzzer
   #- name: .aggregation !.unwind
   #- name: audit
   #- name: .auth
@@ -683,8 +678,7 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation
   - name: audit
   - name: unittest_shell_hang_analyzer_gen
@@ -846,7 +840,6 @@ buildvariants:
   - name: compile_build_tools_next_TG
     distros:
     - windows-vsCurrent-xlarge
-  - name: build_variant_gen
   - name: .aggregation !.auth !.encrypt
   - name: aggregation_expression_multiversion_fuzzer_gen
   - name: aggregation_expression_optimization_fuzzer_gen
@@ -925,7 +918,6 @@ buildvariants:
   - name: compile_build_tools_next_TG
     distros:
     - windows-vsCurrent-xlarge
-  - name: build_variant_gen
   - name: burn_in_tests_gen
   - name: audit
   - name: auth_audit_gen
@@ -998,7 +990,6 @@ buildvariants:
   - name: compile_build_tools_next_TG
     distros:
     - windows-vsCurrent-xlarge
-  - name: build_variant_gen
   - name: burn_in_tests_gen
   - name: audit
   - name: auth_audit_gen
@@ -1055,6 +1046,9 @@ buildvariants:
   - name: compile_ninja_TG
     distros:
     - windows-vsCurrent-large
+  - name: ninja_determinism_TG
+    distros:
+    - windows-vsCurrent-large
 
 - name: enterprise-windows-cxx20-debug-experimental
   display_name: "~ Enterprise Windows C++20 DEBUG"
@@ -1082,8 +1076,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - windows-vsCurrent-large
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1160,7 +1153,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: build_variant_gen
   - name: aggregation
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1188,6 +1180,7 @@ buildvariants:
   tasks:
   - name: compile_ninja_next_TG
   - name: compile_ninja_TG
+  - name: ninja_determinism_TG
 
 - name: enterprise-macos-rosetta-2
   display_name: "Enterprise macOS Via Rosetta 2"
@@ -1204,7 +1197,6 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1233,7 +1225,6 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1260,7 +1251,6 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1376,14 +1366,13 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: .lint
   - name: lint_fuzzer_sanity_patch
   - name: test_api_version_compatibility
   - name: burn_in_tests_gen
   - name: check_feature_flag_tags
   - name: check_for_todos
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation
   - name: audit
   - name: .auth
@@ -1498,6 +1487,7 @@ buildvariants:
   - name: compile_ninja_TG
     distros:
     - rhel80-xlarge
+  - name: ninja_determinism_TG
 
 - &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required
@@ -1544,14 +1534,12 @@ buildvariants:
   - name: libdeps_graph_linting_TG
     distros:
     - rhel80-large
-  - name: build_variant_gen
   - name: burn_in_tests_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation
   - name: audit
   - name: .auth
   - name: unittest_shell_hang_analyzer_gen
-  - name: .batched_deletes
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .change_stream_fuzzer
@@ -1657,7 +1645,7 @@ buildvariants:
     test_flags: >-
       --mongodSetParameters="{internalQueryForceClassicEngine: true}"
   tasks:
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: .aggregation
   - name: .auth
   - name: .causally_consistent !.sharding
@@ -1696,7 +1684,6 @@ buildvariants:
     - rhel80-xlarge
   - name: .updatefuzzer
   - name: audit
-  - name: build_variant_gen
   - name: burn_in_tags_gen
   - name: burn_in_tests_gen
   - name: check_feature_flag_tags
@@ -1786,7 +1773,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-large
-  - name: build_variant_gen
   - name: auth_gen
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1869,7 +1855,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: .multiversion_fuzzer
   - name: .multiversion_passthrough
   - name: .random_multiversion_ds
@@ -1895,7 +1880,6 @@ buildvariants:
   # - name: compile_test_and_package_parallel_dbtest_stream_TG
   #   distros:
   #   - rhel80-xlarge
-  - name: build_variant_gen
   - name: .multiversion_fuzzer
   - name: .multiversion_passthrough
   - name: .random_multiversion_ds
@@ -1937,7 +1921,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: .multiversion !.future_git_tag_incompatible
   - name: .multiversion_future_git_tag
 
@@ -1996,8 +1979,7 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -2060,7 +2042,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_core_stream_TG
   - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: compile_test_and_package_parallel_dbtest_stream_TG
-  - name: build_variant_gen
   - name: jsCore
   - name: noPassthroughHotBackups_gen
 
@@ -2089,8 +2070,7 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel70
-  - name: build_variant_gen
-  #  - name: .aggfuzzer # Disabled for FCV 5.3
+  - name: .aggfuzzer
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -2131,7 +2111,6 @@ buildvariants:
   - name: compile_and_archive_dist_test_then_package_TG
     distros:
     - ubuntu1804-build
-  - name: build_variant_gen
   - name: jsCore
   - name: sharding_gen
   - name: replica_sets_gen
@@ -2187,6 +2166,29 @@ buildvariants:
     scons_cache_scope: shared
     scons_cache_mode: all
     show_scons_timings: false
+    clang_tidy_toolchain: v3
+  tasks:
+  - name: clang_tidy_TG
+
+- name: enterprise-rhel80-dynamic-clang-tidy-v4
+  display_name: "Enterprise Clang Tidy v4 Toolchain"
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
+  modules:
+  - enterprise
+  run_on:
+  - rhel80-xlarge
+  expansions:
+    lang_environment: LANG=C
+    compile_flags: --link-model=dynamic -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v4_clang.vars
+    # Unlike static builds, dynamic builds have no need to
+    # constrain the number of link jobs. Unfortunately, --jlink=1
+    # means one link job, not 100%. So this is a bit gross but set
+    # it to .99.
+    num_scons_link_jobs_available: 0.99
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    show_scons_timings: false
+    clang_tidy_toolchain: v4
   tasks:
   - name: clang_tidy_TG
 
@@ -2216,7 +2218,6 @@ buildvariants:
   - name: compile_build_tools_next_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: jsCore
   - name: .read_write_concern !.write !.aggregation
   - name: replica_sets_jscore_passthrough
@@ -2243,59 +2244,6 @@ buildvariants:
   tasks:
   - name: compile_benchmarks
   - name: .benchmarks
-
-- name: linux-64-ephemeralForTest
-  display_name: Linux (ephemeralForTest)
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - rhel80-medium
-  expansions:
-    # Transactions are not explicitly supported on the ephemeralForTest storage engine.
-    # Speculative majority reads are currently only allowed for change streams, which are only supported on WiredTiger.
-    # We also relax oplog constraints so that applying oplog entries after a rollbackViaRefetch works correctly.
-    # TODO (SERVER-47022): Re-enable oplog constraint enforcement once we set the application mode
-    # correctly after rollbackViaRefetch.
-    test_flags: >-
-      --storageEngine=ephemeralForTest
-      --excludeWithAnyTags=requires_persistence,requires_fsync,requires_journaling,requires_wiredtiger,uses_transactions,uses_speculative_majority,requires_snapshot_read,requires_majority_read_concern,uses_change_streams,requires_sharding,incompatible_with_eft
-      --mongodSetParameters="{oplogApplicationEnforcesSteadyStateConstraints: false}"
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
-    multiversion_platform: rhel80
-    multiversion_edition: targeted
-    scons_cache_mode: all
-    scons_cache_scope: shared
-    num_scons_link_jobs_available: 0.99
-  tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
-    # TODO (SERVER-58125): Re-enable the timeseries fuzzer for EFT
-  - name: build_variant_gen
-  #  - name: .aggfuzzer .common !.timeseries # Disabled for FCV 5.3
-  - name: aggregation
-  - name: .auth !.multiversion !.audit !.sharding
-  # SERVER-58597: Re-enable parallel
-  - name: .misc_js !.parallel
-  # SERVER-50296: Investigate concurrency test failures.
-  # - name: concurrency_gen
-  # - name: concurrency_replication_gen
-  # - name: concurrency_replication_causal_consistency_gen
-  # - name: concurrency_simultaneous_gen
-  # - name: concurrency_simultaneous_replication
-  - name: .integration !.audit
-  - name: .jscore .common !.txns !.decimal
-  # SERVER-50295: Investigate jstestfuzz time outs.
-  # - name: .jstestfuzz .common
-  # SERVER-59095: Investigate the EFT failure and re-enable the failing jstest suite on evergreen.
-  # - name: .logical_session_cache .one_sec
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: .read_write_concern .linearize
-  - name: replica_sets_gen
-  - name: .replica_sets .common
-  # SERVER-49428: Disabled due to writeConcernMajorityJournalDefault is not off
-  # rollback_fuzzer_gen
-  - name: .updatefuzzer
 
 
 ###########################################
@@ -2335,7 +2283,6 @@ buildvariants:
   - name: cqf_parallel
   - name: compile_and_archive_dist_test_then_package_TG
   - name: compile_benchmarks
-  - name: build_variant_gen
   - name: .aggregation
   #  - name: .auth
   - name: audit
@@ -2409,7 +2356,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_benchmarks
-  - name: build_variant_gen
   - name: .aggregation
   - name: .auth
   - name: audit
@@ -2486,7 +2432,6 @@ buildvariants:
   - name: cqf_parallel
   - name: compile_and_archive_dist_test_then_package_TG
   - name: compile_benchmarks
-  - name: build_variant_gen
   - name: .aggregation
   - name: .auth
   - name: audit
@@ -2556,7 +2501,6 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_benchmarks
-  - name: build_variant_gen
   - name: .aggregation
   - name: .auth
   - name: audit
@@ -2632,7 +2576,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: jsCore
   - name: jsCore_txns
   - name: unittest_shell_hang_analyzer_gen
@@ -2665,7 +2608,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_core_stream_TG
     distros:
     - rhel80-xlarge
-  - name: build_variant_gen
   - name: jsCore
   - name: jsCore_txns
 # Disabling these tests as they are not aware of feature flags.
@@ -2779,7 +2721,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot
@@ -2821,7 +2762,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot
@@ -2859,7 +2799,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot
@@ -2898,7 +2837,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot
@@ -2937,7 +2875,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot
@@ -2976,7 +2913,6 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot
@@ -3007,7 +2943,6 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel80-build
-  - name: build_variant_gen
   - name: .aggregation !.no_async
   - name: .sharding .auth
   - name: .sharding .causally_consistent !.wo_snapshot

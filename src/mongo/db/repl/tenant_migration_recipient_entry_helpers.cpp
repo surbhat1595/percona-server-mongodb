@@ -33,7 +33,7 @@
 
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
@@ -147,11 +147,8 @@ StatusWith<TenantMigrationRecipientDocument> getStateDoc(OperationContext* opCtx
     }
 
     BSONObj result;
-    auto foundDoc = Helpers::findOne(opCtx,
-                                     collection.getCollection(),
-                                     BSON("_id" << migrationUUID),
-                                     result,
-                                     /*requireIndex=*/true);
+    auto foundDoc =
+        Helpers::findOne(opCtx, collection.getCollection(), BSON("_id" << migrationUUID), result);
     if (!foundDoc) {
         return Status(ErrorCodes::NoMatchingDocument,
                       str::stream() << "No matching state doc found with tenant migration UUID: "

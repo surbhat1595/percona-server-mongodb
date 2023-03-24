@@ -40,9 +40,10 @@
 
 #include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/concurrency/exception_util_gen.h"
 #include "mongo/db/concurrency/temporarily_unavailable_exception.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
-#include "mongo/db/concurrency/write_conflict_exception_gen.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/server_options_general_gen.h"
 #include "mongo/db/snapshot_window_options_gen.h"
@@ -98,10 +99,11 @@ void createTableChecksFile() {
                   "incomplete."
                << std::endl;
     if (fileStream.fail()) {
+        auto ec = lastSystemError();
         LOGV2_FATAL_NOTRACE(4366400,
                             "Failed to write to file",
                             "file"_attr = path.generic_string(),
-                            "error"_attr = errnoWithDescription());
+                            "error"_attr = errorMessage(ec));
     }
     fileStream.close();
 
@@ -719,7 +721,7 @@ int mdb_handle_error(WT_EVENT_HANDLER* handler,
 int mdb_handle_message(WT_EVENT_HANDLER* handler, WT_SESSION* session, const char* message) {
     logv2::DynamicAttributes attr;
     logv2::LogSeverity severity = ::mongo::logv2::LogSeverity::Log();
-    logv2::LogOptions options = ::mongo::logv2::LogOptions{MongoLogV2DefaultComponent_component};
+    logv2::LogOptions options = ::mongo::logv2::LogOptions{MONGO_LOGV2_DEFAULT_COMPONENT};
 
     try {
         try {

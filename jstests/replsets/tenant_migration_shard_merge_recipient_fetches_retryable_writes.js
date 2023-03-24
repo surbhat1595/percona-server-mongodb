@@ -2,7 +2,6 @@
  * Tests that the shard merge recipient correctly fetches retryable writes.
  *
  * @tags: [
- *   incompatible_with_eft,
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
  *   featureFlagShardMerge,
@@ -14,14 +13,8 @@
 (function() {
 "use strict";
 
-load("jstests/libs/retryable_writes_util.js");
 load("jstests/replsets/libs/tenant_migration_test.js");
 load("jstests/libs/uuid_util.js");  // For extractUUIDFromObject().
-
-if (!RetryableWritesUtil.storageEngineSupportsRetryableWrites(jsTest.options().storageEngine)) {
-    jsTestLog("Retryable writes are not supported, skipping test");
-    return;
-}
 
 const kParams = {
     ttlMonitorSleepSecs: 1,

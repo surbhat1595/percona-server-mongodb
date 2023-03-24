@@ -46,7 +46,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -2754,8 +2754,7 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
     // to the side writes table and must be drained.
     Helpers::upsert(_opCtx, collection->ns().ns(), BSON("_id" << 0 << "a" << 1 << "b" << 1));
     {
-        RecordId badRecord =
-            Helpers::findOne(_opCtx, collection.get(), BSON("_id" << 1), false /* requireIndex */);
+        RecordId badRecord = Helpers::findOne(_opCtx, collection.get(), BSON("_id" << 1));
         WriteUnitOfWork wuow(_opCtx);
         collection->deleteDocument(_opCtx, kUninitializedStmtId, badRecord, nullptr);
         wuow.commit();

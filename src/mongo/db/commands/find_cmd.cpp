@@ -171,6 +171,10 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         findCommand.getLet(),                    // let
         CurOp::get(opCtx)->dbProfileLevel() > 0  // mayDbProfile
     );
+    if (opCtx->readOnly()) {
+        // Disallow disk use if in read-only mode.
+        expCtx->allowDiskUse = false;
+    }
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     expCtx->startExpressionCounters();
 
@@ -557,6 +561,10 @@ public:
                 uassertStatusOK(status);
                 result->getBodyBuilder().appendElements(aggResult);
                 return;
+            }
+
+            if (!cq->getFindCommandRequest().getAllowDiskUse().value_or(true)) {
+                allowDiskUseFalseCounter.increment();
             }
 
             // Check whether we are allowed to read from this node after acquiring our locks.

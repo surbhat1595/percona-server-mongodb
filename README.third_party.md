@@ -22,7 +22,7 @@ a notice will be included in
 | Name                       | License           | Vendored Version  | Emits persisted data | Distributed in Release Binaries |
 | ---------------------------| ----------------- | ------------------| :------------------: | :-----------------------------: |
 | [abseil-cpp]               | Apache-2.0        | 20210324.1        |                      |                ✗                |
-| Aladdin MD5                | Zlib              | Unknown           |          ✗           |                ✗                |
+| [Aladdin MD5]              | Zlib              | Unknown           |          ✗           |                ✗                |
 | [ASIO]                     | BSL-1.0           | b0926b61b0        |                      |                ✗                |
 | [benchmark]                | Apache-2.0        | 1.5.2             |                      |                                 |
 | [Boost]                    | BSL-1.0           | 1.76.0            |                      |                ✗                |
@@ -38,8 +38,8 @@ a notice will be included in
 | [MurmurHash3]              | Public Domain     | Unknown + changes |          ✗           |                ✗                |
 | [ocspbuilder]              | MIT               | 0.10.2            |                      |                                 |
 | [ocspresponder]            | Apache-2.0        | 0.5.0             |                      |                                 |
-| [peglib]                   | MIT               | 0.1.12            |                      |                ✗                |
 | [Pcre]                     | BSD-3-Clause      | 8.42              |                      |                ✗                |
+| [pcre2]                    | BSD-3-Clause      | 10.39             |                      |                ✗                |
 | [S2]                       | Apache-2.0        | Unknown           |          ✗           |                ✗                |
 | [SafeInt]                  | MIT               | 3.0.26            |                      |                                 |
 | [schemastore.org]          | Apache-2.0        | 6847cfc3a1        |                      |                                 |
@@ -72,8 +72,8 @@ a notice will be included in
 [MurmurHash3]: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
 [ocspbuilder]: https://github.com/wbond/ocspbuilder
 [ocspresponder]: https://github.com/threema-ch/ocspresponder
-[peglib]: https://github.com/yhirose/cpp-peglib
 [Pcre]: http://www.pcre.org/
+[pcre2]: http://www.pcre.org/
 [S2]: https://github.com/google/s2geometry
 [SafeInt]: https://github.com/dcleblanc/SafeInt
 [schemastore.org]: https://www.schemastore.org/json/

@@ -33,7 +33,7 @@
 
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
@@ -187,8 +187,7 @@ boost::optional<Document> findDocWithHighestInsertedId(OperationContext* opCtx,
     findCommand->setLimit(1);
     findCommand->setSort(BSON("_id" << -1));
 
-    auto recordId =
-        Helpers::findOne(opCtx, collection, std::move(findCommand), true /* requireIndex */);
+    auto recordId = Helpers::findOne(opCtx, collection, std::move(findCommand));
     if (recordId.isNull()) {
         return boost::none;
     }

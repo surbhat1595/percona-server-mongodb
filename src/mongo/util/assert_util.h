@@ -112,7 +112,7 @@ public:
     /**
      * Returns the generic ErrorExtraInfo if present.
      */
-    const std::shared_ptr<const ErrorExtraInfo> extraInfo() const {
+    std::shared_ptr<const ErrorExtraInfo> extraInfo() const {
         return _status.extraInfo();
     }
 
@@ -165,6 +165,8 @@ protected:
     }
 };
 
+class WriteConflictException;
+class TemporarilyUnavailableException;
 
 /**
  * This namespace contains implementation details for our error handling code and should not be used
@@ -201,6 +203,16 @@ struct ExceptionForDispatcher<code, CategoryList<categories...>> {
     using type = std::conditional_t<sizeof...(categories) == 0,
                                     ExceptionForImpl<code, AssertionException>,
                                     ExceptionForImpl<code, ExceptionForCat<categories>...>>;
+};
+
+template <>
+struct ExceptionForDispatcher<ErrorCodes::WriteConflict> {
+    using type = WriteConflictException;
+};
+
+template <>
+struct ExceptionForDispatcher<ErrorCodes::TemporarilyUnavailable> {
+    using type = TemporarilyUnavailableException;
 };
 
 }  // namespace error_details

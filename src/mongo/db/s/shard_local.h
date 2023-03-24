@@ -34,6 +34,11 @@
 
 namespace mongo {
 
+Status createIndexOnConfigCollection(OperationContext* opCtx,
+                                     const NamespaceString& ns,
+                                     const BSONObj& keys,
+                                     bool unique);
+
 class ShardLocal : public Shard {
     ShardLocal(const ShardLocal&) = delete;
     ShardLocal& operator=(const ShardLocal&) = delete;
@@ -47,7 +52,7 @@ public:
      * These functions are implemented for the Shard interface's sake. They should not be called on
      * ShardLocal because doing so triggers invariants.
      */
-    const ConnectionString getConnString() const override;
+    ConnectionString getConnString() const override;
     std::shared_ptr<RemoteCommandTargeter> getTargeter() const override;
     void updateReplSetMonitor(const HostAndPort& remoteHost,
                               const Status& remoteCommandStatus) override;

@@ -333,11 +333,6 @@ TEST_F(KVEngineTestHarness, AllDurableTimestamp) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
 
-    // TODO SERVER-65151: Remove after removing EFT.
-    if (engine->isEphemeral()) {
-        return;
-    }
-
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
     {
@@ -414,9 +409,6 @@ TEST_F(KVEngineTestHarness, AllDurableTimestamp) {
 TEST_F(KVEngineTestHarness, PinningOldestWithAnotherSession) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
@@ -576,9 +568,6 @@ TEST_F(KVEngineTestHarness, AllDurable) {
 TEST_F(KVEngineTestHarness, BasicTimestampSingle) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
@@ -649,9 +638,6 @@ TEST_F(KVEngineTestHarness, BasicTimestampSingle) {
 TEST_F(KVEngineTestHarness, BasicTimestampMultiple) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
@@ -709,9 +695,6 @@ TEST_F(KVEngineTestHarness, BasicTimestampMultiple) {
 DEATH_TEST_REGEX_F(KVEngineTestHarness, SnapshotHidesVisibility, ".*item not found.*") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        invariant(false, "item not found");
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
@@ -767,9 +750,6 @@ DEATH_TEST_REGEX_F(KVEngineTestHarness, SnapshotHidesVisibility, ".*item not fou
 TEST_F(KVEngineTestHarness, SingleReadWithConflictWithOplog) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> collectionRs;
@@ -846,9 +826,6 @@ TEST_F(KVEngineTestHarness, SingleReadWithConflictWithOplog) {
 TEST_F(KVEngineTestHarness, PinningOldestTimestampWithReadConflict) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
@@ -893,9 +870,6 @@ DEATH_TEST_REGEX_F(KVEngineTestHarness,
                    "Fatal assertion.*39001") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        invariant(false, "Fatal assertion: 39001");
 
     std::string ns = "a.b";
     std::unique_ptr<RecordStore> rs;
@@ -935,9 +909,6 @@ DEATH_TEST_REGEX_F(KVEngineTestHarness,
 TEST_F(KVEngineTestHarness, RollingBackToLastStable) {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        return;
 
     // The initial data timestamp has to be set to take stable checkpoints.
     engine->setInitialDataTimestamp(Timestamp(1, 1));
@@ -1018,9 +989,6 @@ TEST_F(KVEngineTestHarness, RollingBackToLastStable) {
 DEATH_TEST_REGEX_F(KVEngineTestHarness, CommitBehindStable, "Fatal assertion.*39001") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
-    // TODO SERVER-48314: Remove after implementing correct behavior on biggie.
-    if (engine->isEphemeral())
-        invariant(false, "Fatal assertion: 39001");
 
     // The initial data timestamp has to be set to take stable checkpoints.
     engine->setInitialDataTimestamp(Timestamp(1, 1));

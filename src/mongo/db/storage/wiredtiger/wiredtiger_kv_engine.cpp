@@ -102,6 +102,7 @@
 #include "mongo/db/storage/ticketholders.h"
 #include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_backup_cursor_hooks.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_column_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_encryption_hooks.h"
@@ -1369,7 +1370,7 @@ Status WiredTigerKVEngine::disableIncrementalBackup(OperationContext* opCtx) {
 
 namespace {
 
-const boost::filesystem::path constructFilePath(std::string path, std::string filename) {
+boost::filesystem::path constructFilePath(std::string path, std::string filename) {
     const auto directoryPath = boost::filesystem::path(path);
     const auto wiredTigerLogFilePrefix = "WiredTigerLog";
 
@@ -2432,9 +2433,9 @@ Status WiredTigerKVEngine::hotBackup(OperationContext* opCtx, const percona::S3B
                     if (!fileStream->good()) {
                         auto eno = errno;
                         // cancel all uploads
-                        cancelMessage = 
-                            str::stream() << "Cannot open file '" << srcFile.string() << "' for upload. "
-                                          << "Error is: " << errnoWithDescription(eno);
+                        cancelMessage = str::stream()
+                            << "Cannot open file '" << srcFile.string() << "' for upload. "
+                            << "Error is: " << errorMessage(systemError(eno));
                         backupCancelled.store(true);
                         break;
                     }
@@ -2947,7 +2948,7 @@ Status WiredTigerKVEngine::createSortedDataInterface(OperationContext* opCtx,
         "collection_uuid"_attr = collOptions.uuid,
         "ident"_attr = ident,
         "config"_attr = config);
-    return WiredTigerIndex::Create(opCtx, _uri(ident), config);
+    return WiredTigerIndex::create(opCtx, _uri(ident), config);
 }
 
 Status WiredTigerKVEngine::importSortedDataInterface(OperationContext* opCtx,
@@ -2972,7 +2973,7 @@ Status WiredTigerKVEngine::importSortedDataInterface(OperationContext* opCtx,
                 "WiredTigerKVEngine::importSortedDataInterface",
                 "ident"_attr = ident,
                 "config"_attr = config);
-    return WiredTigerIndex::Create(opCtx, _uri(ident), config);
+    return WiredTigerIndex::create(opCtx, _uri(ident), config);
 }
 
 Status WiredTigerKVEngine::dropSortedDataInterface(OperationContext* opCtx, StringData ident) {
@@ -2998,6 +2999,17 @@ std::unique_ptr<SortedDataInterface> WiredTigerKVEngine::getSortedDataInterface(
 
     return std::make_unique<WiredTigerIndexStandard>(
         opCtx, _uri(ident), ident, keyFormat, desc, WiredTigerUtil::useTableLogging(nss));
+}
+
+std::unique_ptr<ColumnStore> WiredTigerKVEngine::getColumnStore(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const CollectionOptions& collOptions,
+    StringData ident,
+    const IndexDescriptor* descriptor) {
+    // TODO SERVER-66098 readOnly support.
+    const bool readOnly = false;
+    return std::make_unique<WiredTigerColumnStore>(opCtx, _uri(ident), ident, descriptor, readOnly);
 }
 
 std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,

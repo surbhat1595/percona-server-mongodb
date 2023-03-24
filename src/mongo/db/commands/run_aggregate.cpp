@@ -98,10 +98,11 @@ using std::string;
 using std::stringstream;
 using std::unique_ptr;
 
+Counter64 allowDiskUseFalseCounter;
+
 namespace {
-Counter64 allowDiskUseCounter;
-ServerStatusMetricField<Counter64> allowDiskUseMetric{"commands.aggregate.allowDiskUseTrue",
-                                                      &allowDiskUseCounter};
+ServerStatusMetricField<Counter64> allowDiskUseMetric{"query.allowDiskUseFalse",
+                                                      &allowDiskUseFalseCounter};
 
 /**
  * If a pipeline is empty (assuming that a $cursor stage hasn't been created yet), it could mean
@@ -444,13 +445,17 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     expCtx->collationMatchesDefault = collationMatchesDefault;
     expCtx->forPerShardCursor = request.getPassthroughToShard().has_value();
     expCtx->allowDiskUse = request.getAllowDiskUse().value_or(allowDiskUseByDefault.load());
+    if (opCtx->readOnly()) {
+        // Disallow disk use if in read-only mode.
+        expCtx->allowDiskUse = false;
+    }
 
-    // If the request specified v2 resume tokens for change streams, set this on the expCtx. On 6.0
-    // we only expect this to occur during testing.
-    // TODO SERVER-65370: after 6.0, assume true unless present and explicitly false.
-    if (request.getGenerateV2ResumeTokens()) {
-        uassert(6528200, "Invalid request for v2 resume tokens", getTestCommandsEnabled());
-        expCtx->changeStreamTokenVersion = 2;
+    // If the request explicitly specified NOT to use v2 resume tokens for change streams, set this
+    // on the expCtx. This can happen if a the request originated from 6.0 mongos, or in test mode.
+    if (request.getGenerateV2ResumeTokens().has_value()) {
+        // We only ever expect an explicit $_generateV2ResumeTokens to be false.
+        uassert(6528200, "Invalid request for v2 tokens", !request.getGenerateV2ResumeTokens());
+        expCtx->changeStreamTokenVersion = 1;
     }
 
     return expCtx;
@@ -907,8 +912,8 @@ Status runAggregate(OperationContext* opCtx,
         auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
         expCtx->stopExpressionCounters();
 
-        if (request.getAllowDiskUse()) {
-            allowDiskUseCounter.increment();
+        if (!request.getAllowDiskUse().value_or(true)) {
+            allowDiskUseFalseCounter.increment();
         }
 
         // Check that the view's collation matches the collation of any views involved in the
@@ -1041,6 +1046,14 @@ Status runAggregate(OperationContext* opCtx,
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.
         if (ctx) {
+            // Due to yielding, the collection pointers saved in MultipleCollectionAccessor might
+            // have become invalid. We will need to refresh them here.
+            collections = MultipleCollectionAccessor(opCtx,
+                                                     &ctx->getCollection(),
+                                                     ctx->getNss(),
+                                                     ctx->isAnySecondaryNamespaceAViewOrSharded(),
+                                                     secondaryExecNssList);
+
             if (const auto& coll = ctx->getCollection()) {
                 CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, stats);
             }

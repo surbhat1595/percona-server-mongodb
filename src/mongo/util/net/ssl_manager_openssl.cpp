@@ -601,7 +601,7 @@ struct OCSPFetchResponse {
         return (statusOfResponse == ErrorCodes::OCSPCertificateStatusRevoked) || hasNextUpdate;
     }
 
-    const Milliseconds fetchNewResponseDuration() {
+    Milliseconds fetchNewResponseDuration() {
         Milliseconds timeBeforeNextUpdate = refreshTime - Date_t::now();
         if (timeBeforeNextUpdate < Milliseconds(0)) {
             return Milliseconds(0);
@@ -620,7 +620,7 @@ struct OCSPFetchResponse {
         return timeBeforeNextUpdate / 2;
     }
 
-    const Date_t nextStapleRefresh() {
+    Date_t nextStapleRefresh() {
         return refreshTime;
     }
 };
@@ -1323,7 +1323,7 @@ public:
 
     SSLInformationToLog getSSLInformationToLog() const final;
 
-    const std::shared_ptr<OCSPStaplingContext> getOcspStaplingContext() {
+    std::shared_ptr<OCSPStaplingContext> getOcspStaplingContext() {
         stdx::lock_guard<mongo::Mutex> guard(_sharedResponseMutex);
         return _ocspStaplingContext;
     }
@@ -3561,10 +3561,11 @@ void SSLManagerOpenSSL::_handleSSLError(SSLConnectionOpenSSL* conn, int ret) {
             } else if (ret == 0) {
                 LOGV2_ERROR(23261, "Unexpected EOF encountered during SSL communication");
             } else {
+                auto ec = lastSystemError();
                 LOGV2_ERROR(23262,
                             "The SSL BIO reported an I/O error {error}",
                             "The SSL BIO reported an I/O error",
-                            "error"_attr = errnoWithDescription());
+                            "error"_attr = errorMessage(ec));
             }
             break;
         case SSL_ERROR_SSL: {

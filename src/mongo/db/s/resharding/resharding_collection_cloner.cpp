@@ -39,7 +39,6 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/logical_session_id_helpers.h"
@@ -285,13 +284,15 @@ bool ReshardingCollectionCloner::doOneBatch(OperationContext* opCtx, Pipeline& p
                                           ChunkVersion::IGNORED() /* shardVersion */,
                                           boost::none /* databaseVersion */);
 
+    Timer batchInsertTimer;
     int bytesInserted = resharding::data_copy::withOneStaleConfigRetry(
         opCtx, [&] { return resharding::data_copy::insertBatch(opCtx, _outputNss, batch); });
 
     _env->metrics()->onDocumentsCopied(batch.size(), bytesInserted);
     _env->metrics()->gotInserts(batch.size());
     if (ShardingDataTransformMetrics::isEnabled()) {
-        _env->metricsNew()->onDocumentsCopied(batch.size(), bytesInserted);
+        _env->metricsNew()->onDocumentsCopied(
+            batch.size(), bytesInserted, Milliseconds(batchInsertTimer.millis()));
         // TODO: Remove this comment when ReshardingMetrics are replaced with ReshardingMetricsNew.
         // ReshardingMetricsNew::onInsertsApplied is intentionally not called here. Documents copied
         // are no longer considered applied inserts.

@@ -70,7 +70,6 @@ public:
         size_t cacheMB = WiredTigerUtil::getCacheSizeMB(wiredTigerGlobalOptions.cacheSizeGB);
         const bool durable = false;
         const bool ephemeral = true;
-        const bool readOnly = false;
         auto kv =
             std::make_unique<WiredTigerKVEngine>(getCanonicalName().toString(),
                                                  params.dbpath,

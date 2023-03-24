@@ -165,8 +165,8 @@ void LoopJoinStage::close() {
 
 void LoopJoinStage::doSaveState(bool relinquishCursor) {
     if (_isReadingLeftSide || _outerGetNext) {
-        // If we yield while reading the left side, there is no need to makeOwned() data held in
-        // the right side, since we will have to re-open it anyway.
+        // If we yield while reading the left side, there is no need to prepareForYielding() data
+        // held in the right side, since we will have to re-open it anyway.
         const bool recursive = true;
         _children[1]->disableSlotAccess(recursive);
     }
@@ -174,12 +174,13 @@ void LoopJoinStage::doSaveState(bool relinquishCursor) {
 
 std::unique_ptr<PlanStageStats> LoopJoinStage::getStats(bool includeDebugInfo) const {
     auto ret = std::make_unique<PlanStageStats>(_commonStats);
+    invariant(ret);
     ret->children.emplace_back(_children[0]->getStats(includeDebugInfo));
     ret->children.emplace_back(_children[1]->getStats(includeDebugInfo));
     ret->specific = std::make_unique<LoopJoinStats>(_specificStats);
 
     if (includeDebugInfo) {
-        BSONObjBuilder bob(StorageAccessStatsVisitor::collectStats(*this, ret.get()).toBSON());
+        BSONObjBuilder bob(StorageAccessStatsVisitor::collectStats(*this, *ret).toBSON());
         bob.appendNumber("innerOpens", static_cast<long long>(_specificStats.innerOpens))
             .appendNumber("innerCloses", static_cast<long long>(_specificStats.innerCloses))
             .append("outerProjects", _outerProjects.begin(), _outerProjects.end())

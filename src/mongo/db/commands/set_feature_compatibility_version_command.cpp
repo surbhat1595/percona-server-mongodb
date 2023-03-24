@@ -503,10 +503,7 @@ public:
                 migrationutil::drainMigrationsPendingRecovery(opCtx);
 
                 if (orphanTrackingCondition) {
-                    {
-                        ScopedRangeDeleterLock rangeDeleterLock(opCtx);
-                        setOrphanCountersOnRangeDeletionTasks(opCtx);
-                    }
+                    setOrphanCountersOnRangeDeletionTasks(opCtx);
                     BalancerStatsRegistry::get(opCtx)->initializeAsync(opCtx);
                 }
             }
@@ -556,50 +553,6 @@ private:
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before upgrade procedures begin right after this.
             Lock::GlobalLock lk(opCtx, MODE_S);
-        }
-
-        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
-        // upgrade code.
-        if (requestedVersion == multiversion::GenericFCV::kLatest) {
-            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& dbName = tenantDbName.dbName();
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-                catalog::forEachCollectionFromDb(
-                    opCtx,
-                    tenantDbName,
-                    MODE_X,
-                    [&](const CollectionPtr& collection) {
-                        if (collection->getTimeseriesBucketsMayHaveMixedSchemaData()) {
-                            // The catalog entry flag has already been added. This can happen if the
-                            // upgrade process was interrupted and is being run again, or if there
-                            // was a time-series collection created during the upgrade. The upgrade
-                            // process cannot be aborted at this point.
-                            return true;
-                        }
-
-                        NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
-                        CollMod collModCmd(collection->ns());
-                        BSONObjBuilder unusedBuilder;
-                        Status status =
-                            processCollModCommand(opCtx, nsOrUUID, collModCmd, &unusedBuilder);
-
-                        if (!status.isOK()) {
-                            LOGV2_FATAL(
-                                6057503,
-                                "Failed to add catalog entry during upgrade",
-                                "error"_attr = status,
-                                "timeseriesBucketsMayHaveMixedSchemaData"_attr =
-                                    collection->getTimeseriesBucketsMayHaveMixedSchemaData(),
-                                logAttrs(collection->ns()),
-                                logAttrs(collection->uuid()));
-                        }
-
-                        return true;
-                    },
-                    [&](const CollectionPtr& collection) {
-                        return collection->getTimeseriesOptions() != boost::none;
-                    });
-            }
         }
 
         uassert(ErrorCodes::Error(549180),
@@ -674,94 +627,6 @@ private:
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before downgrade procedures begin right after this.
             Lock::GlobalLock lk(opCtx, MODE_S);
-        }
-
-        // (Generic FCV reference): TODO SERVER-60912: When kLastLTS is 6.0, remove this FCV-gated
-        // downgrade code.
-        if (requestedVersion == multiversion::GenericFCV::kLastLTS) {
-            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& dbName = tenantDbName.dbName();
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-                catalog::forEachCollectionFromDb(
-                    opCtx,
-                    tenantDbName,
-                    MODE_X,
-                    [&](const CollectionPtr& collection) {
-                        invariant(collection->getTimeseriesOptions());
-
-                        auto indexCatalog = collection->getIndexCatalog();
-                        auto indexIt = indexCatalog->getIndexIterator(
-                            opCtx, /*includeUnfinishedIndexes=*/true);
-
-                        while (indexIt->more()) {
-                            auto indexEntry = indexIt->next();
-                            // Secondary indexes on time-series measurements are only supported
-                            // in 5.2 and up. If the user tries to downgrade the cluster to an
-                            // earlier version, they must first remove all incompatible secondary
-                            // indexes on time-series measurements.
-                            uassert(
-                                ErrorCodes::CannotDowngrade,
-                                str::stream()
-                                    << "Cannot downgrade the cluster when there are secondary "
-                                       "indexes on time-series measurements present, or when there "
-                                       "are partial indexes on a time-series collection. Drop all "
-                                       "secondary indexes on time-series measurements, and all "
-                                       "partial indexes on time-series collections, before "
-                                       "downgrading. First detected incompatible index name: '"
-                                    << indexEntry->descriptor()->indexName() << "' on collection: '"
-                                    << collection->ns().getTimeseriesViewNamespace() << "'",
-                                timeseries::isBucketsIndexSpecCompatibleForDowngrade(
-                                    *collection->getTimeseriesOptions(),
-                                    indexEntry->descriptor()->infoObj()));
-
-                            if (auto filter = indexEntry->getFilterExpression()) {
-                                auto status = IndexCatalogImpl::checkValidFilterExpressions(
-                                    filter,
-                                    /*timeseriesMetricIndexesFeatureFlagEnabled*/ false);
-                                uassert(ErrorCodes::CannotDowngrade,
-                                        str::stream()
-                                            << "Cannot downgrade the cluster when there are "
-                                               "secondary indexes with partial filter expressions "
-                                               "that contain $in/$or/$geoWithin or an $and that is "
-                                               "not top level. Drop all indexes containing these "
-                                               "partial filter elements before downgrading. First "
-                                               "detected incompatible index name: '"
-                                            << indexEntry->descriptor()->indexName()
-                                            << "' on collection: '"
-                                            << collection->ns().getTimeseriesViewNamespace() << "'",
-                                        status.isOK());
-                            }
-                        }
-
-                        if (!collection->getTimeseriesBucketsMayHaveMixedSchemaData()) {
-                            // The catalog entry flag has already been removed. This can happen if
-                            // the downgrade process was interrupted and is being run again. The
-                            // downgrade process cannot be aborted at this point.
-                            return true;
-                        }
-                        NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
-                        CollMod collModCmd(collection->ns());
-                        BSONObjBuilder unusedBuilder;
-                        Status status =
-                            processCollModCommand(opCtx, nsOrUUID, collModCmd, &unusedBuilder);
-
-                        if (!status.isOK()) {
-                            LOGV2_FATAL(
-                                6057600,
-                                "Failed to remove catalog entry during downgrade",
-                                "error"_attr = status,
-                                "timeseriesBucketsMayHaveMixedSchemaData"_attr =
-                                    collection->getTimeseriesBucketsMayHaveMixedSchemaData(),
-                                logAttrs(collection->ns()),
-                                logAttrs(collection->uuid()));
-                        }
-
-                        return true;
-                    },
-                    [&](const CollectionPtr& collection) {
-                        return collection->getTimeseriesOptions() != boost::none;
-                    });
-            }
         }
 
         if (serverGlobalParams.featureCompatibility
@@ -1051,8 +916,26 @@ private:
     void _updateSessionDocuments(OperationContext* opCtx,
                                  const LogicalSessionIdMap<TxnNumber>& parentLsidToTxnNum) {
         DBDirectClient client(opCtx);
-        write_ops::UpdateCommandRequest updateOp(
-            NamespaceString::kSessionTransactionsTableNamespace);
+
+        auto runUpdates = [&](std::vector<write_ops::UpdateOpEntry> updates) {
+            write_ops::UpdateCommandRequest updateOp(
+                NamespaceString::kSessionTransactionsTableNamespace);
+            updateOp.setUpdates(updates);
+            updateOp.getWriteCommandRequestBase().setOrdered(false);
+            auto updateReply = client.update(updateOp);
+            if (auto& writeErrors = updateReply.getWriteErrors()) {
+                for (auto&& writeError : *writeErrors) {
+                    if (writeError.getStatus() == ErrorCodes::DuplicateKey) {
+                        // There is a transaction or retryable write with a higher txnNumber that
+                        // committed between when the check below was done and when the write was
+                        // applied.
+                        continue;
+                    }
+                    uassertStatusOK(writeError.getStatus());
+                }
+            }
+        };
+
         std::vector<write_ops::UpdateOpEntry> updates;
         for (const auto& [lsid, txnNumber] : parentLsidToTxnNum) {
             SessionTxnRecord modifiedDoc;
@@ -1086,24 +969,21 @@ private:
             modifiedDoc.setLastWriteOpTime(repl::OpTime(Timestamp(1, 0), 1));
 
             write_ops::UpdateOpEntry updateEntry;
-            updateEntry.setQ(BSON("_id" << lsid.toBSON()));
+            updateEntry.setQ(BSON("_id" << lsid.toBSON() << "txnNum"
+                                        << BSON("$lte" << modifiedDoc.getTxnNum())));
             updateEntry.setU(
                 write_ops::UpdateModification::parseFromClassicUpdate(modifiedDoc.toBSON()));
             updateEntry.setUpsert(true);
             updates.push_back(updateEntry);
 
             if (updates.size() == write_ops::kMaxWriteBatchSize) {
-                updateOp.setUpdates(updates);
-                auto response = client.runCommand(updateOp.serialize({}));
-                uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
+                runUpdates(updates);
                 updates.clear();
             }
         }
 
         if (updates.size() > 0) {
-            updateOp.setUpdates(updates);
-            auto response = client.runCommand(updateOp.serialize({}));
-            uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
+            runUpdates(updates);
         }
     }
 

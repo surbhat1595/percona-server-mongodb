@@ -44,7 +44,7 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/dbhelpers.h"
@@ -238,8 +238,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
 
         assertCanWrite_inlock(opCtx, ns);
         if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-                opCtx,
-                ns)) {  // someone else may have beat us to it.
+                opCtx, ns)) {  // someone else may have beat us to it.
             uassertStatusOK(userAllowedCreateNS(opCtx, ns));
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
                 unsafeCreateCollection(opCtx);

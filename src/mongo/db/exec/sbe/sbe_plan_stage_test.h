@@ -33,6 +33,7 @@
 
 #pragma once
 
+#include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/sbe/stages/project.h"
@@ -80,24 +81,18 @@ using MakeStageFn = std::function<std::pair<T, std::unique_ptr<PlanStage>>(
  * observe 1 output slot, use runTest(). For unittests where the PlanStage has multiple input slots
  * and/or where the test needs to observe multiple output slots, use runTestMulti().
  */
-class PlanStageTestFixture : public ServiceContextMongoDTest {
+class PlanStageTestFixture : public CatalogTestFixture {
 public:
     PlanStageTestFixture() = default;
 
     void setUp() override {
-        ServiceContextMongoDTest::setUp();
-        _opCtx = cc().makeOperationContext();
+        CatalogTestFixture::setUp();
         _slotIdGenerator.reset(new value::SlotIdGenerator());
     }
 
     void tearDown() override {
         _slotIdGenerator.reset();
-        _opCtx.reset();
-        ServiceContextMongoDTest::tearDown();
-    }
-
-    OperationContext* opCtx() {
-        return _opCtx.get();
+        CatalogTestFixture::tearDown();
     }
 
     value::SlotId generateSlotId() {
@@ -114,10 +109,10 @@ public:
     /**
      * Compare two SBE values for equality.
      */
-    bool valueEquals(value::TypeTags lhsTag,
-                     value::Value lhsVal,
-                     value::TypeTags rhsTag,
-                     value::Value rhsVal) {
+    static bool valueEquals(value::TypeTags lhsTag,
+                            value::Value lhsVal,
+                            value::TypeTags rhsTag,
+                            value::Value rhsVal) {
         auto [cmpTag, cmpVal] = value::compareValue(lhsTag, lhsVal, rhsTag, rhsVal);
         return (cmpTag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(cmpVal) == 0);
     }
@@ -125,10 +120,10 @@ public:
     /**
      * Asserts the two values are equal. Will write a log message and abort() if they are not.
      */
-    void assertValuesEqual(value::TypeTags lhsTag,
-                           value::Value lhsVal,
-                           value::TypeTags rhsTag,
-                           value::Value rhsVal);
+    static void assertValuesEqual(value::TypeTags lhsTag,
+                                  value::Value lhsVal,
+                                  value::TypeTags rhsTag,
+                                  value::Value rhsVal);
 
     /**
      * This method takes an SBE array and returns an output slot and a unwind/project/limit/coscan
@@ -248,7 +243,6 @@ public:
                       const MakeStageFn<value::SlotVector>& makeStageMulti);
 
 private:
-    ServiceContext::UniqueOperationContext _opCtx;
     std::unique_ptr<value::SlotIdGenerator> _slotIdGenerator;
 };
 

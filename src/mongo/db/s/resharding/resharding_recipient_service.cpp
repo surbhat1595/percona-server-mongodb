@@ -36,7 +36,7 @@
 #include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/ops/delete.h"
@@ -52,6 +52,7 @@
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
+#include "mongo/db/s/resharding/resharding_metrics_helpers.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier.h"
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
@@ -112,6 +113,77 @@ void ensureFulfilledPromise(WithLock lk, SharedPromise<T>& sp, T value) {
     }
 }
 
+using resharding_metrics::getIntervalEndFieldName;
+using resharding_metrics::getIntervalStartFieldName;
+using DocT = ReshardingRecipientDocument;
+const auto metricsPrefix = resharding_metrics::getMetricsPrefix<DocT>();
+
+void buildStateDocumentCloneMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetricsNew* metrics) {
+    bob.append(getIntervalStartFieldName<DocT>(ReshardingRecipientMetrics::kDocumentCopyFieldName),
+               metrics->getCopyingBegin());
+}
+
+void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetricsNew* metrics) {
+    bob.append(getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kDocumentCopyFieldName),
+               metrics->getCopyingEnd());
+    bob.append(metricsPrefix + ReshardingRecipientMetrics::kFinalDocumentsCopiedCountFieldName,
+               metrics->getDocumentsCopiedCount());
+    bob.append(metricsPrefix + ReshardingRecipientMetrics::kFinalBytesCopiedCountFieldName,
+               metrics->getBytesCopiedCount());
+}
+
+void buildStateDocumentMetricsForUpdate(BSONObjBuilder& bob,
+                                        ReshardingMetricsNew* metrics,
+                                        RecipientStateEnum newState) {
+    switch (newState) {
+        case RecipientStateEnum::kCloning:
+            buildStateDocumentCloneMetricsForUpdate(bob, metrics);
+            return;
+        case RecipientStateEnum::kApplying:
+            buildStateDocumentApplyMetricsForUpdate(bob, metrics);
+            return;
+        default:
+            return;
+    }
+}
+
+ShardingDataTransformCumulativeMetrics::RecipientStateEnum toMetricsState(
+    RecipientStateEnum enumVal) {
+    using MetricsEnum = ShardingDataTransformCumulativeMetrics::RecipientStateEnum;
+
+    switch (enumVal) {
+        case RecipientStateEnum::kUnused:
+            return MetricsEnum::kUnused;
+
+        case RecipientStateEnum::kAwaitingFetchTimestamp:
+            return MetricsEnum::kAwaitingFetchTimestamp;
+
+        case RecipientStateEnum::kCreatingCollection:
+            return MetricsEnum::kCreatingCollection;
+
+        case RecipientStateEnum::kCloning:
+            return MetricsEnum::kCloning;
+
+        case RecipientStateEnum::kApplying:
+            return MetricsEnum::kApplying;
+
+        case RecipientStateEnum::kError:
+            return MetricsEnum::kError;
+
+        case RecipientStateEnum::kStrictConsistency:
+            return MetricsEnum::kStrictConsistency;
+
+        case RecipientStateEnum::kDone:
+            return MetricsEnum::kDone;
+
+        default:
+            invariant(false,
+                      str::stream() << "Unexpected resharding coordinator state: "
+                                    << RecipientState_serializer(enumVal));
+            MONGO_UNREACHABLE;
+    }
+}
+
 }  // namespace
 
 ThreadPool::Limits ReshardingRecipientService::getThreadPoolLimits() const {
@@ -167,6 +239,10 @@ ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
                               }) != _donorShards.end();
       }()) {
     invariant(_externalState);
+
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->onStateTransition(boost::none, toMetricsState(_recipientCtx.getState()));
+    }
 }
 
 ExecutorFuture<void>
@@ -370,6 +446,12 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_runMand
                 // Interrupt occurred, ensure the metrics get shut down.
                 _metrics()->onStepDown(ReshardingMetrics::Role::kRecipient);
             }
+
+            if (ShardingDataTransformMetrics::isEnabled()) {
+                _metricsNew->onStateTransition(toMetricsState(_recipientCtx.getState()),
+                                               boost::none);
+            }
+
             // Wait for all of the data replication components to halt. We ignore any data
             // replication errors because resharding is known to have failed already.
             stdx::lock_guard<Latch> lk(_mutex);
@@ -559,7 +641,9 @@ ReshardingRecipientService::RecipientStateMachine::_makeDataReplication(Operatio
                 std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), boost::none));
         }
     } else {
-        invariant(_applierMetricsMap.size() == _donorShards.size());
+        invariant(_applierMetricsMap.size() == _donorShards.size(),
+                  str::stream() << "applier metrics map size: " << _applierMetricsMap.size()
+                                << " != donor shards count: " << _donorShards.size());
     }
 
     return _dataReplicationFactory(opCtx,
@@ -789,6 +873,10 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionState(
 
     _metrics()->setRecipientState(newState);
 
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->onStateTransition(toMetricsState(oldState), toMetricsState(newState));
+    }
+
     LOGV2_INFO(5279506,
                "Transitioned resharding recipient state",
                "newState"_attr = RecipientState_serializer(newState),
@@ -812,13 +900,13 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionToCreatingCol
 
 void ReshardingRecipientService::RecipientStateMachine::_transitionToCloning(
     const CancelableOperationContextFactory& factory) {
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->onCopyingBegin();
+    }
     auto newRecipientCtx = _recipientCtx;
     newRecipientCtx.setState(RecipientStateEnum::kCloning);
     _transitionState(std::move(newRecipientCtx), boost::none, boost::none, factory);
     _metrics()->startCopyingDocuments(getCurrentTime());
-    if (ShardingDataTransformMetrics::isEnabled()) {
-        _metricsNew->onCopyingBegin();
-    }
 }
 
 void ReshardingRecipientService::RecipientStateMachine::_transitionToApplying(
@@ -1003,6 +1091,11 @@ void ReshardingRecipientService::RecipientStateMachine::_updateRecipientDocument
                               *configStartTime);
         }
 
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            buildStateDocumentMetricsForUpdate(
+                setBuilder, _metricsNew.get(), newRecipientCtx.getState());
+        }
+
         setBuilder.doneFast();
     }
 
@@ -1117,6 +1210,14 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
             documentBytesCopied = tempReshardingColl->dataSize(opCtx.get());
             documentCountCopied = tempReshardingColl->numRecords(opCtx.get());
         }
+        if (ShardingDataTransformMetrics::isEnabled() &&
+            _recipientCtx.getState() == RecipientStateEnum::kCloning) {
+            // Before cloning, these values are 0. After cloning these values are written to the
+            // metrics section of the recipient state document and restored during metrics
+            // initialization. This is so that applied oplog entries that add or remove documents do
+            // not affect the cloning metrics.
+            _metricsNew->restoreDocumentsCopied(documentCountCopied, documentBytesCopied);
+        }
     }
 
     reshardingOpCtxKilledWhileRestoringMetrics.execute(
@@ -1135,31 +1236,28 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
             }
         }
 
-        {
-            AutoGetCollection progressApplierColl(
-                opCtx.get(), NamespaceString::kReshardingApplierProgressNamespace, MODE_IS);
-            if (progressApplierColl) {
-                BSONObj result;
-                Helpers::findOne(
-                    opCtx.get(),
-                    progressApplierColl.getCollection(),
-                    BSON(ReshardingOplogApplierProgress::kOplogSourceIdFieldName
-                         << (ReshardingSourceId{_metadata.getReshardingUUID(), donor.getShardId()})
-                                .toBSON()),
-                    result);
+        boost::optional<ReshardingOplogApplierProgress> progressDoc;
+        AutoGetCollection progressApplierColl(
+            opCtx.get(), NamespaceString::kReshardingApplierProgressNamespace, MODE_IS);
+        if (progressApplierColl) {
+            BSONObj result;
+            Helpers::findOne(
+                opCtx.get(),
+                progressApplierColl.getCollection(),
+                BSON(ReshardingOplogApplierProgress::kOplogSourceIdFieldName
+                     << (ReshardingSourceId{_metadata.getReshardingUUID(), donor.getShardId()})
+                            .toBSON()),
+                result);
 
-                if (!result.isEmpty()) {
-                    auto progressDoc = ReshardingOplogApplierProgress::parse(
-                        IDLParserErrorContext("resharding-recipient-service-progress-doc"), result);
-                    oplogEntriesApplied += progressDoc.getNumEntriesApplied();
-
-                    if (ShardingDataTransformMetrics::isEnabled()) {
-                        progressDocList.emplace_back(donor.getShardId(), progressDoc);
-                    }
-                }
-            } else {
-                progressDocList.emplace_back(donor.getShardId(), boost::none);
+            if (!result.isEmpty()) {
+                progressDoc = ReshardingOplogApplierProgress::parse(
+                    IDLParserErrorContext("resharding-recipient-service-progress-doc"), result);
+                oplogEntriesApplied += progressDoc->getNumEntriesApplied();
             }
+        }
+
+        if (ShardingDataTransformMetrics::isEnabled()) {
+            progressDocList.emplace_back(donor.getShardId(), progressDoc);
         }
     }
 

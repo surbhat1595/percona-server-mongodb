@@ -90,8 +90,8 @@ Status StorageEngineImpl::hotBackup(OperationContext* opCtx, const percona::S3Ba
     return _engine->hotBackup(opCtx, s3params);
 }
 
-void StorageEngineImpl::keydbDropDatabase(const TenantDatabaseName& tenantDbName) {
-    _engine->keydbDropDatabase(tenantDbName);
+void StorageEngineImpl::keydbDropDatabase(const DatabaseName& dbName) {
+    _engine->keydbDropDatabase(dbName);
 }
 
 StorageEngineImpl::StorageEngineImpl(OperationContext* opCtx,
@@ -863,7 +863,7 @@ Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseNa
 
     // If all collections were dropped successfully then drop database's encryption key
     if (status.isOK()) {
-        keydbDropDatabase(tenantDbName);
+        keydbDropDatabase(dbName);
     }
 
     return status;

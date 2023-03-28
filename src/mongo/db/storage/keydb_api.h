@@ -32,7 +32,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #pragma once
 
 namespace mongo {
-class TenantDatabaseName;
+class DatabaseName;
 }
 
 namespace percona {
@@ -47,7 +47,7 @@ struct KeyDBAPI {
     /**
      * Returns whether the engine supports feature compatibility version 3.6
      */
-    virtual void keydbDropDatabase(const mongo::TenantDatabaseName& tenantDbName) {
+    virtual void keydbDropDatabase(const mongo::DatabaseName& dbName) {
         // do nothing for engines which do not support KeyDB
     }
 };

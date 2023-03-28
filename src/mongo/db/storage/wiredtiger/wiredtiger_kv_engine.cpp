@@ -3186,13 +3186,13 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
     invariantWTOK(ret, session.getSession());
 }
 
-void WiredTigerKVEngine::keydbDropDatabase(const TenantDatabaseName& tenantDbName) {
+void WiredTigerKVEngine::keydbDropDatabase(const DatabaseName& dbName) {
     if (_encryptionKeyDB) {
-        int res = _encryptionKeyDB->delete_key_by_id(tenantDbName.toString());
+        int res = _encryptionKeyDB->delete_key_by_id(dbName.toString());
         if (res) {
             // we cannot throw exceptions here because we are inside WUOW::commit
             // every other part of DB is already dropped so we just log error message
-            LOGV2_ERROR(29001, "failed to delete encryption key for db", logAttrs(tenantDbName));
+            LOGV2_ERROR(29001, "failed to delete encryption key for db", logAttrs(dbName));
         }
     }
 }

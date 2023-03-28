@@ -201,7 +201,7 @@ public:
 
     Status alterMetadata(StringData uri, StringData config);
 
-    void keydbDropDatabase(const TenantDatabaseName& tenantDbName) override;
+    void keydbDropDatabase(const DatabaseName& dbName) override;
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 

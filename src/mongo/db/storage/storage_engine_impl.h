@@ -66,7 +66,7 @@ class StorageEngineImpl final : public StorageEngineInterface, public StorageEng
     Status hotBackup(OperationContext* opCtx, const std::string& path) override;
     Status hotBackupTar(OperationContext* opCtx, const std::string& path) override;
     Status hotBackup(OperationContext* opCtx, const percona::S3BackupParameters& s3params) override;
-    void keydbDropDatabase(const TenantDatabaseName& tenantDbName) override;
+    void keydbDropDatabase(const DatabaseName& dbName) override;
 
 public:
     StorageEngineImpl(OperationContext* opCtx,

@@ -29,7 +29,6 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 
@@ -41,6 +40,8 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/util/debug_util.h"
 
 #include <third_party/wiredtiger/ext/encryptors/percona/encryption_keydb_c_api.h>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 
 namespace mongo {

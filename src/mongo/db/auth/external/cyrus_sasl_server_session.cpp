@@ -29,7 +29,6 @@ Copyright (C) 2020-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 #include "mongo/db/auth/external/cyrus_sasl_server_session.h"
 
@@ -41,6 +40,9 @@ Copyright (C) 2020-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/socket_utils.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
+
 
 namespace mongo {
 

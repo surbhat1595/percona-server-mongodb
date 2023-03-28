@@ -29,7 +29,6 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 #include "mongo/db/ldap/ldap_manager_impl.h"
 
@@ -48,6 +47,9 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
+
 
 namespace mongo {
 namespace {

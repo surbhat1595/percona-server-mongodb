@@ -29,7 +29,6 @@ Copyright (C) 2021-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_backup_cursor_hooks.h"
 
@@ -39,6 +38,9 @@ Copyright (C) 2021-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/storage/encryption_hooks.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 

@@ -29,7 +29,6 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 #include "mongo/db/encryption/encryption_vault.h"
 
@@ -41,6 +40,9 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/encryption/secret_string.h"
 #include "mongo/db/json.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
+
 
 namespace mongo::encryption::detail {
 

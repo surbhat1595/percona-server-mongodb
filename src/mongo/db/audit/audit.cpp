@@ -49,12 +49,6 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/util/debug_util.h"
 #include "mongo/util/net/socket_utils.h"
 
-/*
- * See this link for explanation of the MONGO_LOG macro:
- * http://www.mongodb.org/about/contributors/reference/server-logging-rules/
- */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
-
 #include "mongo/base/init.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/db/audit.h"
@@ -80,6 +74,9 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "audit_options.h"
 
 #define PERCONA_AUDIT_STUB {}
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo {
 

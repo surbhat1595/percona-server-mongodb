@@ -29,7 +29,6 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/db/encryption/master_key_provider.h"
 
@@ -40,6 +39,9 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/encryption/key_operations.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_options.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo::encryption {
 MasterKeyProvider::~MasterKeyProvider() = default;

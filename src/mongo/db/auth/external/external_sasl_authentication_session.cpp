@@ -31,7 +31,6 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 #include "mongo/db/auth/external/external_sasl_authentication_session.h"
 
@@ -51,6 +50,9 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/logv2/log.h"
 #include "mongo/util/str.h"
 #include "mongo/util/net/socket_utils.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
+
 
 namespace mongo {
 

@@ -29,7 +29,6 @@ Copyright (C) 2023-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 #include "mongo/db/auth/external/awsiam_server_mechanism.h"
 
@@ -59,6 +58,9 @@ Copyright (C) 2023-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/util/base64.h"
 #include "mongo/util/net/http_client.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
+
 
 namespace mongo {
 namespace awsIam {

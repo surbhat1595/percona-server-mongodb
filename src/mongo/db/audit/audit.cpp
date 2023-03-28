@@ -603,7 +603,7 @@ namespace audit {
             // Build the users array, which consists of (user, db) pairs
             AuthorizationSession *session = AuthorizationSession::get(client);
             BSONArrayBuilder users(builder.subarrayStart("users"));
-            for (UserNameIterator it = session->getAuthenticatedUserNames(); it.more(); it.next()) {
+            if (auto it = session->getAuthenticatedUserName(); it) {
                 BSONObjBuilder user(users.subobjStart());
                 user.append("user", it->getUser());
                 user.append("db", it->getDB());
@@ -664,10 +664,12 @@ namespace audit {
     }
 
     ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {
-        auto optAttrs = rpc::getImpersonatedUserMetadata(client->getOperationContext());
-        if (optAttrs) {
-            userNames = optAttrs->getUsers();
-            roleNames = optAttrs->getRoles();
+        if (auto optAttrs = rpc::getImpersonatedUserMetadata(client->getOperationContext());
+            optAttrs) {
+            if (auto users = optAttrs->getUsers(); !users.empty()) {
+                userName = users.front();
+                roleNames = optAttrs->getRoles();
+            }
         }
     }
 

@@ -96,12 +96,15 @@ public:
      * ScopedReceiveChunk will unregister the migration when the ScopedReceiveChunk goes out of
      * scope.
      *
-     * Otherwise returns a ConflictingOperationInProgress error.
+     * Otherwise returns a ConflictingOperationInProgress error if waitForOngoingMigrations is false
+     * or waits for the ongoing migration/split/merge to finish and then registers the migration if
+     * waitForOngoingMigrations is true.
      */
     StatusWith<ScopedReceiveChunk> registerReceiveChunk(OperationContext* opCtx,
                                                         const NamespaceString& nss,
                                                         const ChunkRange& chunkRange,
-                                                        const ShardId& fromShardId);
+                                                        const ShardId& fromShardId,
+                                                        bool waitForOngoingMigrations);
 
     /**
      * If there are no migrations running on this shard, registers an active split or merge
@@ -292,8 +295,12 @@ private:
      */
     bool _shouldExecute;
 
-    // This is the future, which will be signaled at the end of a migration
+    // This is the future, which will be set at the end of a migration.
     std::shared_ptr<Notification<Status>> _completionNotification;
+
+    // This is the outcome of the migration execution, stored when signalComplete() is called and
+    // set on the future of the executing ScopedDonateChunk object when this gets destroyed.
+    boost::optional<Status> _completionOutcome;
 };
 
 /**

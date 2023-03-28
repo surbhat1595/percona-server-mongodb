@@ -17,33 +17,49 @@ load('jstests/concurrency/fsm_workloads/internal_transactions_unsharded.js');
 load('jstests/libs/fail_point_util.js');
 
 var $config = extendWorkload($config, function($config, $super) {
-    // This workload sets the 'storeFindAndModifyImagesInSideCollection' parameter to a random bool
-    // during setup() and restores the original value during teardown().
-    $config.data.originalStoreFindAndModifyImagesInSideCollection = {};
-
-    $config.data.getQueryForDocument = function getQueryForDocument(collection, doc) {
+    $config.data.getQueryForDocument = function getQueryForDocument(doc) {
         // The query for a write command against a sharded collection must contain the shard key.
-        const shardKeyFieldName = this.shardKeyField[collection.getName()];
-        return {_id: doc._id, tid: this.tid, [shardKeyFieldName]: doc[shardKeyFieldName]};
+        const query = $super.data.getQueryForDocument.apply(this, arguments);
+        query[this.defaultShardKeyField] = doc[this.defaultShardKeyField];
+        return query;
     };
 
-    $config.data.generateRandomDocument = function generateRandomDocument(collection) {
-        const shardKeyFieldName = this.shardKeyField[collection.getName()];
-        return {
-            _id: UUID(),
-            tid: this.tid,
-            [shardKeyFieldName]:
-                this.generateRandomInt(this.partition.lower, this.partition.upper - 1),
-            counter: 0
-        };
+    $config.data.generateRandomDocument = function generateRandomDocument(
+        tid, {partition, isLowerChunkDoc, isUpperChunkDoc} = {}) {
+        const doc = $super.data.generateRandomDocument.apply(this, arguments);
+        if (partition === undefined) {
+            partition = this.partition;
+        }
+        assert.neq(partition, null);
+        if (isLowerChunkDoc) {
+            doc[this.defaultShardKeyField] =
+                this.generateRandomInt(partition.lower, partition.mid - 1);
+        } else if (isUpperChunkDoc) {
+            doc[this.defaultShardKeyField] =
+                this.generateRandomInt(partition.mid, partition.upper - 1);
+        } else {
+            doc[this.defaultShardKeyField] =
+                this.generateRandomInt(partition.lower, partition.upper - 1);
+        }
+        return doc;
+    };
+
+    $config.data.insertInitialDocuments = function insertInitialDocuments(db, collName, tid) {
+        const ns = db.getName() + "." + collName;
+        const partition = this.makePartition(ns, tid, this.partitionSize);
+        let bulk = db.getCollection(collName).initializeUnorderedBulkOp();
+        for (let i = 0; i < this.partitionSize; ++i) {
+            const doc = this.generateRandomDocument(tid, {partition});
+            bulk.insert(doc);
+        }
+        assert.commandWorked(bulk.execute());
     };
 
     /**
      * Creates chunks for the collection that the commands in this workload runs against.
      */
     $config.setup = function setup(db, collName, cluster) {
-        const collection = db.getCollection(collName);
-        const ns = collection.getFullName();
+        const ns = db.getName() + "." + collName;
 
         // Move the initial chunk to shard0.
         const shards = Object.keys(cluster.getSerializedCluster().shards);
@@ -81,32 +97,18 @@ var $config = extendWorkload($config, function($config, $super) {
 
         db.printShardingStatus();
 
-        const enableFindAndModifyImageCollection = this.generateRandomBool();
-        cluster.executeOnMongodNodes((db) => {
-            const res = assert.commandWorked(db.adminCommand({
-                setParameter: 1,
-                storeFindAndModifyImagesInSideCollection: enableFindAndModifyImageCollection
-            }));
-            this.originalStoreFindAndModifyImagesInSideCollection[db.getMongo().host] = res.was;
-        });
+        if (this.insertInitialDocsOnSetUp) {
+            // There isn't a way to determine what the thread ids are in setup phase so just assume
+            // that they are [0, 1, ..., this.threadCount-1].
+            for (let tid = 0; tid < this.threadCount; ++tid) {
+                this.insertInitialDocuments(db, collName, tid);
+            }
+        }
 
-        cluster.executeOnMongosNodes((db) => {
-            configureFailPoint(db, "skipTransactionApiRetryCheckInHandleError");
-        });
-    };
-
-    $config.teardown = function teardown(db, collName, cluster) {
-        cluster.executeOnMongodNodes((db) => {
-            assert.commandWorked(db.adminCommand({
-                setParameter: 1,
-                storeFindAndModifyImagesInSideCollection:
-                    this.originalStoreFindAndModifyImagesInSideCollection[db.getMongo().host]
-            }));
-        });
-
-        cluster.executeOnMongosNodes((db) => {
-            configureFailPoint(db, "skipTransactionApiRetryCheckInHandleError", {}, "off");
-        });
+        this.overrideStoreFindAndModifyImagesInSideCollection(cluster);
+        if (this.lowerTransactionLifetimeLimitSeconds) {
+            this.overrideTransactionLifetimeLimit(cluster);
+        }
     };
 
     return $config;

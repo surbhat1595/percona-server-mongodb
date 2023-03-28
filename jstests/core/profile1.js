@@ -9,6 +9,8 @@
 //   requires_profiling,
 //   # This test depends on hardcoded database name equality.
 //   tenant_migration_incompatible,
+//   # This test depends on the strict argument since 6.1.
+//   requires_fcv_61,
 // ]
 
 (function() {
@@ -44,6 +46,11 @@ db.dropDatabase();
 try {
     db.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
     db.auth(username, "password");
+
+    // expect error given unrecognized options
+    assert.commandFailedWithCode(db.runCommand({profile: 0, unknown: {}}),
+                                 40415 /* IDL unknown field error */,
+                                 "Expected IDL to reject unknown field for profile command.");
 
     // With pre-created system.profile (capped)
     db.runCommand({profile: 0});

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -41,6 +40,9 @@
 #include "mongo/stdx/future.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -87,13 +89,20 @@ void JournalFlusher::run() {
                                 [&] { return _flushJournalNow || _needToPause || _shuttingDown; });
     }
 
-    // Initialize the thread's opCtx.
-    _uniqueCtx.emplace(tc->makeOperationContext());
+    auto setUpOpCtx = [&] {
+        // Initialize the thread's opCtx.
+        _uniqueCtx.emplace(tc->makeOperationContext());
 
-    // Updates to a non-replicated collection, oplogTruncateAfterPoint, are made by this thread.
-    // Non-replicated writes will not contribute to replication lag and can be safely excluded
-    // from Flow Control.
-    _uniqueCtx->get()->setShouldParticipateInFlowControl(false);
+        // Updates to a non-replicated collection, oplogTruncateAfterPoint, are made by this thread.
+        // Non-replicated writes will not contribute to replication lag and can be safely excluded
+        // from Flow Control.
+        _uniqueCtx->get()->setShouldParticipateInFlowControl(false);
+
+        // The journal flusher should not conflict with the setFCV command.
+        _uniqueCtx->get()->lockState()->setShouldConflictWithSetFeatureCompatibilityVersion(false);
+    };
+
+    setUpOpCtx();
     while (true) {
         pauseJournalFlusherBeforeFlush.pauseWhileSet();
         try {
@@ -107,8 +116,7 @@ void JournalFlusher::run() {
                 // the time during or before the next flush.
                 stdx::lock_guard<Latch> lk(_opCtxMutex);
                 _uniqueCtx.reset();
-                _uniqueCtx.emplace(tc->makeOperationContext());
-                _uniqueCtx->get()->setShouldParticipateInFlowControl(false);
+                setUpOpCtx();
             });
 
             _uniqueCtx->get()->recoveryUnit()->waitUntilDurable(_uniqueCtx->get());

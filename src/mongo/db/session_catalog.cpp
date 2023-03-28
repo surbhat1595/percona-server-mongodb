@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
@@ -40,6 +39,9 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
+
 
 namespace mongo {
 namespace {
@@ -288,6 +290,10 @@ SessionCatalog::SessionRuntimeInfo* SessionCatalog::_getOrCreateSessionRuntimeIn
         // Insert should always succeed since the session did not exist prior to this.
         invariant(inserted);
 
+        if (auto txnNumber = lsid.getTxnNumber()) {
+            sri->highestTxnNumberWithChildSessions =
+                std::max(*txnNumber, sri->highestTxnNumberWithChildSessions);
+        }
         auto& childSession = childSessionIt->second;
         childSession._parentSession = &sri->parentSession;
     }

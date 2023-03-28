@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -47,6 +46,9 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -102,13 +104,13 @@ public:
         CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                       opCtx->getWriteConcern());
 
-        opCtx->setAlwaysInterruptAtStepDownOrUp();
+        opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
         // Since this operation is not directly writing locally we need to force its db
         // profile level increase in order to be logged in "<db>.system.profile"
         const auto& cmd = requestParser.request();
         CurOp::get(opCtx)->raiseDbProfileLevel(
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(cmd.getDbName()));
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(cmd.getNamespace().dbName()));
 
         boost::optional<FixedFCVRegion> fcvRegion;
         fcvRegion.emplace(opCtx);

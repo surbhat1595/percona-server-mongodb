@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -50,7 +49,7 @@
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -88,6 +87,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/object_check.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -229,7 +231,7 @@ Status checkValidationOptionsCanBeUsed(const CollectionOptions& opts,
 Status validateIsNotInDbs(const NamespaceString& ns,
                           const std::vector<StringData>& disallowedDbs,
                           StringData optionName) {
-    // TODO SERVER-62491 Check for TenantDatabaseName instead
+    // TODO SERVER-62491 Check for DatabaseName instead
     if (std::find(disallowedDbs.begin(), disallowedDbs.end(), ns.db()) != disallowedDbs.end()) {
         return {ErrorCodes::InvalidOptions,
                 str::stream() << optionName << " collection option is not supported on the "
@@ -929,7 +931,7 @@ Status CollectionImpl::insertDocumentForBulkLoader(
               "Failpoint failAfterBulkLoadDocInsert enabled. Throwing "
               "WriteConflictException",
               logAttrs(_ns));
-        throw WriteConflictException();
+        throwWriteConflictException();
     }
 
     std::vector<InsertStatement> inserts;

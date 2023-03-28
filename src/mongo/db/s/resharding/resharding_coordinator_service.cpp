@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
 #include "mongo/platform/basic.h"
 
@@ -78,6 +77,9 @@
 #include "mongo/util/future_util.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
+
 
 namespace mongo {
 namespace {
@@ -157,6 +159,16 @@ void buildStateDocumentCloneMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetr
 void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetricsNew* metrics) {
     bob.append(getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kDocumentCopyFieldName),
                metrics->getCopyingEnd());
+    bob.append(
+        getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
+        metrics->getApplyingBegin());
+}
+
+void buildStateDocumentBlockingWritesMetricsForUpdate(BSONObjBuilder& bob,
+                                                      ReshardingMetricsNew* metrics) {
+    bob.append(
+        getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
+        metrics->getApplyingEnd());
 }
 
 void buildStateDocumentMetricsForUpdate(BSONObjBuilder& bob,
@@ -168,6 +180,9 @@ void buildStateDocumentMetricsForUpdate(BSONObjBuilder& bob,
             return;
         case CoordinatorStateEnum::kApplying:
             buildStateDocumentApplyMetricsForUpdate(bob, metrics);
+            return;
+        case CoordinatorStateEnum::kBlockingWrites:
+            buildStateDocumentBlockingWritesMetricsForUpdate(bob, metrics);
             return;
         default:
             return;
@@ -695,21 +710,24 @@ void writeDecisionPersistedState(OperationContext* opCtx,
                                  Timestamp newCollectionTimestamp) {
 
     // No need to bump originalNss version because its epoch will be changed.
-    executeMetadataChangesInTxn(opCtx, [&](OperationContext* opCtx, TxnNumber txnNumber) {
-        // Update the config.reshardingOperations entry
-        writeToCoordinatorStateNss(opCtx, metrics, coordinatorDoc, txnNumber);
+    executeMetadataChangesInTxn(
+        opCtx,
+        [&metrics, &coordinatorDoc, &newCollectionEpoch, &newCollectionTimestamp](
+            OperationContext* opCtx, TxnNumber txnNumber) {
+            // Update the config.reshardingOperations entry
+            writeToCoordinatorStateNss(opCtx, metrics, coordinatorDoc, txnNumber);
 
-        // Remove the config.collections entry for the temporary collection
-        writeToConfigCollectionsForTempNss(
-            opCtx, coordinatorDoc, boost::none, boost::none, txnNumber);
+            // Remove the config.collections entry for the temporary collection
+            writeToConfigCollectionsForTempNss(
+                opCtx, coordinatorDoc, boost::none, boost::none, txnNumber);
 
-        // Update the config.collections entry for the original namespace to reflect the new
-        // shard key, new epoch, and new UUID
-        updateConfigCollectionsForOriginalNss(
-            opCtx, coordinatorDoc, newCollectionEpoch, newCollectionTimestamp, txnNumber);
+            // Update the config.collections entry for the original namespace to reflect the new
+            // shard key, new epoch, and new UUID
+            updateConfigCollectionsForOriginalNss(
+                opCtx, coordinatorDoc, newCollectionEpoch, newCollectionTimestamp, txnNumber);
 
-        updateChunkAndTagsDocsForTempNss(opCtx, coordinatorDoc, newCollectionEpoch, txnNumber);
-    });
+            updateChunkAndTagsDocsForTempNss(opCtx, coordinatorDoc, newCollectionEpoch, txnNumber);
+        });
 }
 
 void insertCoordDocAndChangeOrigCollEntry(OperationContext* opCtx,
@@ -1560,6 +1578,10 @@ void ReshardingCoordinatorService::ReshardingCoordinator::abort() {
 boost::optional<BSONObj> ReshardingCoordinatorService::ReshardingCoordinator::reportForCurrentOp(
     MongoProcessInterface::CurrentOpConnectionsMode,
     MongoProcessInterface::CurrentOpSessionsMode) noexcept {
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        return _metricsNew->reportForCurrentOp();
+    }
+
     ReshardingMetrics::ReporterOptions options(ReshardingMetrics::Role::kCoordinator,
                                                _coordinatorDoc.getReshardingUUID(),
                                                _coordinatorDoc.getSourceNss(),

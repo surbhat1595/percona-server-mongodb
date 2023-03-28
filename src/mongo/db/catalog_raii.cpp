@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -41,6 +40,9 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeAutoGetCollectionLockFreeShardedStateAccess);
 
@@ -162,14 +164,14 @@ void acquireCollectionLocksInResourceIdOrder(
 
 }  // namespace
 
-// TODO SERVER-62918 Pass TenantDatabaseName instead of string for dbName.
+// TODO SERVER-62918 Pass DatabaseName instead of string for dbName.
 AutoGetDb::AutoGetDb(OperationContext* opCtx,
                      StringData dbName,
                      LockMode mode,
                      Date_t deadline,
                      const std::set<StringData>& secondaryDbNames)
     : _dbName(dbName), _dbLock(opCtx, dbName, mode, deadline), _db([&] {
-          const TenantDatabaseName tenantDbName(boost::none, dbName);
+          const DatabaseName tenantDbName(boost::none, dbName);
           auto databaseHolder = DatabaseHolder::get(opCtx);
           return databaseHolder->getDb(opCtx, tenantDbName);
       }()) {
@@ -198,8 +200,8 @@ Database* AutoGetDb::ensureDbExists(OperationContext* opCtx) {
     }
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    const TenantDatabaseName tenantDbName(boost::none, _dbName);
-    _db = databaseHolder->openDb(opCtx, tenantDbName, nullptr);
+    const DatabaseName dbName(boost::none, _dbName);
+    _db = databaseHolder->openDb(opCtx, dbName, nullptr);
 
     auto dss = DatabaseShardingState::get(opCtx, _dbName);
     auto dssLock = DatabaseShardingState::DSSLock::lockShared(opCtx, dss);
@@ -268,13 +270,13 @@ AutoGetCollection::AutoGetCollection(
             catalog->resolveNamespaceStringOrUUID(opCtx, secondaryNssOrUUID);
         auto secondaryColl = catalog->lookupCollectionByNamespace(opCtx, secondaryResolvedNss);
         // TODO SERVER-64608 Use tenantID on NamespaceString to construct DatabaseName
-        const TenantDatabaseName secondaryTenantDbName(boost::none, secondaryNssOrUUID.db());
+        const DatabaseName secondaryDbName(boost::none, secondaryNssOrUUID.db());
         verifyDbAndCollection(opCtx,
                               MODE_IS,
                               secondaryNssOrUUID,
                               secondaryResolvedNss,
                               secondaryColl,
-                              databaseHolder->getDb(opCtx, secondaryTenantDbName));
+                              databaseHolder->getDb(opCtx, secondaryDbName));
     }
 
     if (_coll) {
@@ -300,7 +302,8 @@ AutoGetCollection::AutoGetCollection(
 
     if ((_view = catalog->lookupView(opCtx, _resolvedNss))) {
         uassert(ErrorCodes::CommandNotSupportedOnView,
-                str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
+                str::stream() << "Taking " << _resolvedNss.ns()
+                              << " lock for timeseries is not allowed",
                 viewMode == AutoGetCollectionViewMode::kViewsPermitted || !_view->timeseries());
 
         uassert(ErrorCodes::CommandNotSupportedOnView,
@@ -430,10 +433,10 @@ AutoGetCollectionLockFree::AutoGetCollectionLockFree(OperationContext* opCtx,
     }
 
     _view = catalog->lookupView(opCtx, _resolvedNss);
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            str::stream() << "Namespace " << _resolvedNss.ns() << " is a timeseries collection",
-            !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted ||
-                !_view->timeseries());
+    uassert(
+        ErrorCodes::CommandNotSupportedOnView,
+        str::stream() << "Taking " << _resolvedNss.ns() << " lock for timeseries is not allowed",
+        !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted || !_view->timeseries());
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "Namespace " << _resolvedNss.ns() << " is a view, not a collection",
             !_view || viewMode == AutoGetCollectionViewMode::kViewsPermitted);

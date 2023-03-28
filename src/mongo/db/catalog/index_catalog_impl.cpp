@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/client/index_spec.h"
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/index_catalog_impl.h"
@@ -87,6 +84,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
+
 
 namespace mongo {
 
@@ -738,7 +738,15 @@ Status validateWildcardSpec(const BSONObj& spec, IndexVersion indexVersion) {
     return Status::OK();
 }  // namespace
 
-Status validateColumnStoreSpec(const BSONObj& spec, IndexVersion indexVersion) {
+Status validateColumnStoreSpec(const CollectionPtr& collection,
+                               const BSONObj& spec,
+                               IndexVersion indexVersion) {
+    if (collection->isClustered()) {
+        return {ErrorCodes::InvalidOptions,
+                "unsupported configuation. Cannot create a columnstore index on a clustered "
+                "collection"};
+    }
+
     // TODO SERVER-63123 support 'columnstoreProjection'.
     for (auto&& notToBeSpecified : {"sparse"_sd,
                                     "unique"_sd,
@@ -878,7 +886,7 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
                                  "enabling the feature flag",
                 feature_flags::gFeatureFlagColumnstoreIndexes.isEnabled(
                     serverGlobalParams.featureCompatibility));
-        if (auto columnSpecStatus = validateColumnStoreSpec(spec, indexVersion);
+        if (auto columnSpecStatus = validateColumnStoreSpec(collection, spec, indexVersion);
             !columnSpecStatus.isOK()) {
             return columnSpecStatus;
         }

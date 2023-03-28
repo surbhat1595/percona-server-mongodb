@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -42,6 +41,9 @@
 #include "mongo/db/pipeline/document_source_union_with_gen.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 
@@ -107,10 +109,11 @@ void validateUnionWithCollectionlessPipeline(
     );
 }
 
-boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::clone() const {
+boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::clone(
+    const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const {
     // At this point the ExpressionContext already has info about any resolved namespaces, so there
     // is no need to resolve them again when creating the clone.
-    return make_intrusive<DocumentSourceUnionWith>(*this);
+    return make_intrusive<DocumentSourceUnionWith>(*this, newExpCtx);
 }
 
 std::unique_ptr<DocumentSourceUnionWith::LiteParsed> DocumentSourceUnionWith::LiteParsed::parse(
@@ -124,16 +127,16 @@ std::unique_ptr<DocumentSourceUnionWith::LiteParsed> DocumentSourceUnionWith::Li
     NamespaceString unionNss;
     boost::optional<LiteParsedPipeline> liteParsedPipeline;
     if (spec.type() == BSONType::String) {
-        unionNss = NamespaceString(nss.db(), spec.valueStringData());
+        unionNss = NamespaceString(nss.dbName(), spec.valueStringData());
     } else {
         auto unionWithSpec =
             UnionWithSpec::parse(IDLParserErrorContext(kStageName), spec.embeddedObject());
         if (unionWithSpec.getColl()) {
-            unionNss = NamespaceString(nss.db(), *unionWithSpec.getColl());
+            unionNss = NamespaceString(nss.dbName(), *unionWithSpec.getColl());
         } else {
             // If no collection specified, it must have $documents as first field in pipeline.
             validateUnionWithCollectionlessPipeline(unionWithSpec.getPipeline());
-            unionNss = NamespaceString::makeCollectionlessAggregateNSS(nss.db());
+            unionNss = NamespaceString::makeCollectionlessAggregateNSS(nss.dbName());
         }
 
         // Recursively lite parse the nested pipeline, if one exists.
@@ -182,16 +185,16 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::createFromBson(
     NamespaceString unionNss;
     std::vector<BSONObj> pipeline;
     if (elem.type() == BSONType::String) {
-        unionNss = NamespaceString(expCtx->ns.db().toString(), elem.valueStringData());
+        unionNss = NamespaceString(expCtx->ns.dbName(), elem.valueStringData());
     } else {
         auto unionWithSpec =
             UnionWithSpec::parse(IDLParserErrorContext(kStageName), elem.embeddedObject());
         if (unionWithSpec.getColl()) {
-            unionNss = NamespaceString(expCtx->ns.db().toString(), *unionWithSpec.getColl());
+            unionNss = NamespaceString(expCtx->ns.dbName(), *unionWithSpec.getColl());
         } else {
             // if no collection specified, it must have $documents as first field in pipeline
             validateUnionWithCollectionlessPipeline(unionWithSpec.getPipeline());
-            unionNss = NamespaceString::makeCollectionlessAggregateNSS(expCtx->ns.db());
+            unionNss = NamespaceString::makeCollectionlessAggregateNSS(expCtx->ns.dbName());
         }
         pipeline = unionWithSpec.getPipeline().value_or(std::vector<BSONObj>{});
     }

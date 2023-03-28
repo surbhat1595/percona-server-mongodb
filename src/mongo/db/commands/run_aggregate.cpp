@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -89,6 +88,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/string_map.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -287,7 +289,7 @@ bool handleCursorCommand(OperationContext* opCtx,
     responseBuilder.done(cursorId, nsForCursor.ns());
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementDocUnitsReturned(docUnitsReturned);
+    metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
 
     return static_cast<bool>(cursor);
 }
@@ -405,7 +407,6 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
  * 'collator'. Otherwise, returns ErrorCodes::OptionNotSupportedOnView.
  */
 Status collatorCompatibleWithPipeline(OperationContext* opCtx,
-                                      StringData dbName,
                                       const CollatorInterface* collator,
                                       const LiteParsedPipeline& liteParsedPipeline) {
     auto catalog = CollectionCatalog::get(opCtx);
@@ -759,12 +760,11 @@ Status runAggregate(OperationContext* opCtx,
 
             // Raise an error if 'origNss' is a view. We do not need to check this if we are opening
             // a stream on an entire db or across the cluster.
-            const TenantDatabaseName origTenantDbName(boost::none, origNss.db());
             if (!origNss.isCollectionlessAggregateNS()) {
                 auto view = catalog->lookupView(opCtx, origNss);
                 uassert(ErrorCodes::CommandNotSupportedOnView,
-                        str::stream()
-                            << "Namespace " << origNss.ns() << " is a timeseries collection",
+                        str::stream() << "Cannot run aggregation on timeseries with namespace "
+                                      << origNss.ns(),
                         !view || !view->timeseries());
                 uassert(ErrorCodes::CommandNotSupportedOnView,
                         str::stream()
@@ -919,8 +919,8 @@ Status runAggregate(OperationContext* opCtx,
         // Check that the view's collation matches the collation of any views involved in the
         // pipeline.
         if (!pipelineInvolvedNamespaces.empty()) {
-            auto pipelineCollationStatus = collatorCompatibleWithPipeline(
-                opCtx, nss.db(), expCtx->getCollator(), liteParsedPipeline);
+            auto pipelineCollationStatus =
+                collatorCompatibleWithPipeline(opCtx, expCtx->getCollator(), liteParsedPipeline);
             if (!pipelineCollationStatus.isOK()) {
                 return pipelineCollationStatus;
             }
@@ -949,7 +949,7 @@ Status runAggregate(OperationContext* opCtx,
 
             auto timeBegin = Date_t::now();
             execs.emplace_back(getSBEExecutorViaCascadesOptimizer(
-                opCtx, expCtx, nss, collections.getMainCollection(), *pipeline));
+                opCtx, expCtx, nss, collections.getMainCollection(), request.getHint(), *pipeline));
             auto elapsed =
                 (Date_t::now().toMillisSinceEpoch() - timeBegin.toMillisSinceEpoch()) / 1000.0;
             std::cerr << "Optimization took: " << elapsed << " s.\n";
@@ -989,7 +989,7 @@ Status runAggregate(OperationContext* opCtx,
         ClientCursorParams cursorParams(
             std::move(exec),
             origNss,
-            AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
+            AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName(),
             APIParameters::get(opCtx),
             opCtx->getWriteConcern(),
             repl::ReadConcernArgs::get(opCtx),

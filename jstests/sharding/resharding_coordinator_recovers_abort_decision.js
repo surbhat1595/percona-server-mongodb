@@ -9,8 +9,8 @@ load("jstests/libs/parallelTester.js");
 load("jstests/libs/parallel_shell_helpers.js");
 load("jstests/sharding/libs/resharding_test_fixture.js");
 
-const reshardingTest =
-    new ReshardingTest({enableElections: true, logComponentVerbosity: tojson({sharding: 2})});
+const reshardingTest = new ReshardingTest(
+    {enableElections: true, logComponentVerbosity: tojson({sharding: 2, network: 4})});
 reshardingTest.setup();
 
 const donorShardNames = reshardingTest.donorShardNames;
@@ -48,9 +48,19 @@ reshardingTest.withReshardingInBackground(
         // Wait until participants are aware of the resharding operation.
         reshardingTest.awaitCloneTimestampChosen();
 
+        const ns = sourceCollection.getFullName();
         awaitAbort = startParallelShell(funWithArgs(function(ns) {
                                             db.adminCommand({abortReshardCollection: ns});
-                                        }, sourceCollection.getFullName()), mongos.port);
+                                        }, ns), mongos.port);
+
+        // Wait for the coordinator to have persisted its decision to abort the resharding operation
+        // as a result of the abortReshardCollection command being processed.
+        assert.soon(() => {
+            const coordinatorDoc =
+                mongos.getCollection("config.reshardingOperations").findOne({ns: ns});
+
+            return coordinatorDoc !== null && coordinatorDoc.state === "aborting";
+        });
     },
     {
         expectedErrorCode: ErrorCodes.ReshardCollectionAborted,

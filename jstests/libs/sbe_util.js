@@ -24,8 +24,8 @@ function checkSBEEnabled(theDB, featureFlags = []) {
             return false;
         }
 
-        // Find a non-mongos node and check whether its forceClassicEngine flag is on. We
-        // assume either all nodes in the cluster have SBE disabled or none.
+        // Find a non-mongos node and check whether its forceClassicEngine flag is on. We assume
+        // either all nodes in the cluster have SBE disabled or none.
         for (const node of nodes) {
             try {
                 const conn = new Mongo(node);
@@ -38,11 +38,13 @@ function checkSBEEnabled(theDB, featureFlags = []) {
                     internalQueryForceClassicEngine: 1,
                     internalQueryEnableSlotBasedExecutionEngine: 1
                 });
+
                 if (getParam.hasOwnProperty("internalQueryForceClassicEngine") &&
                     !getParam.internalQueryForceClassicEngine) {
                     checkResult = true;
                 }
-                // Some versions use a different parameter to enable SBE instead of disabling it.
+
+                // Some versions use a different parameter to disable SBE instead of enabling it.
                 if (getParam.hasOwnProperty("internalQueryEnableSlotBasedExecutionEngine") &&
                     getParam.internalQueryEnableSlotBasedExecutionEngine) {
                     checkResult = true;

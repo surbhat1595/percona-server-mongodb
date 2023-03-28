@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 #include "mongo/platform/basic.h"
 
@@ -63,6 +62,7 @@
 #include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_metadata_propagation_egress_hook.h"
@@ -233,6 +233,9 @@
 #if !defined(_WIN32)
 #include <sys/file.h>
 #endif
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
+
 
 namespace mongo {
 
@@ -561,10 +564,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     auto const globalAuthzManager = AuthorizationManager::get(serviceContext);
     uassertStatusOK(globalAuthzManager->initialize(startupOpCtx.get()));
-
-    if (gFeatureFlagClusterWideConfig.isEnabledAndIgnoreFCV()) {
-        ClusterServerParameterOpObserver::initializeAllParametersFromDisk(startupOpCtx.get());
-    }
 
     if (audit::initializeManager) {
         audit::initializeManager(startupOpCtx.get());
@@ -1561,6 +1560,8 @@ int mongod_main(int argc, char* argv[]) {
 
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
     ChangeStreamOptionsManager::create(service);
+
+    ChangeStreamChangeCollectionManager::create(service);
 
 #if defined(_WIN32)
     if (ntservice::shouldStartService()) {

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -47,6 +46,9 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/future_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 
@@ -123,10 +125,9 @@ bool ShardingDDLCoordinator::_removeDocument(OperationContext* opCtx) {
     batchedResponse.parseBSON(commandReply, &unusedErrmsg);
 
     WriteConcernResult ignoreResult;
-    const WriteConcernOptions majorityWriteConcern{
-        WriteConcernOptions::kMajority,
-        WriteConcernOptions::SyncMode::UNSET,
-        WriteConcernOptions::kWriteConcernTimeoutSharding};
+    const WriteConcernOptions majorityWriteConcern{WriteConcernOptions::kMajority,
+                                                   WriteConcernOptions::SyncMode::UNSET,
+                                                   WriteConcernOptions::kNoTimeout};
     auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     uassertStatusOK(waitForWriteConcern(opCtx, latestOpTime, majorityWriteConcern, &ignoreResult));
 

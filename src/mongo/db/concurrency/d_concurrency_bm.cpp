@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 #include <benchmark/benchmark.h>
@@ -37,6 +36,9 @@
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/unittest/unittest.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -95,6 +97,10 @@ protected:
 };
 
 BENCHMARK_DEFINE_F(DConcurrencyTest, BM_StdMutex)(benchmark::State& state) {
+    if (state.thread_index == 0) {
+        makeKClientsWithLockers(state.threads);
+    }
+
     static auto mtx = MONGO_MAKE_LATCH();
 
     for (auto keepRunning : state) {
@@ -103,6 +109,10 @@ BENCHMARK_DEFINE_F(DConcurrencyTest, BM_StdMutex)(benchmark::State& state) {
 }
 
 BENCHMARK_DEFINE_F(DConcurrencyTest, BM_ResourceMutexShared)(benchmark::State& state) {
+    if (state.thread_index == 0) {
+        makeKClientsWithLockers(state.threads);
+    }
+
     static Lock::ResourceMutex mtx("testMutex");
 
     for (auto keepRunning : state) {
@@ -111,6 +121,10 @@ BENCHMARK_DEFINE_F(DConcurrencyTest, BM_ResourceMutexShared)(benchmark::State& s
 }
 
 BENCHMARK_DEFINE_F(DConcurrencyTest, BM_ResourceMutexExclusive)(benchmark::State& state) {
+    if (state.thread_index == 0) {
+        makeKClientsWithLockers(state.threads);
+    }
+
     static Lock::ResourceMutex mtx("testMutex");
 
     for (auto keepRunning : state) {

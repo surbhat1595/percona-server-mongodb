@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 #define LOGV2_FOR_ELECTION(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(                             \
@@ -114,6 +113,9 @@
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 namespace mongo {
 namespace repl {
@@ -336,6 +338,16 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _readWriteAbility(std::make_unique<ReadWriteAbility>(!settings.usingReplSets())),
       _replicationProcess(replicationProcess),
       _storage(storage),
+      _handleLivenessTimeoutCallback(_replExecutor.get(),
+                                     [this](const executor::TaskExecutor::CallbackArgs& args) {
+                                         _handleLivenessTimeout(args);
+                                     }),
+      _handleElectionTimeoutCallback(
+          _replExecutor.get(),
+          [this](const executor::TaskExecutor::CallbackArgs&) {
+              _startElectSelfIfEligibleV1(StartElectionReasonEnum::kElectionTimeout);
+          },
+          [this](int64_t limit) { return _nextRandomInt64_inlock(limit); }),
       _random(prngSeed) {
 
     _termShadow.store(OpTime::kUninitializedTerm);
@@ -382,10 +394,7 @@ ReplSetConfig ReplicationCoordinatorImpl::getReplicaSetConfig_forTest() {
 
 Date_t ReplicationCoordinatorImpl::getElectionTimeout_forTest() const {
     stdx::lock_guard<Latch> lk(_mutex);
-    if (!_handleElectionTimeoutCbh.isValid()) {
-        return Date_t();
-    }
-    return _handleElectionTimeoutWhen;
+    return _handleElectionTimeoutCallback.getNextCall();
 }
 
 Milliseconds ReplicationCoordinatorImpl::getRandomizedElectionOffset_forTest() {
@@ -1855,7 +1864,7 @@ Status ReplicationCoordinatorImpl::_setLastOptime(WithLock lk,
         _wakeReadyWaiters(lk, std::max(args.appliedOpTime, args.durableOpTime));
     }
 
-    _cancelAndRescheduleLivenessUpdate_inlock(args.memberId);
+    _rescheduleLivenessUpdate_inlock(args.memberId);
     return Status::OK();
 }
 
@@ -3431,6 +3440,16 @@ Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, b
     lk.unlock();
     _performPostMemberStateUpdateAction(action);
     return Status::OK();
+}
+
+bool ReplicationCoordinatorImpl::shouldDropSyncSourceAfterShardSplit(const OID replicaSetId) const {
+    if (!_settings.isServerless()) {
+        return false;
+    }
+
+    stdx::lock_guard<Latch> lg(_mutex);
+
+    return replicaSetId != _rsConfig.getReplicaSetId();
 }
 
 Status ReplicationCoordinatorImpl::processReplSetSyncFrom(OperationContext* opCtx,
@@ -5254,6 +5273,15 @@ ChangeSyncSourceAction ReplicationCoordinatorImpl::shouldChangeSyncSource(
     const rpc::OplogQueryMetadata& oqMetadata,
     const OpTime& previousOpTimeFetched,
     const OpTime& lastOpTimeFetched) const {
+    if (shouldDropSyncSourceAfterShardSplit(replMetadata.getReplicaSetId())) {
+        // Drop the last batch of message following a change of replica set due to a shard split.
+        LOGV2(6394902,
+              "Choosing new sync source because we left the replica set due to a shard split.",
+              "currentReplicaSetId"_attr = _rsConfig.getReplicaSetId(),
+              "otherReplicaSetId"_attr = replMetadata.getReplicaSetId());
+        return ChangeSyncSourceAction::kStopSyncingAndDropLastBatchIfPresent;
+    }
+
     stdx::lock_guard<Latch> lock(_mutex);
     const auto now = _replExecutor->now();
 

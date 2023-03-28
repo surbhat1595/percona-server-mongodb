@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -59,6 +58,9 @@
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -189,7 +191,9 @@ void incrementChunkOnInsertOrUpdate(OperationContext* opCtx,
             return balancerConfig->getMaxChunkSizeBytes();
         }();
 
-        if (balancerConfig->getShouldAutoSplit() && chunkManager.allowAutoSplit() &&
+        if (!feature_flags::gNoMoreAutoSplitter.isEnabled(
+                serverGlobalParams.featureCompatibility) &&
+            balancerConfig->getShouldAutoSplit() && chunkManager.allowAutoSplit() &&
             chunkWritesTracker->shouldSplit(maxChunkSizeBytes)) {
             auto chunkSplitStateDriver =
                 ChunkSplitStateDriver::tryInitiateSplit(chunkWritesTracker);

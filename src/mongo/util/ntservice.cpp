@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 #if defined(_WIN32)
 
@@ -48,6 +47,8 @@
 #include "mongo/util/signal_handlers.h"
 #include "mongo/util/text.h"
 #include "mongo/util/winutil.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 using std::string;
 using std::wstring;

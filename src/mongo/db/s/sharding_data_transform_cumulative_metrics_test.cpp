@@ -41,6 +41,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
+
 namespace mongo {
 namespace {
 
@@ -103,6 +104,13 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, MetricsReportsOldestWhenInser
     ASSERT_EQ(_cumulativeMetrics.getOldestOperationHighEstimateRemainingTimeMillis(
                   ObserverMock::kDefaultRole),
               kOldestTimeLeft);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, NoServerStatusWhenNeverUsed) {
+    BSONObjBuilder bob;
+    _cumulativeMetrics.reportForServerStatus(&bob);
+    auto report = bob.done();
+    ASSERT_BSONOBJ_EQ(report, BSONObj());
 }
 
 TEST_F(ShardingDataTransformCumulativeMetricsTest, RemainingTimeReports0WhenEmpty) {
@@ -321,27 +329,19 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringCl
     ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInserts"), 0);
     ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 0);
 
-    _cumulativeMetrics.onInsertsDuringCloning(140, Milliseconds(15));
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("documentsProcessed"), 0);
+    ASSERT_EQ(activeSection.getIntField("bytesWritten"), 0);
+
+    _cumulativeMetrics.onInsertsDuringCloning(140, 20763, Milliseconds(15));
 
     latencySection = getLatencySection(_cumulativeMetrics);
-    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInserts"), 140);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInserts"), 1);
     ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 15);
-}
 
-TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsBatchRetrievedDuringFetching) {
-    using Role = ShardingDataTransformMetrics::Role;
-    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
-    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
-
-    auto latencySection = getLatencySection(_cumulativeMetrics);
-    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchesRetrieved"), 0);
-    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchRetrievalTimeMillis"), 0);
-
-    _cumulativeMetrics.onRemoteBatchRetrievedDuringOplogFetching(200, Milliseconds(5));
-
-    latencySection = getLatencySection(_cumulativeMetrics);
-    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchesRetrieved"), 200);
-    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchRetrievalTimeMillis"), 5);
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("documentsProcessed"), 140);
+    ASSERT_EQ(activeSection.getIntField("bytesWritten"), 20763);
 }
 
 TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringFetching) {
@@ -369,10 +369,10 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsBatchRetrievedD
     ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesRetrieved"), 0);
     ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchRetrievalTimeMillis"), 0);
 
-    _cumulativeMetrics.onBatchRetrievedDuringOplogApplying(707, Milliseconds(39));
+    _cumulativeMetrics.onBatchRetrievedDuringOplogApplying(Milliseconds(39));
 
     latencySection = getLatencySection(_cumulativeMetrics);
-    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesRetrieved"), 707);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesRetrieved"), 1);
     ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchRetrievalTimeMillis"), 39);
 }
 
@@ -418,6 +418,118 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsWriteToStashedC
     ASSERT_EQ(activeSection.getIntField("countWritesToStashCollections"), 1);
 }
 
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsBatchRetrievedDuringCloning) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalRemoteBatchesRetrieved"), 0);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalRemoteBatchRetrievalTimeMillis"),
+              0);
+
+    _cumulativeMetrics.onCloningTotalRemoteBatchRetrieval(Milliseconds(19));
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalRemoteBatchesRetrieved"), 1);
+    ASSERT_EQ(latencySection.getIntField("collectionCloningTotalRemoteBatchRetrievalTimeMillis"),
+              19);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsBatchApplied) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesApplied"), 0);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchApplyTimeMillis"), 0);
+
+    _cumulativeMetrics.onOplogLocalBatchApplied(Milliseconds(333));
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchesApplied"), 1);
+    ASSERT_EQ(latencySection.getIntField("oplogApplyingTotalLocalBatchApplyTimeMillis"), 333);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsApplied) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("insertsApplied"), 0);
+
+    _cumulativeMetrics.onInsertApplied();
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("insertsApplied"), 1);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsUpdatesApplied) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("updatesApplied"), 0);
+
+    _cumulativeMetrics.onUpdateApplied();
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("updatesApplied"), 1);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsDeletesApplied) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("deletesApplied"), 0);
+
+    _cumulativeMetrics.onDeleteApplied();
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("deletesApplied"), 1);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsOplogEntriesFetched) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("oplogEntriesFetched"), 0);
+
+    auto latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchesRetrieved"), 0);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchRetrievalTimeMillis"), 0);
+
+    _cumulativeMetrics.onOplogEntriesFetched(123, Milliseconds(43));
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("oplogEntriesFetched"), 123);
+
+    latencySection = getLatencySection(_cumulativeMetrics);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchesRetrieved"), 1);
+    ASSERT_EQ(latencySection.getIntField("oplogFetchingTotalRemoteBatchRetrievalTimeMillis"), 43);
+}
+
+TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsOplogEntriesApplied) {
+    using Role = ShardingDataTransformMetrics::Role;
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics.registerInstanceMetrics(&recipient);
+
+    auto activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("oplogEntriesApplied"), 0);
+
+    _cumulativeMetrics.onOplogEntriesApplied(99);
+
+    activeSection = getActiveSection(_cumulativeMetrics);
+    ASSERT_EQ(activeSection.getIntField("oplogEntriesApplied"), 99);
+}
+
 class ShardingDataTransformCumulativeStateTest : public ShardingDataTransformCumulativeMetricsTest {
 public:
     using CoordinatorStateEnum = ShardingDataTransformCumulativeMetrics::CoordinatorStateEnum;
@@ -450,13 +562,13 @@ public:
         addExpectedField(CoordinatorStateEnum::kAborting);
         addExpectedField(CoordinatorStateEnum::kCommitting);
 
-        for (const auto& expectedState : expectedStateFieldCount) {
-            const auto actualValue = serverStatusSubObj.getIntField(expectedState.first);
-            if (actualValue != expectedState.second) {
+        for (const auto& fieldNameAndState : expectedStateFieldCount) {
+            const auto actualValue = serverStatusSubObj.getIntField(fieldNameAndState.first);
+            if (actualValue != fieldNameAndState.second) {
                 LOGV2_DEBUG(6438600,
                             0,
                             "coordinator state field value does not match expected value",
-                            "field"_attr = expectedState.first,
+                            "field"_attr = fieldNameAndState.first,
                             "serverStatus"_attr = serverStatusSubObj);
                 return false;
             }
@@ -484,13 +596,13 @@ public:
         addExpectedField(DonorStateEnum::kBlockingWrites);
         addExpectedField(DonorStateEnum::kDone);
 
-        for (const auto& expectedState : expectedStateFieldCount) {
-            const auto actualValue = serverStatusSubObj.getIntField(expectedState.first);
-            if (actualValue != expectedState.second) {
+        for (const auto& fieldNameAndState : expectedStateFieldCount) {
+            const auto actualValue = serverStatusSubObj.getIntField(fieldNameAndState.first);
+            if (actualValue != fieldNameAndState.second) {
                 LOGV2_DEBUG(6438701,
                             0,
                             "Donor state field value does not match expected value",
-                            "field"_attr = expectedState.first,
+                            "field"_attr = fieldNameAndState.first,
                             "serverStatus"_attr = serverStatusSubObj);
                 return false;
             }
@@ -518,13 +630,13 @@ public:
         addExpectedField(RecipientStateEnum::kStrictConsistency);
         addExpectedField(RecipientStateEnum::kDone);
 
-        for (const auto& expectedState : expectedStateFieldCount) {
-            const auto actualValue = serverStatusSubObj.getIntField(expectedState.first);
-            if (actualValue != expectedState.second) {
+        for (const auto& fieldNameAndState : expectedStateFieldCount) {
+            const auto actualValue = serverStatusSubObj.getIntField(fieldNameAndState.first);
+            if (actualValue != fieldNameAndState.second) {
                 LOGV2_DEBUG(6438901,
                             0,
                             "Recipient state field value does not match expected value",
-                            "field"_attr = expectedState.first,
+                            "field"_attr = fieldNameAndState.first,
                             "serverStatus"_attr = serverStatusSubObj);
                 return false;
             }

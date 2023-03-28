@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT mongo::logv2::LogComponent::kExecutor
 
 #include "mongo/platform/basic.h"
 
@@ -48,6 +47,9 @@
 #include "mongo/util/concurrency/thread_pool_interface.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT mongo::logv2::LogComponent::kExecutor
+
 
 namespace mongo {
 namespace executor {
@@ -567,8 +569,10 @@ void ThreadPoolTaskExecutor::signalEvent_inlock(const EventHandle& event,
                                                 stdx::unique_lock<Latch> lk) {
     invariant(event.isValid());
     auto eventState = checked_cast<EventState*>(getEventFromHandle(event));
-    invariant(!eventState->isSignaledFlag);
-    eventState->isSignaledFlag = true;
+    const auto wasSignaled = std::exchange(eventState->isSignaledFlag, true);
+    if (MONGO_unlikely(wasSignaled && _inShutdown_inlock()))
+        return;
+    invariant(!wasSignaled);
     eventState->isSignaledCondition.notify_all();
     _unsignaledEvents.erase(eventState->iter);
     scheduleIntoPool_inlock(&eventState->waiters, std::move(lk));

@@ -33,7 +33,6 @@ selector:
   - jstests/core/profile2.js
   - jstests/core/profile3.js
   - jstests/core/profile_findandmodify.js
-  - jstests/core/profile_write_conflict.js
   - jstests/core/top.js
   - jstests/core/views/views_stats.js
 
@@ -186,7 +185,6 @@ executor:
             readPreference:
               mode: "primary"
             retryWrites: true
-          skipTenantMigrationDBHash: false
       # We specify nodb so the shell used by each test will attempt to connect after loading the
       # retry logic in auto_retry_on_network_error.js.
       nodb: ""

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -45,6 +44,9 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 namespace {
@@ -89,7 +91,7 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
 
     // TODO (SERVER-65077): Remove FCV check once 6.0 is released
     uassert(6319903,
-            "FLE 2 is only supported when FCV supports 6.0",
+            "Queryable Encryption is only supported when FCV supports 6.0",
             gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     validateCompactRequest(request, *edc.get());

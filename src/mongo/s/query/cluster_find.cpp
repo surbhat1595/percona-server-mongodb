@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -71,6 +70,9 @@
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 
@@ -407,11 +409,11 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
     const auto cursorLifetime = findCommand.getNoCursorTimeout()
         ? ClusterCursorManager::CursorLifetime::Immortal
         : ClusterCursorManager::CursorLifetime::Mortal;
-    auto authUsers = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames();
+    auto authUser = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName();
     ccc->incNBatches();
 
     auto cursorId = uassertStatusOK(cursorManager->registerCursor(
-        opCtx, ccc.releaseCursor(), query.nss(), cursorType, cursorLifetime, authUsers));
+        opCtx, ccc.releaseCursor(), query.nss(), cursorType, cursorLifetime, authUser));
 
     // Record the cursorID in CurOp.
     CurOp::get(opCtx)->debug().cursorid = cursorId;
@@ -697,8 +699,8 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
     auto cursorManager = Grid::get(opCtx)->getCursorManager();
 
     auto authzSession = AuthorizationSession::get(opCtx->getClient());
-    auto authChecker = [&authzSession](UserNameIterator userNames) -> Status {
-        return authzSession->isCoauthorizedWith(userNames)
+    auto authChecker = [&authzSession](const boost::optional<UserName>& userName) -> Status {
+        return authzSession->isCoauthorizedWith(userName)
             ? Status::OK()
             : Status(ErrorCodes::Unauthorized, "User not authorized to access cursor");
     };

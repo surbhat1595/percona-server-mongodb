@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/platform/basic.h"
 
@@ -96,6 +95,9 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version/releases.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 using namespace fmt::literals;
 
@@ -266,7 +268,7 @@ public:
 
         // Ensure that this operation will be killed by the RstlKillOpThread during step-up or
         // stepdown.
-        opCtx->setAlwaysInterruptAtStepDownOrUp();
+        opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
         // Only allow one instance of setFeatureCompatibilityVersion to run at a time.
         Lock::ExclusiveLock setFCVCommandLock(opCtx->lockState(), commandMutex);
@@ -546,13 +548,15 @@ private:
         _cancelTenantMigrations(opCtx);
 
         {
-            // Take the global lock in S mode to create a barrier for operations taking the global
-            // IX or X locks. This ensures that either:
+            // Take the FCV full transition lock in S mode to create a barrier for operations taking
+            // the global IX or X locks, which implicitly take the FCV full transition lock in IX
+            // mode (aside from those which explicitly opt out). This ensures that either:
             //   - The global IX/X locked operation will start after the FCV change, see the
             //     upgrading to the latest FCV and act accordingly.
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before upgrade procedures begin right after this.
-            Lock::GlobalLock lk(opCtx, MODE_S);
+            Lock::ResourceLock lk(
+                opCtx, opCtx->lockState(), resourceIdFeatureCompatibilityVersion, MODE_S);
         }
 
         uassert(ErrorCodes::Error(549180),
@@ -620,23 +624,25 @@ private:
         _cancelTenantMigrations(opCtx);
 
         {
-            // Take the global lock in S mode to create a barrier for operations taking the global
-            // IX or X locks. This ensures that either
+            // Take the FCV full transition lock in S mode to create a barrier for operations taking
+            // the global IX or X locks, which implicitly take the FCV full transition lock in IX
+            // mode (aside from those which explicitly opt out). This ensures that either:
             //   - The global IX/X locked operation will start after the FCV change, see the
             //     downgrading to the last-lts or last-continuous FCV and act accordingly.
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before downgrade procedures begin right after this.
-            Lock::GlobalLock lk(opCtx, MODE_S);
+            Lock::ResourceLock lk(
+                opCtx, opCtx->lockState(), resourceIdFeatureCompatibilityVersion, MODE_S);
         }
 
         if (serverGlobalParams.featureCompatibility
                 .isFCVDowngradingOrAlreadyDowngradedFromLatest()) {
-            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& dbName = tenantDbName.dbName();
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                const auto& db = dbName.db();
+                Lock::DBLock dbLock(opCtx, db, MODE_IX);
                 catalog::forEachCollectionFromDb(
                     opCtx,
-                    tenantDbName,
+                    dbName,
                     MODE_X,
                     [&](const CollectionPtr& collection) {
                         // Fail to downgrade if there exists a collection with
@@ -655,35 +661,6 @@ private:
                         // FCV 6.0 becomes last-lts.
                         return preImagesFeatureFlagDisabledOnDowngradeVersion &&
                             collection->isChangeStreamPreAndPostImagesEnabled();
-                    });
-            }
-
-            // TODO SERVER-63564: Remove once FCV 6.0 becomes last-lts.
-            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& dbName = tenantDbName.dbName();
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-                catalog::forEachCollectionFromDb(
-                    opCtx, tenantDbName, MODE_X, [&](const CollectionPtr& collection) {
-                        auto indexCatalog = collection->getIndexCatalog();
-                        auto indexIt = indexCatalog->getIndexIterator(
-                            opCtx, true /* includeUnfinishedIndexes */);
-                        while (indexIt->more()) {
-                            auto indexEntry = indexIt->next();
-                            uassert(
-                                ErrorCodes::CannotDowngrade,
-                                fmt::format(
-                                    "Cannot downgrade the cluster when there are indexes that have "
-                                    "the 'prepareUnique' field. Use listIndexes to find "
-                                    "them and drop "
-                                    "the indexes or use collMod to manually set it to false to "
-                                    "remove the field "
-                                    "before downgrading. First detected incompatible index name: "
-                                    "'{}' on collection: '{}'",
-                                    indexEntry->descriptor()->indexName(),
-                                    collection->ns().toString()),
-                                !indexEntry->descriptor()->prepareUnique());
-                        }
-                        return true;
                     });
             }
 
@@ -706,11 +683,11 @@ private:
 
             // Block downgrade for collections with encrypted fields
             // TODO SERVER-65077: Remove once FCV 6.0 becomes last-lts.
-            for (const auto& tenantDbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& dbName = tenantDbName.dbName();
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                const auto& db = dbName.db();
+                Lock::DBLock dbLock(opCtx, db, MODE_IX);
                 catalog::forEachCollectionFromDb(
-                    opCtx, tenantDbName, MODE_X, [&](const CollectionPtr& collection) {
+                    opCtx, dbName, MODE_X, [&](const CollectionPtr& collection) {
                         uassert(
                             ErrorCodes::CannotDowngrade,
                             str::stream() << "Cannot downgrade the cluster as collection "
@@ -962,6 +939,7 @@ private:
 
             modifiedDoc.setLastWriteDate(Date_t::now());
             modifiedDoc.setTxnNum(txnNumber);
+            modifiedDoc.setState(boost::none);
 
             // We set this timestamp to ensure that retry attempts fail with
             // IncompleteTransactionHistory. This is to stop us from double applying an

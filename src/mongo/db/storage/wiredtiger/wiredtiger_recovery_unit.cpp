@@ -27,13 +27,13 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
@@ -47,6 +47,9 @@
 
 #include <fmt/compile.h>
 #include <fmt/format.h>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 namespace {
@@ -421,7 +424,7 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
             LOGV2_ERROR(5703401,
                         "Found a violation of multi-timestamp constraint. Retrying operation to "
                         "collect extra debugging context for the involved writes.");
-            throw WriteConflictException();
+            throwWriteConflictException();
         }
         if (commit) {
             LOGV2_FATAL(
@@ -690,11 +693,12 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SES
                                     RoundUpReadTimestamp::kRound);
     auto status = txnOpen.setReadSnapshot(*lastApplied);
     fassert(4847501, status);
-    txnOpen.done();
 
     // We might have rounded to oldest between calling getLastApplied and setReadSnapshot. We
     // need to get the actual read timestamp we used.
-    return _getTransactionReadTimestamp(session);
+    auto readTimestamp = _getTransactionReadTimestamp(session);
+    txnOpen.done();
+    return readTimestamp;
 }
 
 Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSION* session) {
@@ -751,11 +755,11 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSI
                                     RoundUpReadTimestamp::kRound);
     auto status = txnOpen.setReadSnapshot(readTimestamp);
     fassert(51066, status);
-    txnOpen.done();
 
     // We might have rounded to oldest between calling getAllDurable and setReadSnapshot. We
     // need to get the actual read timestamp we used.
     readTimestamp = _getTransactionReadTimestamp(session);
+    txnOpen.done();
     return readTimestamp;
 }
 

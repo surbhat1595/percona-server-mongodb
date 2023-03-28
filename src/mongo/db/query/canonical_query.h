@@ -305,7 +305,7 @@ private:
     bool _explain = false;
 
     // Determines whether the classic engine must be used.
-    bool _forceClassicEngine = false;
+    bool _forceClassicEngine = true;
 
     // True if this query can be executed by the SBE.
     bool _sbeCompatible = false;

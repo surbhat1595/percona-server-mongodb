@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
 #include "mongo/platform/basic.h"
 
@@ -54,6 +53,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
+
+
 namespace mongo {
 namespace {
 Date_t getDeadline(OperationContext* opCtx) {
@@ -70,7 +72,7 @@ void runWithTransaction(OperationContext* opCtx,
         stdx::lock_guard<Client> lk(*client);
         client->setSystemOperationKillableByStepdown(lk);
     }
-    asr.opCtx()->setAlwaysInterruptAtStepDownOrUp();
+    asr.opCtx()->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
     AuthorizationSession::get(client)->grantInternalAuthorization(client);
     TxnNumber txnNumber = 0;
@@ -214,7 +216,7 @@ Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
             return Status::OK();
         } catch (const DBException& ex) {
             if (ex.code() == ErrorCodes::WriteConflict || ex.code() == ErrorCodes::LockTimeout) {
-                throw WriteConflictException();
+                throwWriteConflictException();
             }
 
             return ex.toStatus();

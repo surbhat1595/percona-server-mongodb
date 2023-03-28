@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -43,6 +42,9 @@
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo::sbe {
 CandidatePlans CachedSolutionPlanner::plan(
@@ -161,7 +163,7 @@ plan_ranker::CandidatePlan CachedSolutionPlanner::collectExecutionStatsForCached
     auto tracker = std::make_unique<TrialRunTracker>(
         std::move(onMetricReached), maxNumResults, maxTrialPeriodNumReads);
     candidate.root->attachToTrialRunTracker(tracker.get());
-    executeCandidateTrial(&candidate, maxNumResults);
+    executeCandidateTrial(&candidate, maxNumResults, /*isCachedPlanTrial*/ true);
 
     return candidate;
 }

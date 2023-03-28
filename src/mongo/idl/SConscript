@@ -25,13 +25,13 @@ env.Library(
     source=[
         'command_generic_argument.cpp',
         'generic_argument.idl',
-        'idl_parser.cpp'
+        'idl_parser.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/tenant_id',
-    ]
+    ],
 )
 
 env.Library(
@@ -43,7 +43,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        'idl_parser',
+        '$BUILD_DIR/mongo/db/logical_time',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
@@ -59,8 +59,19 @@ env.Library(
         '$BUILD_DIR/mongo/db/logical_time',
         'feature_flag',
     ],
+)
+
+env.Library(
+    target='cluster_server_parameter_initializer',
+    source=[
+        'cluster_server_parameter_initializer.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
     LIBDEPS_PRIVATE=[
-        'idl_parser',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/repl/replica_set_aware_service',
     ],
 )
 
@@ -75,17 +86,27 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/op_observer',
+        'cluster_server_parameter_initializer',
+    ],
+)
+
+env.Library(
+    target='cluster_server_parameter_test_parameter',
+    source=[
+        'cluster_server_parameter_test.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        'cluster_server_parameter',
     ],
 )
 
 env.CppUnitTest(
-    target='cluster_server_parameter_test',
+    target='cluster_server_parameter_op_observer_test',
     source=[
-        'cluster_server_parameter_test.idl',
         'cluster_server_parameter_op_observer_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/repl/oplog',
@@ -94,8 +115,27 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
         '$BUILD_DIR/mongo/util/signal_handlers',
-        'cluster_server_parameter',
         'cluster_server_parameter_op_observer',
+        'cluster_server_parameter_test_parameter',
+    ],
+)
+
+env.CppUnitTest(
+    target='cluster_server_parameter_initializer_test',
+    source=[
+        'cluster_server_parameter_initializer_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/change_stream_options_manager',
+        '$BUILD_DIR/mongo/db/repl/oplog',
+        '$BUILD_DIR/mongo/db/repl/oplog_interface_local',
+        '$BUILD_DIR/mongo/db/repl/replmocks',
+        '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
+        '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
+        '$BUILD_DIR/mongo/util/signal_handlers',
+        'cluster_server_parameter_initializer',
+        'cluster_server_parameter_test_parameter',
     ],
 )
 
@@ -143,12 +183,12 @@ env.CppUnitTest(
         'unittest.idl',
         'unittest_import.idl',
     ],
-
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',

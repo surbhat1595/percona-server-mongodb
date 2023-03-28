@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -56,6 +55,9 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -277,10 +279,9 @@ TEST_F(ReshardingDonorServiceTest, WritesNoOpOplogEntryOnReshardingBegin) {
     ASSERT_FALSE(cursor->more()) << "Found multiple oplog entries for source collection: "
                                  << op.getEntry() << " and " << cursor->nextSafe();
 
-    ReshardingChangeEventO2Field expectedChangeEvent{doc.getReshardingUUID(),
-                                                     ReshardingChangeEventEnum::kReshardBegin};
-    auto receivedChangeEvent = ReshardingChangeEventO2Field::parse(
-        IDLParserErrorContext("ReshardingChangeEventO2Field"), *op.getObject2());
+    ReshardBeginChangeEventO2Field expectedChangeEvent{sourceNss, doc.getReshardingUUID()};
+    auto receivedChangeEvent = ReshardBeginChangeEventO2Field::parse(
+        IDLParserErrorContext("ReshardBeginChangeEventO2Field"), *op.getObject2());
 
     ASSERT_EQ(OpType_serializer(op.getOpType()), OpType_serializer(repl::OpTypeEnum::kNoop))
         << op.getEntry();

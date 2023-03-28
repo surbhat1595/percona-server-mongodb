@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -76,6 +75,9 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 
@@ -899,95 +901,6 @@ bool ShardingCatalogClientImpl::runUserManagementReadCommand(OperationContext* o
     }
 
     return CommandHelpers::appendCommandStatusNoThrow(*result, resultStatus.getStatus());  // XXX
-}
-
-Status ShardingCatalogClientImpl::applyChunkOpsDeprecated(OperationContext* opCtx,
-                                                          const BSONArray& updateOps,
-                                                          const BSONArray& preCondition,
-                                                          const UUID& uuid,
-                                                          const NamespaceString& nss,
-                                                          const ChunkVersion& lastChunkVersion,
-                                                          const WriteConcernOptions& writeConcern,
-                                                          repl::ReadConcernLevel readConcern) {
-    invariant(
-        serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
-        (readConcern == repl::ReadConcernLevel::kMajorityReadConcern && writeConcern.isMajority()));
-    BSONObj cmd =
-        BSON("applyOps" << updateOps << "preCondition" << preCondition
-                        << WriteConcernOptions::kWriteConcernField << writeConcern.toBSON());
-
-    auto response =
-        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
-            opCtx,
-            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            NamespaceString::kAdminDb.toString(),
-            cmd,
-            Shard::RetryPolicy::kIdempotent);
-
-    if (!response.isOK()) {
-        return response.getStatus();
-    }
-
-    Status status = response.getValue().commandStatus.isOK()
-        ? std::move(response.getValue().writeConcernStatus)
-        : std::move(response.getValue().commandStatus);
-
-    if (!status.isOK()) {
-        string errMsg;
-
-        // This could be a blip in the network connectivity. Check if the commit request made it.
-        //
-        // If all the updates were successfully written to the chunks collection, the last
-        // document in the list of updates should be returned from a query to the chunks
-        // collection. The last chunk can be identified by namespace and version number.
-
-        LOGV2_WARNING(
-            22675,
-            "Error committing chunk operation, metadata will be revalidated. Caused by {error}",
-            "Error committing chunk operation, metadata will be revalidated",
-            "error"_attr = redact(status));
-
-        // Look for the chunk in this shard whose version got bumped. We assume that if that
-        // mod made it to the config server, then transaction was successful.
-        BSONObjBuilder query;
-        lastChunkVersion.appendLegacyWithField(&query, ChunkType::lastmod());
-        query.append(ChunkType::collectionUUID(), uuid.toBSON());
-
-        auto chunkWithStatus = getChunks(opCtx,
-                                         query.obj(),
-                                         BSONObj(),
-                                         1,
-                                         nullptr,
-                                         lastChunkVersion.epoch(),
-                                         lastChunkVersion.getTimestamp(),
-                                         readConcern);
-
-        if (!chunkWithStatus.isOK()) {
-            errMsg = str::stream()
-                << "getChunks function failed, unable to validate chunk "
-                << "operation metadata: " << chunkWithStatus.getStatus().toString()
-                << ". applyChunkOpsDeprecated failed to get confirmation "
-                << "of commit. Unable to save chunk ops. Command: " << cmd
-                << ". Result: " << response.getValue().response;
-            return status.withContext(errMsg);
-        };
-
-        const auto& newestChunk = chunkWithStatus.getValue();
-
-        if (newestChunk.empty()) {
-            errMsg = str::stream()
-                << "chunk operation commit failed: version " << lastChunkVersion.toString()
-                << " doesn't exist in namespace: " << nss.ns()
-                << ". Unable to save chunk ops. Command: " << cmd
-                << ". Result: " << response.getValue().response;
-            return status.withContext(errMsg);
-        };
-
-        invariant(newestChunk.size() == 1);
-        return Status::OK();
-    }
-
-    return Status::OK();
 }
 
 Status ShardingCatalogClientImpl::insertConfigDocument(OperationContext* opCtx,

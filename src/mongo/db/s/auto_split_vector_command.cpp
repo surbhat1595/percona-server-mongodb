@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
@@ -35,6 +34,9 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/request_types/auto_split_vector_gen.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -70,7 +72,7 @@ public:
                     serverGlobalParams.clusterRole == ClusterRole::ShardServer);
 
             uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
-            opCtx->setAlwaysInterruptAtStepDownOrUp();
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
             const auto& req = request();
 
@@ -85,9 +87,7 @@ public:
                                                                req.getMin(),
                                                                req.getMax(),
                                                                req.getMaxChunkSizeBytes());
-            Response autoSplitVectorResponse(std::move(splitPoints));
-            autoSplitVectorResponse.setContinuation(continuation);
-            return autoSplitVectorResponse;
+            return Response(std::move(splitPoints), continuation);
         }
 
     private:

@@ -11,6 +11,12 @@ selector:
   - jstests/sharding/query/*[aA]uth*.js
   - jstests/sharding/change_streams/*[aA]uth*.js
   - jstests/sharding/internal_txns/internal_client_restrictions.js
+  - jstests/sharding/internal_txns/non_retryable_writes_during_migration.js
+  - jstests/sharding/internal_txns/retry_on_transient_error_validation.js
+  - jstests/sharding/internal_txns/retryable_findAndModify_during_migration_oplog.js
+  - jstests/sharding/internal_txns/retryable_findAndModify_during_migration_side_coll.js
+  - jstests/sharding/internal_txns/retryable_writes_aborted_during_migration.js
+  - jstests/sharding/internal_txns/retryable_writes_committed_during_migration.js
 
   - jstests/sharding/localhostAuthBypass.js
   - jstests/sharding/kill_sessions.js
@@ -62,7 +68,6 @@ selector:
   - jstests/sharding/sharding_balance1.js
   - jstests/sharding/sharding_balance2.js
   - jstests/sharding/sharding_balance3.js
-  - jstests/sharding/sharding_balance4.js
   - jstests/sharding/sharding_migrate_cursor1.js
   - jstests/sharding/tag_range.js
   - jstests/sharding/top_chunk_autosplit.js
@@ -235,6 +240,11 @@ selector:
 
   # Expects reshardCollection executes without config server stepdown
   - jstests/sharding/shard_encrypted_collection.js
+
+  # Runs commands against mongos which target the config server primary and may fail with
+  # FailedToSatisfyReadPreference when electing a new primary of the config server replica
+  # set takes a while.
+  - jstests/sharding/move_chunk_respects_maxtimems.js
 
   exclude_with_any_tags:
   - does_not_support_stepdowns

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 #include "mongo/platform/basic.h"
 
@@ -48,6 +47,7 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/keys_collection_document_gen.h"
@@ -65,6 +65,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog_mongod.h"
@@ -79,6 +80,9 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 namespace mongo {
 using repl::DurableOplogEntry;
@@ -524,14 +528,34 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     const bool inBatchedWrite = batchedWriteContext.writesAreBatched();
 
     if (inBatchedWrite) {
+        invariant(!fromMigrate);
+
+        write_stage_common::PreWriteFilter preWriteFilter(opCtx, nss);
+
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = repl::getDocumentKey(opCtx, nss, iter->doc).getShardKeyAndId();
             auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
             operation.setDestinedRecipient(
                 shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
+
+            if (!OperationShardingState::isComingFromRouter(opCtx) &&
+                preWriteFilter.computeAction(Document(iter->doc)) ==
+                    write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
+                LOGV2_DEBUG(6585800,
+                            3,
+                            "Marking insert operation of orphan document with the 'fromMigrate' "
+                            "flag to prevent a wrong change stream event",
+                            "namespace"_attr = nss,
+                            "document"_attr = iter->doc);
+
+                operation.setFromMigrate(true);
+            }
+
             batchedWriteContext.addBatchedOperation(opCtx, operation);
         }
     } else if (inMultiDocumentTransaction) {
+        invariant(!fromMigrate);
+
         // Do not add writes to the profile collection to the list of transaction operations, since
         // these are done outside the transaction. There is no top-level WriteUnitOfWork when we are
         // in a SideTransactionBlock.
@@ -542,6 +566,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
 
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
+        write_stage_common::PreWriteFilter preWriteFilter(opCtx, nss);
 
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = repl::getDocumentKey(opCtx, nss, iter->doc).getShardKeyAndId();
@@ -551,6 +576,20 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             }
             operation.setDestinedRecipient(
                 shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
+
+            if (!OperationShardingState::isComingFromRouter(opCtx) &&
+                preWriteFilter.computeAction(Document(iter->doc)) ==
+                    write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
+                LOGV2_DEBUG(6585801,
+                            3,
+                            "Marking insert operation of orphan document with the 'fromMigrate' "
+                            "flag to prevent a wrong change stream event",
+                            "namespace"_attr = nss,
+                            "document"_attr = iter->doc);
+
+                operation.setFromMigrate(true);
+            }
+
             txnParticipant.addTransactionOperation(opCtx, operation);
         }
     } else {
@@ -670,6 +709,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             args.nss, args.uuid, args.updateArgs->update, args.updateArgs->criteria);
         operation.setDestinedRecipient(
             shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
+        operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -733,7 +773,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
         }
         operation.setDestinedRecipient(
             shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
-
+        operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
@@ -880,6 +920,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
         operation.setDestinedRecipient(destinedRecipientDecoration(opCtx));
+        operation.setFromMigrateIfTrue(args.fromMigrate);
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -938,6 +979,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         }
 
         operation.setDestinedRecipient(destinedRecipientDecoration(opCtx));
+        operation.setFromMigrateIfTrue(args.fromMigrate);
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
@@ -1125,9 +1167,8 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
     // Make sure the UUID values in the Collection metadata, the Collection object, and the UUID
     // catalog are all present and equal.
     invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X));
-    const TenantDatabaseName tenantDbName(boost::none, nss.db());
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto db = databaseHolder->getDb(opCtx, tenantDbName);
+    auto db = databaseHolder->getDb(opCtx, nss.dbName());
     // Some unit tests call the op observer on an unregistered Database.
     if (!db) {
         return;
@@ -2051,6 +2092,12 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
     // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
     // reserve enough entries for all statements in the transaction.
     auto oplogSlots = repl::getNextOpTimes(opCtx, batchedOps.size());
+
+    // Throw TenantMigrationConflict error if the database for the transaction statements is being
+    // migrated. We only need check the namespace of the first statement since a transaction's
+    // statements must all be for the same tenant.
+    tenant_migration_access_blocker::checkIfCanWriteOrThrow(
+        opCtx, batchedOps.begin()->getNss().db(), oplogSlots.back().getTimestamp());
 
     auto noPrePostImage = boost::optional<ImageBundle>(boost::none);
 

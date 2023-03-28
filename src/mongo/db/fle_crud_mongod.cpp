@@ -52,6 +52,8 @@
 #include "mongo/db/transaction_api.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/transaction_participant_resource_yielder.h"
+#include "mongo/executor/network_interface_factory.h"
+#include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/transaction_router_resource_yielder.h"
@@ -62,7 +64,7 @@
 namespace mongo {
 namespace {
 
-std::shared_ptr<ThreadPool> _fleCrudthreadPool;
+std::shared_ptr<executor::ThreadPoolTaskExecutor> _fleCrudExecutor;
 
 ThreadPool::Options getThreadPoolOptions() {
     ThreadPool::Options tpOptions;
@@ -75,16 +77,16 @@ ThreadPool::Options getThreadPoolOptions() {
 }
 
 void setMongosFieldsInReply(OperationContext* opCtx, write_ops::WriteCommandReplyBase* replyBase) {
-    // Set these fields only if not set
-    if (replyBase->getOpTime().has_value() && replyBase->getElectionId().has_value()) {
-        return;
-    }
-
-    // Undocumented repl fields that mongos depends on.
+    // Update the OpTime for the reply to current OpTime
+    //
+    // The OpTime in the reply reflects the OpTime of when the request was run, not when it was
+    // committed. The Transaction API propagates the OpTime from the commit transaction onto the
+    // current thread so grab it from TLS and change the OpTime on the reply.
+    //
     auto* replCoord = repl::ReplicationCoordinator::get(opCtx->getServiceContext());
     const auto replMode = replCoord->getReplicationMode();
-    if (replMode != repl::ReplicationCoordinator::modeNone) {
 
+    if (replMode != repl::ReplicationCoordinator::modeNone) {
         replyBase->setOpTime(repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp());
         replyBase->setElectionId(replCoord->getElectionId());
     }
@@ -145,7 +147,7 @@ private:
 std::shared_ptr<txn_api::SyncTransactionWithRetries> getTransactionWithRetriesForMongoD(
     OperationContext* opCtx) {
     return std::make_shared<txn_api::SyncTransactionWithRetries>(
-        opCtx, _fleCrudthreadPool, std::make_unique<FLEMongoDResourceYielder>());
+        opCtx, _fleCrudExecutor, std::make_unique<FLEMongoDResourceYielder>());
 }
 
 void startFLECrud(ServiceContext* serviceContext) {
@@ -155,14 +157,16 @@ void startFLECrud(ServiceContext* serviceContext) {
         return;
     }
 
-    _fleCrudthreadPool = std::make_shared<ThreadPool>(getThreadPoolOptions());
-    _fleCrudthreadPool->startup();
+    _fleCrudExecutor = std::make_shared<executor::ThreadPoolTaskExecutor>(
+        std::make_unique<ThreadPool>(getThreadPoolOptions()),
+        executor::makeNetworkInterface("FLECrudNetwork"));
+    _fleCrudExecutor->startup();
 }
 
 void stopFLECrud() {
     // Check if it was started
-    if (_fleCrudthreadPool.get() != nullptr) {
-        _fleCrudthreadPool->shutdown();
+    if (_fleCrudExecutor.get() != nullptr) {
+        _fleCrudExecutor->shutdown();
     }
 }
 
@@ -176,7 +180,7 @@ FLEBatchResult processFLEInsert(OperationContext* opCtx,
                 repl::ReplicationCoordinator::modeReplSet);
 
     uassert(5926101,
-            "FLE 2 is only supported when FCV supports 6.0",
+            "Queryable Encryption is only supported when FCV supports 6.0",
             gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     auto [batchResult, insertReplyReturn] =
@@ -202,7 +206,7 @@ write_ops::DeleteCommandReply processFLEDelete(
                 repl::ReplicationCoordinator::modeReplSet);
 
     uassert(5926102,
-            "FLE 2 is only supported when FCV supports 6.0",
+            "Queryable Encryption is only supported when FCV supports 6.0",
             gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     auto deleteReply = processDelete(opCtx, deleteRequest, &getTransactionWithRetriesForMongoD);
@@ -221,13 +225,13 @@ write_ops::FindAndModifyCommandReply processFLEFindAndModify(
                 repl::ReplicationCoordinator::modeReplSet);
 
     uassert(5926103,
-            "FLE 2 is only supported when FCV supports 6.0",
+            "Queryable Encryption is only supported when FCV supports 6.0",
             gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     auto reply = processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
         opCtx, findAndModifyRequest, &getTransactionWithRetriesForMongoD);
 
-    return uassertStatusOK(reply);
+    return uassertStatusOK(reply).first;
 }
 
 write_ops::UpdateCommandReply processFLEUpdate(
@@ -239,7 +243,7 @@ write_ops::UpdateCommandReply processFLEUpdate(
                 repl::ReplicationCoordinator::modeReplSet);
 
     uassert(5926104,
-            "FLE 2 is only supported when FCV supports 6.0",
+            "Queryable Encryption is only supported when FCV supports 6.0",
             gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     auto updateReply = processUpdate(opCtx, updateRequest, &getTransactionWithRetriesForMongoD);
@@ -282,8 +286,9 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
     return fle::rewriteQuery(opCtx, expCtx, nss, info, query, &getTransactionWithRetriesForMongoD);
 }
 
-write_ops::FindAndModifyCommandRequest processFLEFindAndModifyExplainMongod(
-    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& request) {
+std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
+processFLEFindAndModifyExplainMongod(OperationContext* opCtx,
+                                     const write_ops::FindAndModifyCommandRequest& request) {
     tassert(6513401,
             "Missing encryptionInformation for findAndModify",
             request.getEncryptionInformation().has_value());

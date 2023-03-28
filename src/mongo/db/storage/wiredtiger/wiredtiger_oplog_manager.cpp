@@ -27,13 +27,13 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
 #include <cstring>
 
 #include "mongo/db/concurrency/lock_state.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
@@ -41,6 +41,9 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -69,9 +72,14 @@ void WiredTigerOplogManager::startVisibilityThread(OperationContext* opCtx,
                     1,
                     "Initializing the oplog read timestamp (oplog visibility).",
                     "oplogReadTimestamp"_attr = topOfOplogTimestamp);
-    } else {
+    } else if (repl::ReplicationCoordinator::get(opCtx)->isReplEnabled()) {
         // Avoid setting oplog visibility to 0. That means "everything is visible".
         setOplogReadTimestamp(Timestamp(StorageEngine::kMinimumTimestamp));
+    } else {
+        // Use max Timestamp to disable oplog visibility in standalone mode. The read timestamp may
+        // be interpreted as signed so we need to use signed int64_t max to make sure it is always
+        // larger than any user 'ts' field.
+        setOplogReadTimestamp(Timestamp(std::numeric_limits<int64_t>::max()));
     }
 
     // Need to obtain the mutex before starting the thread, as otherwise it may race ahead

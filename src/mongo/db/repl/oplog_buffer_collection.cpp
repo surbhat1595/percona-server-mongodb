@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 #include "mongo/platform/basic.h"
 
@@ -45,6 +44,9 @@
 #include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/util/assert_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 namespace mongo {
 namespace repl {
@@ -272,10 +274,20 @@ bool OplogBufferCollection::tryPop(OperationContext* opCtx, Value* value) {
     return _pop_inlock(opCtx, value);
 }
 
-bool OplogBufferCollection::waitForData(Seconds waitDuration) {
+bool OplogBufferCollection::waitForDataFor(Milliseconds waitDuration,
+                                           Interruptible* interruptible) {
     stdx::unique_lock<Latch> lk(_mutex);
-    if (!_cvNoLongerEmpty.wait_for(
-            lk, waitDuration.toSystemDuration(), [&]() { return _count != 0; })) {
+    if (!interruptible->waitForConditionOrInterruptFor(
+            _cvNoLongerEmpty, lk, waitDuration, [&]() { return _count != 0; })) {
+        return false;
+    }
+    return _count != 0;
+}
+
+bool OplogBufferCollection::waitForDataUntil(Date_t deadline, Interruptible* interruptible) {
+    stdx::unique_lock<Latch> lk(_mutex);
+    if (!interruptible->waitForConditionOrInterruptUntil(
+            _cvNoLongerEmpty, lk, deadline, [&]() { return _count != 0; })) {
         return false;
     }
     return _count != 0;

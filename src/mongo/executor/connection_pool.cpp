@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kConnectionPool
 
 #include "mongo/platform/basic.h"
 
@@ -47,6 +46,9 @@
 #include "mongo/util/hierarchical_acquisition.h"
 #include "mongo/util/lru_cache.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kConnectionPool
+
 
 using namespace fmt::literals;
 
@@ -318,6 +320,11 @@ public:
     size_t createdConnections() const;
 
     /**
+     * Returns the number of connections that expire and are destroyed before they are ever used.
+     */
+    size_t neverUsedConnections() const;
+
+    /**
      * Returns the total number of connections currently open that belong to
      * this pool. This is the sum of refreshingConnections, availableConnections,
      * and inUseConnections.
@@ -369,6 +376,27 @@ private:
     };
 
     ConnectionHandle makeHandle(ConnectionInterface* connection);
+
+    /**
+     * Given a uniquely-owned OwnedConnection, returns an OwnedConnection
+     * pointing to the same object, but which gathers stats just before destruction.
+     */
+    OwnedConnection makeDeathNotificationWrapper(OwnedConnection h) {
+        invariant(h.use_count() == 1);
+        struct ConnWrap {
+            ConnWrap(OwnedConnection conn, std::weak_ptr<SpecificPool> owner)
+                : conn{std::move(conn)}, owner{std::move(owner)} {}
+            ~ConnWrap() {
+                if (conn->getLastUsed() == Date_t{})
+                    if (auto ownerSp = owner.lock())
+                        ++ownerSp->_neverUsed;
+            }
+            const OwnedConnection conn;
+            const std::weak_ptr<SpecificPool> owner;
+        };
+        ConnectionInterface* ptr = h.get();
+        return {std::make_shared<ConnWrap>(std::move(h), shared_from_this()), ptr};
+    }
 
     /**
      * Establishes connections until the ControllerInterface's target is met.
@@ -436,6 +464,8 @@ private:
     size_t _created = 0;
 
     size_t _refreshed = 0;
+
+    size_t _neverUsed = 0;
 
     transport::Session::TagMask _tags = transport::Session::kPending;
 
@@ -592,7 +622,8 @@ void ConnectionPool::appendConnectionStats(ConnectionPoolStats* stats) const {
                                      pool->availableConnections(),
                                      pool->createdConnections(),
                                      pool->refreshingConnections(),
-                                     pool->refreshedConnections()};
+                                     pool->refreshedConnections(),
+                                     pool->neverUsedConnections()};
         stats->updateStatsForHost(_name, host, hostStats);
     }
 }
@@ -646,6 +677,10 @@ size_t ConnectionPool::SpecificPool::refreshedConnections() const {
 
 size_t ConnectionPool::SpecificPool::createdConnections() const {
     return _created;
+}
+
+size_t ConnectionPool::SpecificPool::neverUsedConnections() const {
+    return _neverUsed;
 }
 
 size_t ConnectionPool::SpecificPool::openConnections() const {
@@ -1076,6 +1111,7 @@ void ConnectionPool::SpecificPool::spawnConnections() {
                         "reason"_attr = e.what());
         }
 
+        handle = makeDeathNotificationWrapper(std::move(handle));
         _processingPool[handle.get()] = handle;
         ++_created;
 

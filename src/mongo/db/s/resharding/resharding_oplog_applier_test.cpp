@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -63,6 +62,9 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -140,6 +142,9 @@ public:
             operationContext(),
             NamespaceString::kSessionTransactionsTableNamespace.db().toString(),
             BSON("create" << NamespaceString::kSessionTransactionsTableNamespace.coll())));
+        DBDirectClient client(operationContext());
+        client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+                             {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
 
         OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
             operationContext());

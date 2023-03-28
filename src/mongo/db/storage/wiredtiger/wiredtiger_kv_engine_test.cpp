@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -53,6 +52,9 @@
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -567,11 +569,11 @@ TEST_F(WiredTigerKVEngineTest, TestReconfigureLog) {
         ASSERT_FALSE(foundWTCheckpointMessage);
     }
     {
-        // Set the WiredTiger Checkpoint LOGV2 component severity to the Debug(1) level.
+        // Set the WiredTiger Checkpoint LOGV2 component severity to the Debug(2) level.
         auto severityGuard = unittest::MinimumLoggedSeverityGuard{
-            logv2::LogComponent::kWiredTigerCheckpoint, logv2::LogSeverity::Debug(1)};
+            logv2::LogComponent::kWiredTigerCheckpoint, logv2::LogSeverity::Debug(2)};
         ASSERT_OK(_engine->reconfigureLogging());
-        ASSERT_EQ(logv2::LogSeverity::Debug(1),
+        ASSERT_EQ(logv2::LogSeverity::Debug(2),
                   unittest::getMinimumLogSeverity(logv2::LogComponent::kWiredTigerCheckpoint));
 
         // Perform another checkpoint.

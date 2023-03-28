@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -65,6 +64,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 namespace {
@@ -684,7 +686,7 @@ public:
                     opCtx,
                     {std::move(exec),
                      nss,
-                     AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
+                     AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName(),
                      APIParameters::get(opCtx),
                      opCtx->getWriteConcern(),
                      repl::ReadConcernArgs::get(opCtx),
@@ -735,7 +737,7 @@ public:
             // Increment this metric once we have generated a response and we know it will return
             // documents.
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-            metricsCollector.incrementDocUnitsReturned(docUnitsReturned);
+            metricsCollector.incrementDocUnitsReturned(nss.ns(), docUnitsReturned);
             query_request_helper::validateCursorResponse(result->getBodyBuilder().asTempObj());
         }
 

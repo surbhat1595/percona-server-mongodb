@@ -36,6 +36,29 @@
 namespace mongo {
 
 /**
+ * The most-significant component of the shard versioning protocol (collection epoch/timestamp).
+ */
+class CollectionGeneration {
+public:
+    CollectionGeneration(OID epoch, Timestamp timestamp) : _epoch(epoch), _timestamp(timestamp) {}
+
+    /**
+     * Returns whether the combination of epoch/timestamp for two collections indicates that they
+     * are the same collection for the purposes of sharding or not.
+     *
+     * Will throw if the combinations provided are illegal (for example matching timestamps, but
+     * different epochs or vice-versa).
+     */
+    bool isSameCollection(const CollectionGeneration& other) const;
+
+    std::string toString() const;
+
+protected:
+    OID _epoch;
+    Timestamp _timestamp;
+};
+
+/**
  * ChunkVersions consist of a major/minor version scoped to a version epoch
  *
  * Version configurations (format: major version, epoch):
@@ -47,7 +70,7 @@ namespace mongo {
  *
  * TODO (SERVER-65530): Get rid of all the legacy format parsers/serialisers
  */
-struct ChunkVersion {
+class ChunkVersion : public CollectionGeneration {
 public:
     /**
      * The name for the shard version information field, which shard-aware commands should include
@@ -56,9 +79,8 @@ public:
     static constexpr StringData kShardVersionField = "shardVersion"_sd;
 
     ChunkVersion(uint32_t major, uint32_t minor, const OID& epoch, const Timestamp& timestamp)
-        : _combined(static_cast<uint64_t>(minor) | (static_cast<uint64_t>(major) << 32)),
-          _epoch(epoch),
-          _timestamp(timestamp) {}
+        : CollectionGeneration(epoch, timestamp),
+          _combined(static_cast<uint64_t>(minor) | (static_cast<uint64_t>(major) << 32)) {}
 
     ChunkVersion() : ChunkVersion(0, 0, OID(), Timestamp()) {}
 
@@ -107,6 +129,7 @@ public:
             "The chunk major version has reached its maximum value. Manual intervention will be "
             "required before more chunk move, split, or merge operations are allowed.",
             majorVersion() != std::numeric_limits<uint32_t>::max());
+
         _combined = static_cast<uint64_t>(majorVersion() + 1) << 32;
     }
 
@@ -154,14 +177,6 @@ public:
         return !(otherVersion == *this);
     }
 
-    bool isSameCollection(const Timestamp& timestamp) const {
-        return getTimestamp() == timestamp;
-    }
-
-    bool isSameCollection(const ChunkVersion& other) const {
-        return isSameCollection(other.getTimestamp());
-    }
-
     // Can we write to this data and not have a problem?
     bool isWriteCompatibleWith(const ChunkVersion& other) const {
         return isSameCollection(other) && majorVersion() == other.majorVersion();
@@ -198,28 +213,8 @@ public:
         return isOlderThan(otherVersion) || (*this == otherVersion);
     }
 
-    /**
-     * Serializes the version held by this object to 'out' in the form:
-     * {..., <field>: {0:<combined major/minor, 1: <epoch>, 2: <Timestamp>}}
-     *  or
-     * { ..., <field> : {t: <Timestamp>, e: <OID>, v: <major/minor> }}.
-     *
-     * Depending on the FCV version
-     */
-    void serializeToPositionalWronlyEcondedOr60AsBSON(StringData fieldName,
-                                                      BSONObjBuilder* builder) const;
-
-    /**
-     * Serializes the version held by this object to 'out' in the form:
-     *  { ..., <field>: [ <combined major/minor>, <OID epoch>, <Timestamp> ], ... }.
-     *  or
-     * { ..., <field> : {t: <Timestamp>, e: <OID>, v: <major/minor> }}.
-     *
-     * Depending on the FCV version
-     */
-    void serializeToBSON(StringData fieldName, BSONObjBuilder* builder) const;
-    void serializeToPositionalFormatWronglyEncodedAsBSON(StringData fieldName,
-                                                         BSONObjBuilder* builder) const;
+    static ChunkVersion parse(const BSONElement& element);
+    void serializeToBSON(StringData field, BSONObjBuilder* builder) const;
 
     /**
      * NOTE: This format is being phased out. Use serializeToBSON instead.
@@ -244,12 +239,6 @@ public:
                                                               BSONObjBuilder* builder) const;
 
 private:
-    /**
-     * Parses future ChunkVersion BSON format (from 6.1+):
-     * {t: timestamp, e: epoch, v: (major, minor)}
-     */
-    static ChunkVersion _parse60Format(const BSONObj&);
-
     // The following static functions will be deprecated. Only one function should be used to parse
     // ChunkVersion and is fromBSON.
     /**
@@ -271,10 +260,9 @@ private:
      */
     static StatusWith<ChunkVersion> _parseLegacyWithField(const BSONObj& obj, StringData field);
 
+private:
+    // The combined major/minor version, which exists as subordinate to the collection generation
     uint64_t _combined;
-    OID _epoch;
-
-    Timestamp _timestamp;
 };
 
 inline std::ostream& operator<<(std::ostream& s, const ChunkVersion& v) {

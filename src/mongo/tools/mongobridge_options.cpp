@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kBridge
 
 #include "mongo/tools/mongobridge_options.h"
 
@@ -40,6 +39,9 @@
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/version.h"
 #include "mongo/util/version_constants.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kBridge
+
 
 namespace mongo {
 

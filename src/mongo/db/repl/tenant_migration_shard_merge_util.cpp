@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
 
 #include "mongo/db/repl/tenant_migration_shard_merge_util.h"
 
@@ -51,6 +50,9 @@
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/future_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
+
 
 // Keep the backup cursor alive by pinging twice as often as the donor's default
 // cursor timeout.
@@ -181,7 +183,7 @@ void wiredTigerImportFromBackupCursor(OperationContext* opCtx,
                                           nss,
                                           Top::LockType::NotLocked,
                                           AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                          catalog->getDatabaseProfileLevel(nss.db()));
+                                          catalog->getDatabaseProfileLevel(nss.dbName()));
 
             // If the collection creation rolls back, ensure that the Top entry created for the
             // collection is deleted.

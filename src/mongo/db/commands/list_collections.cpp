@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -67,6 +66,9 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -292,9 +294,9 @@ public:
         void doCheckAuthorization(OperationContext* opCtx) const final {
             AuthorizationSession* authzSession = AuthorizationSession::get(opCtx->getClient());
 
-            auto dbName = request().getDbName();
+            auto db = request().getDbName();
             auto cmdObj = request().toBSON({});
-            uassertStatusOK(authzSession->checkAuthorizedToListCollections(dbName, cmdObj));
+            uassertStatusOK(authzSession->checkAuthorizedToListCollections(db, cmdObj));
         }
 
         NamespaceString ns() const final {
@@ -307,14 +309,14 @@ public:
             const auto as = AuthorizationSession::get(opCtx->getClient());
 
             const auto listCollRequest = request();
-            const auto dbName = listCollRequest.getDbName();
-            const TenantDatabaseName tenantDbName(getActiveTenant(opCtx), dbName);
+            const auto db = listCollRequest.getDbName();
+            const DatabaseName dbName(getActiveTenant(opCtx), db);
             const bool nameOnly = listCollRequest.getNameOnly();
             const bool authorizedCollections = listCollRequest.getAuthorizedCollections();
 
             // The collator is null because collection objects are compared using binary comparison.
             auto expCtx = make_intrusive<ExpressionContext>(
-                opCtx, std::unique_ptr<CollatorInterface>(nullptr), NamespaceString(dbName));
+                opCtx, std::unique_ptr<CollatorInterface>(nullptr), NamespaceString(db));
 
             if (listCollRequest.getFilter()) {
                 matcher = uassertStatusOK(
@@ -325,13 +327,13 @@ public:
             // collections.
             bool includePendingDrops = listCollRequest.getIncludePendingDrops().value_or(false);
 
-            const NamespaceString cursorNss = NamespaceString::makeListCollectionsNSS(dbName);
+            const NamespaceString cursorNss = NamespaceString::makeListCollectionsNSS(db);
             std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
             std::vector<mongo::ListCollectionsReplyItem> firstBatch;
             {
                 // Acquire only the global lock and set up a consistent in-memory catalog and
                 // storage snapshot.
-                AutoGetDbForReadMaybeLockFree lockFreeReadBlock(opCtx, dbName);
+                AutoGetDbForReadMaybeLockFree lockFreeReadBlock(opCtx, db);
                 auto catalog = CollectionCatalog::get(opCtx);
 
                 CurOpFailpointHelpers::waitWhileFailPointEnabled(&hangBeforeListCollections,
@@ -343,11 +345,10 @@ public:
                 auto ws = std::make_unique<WorkingSet>();
                 auto root = std::make_unique<QueuedDataStage>(expCtx.get(), ws.get());
 
-                if (DatabaseHolder::get(opCtx)->dbExists(opCtx,
-                                                         TenantDatabaseName(boost::none, dbName))) {
+                if (DatabaseHolder::get(opCtx)->dbExists(opCtx, DatabaseName(boost::none, db))) {
                     if (auto collNames = _getExactNameMatches(matcher.get())) {
                         for (auto&& collName : *collNames) {
-                            auto nss = NamespaceString(dbName, collName);
+                            auto nss = NamespaceString(db, collName);
 
                             // Only validate on a per-collection basis if the user requested
                             // a list of authorized collections
@@ -435,14 +436,14 @@ public:
                         // needing to yield as we don't take any locks.
                         if (opCtx->isLockFreeReadsOp()) {
                             auto collectionCatalog = CollectionCatalog::get(opCtx);
-                            for (auto it = collectionCatalog->begin(opCtx, tenantDbName);
+                            for (auto it = collectionCatalog->begin(opCtx, dbName);
                                  it != collectionCatalog->end(opCtx);
                                  ++it) {
                                 perCollectionWork(*it);
                             }
                         } else {
                             mongo::catalog::forEachCollectionFromDb(
-                                opCtx, tenantDbName, MODE_IS, perCollectionWork);
+                                opCtx, dbName, MODE_IS, perCollectionWork);
                         }
                     }
 
@@ -453,7 +454,7 @@ public:
                             ListCollectionsFilter::makeTypeCollectionFilter());
 
                     if (!skipViews) {
-                        catalog->iterateViews(opCtx, tenantDbName, [&](const ViewDefinition& view) {
+                        catalog->iterateViews(opCtx, db, [&](const ViewDefinition& view) {
                             if (authorizedCollections &&
                                 !as->isAuthorizedForAnyActionOnResource(
                                     ResourcePattern::forExactNamespace(view.name()))) {
@@ -543,14 +544,15 @@ public:
                 opCtx,
                 {std::move(exec),
                  cursorNss,
-                 AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
+                 AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName(),
                  APIParameters::get(opCtx),
                  opCtx->getWriteConcern(),
                  repl::ReadConcernArgs::get(opCtx),
                  ReadPreferenceSetting::get(opCtx),
                  cmdObj,
-                 uassertStatusOK(AuthorizationSession::get(opCtx->getClient())
-                                     ->checkAuthorizedToListCollections(dbName, cmdObj))});
+                 uassertStatusOK(
+                     AuthorizationSession::get(opCtx->getClient())
+                         ->checkAuthorizedToListCollections(dbName.toString(), cmdObj))});
 
             pinnedCursor->incNBatches();
             pinnedCursor->incNReturnedSoFar(firstBatch.size());

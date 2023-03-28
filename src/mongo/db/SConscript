@@ -84,7 +84,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
-    ]
+    ],
 )
 
 env.Library(
@@ -101,7 +101,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/security_token',
         '$BUILD_DIR/mongo/idl/feature_flag',
         'server_feature_flags',
-    ]
+    ],
 )
 
 env.Library(
@@ -124,7 +124,6 @@ env.Library(
     ],
 )
 
-
 env.Library(
     target="dbmessage",
     source=[
@@ -134,7 +133,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/transport/transport_layer_common',
         '$BUILD_DIR/mongo/util/net/network',
-    ]
+    ],
 )
 
 env.Library(
@@ -146,7 +145,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/client/authentication',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
-    ]
+    ],
 )
 
 env.Library(
@@ -159,7 +158,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/util/processinfo',
         'startup_warnings_common',
-    ]
+    ],
 )
 
 env.Library(
@@ -176,7 +175,6 @@ env.Library(
     target='curop',
     source=[
         'curop.cpp',
-
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
@@ -187,8 +185,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/stats/timer_stats',
         '$BUILD_DIR/mongo/rpc/client_metadata',
         '$BUILD_DIR/mongo/transport/service_executor',
-        '$BUILD_DIR/mongo/util/diagnostic_info' if get_option(
-            'use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/diagnostic_info'
+        if get_option('use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/net/network',
         '$BUILD_DIR/mongo/util/progress_meter',
@@ -223,7 +221,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
-    ]
+    ],
 )
 
 env.Library(
@@ -234,7 +232,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/util/md5',
-    ]
+    ],
 )
 
 # Range arithmetic library, used by both mongod and mongos
@@ -252,7 +250,7 @@ env.Library(
     target='namespace_string',
     source=[
         'namespace_string.cpp',
-        'tenant_database_name.cpp',
+        'database_name.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -277,7 +275,7 @@ env.Library(
 env.Library(
     target='update_index_data',
     source=[
-        'update_index_data.cpp'
+        'update_index_data.cpp',
     ],
     LIBDEPS=[
         'common',
@@ -296,7 +294,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/index_names',
-    ]
+    ],
 )
 
 env.Library(
@@ -486,7 +484,7 @@ env.Library(
         'global_settings',
         'server_options_base',
         'server_options_servers',
-    ]
+    ],
 )
 
 env.Library(
@@ -516,8 +514,8 @@ env.Library(
         'read_write_concern_provenance',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/server_options_core', # For serverGlobalParams
-    ]
+        '$BUILD_DIR/mongo/db/server_options_core',  # For serverGlobalParams
+    ],
 )
 
 env.Library(
@@ -558,6 +556,20 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         'change_stream_options',
+        'service_context',
+    ],
+)
+
+env.Library(
+    target='change_stream_change_collection_manager',
+    source=[
+        'change_stream_change_collection_manager.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+        "$BUILD_DIR/mongo/db/catalog/clustered_collection_options",
+        '$BUILD_DIR/mongo/db/dbhelpers',
+        '$BUILD_DIR/mongo/db/service_context',
     ],
 )
 
@@ -803,7 +815,7 @@ env.Library(
         '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/idl/server_parameter',
         'server_options_core',
-    ]
+    ],
 )
 
 env.Library(
@@ -813,7 +825,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/idl/feature_flag',
-    ]
+    ],
 )
 
 env.Library(
@@ -829,7 +841,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         'internal_transactions_feature_flag',
         'service_context',
-    ]
+    ],
 )
 
 env.Library(
@@ -849,7 +861,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         'multitenancy',
-    ]
+    ],
 )
 
 env.Library(
@@ -898,7 +910,7 @@ env.Library(
         'stats/top',
         'stats/transaction_stats',
         'update/update_driver',
-    ]
+    ],
 )
 
 env.Library(
@@ -910,11 +922,14 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/query/command_request_response',
         '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/db/s/sharding_api_d',
+        '$BUILD_DIR/mongo/executor/task_executor_interface',
         '$BUILD_DIR/mongo/rpc/command_status',
         '$BUILD_DIR/mongo/rpc/rpc',
         '$BUILD_DIR/mongo/transport/service_entry_point',
         'logical_session_id',
         'logical_session_id_helpers',
+        'operation_time_tracker',
         'repl/repl_coordinator_interface',
         'service_context',
         'session_catalog',
@@ -926,7 +941,7 @@ env.Library(
     target='fle_crud',
     source=[
         'fle_crud.cpp',
-        'query/fle/server_rewrite.cpp'
+        'query/fle/server_rewrite.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
@@ -956,7 +971,9 @@ env.Library(
         '$BUILD_DIR/mongo/crypto/fle_crypto',
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/executor/task_executor_pool',
+        '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
         "$BUILD_DIR/mongo/util/concurrency/thread_pool",
         'fle_crud',
         'logical_session_id',
@@ -1347,7 +1364,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         "commands/server_status_core",
         "curop",
-    ]
+    ],
 )
 
 env.Library(
@@ -1467,7 +1484,7 @@ env.Library(
         'commands/server_status_core',
         'service_context',
         'write_ops',
-    ]
+    ],
 )
 
 env.Library(
@@ -1482,7 +1499,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface',
         '$BUILD_DIR/mongo/db/storage/key_string',
-    ],)
+    ],
+)
 
 env.Library(
     target='query_exec',
@@ -1861,7 +1879,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         'internal_transactions_feature_flag',
-    ]
+    ],
 )
 
 env.Library(
@@ -1917,10 +1935,21 @@ env.Library(
     target='logical_time',
     source=[
         'logical_time.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
+    target='operation_time_tracker',
+    source=[
         'operation_time_tracker.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        'logical_time',
         'service_context',
     ],
 )
@@ -1957,7 +1986,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         'session_catalog',
-        'transaction'
+        'transaction',
     ],
 )
 
@@ -2038,7 +2067,7 @@ env.Library(
     ],
     LIBDEPS=[
         'logical_time',
-        'time_proof_service'
+        'time_proof_service',
     ],
 )
 
@@ -2114,6 +2143,7 @@ env.Library(
 env.Library(
     target='vector_clock_mongod',
     source=[
+        's/topology_time_ticker.cpp',
         'vector_clock_mongod.cpp',
     ],
     LIBDEPS=[
@@ -2146,7 +2176,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/rpc/metadata',
-        'logical_time',
+        'operation_time_tracker',
         'vector_clock',
     ],
 )
@@ -2363,7 +2393,7 @@ env.Library(
 env.Program(
     target="mongotrafficreader",
     source=[
-        "traffic_reader_main.cpp"
+        "traffic_reader_main.cpp",
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -2371,7 +2401,6 @@ env.Program(
         '$BUILD_DIR/mongo/util/signal_handlers',
         'traffic_reader',
     ],
-    AIB_COMPONENT="mongotrafficreader"
 )
 
 env.Library(
@@ -2383,11 +2412,10 @@ env.Library(
         '$BUILD_DIR/mongo/base',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/util/net/ssl_options_server' if get_option(
-            'ssl') == 'on' else '',
+        '$BUILD_DIR/mongo/util/net/ssl_options_server' if get_option('ssl') == 'on' else '',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
         'mongod_options',
-    ]
+    ],
 )
 
 env.Library(
@@ -2410,8 +2438,8 @@ env.Library(
         '$BUILD_DIR/mongo/util/clock_sources',
         '$BUILD_DIR/mongo/util/elapsed_tracker',
         '$BUILD_DIR/mongo/util/fail_point',
-        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option(
-            'use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/latch_analyzer'
+        if get_option('use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/net/network',
         '$BUILD_DIR/mongo/util/ntservice',
         '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
@@ -2527,6 +2555,7 @@ env.Library(
         # please add that library as a private libdep of
         # mongod_initializers.
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
+        '$BUILD_DIR/mongo/db/change_stream_change_collection_manager',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
@@ -2538,8 +2567,8 @@ env.Library(
         '$BUILD_DIR/mongo/transport/transport_layer_manager',
         '$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
-        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option(
-            'use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/latch_analyzer'
+        if get_option('use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/net/http_client_impl',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
         '$BUILD_DIR/mongo/util/signal_handlers',
@@ -2617,7 +2646,8 @@ if env.TargetOSIs('windows'):
             ('@mongo_version_patch@', version_parts[2]),
             ('@mongo_version_extra@', version_parts[3]),
             ('@mongo_version_extra_str@', version_extra),
-        ])
+        ],
+    )
 
     env.Alias('generated-sources', generatedDbManifest)
     env.Depends("mongod.res", generatedDbManifest)
@@ -2627,9 +2657,7 @@ env.Append( LINKFLAGS=["-upercona_encryption_extension_init"] );
 
 env.Program(
     target="mongod",
-    source=[
-        'mongod.cpp'
-    ] + env.WindowsResourceFile("mongod.rc"),
+    source=['mongod.cpp'] + env.WindowsResourceFile("mongod.rc"),
     LIBDEPS=[
         # NOTE: Do not add new libdeps (public or private) here unless
         # required by the linker to satisfy symbol dependencies from
@@ -2644,12 +2672,13 @@ env.Program(
     AIB_COMPONENTS_EXTRA=[
         "core",
         "default",
+        "devcore",
         "dist",
         "dist-test",
+        "integration-tests",
         "serverless",
         "serverless-test",
         "servers",
-        "integration-tests",
     ],
 )
 
@@ -2778,6 +2807,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/mongohasher',
             '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
             '$BUILD_DIR/mongo/db/query/query_test_service_context',
+            '$BUILD_DIR/mongo/db/s/sharding_api_d',
             '$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger',
             '$BUILD_DIR/mongo/executor/async_timer_mock',
             '$BUILD_DIR/mongo/idl/idl_parser',
@@ -2815,6 +2845,7 @@ if wiredtiger:
             'namespace_string',
             'op_observer',
             'op_observer_impl',
+            'operation_time_tracker',
             'query_exec',
             'range_arithmetic',
             'read_write_concern_defaults_mock',

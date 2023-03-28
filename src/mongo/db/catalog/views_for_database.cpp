@@ -27,11 +27,13 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "views_for_database.h"
 
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -113,6 +115,17 @@ Status ViewsForDatabase::_insert(OperationContext* opCtx, const BSONObj& view) {
                                                     view["viewOn"].str(),
                                                     pipeline,
                                                     std::move(collator.getValue()));
+
+    // Cannot have a secondary view on a system.buckets collection, only the time-series
+    // collection view.
+    if (viewDef->viewOn().isTimeseriesBucketsCollection() &&
+        viewDef->name() != viewDef->viewOn().getTimeseriesViewNamespace()) {
+        return {
+            ErrorCodes::InvalidNamespace,
+            "Invalid view: cannot define a view over a system.buckets namespace except by "
+            "creating a time-series collection",
+        };
+    }
 
     if (!viewName.isOnInternalDb() && !viewName.isSystem()) {
         if (viewDef->timeseries()) {

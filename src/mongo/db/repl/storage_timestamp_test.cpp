@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -97,6 +96,9 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/stacktrace.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -814,6 +816,8 @@ private:
 };
 
 TEST_F(StorageTimestampTest, SecondaryInsertTimes) {
+    Lock::GlobalWrite lk{_opCtx};  // avoid global lock upgrade during applyOps.
+
     // In order for applyOps to assign timestamps, we must be in non-replicated mode.
     repl::UnreplicatedWritesBlock uwb(_opCtx);
 

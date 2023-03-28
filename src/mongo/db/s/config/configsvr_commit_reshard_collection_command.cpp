@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -40,6 +39,9 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/commit_reshard_collection_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -74,7 +76,7 @@ public:
                     format(FMT_STRING("{} command not enabled"), definition()->getName()),
                     resharding::gFeatureFlagResharding.isEnabled(
                         serverGlobalParams.featureCompatibility));
-            opCtx->setAlwaysInterruptAtStepDownOrUp();
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
             uassert(
                 ErrorCodes::IllegalOperation,
                 format(FMT_STRING("{} can only be run on config servers"), definition()->getName()),

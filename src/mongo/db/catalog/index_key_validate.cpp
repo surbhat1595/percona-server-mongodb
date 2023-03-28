@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
 #include "mongo/platform/basic.h"
 
@@ -55,6 +54,9 @@
 #include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
+
+
 namespace mongo {
 namespace index_key_validate {
 
@@ -67,36 +69,6 @@ namespace {
 // names will be disabled. This will allow for creation of indexes with invalid field names in their
 // specification.
 MONGO_FAIL_POINT_DEFINE(skipIndexCreateFieldNameValidation);
-
-static std::set<StringData> allowedFieldNames = {
-    IndexDescriptor::k2dIndexBitsFieldName,
-    IndexDescriptor::k2dIndexMaxFieldName,
-    IndexDescriptor::k2dIndexMinFieldName,
-    IndexDescriptor::k2dsphereCoarsestIndexedLevel,
-    IndexDescriptor::k2dsphereFinestIndexedLevel,
-    IndexDescriptor::k2dsphereVersionFieldName,
-    IndexDescriptor::kBackgroundFieldName,
-    IndexDescriptor::kCollationFieldName,
-    IndexDescriptor::kDefaultLanguageFieldName,
-    IndexDescriptor::kDropDuplicatesFieldName,
-    IndexDescriptor::kExpireAfterSecondsFieldName,
-    IndexDescriptor::kHiddenFieldName,
-    IndexDescriptor::kIndexNameFieldName,
-    IndexDescriptor::kIndexVersionFieldName,
-    IndexDescriptor::kKeyPatternFieldName,
-    IndexDescriptor::kLanguageOverrideFieldName,
-    IndexDescriptor::kNamespaceFieldName,
-    IndexDescriptor::kPartialFilterExprFieldName,
-    IndexDescriptor::kPathProjectionFieldName,
-    IndexDescriptor::kSparseFieldName,
-    IndexDescriptor::kStorageEngineFieldName,
-    IndexDescriptor::kTextVersionFieldName,
-    IndexDescriptor::kUniqueFieldName,
-    IndexDescriptor::kWeightsFieldName,
-    IndexDescriptor::kOriginalSpecFieldName,
-    IndexDescriptor::kPrepareUniqueFieldName,
-    // Index creation under legacy writeMode can result in an index spec with an _id field.
-    "_id"};
 
 static const std::set<StringData> allowedIdIndexFieldNames = {
     IndexDescriptor::kCollationFieldName,
@@ -134,6 +106,7 @@ Status isIndexVersionAllowedForCreation(IndexVersion indexVersion, const BSONObj
 BSONObj buildRepairedIndexSpec(
     const NamespaceString& ns,
     const BSONObj& indexSpec,
+    const std::set<StringData>& allowedFieldNames,
     std::function<void(const BSONElement&, BSONObjBuilder*)> indexSpecHandleFn) {
     BSONObjBuilder builder;
     for (const auto& indexSpecElem : indexSpec) {
@@ -282,10 +255,12 @@ BSONObj removeUnknownFields(const NamespaceString& ns, const BSONObj& indexSpec)
     auto appendIndexSpecFn = [](const BSONElement& indexSpecElem, BSONObjBuilder* builder) {
         builder->append(indexSpecElem);
     };
-    return buildRepairedIndexSpec(ns, indexSpec, appendIndexSpecFn);
+    return buildRepairedIndexSpec(ns, indexSpec, allowedFieldNames, appendIndexSpecFn);
 }
 
-BSONObj repairIndexSpec(const NamespaceString& ns, const BSONObj& indexSpec) {
+BSONObj repairIndexSpec(const NamespaceString& ns,
+                        const BSONObj& indexSpec,
+                        const std::set<StringData>& allowedFieldNames) {
     auto fixBoolIndexSpecFn = [&indexSpec, &ns](const BSONElement& indexSpecElem,
                                                 BSONObjBuilder* builder) {
         StringData fieldName = indexSpecElem.fieldNameStringData();
@@ -305,7 +280,7 @@ BSONObj repairIndexSpec(const NamespaceString& ns, const BSONObj& indexSpec) {
             builder->append(indexSpecElem);
         }
     };
-    return buildRepairedIndexSpec(ns, indexSpec, fixBoolIndexSpecFn);
+    return buildRepairedIndexSpec(ns, indexSpec, allowedFieldNames, fixBoolIndexSpecFn);
 }
 
 StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& indexSpec) {

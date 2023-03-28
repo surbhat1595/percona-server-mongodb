@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -47,6 +46,9 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/future_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 
@@ -201,12 +203,23 @@ void RenameParticipantInstance::_enterPhase(Phase newPhase) {
     PersistentTaskStore<StateDoc> store(NamespaceString::kShardingRenameParticipantsNamespace);
 
     if (_doc.getPhase() == Phase::kUnset) {
-        store.add(opCtx.get(), newDoc, WriteConcerns::kMajorityWriteConcernShardingTimeout);
+        try {
+            store.add(opCtx.get(), newDoc, WriteConcerns::kMajorityWriteConcernNoTimeout);
+        } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
+            // A series of step-up and step-down events can cause a node to try and insert the
+            // document when it has already been persisted locally, but we must still wait for
+            // majority commit.
+            const auto replCoord = repl::ReplicationCoordinator::get(opCtx.get());
+            const auto lastLocalOpTime = replCoord->getMyLastAppliedOpTime();
+            WaitForMajorityService::get(opCtx->getServiceContext())
+                .waitUntilMajority(lastLocalOpTime, opCtx.get()->getCancellationToken())
+                .get(opCtx.get());
+        }
     } else {
         store.update(opCtx.get(),
                      BSON(StateDoc::kFromNssFieldName << fromNss().ns()),
                      newDoc.toBSON(),
-                     WriteConcerns::kMajorityWriteConcernShardingTimeout);
+                     WriteConcerns::kMajorityWriteConcernNoTimeout);
     }
 
     _doc = std::move(newDoc);
@@ -222,7 +235,7 @@ void RenameParticipantInstance::_removeStateDocument(OperationContext* opCtx) {
     PersistentTaskStore<StateDoc> store(NamespaceString::kShardingRenameParticipantsNamespace);
     store.remove(opCtx,
                  BSON(StateDoc::kFromNssFieldName << fromNss().ns()),
-                 WriteConcerns::kMajorityWriteConcernShardingTimeout);
+                 WriteConcerns::kMajorityWriteConcernNoTimeout);
 
     _doc = {};
 }
@@ -328,8 +341,6 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                 RenameCollectionOptions options;
                 options.dropTarget = _doc.getDropTarget();
                 options.stayTemp = _doc.getStayTemp();
-                options.expectedSourceUUID = _doc.getExpectedSourceUUID();
-                options.expectedTargetUUID = _doc.getExpectedTargetUUID();
 
                 renameOrDropTarget(
                     opCtx, fromNss(), toNss(), options, _doc.getSourceUUID(), _doc.getTargetUUID());
@@ -377,7 +388,7 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                 service->releaseRecoverableCriticalSection(
                     opCtx, fromNss(), reason, ShardingCatalogClient::kLocalWriteConcern);
                 service->releaseRecoverableCriticalSection(
-                    opCtx, toNss(), reason, ShardingCatalogClient::kMajorityWriteConcern);
+                    opCtx, toNss(), reason, WriteConcerns::kMajorityWriteConcernNoTimeout);
 
                 LOGV2(5515107, "CRUD unblocked", "fromNs"_attr = fromNss(), "toNs"_attr = toNss());
             }))

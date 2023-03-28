@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
 
 #include "mongo/platform/basic.h"
 
@@ -37,14 +36,18 @@
 #include "mongo/db/repl/oplog_batcher.h"
 #include "mongo/logv2/log.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
+
+
 namespace mongo {
 namespace repl {
-TenantOplogBatcher::TenantOplogBatcher(const std::string& tenantId,
+TenantOplogBatcher::TenantOplogBatcher(const UUID& migrationUuid,
                                        RandomAccessOplogBuffer* oplogBuffer,
                                        std::shared_ptr<executor::TaskExecutor> executor,
                                        Timestamp resumeBatchingTs,
                                        OpTime beginApplyingAfterOpTime)
-    : AbstractAsyncComponent(executor.get(), std::string("TenantOplogBatcher_") + tenantId),
+    : AbstractAsyncComponent(executor.get(),
+                             std::string("TenantOplogBatcher_") + migrationUuid.toString()),
       _oplogBuffer(oplogBuffer),
       _executor(executor),
       _resumeBatchingTs(resumeBatchingTs),

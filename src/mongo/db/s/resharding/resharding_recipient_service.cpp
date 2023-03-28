@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 
@@ -68,6 +67,9 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/stale_shard_version_helpers.h"
 #include "mongo/util/future_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
+
 
 namespace mongo {
 
@@ -126,10 +128,20 @@ void buildStateDocumentCloneMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetr
 void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetricsNew* metrics) {
     bob.append(getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kDocumentCopyFieldName),
                metrics->getCopyingEnd());
+    bob.append(
+        getIntervalStartFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
+        metrics->getApplyingBegin());
     bob.append(metricsPrefix + ReshardingRecipientMetrics::kFinalDocumentsCopiedCountFieldName,
                metrics->getDocumentsCopiedCount());
     bob.append(metricsPrefix + ReshardingRecipientMetrics::kFinalBytesCopiedCountFieldName,
                metrics->getBytesCopiedCount());
+}
+
+void buildStateDocumentStrictConsistencyMetricsForUpdate(BSONObjBuilder& bob,
+                                                         ReshardingMetricsNew* metrics) {
+    bob.append(
+        getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
+        metrics->getApplyingEnd());
 }
 
 void buildStateDocumentMetricsForUpdate(BSONObjBuilder& bob,
@@ -141,6 +153,9 @@ void buildStateDocumentMetricsForUpdate(BSONObjBuilder& bob,
             return;
         case RecipientStateEnum::kApplying:
             buildStateDocumentApplyMetricsForUpdate(bob, metrics);
+            return;
+        case RecipientStateEnum::kStrictConsistency:
+            buildStateDocumentStrictConsistencyMetricsForUpdate(bob, metrics);
             return;
         default:
             return;
@@ -452,6 +467,15 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_runMand
                                                boost::none);
             }
 
+            // If the stepdownToken was triggered, it takes priority in order to make sure that
+            // the promise is set with an error that the coordinator can retry with. If it ran into
+            // an unrecoverable error, it would have fasserted earlier.
+            auto statusForPromise = isCanceled
+                ? Status{ErrorCodes::InterruptedDueToReplStateChange,
+                         "Resharding operation recipient state machine interrupted due to replica "
+                         "set stepdown"}
+                : outerStatus;
+
             // Wait for all of the data replication components to halt. We ignore any data
             // replication errors because resharding is known to have failed already.
             stdx::lock_guard<Latch> lk(_mutex);
@@ -528,6 +552,10 @@ void ReshardingRecipientService::RecipientStateMachine::interrupt(Status status)
 boost::optional<BSONObj> ReshardingRecipientService::RecipientStateMachine::reportForCurrentOp(
     MongoProcessInterface::CurrentOpConnectionsMode,
     MongoProcessInterface::CurrentOpSessionsMode) noexcept {
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        return _metricsNew->reportForCurrentOp();
+    }
+
     ReshardingMetrics::ReporterOptions options(ReshardingMetrics::Role::kRecipient,
                                                _metadata.getReshardingUUID(),
                                                _metadata.getSourceNss(),
@@ -781,8 +809,8 @@ void ReshardingRecipientService::RecipientStateMachine::_writeStrictConsistencyO
     auto rawOpCtx = opCtx.get();
 
     auto generateOplogEntry = [&]() {
-        ReshardingChangeEventO2Field changeEvent{_metadata.getReshardingUUID(),
-                                                 ReshardingChangeEventEnum::kReshardDoneCatchUp};
+        ReshardDoneCatchUpChangeEventO2Field changeEvent{_metadata.getTempReshardingNss(),
+                                                         _metadata.getReshardingUUID()};
 
         repl::MutableOplogEntry oplog;
         oplog.setOpType(repl::OpTypeEnum::kNoop);
@@ -1279,6 +1307,10 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
         auto applierMetrics =
             std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), progressDoc);
         _applierMetricsMap.emplace(shardId, std::move(applierMetrics));
+    }
+
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        _metricsNew->restoreOplogEntriesFetched(oplogEntriesFetched);
     }
 
     _metrics()->restoreForCurrentOp(

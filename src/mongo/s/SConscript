@@ -140,11 +140,11 @@ env.Library(
 env.Library(
     target="load_balancer_feature_flag",
     source=[
-        'load_balancer_feature_flag.idl'
+        'load_balancer_feature_flag.idl',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/idl/feature_flag',
-    ]
+    ],
 )
 
 env.Library(
@@ -187,6 +187,7 @@ env.Library(
         'refine_collection_shard_key_coordinator_feature_flags.idl',
         'request_types/abort_reshard_collection.idl',
         'request_types/add_shard_request_type.cpp',
+        'request_types/get_stats_for_balancing.idl',
         'request_types/add_shard_to_zone_request_type.cpp',
         'request_types/auto_split_vector.idl',
         'request_types/balance_chunk_request_type.cpp',
@@ -202,6 +203,7 @@ env.Library(
         'request_types/flush_resharding_state_change.idl',
         'request_types/flush_routing_table_cache_updates.idl',
         'request_types/get_database_version.idl',
+        'request_types/shardsvr_join_migrations_request.idl',
         'request_types/merge_chunk_request.idl',
         'request_types/migration_secondary_throttle_options.cpp',
         'request_types/move_chunk_request.cpp',
@@ -252,7 +254,7 @@ env.Library(
     source=[
         'sharding_test_fixture_common.cpp',
         'catalog_cache_loader_mock.cpp',
-        'catalog_cache_mock.cpp'
+        'catalog_cache_mock.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/remote_command_targeter_mock',
@@ -290,6 +292,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/operation_time_tracker',
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
         '$BUILD_DIR/mongo/s/client/sharding_client',
         'sharding_router_api',
@@ -348,12 +351,12 @@ env.Benchmark(
 env.Library(
     target='committed_optime_metadata_hook',
     source=[
-        'committed_optime_metadata_hook.cpp'
+        'committed_optime_metadata_hook.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/rpc/metadata',
         'coreshard',
-    ]
+    ],
 )
 
 env.Library(
@@ -375,7 +378,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/util/bson_extract',
         '$BUILD_DIR/mongo/rpc/metadata',
-    ]
+    ],
 )
 
 env.Library(
@@ -400,7 +403,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/idl/server_parameter',
-    ]
+    ],
 )
 
 env.Library(
@@ -480,7 +483,8 @@ env.Library(
         '$BUILD_DIR/mongo/transport/transport_layer_manager',
         '$BUILD_DIR/mongo/util/clock_sources',
         '$BUILD_DIR/mongo/util/fail_point',
-        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option('use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/latch_analyzer'
+        if get_option('use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/net/http_client_impl',
         '$BUILD_DIR/mongo/util/net/ssl_options_server' if get_option('ssl') == 'on' else '',
         '$BUILD_DIR/mongo/util/ntservice',
@@ -537,7 +541,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/startup_warnings_common',
         '$BUILD_DIR/mongo/transport/service_entry_point',
         '$BUILD_DIR/mongo/transport/transport_layer_manager',
-        '$BUILD_DIR/mongo/util/latch_analyzer' if get_option('use-diagnostic-latches') == 'on' else [],
+        '$BUILD_DIR/mongo/util/latch_analyzer'
+        if get_option('use-diagnostic-latches') == 'on' else [],
         '$BUILD_DIR/mongo/util/signal_handlers',
         'client/sharding_client',
         'commands/cluster_commands',
@@ -566,7 +571,8 @@ if env.TargetOSIs('windows'):
             ('@mongo_version_patch@', version_parts[2]),
             ('@mongo_version_extra@', version_parts[3]),
             ('@mongo_version_extra_str@', version_extra),
-        ])
+        ],
+    )
 
     env.Alias('generated-sources', generatedServerManifest)
     env.Depends("mongos.res", generatedServerManifest)
@@ -590,10 +596,11 @@ env.Program(
     AIB_COMPONENTS_EXTRA=[
         "core",
         "default",
+        "devcore",
         "dist",
         "dist-test",
-        "servers",
         "integration-tests",
+        "servers",
     ],
 )
 

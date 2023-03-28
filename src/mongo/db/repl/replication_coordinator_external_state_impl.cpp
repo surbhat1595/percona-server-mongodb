@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 #include "mongo/platform/basic.h"
 
@@ -46,6 +45,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/local_oplog_info.h"
+#include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
@@ -121,6 +121,9 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 using namespace fmt::literals;
 
@@ -552,6 +555,17 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     if (::mongo::feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
             serverGlobalParams.featureCompatibility)) {
         createChangeStreamPreImagesCollection(opCtx);
+    }
+
+    // TODO: SERVER-65948 move the change collection creation logic from here to the PM-2502 hooks.
+    // The change collection will be created when the change stream is enabled.
+    if (::mongo::feature_flags::gFeatureFlagServerlessChangeStreams.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx);
+        auto status = changeCollectionManager.createChangeCollection(opCtx, boost::none);
+        if (!status.isOK()) {
+            fassert(6520900, status);
+        }
     }
 
     serverGlobalParams.validateFeaturesAsPrimary.store(true);
@@ -1023,23 +1037,21 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
     Lock::GlobalLock lk(opCtx, MODE_IS);
 
     StorageEngine* storageEngine = _service->getStorageEngine();
-    std::vector<TenantDatabaseName> tenantDbNames = storageEngine->listDatabases();
+    std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
 
-    for (std::vector<TenantDatabaseName>::iterator it = tenantDbNames.begin();
-         it != tenantDbNames.end();
-         ++it) {
+    for (const auto& dbName : dbNames) {
         // The local db is special because it isn't replicated. It is cleared at startup even on
         // replica set members.
-        if (it->dbName() == "local")
+        if (dbName.db() == "local")
             continue;
         LOGV2_DEBUG(21309,
                     2,
                     "Removing temporary collections from {db}",
                     "Removing temporary collections",
-                    "db"_attr = *it);
-        AutoGetDb autoDb(opCtx, it->dbName(), MODE_IX);
+                    "db"_attr = dbName);
+        AutoGetDb autoDb(opCtx, dbName.db(), MODE_IX);
         invariant(autoDb.getDb(),
-                  str::stream() << "Unable to get reference to database " << it->dbName());
+                  str::stream() << "Unable to get reference to database " << dbName.db());
         autoDb.getDb()->clearTmpCollections(opCtx);
     }
 }

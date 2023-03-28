@@ -96,7 +96,7 @@ modules:
     repo: git@github.com:gregorynoma/tsbs.git
     prefix: ${workdir}/src
     branch: master
-    ref: 225e713010463582712dca30ffcfc70c7d661663
+    ref: 027f4b2d83267ae69d2740855654b4a7cac72498
   - name: mongo-perf
     repo: git@github.com:mongodb/mongo-perf.git
     prefix: ${workdir}/src
@@ -346,7 +346,7 @@ functions:
           set -o errexit
           set -o verbose
           source "${workdir}/compile_venv/bin/activate"
-          python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} install-core MONGO_VERSION=${version} DESTDIR=$(pwd)/mongodb ${patch_compile_flags|}
+          python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} install-core install-jstestshell MONGO_VERSION=${version} DESTDIR=$(pwd)/mongodb ${patch_compile_flags|}
           mkdir -p mongodb/jstests/hooks
           if [ -d jstests/hooks ]
           then
@@ -578,6 +578,20 @@ tasks:
         vars:
           test_control: "tsbs_query"
 
+  - name: tsbs_query_sharded
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_sharded"
+
+  - name: tsbs_query_sharded_balancer
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_sharded_balancer"
+
   - name: tsbs_query_manual_bucketing
     priority: 5
     commands:
@@ -800,6 +814,28 @@ tasks:
           test_control: "tpch"
           test_control_params: |
             {scale: 1,
+             schema: denormalized}
+
+  - name: tpch_10_normalized
+    priority: 5
+    exec_timeout_secs: 43200 # 12 hours
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tpch"
+          test_control_params: |
+            {scale: 10,
+             schema: normalized}
+
+  - name: tpch_10_denormalized
+    priority: 5
+    exec_timeout_secs: 43200 # 12 hours
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tpch"
+          test_control_params: |
+            {scale: 10,
              schema: denormalized}
 
   - name: non_sharded_workloads
@@ -1080,6 +1116,8 @@ buildvariants:
       - name: bestbuy_query
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
 
   - name: linux-standalone-all-feature-flags
     display_name: Linux Standalone (all feature flags)
@@ -1100,6 +1138,8 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
 
   - name: compile-rhel70
     display_name: Compile for Atlas-like
@@ -1163,6 +1203,8 @@ buildvariants:
       - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
       - name: industry_benchmarks_wmajority
       - name: sb_large_scale
       - name: sb_timeseries
@@ -1181,12 +1223,60 @@ buildvariants:
     run_on:
       - "rhel70-perf-single"
     depends_on: *_compile_amazon2
-    tasks:
+    tasks: &audit-tasks
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: crud_workloads
       - name: smoke_test
+
+  - name: linux-1-node-replSet-audit-log-encryption-no-compression
+    display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (No compression)
+    batchtime: 10080 # 7 days
+    modules: *modules
+    expansions:
+      mongodb_setup: single-replica-audit-log-encryption-no-compression
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *audit-tasks
+
+  - name: linux-1-node-replSet-audit
+    display_name: Linux Single-node Replica Set Audit
+    batchtime: 10080 # 7 days
+    modules: *modules
+    expansions:
+      mongodb_setup: single-replica-audit
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *audit-tasks
+
+  - name: linux-1-node-replSet-audit-log-encryption-compression
+    display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression)
+    batchtime: 10080 # 7 days
+    modules: *modules
+    expansions:
+      mongodb_setup: single-replica-audit-log-encryption-compression
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *audit-tasks
 
   - name: linux-1-node-replSet-fle
     display_name: Linux 1-Node ReplSet FLE
@@ -1342,6 +1432,8 @@ buildvariants:
       - name: change_streams_latency
       - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
+      - name: tsbs_query_sharded
+      - name: tsbs_query_sharded_balancer
 
   - name: linux-shard-lite-audit
     display_name: Linux Shard Lite Cluster Audit
@@ -1384,7 +1476,9 @@ buildvariants:
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
       - name: change_streams_latency
+      - name: change_streams_preimage_latency
       - name: change_streams_throughput
+      - name: change_streams_preimage_throughput
       - name: change_streams_listen_throughput
       - name: industry_benchmarks
       - name: industry_benchmarks_wmajority
@@ -1397,6 +1491,8 @@ buildvariants:
       - name: move_chunk_waiting_workloads
       - name: retryable_writes_workloads
       - name: smoke_test
+      - name: tsbs_query_sharded
+      - name: tsbs_query_sharded_balancer
 
   - name: linux-shard-lite-cwrwc
     display_name: Linux Shard Lite Cluster CWRWC
@@ -1513,13 +1609,18 @@ buildvariants:
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
       - name: change_streams_throughput
+      - name: change_streams_preimage_throughput
       - name: change_streams_latency
+      - name: change_streams_preimage_latency
       - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      # TODO: Enable in SERVER-66572.
+      # - name: tpch_10_normalized
+      # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
       - name: tsbs_load
@@ -1573,6 +1674,9 @@ buildvariants:
       - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      # TODO: Enable in SERVER-66572.
+      # - name: tpch_10_normalized
+      # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
       # Time-series collections are available since v5.0.
@@ -1626,6 +1730,9 @@ buildvariants:
       - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      # TODO: Enable in SERVER-66572.
+      # - name: tpch_10_normalized
+      # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
       # Time-series collections are available since v5.0.
@@ -1683,6 +1790,9 @@ buildvariants:
       - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
+      # TODO: Enable in SERVER-66572.
+      # - name: tpch_10_normalized
+      # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
       # Time-series collections are available since v5.0.

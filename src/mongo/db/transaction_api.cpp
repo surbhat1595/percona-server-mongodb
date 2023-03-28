@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
 #include "mongo/db/transaction_api.h"
 
@@ -49,6 +48,7 @@
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
@@ -62,15 +62,19 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future_util.h"
 
-// TODO SERVER-65395: Remove failpoint when fle2 tests can reliably support internal transaction
-// retry limit.
-MONGO_FAIL_POINT_DEFINE(skipTransactionApiRetryCheckInHandleError);
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
-namespace mongo::txn_api {
+MONGO_FAIL_POINT_DEFINE(overrideTransactionApiMaxRetriesToThree);
+
+namespace mongo {
+
+const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
+
+namespace txn_api {
 
 SyncTransactionWithRetries::SyncTransactionWithRetries(
     OperationContext* opCtx,
-    ExecutorPtr executor,
+    std::shared_ptr<executor::TaskExecutor> executor,
     std::unique_ptr<ResourceYielder> resourceYielder,
     std::unique_ptr<TransactionClient> txnClient)
     : _resourceYielder(std::move(resourceYielder)),
@@ -160,11 +164,12 @@ std::string Transaction::_transactionStateToString(TransactionState txnState) co
     MONGO_UNREACHABLE;
 }
 
-void logNextStep(Transaction::ErrorHandlingStep nextStep, const BSONObj& txnInfo) {
+void logNextStep(Transaction::ErrorHandlingStep nextStep, const BSONObj& txnInfo, int attempts) {
     LOGV2(5918600,
           "Chose internal transaction error handling step",
           "nextStep"_attr = errorHandlingStepToString(nextStep),
-          "txnInfo"_attr = txnInfo);
+          "txnInfo"_attr = txnInfo,
+          "attempts"_attr = attempts);
 }
 
 SemiFuture<CommitResult> TransactionWithRetries::run(Callback callback) noexcept {
@@ -181,6 +186,7 @@ SemiFuture<CommitResult> TransactionWithRetries::run(Callback callback) noexcept
             invariant(txnStatus != ErrorCodes::TransactionAPIMustRetryCommit);
             return txnStatus.isOK() || txnStatus != ErrorCodes::TransactionAPIMustRetryTransaction;
         })
+        .withBackoffBetweenIterations(kExponentialBackoff)
         // Cancellation happens by interrupting the caller's opCtx.
         .on(_executor, CancellationToken::uncancelable())
         // Safe to inline because the continuation only holds state.
@@ -193,7 +199,7 @@ ExecutorFuture<void> TransactionWithRetries::_runBodyHandleErrors(int bodyAttemp
     return _internalTxn->runCallback().thenRunOn(_executor).onError(
         [this, bodyAttempts](Status bodyStatus) {
             auto nextStep = _internalTxn->handleError(bodyStatus, bodyAttempts);
-            logNextStep(nextStep, _internalTxn->reportStateForLog());
+            logNextStep(nextStep, _internalTxn->reportStateForLog(), bodyAttempts);
 
             if (nextStep == Transaction::ErrorHandlingStep::kDoNotRetry) {
                 iassert(bodyStatus);
@@ -220,7 +226,7 @@ ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitHandleErrors(int 
             }
 
             auto nextStep = _internalTxn->handleError(swCommitResult, commitAttempts);
-            logNextStep(nextStep, _internalTxn->reportStateForLog());
+            logNextStep(nextStep, _internalTxn->reportStateForLog(), commitAttempts);
 
             if (nextStep == Transaction::ErrorHandlingStep::kDoNotRetry) {
                 return ExecutorFuture<CommitResult>(_executor, swCommitResult);
@@ -249,6 +255,7 @@ ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitWithRetries() {
         .until([](StatusWith<CommitResult> swResult) {
             return swResult.isOK() || swResult != ErrorCodes::TransactionAPIMustRetryCommit;
         })
+        .withBackoffBetweenIterations(kExponentialBackoff)
         // Cancellation happens by interrupting the caller's opCtx.
         .on(_executor, CancellationToken::uncancelable());
 }
@@ -477,6 +484,12 @@ SemiFuture<void> Transaction::runCallback() {
         .semi();
 }
 
+int getMaxRetries() {
+    // Allow overriding the number of retries so unit tests can exhaust them faster.
+    return MONGO_unlikely(overrideTransactionApiMaxRetriesToThree.shouldFail()) ? 3
+                                                                                : kTxnRetryLimit;
+}
+
 Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitResult>& swResult,
                                                         int attemptCounter) const noexcept {
     stdx::lock_guard<Latch> lg(_mutex);
@@ -489,17 +502,15 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
                 "hasTransientTransactionErrorLabel"_attr =
                     _latestResponseHasTransientTransactionErrorLabel,
                 "txnInfo"_attr = _reportStateForLog(lg),
-                "retriesLeft"_attr =
-                    kTxnRetryLimit - attemptCounter + 1  // To account for the initial execution.
-    );
+                "attempts"_attr = attemptCounter);
 
     if (_execContext == ExecutionContext::kClientTransaction) {
         // If we're nested in another transaction, let the outer most client decide on errors.
         return ErrorHandlingStep::kDoNotRetry;
     }
 
-    if (!MONGO_unlikely(skipTransactionApiRetryCheckInHandleError.shouldFail()) &&
-        attemptCounter > kTxnRetryLimit) {
+    // If the op has a deadline, retry until it is reached regardless of the number of attempts.
+    if (attemptCounter > getMaxRetries() && !_opDeadline) {
         return _isInCommit() ? ErrorHandlingStep::kDoNotRetry
                              : ErrorHandlingStep::kAbortAndDoNotRetry;
     }
@@ -659,6 +670,17 @@ void Transaction::_setSessionInfo(WithLock,
 }
 
 void Transaction::_primeTransaction(OperationContext* opCtx) {
+    // The API does not forward shard or database versions from the caller's opCtx, so spawned
+    // commands would not obey sharding protocols, like the migration critical section, so it
+    // cannot currently be used in an operation with shard versions. This does not apply in the
+    // cluster commands configuration because those commands will attach appropriate shard
+    // versions.
+    uassert(6638800,
+            "Transaction API does not currently support use within operations with shard or "
+            "database versions without using router commands",
+            !OperationShardingState::isComingFromRouter(opCtx) ||
+                _txnClient->canRunInShardedOperations());
+
     stdx::lock_guard<Latch> lg(_mutex);
 
     // Extract session options and infer execution context from client's opCtx.
@@ -745,4 +767,5 @@ Transaction::~Transaction() {
 }
 
 }  // namespace details
-}  // namespace mongo::txn_api
+}  // namespace txn_api
+}  // namespace mongo

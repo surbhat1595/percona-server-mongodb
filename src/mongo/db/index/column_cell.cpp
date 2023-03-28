@@ -27,16 +27,19 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/db/index/column_cell.h"
 
 #include "mongo/db/storage/column_store.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
+
 namespace mongo {
 namespace column_keygen {
 namespace {
-void appendInt(int64_t value, bool isLong, BufBuilder* cellBuffer) {
+template <typename Buffer>
+void appendInt(int64_t value, bool isLong, Buffer* cellBuffer) {
     using Bytes = ColumnStore::Bytes;
     using TinyNum = ColumnStore::Bytes::TinyNum;
     if (value >= TinyNum::kMinVal && value <= TinyNum::kMaxVal) {
@@ -74,7 +77,8 @@ boost::optional<T> downCastToIntType(double value) {
     return {};
 }
 
-void appendDouble(double value, BufBuilder* cellBuffer) {
+template <typename Buffer>
+void appendDouble(double value, Buffer* cellBuffer) {
     using Bytes = ColumnStore::Bytes;
     if (auto small = downCastToIntType<int8_t>(value); small) {
         cellBuffer->appendUChar(Bytes::kInt1Double);
@@ -101,9 +105,9 @@ void appendDouble(double value, BufBuilder* cellBuffer) {
         cellBuffer->appendNum(value);  // Little-endian write.
     }
 }
-}  // namespace
 
-void appendElementToCell(const BSONElement& element, BufBuilder* cellBuffer) {
+template <typename Buffer>
+void doAppendElementToCell(const BSONElement& element, Buffer* cellBuffer) {
     using Bytes = ColumnStore::Bytes;
     switch (element.type()) {
         case jstNULL:
@@ -164,14 +168,17 @@ void appendElementToCell(const BSONElement& element, BufBuilder* cellBuffer) {
     cellBuffer->appendBuf(element.value(), element.valuesize());
 }
 
-void writeEncodedCell(const UnencodedCellView& cell, BufBuilder* cellBuffer) {
+template <typename Buffer>
+void doWriteEncodedCell(const UnencodedCellView& cell, Buffer* cellBuffer) {
     using Bytes = ColumnStore::Bytes;
 
-    // The 'hasDuplicateFields' flag indicates an ill-formed document. We encode the values from all
-    // instances of the multiply defined path, but we do not store an 'arrayInfo' or otherwise
-    // attempt to encode the structure of the encoded values.
+    // WARNING: The decoder assumes that flags are written in this order. Do not change the order!
+
+    // The 'hasDuplicateFields' flag indicates an ill-formed document. In this case, we make no
+    // attempt to record any other information about this field in the index.
     if (cell.hasDuplicateFields) {
         cellBuffer->appendUChar(Bytes::kDuplicateFieldsMarker);
+        return;
     }
 
     // Encode meaningful flags.
@@ -223,12 +230,26 @@ void writeEncodedCell(const UnencodedCellView& cell, BufBuilder* cellBuffer) {
     }
 
     for (auto&& value : cell.vals) {
-        appendElementToCell(value, cellBuffer);
+        doAppendElementToCell(value, cellBuffer);
     }
 
     if (writeArrayInfo) {
         cellBuffer->appendBuf(cell.arrayInfo.rawData(), cell.arrayInfo.size());
     }
 }
+}  // namespace
+
+// These overrides are just to keep the templating and implementation defined in the .cpp files. We
+// could template the public method but then we'd have to drag the implementation into the header.
+void appendElementToCell(const BSONElement& element, BufBuilder* cellBuffer) {
+    return doAppendElementToCell(element, cellBuffer);
+}
+void writeEncodedCell(const UnencodedCellView& cell, BufBuilder* cellBuffer) {
+    return doWriteEncodedCell(cell, cellBuffer);
+}
+void writeEncodedCell(const UnencodedCellView& cell, PooledFragmentBuilder* cellBuffer) {
+    return doWriteEncodedCell(cell, cellBuffer);
+}
+
 }  // namespace column_keygen
 }  // namespace mongo

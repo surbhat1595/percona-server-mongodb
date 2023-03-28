@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -59,6 +58,9 @@
 #include "mongo/s/shard_id.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/transaction_router.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 namespace cluster_aggregation_planner {
@@ -342,14 +344,14 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
     CursorId clusterCursorId = 0;
 
     if (cursorState == ClusterCursorManager::CursorState::NotExhausted) {
-        auto authUsers = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames();
+        auto authUser = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName();
         clusterCursorId = uassertStatusOK(Grid::get(opCtx)->getCursorManager()->registerCursor(
             opCtx,
             ccc.releaseCursor(),
             requestedNss,
             ClusterCursorManager::CursorType::MultiTarget,
             ClusterCursorManager::CursorLifetime::Mortal,
-            authUsers));
+            authUser));
     }
 
     // Fill out the aggregation metrics in CurOp.
@@ -495,7 +497,6 @@ BSONObj getUnshardedCollInfo(OperationContext* opCtx,
     ScopedDbConnection conn(shard->getConnString());
     std::list<BSONObj> all =
         conn->getCollectionInfos(nss.db().toString(), BSON("name" << nss.coll()));
-    conn.done();
     if (all.empty()) {
         // Collection does not exist, return an empty object.
         return BSONObj();

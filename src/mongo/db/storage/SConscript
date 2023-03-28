@@ -11,7 +11,7 @@ env.SConscript(
         'wiredtiger',
     ],
     exports=[
-        'env'
+        'env',
     ],
 )
 
@@ -210,7 +210,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/service_context'
+        '$BUILD_DIR/mongo/db/service_context',
     ],
 )
 
@@ -286,11 +286,10 @@ env.Library(
     ],
 )
 
-
 env.Library(
     target='recovery_unit_test_harness',
     source=[
-        'recovery_unit_test_harness.cpp'
+        'recovery_unit_test_harness.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
@@ -315,7 +314,7 @@ env.Library(
 env.Library(
     target='storage_change_lock',
     source=[
-        'storage_change_lock.cpp'
+        'storage_change_lock.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -326,10 +325,9 @@ env.Library(
     target='storage_engine_common',
     source=[
         'storage_engine_init.cpp',
-        'storage_engine_change_context.cpp'
+        'storage_engine_change_context.cpp',
     ],
-    LIBDEPS=[
-    ],
+    LIBDEPS=[],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/encryption/key',
@@ -353,8 +351,8 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/server_status',
-        'backup_cursor_hooks'
-    ]
+        'backup_cursor_hooks',
+    ],
 )
 
 env.Library(
@@ -365,7 +363,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/base",
         '$BUILD_DIR/mongo/db/namespace_string',
-    ]
+    ],
 )
 
 env.Library(
@@ -423,7 +421,7 @@ env.Library(
 env.Benchmark(
     target='storage_key_string_bm',
     source=[
-        'key_string_bm.cpp'
+        'key_string_bm.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -434,7 +432,7 @@ env.Benchmark(
 env.Benchmark(
     target='storage_record_id_bm',
     source=[
-        'record_id_bm.cpp'
+        'record_id_bm.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -451,7 +449,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         'encryption_hooks',
         'storage_options',
-    ]
+    ],
 )
 
 env.Library(

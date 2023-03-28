@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -39,6 +38,9 @@
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -92,9 +94,11 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
             "cannot set both sampleRate/filter and ratelimit to non-default values",
             (newSampleRate == 1.0 && !request.getFilter()) || newRateLimit == 1);
 
-    // Delegate to _applyProfilingLevel to set the profiling level appropriately whether we are on
-    // mongoD or mongoS.
-    auto oldSettings = _applyProfilingLevel(opCtx, dbName, request);
+    // TODO SERVER-66561: For _applyProfilingLevel, takes the passed in "const DatabaseName& dbName"
+    // directly.
+    // Delegate to _applyProfilingLevel to set the profiling level appropriately whether
+    // we are on mongoD or mongoS.
+    auto oldSettings = _applyProfilingLevel(opCtx, {boost::none, dbName}, request);
     auto oldSlowMS = serverGlobalParams.slowMS;
     auto oldRateLimit = serverGlobalParams.rateLimit;
     auto oldSampleRate = serverGlobalParams.sampleRate;
@@ -141,10 +145,14 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
         }
         attrs.add("from", oldState.obj());
 
+        // TODO SERVER-66561: For getDatabaseProfileSettings, takes the passed in "const
+        // DatabaseName& dbName" directly.
+
         // newSettings.level may differ from profilingLevel: profilingLevel is part of the request,
         // and if the request specifies {profile: -1, ...} then we want to show the unchanged value
         // (0, 1, or 2).
-        auto newSettings = CollectionCatalog::get(opCtx)->getDatabaseProfileSettings(dbName);
+        auto newSettings =
+            CollectionCatalog::get(opCtx)->getDatabaseProfileSettings({boost::none, dbName});
         newState.append("level"_sd, newSettings.level);
         newState.append("slowms"_sd, serverGlobalParams.slowMS);
         newState.append("ratelimit"_sd, serverGlobalParams.rateLimit);

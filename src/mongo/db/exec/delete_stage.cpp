@@ -27,14 +27,13 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/exec/delete_stage.h"
 
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
@@ -46,6 +45,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
+
 
 namespace mongo {
 
@@ -171,7 +173,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
         // Either the document has already been deleted, or it has been updated such that it no
         // longer matches the predicate.
         if (shouldRestartDeleteIfNoLongerMatches(_params.get())) {
-            throw WriteConflictException();
+            throwWriteConflictException();
         }
         return PlanStage::NEED_TIME;
     }

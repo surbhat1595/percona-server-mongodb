@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -45,6 +44,9 @@
 #include "mongo/s/request_types/auto_split_vector_gen.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace shardutil {
@@ -138,52 +140,19 @@ StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* opCtx,
         return shardStatus.getStatus();
     }
 
-    auto invokeSplitCommand = [&](const BSONObj& command, const StringData db) {
-        return shardStatus.getValue()->runCommandWithFixedRetryAttempts(
-            opCtx,
-            ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
-            db.toString(),
-            command,
-            Shard::RetryPolicy::kIdempotent);
-    };
-
     const AutoSplitVectorRequest req(
         nss, shardKeyPattern.toBSON(), chunkRange.getMin(), chunkRange.getMax(), chunkSizeBytes);
 
-    auto cmdStatus = invokeSplitCommand(req.toBSON({}), nss.db());
-
-    // Fallback to splitVector command in case of mixed binaries not supporting autoSplitVector
-    bool fallback = [&]() {
-        auto status = Shard::CommandResponse::getEffectiveStatus(cmdStatus);
-        return !status.isOK() && status.code() == ErrorCodes::CommandNotFound;
-    }();
-
-    // TODO SERVER-60039 remove fallback logic once 6.0 branches out
-    if (fallback) {
-        BSONObjBuilder cmd;
-        cmd.append("splitVector", nss.ns());
-        cmd.append("keyPattern", shardKeyPattern.toBSON());
-        chunkRange.append(&cmd);
-        cmd.append("maxChunkSizeBytes", chunkSizeBytes);
-        cmdStatus = invokeSplitCommand(cmd.obj(), NamespaceString::kAdminDb);
-    }
-
+    auto cmdStatus = shardStatus.getValue()->runCommandWithFixedRetryAttempts(
+        opCtx,
+        ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
+        nss.db().toString(),
+        req.toBSON({}),
+        Shard::RetryPolicy::kIdempotent);
 
     auto status = Shard::CommandResponse::getEffectiveStatus(cmdStatus);
     if (!status.isOK()) {
         return status;
-    }
-
-    // TODO SERVER-60039 remove fallback logic once 6.0 branches out
-    if (fallback) {
-        const auto response = std::move(cmdStatus.getValue().response);
-        std::vector<BSONObj> splitPoints;
-
-        BSONObjIterator it(response.getObjectField("splitKeys"));
-        while (it.more()) {
-            splitPoints.push_back(it.next().Obj().getOwned());
-        }
-        return std::move(splitPoints);
     }
 
     const auto response = AutoSplitVectorResponse::parse(

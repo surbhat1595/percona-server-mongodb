@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -52,6 +51,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/clock_source.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -142,6 +144,8 @@ void CollectionQueryInfo::computeIndexKeys(OperationContext* opCtx, const Collec
                     _indexedPaths.addPath(path);
                 }
             }
+        } else if (descriptor->getAccessMethodName() == IndexNames::COLUMN) {
+            _indexedPaths.allPathsIndexed();
         } else if (descriptor->getAccessMethodName() == IndexNames::TEXT) {
             fts::FTSSpec ftsSpec(descriptor->infoObj());
 

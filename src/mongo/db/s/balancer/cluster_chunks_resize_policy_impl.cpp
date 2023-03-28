@@ -26,13 +26,15 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/s/balancer/cluster_chunks_resize_policy_impl.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 
@@ -90,7 +92,7 @@ void applyResultToCollState(OperationContext* opCtx,
                       "Marking collection chunks resize state as pending to be restarded",
                       "namespace"_attr = collectionState.getNss().ns(),
                       "err"_attr = result);
-        collectionState.errorDetectedOnActionCompleted();
+        collectionState.errorDetectedOnActionCompleted(opCtx);
     }
 }
 
@@ -142,7 +144,7 @@ boost::optional<DefragmentationAction> CollectionState::popNextAction(OperationC
                   "pending to be restarted",
                   "namespace"_attr = _nss.ns(),
                   "error"_attr = redact(e));
-            _restartRequested = true;
+            _requestRestart(opCtx);
         }
     }
     return boost::none;
@@ -168,8 +170,8 @@ void CollectionState::actionCompleted(std::vector<ActionRequestInfo>&& followUpR
     }
 }
 
-void CollectionState::errorDetectedOnActionCompleted() {
-    _restartRequested = true;
+void CollectionState::errorDetectedOnActionCompleted(OperationContext* opCtx) {
+    _requestRestart(opCtx);
     --_numOutstandingActions;
     _pendingRequests.clear();
 }
@@ -188,6 +190,12 @@ const NamespaceString& CollectionState::getNss() const {
 
 const UUID& CollectionState::getUuid() const {
     return _uuid;
+}
+
+void CollectionState::_requestRestart(OperationContext* opCtx) {
+    // Invalidate the CollectionState object and the related entry in the cache.
+    _restartRequested = true;
+    Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(_nss);
 }
 
 ClusterChunksResizePolicyImpl::ClusterChunksResizePolicyImpl(
@@ -266,11 +274,24 @@ boost::optional<DefragmentationAction> ClusterChunksResizePolicyImpl::getNextStr
             if (collState.restartNeeded()) {
                 auto refreshedCollState = _buildInitialStateFor(opCtx, collState.getNss());
                 if (!refreshedCollState) {
+                    // The collection does not longer exist - discard it
                     auto entryToErase = it;
                     it = std::next(it);
                     _collectionsBeingProcessed.erase(entryToErase);
                     continue;
                 }
+                if (refreshedCollState->getUuid() != collUuid) {
+                    // the collection has been dropped and re-created since the creation of the
+                    // element; re-insert the entry with an updated UUID (this operation will
+                    // invalidate the iterator).
+                    _collectionsBeingProcessed.erase(it);
+                    _collectionsBeingProcessed.emplace(refreshedCollState->getUuid(),
+                                                       std::move(*refreshedCollState));
+                    it = _collectionsBeingProcessed.begin();
+                    continue;
+                }
+
+                // update the current element
                 collState = std::move(*refreshedCollState);
             }
 
@@ -332,6 +353,30 @@ boost::optional<DefragmentationAction> ClusterChunksResizePolicyImpl::getNextStr
 void ClusterChunksResizePolicyImpl::applyActionResult(OperationContext* opCtx,
                                                       const DefragmentationAction& action,
                                                       const DefragmentationActionResponse& result) {
+    std::string completedNss;
+    ScopeGuard onExitGuard([&] {
+        if (!completedNss.empty()) {
+            PersistentTaskStore<CollectionType> store(CollectionType::ConfigNS);
+            try {
+                store.update(
+                    opCtx,
+                    BSON(CollectionType::kNssFieldName << completedNss),
+                    BSON("$set" << BSON(CollectionType::kChunksAlreadySplitForDowngradeFieldName
+                                        << true)),
+                    WriteConcerns::kMajorityWriteConcernNoTimeout);
+            } catch (const DBException& e) {
+                LOGV2(6417111,
+                      "Could not mark collection as already processed by ClusterChunksResizePolicy",
+                      "namespace"_attr = completedNss,
+                      "error"_attr = redact(e));
+            }
+        }
+
+        // Notify the reception of an operation outcome, even if it did not lead to a change of the
+        // internal state.
+        _onStateUpdated();
+    });
+
     stdx::lock_guard<Latch> lk(_stateMutex);
     if (!_activeRequestPromise.is_initialized()) {
         return;
@@ -412,7 +457,6 @@ void ClusterChunksResizePolicyImpl::applyActionResult(OperationContext* opCtx,
         action);
 
     if (updatedEntryIt == _collectionsBeingProcessed.end()) {
-        _onStateUpdated();
         return;
     }
 
@@ -421,17 +465,7 @@ void ClusterChunksResizePolicyImpl::applyActionResult(OperationContext* opCtx,
         LOGV2(6417107,
               "Collection chunks resize process completed",
               "namespace"_attr = collectionState.getNss().ns());
-        PersistentTaskStore<CollectionType> store(CollectionType::ConfigNS);
-        try {
-            store.update(
-                opCtx,
-                BSON(CollectionType::kNssFieldName << collectionState.getNss().ns()),
-                BSON("$set" << BSON(CollectionType::kChunksAlreadySplitForDowngradeFieldName
-                                    << true)),
-                WriteConcerns::kMajorityWriteConcernNoTimeout);
-        } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
-            // ignore
-        }
+        completedNss = collectionState.getNss().ns();
         _collectionsBeingProcessed.erase(updatedEntryIt);
 
     } else if (collectionState.restartNeeded()) {
@@ -443,7 +477,6 @@ void ClusterChunksResizePolicyImpl::applyActionResult(OperationContext* opCtx,
                                                std::move(*refreshedState));
         }
     }
-    _onStateUpdated();
 }
 
 boost::optional<CollectionState> ClusterChunksResizePolicyImpl::_buildInitialStateFor(

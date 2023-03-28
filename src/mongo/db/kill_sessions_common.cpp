@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -39,6 +38,9 @@
 #include "mongo/db/session_killer.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -100,8 +102,11 @@ void killSessionsReport(OperationContext* opCtx, const BSONObj& cmdObj) {
     auto client = opCtx->getClient();
     if (client) {
         if (AuthorizationManager::get(client->getServiceContext())->isAuthEnabled()) {
-            auto user = AuthorizationSession::get(client)->getAuthenticatedUserNames();
-            attr.add("user", user->toBSON());
+            if (auto user = AuthorizationSession::get(client)->getAuthenticatedUserName()) {
+                attr.add("user", BSON_ARRAY(user->toBSON()));
+            } else {
+                attr.add("user", BSONArray());
+            }
         }
 
         if (client->session()) {

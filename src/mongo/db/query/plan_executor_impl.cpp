@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -38,7 +37,6 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/collection_scan.h"
@@ -67,6 +65,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/stacktrace.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 
@@ -423,7 +424,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
             invariant(id == WorkingSet::INVALID_ID);
             if (!_yieldPolicy->canAutoYield() ||
                 MONGO_unlikely(skipWriteConflictRetries.shouldFail())) {
-                throw WriteConflictException();
+                throwWriteConflictException();
             }
 
             CurOp::get(_opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
@@ -578,6 +579,23 @@ long long PlanExecutorImpl::executeDelete() {
             return deleteStats->docsDeleted;
         }
     }
+}
+
+BatchedDeleteStats PlanExecutorImpl::getBatchedDeleteStats() {
+    // If we're deleting on a non-existent collection, then the delete plan may have an EOF as the
+    // root stage.
+    if (_root->stageType() == STAGE_EOF) {
+        return BatchedDeleteStats();
+    }
+
+    invariant(_root->stageType() == StageType::STAGE_BATCHED_DELETE);
+
+    // If the collection exists, we expect the root of the plan tree to be a batched delete stage.
+    // Note: findAndModify is incompatible with the batched delete stage so no need to handle
+    // projection stage wrapping.
+    const auto stats = _root->getSpecificStats();
+    auto batchedStats = static_cast<const BatchedDeleteStats*>(stats);
+    return *batchedStats;
 }
 
 void PlanExecutorImpl::stashResult(const BSONObj& obj) {

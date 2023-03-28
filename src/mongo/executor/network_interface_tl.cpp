@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kASIO
 
 #include "mongo/executor/network_interface_tl.h"
 
@@ -46,6 +45,9 @@
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/testing_proctor.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kASIO
+
 
 namespace mongo {
 namespace executor {
@@ -567,6 +569,11 @@ Status NetworkInterfaceTL::startCommand(const TaskExecutor::CallbackHandle& cbHa
                   [](const HostAndPort& target1, const HostAndPort& target2) {
                       return target1.toString() < target2.toString();
                   });
+    }
+
+    if ((request.target.size() > 1) && !request.hedgeOptions &&
+        !gOpportunisticSecondaryTargeting.load()) {
+        request.target.resize(1);
     }
 
     auto [cmdState, future] = CommandState::make(this, request, cbHandle);

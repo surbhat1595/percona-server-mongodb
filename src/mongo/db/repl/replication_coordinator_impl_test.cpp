@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -82,6 +81,9 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace repl {
@@ -2450,6 +2452,91 @@ TEST_F(ReplCoordTest, CancelElectionTimeoutIfSyncSourceKnowsThePrimary) {
 
     // Since we advanced the clock, the new election timeout is after the old one.
     ASSERT_GREATER_THAN(getReplCoord()->getElectionTimeout_forTest(), electionTimeout);
+}
+
+TEST_F(ReplCoordTest, ShouldChangeSyncSource) {
+    init();
+
+    const OID replicaSetId = OID::gen();
+    BSONObj configObj = BSON("_id"
+                             << "mySet"
+                             << "version" << 1 << "members"
+                             << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                      << "node1:12345")
+                                           << BSON("_id" << 2 << "host"
+                                                         << "node2:12345")
+                                           << BSON("_id" << 3 << "host"
+                                                         << "node3:12345"))
+                             << "protocolVersion" << 1 << "settings"
+                             << BSON("replicaSetId" << replicaSetId));
+    assertStartSuccess(configObj, HostAndPort("node1", 12345));
+    ReplSetConfig config = assertMakeRSConfig(configObj);
+
+    getTopoCoord().updateConfig(config, 1, getNet()->now());
+
+    OplogQueryMetadata opMetaData(
+        OpTimeAndWallTime(), OpTime(Timestamp(1, 1), 1), 1, 0 /* currentPrimaryIndex */, 1, "");
+    ReplSetMetadata rsMeta(
+        0, OpTimeAndWallTime(), OpTime(), 1, 0, replicaSetId, 1, true /* isPrimary */);
+
+    ASSERT_EQ(getReplCoord()->shouldChangeSyncSource(
+                  HostAndPort("node1", 12345), rsMeta, opMetaData, OpTime(), OpTime()),
+              ChangeSyncSourceAction::kContinueSyncing);
+
+    ASSERT_EQ(getReplCoord()->shouldChangeSyncSource(
+                  HostAndPort("node4", 12345), rsMeta, opMetaData, OpTime(), OpTime()),
+              ChangeSyncSourceAction::kStopSyncingAndEnqueueLastBatch);
+}
+
+TEST_F(ReplCoordTest, ServerlessNodeShouldChangeSyncSourceAfterSplit) {
+    // Test that ReplicationCoordinator will correctly stop enqueuing messages from the donor and
+    // change sync source when started in serverless mode and the replicaSetId changes.
+
+    ReplSettings settings;
+    settings.setServerlessMode();
+    init(settings);
+
+    const OID replicaSetId = OID::gen();
+    BSONObj configObj = BSON("_id"
+                             << "mySet"
+                             << "version" << 1 << "members"
+                             << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                      << "node1:12345")
+                                           << BSON("_id" << 2 << "host"
+                                                         << "node2:12345")
+                                           << BSON("_id" << 3 << "host"
+                                                         << "node3:12345"))
+                             << "protocolVersion" << 1 << "settings"
+                             << BSON("replicaSetId" << replicaSetId));
+
+    assertStartSuccess(configObj, HostAndPort("node1", 12345));
+    ReplSetConfig config = assertMakeRSConfig(configObj);
+
+    getTopoCoord().updateConfig(config, 1, getNet()->now());
+
+    OplogQueryMetadata opMetaData(
+        OpTimeAndWallTime(), OpTime(Timestamp(1, 1), 1), 1, 0 /* currentPrimaryIndex */, 1, "");
+    ReplSetMetadata rsMeta(
+        0, OpTimeAndWallTime(), OpTime(), 1, 0, replicaSetId, 1, true /* isPrimary */);
+
+    // Continue syncing when the node is in the replica set and the replicaSetId is the same.
+    ASSERT_EQ(getReplCoord()->shouldChangeSyncSource(
+                  HostAndPort("node1", 12345), rsMeta, opMetaData, OpTime(), OpTime()),
+              ChangeSyncSourceAction::kContinueSyncing);
+
+    // Enqueue final message but stop syncing when the replicaSetId is the same but the node is not
+    // in the replica set anymore.
+    ASSERT_EQ(getReplCoord()->shouldChangeSyncSource(
+                  HostAndPort("node4", 12345), rsMeta, opMetaData, OpTime(), OpTime()),
+              ChangeSyncSourceAction::kStopSyncingAndEnqueueLastBatch);
+
+    // Discard messages and stop syncing when the node is not in the replica set anymore and the
+    // replicaSetId has changed. This case occurs after a successfull shard split.
+    ReplSetMetadata rsMeta2(
+        0, OpTimeAndWallTime(), OpTime(), 1, 0, OID::gen(), 1, false /* isPrimary */);
+    ASSERT_EQ(getReplCoord()->shouldChangeSyncSource(
+                  HostAndPort("node4", 12345), rsMeta2, opMetaData, OpTime(), OpTime()),
+              ChangeSyncSourceAction::kStopSyncingAndDropLastBatchIfPresent);
 }
 
 TEST_F(ReplCoordTest, SingleNodeReplSetUnfreeze) {
@@ -6927,15 +7014,14 @@ TEST_F(ReplCoordTest, CancelAndRescheduleElectionTimeoutLogging) {
     // Setting mode to secondary should schedule the election timeout.
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
     ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Scheduling election timeout callback"));
-    ASSERT_EQ(0, countTextFormatLogLinesContaining("Rescheduling election timeout callback"));
+    ASSERT_EQ(1, countTextFormatLogLinesContaining("Scheduled election timeout callback"));
+    ASSERT_EQ(0, countTextFormatLogLinesContaining("Rescheduled election timeout callback"));
     ASSERT_EQ(0, countTextFormatLogLinesContaining("Canceling election timeout callback"));
 
     // Scheduling again should produce the "rescheduled", not the "scheduled", message .
     replCoord->cancelAndRescheduleElectionTimeout();
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Scheduling election timeout callback"));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Rescheduling election timeout callback"));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Canceling election timeout callback"));
+    ASSERT_EQ(1, countTextFormatLogLinesContaining("Scheduled election timeout callback"));
+    ASSERT_EQ(1, countTextFormatLogLinesContaining("Rescheduled election timeout callback"));
 
     auto net = getNet();
     net->enterNetwork();
@@ -6963,9 +7049,8 @@ TEST_F(ReplCoordTest, CancelAndRescheduleElectionTimeoutLogging) {
     net->exitNetwork();
 
     // The election should have scheduled (not rescheduled) another timeout.
-    ASSERT_EQ(2, countTextFormatLogLinesContaining("Scheduling election timeout callback"));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Rescheduling election timeout callback"));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Canceling election timeout callback"));
+    ASSERT_EQ(2, countTextFormatLogLinesContaining("Scheduled election timeout callback"));
+    ASSERT_EQ(1, countTextFormatLogLinesContaining("Rescheduled election timeout callback"));
 
     auto replElectionReducedSeverityGuard = unittest::MinimumLoggedSeverityGuard{
         logv2::LogComponent::kReplicationElection, logv2::LogSeverity::Debug(4)};
@@ -6976,9 +7061,8 @@ TEST_F(ReplCoordTest, CancelAndRescheduleElectionTimeoutLogging) {
     replCoord->cancelAndRescheduleElectionTimeout();
 
     // We should not see this reschedule because it should be at log level 5.
-    ASSERT_EQ(2, countTextFormatLogLinesContaining("Scheduling election timeout callback"));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Rescheduling election timeout callback"));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining("Canceling election timeout callback"));
+    ASSERT_EQ(2, countTextFormatLogLinesContaining("Scheduled election timeout callback"));
+    ASSERT_EQ(1, countTextFormatLogLinesContaining("Rescheduled election timeout callback"));
 
     net->enterNetwork();
     until = electionTimeoutWhen + Milliseconds(1001);
@@ -6989,9 +7073,8 @@ TEST_F(ReplCoordTest, CancelAndRescheduleElectionTimeoutLogging) {
     stopCapturingLogMessages();
     // We should see this reschedule at level 4 because it has been over 1 sec since we logged
     // at level 4.
-    ASSERT_EQ(2, countTextFormatLogLinesContaining("Scheduling election timeout callback"));
-    ASSERT_EQ(2, countTextFormatLogLinesContaining("Rescheduling election timeout callback"));
-    ASSERT_EQ(2, countTextFormatLogLinesContaining("Canceling election timeout callback"));
+    ASSERT_EQ(2, countTextFormatLogLinesContaining("Scheduled election timeout callback"));
+    ASSERT_EQ(2, countTextFormatLogLinesContaining("Rescheduled election timeout callback"));
 }
 
 TEST_F(ReplCoordTest, ZeroCommittedSnapshotAfterClearingCommittedSnapshot) {

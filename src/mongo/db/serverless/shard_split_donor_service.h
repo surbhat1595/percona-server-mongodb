@@ -164,11 +164,14 @@ private:
     ExecutorFuture<void> _applySplitConfigToDonor(const ScopedTaskExecutorPtr& executor,
                                                   const CancellationToken& abortToken);
 
-    ExecutorFuture<void> _waitForRecipientToAcceptSplit(const ScopedTaskExecutorPtr& executor,
-                                                        const CancellationToken& abortToken);
+    ExecutorFuture<void> _waitForRecipientToAcceptSplitAndTriggerElection(
+        const ScopedTaskExecutorPtr& executor, const CancellationToken& abortToken);
 
     ExecutorFuture<void> _waitForForgetCmdThenMarkGarbageCollectable(
         const ScopedTaskExecutorPtr& executor, const CancellationToken& primaryToken);
+
+    ExecutorFuture<void> _removeSplitConfigFromDonor(const ScopedTaskExecutorPtr& executor,
+                                                     const CancellationToken& token);
 
     ExecutorFuture<DurableState> _handleErrorOrEnterAbortedState(
         StatusWith<DurableState> durableState,
@@ -188,12 +191,16 @@ private:
     void _initiateTimeout(const ScopedTaskExecutorPtr& executor,
                           const CancellationToken& abortToken);
 
+    bool _hasInstalledSplitConfig(WithLock lock);
+
     /*
      * We need to call this method when we find out the replica set name is the same as the state
      * doc recipient set name and the current state doc state is blocking.
      */
     ExecutorFuture<void> _cleanRecipientStateDoc(const ScopedTaskExecutorPtr& executor,
                                                  const CancellationToken& token);
+
+    void _abortIndexBuilds(const CancellationToken& abortToken);
 
 private:
     const NamespaceString _stateDocumentsNS = NamespaceString::kTenantSplitDonorsNamespace;

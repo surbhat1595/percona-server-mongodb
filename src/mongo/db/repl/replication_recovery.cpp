@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 #define LOGV2_FOR_RECOVERY(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kStorageRecovery}, MESSAGE, ##__VA_ARGS__)
 
@@ -60,6 +59,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 namespace mongo {
 namespace repl {
@@ -214,7 +216,10 @@ public:
     void clear(OperationContext*) final {
         MONGO_UNREACHABLE;
     }
-    bool waitForData(Seconds) final {
+    bool waitForDataFor(Milliseconds, Interruptible*) final {
+        MONGO_UNREACHABLE;
+    }
+    bool waitForDataUntil(Date_t, Interruptible*) final {
         MONGO_UNREACHABLE;
     }
     boost::optional<Value> lastObjectPushed(OperationContext*) const final {

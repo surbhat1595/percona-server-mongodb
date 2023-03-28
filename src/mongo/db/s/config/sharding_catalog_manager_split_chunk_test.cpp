@@ -29,9 +29,12 @@
 
 #include "mongo/client/read_preference.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/logical_session_cache_noop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/session_catalog_mongod.h"
 #include "mongo/s/catalog/type_chunk.h"
 
 namespace mongo {
@@ -47,8 +50,21 @@ protected:
         shard.setName(_shardName);
         shard.setHost(_shardName + ":12");
         setupShards({shard});
+
+        DBDirectClient client(operationContext());
+        client.createCollection(NamespaceString::kSessionTransactionsTableNamespace.ns());
+        client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+                             {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
+
+        LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
+        TransactionCoordinatorService::get(operationContext())
+            ->onShardingInitialization(operationContext(), true);
     }
 
+    void tearDown() override {
+        TransactionCoordinatorService::get(operationContext())->onStepDown();
+        ConfigServerTestFixture::tearDown();
+    }
 
     const NamespaceString _nss1{"TestDB", "TestColl1"};
     const NamespaceString _nss2{"TestDB", "TestColl2"};
@@ -323,7 +339,7 @@ TEST_F(SplitChunkTest, PreConditionFailErrors) {
 
         setupCollection(nss, _keyPattern, {chunk});
 
-        auto splitStatus = ShardingCatalogManager::get(operationContext())
+        ASSERT_THROWS_CODE(ShardingCatalogManager::get(operationContext())
                                ->commitChunkSplit(operationContext(),
                                                   nss,
                                                   collEpoch,
@@ -331,8 +347,9 @@ TEST_F(SplitChunkTest, PreConditionFailErrors) {
                                                   ChunkRange(chunkMin, BSON("a" << 7)),
                                                   splitPoints,
                                                   "shard0000",
-                                                  false /* fromChunkSplitter*/);
-        ASSERT_EQ(ErrorCodes::BadValue, splitStatus);
+                                                  false /* fromChunkSplitter*/),
+                           DBException,
+                           ErrorCodes::BadValue);
     };
 
     test(_nss2, Timestamp(42));
@@ -430,7 +447,7 @@ TEST_F(SplitChunkTest, SplitPointsOutOfOrderShouldFail) {
 
         setupCollection(nss, _keyPattern, {chunk});
 
-        auto splitStatus = ShardingCatalogManager::get(operationContext())
+        ASSERT_THROWS_CODE(ShardingCatalogManager::get(operationContext())
                                ->commitChunkSplit(operationContext(),
                                                   nss,
                                                   collEpoch,
@@ -438,8 +455,9 @@ TEST_F(SplitChunkTest, SplitPointsOutOfOrderShouldFail) {
                                                   ChunkRange(chunkMin, chunkMax),
                                                   splitPoints,
                                                   "shard0000",
-                                                  false /* fromChunkSplitter*/);
-        ASSERT_EQ(ErrorCodes::InvalidOptions, splitStatus);
+                                                  false /* fromChunkSplitter*/),
+                           DBException,
+                           ErrorCodes::InvalidOptions);
     };
 
     test(_nss2, Timestamp(42));
@@ -465,7 +483,7 @@ TEST_F(SplitChunkTest, SplitPointsOutOfRangeAtMinShouldFail) {
 
         setupCollection(nss, _keyPattern, {chunk});
 
-        auto splitStatus = ShardingCatalogManager::get(operationContext())
+        ASSERT_THROWS_CODE(ShardingCatalogManager::get(operationContext())
                                ->commitChunkSplit(operationContext(),
                                                   nss,
                                                   collEpoch,
@@ -473,8 +491,9 @@ TEST_F(SplitChunkTest, SplitPointsOutOfRangeAtMinShouldFail) {
                                                   ChunkRange(chunkMin, chunkMax),
                                                   splitPoints,
                                                   "shard0000",
-                                                  false /* fromChunkSplitter*/);
-        ASSERT_EQ(ErrorCodes::InvalidOptions, splitStatus);
+                                                  false /* fromChunkSplitter*/),
+                           DBException,
+                           ErrorCodes::InvalidOptions);
     };
 
     test(_nss2, Timestamp(42));
@@ -501,7 +520,7 @@ TEST_F(SplitChunkTest, SplitPointsOutOfRangeAtMaxShouldFail) {
 
         setupCollection(nss, _keyPattern, {chunk});
 
-        auto splitStatus = ShardingCatalogManager::get(operationContext())
+        ASSERT_THROWS_CODE(ShardingCatalogManager::get(operationContext())
                                ->commitChunkSplit(operationContext(),
                                                   nss,
                                                   collEpoch,
@@ -509,8 +528,9 @@ TEST_F(SplitChunkTest, SplitPointsOutOfRangeAtMaxShouldFail) {
                                                   ChunkRange(chunkMin, chunkMax),
                                                   splitPoints,
                                                   "shard0000",
-                                                  false /* fromChunkSplitter*/);
-        ASSERT_EQ(ErrorCodes::InvalidOptions, splitStatus);
+                                                  false /* fromChunkSplitter*/),
+                           DBException,
+                           ErrorCodes::InvalidOptions);
     };
 
     test(_nss2, Timestamp(42));
@@ -533,7 +553,7 @@ TEST_F(SplitChunkTest, SplitPointsWithDollarPrefixShouldFail) {
         chunk.setMax(chunkMax);
         setupCollection(nss, _keyPattern, {chunk});
 
-        ASSERT_NOT_OK(ShardingCatalogManager::get(operationContext())
+        ASSERT_THROWS(ShardingCatalogManager::get(operationContext())
                           ->commitChunkSplit(operationContext(),
                                              nss,
                                              collEpoch,
@@ -541,8 +561,9 @@ TEST_F(SplitChunkTest, SplitPointsWithDollarPrefixShouldFail) {
                                              ChunkRange(chunkMin, chunkMax),
                                              {BSON("a" << BSON("$minKey" << 1))},
                                              "shard0000",
-                                             false /* fromChunkSplitter*/));
-        ASSERT_NOT_OK(ShardingCatalogManager::get(operationContext())
+                                             false /* fromChunkSplitter*/),
+                      DBException);
+        ASSERT_THROWS(ShardingCatalogManager::get(operationContext())
                           ->commitChunkSplit(operationContext(),
                                              nss,
                                              collEpoch,
@@ -550,7 +571,8 @@ TEST_F(SplitChunkTest, SplitPointsWithDollarPrefixShouldFail) {
                                              ChunkRange(chunkMin, chunkMax),
                                              {BSON("a" << BSON("$maxKey" << 1))},
                                              "shard0000",
-                                             false /* fromChunkSplitter*/));
+                                             false /* fromChunkSplitter*/),
+                      DBException);
     };
 
     test(_nss2, Timestamp(42));

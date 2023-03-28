@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
 #include "mongo/platform/basic.h"
 
@@ -41,6 +40,9 @@
 #include "mongo/db/s/resharding/resharding_oplog_application.h"
 #include "mongo/db/s/resharding/resharding_oplog_session_application.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
+
 
 namespace mongo {
 
@@ -72,12 +74,12 @@ SemiFuture<void> ReshardingOplogBatchApplier::applyBatch(
                        auto opCtx = factory.makeOperationContext(&cc());
 
                        if constexpr (IsForSessionApplication) {
-                           auto hitPreparedTxn =
+                           auto conflictingTxnCompletionFuture =
                                _sessionApplication.tryApplyOperation(opCtx.get(), oplogEntry);
 
-                           if (hitPreparedTxn) {
-                               return future_util::withCancellation(std::move(*hitPreparedTxn),
-                                                                    cancelToken);
+                           if (conflictingTxnCompletionFuture) {
+                               return future_util::withCancellation(
+                                   std::move(*conflictingTxnCompletionFuture), cancelToken);
                            }
                        } else {
                            // ReshardingOpObserver depends on the collection metadata being known

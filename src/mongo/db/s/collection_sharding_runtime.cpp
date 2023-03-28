@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/s/collection_sharding_runtime.h"
 
@@ -43,6 +42,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/util/duration.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -126,14 +128,16 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
 
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     OperationContext* opCtx) {
-    auto& oss = OperationShardingState::get(opCtx);
-
     // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
-    // consider all collections as unsharded. Also, return unsharded if no shard version or db
-    // version is present on the context.
-    if (!OperationShardingState::isComingFromRouter(opCtx)) {
+    // consider all collections as unsharded
+    if (!ShardingState::get(opCtx)->enabled())
         return {kUnshardedCollection};
-    }
+
+    // Present the collection as unsharded to internal or direct commands against shards
+    if (!OperationShardingState::isComingFromRouter(opCtx))
+        return {kUnshardedCollection};
+
+    auto& oss = OperationShardingState::get(opCtx);
 
     auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
     const auto receivedShardVersion{oss.getShardVersion(_nss)};
@@ -333,7 +337,8 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     OperationContext* opCtx,
     const boost::optional<mongo::LogicalTime>& atClusterTime,
     bool supportNonVersionedOperations) {
-
+    // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
+    // consider all collections as unsharded
     if (!ShardingState::get(opCtx)->enabled())
         return kUnshardedCollection;
 

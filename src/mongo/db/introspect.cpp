@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/platform/basic.h"
 
@@ -36,7 +35,6 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/user_set.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -47,6 +45,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo {
 
@@ -161,10 +162,10 @@ void profile(OperationContext* opCtx, NetworkOp op) {
 
 
 Status createProfileCollection(OperationContext* opCtx, Database* db) {
-    invariant(opCtx->lockState()->isDbLockedForMode(db->name().dbName(), MODE_IX));
+    invariant(opCtx->lockState()->isDbLockedForMode(db->name().db(), MODE_IX));
     invariant(!opCtx->shouldParticipateInFlowControl());
 
-    const auto dbProfilingNS = NamespaceString(db->name().dbName(), "system.profile");
+    const auto dbProfilingNS = NamespaceString(db->name().db(), "system.profile");
 
     // Checking the collection exists must also be done in the WCE retry loop. Only retrying
     // collection creation would endlessly throw errors because the collection exists: must check

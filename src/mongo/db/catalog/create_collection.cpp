@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -46,6 +45,7 @@
 #include "mongo/db/commands/create_gen.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
@@ -56,11 +56,13 @@
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/tenant_database_name.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -177,6 +179,14 @@ Status _createView(OperationContext* opCtx,
                           "option not supported on a view: changeStreamPreAndPostImages");
         }
 
+        // Cannot directly create a view on a system.buckets collection, only by creating a
+        // time-series collection.
+        auto viewOnNss = NamespaceString{collectionOptions.viewOn};
+        uassert(ErrorCodes::InvalidNamespace,
+                "Cannot create view on a system.buckets namespace except by creating a time-series "
+                "collection",
+                !viewOnNss.isTimeseriesBucketsCollection());
+
         _createSystemDotViewsIfNecessary(opCtx, db);
 
         WriteUnitOfWork wunit(opCtx);
@@ -186,7 +196,7 @@ Status _createView(OperationContext* opCtx,
             nss,
             Top::LockType::NotLocked,
             AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.db()));
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
 
         // If the view creation rolls back, ensure that the Top entry created for the view is
         // deleted.
@@ -302,7 +312,7 @@ Status _createTimeseries(OperationContext* opCtx,
                 bucketsNs,
                 Top::LockType::NotLocked,
                 AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.db()));
+                CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
 
             // If the buckets collection and time-series view creation roll back, ensure that their
             // Top entries are deleted.
@@ -384,7 +394,7 @@ Status _createTimeseries(OperationContext* opCtx,
                                       ns,
                                       Top::LockType::NotLocked,
                                       AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                      catalog->getDatabaseProfileLevel(ns.db()));
+                                      catalog->getDatabaseProfileLevel(ns.dbName()));
 
         // If the buckets collection and time-series view creation roll back, ensure that their
         // Top entries are deleted.
@@ -505,7 +515,7 @@ Status _createCollection(OperationContext* opCtx,
             nss,
             Top::LockType::NotLocked,
             AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.db()));
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
 
         // If the collection creation rolls back, ensure that the Top entry created for the
         // collection is deleted.
@@ -528,46 +538,6 @@ Status _createCollection(OperationContext* opCtx,
 
         return Status::OK();
     });
-}
-
-/**
- * Creates the collection or the view as described by 'options'.
- */
-Status createCollection(OperationContext* opCtx,
-                        const NamespaceString& ns,
-                        const CollectionOptions& options,
-                        const boost::optional<BSONObj>& idIndex) {
-    auto status = userAllowedCreateNS(opCtx, ns);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    if (options.isView()) {
-        uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Cannot create a view in a multi-document "
-                                 "transaction.",
-                !opCtx->inMultiDocumentTransaction());
-        uassert(ErrorCodes::Error(6026500),
-                "The 'clusteredIndex' option is not supported with views",
-                !options.clusteredIndex);
-
-        return _createView(opCtx, ns, options);
-    } else if (options.timeseries && !ns.isTimeseriesBucketsCollection()) {
-        // This helper is designed for user-created time-series collections on primaries. If a
-        // time-series buckets collection is created explicitly or during replication, treat this as
-        // a normal collection creation.
-        uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream()
-                    << "Cannot create a time-series collection in a multi-document transaction.",
-                !opCtx->inMultiDocumentTransaction());
-        return _createTimeseries(opCtx, ns, options);
-    } else {
-        uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Cannot create system collection " << ns
-                              << " within a transaction.",
-                !opCtx->inMultiDocumentTransaction() || !ns.isSystem());
-        return _createCollection(opCtx, ns, options, idIndex);
-    }
 }
 
 CollectionOptions clusterByDefaultIfNecessary(const NamespaceString& nss,
@@ -682,7 +652,7 @@ void createChangeStreamPreImagesCollection(OperationContext* opCtx) {
             status.isOK() || status.code() == ErrorCodes::NamespaceExists);
 }
 
-// TODO SERVER-62880 pass TenantDatabaseName instead of dbName.
+// TODO SERVER-62880 pass DatabaseName instead of dbName.
 Status createCollectionForApplyOps(OperationContext* opCtx,
                                    const std::string& dbName,
                                    const boost::optional<UUID>& ui,
@@ -695,7 +665,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
     auto newCmd = cmdObj;
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    const TenantDatabaseName tenantDbName(boost::none, dbName);
+    const DatabaseName tenantDbName(boost::none, dbName);
     auto* const db = databaseHolder->getDb(opCtx, tenantDbName);
 
     // If a UUID is given, see if we need to rename a collection out of the way, and whether the
@@ -841,6 +811,43 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
 
     return createCollection(
         opCtx, newCollName, newCmd, idIndex, CollectionOptions::parseForStorage);
+}
+
+Status createCollection(OperationContext* opCtx,
+                        const NamespaceString& ns,
+                        const CollectionOptions& options,
+                        const boost::optional<BSONObj>& idIndex) {
+    auto status = userAllowedCreateNS(opCtx, ns);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    if (options.isView()) {
+        uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                str::stream() << "Cannot create a view in a multi-document "
+                                 "transaction.",
+                !opCtx->inMultiDocumentTransaction());
+        uassert(ErrorCodes::Error(6026500),
+                "The 'clusteredIndex' option is not supported with views",
+                !options.clusteredIndex);
+
+        return _createView(opCtx, ns, options);
+    } else if (options.timeseries && !ns.isTimeseriesBucketsCollection()) {
+        // This helper is designed for user-created time-series collections on primaries. If a
+        // time-series buckets collection is created explicitly or during replication, treat this as
+        // a normal collection creation.
+        uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                str::stream()
+                    << "Cannot create a time-series collection in a multi-document transaction.",
+                !opCtx->inMultiDocumentTransaction());
+        return _createTimeseries(opCtx, ns, options);
+    } else {
+        uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                str::stream() << "Cannot create system collection " << ns
+                              << " within a transaction.",
+                !opCtx->inMultiDocumentTransaction() || !ns.isSystem());
+        return _createCollection(opCtx, ns, options, idIndex);
+    }
 }
 
 }  // namespace mongo

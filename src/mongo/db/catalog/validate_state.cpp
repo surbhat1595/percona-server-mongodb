@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -43,6 +42,9 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -282,9 +284,7 @@ void ValidateState::_relockDatabaseAndCollection(OperationContext* opCtx) {
         << " while validating collection: " << _nss << " (" << *_uuid << ")";
 
     _databaseLock.emplace(opCtx, _nss.db(), MODE_IS);
-    // TODO SERVER-64608 Use the tenantID from '_nss' to construct the DatabaseName
-    const TenantDatabaseName tenantDbName(boost::none, _nss.db());
-    _database = DatabaseHolder::get(opCtx)->getDb(opCtx, tenantDbName);
+    _database = DatabaseHolder::get(opCtx)->getDb(opCtx, _nss.dbName());
     uassert(ErrorCodes::Interrupted, dbErrMsg, _database);
     uassert(ErrorCodes::Interrupted, dbErrMsg, !_database->isDropPending(opCtx));
 

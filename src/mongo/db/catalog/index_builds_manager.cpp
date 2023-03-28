@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -47,6 +46,9 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -370,6 +372,17 @@ bool IndexBuildsManager::abortIndexBuildWithoutCleanup(OperationContext* opCtx,
 bool IndexBuildsManager::isBackgroundBuilding(const UUID& buildUUID) {
     auto builder = invariant(_getBuilder(buildUUID));
     return builder->isBackgroundBuilding();
+}
+
+void IndexBuildsManager::appendBuildInfo(const UUID& buildUUID, BSONObjBuilder* builder) const {
+    stdx::unique_lock<Latch> lk(_mutex);
+
+    auto builderIt = _builders.find(buildUUID);
+    if (builderIt == _builders.end()) {
+        return;
+    }
+
+    builderIt->second->appendBuildInfo(builder);
 }
 
 void IndexBuildsManager::verifyNoIndexBuilds_forTestOnly() {

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -49,6 +48,9 @@
 #include "mongo/db/transaction_participant.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -109,6 +111,20 @@ public:
         client.insert(_oplogBufferNss.toString(), oplogBson);
     }
 
+    void makeInProgressTxn(OperationContext* opCtx, LogicalSessionId lsid, TxnNumber txnNumber) {
+        opCtx->setInMultiDocumentTransaction();
+        opCtx->setLogicalSessionId(std::move(lsid));
+        opCtx->setTxnNumber(txnNumber);
+
+        MongoDOperationContextSession ocs(opCtx);
+        auto txnParticipant = TransactionParticipant::get(opCtx);
+        txnParticipant.beginOrContinue(
+            opCtx, {txnNumber}, false /* autocommit */, true /* startTransaction */);
+
+        txnParticipant.unstashTransactionResources(opCtx, "insert");
+        txnParticipant.stashTransactionResources(opCtx);
+    }
+
     repl::OpTime makePreparedTxn(OperationContext* opCtx,
                                  LogicalSessionId lsid,
                                  TxnNumber txnNumber) {
@@ -143,7 +159,7 @@ public:
         return opTime;
     }
 
-    void clearPreparedTxn(OperationContext* opCtx, LogicalSessionId lsid, TxnNumber txnNumber) {
+    void abortTxn(OperationContext* opCtx, LogicalSessionId lsid, TxnNumber txnNumber) {
         opCtx->setInMultiDocumentTransaction();
         opCtx->setLogicalSessionId(std::move(lsid));
         opCtx->setTxnNumber(txnNumber);
@@ -228,6 +244,11 @@ public:
         op.setWallClockTime({});
 
         return {op.toBSON()};
+    }
+
+    size_t getNumOplogEntries(OperationContext* opCtx) {
+        PersistentTaskStore<repl::OplogEntryBase> store(NamespaceString::kRsOplogNamespace);
+        return store.count(opCtx);
     }
 
     std::vector<repl::DurableOplogEntry> findOplogEntriesNewerThan(OperationContext* opCtx,
@@ -348,8 +369,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteForNewSessio
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -386,8 +407,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteForNewSessio
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -427,8 +448,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasHigherTxn
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -470,8 +491,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasLowerTxnN
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -513,8 +534,8 @@ TEST_F(ReshardingOplogSessionApplicationTest,
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -543,7 +564,7 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasEqualTxnN
     auto opTime = [&] {
         auto opCtx = makeOperationContext();
         auto opTime = makePreparedTxn(opCtx.get(), lsid, txnNumber);
-        clearPreparedTxn(opCtx.get(), lsid, txnNumber);
+        abortTxn(opCtx.get(), lsid, txnNumber);
         return opTime;
     }();
 
@@ -553,8 +574,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasEqualTxnN
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -583,8 +604,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteStmtAlreadyE
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -616,8 +637,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteStmtsAlready
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -648,14 +669,14 @@ TEST_F(ReshardingOplogSessionApplicationTest,
     StmtId incomingStmtId = 2;
     auto oplogEntry = makeUpdateOp(BSON("_id" << 1), lsid, incomingTxnNumber, {incomingStmtId});
 
-    auto hitPreparedTxn = [&] {
+    auto conflictingTxnCompletionFuture = [&] {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
         return applier.tryApplyOperation(opCtx.get(), oplogEntry);
     }();
 
-    ASSERT_TRUE(bool(hitPreparedTxn));
-    ASSERT_FALSE(hitPreparedTxn->isReady());
+    ASSERT_TRUE(bool(conflictingTxnCompletionFuture));
+    ASSERT_FALSE(conflictingTxnCompletionFuture->isReady());
 
     {
         auto opCtx = makeOperationContext();
@@ -668,11 +689,97 @@ TEST_F(ReshardingOplogSessionApplicationTest,
 
     {
         auto opCtx = makeOperationContext();
-        clearPreparedTxn(opCtx.get(), lsid, existingTxnNumber);
+        abortTxn(opCtx.get(), lsid, existingTxnNumber);
     }
 
-    ASSERT_TRUE(hitPreparedTxn->isReady());
-    ASSERT_OK(hitPreparedTxn->getNoThrow());
+    ASSERT_TRUE(conflictingTxnCompletionFuture->isReady());
+    ASSERT_OK(conflictingTxnCompletionFuture->getNoThrow());
+}
+
+TEST_F(ReshardingOplogSessionApplicationTest,
+       IncomingRetryableWriteHasInProgressRetryableInternalTransaction) {
+    auto retryableWriteLsid = makeLogicalSessionIdForTest();
+    TxnNumber retryableWriteTxnNumber = 100;
+    auto internalTxnLsid = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(retryableWriteLsid,
+                                                                           retryableWriteTxnNumber);
+    TxnNumber internalTxnTxnNumber = 1;
+    StmtId stmtId = 2;
+
+    {
+        auto opCtx = makeOperationContext();
+        makeInProgressTxn(opCtx.get(), internalTxnLsid, internalTxnTxnNumber);
+    }
+
+    auto oplogEntry =
+        makeUpdateOp(BSON("_id" << 1), retryableWriteLsid, retryableWriteTxnNumber, {stmtId});
+
+    auto conflictingTxnCompletionFuture = [&] {
+        auto opCtx = makeOperationContext();
+        ReshardingOplogSessionApplication applier{oplogBufferNss()};
+        return applier.tryApplyOperation(opCtx.get(), oplogEntry);
+    }();
+
+    ASSERT_TRUE(bool(conflictingTxnCompletionFuture));
+    ASSERT_FALSE(conflictingTxnCompletionFuture->isReady());
+
+    {
+        auto opCtx = makeOperationContext();
+        ASSERT_EQ(getNumOplogEntries(opCtx.get()), 0U);
+        auto sessionTxnRecord = findSessionRecord(opCtx.get(), retryableWriteLsid);
+        ASSERT_FALSE(bool(sessionTxnRecord));
+    }
+
+    {
+        auto opCtx = makeOperationContext();
+        abortTxn(opCtx.get(), internalTxnLsid, internalTxnTxnNumber);
+    }
+
+    ASSERT_TRUE(conflictingTxnCompletionFuture->isReady());
+    ASSERT_OK(conflictingTxnCompletionFuture->getNoThrow());
+}
+
+TEST_F(ReshardingOplogSessionApplicationTest,
+       IncomingRetryableWriteHasPreparedRetryableInternalTransaction) {
+    auto retryableWriteLsid = makeLogicalSessionIdForTest();
+    TxnNumber retryableWriteTxnNumber = 100;
+    auto internalTxnLsid = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(retryableWriteLsid,
+                                                                           retryableWriteTxnNumber);
+    TxnNumber internalTxnTxnNumber = 1;
+    StmtId stmtId = 2;
+
+    auto opTime = [&] {
+        auto opCtx = makeOperationContext();
+        return makePreparedTxn(opCtx.get(), internalTxnLsid, internalTxnTxnNumber);
+    }();
+
+    auto oplogEntry =
+        makeUpdateOp(BSON("_id" << 1), retryableWriteLsid, retryableWriteTxnNumber, {stmtId});
+
+    auto conflictingTxnCompletionFuture = [&] {
+        auto opCtx = makeOperationContext();
+        ReshardingOplogSessionApplication applier{oplogBufferNss()};
+        return applier.tryApplyOperation(opCtx.get(), oplogEntry);
+    }();
+
+    ASSERT_TRUE(bool(conflictingTxnCompletionFuture));
+    ASSERT_FALSE(conflictingTxnCompletionFuture->isReady());
+
+    {
+        auto opCtx = makeOperationContext();
+        auto foundOps = findOplogEntriesNewerThan(opCtx.get(), opTime.getTimestamp());
+        ASSERT_EQ(foundOps.size(), 0U);
+
+        auto sessionTxnRecord = findSessionRecord(opCtx.get(), retryableWriteLsid);
+        ASSERT_FALSE(bool(sessionTxnRecord));
+    }
+
+    {
+        auto opCtx = makeOperationContext();
+        abortTxn(opCtx.get(), internalTxnLsid, internalTxnTxnNumber);
+    }
+
+    ASSERT_TRUE(conflictingTxnCompletionFuture->isReady());
+    ASSERT_OK(conflictingTxnCompletionFuture->getNoThrow());
 }
 
 TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasPreImage) {
@@ -702,8 +809,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasPreImage)
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -749,8 +856,8 @@ DEATH_TEST_REGEX_F(ReshardingOplogSessionApplicationTest,
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -799,8 +906,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasPostImage
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -847,8 +954,8 @@ DEATH_TEST_REGEX_F(ReshardingOplogSessionApplicationTest,
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -892,8 +999,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteHasNeedsRetr
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -931,8 +1038,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnForNewSession) {
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -964,8 +1071,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasHigherTxnNumber) {
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -997,8 +1104,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasLowerTxnNumber) {
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -1030,8 +1137,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasEqualTxnNumberAsRetr
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -1055,7 +1162,7 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasEqualTxnNumberAsTxn)
     auto opTime = [&] {
         auto opCtx = makeOperationContext();
         auto opTime = makePreparedTxn(opCtx.get(), lsid, txnNumber);
-        clearPreparedTxn(opCtx.get(), lsid, txnNumber);
+        abortTxn(opCtx.get(), lsid, txnNumber);
         return opTime;
     }();
 
@@ -1064,8 +1171,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasEqualTxnNumberAsTxn)
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -1091,14 +1198,14 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasHigherTxnNumberThanP
     TxnNumber incomingTxnNumber = existingTxnNumber + 1;
     auto oplogEntry = makeFinishTxnOp(lsid, incomingTxnNumber);
 
-    auto hitPreparedTxn = [&] {
+    auto conflictingTxnCompletionFuture = [&] {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
         return applier.tryApplyOperation(opCtx.get(), oplogEntry);
     }();
 
-    ASSERT_TRUE(bool(hitPreparedTxn));
-    ASSERT_FALSE(hitPreparedTxn->isReady());
+    ASSERT_TRUE(bool(conflictingTxnCompletionFuture));
+    ASSERT_FALSE(conflictingTxnCompletionFuture->isReady());
 
     {
         auto opCtx = makeOperationContext();
@@ -1111,11 +1218,11 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingTxnHasHigherTxnNumberThanP
 
     {
         auto opCtx = makeOperationContext();
-        clearPreparedTxn(opCtx.get(), lsid, existingTxnNumber);
+        abortTxn(opCtx.get(), lsid, existingTxnNumber);
     }
 
-    ASSERT_TRUE(hitPreparedTxn->isReady());
-    ASSERT_OK(hitPreparedTxn->getNoThrow());
+    ASSERT_TRUE(conflictingTxnCompletionFuture->isReady());
+    ASSERT_OK(conflictingTxnCompletionFuture->getNoThrow());
 }
 
 TEST_F(ReshardingOplogSessionApplicationTest, IgnoreIncomingAbortedRetryableInternalTransaction) {
@@ -1134,8 +1241,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IgnoreIncomingAbortedRetryableInte
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {
@@ -1163,8 +1270,8 @@ TEST_F(ReshardingOplogSessionApplicationTest, IgnoreIncomingNonRetryableInternal
     {
         auto opCtx = makeOperationContext();
         ReshardingOplogSessionApplication applier{oplogBufferNss()};
-        auto hitPreparedTxn = applier.tryApplyOperation(opCtx.get(), oplogEntry);
-        ASSERT_FALSE(bool(hitPreparedTxn));
+        auto conflictingTxnCompletionFuture = applier.tryApplyOperation(opCtx.get(), oplogEntry);
+        ASSERT_FALSE(bool(conflictingTxnCompletionFuture));
     }
 
     {

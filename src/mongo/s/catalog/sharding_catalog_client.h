@@ -30,7 +30,6 @@
 #pragma once
 
 #include <boost/optional.hpp>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -40,6 +39,7 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/chunk_version.h"
 
 namespace mongo {
 
@@ -48,7 +48,6 @@ class BSONArrayBuilder;
 class BSONObj;
 class BSONObjBuilder;
 class ChunkType;
-struct ChunkVersion;
 class CollectionType;
 class ConnectionString;
 class DatabaseType;
@@ -232,34 +231,6 @@ public:
                                               const std::string& dbname,
                                               const BSONObj& cmdObj,
                                               BSONObjBuilder* result) = 0;
-
-    /**
-     * Applies oplog entries to the config servers.
-     * Used by mergeChunk and splitChunk commands.
-     *
-     * @param updateOps: documents to write to the chunks collection.
-     * @param preCondition: preconditions for applying documents.
-     * @param uuid: collection UUID.
-     * @param nss: namespace string for the chunks collection.
-     * @param lastChunkVersion: version of the last document being written to the chunks
-     * collection.
-     * @param writeConcern: writeConcern to use for applying documents.
-     * @param readConcern: readConcern to use for verifying that documents have been applied.
-     *
-     * 'nsOrUUID' and 'lastChunkVersion' uniquely identify the last document being written, which is
-     * expected to appear in the chunks collection on success. This is important for the
-     * case where network problems cause a retry of a successful write, which then returns
-     * failure because the precondition no longer matches. If a query of the chunks collection
-     * returns a document matching both 'nss' and 'lastChunkVersion,' the write succeeded.
-     */
-    virtual Status applyChunkOpsDeprecated(OperationContext* opCtx,
-                                           const BSONArray& updateOps,
-                                           const BSONArray& preCondition,
-                                           const UUID& uuid,
-                                           const NamespaceString& nss,
-                                           const ChunkVersion& lastChunkVersion,
-                                           const WriteConcernOptions& writeConcern,
-                                           repl::ReadConcernLevel readConcern) = 0;
 
     /**
      * Reads global sharding settings from the confing.settings collection. The key parameter is

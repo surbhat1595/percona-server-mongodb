@@ -26,11 +26,10 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache_noop.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
@@ -41,6 +40,9 @@
 #include "mongo/db/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -60,6 +62,8 @@ class ShardingCatalogManagerBumpCollectionVersionAndChangeMetadataTest
         auto opCtx = operationContext();
         DBDirectClient client(opCtx);
         client.createCollection(NamespaceString::kSessionTransactionsTableNamespace.ns());
+        client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+                             {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
         client.createCollection(CollectionType::ConfigNS.ns());
 
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
@@ -197,7 +201,7 @@ TEST_F(ShardingCatalogManagerBumpCollectionVersionAndChangeMetadataTest,
             operationContext(), kNss, [&](OperationContext*, TxnNumber) {
                 ++numCalls;
                 if (numCalls < 5) {
-                    throw WriteConflictException();
+                    throwWriteConflictException();
                 }
             });
 

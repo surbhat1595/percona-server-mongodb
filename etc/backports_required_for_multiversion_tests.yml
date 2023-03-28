@@ -218,6 +218,40 @@ last-continuous:
       test_file: jstests/core/sbe_plan_cache_autoparameterize_collscan.js
     - ticket: SERVER-64315
       test_file: jstests/core/wildcard_index_cached_plans.js
+    - ticket: SERVER-66719
+      test_file: jstests/replsets/dbhash_lock_acquisition.js
+    - ticket: SERVER-60829
+      test_file: jstests/replsets/tenant_migration_donor_resume_on_stepup_and_restart.js
+    - ticket: SERVER-65188
+      test_file: jstests/sharding/sessions_collection_auto_healing.js
+    - ticket: SERVER-65188
+      test_file: jstests/replsets/sessions_collection_auto_healing.js
+    - ticket: SERVER-66089
+      test_file: jstests/replsets/initial_sync_with_partial_transaction.js
+    - ticket: SERVER-66389
+      test_file: jstests/core/where_multiple_plans.js
+    - ticket: SERVER-66445
+      test_file: jstests/concurrency/fsm_workloads/find_flip_sbe_enabled.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/index_stats.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/wildcard_index_cached_plans.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/index_filter_commands_invalidate_plan_cache_entries.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/idhack.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/sbe/sbe_explain_rejected_plans.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/plan_cache_list_shapes.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/plan_cache_list_plans.js
+    - ticket: SERVER-65947
+      test_file: jstests/sharding/migration_retries_on_write_conflict_exceptions.js
+    - ticket: SERVER-64395
+      test_file: jstests/sharding/resharding_metrics_increment.js
+    - ticket: SERVER-64395
+      test_file: jstests/sharding/resharding_abort_command.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -569,6 +603,40 @@ last-lts:
       test_file: jstests/core/sbe_plan_cache_autoparameterize_collscan.js
     - ticket: SERVER-64315
       test_file: jstests/core/wildcard_index_cached_plans.js
+    - ticket: SERVER-66719
+      test_file: jstests/replsets/dbhash_lock_acquisition.js
+    - ticket: SERVER-60829
+      test_file: jstests/replsets/tenant_migration_donor_resume_on_stepup_and_restart.js
+    - ticket: SERVER-65188
+      test_file: jstests/sharding/sessions_collection_auto_healing.js
+    - ticket: SERVER-65188
+      test_file: jstests/replsets/sessions_collection_auto_healing.js
+    - ticket: SERVER-66089
+      test_file: jstests/replsets/initial_sync_with_partial_transaction.js
+    - ticket: SERVER-66389
+      test_file: jstests/core/where_multiple_plans.js
+    - ticket: SERVER-66445
+      test_file: jstests/concurrency/fsm_workloads/find_flip_sbe_enabled.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/index_stats.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/wildcard_index_cached_plans.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/index_filter_commands_invalidate_plan_cache_entries.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/idhack.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/sbe/sbe_explain_rejected_plans.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/plan_cache_list_shapes.js
+    - ticket: SERVER-66445
+      test_file: jstests/core/plan_cache_list_plans.js
+    - ticket: SERVER-65947
+      test_file: jstests/sharding/migration_retries_on_write_conflict_exceptions.js
+    - ticket: SERVER-64395
+      test_file: jstests/sharding/resharding_metrics_increment.js
+    - ticket: SERVER-64395
+      test_file: jstests/sharding/resharding_abort_command.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

@@ -29,7 +29,6 @@
 
 // _ todo: reconnect?
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 #include "mongo/platform/basic.h"
 
@@ -57,6 +56,9 @@
 #if __has_feature(address_sanitizer)
 #include <sanitizer/lsan_interface.h>
 #endif
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
+
 
 namespace mongo {
 
@@ -590,6 +592,7 @@ void DBConnectionPool::appendConnectionStats(executor::ConnectionPoolStats* stat
             executor::ConnectionStatsPer hostStats{static_cast<size_t>(i->second.numInUse()),
                                                    static_cast<size_t>(i->second.numAvailable()),
                                                    static_cast<size_t>(i->second.numCreated()),
+                                                   0,
                                                    0,
                                                    0};
             stats->updateStatsForHost("global", host, hostStats);

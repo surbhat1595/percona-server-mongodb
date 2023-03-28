@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
@@ -94,6 +93,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
+
 
 namespace mongo::write_ops_exec {
 
@@ -461,8 +463,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
             makeCollection(opCtx, wholeOp.getNamespace());
         }
 
-        curOp.raiseDbProfileLevel(
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(wholeOp.getNamespace().db()));
+        curOp.raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(
+            wholeOp.getNamespace().dbName()));
         assertCanWrite_inlock(opCtx, wholeOp.getNamespace());
 
         CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -840,7 +842,8 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
     auto& curOp = *CurOp::get(opCtx);
 
     if (collection->getDb()) {
-        curOp.raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.db()));
+        curOp.raiseDbProfileLevel(
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, ns);
@@ -923,7 +926,9 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 
     uassert(ErrorCodes::InvalidOptions,
             "Cannot use (or request) retryable writes with multi=true",
-            opCtx->inMultiDocumentTransaction() || !opCtx->getTxnNumber() || !op.getMulti());
+            !opCtx->isRetryableWrite() || !op.getMulti() ||
+                // If the first stmtId is uninitialized, we assume all are.
+                (stmtIds.empty() || stmtIds.front() == kUninitializedStmtId));
 
     UpdateRequest request(op);
     request.setNamespaceString(ns);
@@ -1088,7 +1093,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                                                OperationSource source) {
     uassert(ErrorCodes::InvalidOptions,
             "Cannot use (or request) retryable writes with limit=0",
-            opCtx->inMultiDocumentTransaction() || !opCtx->getTxnNumber() || !op.getMulti());
+            !opCtx->isRetryableWrite() || !op.getMulti() || stmtId == kUninitializedStmtId);
 
     globalOpCounters.gotDelete();
     ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForDelete(opCtx->getWriteConcern());
@@ -1170,7 +1175,8 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     uassertStatusOK(parsedDelete.parseRequest());
 
     if (collection.getDb()) {
-        curOp.raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.db()));
+        curOp.raiseDbProfileLevel(
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, ns);
@@ -1321,7 +1327,7 @@ Status performAtomicTimeseriesWrites(
     }
 
     auto curOp = CurOp::get(opCtx);
-    curOp->raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.db()));
+    curOp->raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
 
     assertCanWrite_inlock(opCtx, ns);
 

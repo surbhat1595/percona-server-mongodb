@@ -27,18 +27,22 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/s/sharding_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
+#include "mongo/s/request_types/shardsvr_join_migrations_request_gen.h"
 #include "mongo/s/shard_id.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 
@@ -46,6 +50,35 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(pauseSubmissionsFailPoint);
 MONGO_FAIL_POINT_DEFINE(deferredCleanupCompletedCheckpoint);
+
+void waitForQuiescedCluster(OperationContext* opCtx) {
+    const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    ShardsvrJoinMigrations joinShardOnMigrationsRequest;
+    joinShardOnMigrationsRequest.setDbName(NamespaceString::kAdminDb);
+
+    auto unquiescedShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+
+    const auto responses =
+        sharding_util::sendCommandToShards(opCtx,
+                                           NamespaceString::kAdminDb.toString(),
+                                           joinShardOnMigrationsRequest.toBSON({}),
+                                           unquiescedShardIds,
+                                           executor,
+                                           false /*throwOnError*/);
+    for (const auto& r : responses) {
+        auto responseOutcome = r.swResponse.isOK()
+            ? getStatusFromCommandResult(r.swResponse.getValue().data)
+            : r.swResponse.getStatus();
+
+        if (!responseOutcome.isOK()) {
+            LOGV2_WARNING(6648001,
+                          "Could not complete _ShardsvrJoinMigrations on shard",
+                          "error"_attr = responseOutcome,
+                          "shard"_attr = r.shardId);
+        }
+    }
+}
+
 
 Status processRemoteResponse(const executor::RemoteCommandResponse& remoteResponse) {
     if (!remoteResponse.status.isOK()) {
@@ -124,7 +157,7 @@ std::vector<RequestData> rebuildRequestsFromRecoveryInfo(
         FindCommandRequest findRequest{MigrationType::ConfigNS};
         dbClient.find(std::move(findRequest), ReadPreferenceSetting{}, documentProcessor);
     } catch (const DBException& e) {
-        LOGV2_ERROR(5847215, "Failed to load requests to recover", "error"_attr = redact(e));
+        LOGV2_ERROR(5847215, "Failed to fetch requests to recover", "error"_attr = redact(e));
     }
 
     return rebuiltRequests;
@@ -175,17 +208,28 @@ void BalancerCommandsSchedulerImpl::start(OperationContext* opCtx,
     stdx::lock_guard<Latch> lg(_mutex);
     invariant(!_workerThreadHandle.joinable());
     if (!_executor) {
-        _executor = std::make_unique<executor::ScopedTaskExecutor>(
-            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor());
+        _executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    }
+    _state = SchedulerState::Recovering;
+
+    try {
+        waitForQuiescedCluster(opCtx);
+    } catch (const DBException& e) {
+        LOGV2_WARNING(
+            6648002, "Could not join migration activity on shards", "error"_attr = redact(e));
     }
     auto requestsToRecover = rebuildRequestsFromRecoveryInfo(opCtx, defaultValues);
+
     _numRequestsToRecover = requestsToRecover.size();
-    _state = _numRequestsToRecover == 0 ? SchedulerState::Running : SchedulerState::Recovering;
-
-    for (auto& requestToRecover : requestsToRecover) {
-        _enqueueRequest(lg, std::move(requestToRecover));
+    if (_numRequestsToRecover == 0) {
+        LOGV2(6648003, "Balancer scheduler recovery complete. Switching to regular execution");
+        _state = SchedulerState::Running;
+    } else {
+        for (auto& requestToRecover : requestsToRecover) {
+            // TODO I'd prefer to simply delete the entries.
+            _enqueueRequest(lg, std::move(requestToRecover));
+        }
     }
-
     _workerThreadHandle = stdx::thread([this] { _workerThread(); });
 }
 
@@ -213,11 +257,12 @@ SemiFuture<void> BalancerCommandsSchedulerImpl::requestMoveChunk(
     auto externalClientInfo =
         issuedByRemoteUser ? boost::optional<ExternalClientInfo>(opCtx) : boost::none;
 
+    invariant(migrateInfo.maxKey.has_value(), "Bound not present when requesting move chunk");
     auto commandInfo = std::make_shared<MoveChunkCommandInfo>(migrateInfo.nss,
                                                               migrateInfo.from,
                                                               migrateInfo.to,
                                                               migrateInfo.minKey,
-                                                              migrateInfo.maxKey,
+                                                              *migrateInfo.maxKey,
                                                               commandSettings.maxChunkSizeBytes,
                                                               commandSettings.secondaryThrottle,
                                                               commandSettings.waitForDelete,
@@ -421,7 +466,7 @@ CommandSubmissionResult BalancerCommandsSchedulerImpl::_submit(
     }
 
     auto swRemoteCommandHandle =
-        (*_executor)->scheduleRemoteCommand(remoteCommand, onRemoteResponseReceived);
+        _executor->scheduleRemoteCommand(remoteCommand, onRemoteResponseReceived);
     return CommandSubmissionResult(params.id, distLockTaken, swRemoteCommandHandle.getStatus());
 }
 
@@ -466,8 +511,7 @@ void BalancerCommandsSchedulerImpl::_applyCommandResponse(
 
 void BalancerCommandsSchedulerImpl::_performDeferredCleanup(
     OperationContext* opCtx,
-    const stdx::unordered_map<UUID, RequestData, UUID::Hash>& requestsHoldingResources,
-    bool includePersistedData) {
+    const stdx::unordered_map<UUID, RequestData, UUID::Hash>& requestsHoldingResources) {
     if (requestsHoldingResources.empty()) {
         return;
     }
@@ -477,7 +521,7 @@ void BalancerCommandsSchedulerImpl::_performDeferredCleanup(
         if (request.holdsDistributedLock()) {
             _distributedLocks.releaseFor(opCtx, request.getNamespace());
         }
-        if (includePersistedData && request.requiresRecoveryCleanupOnCompletion()) {
+        if (request.requiresRecoveryCleanupOnCompletion()) {
             deletePersistedRecoveryInfo(dbClient, request.getCommandInfo());
         }
     }
@@ -539,8 +583,7 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
         // 2.a Free any resource acquired by already completed/aborted requests.
         {
             auto opCtxHolder = cc().makeOperationContext();
-            _performDeferredCleanup(
-                opCtxHolder.get(), completedRequestsToCleanUp, true /*includePersistedData*/);
+            _performDeferredCleanup(opCtxHolder.get(), completedRequestsToCleanUp);
             completedRequestsToCleanUp.clear();
         }
 
@@ -568,21 +611,17 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
         }
     }
     // Wait for each outstanding command to complete, clean out its resources and leave.
-    (*_executor)->shutdown();
-    (*_executor)->join();
-
-    stdx::unordered_map<UUID, RequestData, UUID::Hash> cancelledRequests;
+    stdx::unordered_map<UUID, RequestData, UUID::Hash> requestsToClean;
     {
         stdx::unique_lock<Latch> ul(_mutex);
-        cancelledRequests.swap(_requests);
+        _stateUpdatedCV.wait(
+            ul, [this] { return (_requests.size() == _recentlyCompletedRequestIds.size()); });
+        requestsToClean.swap(_requests);
         _requests.clear();
         _recentlyCompletedRequestIds.clear();
-        _executor.reset();
     }
     auto opCtxHolder = cc().makeOperationContext();
-    // Ensure that the clean up won't delete any request recovery document (the commands will be
-    // reissued once the scheduler is restarted)
-    _performDeferredCleanup(opCtxHolder.get(), cancelledRequests, false /*includePersistedData*/);
+    _performDeferredCleanup(opCtxHolder.get(), requestsToClean);
 }
 
 

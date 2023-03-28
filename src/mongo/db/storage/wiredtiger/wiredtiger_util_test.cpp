@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -44,6 +43,9 @@
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/system_clock_source.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -441,11 +443,11 @@ TEST(WiredTigerUtilTest, GenerateVerboseConfiguration) {
         ASSERT_TRUE(config.find("checkpoint:1") == std::string::npos);
     }
     {
-        // Set the WiredTiger Checkpoint LOGV2 component severity to the Debug(1) level.
+        // Set the WiredTiger Checkpoint LOGV2 component severity to the Debug(2) level.
         // We want to ensure this setting is subsequently reflected in a new WiredTiger
         // verbose configuration string.
         auto severityGuard = unittest::MinimumLoggedSeverityGuard{
-            logv2::LogComponent::kWiredTigerCheckpoint, logv2::LogSeverity::Debug(1)};
+            logv2::LogComponent::kWiredTigerCheckpoint, logv2::LogSeverity::Debug(2)};
         std::string config = WiredTigerUtil::generateWTVerboseConfiguration();
         ASSERT_TRUE(config.find("checkpoint:1") != std::string::npos);
         ASSERT_TRUE(config.find("checkpoint:0") == std::string::npos);

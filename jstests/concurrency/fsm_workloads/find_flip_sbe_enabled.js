@@ -1,12 +1,10 @@
 'use strict';
 
 /**
- * Sets the internalQueryForceClassicEngine flag to true and false, and
- * asserts that find queries using the plan cache produce the correct results.
+ * Sets the internalQueryForceClassicEngine flag to true and false, and asserts that find queries
+ * using the plan cache produce the correct results.
  *
  * @tags: [
- *     # Needed as the setParameter for ForceClassicEngine was introduced in 5.1.
- *     requires_fcv_51,
  *     # Our test infrastructure prevents tests which use the 'setParameter' command from running in
  *     # stepdown suites, since parameters are local to each mongod in the replica set.
  *     does_not_support_stepdowns,
@@ -135,7 +133,7 @@ var $config = (function() {
     return {
         threadCount: 10,
         iterations: 100,
-        startState: 'setForceClassicEngineOn',
+        startState: 'setForceClassicEngineOff',
         states: states,
         transitions: transitions,
         setup: setup,

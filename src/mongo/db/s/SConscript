@@ -36,8 +36,8 @@ env.Library(
         '$BUILD_DIR/mongo/s/sharding_routing_table',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/write_block_bypass'
-    ]
+        '$BUILD_DIR/mongo/db/write_block_bypass',
+    ],
 )
 
 env.Library(
@@ -187,7 +187,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/replica_set_aware_service',
         '$BUILD_DIR/mongo/db/rw_concern_d',
         'sharding_api_d',
-    ]
+    ],
 )
 
 env.Library(
@@ -222,14 +222,14 @@ env.Library(
         '$BUILD_DIR/mongo/executor/task_executor_pool',
         '$BUILD_DIR/mongo/s/grid',
         'sharding_api_d',
-    ]
+    ],
 )
 
 env.Library(
     target='forwardable_operation_metadata',
     source=[
         'forwardable_operation_metadata.cpp',
-        'forwardable_operation_metadata.idl'
+        'forwardable_operation_metadata.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -237,7 +237,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/write_block_bypass',
-    ]
+    ],
 )
 
 env.Library(
@@ -381,7 +381,6 @@ env.Library(
         'flush_routing_table_cache_updates_command.cpp',
         'get_database_version_command.cpp',
         'get_shard_version_command.cpp',
-        'get_stats_for_balancing.idl',
         'migration_chunk_cloner_source_legacy_commands.cpp',
         'migration_destination_manager_legacy_commands.cpp',
         'move_primary_coordinator_document.idl',
@@ -422,6 +421,7 @@ env.Library(
         'shardsvr_drop_database_participant_command.cpp',
         'shardsvr_drop_indexes_command.cpp',
         'shardsvr_get_stats_for_balancing_command.cpp',
+        'shardsvr_join_migrations_command.cpp',
         'shardsvr_merge_chunks_command.cpp',
         'shardsvr_move_primary_command.cpp',
         'shardsvr_move_range_command.cpp',
@@ -485,7 +485,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/pipeline/sharded_agg_helpers',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
         '$BUILD_DIR/mongo/s/sharding_api',
-    ]
+    ],
 )
 
 env.Library(
@@ -673,6 +673,7 @@ env.CppUnitTest(
         'resharding/resharding_util_test.cpp',
         'sharding_ddl_util_test.cpp',
         'sharding_util_refresh_test.cpp',
+        'topology_time_ticker_test.cpp',
         'type_lockpings_test.cpp',
         'type_locks_test.cpp',
         'vector_clock_config_server_test.cpp',
@@ -685,6 +686,8 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/read_write_concern_defaults_mock',
         '$BUILD_DIR/mongo/db/repl/replication_info',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+        '$BUILD_DIR/mongo/db/transaction',
+        '$BUILD_DIR/mongo/db/transaction_api',
         '$BUILD_DIR/mongo/util/version_impl',
         'config_server_test_fixture',
     ],
@@ -698,7 +701,7 @@ env.Benchmark(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/auth/authorization_manager_global',
-        'sharding_runtime_d'
+        'sharding_runtime_d',
     ],
 )
 

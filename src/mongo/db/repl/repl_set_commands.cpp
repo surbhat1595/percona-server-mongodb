@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #define LOGV2_FOR_HEARTBEATS(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(                               \
@@ -68,6 +67,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace repl {
@@ -709,12 +711,12 @@ namespace {
  */
 bool replHasDatabases(OperationContext* opCtx) {
     StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
-    std::vector<TenantDatabaseName> tenantDbNames = storageEngine->listDatabases();
+    std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
 
-    if (tenantDbNames.size() >= 2)
+    if (dbNames.size() >= 2)
         return true;
-    if (tenantDbNames.size() == 1) {
-        if (tenantDbNames[0].dbName() != "local")
+    if (dbNames.size() == 1) {
+        if (dbNames[0].db() != "local")
             return true;
 
         // we have a local database.  return true if oplog isn't empty

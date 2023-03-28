@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -57,6 +56,9 @@
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/version/releases.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -194,7 +196,7 @@ private:
  *
  * setFCV takes this lock in exclusive mode when changing the FCV value.
  */
-Lock::ResourceMutex fcvLock("featureCompatibilityVersionLock");
+Lock::ResourceMutex fcvDocumentLock("featureCompatibilityVersionDocumentLock");
 // lastFCVUpdateTimestamp contains the latest oplog entry timestamp which updated the FCV.
 // It is reset on rollback.
 Timestamp lastFCVUpdateTimestamp;
@@ -375,11 +377,11 @@ void FeatureCompatibilityVersion::setIfCleanStartup(OperationContext* opCtx,
 
 bool FeatureCompatibilityVersion::hasNoReplicatedCollections(OperationContext* opCtx) {
     StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
-    std::vector<TenantDatabaseName> tenantDbNames = storageEngine->listDatabases();
+    std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
     auto catalog = CollectionCatalog::get(opCtx);
-    for (auto&& tenantDbName : tenantDbNames) {
-        Lock::DBLock dbLock(opCtx, tenantDbName.dbName(), MODE_S);
-        for (auto&& collNss : catalog->getAllCollectionNamesFromDb(opCtx, tenantDbName)) {
+    for (auto&& dbName : dbNames) {
+        Lock::DBLock dbLock(opCtx, dbName.db(), MODE_S);
+        for (auto&& collNss : catalog->getAllCollectionNamesFromDb(opCtx, dbName)) {
             if (collNss.isReplicated()) {
                 return false;
             }
@@ -478,11 +480,10 @@ void FeatureCompatibilityVersion::fassertInitializedAfterStartup(OperationContex
     auto fcvDocument = findFeatureCompatibilityVersionDocument(opCtx);
 
     auto const storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    auto tenantDbNames = storageEngine->listDatabases();
-    bool nonLocalDatabases =
-        std::any_of(tenantDbNames.begin(), tenantDbNames.end(), [](auto tenantDbName) {
-            return tenantDbName.dbName() != NamespaceString::kLocalDb;
-        });
+    auto dbNames = storageEngine->listDatabases();
+    bool nonLocalDatabases = std::any_of(dbNames.begin(), dbNames.end(), [](auto dbName) {
+        return dbName.db() != NamespaceString::kLocalDb;
+    });
 
     // Fail to start up if there is no featureCompatibilityVersion document and there are non-local
     // databases present.
@@ -504,7 +505,7 @@ void FeatureCompatibilityVersion::fassertInitializedAfterStartup(OperationContex
 
 Lock::ExclusiveLock FeatureCompatibilityVersion::enterFCVChangeRegion(OperationContext* opCtx) {
     invariant(!opCtx->lockState()->isLocked());
-    return Lock::ExclusiveLock(opCtx->lockState(), fcvLock);
+    return Lock::ExclusiveLock(opCtx->lockState(), fcvDocumentLock);
 }
 
 void FeatureCompatibilityVersion::advanceLastFCVUpdateTimestamp(Timestamp fcvUpdateTimestamp) {
@@ -569,7 +570,7 @@ FixedFCVRegion::FixedFCVRegion(OperationContext* opCtx)
     : _lk([&] {
           invariant(!opCtx->lockState()->isLocked());
           invariant(!opCtx->lockState()->isRSTLLocked());
-          return Lock::SharedLock(opCtx->lockState(), fcvLock);
+          return Lock::SharedLock(opCtx->lockState(), fcvDocumentLock);
       }()) {}
 
 FixedFCVRegion::~FixedFCVRegion() = default;

@@ -264,6 +264,7 @@ buildvariants:
   - name: sharded_multi_stmt_txn_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot
   - name: sharding_gen
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: .stitch
   - name: server_discovery_and_monitoring_json_test_TG
     distros:
@@ -358,7 +359,6 @@ buildvariants:
   - name: compile_ninja_TG
     distros:
     - rhel80-build
-  - name: ninja_determinism_TG
 
 - &enterprise-rhel80-dynamic-v4gcc-debug-experimental-template
   name: enterprise-rhel80-dynamic-v4gcc-debug-experimental
@@ -571,8 +571,8 @@ buildvariants:
     # strip from the top of the default path before appending to the GCOV_PREFIX (if any).
     gcov_environment: GCOV_PREFIX=$(pwd) GCOV_PREFIX_STRIP=4
     # Mixing --cache and --gcov doesn't work correctly yet. See SERVER-11084
-    exec_timeout_secs: 16200 # 4.5 hour timeout
-    timeout_secs: 9000 # 2.5 hour idle timeout
+    exec_timeout_secs: 32400 # 9 hour timeout
+    timeout_secs: 21600 # 7 hour idle timeout
     use_scons_cache: false
     # llvm-cov is too old in the v3 toolchain to handle the same options that
     # gcov does. However, this version of clang still produces .gcda files that
@@ -634,8 +634,8 @@ buildvariants:
     # strip from the top of the default path before appending to the GCOV_PREFIX (if any).
     gcov_environment: GCOV_PREFIX=$(pwd) GCOV_PREFIX_STRIP=4
     # Mixing --cache and --gcov doesn't work correctly yet. See SERVER-11084
-    exec_timeout_secs: 16200 # 4.5 hour timeout
-    timeout_secs: 9000 # 2.5 hour idle timeout
+    exec_timeout_secs: 32400 # 9 hour timeout
+    timeout_secs: 21600 # 7 hour idle timeout
     use_scons_cache: false
     gcov_tool: /opt/mongodbtoolchain/v4/bin/llvm-cov gcov
     num_scons_link_jobs_available: 0.99
@@ -878,6 +878,7 @@ buildvariants:
     - windows-vsCurrent-large
   - name: session_jscore_passthrough
   - name: sharding_gen
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: .stitch
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
@@ -952,6 +953,7 @@ buildvariants:
   - name: sharding_auth_gen
   - name: sharding_auth_audit_gen
   - name: sharding_ese_gen
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: snmp
   - name: unittest_shell_hang_analyzer_gen
 
@@ -1044,9 +1046,6 @@ buildvariants:
     distros:
     - windows-vsCurrent-large
   - name: compile_ninja_TG
-    distros:
-    - windows-vsCurrent-large
-  - name: ninja_determinism_TG
     distros:
     - windows-vsCurrent-large
 
@@ -1166,6 +1165,7 @@ buildvariants:
   - name: .ssl
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: macos-enterprise-ninja
   display_name: "Ninja Build: macOS Enterprise"
@@ -1180,7 +1180,6 @@ buildvariants:
   tasks:
   - name: compile_ninja_next_TG
   - name: compile_ninja_TG
-  - name: ninja_determinism_TG
 
 - name: enterprise-macos-rosetta-2
   display_name: "Enterprise macOS Via Rosetta 2"
@@ -1452,6 +1451,7 @@ buildvariants:
   - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
   - name: .sharding .common
+  - name: sharding_opportunistic_secondary_targeting_gen
   - name: snmp
   - name: .stitch
   - name: .csfle
@@ -1469,6 +1469,7 @@ buildvariants:
   - name: server_selection_json_test_TG
     distros:
     - rhel80-xlarge
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-80-64-bit-dynamic-required-ninja
   display_name: "Ninja Build: Enterprise RHEL 8.0"
@@ -1487,7 +1488,6 @@ buildvariants:
   - name: compile_ninja_TG
     distros:
     - rhel80-xlarge
-  - name: ninja_determinism_TG
 
 - &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required
@@ -1617,17 +1617,18 @@ buildvariants:
 #  - name: server_selection_json_test_TG
 #    distros:
 #      - rhel80-large
+  - name: generate_buildid_to_debug_symbols_mapping
 
-- &enterprise-rhel-80-64-bit-dynamic-classic-engine
-  name: enterprise-rhel-80-64-bit-dynamic-classic-engine
-  display_name: "Shared Library Enterprise RHEL 8.0 (Classic Engine)"
+- &enterprise-rhel-80-64-bit-dynamic-sbe-engine
+  name: enterprise-rhel-80-64-bit-dynamic-sbe-engine
+  display_name: "Shared Library Enterprise RHEL 8.0 (SBE Engine)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   stepback: false
   modules:
   - enterprise
   run_on:
   - rhel80-small
-  expansions: &enterprise-rhel-80-64-bit-dynamic-classic-engine-expansions
+  expansions: &enterprise-rhel-80-64-bit-dynamic-sbe-engine-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     multiversion_platform: rhel80
@@ -1643,7 +1644,7 @@ buildvariants:
     burn_in_tag_buildvariants: enterprise-rhel-80-64-bit-inmem linux-64-duroff enterprise-rhel-80-64-bit-multiversion
     num_scons_link_jobs_available: 0.99
     test_flags: >-
-      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
+      --mongodSetParameters="{internalQueryForceClassicEngine: false}"
   tasks:
   - name: .aggfuzzer
   - name: .aggregation
@@ -2227,6 +2228,7 @@ buildvariants:
   - name: sharding_auth_gen
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
+  - name: generate_buildid_to_debug_symbols_mapping
 
 ################################
 # storage engine buildvariants #
@@ -2241,6 +2243,7 @@ buildvariants:
   - rhel80-medium
   expansions:
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    scons_cache_scope: shared
   tasks:
   - name: compile_benchmarks
   - name: .benchmarks
@@ -2250,7 +2253,8 @@ buildvariants:
 #     Experimental buildvariants          #
 ###########################################
 
-- name: rhel80-debug-asan-all-feature-flags
+- &rhel80-debug-asan-all-feature-flags-template
+  name: rhel80-debug-asan-all-feature-flags
   display_name: "~ Shared Library ASAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
@@ -2259,12 +2263,13 @@ buildvariants:
   - rhel80-build
   stepback: false
   expansions:
+    toolchain_version: v3
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     lang_environment: LANG=C
     # If you add anything to san_options, make sure the appropriate changes are
     # also made to SConstruct.
-    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
+    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1:external_symbolizer_path=/opt/mongodbtoolchain/${toolchain_version}/bin/llvm-symbolizer" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/${toolchain_version}/bin/llvm-symbolizer"
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under ASAN build.
@@ -2327,8 +2332,14 @@ buildvariants:
 #  - name: server_discovery_and_monitoring_json_test_TG
 #  - name: server_selection_json_test_TG
 
-- name: rhel80-debug-asan-classic-engine
-  display_name: ~ ASAN Enterprise RHEL 8.0 DEBUG (Classic Engine)
+- <<: *rhel80-debug-asan-all-feature-flags-template
+  name: rhel80-debug-v4asan-all-feature-flags-experimental
+  display_name: "~ Shared Library V4 Toolchain ASAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  expansions:
+    toolchain_version: v4
+
+- name: rhel80-debug-asan-sbe-engine
+  display_name: ~ ASAN Enterprise RHEL 8.0 DEBUG (SBE Engine)
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2343,7 +2354,7 @@ buildvariants:
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
-      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
+      --mongodSetParameters="{internalQueryForceClassicEngine: false}"
       --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -2400,7 +2411,8 @@ buildvariants:
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
 
-- name: rhel80-debug-ubsan-all-feature-flags
+- &rhel80-debug-ubsan-all-feature-flags-template
+  name: rhel80-debug-ubsan-all-feature-flags
   display_name: "~ Shared Library UBSAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
@@ -2409,12 +2421,13 @@ buildvariants:
   - rhel80-build
   stepback: false
   expansions:
+    toolchain_version: v3
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     lang_environment: LANG=C
     # If you add anything to san_options, make sure the appropriate changes are
     # also made to SConstruct.
-    san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
+    san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/${toolchain_version}/bin/llvm-symbolizer"
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
@@ -2474,8 +2487,14 @@ buildvariants:
 #  - name: server_discovery_and_monitoring_json_test_TG
 #  - name: server_selection_json_test_TG
 
-- name: rhel80-debug-ubsan-classic-engine
-  display_name: "~ UBSAN Enterprise RHEL 8.0 DEBUG (Classic Engine)"
+- <<: *rhel80-debug-ubsan-all-feature-flags-template
+  name: rhel80-debug-v4ubsan-all-feature-flags-experimental
+  display_name: "~ Shared Library V4 Toolchain UBSAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  expansions:
+    toolchain_version: v4
+
+- name: rhel80-debug-ubsan-sbe-engine
+  display_name: "~ UBSAN Enterprise RHEL 8.0 DEBUG (SBE Engine)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2490,7 +2509,7 @@ buildvariants:
     san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
-      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
+      --mongodSetParameters="{internalQueryForceClassicEngine: false}"
       --excludeWithAnyTags=requires_ocsp_stapling
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -2579,6 +2598,7 @@ buildvariants:
   - name: jsCore
   - name: jsCore_txns
   - name: unittest_shell_hang_analyzer_gen
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - <<: *rhel80-debug-aubsan-lite-required-template
   name: rhel80-debug-aubsan-lite-all-feature-flags-required
@@ -2618,8 +2638,10 @@ buildvariants:
 #    distros:
 #      - rhel80-xlarge
 #  - name: unittest_shell_hang_analyzer_gen
+  - name: generate_buildid_to_debug_symbols_mapping
 
-- name: enterprise-rhel80-debug-tsan
+- &enterprise-rhel80-debug-tsan-template
+  name: enterprise-rhel80-debug-tsan
   display_name: ~ TSAN Enterprise RHEL 8.0 DEBUG
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
@@ -2630,6 +2652,7 @@ buildvariants:
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     lang_environment: LANG=C
+    toolchain_version: v3
     # If you add anything to san_options, make sure the appropriate
     # changes are also made to SConstruct.
     #
@@ -2641,8 +2664,8 @@ buildvariants:
     # thread leaks, which we have because we don't do a clean shutdown
     # of the ServiceContext.
     #
-    san_options: TSAN_OPTIONS="halt_on_error=1:report_thread_leaks=0:die_after_fork=0:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --enable-free-mon=on --use-libunwind=off -j$(grep -c ^processor /proc/cpuinfo)
+    san_options: TSAN_OPTIONS="halt_on_error=1:report_thread_leaks=0:die_after_fork=0:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/${toolchain_version}/bin/llvm-symbolizer"
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --enable-free-mon=on --use-libunwind=off -j$(grep -c ^processor /proc/cpuinfo)
     # Avoid starting too many mongod's under TSAN build.
     resmoke_jobs_factor: 0.3
     scons_cache_scope: shared
@@ -2650,6 +2673,12 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: jsCore
+
+- <<: *enterprise-rhel80-debug-tsan-template
+  name: enterprise-rhel80-debug-v4tsan-experimental
+  display_name: "~ V4 Toolchain TSAN Enterprise RHEL 8.0 DEBUG"
+  expansions:
+    toolchain_version: v4
 
 - name: enterprise-rhel80-unoptimized-64-bit
   display_name: "~ Enterprise RHEL 8.0 (without Diagnostic Latches)"
@@ -2973,19 +3002,6 @@ buildvariants:
   tasks:
   - name: win_shared_scons_cache_pruning
 
-- name: selected-tests
-  display_name: "~ Selected Tests"
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-small
-  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
-  stepback: false
-  expansions:
-    selected_tests_buildvariants: enterprise-windows-required linux-64-debug-required enterprise-ubuntu-dynamic-1604-clang rhel80-debug-aubsan-lite-required
-  tasks:
-  - name: selected_tests_gen
-
 - <<: *enterprise-rhel-80-64-bit-dynamic-required-template
   name: commit-queue
   display_name: "~ Commit Queue"
@@ -3028,18 +3044,18 @@ buildvariants:
     - windows-vsCurrent-large
 
 ### QO & QE Patch-Specific Build Variants ###
-- <<: *enterprise-rhel-80-64-bit-dynamic-classic-engine
-  name: enterprise-rhel-80-64-bit-dynamic-classic-engine-query-patch-only
-  display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (Classic Engine)"
+- <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine
+  name: enterprise-rhel-80-64-bit-dynamic-sbe-engine-query-patch-only
+  display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (SBE Engine)"
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter # This is a patch-only variant but we run on mainline to pick up task history.
   expansions:
-    <<: *enterprise-rhel-80-64-bit-dynamic-classic-engine-expansions
+    <<: *enterprise-rhel-80-64-bit-dynamic-sbe-engine-expansions
     jstestfuzz_num_generated_files: 20
     jstestfuzz_concurrent_num_files: 5
     target_resmoke_time: 30
     max_sub_suites: 3
     test_flags: >-
-      --mongodSetParameters="{internalQueryForceClassicEngine: true}"
+      --mongodSetParameters="{internalQueryForceClassicEngine: false}"
       --excludeWithAnyTags=resource_intensive
 
 # Intentionally derive from SBE to run the SBE tests with all feature flags.
@@ -3112,7 +3128,8 @@ buildvariants:
     distros:
     - windows-vsCurrent-large
 
-- name: rhel80-debug-aubsan-lite_fuzzer
+- &rhel80-debug-aubsan-lite_fuzzer-template
+  name: rhel80-debug-aubsan-lite_fuzzer
   display_name: "{A,UB}SAN Enterprise RHEL 8.0 FUZZER"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
@@ -3123,10 +3140,11 @@ buildvariants:
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     lang_environment: LANG=C
+    toolchain_version: v3
     # If you add anything to san_options, make sure the appropriate changes are
     # also made to SConstruct.
-    san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
-    compile_flags: LINKFLAGS=-nostdlib++ LIBS=stdc++ --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address,fuzzer --ssl --ocsp-stapling=off -j$(grep -c ^processor /proc/cpuinfo)
+    san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/${toolchain_version}/bin/llvm-symbolizer" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/${toolchain_version}/bin/llvm-symbolizer"
+    compile_flags: LINKFLAGS=-nostdlib++ LIBS=stdc++ --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address,fuzzer --ssl --ocsp-stapling=off -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_ocsp_stapling
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
     hang_analyzer_dump_core: false
@@ -3136,3 +3154,9 @@ buildvariants:
   - *libfuzzertests
   tasks:
   - name: compile_archive_and_run_libfuzzertests_TG
+
+- <<: *rhel80-debug-aubsan-lite_fuzzer-template
+  name: rhel80-debug-v4aubsan-lite_fuzzer-experimental
+  display_name: "V4 Toolchain {A,UB}SAN Enterprise RHEL 8.0 FUZZER"
+  expansions:
+    toolchain_version: v4

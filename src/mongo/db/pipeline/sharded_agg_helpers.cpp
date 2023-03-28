@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 
@@ -57,6 +56,7 @@
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/collection_uuid_mismatch.h"
+#include "mongo/s/is_mongos.h"
 #include "mongo/s/query/cluster_query_knobs_gen.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/query/establish_cursors.h"
@@ -65,6 +65,9 @@
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/visit_helper.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 namespace sharded_agg_helpers {
@@ -115,7 +118,7 @@ RemoteCursor openChangeStreamNewShardMonitor(const boost::intrusive_ptr<Expressi
     aggReq.setNeedsMerge(true);
 
     // TODO SERVER-65369: This code block can be removed after 7.0.
-    if (expCtx->inMongos && expCtx->changeStreamTokenVersion == 1) {
+    if (isMongos() && expCtx->changeStreamTokenVersion == 1) {
         // A request for v1 resume tokens on mongos should only be allowed in test mode.
         tassert(6497000, "Invalid request for v1 resume tokens", getTestCommandsEnabled());
         aggReq.setGenerateV2ResumeTokens(false);
@@ -270,6 +273,22 @@ boost::optional<BSONObj> getOwnedOrNone(boost::optional<BSONObj> obj) {
     return boost::none;
 }
 
+void addSplitStages(const DocumentSource::DistributedPlanLogic& distributedPlanLogic,
+                    Pipeline* mergePipe,
+                    Pipeline* shardPipe) {
+    // This stage must be split, split it normally.
+    // Add in reverse order since we add each to the front and this would flip the order otherwise.
+    for (auto reverseIt = distributedPlanLogic.mergingStages.rbegin();
+         reverseIt != distributedPlanLogic.mergingStages.rend();
+         ++reverseIt) {
+        tassert(6448012,
+                "A stage cannot simultaneously be present on both sides of a pipeline split",
+                distributedPlanLogic.shardsStage != *reverseIt);
+        mergePipe->addInitialSource(*reverseIt);
+    }
+    addMaybeNullStageToBack(shardPipe, distributedPlanLogic.shardsStage);
+}
+
 /**
  * Helper for find split point that handles the split after a stage that must be on
  * the merging half of the pipeline defers being added to the merging pipeline.
@@ -293,11 +312,7 @@ finishFindSplitPointAfterDeferral(
 
         // If this stage also would like to split, split here. Don't defer multiple stages.
         if (auto distributedPlanLogic = current->distributedPlanLogic()) {
-            // A source may not simultaneously be present on both sides of the split.
-            invariant(distributedPlanLogic->shardsStage != distributedPlanLogic->mergingStage);
-            // This stage must be split, split it normally.
-            addMaybeNullStageToBack(shardPipe.get(), std::move(distributedPlanLogic->shardsStage));
-            addMaybeNullStageToFront(mergePipe, std::move(distributedPlanLogic->mergingStage));
+            addSplitStages(*distributedPlanLogic, mergePipe, shardPipe.get());
 
             // The sort that was earlier in the pipeline takes precedence.
             if (!mergeSort) {
@@ -345,22 +360,21 @@ std::pair<std::unique_ptr<Pipeline, PipelineDeleter>, boost::optional<BSONObj>> 
             tassert(6253721,
                     "Must have deferral function if deferring pipeline split",
                     distributedPlanLogic->canMovePast);
+            auto mergingStageList = distributedPlanLogic->mergingStages;
+            tassert(6448007,
+                    "Only support deferring at most one stage for now.",
+                    mergingStageList.size() <= 1);
             // We know these are all currently null/none, as if we had deferred something and
             // 'current' did not need split we would have returned above.
             return finishFindSplitPointAfterDeferral(
                 mergePipe,
                 std::move(shardPipe),
-                std::move(distributedPlanLogic->mergingStage),
+                mergingStageList.empty() ? nullptr : std::move(*mergingStageList.begin()),
                 getOwnedOrNone(distributedPlanLogic->mergeSortPattern),
                 distributedPlanLogic->canMovePast);
         }
 
-        // A source may not simultaneously be present on both sides of the split.
-        invariant(distributedPlanLogic->shardsStage != distributedPlanLogic->mergingStage);
-
-        addMaybeNullStageToBack(shardPipe.get(), std::move(distributedPlanLogic->shardsStage));
-        addMaybeNullStageToFront(mergePipe, std::move(distributedPlanLogic->mergingStage));
-
+        addSplitStages(*distributedPlanLogic, mergePipe, shardPipe.get());
         return {std::move(shardPipe), getOwnedOrNone(distributedPlanLogic->mergeSortPattern)};
     }
 

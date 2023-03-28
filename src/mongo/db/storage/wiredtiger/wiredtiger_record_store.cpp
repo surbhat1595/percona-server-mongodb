@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #define LOGV2_FOR_RECOVERY(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kStorageRecovery}, MESSAGE, ##__VA_ARGS__)
@@ -74,6 +73,9 @@
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -704,7 +706,8 @@ public:
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
 
         auto keyLength = computeRecordIdSize(id);
-        metricsCollector.incrementOneDocRead(value.size + keyLength);
+        metricsCollector.incrementOneDocRead(_rs->getURI(), value.size + keyLength);
+
 
         return {
             {std::move(id), {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
@@ -1107,12 +1110,12 @@ bool WiredTigerRecordStore::findRecord(OperationContext* opCtx,
     invariantWTOK(ret, c->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneCursorSeek();
+    metricsCollector.incrementOneCursorSeek(_uri);
 
     *out = _getData(curwrap);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(out->size() + keyLength);
+    metricsCollector.incrementOneDocRead(_uri, out->size() + keyLength);
 
     return true;
 }
@@ -1136,7 +1139,7 @@ void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const Record
     invariantWTOK(ret, c->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneCursorSeek();
+    metricsCollector.incrementOneCursorSeek(_uri);
 
     WT_ITEM old_value;
     ret = c->get_value(c, &old_value);
@@ -1148,7 +1151,7 @@ void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const Record
     invariantWTOK(ret, c->session);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocWritten(old_length + keyLength);
+    metricsCollector.incrementOneDocWritten(_uri, old_length + keyLength);
 
     _changeNumRecords(opCtx, -1);
     _increaseDataSize(opCtx, -old_length);
@@ -1332,6 +1335,8 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
     invariant(nRecords != 0);
 
     if (_keyFormat == KeyFormat::Long) {
+        long long nextId = _isOplog ? 0 : _reserveIdBlock(opCtx, nRecords);
+
         // Non-clustered record stores will extract the RecordId key for the oplog and generate
         // unique int64_t RecordIds if RecordIds are not set.
         for (size_t i = 0; i < nRecords; i++) {
@@ -1346,7 +1351,8 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
                 // Some RecordStores, like TemporaryRecordStores, may want to set their own
                 // RecordIds.
                 if (record.id.isNull()) {
-                    record.id = _nextId(opCtx);
+                    record.id = RecordId(nextId++);
+                    invariant(record.id.isValid());
                 }
             }
             dassert(record.id > highestIdRecord.id);
@@ -1414,7 +1420,7 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
 
             auto keyLength = computeRecordIdSize(record.id);
-            metricsCollector.incrementOneDocWritten(value.size + keyLength);
+            metricsCollector.incrementOneDocWritten(_uri, value.size + keyLength);
         }
     }
 
@@ -1526,7 +1532,7 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
                                        .toString());
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneCursorSeek();
+    metricsCollector.incrementOneCursorSeek(_uri);
 
     WT_ITEM old_value;
     ret = c->get_value(c, &old_value);
@@ -1573,7 +1579,7 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
             }
 
             auto keyLength = computeRecordIdSize(id);
-            metricsCollector.incrementOneDocWritten(modifiedDataSize + keyLength);
+            metricsCollector.incrementOneDocWritten(_uri, modifiedDataSize + keyLength);
 
             WT_ITEM new_value;
             dassert(nentries == 0 ||
@@ -1590,7 +1596,7 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
         ret = WT_OP_CHECK(wiredTigerCursorInsert(opCtx, c));
 
         auto keyLength = computeRecordIdSize(id);
-        metricsCollector.incrementOneDocWritten(value.size + keyLength);
+        metricsCollector.incrementOneDocWritten(_uri, value.size + keyLength);
     }
     invariantWTOK(ret, c->session);
 
@@ -1642,7 +1648,7 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocWritten(modifiedDataSize + keyLength);
+    metricsCollector.incrementOneDocWritten(_uri, modifiedDataSize + keyLength);
 
     WT_ITEM value;
     invariantWTOK(c->get_value(c, &value), c->session);
@@ -1930,7 +1936,7 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     // data, and by creating a new session, we are preventing WT from being able to roll back that
     // transaction to free up cache space. If we do block on cache eviction here, we must consider
     // that the other session owned by this thread may be the one that needs to be rolled back. If
-    // this does time out, we will receive a WT_CACHE_FULL and throw an error.
+    // this does time out, we will receive a WT_ROLLBACK and throw an error.
     auto wtSession = sessRaii.getSession();
     invariantWTOK(wtSession->reconfigure(wtSession, "cache_max_wait_ms=1000"), wtSession);
 
@@ -1940,13 +1946,16 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     // largest_key API returns the largest key in the table regardless of visibility. This ensures
     // we don't re-use RecordIds that are not visible.
     int ret = cursor->largest_key(cursor);
-    // TODO (SERVER-64461): Remove WT_CACHE_FULL error check after WT-8767
-    if (ret == WT_CACHE_FULL || ret == WT_ROLLBACK) {
+    if (ret == WT_ROLLBACK) {
         // Force the caller to rollback its transaction if we can't make progess with eviction.
         // TODO (SERVER-63620): Convert this to a different error code that is distinguishable from
         // a true write conflict.
-        throw WriteConflictException(
-            fmt::format("Cache full while performing initial write to '{}'", _ns));
+        auto rollbackReason = wtSession->get_rollback_reason(wtSession);
+        rollbackReason = rollbackReason ? rollbackReason : "undefined";
+        throwWriteConflictException(
+            fmt::format("Rollback ocurred while performing initial write to '{}'. Reason: '{}'",
+                        _ns,
+                        rollbackReason));
     } else if (ret != WT_NOTFOUND) {
         invariantWTOK(ret, wtSession);
         auto recordId = getKey(cursor);
@@ -1956,15 +1965,13 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     _nextIdNum.store(nextId);
 }
 
-RecordId WiredTigerRecordStore::_nextId(OperationContext* opCtx) {
+long long WiredTigerRecordStore::_reserveIdBlock(OperationContext* opCtx, size_t nRecords) {
     // Clustered record stores do not automatically generate int64 RecordIds. RecordIds are instead
     // constructed as binary strings, KeyFormat::String, from the user-defined cluster key.
     invariant(_keyFormat == KeyFormat::Long);
     invariant(!_isOplog);
     _initNextIdIfNeeded(opCtx);
-    RecordId out = RecordId(_nextIdNum.fetchAndAdd(1));
-    invariant(out.isValid());
-    return out;
+    return _nextIdNum.fetchAndAdd(nRecords);
 }
 
 void WiredTigerRecordStore::_changeNumRecords(OperationContext* opCtx, int64_t diff) {
@@ -2225,7 +2232,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
 
         // Force a retry of the operation from our last known position by acting as-if
         // we received a WT_ROLLBACK error.
-        throw WriteConflictException();
+        throwWriteConflictException();
     }
 
     WT_ITEM value;
@@ -2234,7 +2241,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(value.size + keyLength);
+    metricsCollector.incrementOneDocRead(_rs.getURI(), value.size + keyLength);
 
     _lastReturnedId = id;
     return {{std::move(id), {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
@@ -2270,13 +2277,13 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekExact(const RecordI
     invariantWTOK(seekRet, c->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneCursorSeek();
+    metricsCollector.incrementOneCursorSeek(std::string(c->uri));
 
     WT_ITEM value;
     invariantWTOK(c->get_value(c, &value), c->session);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(value.size + keyLength);
+    metricsCollector.incrementOneDocRead(_rs.getURI(), value.size + keyLength);
 
     _lastReturnedId = id;
     _eof = false;
@@ -2313,7 +2320,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekNear(const RecordId
     invariantWTOK(ret, c->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneCursorSeek();
+    metricsCollector.incrementOneCursorSeek(std::string(c->uri));
 
     RecordId curId = getKey(c);
 
@@ -2355,7 +2362,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekNear(const RecordId
     invariantWTOK(c->get_value(c, &value), c->session);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(value.size + keyLength);
+    metricsCollector.incrementOneDocRead(_rs.getURI(), value.size + keyLength);
 
     _lastReturnedId = curId;
     _eof = false;

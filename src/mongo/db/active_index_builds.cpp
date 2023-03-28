@@ -26,13 +26,15 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/db/active_index_builds.h"
 #include "mongo/db/catalog/index_builds_manager.h"
 #include "mongo/logv2/log.h"
 
 #include <boost/iterator/transform_iterator.hpp>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -204,6 +206,15 @@ Status ActiveIndexBuilds::registerIndexBuild(
 size_t ActiveIndexBuilds::getActiveIndexBuilds() const {
     stdx::unique_lock<Latch> lk(_mutex);
     return _allIndexBuilds.size();
+}
+
+void ActiveIndexBuilds::appendBuildInfo(const UUID& buildUUID, BSONObjBuilder* builder) const {
+    stdx::unique_lock<Latch> lk(_mutex);
+    auto it = _allIndexBuilds.find(buildUUID);
+    if (it == _allIndexBuilds.end()) {
+        return;
+    }
+    it->second->appendBuildInfo(builder);
 }
 
 void ActiveIndexBuilds::sleepIfNecessary_forTestOnly() const {

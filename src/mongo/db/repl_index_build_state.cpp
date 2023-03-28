@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -36,6 +35,9 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 
@@ -113,6 +115,18 @@ void IndexBuildState::setState(StateFlag state,
         invariant(_state == kAborted);
         _abortStatus = *abortStatus;
     }
+}
+
+void IndexBuildState::appendBuildInfo(BSONObjBuilder* builder) const {
+    BSONObjBuilder stateBuilder;
+    stateBuilder.append("state", toString());
+    if (auto ts = getTimestamp()) {
+        stateBuilder.append("timestamp", *ts);
+    }
+    if (auto abortStatus = getAbortStatus(); !abortStatus.isOK()) {
+        abortStatus.serializeErrorToBSON(&stateBuilder);
+    }
+    builder->append("replicationState", stateBuilder.obj());
 }
 
 ReplIndexBuildState::ReplIndexBuildState(const UUID& indexBuildUUID,
@@ -458,6 +472,21 @@ void ReplIndexBuildState::setLastOpTimeBeforeInterceptors(repl::OpTime opTime) {
 void ReplIndexBuildState::clearLastOpTimeBeforeInterceptors() {
     stdx::unique_lock<Latch> lk(_mutex);
     _lastOpTimeBeforeInterceptors = {};
+}
+
+void ReplIndexBuildState::appendBuildInfo(BSONObjBuilder* builder) const {
+    stdx::unique_lock<Latch> lk(_mutex);
+
+    // This allows listIndexes callers to identify how to kill the index build.
+    // Previously, users have to locate the index build in the currentOp command output
+    // for this information.
+    if (_opId) {
+        builder->append("opid", static_cast<int>(*_opId));
+    }
+
+    builder->append("resumable", !_lastOpTimeBeforeInterceptors.isNull());
+
+    _indexBuildState.appendBuildInfo(builder);
 }
 
 bool ReplIndexBuildState::_shouldSkipIndexBuildStateTransitionCheck(OperationContext* opCtx) const {

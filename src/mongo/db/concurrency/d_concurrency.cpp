@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/platform/basic.h"
 
@@ -46,6 +45,9 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo {
 
@@ -133,6 +135,7 @@ Lock::GlobalLock::GlobalLock(OperationContext* opCtx,
     : _opCtx(opCtx),
       _result(LOCK_INVALID),
       _pbwm(opCtx->lockState(), resourceIdParallelBatchWriterMode),
+      _fcvLock(opCtx->lockState(), resourceIdFeatureCompatibilityVersion),
       _interruptBehavior(behavior),
       _skipRSTLLock(skipRSTLLock),
       _isOutermostLock(!opCtx->lockState()->isLocked()) {
@@ -148,6 +151,15 @@ Lock::GlobalLock::GlobalLock(OperationContext* opCtx,
             }
         });
 
+        if (_opCtx->lockState()->shouldConflictWithSetFeatureCompatibilityVersion()) {
+            _fcvLock.lock(_opCtx, isSharedLockMode(lockMode) ? MODE_IS : MODE_IX, deadline);
+        }
+        ScopeGuard unlockFCVLock([this] {
+            if (_opCtx->lockState()->shouldConflictWithSetFeatureCompatibilityVersion()) {
+                _fcvLock.unlock();
+            }
+        });
+
         _result = LOCK_INVALID;
         if (skipRSTLLock) {
             _takeGlobalLockOnly(lockMode, deadline);
@@ -156,6 +168,7 @@ Lock::GlobalLock::GlobalLock(OperationContext* opCtx,
         }
         _result = LOCK_OK;
 
+        unlockFCVLock.dismiss();
         unlockPBWM.dismiss();
     } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
         // The kLeaveUnlocked behavior suppresses this exception.
@@ -184,6 +197,7 @@ Lock::GlobalLock::GlobalLock(GlobalLock&& otherLock)
     : _opCtx(otherLock._opCtx),
       _result(otherLock._result),
       _pbwm(std::move(otherLock._pbwm)),
+      _fcvLock(std::move(otherLock._fcvLock)),
       _interruptBehavior(otherLock._interruptBehavior),
       _skipRSTLLock(otherLock._skipRSTLLock),
       _isOutermostLock(otherLock._isOutermostLock) {

@@ -84,7 +84,7 @@ modules:
 ## Some variables for convenience:
 variables:
 
-# Used when the tests it runs depend only on mongod, mongos, the mongo shell and the tools.
+# Used when the tests it runs depend only on mongod, mongos, the jstestshell and the tools.
 - &task_template
   name: template
   depends_on:
@@ -282,7 +282,6 @@ variables:
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
   - enterprise-amazon2-arm64
-  - enterprise-debian92-64
   - enterprise-debian10-64
   - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
@@ -320,7 +319,6 @@ variables:
 # List of all variants that make mh artifacts.
 # If a variant is listed here and has a push task, the mh artifacts are pushed
 - mh_variants: &mh_variants
-  - enterprise-debian92-64
   - enterprise-macos
   - enterprise-macos-arm64
   - enterprise-rhel-80-64-bit
@@ -329,6 +327,7 @@ variables:
   - enterprise-rhel-82-arm64
   - enterprise-amazon2-arm64
   - enterprise-ubuntu1804-64
+  - enterprise-ubuntu2004-64
   - enterprise-windows
   - enterprise-windows-required
 
@@ -343,8 +342,6 @@ variables:
   - debian11
   - enterprise-debian10-64
   - enterprise-debian11-64
-  - debian92
-  - enterprise-debian92-64
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
@@ -399,19 +396,6 @@ functions:
       binary: bash
       args:
       - "src/evergreen/functions/evergreen_api_credentials_configure.sh"
-
-  "configure selected tests credentials": &configure_selected_tests_credentials
-    command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      silent: true
-      args:
-      - "src/evergreen/functions/selected_tests_credentials_configure.sh"
-      env:
-        project: ${project}
-        selected_tests_auth_user: ${selected_tests_auth_user}
-        selected_tests_auth_token: ${selected_tests_auth_token}
 
   "git get project": &git_get_project
     command: git.get_project
@@ -770,10 +754,10 @@ functions:
         value: ${project}/${build_variant}/${revision}/debugsymbols/mh-debugsymbols-${build_id}.${ext|tgz}
       - key: mongo_debugsymbols
         value: ${project}/${build_variant}/${revision}/debugsymbols/debugsymbols-${build_id}.${ext|tgz}
-      - key: mongo_shell
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-shell-${build_id}.${ext|tgz}
-      - key: mongo_shell_debugsymbols
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-shell-debugsymbols-${build_id}.${ext|tgz}
+      - key: mongo_jstestshell
+        value: ${project}/${build_variant}/${revision}/binaries/mongo-jstestshell-${build_id}.${ext|tgz}
+      - key: mongo_jstestshell_debugsymbols
+        value: ${project}/${build_variant}/${revision}/binaries/mongo-jstestshell-debugsymbols-${build_id}.${ext|tgz}
       - key: mongo_fuzzer_corpus_mciuploads
         value: ${project}/${build_variant}/${revision}/libfuzzer-corpora/corpora-${build_id}.${ext|tgz}
       - key: mongo_fuzzer_corpus
@@ -994,40 +978,6 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/jstestfuzz_minimize.sh"
-
-  "generate selected tests":
-  - *f_expansions_write
-  - *configure_evergreen_api_credentials
-  - *configure_selected_tests_credentials
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/selected_tests_generate.sh"
-  - *f_expansions_write
-  - command: archive.targz_pack
-    params:
-      target: generate_tasks_config.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-      - "*"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: generate_tasks_config.tgz
-      remote_file: ${project}/${revision}/generate_tasks/generated-config-${version_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      display_name: Generated Task Config - Execution ${execution}
-      optional: true
-  - command: generate.tasks
-    params:
-      optional: true
-      files:
-      - src/generated_resmoke_config/*.json
 
   "generate version":
   - *f_expansions_write
@@ -1749,11 +1699,25 @@ functions:
       display_name: Jepsen Test Results - ${execution}
       optional: true
 
+  "upload jepsen_log": &upload_jepsen_log
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/jepsen-mongodb/jepsen_${task_name}_${execution}.log
+      remote_file: ${project}/${build_variant}/${revision}/jepsen_${task_name}_${execution}.log
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Jepsen Test Log
+
   "save jepsen artifacts":
   - *tar_jepsen_logs
   - *archive_jepsen_logs
   - *tar_jepsen_results
   - *archive_jepsen_results
+  - *upload_jepsen_log
 
   ### Process & archive mongo coredumps ###
   "gather mongo coredumps": &gather_mongo_coredumps
@@ -2275,7 +2239,7 @@ tasks:
   tags: []
   commands:
   - func: "scons compile"
-    vars: &compile-ninja-vars
+    vars:
       generating_for_ninja: true
       separate_debug: off
       task_install_action:
@@ -2321,49 +2285,6 @@ tasks:
         --build-tools=next
       targets:
         install-core
-
-- name: ninja_determinism
-  tags: []
-  commands:
-  - command: expansions.update
-    params:
-      updates:
-      - key: generating_for_ninja
-        value: "true"
-      - key: separate_debug
-        value: off
-      - key: task_install_action
-        value: default
-      - key: task_compile_flags
-        value: --ninja
-      - key: targets
-        value: generate-ninja
-  - *f_expansions_write
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/ninja_determinism_test.sh"
-      env:
-        repeat: "5"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/ninja.tgz
-      remote_file: ${project}/${build_variant}/${revision}/artifacts/ninja-determinism-${build_id}-${task_name}-${execution}.tgz
-      bucket: mciuploads
-      permissions: private
-      content_type: application/gzip
-      display_name: Ninja Determinism Test Artifacts
-      visibility: signed
-      optional: true
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/ninja_determinism_status.sh"
 
 - name: libdeps_graph_linting
   tags: []
@@ -2430,7 +2351,7 @@ tasks:
   - *f_expansions_write
   - func: "scons compile"
     vars:
-      targets: compiledb
+      targets: generated-sources compiledb
       compiling_for_test: true
   - command: subprocess.exec
     type: test
@@ -3013,6 +2934,25 @@ tasks:
     vars:
       targets: lint-pylinters
 
+- name: lint_sconslinters
+  tags: ["lint"]
+  commands:
+  - command: timeout.update
+    params:
+      # 40 minutes
+      exec_timeout_secs: 2400
+  - *f_expansions_write
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - func: "set up venv"
+  - func: "upload pip requirements"
+  - func: "scons lint"
+    vars:
+      targets: lint-sconslinters
+
 - name: lint_clang_format
   tags: ["lint"]
   commands:
@@ -3097,6 +3037,8 @@ tasks:
   - *f_expansions_write
   - *kill_processes
   - *cleanup_environment
+  - func: "set up venv"
+  - func: "upload pip requirements"
   - command: subprocess.exec
     type: test
     params:
@@ -4222,18 +4164,6 @@ tasks:
   - func: "upload pip requirements"
   - func: "generate version"
 
-- name: selected_tests_gen
-  tags: []
-  commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - *f_expansions_write
-  - *kill_processes
-  - *cleanup_environment
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "generate selected tests"
-
 - <<: *gen_task_template
   name: auth_audit_gen
   tags: ["auth", "audit"]
@@ -5121,6 +5051,48 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: shard_split_causally_consistent_jscore_passthrough_gen
+  tags: ["shard_split"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: shard_split_multi_stmt_txn_jscore_passthrough_gen
+  tags: ["shard_split"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: shard_split_stepdown_jscore_passthrough_gen
+  tags: ["shard_split"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: shard_split_terminate_primary_jscore_passthrough_gen
+  tags: ["shard_split"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      fallback_num_sub_suites: 10
+
+- <<: *gen_task_template
+  name: shard_split_kill_primary_jscore_passthrough_gen
+  tags: ["shard_split"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      fallback_num_sub_suites: 10
+
+- <<: *gen_task_template
   name: tenant_migration_jscore_passthrough_gen
   tags: ["serverless"]
   commands:
@@ -5556,12 +5528,13 @@ tasks:
     vars:
       use_large_distro: "true"
 
-- <<: *task_template
-  name: cwrwc_wc_majority_passthrough
-  tags: ["read_write_concern", "large", "write"]
+- <<: *gen_task_template
+  name: cwrwc_wc_majority_passthrough_gen
+  tags: ["read_write_concern", "write"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
 
 - <<: *gen_task_template
   name: secondary_reads_passthrough_gen
@@ -5726,6 +5699,14 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_update_v1_oplog_gen
+  tags: ["sharding", "common"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: sharding_opportunistic_secondary_targeting_gen
   tags: ["sharding", "common"]
   commands:
   - func: "generate resmoke tasks"
@@ -6182,6 +6163,7 @@ tasks:
 - name: selinux_rhel8_org
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6189,6 +6171,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       distro: rhel80-selinux
@@ -6197,6 +6181,7 @@ tasks:
 - name: selinux_rhel8_enterprise
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6204,6 +6189,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       distro: rhel80-selinux
@@ -6212,6 +6199,7 @@ tasks:
 - name: selinux_rhel7_org
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6219,6 +6207,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       user: root
@@ -6228,6 +6218,7 @@ tasks:
 - name: selinux_rhel7_enterprise
   tags: []
   depends_on:
+  - name: archive_dist_test
   - name: package
   commands:
   - command: manifest.load
@@ -6235,6 +6226,8 @@ tasks:
   - *f_expansions_write
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
   - func: "run selinux tests"
     vars:
       user: root
@@ -6343,8 +6336,8 @@ tasks:
         distsrc-${ext|tgz}
         archive-dist
         archive-dist-debug
-        archive-shell
-        archive-shell-debug
+        archive-jstestshell
+        archive-jstestshell-debug
         ${additional_package_targets|}
       task_compile_flags: >-
         --legacy-tarball
@@ -6391,26 +6384,24 @@ tasks:
       display_name: Dist Debugsymbols
   - command: s3.put
     params:
-      optional: true
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell.${ext|tgz}
-      remote_file: ${mongo_shell}
+      local_file: src/mongodb-jstestshell.${ext|tgz}
+      remote_file: ${mongo_jstestshell}
       bucket: mciuploads
       permissions: public-read
       content_type: ${content_type|application/gzip}
-      display_name: Shell
+      display_name: Jstestshell
   - command: s3.put
     params:
-      optional: true
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell-debugsymbols.${ext|tgz}
-      remote_file: ${mongo_shell_debugsymbols}
+      local_file: src/mongodb-jstestshell-debugsymbols.${ext|tgz}
+      remote_file: ${mongo_jstestshell_debugsymbols}
       bucket: mciuploads
       permissions: public-read
       content_type: ${content_type|application/gzip}
-      display_name: Shell Debugsymbols
+      display_name: Jstestshell Debugsymbols
   - command: s3.put
     params:
       optional: true
@@ -6528,14 +6519,6 @@ tasks:
   - func: "set up venv"
   - func: "fetch packages"
   - func: "fetch dist tarball"
-  # Fetch the shell
-  - command: s3.get
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      remote_file: ${mongo_shell}
-      bucket: mciuploads
-      local_file: src/mongo-shell.tgz
   # Fetch mongocryptd
   - command: s3.get
     params:
@@ -6589,16 +6572,6 @@ tasks:
       permissions: public-read
       content_type: ${content_type|application/gzip}
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}
-  # Put the shell tarball/zipfile
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}
   # Put the cryptd tarball/zipfile
   - command: s3.put
     params:
@@ -6656,17 +6629,6 @@ tasks:
       permissions: public-read
       content_type: ${content_type|application/gzip}
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig
-
-  # Put the shell tarball signature
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig
 
   # Put the cryptd tarball signature
   - command: s3.put
@@ -6727,17 +6689,6 @@ tasks:
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1
 
-  # Put the shell tarball sha1
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1
-      aws_key: ${aws_key}
-      permissions: public-read
-      bucket: build-push-testing
-      content_type: text/plain
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1
-
   # Put the cryptd tarball sha1
   - command: s3.put
     params:
@@ -6796,17 +6747,6 @@ tasks:
       bucket: build-push-testing
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256
-
-  # Put the shell tarball sha256
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256
-      permissions: public-read
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      content_type: text/plain
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256
 
   # Put the cryptd tarball sha256
   - command: s3.put
@@ -6867,17 +6807,6 @@ tasks:
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5
 
-  # Put the shell tarball md5
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      permissions: public-read
-      content_type: text/plain
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5
-
   # Put the cryptd tarball md5
   - command: s3.put
     params:
@@ -6935,10 +6864,6 @@ tasks:
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'}}
 
-      #Shell
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}', 'bucket': 'build-push-testing'},
-         'destination': {'path': '${push_path}/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'}}
-
       #Cryptd
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'},
@@ -6963,10 +6888,6 @@ tasks:
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig', 'bucket': '${push_bucket}'}}
 
-      #Shell Signature
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig', 'bucket': 'build-push-testing'},
-         'destination': {'path': '${push_path}/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig', 'bucket': '${push_bucket}'}}
-
       #Cryptd Signature
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig', 'bucket': '${push_bucket}'},
@@ -6980,10 +6901,6 @@ tasks:
       #SHA1 for binaries
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'}}
-
-      #SHA1 for shell
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
-         'destination': {'path': '${push_path}/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'}}
 
       #SHA1 for cryptd
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
@@ -7004,10 +6921,6 @@ tasks:
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256', 'bucket': '${push_bucket}'}}
 
-      #SHA256 for shell
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256', 'bucket': 'build-push-testing'},
-         'destination': {'path': '${push_path}/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256', 'bucket': '${push_bucket}'}}
-
       #SHA256 for cryptd
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256', 'bucket': '${push_bucket}'},
@@ -7026,10 +6939,6 @@ tasks:
       #MD5 for binaries
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
-
-      #MD5 for shell
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-shell-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
-         'destination': {'path': '${push_path}/mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
 
       #MD5 for cryptd
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
@@ -7436,11 +7345,6 @@ task_groups:
       display_name: build.ninja
 
 - <<: *compile_task_group_template
-  name: ninja_determinism_TG
-  tasks:
-  - ninja_determinism
-
-- <<: *compile_task_group_template
   name: server_discovery_and_monitoring_json_test_TG
   tasks:
   - server_discovery_and_monitoring_json_test
@@ -7544,6 +7448,7 @@ task_groups:
   - func: "generate compile expansions"
   teardown_group:
   - func: "f_expansions_write"
+  - func: "attach report"
   - func: "umount shared scons directory"
   - func: "cleanup environment"
   setup_task:

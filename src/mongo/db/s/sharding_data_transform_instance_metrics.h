@@ -90,6 +90,8 @@ public:
                            Milliseconds elapsed);
     Date_t getCopyingBegin() const;
     Date_t getCopyingEnd() const;
+    Date_t getApplyingBegin() const;
+    Date_t getApplyingEnd() const;
     int64_t getDocumentsCopiedCount() const;
     int64_t getBytesCopiedCount() const;
     void restoreDocumentsCopied(int64_t documentCount, int64_t totalDocumentsSizeBytes);
@@ -100,9 +102,12 @@ public:
     void onUpdateApplied();
     void onDeleteApplied();
     void onOplogEntriesFetched(int64_t numEntries, Milliseconds elapsed);
+    void restoreOplogEntriesFetched(int64_t numEntries);
     void onLocalInsertDuringOplogFetching(Milliseconds elapsed);
-    void onBatchRetrievedDuringOplogApplying(int64_t numEntries, Milliseconds elapsed);
+    void onBatchRetrievedDuringOplogApplying(Milliseconds elapsed);
     void onOplogEntriesApplied(int64_t numEntries);
+    void onCloningTotalRemoteBatchRetrieval(Milliseconds elapsed);
+    void onOplogLocalBatchApplied(Milliseconds elapsed);
     void onWriteToStashedCollections();
 
     void onReadDuringCriticalSection();
@@ -119,6 +124,8 @@ public:
 protected:
     void restoreCopyingBegin(Date_t date);
     void restoreCopyingEnd(Date_t date);
+    void restoreApplyingBegin(Date_t date);
+    void restoreApplyingEnd(Date_t date);
     virtual std::string createOperationDescription() const noexcept;
     virtual StringData getStateString() const noexcept;
 

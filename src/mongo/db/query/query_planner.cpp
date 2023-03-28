@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -62,6 +61,9 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 namespace log_detail {
@@ -172,7 +174,8 @@ bool hintMatchesClusterKey(const boost::optional<ClusteredCollectionInfo>& clust
  * Returns the dependencies for the CanoncialQuery, split by those needed to answer the filter, and
  * those needed for "everything else" which is the project and sort.
  */
-std::pair<DepsTracker, DepsTracker> computeDeps(const CanonicalQuery& query) {
+std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params,
+                                                const CanonicalQuery& query) {
     DepsTracker filterDeps;
     query.root()->addDependencies(&filterDeps);
     DepsTracker outputDeps;
@@ -184,6 +187,11 @@ std::pair<DepsTracker, DepsTracker> computeDeps(const CanonicalQuery& query) {
     outputDeps.fields.insert(projectionFields.begin(), projectionFields.end());
     if (auto sortPattern = query.getSortPattern()) {
         sortPattern->addDependencies(&outputDeps);
+    }
+    if (params.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
+        for (auto&& field : params.shardKey) {
+            outputDeps.fields.emplace(field.fieldNameStringData());
+        }
     }
     // There's no known way a sort would depend on the whole document, and we already verified that
     // the projection doesn't depend on the whole document.
@@ -199,7 +207,7 @@ void tryToAddColumnScan(const QueryPlannerParams& params,
     }
     invariant(params.columnarIndexes.size() == 1);
 
-    auto [filterDeps, outputDeps] = computeDeps(query);
+    auto [filterDeps, outputDeps] = computeDeps(params, query);
     if (filterDeps.needWholeDocument || outputDeps.needWholeDocument) {
         // We only want to use the columnar index if we can avoid fetching the whole document.
         return;
@@ -210,9 +218,16 @@ void tryToAddColumnScan(const QueryPlannerParams& params,
     }
 
     // TODO SERVER-63123: Check if the columnar index actually provides the fields we need.
-    auto [filterSplitByColumn, residualPredicate] =
-        expression::splitMatchExpressionForColumns(query.root());
-    auto canPushFilters = filterSplitByColumn.size() > 0;
+    std::unique_ptr<MatchExpression> residualPredicate;
+    StringMap<std::unique_ptr<MatchExpression>> filterSplitByColumn;
+    if (params.options & QueryPlannerParams::GENERATE_PER_COLUMN_FILTERS) {
+        std::tie(filterSplitByColumn, residualPredicate) =
+            expression::splitMatchExpressionForColumns(query.root());
+    } else {
+        residualPredicate = query.root()->shallowClone();
+    }
+    const bool canPushFilters = filterSplitByColumn.size() > 0;
+
     auto columnScan = std::make_unique<ColumnIndexScanNode>(params.columnarIndexes.front(),
                                                             std::move(outputDeps.fields),
                                                             std::move(filterDeps.fields),
@@ -318,6 +333,9 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::RETURN_OWNED_DATA:
                 ss << "RETURN_OWNED_DATA ";
+                break;
+            case QueryPlannerParams::GENERATE_PER_COLUMN_FILTERS:
+                ss << "GENERATE_PER_COLUMN_FILTERS ";
                 break;
             case QueryPlannerParams::DEFAULT:
                 MONGO_UNREACHABLE;
@@ -1557,6 +1575,7 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
         }
 
         branchResult->canonicalQuery = std::move(statusWithCQ.getValue());
+        branchResult->canonicalQuery->setSbeCompatible(query.isSbeCompatible());
 
         // Plan the i-th child. We might be able to find a plan for the i-th child in the plan
         // cache. If there's no cached plan, then we generate and rank plans using the MPS.

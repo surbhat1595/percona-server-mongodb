@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -42,6 +41,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/request_types/flush_routing_table_cache_updates_gen.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace sharding_util {
@@ -64,7 +66,8 @@ std::vector<AsyncRequestsSender::Response> sendCommandToShards(
     StringData dbName,
     const BSONObj& command,
     const std::vector<ShardId>& shardIds,
-    const std::shared_ptr<executor::TaskExecutor>& executor) {
+    const std::shared_ptr<executor::TaskExecutor>& executor,
+    const bool throwOnError) {
     std::vector<AsyncRequestsSender::Request> requests;
     for (const auto& shardId : shardIds) {
         requests.emplace_back(shardId, command);
@@ -89,17 +92,20 @@ std::vector<AsyncRequestsSender::Response> sendCommandToShards(
             // Retrieve the responses and throw at the first failure.
             auto response = ars.next();
 
-            const auto errorContext = "Failed command {} for database '{}' on shard '{}'"_format(
-                command.toString(), dbName, StringData{response.shardId});
+            if (throwOnError) {
+                const auto errorContext =
+                    "Failed command {} for database '{}' on shard '{}'"_format(
+                        command.toString(), dbName, StringData{response.shardId});
 
-            auto shardResponse =
-                uassertStatusOKWithContext(std::move(response.swResponse), errorContext);
+                auto shardResponse =
+                    uassertStatusOKWithContext(std::move(response.swResponse), errorContext);
 
-            auto status = getStatusFromCommandResult(shardResponse.data);
-            uassertStatusOKWithContext(status, errorContext);
+                auto status = getStatusFromCommandResult(shardResponse.data);
+                uassertStatusOKWithContext(status, errorContext);
 
-            auto wcStatus = getWriteConcernStatusFromCommandResult(shardResponse.data);
-            uassertStatusOKWithContext(wcStatus, errorContext);
+                auto wcStatus = getWriteConcernStatusFromCommandResult(shardResponse.data);
+                uassertStatusOKWithContext(wcStatus, errorContext);
+            }
 
             responses.push_back(std::move(response));
         }

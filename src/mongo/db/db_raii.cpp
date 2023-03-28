@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -43,6 +42,9 @@
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/storage/snapshot_helper.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeAutoGetShardVersionCheck);
 MONGO_FAIL_POINT_DEFINE(reachedAutoGetLockFreeShardConsistencyRetry);
@@ -812,14 +814,14 @@ AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadType>::
         AutoStatsTracker::LogMode logMode,
         const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs)
     : _autoCollForRead(opCtx, nsOrUUID, viewMode, deadline, secondaryNssOrUUIDs),
-      _statsTracker(
-          opCtx,
-          _autoCollForRead.getNss(),
-          Top::LockType::ReadLocked,
-          logMode,
-          CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_autoCollForRead.getNss().db()),
-          deadline,
-          secondaryNssOrUUIDs) {
+      _statsTracker(opCtx,
+                    _autoCollForRead.getNss(),
+                    Top::LockType::ReadLocked,
+                    logMode,
+                    CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(
+                        _autoCollForRead.getNss().dbName()),
+                    deadline,
+                    secondaryNssOrUUIDs) {
 
     hangBeforeAutoGetShardVersionCheck.executeIf(
         [&](auto&) { hangBeforeAutoGetShardVersionCheck.pauseWhileSet(opCtx); },
@@ -876,13 +878,13 @@ AutoGetCollectionForReadCommandLockFree::AutoGetCollectionForReadCommandLockFree
 
 OldClientContext::OldClientContext(OperationContext* opCtx, const std::string& ns, bool doVersion)
     : _opCtx(opCtx) {
-    // TODO SERVER-65488 Grab the TenantDatabaseName from the NamespaceString passed in
-    const auto dbName = nsToDatabaseSubstring(ns);
-    const TenantDatabaseName tenantDbName(boost::none, dbName);
-    _db = DatabaseHolder::get(opCtx)->getDb(opCtx, tenantDbName);
+    // TODO SERVER-65488 Grab the DatabaseName from the NamespaceString passed in
+    const auto db = nsToDatabaseSubstring(ns);
+    const DatabaseName dbName(boost::none, db);
+    _db = DatabaseHolder::get(opCtx)->getDb(opCtx, dbName);
 
     if (!_db) {
-        _db = DatabaseHolder::get(opCtx)->openDb(_opCtx, tenantDbName, &_justCreated);
+        _db = DatabaseHolder::get(opCtx)->openDb(_opCtx, dbName, &_justCreated);
         invariant(_db);
     }
 
@@ -902,8 +904,8 @@ OldClientContext::OldClientContext(OperationContext* opCtx, const std::string& n
     }
 
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
-    currentOp->enter_inlock(
-        ns.c_str(), CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_db->name().dbName()));
+    currentOp->enter_inlock(ns.c_str(),
+                            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_db->name()));
 }
 
 AutoGetCollectionForReadCommandMaybeLockFree::AutoGetCollectionForReadCommandMaybeLockFree(

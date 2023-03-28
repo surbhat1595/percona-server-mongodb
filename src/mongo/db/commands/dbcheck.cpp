@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -51,6 +50,9 @@
 #include "mongo/util/background.h"
 
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -222,9 +224,9 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
         result->push_back(info);
         return true;
     };
-    // TODO SERVER-63353: Change dbcheck command to use TenantDatabaseName
+    // TODO SERVER-63353: Change dbcheck command to use DatabaseName
     mongo::catalog::forEachCollectionFromDb(
-        opCtx, TenantDatabaseName(boost::none, dbName), MODE_IS, perCollectionWork);
+        opCtx, DatabaseName(boost::none, dbName), MODE_IS, perCollectionWork);
 
     return result;
 }

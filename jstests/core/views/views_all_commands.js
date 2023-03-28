@@ -159,6 +159,7 @@ let viewsCommandTests = {
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
     _shardsvrGetStatsForBalancing: {skip: isAnInternalCommand},
+    _shardsvrJoinMigrations: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isAnInternalCommand},
     _shardsvrMoveRange: {
         command: {_shardsvrMoveRange: "test.view"},
@@ -604,6 +605,7 @@ let viewsCommandTests = {
     rotateCertificates: {skip: isUnrelated},
     saslContinue: {skip: isUnrelated},
     saslStart: {skip: isUnrelated},
+    sbe: {skip: isAnInternalCommand},
     serverStatus: {command: {serverStatus: 1}, skip: isUnrelated},
     setChangeStreamOptions: {skip: isUnrelated},  // TODO SERVER-65353 remove in 6.1.
     setIndexCommitQuorum: {skip: isUnrelated},

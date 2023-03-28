@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -58,6 +57,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/exit.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 
@@ -322,7 +324,7 @@ std::vector<GenericCursor> CursorManager::getIdleCursors(
             // Exclude cursors that this user does not own if auth is enabled.
             if (ctxAuth->getAuthorizationManager().isAuthEnabled() &&
                 userMode == MongoProcessInterface::CurrentOpUserMode::kExcludeOthers &&
-                !ctxAuth->isCoauthorizedWith(cursor->getAuthenticatedUsers())) {
+                !ctxAuth->isCoauthorizedWith(cursor->getAuthenticatedUser())) {
                 continue;
             }
             // Exclude pinned cursors.
@@ -477,7 +479,7 @@ Status CursorManager::checkAuthForKillCursors(OperationContext* opCtx, CursorId 
     // after the cursor's creation. We're guaranteed that the cursor won't get destroyed while we're
     // reading from it because we hold the partition's lock.
     AuthorizationSession* as = AuthorizationSession::get(opCtx->getClient());
-    return auth::checkAuthForKillCursors(as, cursor->nss(), cursor->getAuthenticatedUsers());
+    return auth::checkAuthForKillCursors(as, cursor->nss(), cursor->getAuthenticatedUser());
 }
 
 }  // namespace mongo

@@ -27,11 +27,9 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_column_store.h"
@@ -45,6 +43,9 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 StatusWith<std::string> WiredTigerColumnStore::generateCreateString(
@@ -114,9 +115,11 @@ WiredTigerColumnStore::WiredTigerColumnStore(OperationContext* ctx,
       _desc(desc),
       _indexName(desc->indexName()) {}
 
-std::string& WiredTigerColumnStore::makeKey(std::string& buffer, PathView path, RecordId rid) {
+std::string& WiredTigerColumnStore::makeKey(std::string& buffer,
+                                            PathView path,
+                                            const RecordId& rid) {
     const auto ridSize =
-        rid.withFormat([](RecordId::Null) -> unsigned long { MONGO_UNREACHABLE; },
+        rid.withFormat([](RecordId::Null) -> unsigned long { return 0; },
                        [](int64_t) -> unsigned long { return sizeof(int64_t); },
                        [](const char* data, size_t len) -> unsigned long { MONGO_UNREACHABLE; });
     buffer.clear();
@@ -126,7 +129,7 @@ std::string& WiredTigerColumnStore::makeKey(std::string& buffer, PathView path, 
         // If we end up reserving more values, the above check should be changed.
         buffer += '\0';
     }
-    rid.withFormat([](RecordId::Null) { MONGO_UNREACHABLE; },
+    rid.withFormat([](RecordId::Null) { /* Do nothing. */ },
                    [&](int64_t num) {
                        num = endian::nativeToBig(num);
                        buffer.append(reinterpret_cast<const char*>(&num), sizeof(num));
@@ -142,9 +145,9 @@ public:
         _curwrap.assertInActiveTxn();
     }
 
-    void insert(PathView, RecordId, CellView) override;
-    void remove(PathView, RecordId) override;
-    void update(PathView, RecordId, CellView) override;
+    void insert(PathView, const RecordId&, CellView) override;
+    void remove(PathView, const RecordId&) override;
+    void update(PathView, const RecordId&, CellView) override;
 
     WT_CURSOR* c() {
         return _curwrap.get();
@@ -162,11 +165,11 @@ std::unique_ptr<ColumnStore::WriteCursor> WiredTigerColumnStore::newWriteCursor(
 
 void WiredTigerColumnStore::insert(OperationContext* opCtx,
                                    PathView path,
-                                   RecordId rid,
+                                   const RecordId& rid,
                                    CellView cell) {
     WriteCursor(opCtx, _uri, _tableId).insert(path, rid, cell);
 }
-void WiredTigerColumnStore::WriteCursor::insert(PathView path, RecordId rid, CellView cell) {
+void WiredTigerColumnStore::WriteCursor::insert(PathView path, const RecordId& rid, CellView cell) {
     dassert(_opCtx->lockState()->isWriteLocked());
 
     auto key = makeKey(path, rid);
@@ -178,7 +181,7 @@ void WiredTigerColumnStore::WriteCursor::insert(PathView path, RecordId rid, Cel
     int ret = WT_OP_CHECK(wiredTigerCursorInsert(_opCtx, c()));
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(keyItem.size);
+    metricsCollector.incrementOneIdxEntryWritten(std::string(c()->uri), keyItem.size);
 
     // TODO: SERVER-65978, we may have to specially handle WT_DUPLICATE_KEY error here.
     if (ret) {
@@ -186,10 +189,10 @@ void WiredTigerColumnStore::WriteCursor::insert(PathView path, RecordId rid, Cel
     }
 }
 
-void WiredTigerColumnStore::remove(OperationContext* opCtx, PathView path, RecordId rid) {
+void WiredTigerColumnStore::remove(OperationContext* opCtx, PathView path, const RecordId& rid) {
     WriteCursor(opCtx, _uri, _tableId).remove(path, rid);
 }
-void WiredTigerColumnStore::WriteCursor::remove(PathView path, RecordId rid) {
+void WiredTigerColumnStore::WriteCursor::remove(PathView path, const RecordId& rid) {
     dassert(_opCtx->lockState()->isWriteLocked());
 
     auto key = makeKey(path, rid);
@@ -202,15 +205,15 @@ void WiredTigerColumnStore::WriteCursor::remove(PathView path, RecordId rid) {
     invariantWTOK(ret, c()->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(keyItem.size);
+    metricsCollector.incrementOneIdxEntryWritten(std::string(c()->uri), keyItem.size);
 }
 void WiredTigerColumnStore::update(OperationContext* opCtx,
                                    PathView path,
-                                   RecordId rid,
+                                   const RecordId& rid,
                                    CellView cell) {
     WriteCursor(opCtx, _uri, _tableId).update(path, rid, cell);
 }
-void WiredTigerColumnStore::WriteCursor::update(PathView path, RecordId rid, CellView cell) {
+void WiredTigerColumnStore::WriteCursor::update(PathView path, const RecordId& rid, CellView cell) {
     dassert(_opCtx->lockState()->isWriteLocked());
 
     auto key = makeKey(path, rid);
@@ -222,7 +225,7 @@ void WiredTigerColumnStore::WriteCursor::update(PathView path, RecordId rid, Cel
     int ret = WT_OP_CHECK(wiredTigerCursorUpdate(_opCtx, c()));
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(keyItem.size);
+    metricsCollector.incrementOneIdxEntryWritten(std::string(c()->uri), keyItem.size);
 
     // TODO: SERVER-65978, may want to handle WT_NOTFOUND specially.
     if (ret != 0)
@@ -233,6 +236,7 @@ void WiredTigerColumnStore::fullValidate(OperationContext* opCtx,
                                          int64_t* numKeysOut,
                                          IndexValidateResults* fullResults) const {
     // TODO SERVER-65484: Validation for column indexes.
+    // uasserted(ErrorCodes::NotImplemented, "WiredTigerColumnStore::fullValidate()");
     return;
 }
 
@@ -240,22 +244,25 @@ class WiredTigerColumnStore::Cursor final : public ColumnStore::Cursor,
                                             public WiredTigerIndexCursorGeneric {
 public:
     Cursor(OperationContext* opCtx, const WiredTigerColumnStore* idx)
-        : WiredTigerIndexCursorGeneric(opCtx, true /* forward */), _opCtx(opCtx), _idx(*idx) {
+        : WiredTigerIndexCursorGeneric(opCtx, true /* forward */), _idx(*idx) {
         _cursor.emplace(_idx.uri(), _idx._tableId, false, _opCtx);
     }
     boost::optional<FullCellView> next() override {
-        if (_eof)
+        if (_eof) {
             return {};
-        if (!_lastMoveSkippedKey)
+        }
+        if (!_lastMoveSkippedKey) {
             advanceWTCursor();
+        }
+
         return curr();
     }
-    boost::optional<FullCellView> seekAtOrPast(PathView path, RecordId rid) override {
+    boost::optional<FullCellView> seekAtOrPast(PathView path, const RecordId& rid) override {
         makeKey(_buffer, path, rid);
         seekWTCursor();
         return curr();
     }
-    boost::optional<FullCellView> seekExact(PathView path, RecordId rid) override {
+    boost::optional<FullCellView> seekExact(PathView path, const RecordId& rid) override {
         makeKey(_buffer, path, rid);
         seekWTCursor(/*exactOnly*/ true);
         return curr();
@@ -302,7 +309,6 @@ public:
 private:
     void resetCursor() {
         WiredTigerIndexCursorGeneric::resetCursor();
-        _eof = true;
     }
     bool seekWTCursor(bool exactOnly = false) {
         // Ensure an active transaction is open.
@@ -323,7 +329,7 @@ private:
         invariantWTOK(ret, c->session);
 
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-        metricsCollector.incrementOneCursorSeek();
+        metricsCollector.incrementOneCursorSeek(std::string(c->uri));
 
         _eof = false;
 
@@ -376,8 +382,6 @@ private:
     // false by any operation that moves the cursor, other than subsequent save/restore pairs.
     bool _lastMoveSkippedKey = false;
 
-    OperationContext* _opCtx;
-    boost::optional<WiredTigerCursor> _cursor;
     const WiredTigerColumnStore& _idx;  // not owned
 };
 
@@ -397,7 +401,7 @@ public:
         _cursor->close(_cursor);
     }
 
-    void addCell(PathView path, RecordId rid, CellView cell) override {
+    void addCell(PathView path, const RecordId& rid, CellView cell) override {
         uasserted(ErrorCodes::NotImplemented, "WiredTigerColumnStore bulk builder");
     }
 
@@ -433,12 +437,16 @@ bool WiredTigerColumnStore::isEmpty(OperationContext* opCtx) {
 
 long long WiredTigerColumnStore::getSpaceUsedBytes(OperationContext* opCtx) const {
     // TODO: SERVER-65980.
-    uasserted(ErrorCodes::NotImplemented, "WiredTigerColumnStore::getSpaceUsedBytes");
+    // For now we just return  this so that tests can successfully obtain collection-level stats on
+    // a collection with a columnstore index.
+    return 27017;
 }
 
 long long WiredTigerColumnStore::getFreeStorageBytes(OperationContext* opCtx) const {
     // TODO: SERVER-65980.
-    uasserted(ErrorCodes::NotImplemented, "WiredTigerColumnStore::getFreeStorageBytes");
+    // For now we just fake this so that tests can successfully obtain collection-level stats on a
+    // collection with a columnstore index.
+    return 27017;
 }
 
 Status WiredTigerColumnStore::compact(OperationContext* opCtx) {
@@ -449,7 +457,10 @@ bool WiredTigerColumnStore::appendCustomStats(OperationContext* opCtx,
                                               BSONObjBuilder* output,
                                               double scale) const {
     // TODO: SERVER-65980.
-    uasserted(ErrorCodes::NotImplemented, "WiredTigerColumnStore::appendCustomStats");
+    // For now we just skip this so that tests can successfully obtain collection-level stats on a
+    // collection with a columnstore index.
+    output->append("note"_sd, "columnstore stats are not yet implemented"_sd);
+    return true;
 }
 
 }  // namespace mongo

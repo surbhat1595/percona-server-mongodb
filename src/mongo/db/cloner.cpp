@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #include "mongo/platform/basic.h"
 
@@ -66,6 +65,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
+
 namespace mongo {
 
 using IndexVersion = IndexDescriptor::IndexVersion;
@@ -103,8 +105,8 @@ struct Cloner::Fun {
         // Make sure database still exists after we resume from the temp release
         auto databaseHolder = DatabaseHolder::get(opCtx);
         // TODO SERVER-63111 use TenantDatabase in the Cloner.
-        const TenantDatabaseName tenantDbName(boost::none, _dbName);
-        auto db = databaseHolder->openDb(opCtx, tenantDbName);
+        const DatabaseName dbName(boost::none, _dbName);
+        auto db = databaseHolder->openDb(opCtx, dbName);
         auto catalog = CollectionCatalog::get(opCtx);
         auto collection = catalog->lookupCollectionByNamespace(opCtx, nss);
         if (!collection) {
@@ -151,7 +153,7 @@ struct Cloner::Fun {
                         repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
                 }
 
-                db = databaseHolder->getDb(opCtx, tenantDbName);
+                db = databaseHolder->getDb(opCtx, dbName);
                 uassert(28593,
                         str::stream() << "Database " << _dbName << " dropped while cloning",
                         db != nullptr);
@@ -340,7 +342,7 @@ Status Cloner::_createCollectionsForDb(
     const std::vector<CreateCollectionParams>& createCollectionParams,
     const std::string& dbName) {
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    const TenantDatabaseName tenantDbName(boost::none, dbName);
+    const DatabaseName tenantDbName(boost::none, dbName);
     auto db = databaseHolder->openDb(opCtx, tenantDbName);
     invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
 

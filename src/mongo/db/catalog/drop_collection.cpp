@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -49,6 +48,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -152,7 +154,7 @@ Status _dropView(OperationContext* opCtx,
         collectionName,
         Top::LockType::NotLocked,
         AutoStatsTracker::LogMode::kUpdateCurOp,
-        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(collectionName.db()));
+        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(collectionName.dbName()));
 
     if (opCtx->writesAreReplicated() &&
         !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, collectionName)) {
@@ -220,7 +222,7 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
         startingNss,
         Top::LockType::NotLocked,
         AutoStatsTracker::LogMode::kUpdateCurOp,
-        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(startingNss.db()));
+        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(startingNss.dbName()));
 
     IndexBuildsCoordinator* indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
     const UUID collectionUUID = coll->uuid();
@@ -321,7 +323,7 @@ Status _dropCollectionForApplyOps(OperationContext* opCtx,
         collectionName,
         Top::LockType::NotLocked,
         AutoStatsTracker::LogMode::kUpdateCurOp,
-        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(collectionName.db()));
+        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(collectionName.dbName()));
 
     WriteUnitOfWork wunit(opCtx);
 

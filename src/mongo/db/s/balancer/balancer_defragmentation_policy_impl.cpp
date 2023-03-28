@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/s/balancer/balancer_defragmentation_policy_impl.h"
 #include "mongo/db/dbdirectclient.h"
@@ -41,6 +40,9 @@
 
 #include <fmt/format.h>
 #include <tuple>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 using namespace fmt::literals;
 
@@ -1611,6 +1613,11 @@ std::unique_ptr<DefragmentationPhase> BalancerDefragmentationPolicyImpl::_transi
     DefragmentationPhaseEnum nextPhase,
     bool shouldPersistPhase) {
     std::unique_ptr<DefragmentationPhase> nextPhaseObject(nullptr);
+    if (nextPhase == DefragmentationPhaseEnum::kSplitChunks &&
+        feature_flags::gNoMoreAutoSplitter.isEnabled(serverGlobalParams.featureCompatibility)) {
+        nextPhase = DefragmentationPhaseEnum::kFinished;
+    }
+
     try {
         if (shouldPersistPhase) {
             _persistPhaseUpdate(opCtx, nextPhase, coll.getUuid());
@@ -1629,13 +1636,7 @@ std::unique_ptr<DefragmentationPhase> BalancerDefragmentationPolicyImpl::_transi
                 nextPhaseObject = MergeChunksPhase::build(opCtx, coll);
                 break;
             case DefragmentationPhaseEnum::kSplitChunks:
-                if (feature_flags::gNoMoreAutoSplitter.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
-                    _clearDefragmentationState(opCtx, coll.getUuid());
-                } else {
-                    nextPhaseObject = SplitChunksPhase::build(opCtx, coll);
-                }
-
+                nextPhaseObject = SplitChunksPhase::build(opCtx, coll);
                 break;
             case DefragmentationPhaseEnum::kFinished:
                 _clearDefragmentationState(opCtx, coll.getUuid());

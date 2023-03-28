@@ -71,6 +71,10 @@ ConnectionString makeRecipientConnectionString(const repl::ReplSetConfig& config
                    std::back_inserter(recipientNodes),
                    [](const repl::MemberConfig& member) { return member.getHostAndPort(); });
 
+    uassert(ErrorCodes::BadValue,
+            "The recipient connection string must have at least three members.",
+            recipientNodes.size() >= kMinimumRequiredRecipientNodes);
+
     return ConnectionString::forReplicaSet(recipientSetName.toString(), recipientNodes);
 }
 
@@ -90,10 +94,15 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
             std::any_of(member.tagsBegin(), member.tagsEnd(), [&](const repl::ReplSetTag& tag) {
                 return tagConfig.getTagKey(tag) == recipientTagName;
             });
+
         if (isRecipient) {
+            auto memberBSON = member.toBSON();
+            auto recipientTags = memberBSON.getField("tags").Obj().removeField(recipientTagName);
             BSONObjBuilder bob(
-                member.toBSON().removeField("votes").removeField("priority").removeField("_id"));
+                memberBSON.removeFields(StringDataSet{"votes", "priority", "_id", "tags"}));
+
             bob.appendNumber("_id", recipientIndex);
+            bob.append("tags", recipientTags);
             recipientMembers.push_back(bob.obj());
             recipientIndex++;
         } else {
@@ -119,7 +128,9 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
         configNoMembersBson.getField("settings").isABSONObj()) {
         BSONObj settings = configNoMembersBson.getField("settings").Obj();
         if (settings.hasField("replicaSetId")) {
-            recipientConfigBob.append("settings", settings.removeField("replicaSetId"));
+            recipientConfigBob.append(
+                "settings",
+                settings.removeField("replicaSetId").addFields(BSON("replicaSetId" << OID::gen())));
         }
     }
 
@@ -128,7 +139,13 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
     splitConfigBob.append("members", donorMembers);
     splitConfigBob.append("recipientConfig", recipientConfigBob.obj());
 
-    return repl::ReplSetConfig::parse(splitConfigBob.obj());
+    auto finalConfig = repl::ReplSetConfig::parse(splitConfigBob.obj());
+
+    uassert(ErrorCodes::InvalidReplicaSetConfig,
+            "Recipient config and top level config cannot share the same replicaSetId",
+            finalConfig.getReplicaSetId() != finalConfig.getRecipientConfig()->getReplicaSetId());
+
+    return finalConfig;
 }
 
 Status insertStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& stateDoc) {
@@ -279,16 +296,12 @@ void RecipientAcceptSplitListener::onServerHeartbeatSucceededEvent(const HostAnd
 
     _reportedSetNames[hostAndPort] = reply["setName"].str();
 
-    if (!_hasPrimary && reply["ismaster"].booleanSafe()) {
-        _hasPrimary = true;
-    }
-
     auto allReportCorrectly =
         std::all_of(_reportedSetNames.begin(),
                     _reportedSetNames.end(),
                     [&](const auto& entry) { return entry.second == _recipientSetName; }) &&
         _reportedSetNames.size() == _numberOfRecipient;
-    if (allReportCorrectly && _hasPrimary) {
+    if (allReportCorrectly) {
         _fulfilled = true;
         _promise.emplaceValue();
     }

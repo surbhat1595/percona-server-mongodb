@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
 #include "mongo/db/s/resharding/resharding_donor_service.h"
 
@@ -62,6 +61,9 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/future_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
+
 
 namespace mongo {
 
@@ -448,12 +450,20 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 Status ReshardingDonorService::DonorStateMachine::_runMandatoryCleanup(
     Status status, const CancellationToken& stepdownToken) {
     if (!status.isOK()) {
+        // If the stepdownToken was triggered, it takes priority in order to make sure that
+        // the promise is set with an error that can be retried with. If it ran into an
+        // unrecoverable error, it would have fasserted earlier.
+        auto statusForPromise = stepdownToken.isCanceled()
+            ? Status{ErrorCodes::InterruptedDueToReplStateChange,
+                     "Resharding operation donor state machine interrupted due to replica set "
+                     "stepdown"}
+            : status;
+
         stdx::lock_guard<Latch> lk(_mutex);
 
-        ensureFulfilledPromise(lk, _critSecWasAcquired, status);
-        ensureFulfilledPromise(lk, _critSecWasPromoted, status);
-
-        ensureFulfilledPromise(lk, _completionPromise, status);
+        ensureFulfilledPromise(lk, _critSecWasAcquired, statusForPromise);
+        ensureFulfilledPromise(lk, _critSecWasPromoted, statusForPromise);
+        ensureFulfilledPromise(lk, _completionPromise, statusForPromise);
     }
 
     if (stepdownToken.isCanceled()) {
@@ -529,6 +539,10 @@ void ReshardingDonorService::DonorStateMachine::interrupt(Status status) {}
 boost::optional<BSONObj> ReshardingDonorService::DonorStateMachine::reportForCurrentOp(
     MongoProcessInterface::CurrentOpConnectionsMode connMode,
     MongoProcessInterface::CurrentOpSessionsMode sessionMode) noexcept {
+    if (ShardingDataTransformMetrics::isEnabled()) {
+        return _metricsNew->reportForCurrentOp();
+    }
+
     ReshardingMetrics::ReporterOptions options(ReshardingMetrics::Role::kDonor,
                                                _metadata.getReshardingUUID(),
                                                _metadata.getSourceNss(),
@@ -636,8 +650,10 @@ void ReshardingDonorService::DonorStateMachine::
         auto rawOpCtx = opCtx.get();
 
         auto generateOplogEntry = [&]() {
-            ReshardingChangeEventO2Field changeEvent{_metadata.getReshardingUUID(),
-                                                     ReshardingChangeEventEnum::kReshardBegin};
+            ReshardBeginChangeEventO2Field changeEvent{
+                _metadata.getSourceNss(),
+                _metadata.getReshardingUUID(),
+            };
 
             repl::MutableOplogEntry oplog;
             oplog.setNss(_metadata.getSourceNss());

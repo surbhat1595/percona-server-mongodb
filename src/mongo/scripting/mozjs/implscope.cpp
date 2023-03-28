@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -60,6 +59,9 @@
 #include "mongo/scripting/mozjs/valuewriter.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 #if !defined(__has_feature)
 #define __has_feature(x) 0
@@ -313,10 +315,6 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine,
         if (gFirstRuntimeCreated) {
             // If we've already made a runtime, just proceed
             lk.unlock();
-        } else {
-            // If this is the first one, hold the lock until after the first
-            // one's done
-            gFirstRuntimeCreated = true;
         }
 
         _context = std::unique_ptr<JSContext, std::function<void(JSContext*)>>(
@@ -325,8 +323,15 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine,
 
         // We turn on a variety of optimizations if the jit is enabled
         if (engine->isJITEnabled()) {
-            JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 1);
-            JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 1);
+            if (!gFirstRuntimeCreated) {
+                // The process-wide baseline JIT is enabled as part of creating the first JS
+                // runtime. If JIT is later disabled for a specific JS runtime, then the ION JIT
+                // engine gets disabled, but the baseline JIT is still enabled.
+                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 1);
+                JS_SetGlobalJitCompilerOption(
+                    _context.get(), JSJITCOMPILER_BASELINE_INTERPRETER_ENABLE, 1);
+                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 1);
+            }
             JS::ContextOptionsRef(_context.get())
                 .setAsmJS(true)
                 .setThrowOnAsmJSValidationFailure(true)
@@ -335,8 +340,15 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine,
                 .setWasmIon(true)
                 .setAsyncStack(false);
         } else {
-            JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 0);
-            JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 0);
+            if (!gFirstRuntimeCreated) {
+                // The process-wide baseline JIT is disabled as part of creating the first JS
+                // runtime. If JIT is later enabled for a specific JS runtime, then the ION JIT
+                // engine gets enabled.
+                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 0);
+                JS_SetGlobalJitCompilerOption(
+                    _context.get(), JSJITCOMPILER_BASELINE_INTERPRETER_ENABLE, 0);
+                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 0);
+            }
             JS::ContextOptionsRef(_context.get())
                 .setAsmJS(false)
                 .setThrowOnAsmJSValidationFailure(false)
@@ -345,6 +357,12 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine,
                 .setWasmCranelift(false)
                 .setWasmIon(false)
                 .setAsyncStack(false);
+        }
+
+        if (!gFirstRuntimeCreated) {
+            // If this is the first one, hold the lock until after the first
+            // one's done
+            gFirstRuntimeCreated = true;
         }
 
         uassert(ErrorCodes::JSInterpreterFailure,

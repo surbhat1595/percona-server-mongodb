@@ -3,6 +3,7 @@ test_kind: parallel_fsm_workload_test
 selector:
   roots:
   - jstests/concurrency/fsm_workloads/**/*.js
+  - src/mongo/db/modules/*/jstests/concurrency/fsm_workloads/*.js
   exclude_files:
   # These workloads implicitly assume that their tid ranges are [0, $config.threadCount). This
   # isn't guaranteed to be true when they are run in parallel with other workloads.
@@ -36,6 +37,7 @@ selector:
   # the error response from the op being killed.
   - jstests/concurrency/fsm_workloads/multi_statement_transaction_kill_sessions_atomicity_isolation.js
   - jstests/concurrency/fsm_workloads/multi_statement_transaction_simple_kill_sessions.js
+  - jstests/concurrency/fsm_workloads/internal_transactions_kill_sessions.js
 
   # This workload may restart running transactions on a different client, causing deadlock if
   # there is a concurrent dropDatabase waiting for the global X lock.
@@ -58,6 +60,12 @@ selector:
   - jstests/concurrency/fsm_workloads/reindex.js
   - jstests/concurrency/fsm_workloads/reindex_background.js
   - jstests/concurrency/fsm_workloads/reindex_writeconflict.js
+
+  # These workloads depend on transactions which may be blocked by cursor sweeps.
+  - jstests/concurrency/fsm_workloads/auth_drop_role.js
+  - jstests/concurrency/fsm_workloads/auth_privilege_cache_miss.js
+  - jstests/concurrency/fsm_workloads/auth_privilege_consistency.js
+  - jstests/concurrency/fsm_workloads/auth_role_consistency.js
 
   exclude_with_any_tags:
   - requires_sharding

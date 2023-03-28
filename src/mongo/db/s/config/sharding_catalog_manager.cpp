@@ -28,7 +28,6 @@
  */
 
 #include "mongo/db/ops/write_ops_parsers.h"
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -66,6 +65,9 @@
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/log_and_backoff.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -145,7 +147,7 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     }
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
-    newOpCtx->setAlwaysInterruptAtStepDownOrUp();
+    newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
     AuthorizationSession::get(newOpCtx.get()->getClient())
         ->grantInternalAuthorization(newOpCtx.get()->getClient());
     newOpCtx.get()->setLogicalSessionId(opCtx->getLogicalSessionId().get());
@@ -718,7 +720,7 @@ void ShardingCatalogManager::withTransaction(
         stdx::lock_guard<Client> lk(*client);
         client->setSystemOperationKillableByStepdown(lk);
     }
-    asr.opCtx()->setAlwaysInterruptAtStepDownOrUp();
+    asr.opCtx()->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
     AuthorizationSession::get(client)->grantInternalAuthorization(client);
     TxnNumber txnNumber = 0;
 

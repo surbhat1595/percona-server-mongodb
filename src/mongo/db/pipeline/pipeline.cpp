@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/logv2/log.h"
@@ -51,6 +50,9 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo {
 
@@ -153,12 +155,13 @@ Pipeline::~Pipeline() {
     invariant(_disposed);
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::clone() const {
+std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::clone(
+    const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const {
     SourceContainer clonedStages;
     for (auto&& stage : _sources) {
-        clonedStages.push_back(stage->clone());
+        clonedStages.push_back(stage->clone(newExpCtx));
     }
-    return create(clonedStages, getContext());
+    return create(clonedStages, newExpCtx ? newExpCtx : getContext());
 }
 
 template <class T>

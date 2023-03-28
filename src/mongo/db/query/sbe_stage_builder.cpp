@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -79,6 +78,9 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo::stage_builder {
 namespace {
@@ -400,7 +402,8 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
                                     PlanStageData* data,
                                     const CanonicalQuery& cq,
                                     const MultipleCollectionAccessor& collections,
-                                    PlanYieldPolicySBE* yieldPolicy) {
+                                    PlanYieldPolicySBE* yieldPolicy,
+                                    const bool preparingFromCache) {
     tassert(6183502, "PlanStage cannot be null", root);
     tassert(6142205, "PlanStageData cannot be null", data);
     tassert(6142206, "yieldPolicy cannot be null", yieldPolicy);
@@ -462,7 +465,7 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
     // TODO SERVER-66039: Add dassert on sbe::validateInputParamsBindings().
     // If the cached plan is parameterized, bind new values for the parameters into the runtime
     // environment.
-    input_params::bind(cq, data->inputParamToSlotMap, env);
+    input_params::bind(cq, data->inputParamToSlotMap, env, preparingFromCache);
 
     for (auto&& indexBoundsInfo : data->indexBoundsEvaluationInfos) {
         input_params::bindIndexBounds(cq, indexBoundsInfo, env);
@@ -868,6 +871,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             "'postAssemblyFilter' to be used instead.",
             !csn->filter);
 
+    tassert(6610251, "Expected no filters by path", csn->filtersByPath.empty());
+
     PlanStageSlots outputs;
 
     auto recordSlot = _slotIdGenerator.generate();
@@ -904,7 +909,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     slotMap[rootStr] = rowStoreSlot;
     auto abt = builder.generateABT();
     auto exprOut = abt ? abtToExpr(*abt, slotMap) : emptyExpr->clone();
-    auto stage = std::make_unique<sbe::ColumnScanStage>(
+    std::unique_ptr<sbe::PlanStage> stage = std::make_unique<sbe::ColumnScanStage>(
         getCurrentCollection(reqs)->uuid(),
         csn->indexEntry.catalogName,
         fieldSlotIds,
@@ -916,6 +921,22 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         rowStoreSlot,
         _yieldPolicy,
         csn->nodeId());
+
+    // Generate post assembly filter.
+    if (csn->postAssemblyFilter) {
+        auto relevantSlots = sbe::makeSV(recordSlot);
+        if (ridSlot) {
+            relevantSlots.push_back(*ridSlot);
+        }
+        relevantSlots.insert(relevantSlots.end(), fieldSlotIds.begin(), fieldSlotIds.end());
+
+        auto [_, outputStage] = generateFilter(_state,
+                                               csn->postAssemblyFilter.get(),
+                                               {std::move(stage), std::move(relevantSlots)},
+                                               recordSlot,
+                                               csn->nodeId());
+        stage = std::move(outputStage.stage);
+    }
 
     return {std::move(stage), std::move(outputs)};
 }
@@ -2965,7 +2986,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             {STAGE_COLLSCAN, &SlotBasedStageBuilder::buildCollScan},
             {STAGE_VIRTUAL_SCAN, &SlotBasedStageBuilder::buildVirtualScan},
             {STAGE_IXSCAN, &SlotBasedStageBuilder::buildIndexScan},
-            {STAGE_COLUMN_IXSCAN, &SlotBasedStageBuilder::buildColumnScan},
+            {STAGE_COLUMN_SCAN, &SlotBasedStageBuilder::buildColumnScan},
             {STAGE_FETCH, &SlotBasedStageBuilder::buildFetch},
             {STAGE_LIMIT, &SlotBasedStageBuilder::buildLimit},
             {STAGE_SKIP, &SlotBasedStageBuilder::buildSkip},

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
 
@@ -57,10 +56,14 @@
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/periodic_runner_factory.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
+
 namespace mongo {
 
 ServiceContextMongoDTest::ServiceContextMongoDTest(Options options)
-    : _tempDir("service_context_d_test_fixture") {
+    : _journalListener(std::move(options._journalListener)),
+      _tempDir("service_context_d_test_fixture") {
 
     if (options._useReplSettings) {
         repl::ReplSettings replSettings;
@@ -135,6 +138,10 @@ ServiceContextMongoDTest::ServiceContextMongoDTest(Options options)
         getServiceContext(),
         std::make_unique<CollectionShardingStateFactoryShard>(getServiceContext()));
     getServiceContext()->getStorageEngine()->notifyStartupComplete();
+
+    if (_journalListener) {
+        serviceContext->getStorageEngine()->setJournalListener(_journalListener.get());
+    }
 }
 
 ServiceContextMongoDTest::~ServiceContextMongoDTest() {

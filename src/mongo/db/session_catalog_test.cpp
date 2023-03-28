@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/platform/basic.h"
 
@@ -44,6 +43,9 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo {
 namespace {
@@ -340,6 +342,32 @@ TEST_F(SessionCatalogTest, ScanSession) {
     catalog()->scanSession(makeLogicalSessionIdForTest(), [](const ObservableSession&) {
         FAIL("The callback was called for non-existent session");
     });
+}
+
+TEST_F(SessionCatalogTestWithDefaultOpCtx, GetHighestTxnNumberWithChildSessions) {
+    auto parentLsid = makeLogicalSessionIdForTest();
+    auto childLsid0 = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid, 1);
+    auto childLsid1 = makeLogicalSessionIdWithTxnUUIDForTest(parentLsid);
+    auto childLsid2 = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid, 5);
+    auto childLsid3 = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid, 3);
+    auto childLsid4 = makeLogicalSessionIdWithTxnUUIDForTest(parentLsid);
+    std::vector<LogicalSessionId> lsids{
+        parentLsid, childLsid0, childLsid1, childLsid2, childLsid3, childLsid4};
+
+    createSession(parentLsid);
+    catalog()->scanSession(parentLsid, [](const ObservableSession& session) {
+        ASSERT_EQ(session.getHighestTxnNumberWithChildSessions(),
+                  TxnNumber{kUninitializedTxnNumber});
+    });
+
+    for (const auto& lsid : lsids) {
+        createSession(lsid);
+    }
+    for (const auto& lsid : lsids) {
+        catalog()->scanSession(lsid, [](const ObservableSession& session) {
+            ASSERT_EQ(session.getHighestTxnNumberWithChildSessions(), TxnNumber{5});
+        });
+    }
 }
 
 TEST_F(SessionCatalogTestWithDefaultOpCtx, ScanSessionsForReapWhenSessionIsIdle) {

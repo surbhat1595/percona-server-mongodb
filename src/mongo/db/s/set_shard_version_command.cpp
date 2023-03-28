@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/platform/basic.h"
 
@@ -50,6 +49,9 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -126,8 +128,7 @@ public:
                 nss.isValid());
 
         // Validate chunk version parameter.
-        const ChunkVersion requestedVersion =
-            ChunkVersion::fromBSONLegacyOrNewerFormat(cmdObj, SetShardVersionRequest::kVersion);
+        auto requestedVersion = ChunkVersion::parse(cmdObj[SetShardVersionRequest::kVersion]);
 
         // Step 3
 

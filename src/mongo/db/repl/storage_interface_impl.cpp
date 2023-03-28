@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 #include "mongo/platform/basic.h"
 
@@ -56,6 +55,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/delete_stage.h"
@@ -81,11 +81,13 @@
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/oplog_cap_maintainer_thread.h"
-#include "mongo/db/tenant_database_name.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 namespace mongo {
 namespace repl {
@@ -413,25 +415,25 @@ Status StorageInterfaceImpl::insertDocuments(OperationContext* opCtx,
 Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
     Lock::GlobalWrite globalWriteLock(opCtx);
 
-    std::vector<TenantDatabaseName> tenantDbNames =
+    std::vector<DatabaseName> dbNames =
         opCtx->getServiceContext()->getStorageEngine()->listDatabases();
-    invariant(!tenantDbNames.empty());
+    invariant(!dbNames.empty());
     LOGV2(21754,
           "dropReplicatedDatabases - dropping {numDatabases} databases",
           "dropReplicatedDatabases - dropping databases",
-          "numDatabases"_attr = tenantDbNames.size());
+          "numDatabases"_attr = dbNames.size());
 
     ReplicationCoordinator::get(opCtx)->clearCommittedSnapshot();
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto hasLocalDatabase = false;
-    for (const auto& tenantDbName : tenantDbNames) {
-        if (tenantDbName.dbName() == "local") {
+    for (const auto& dbName : dbNames) {
+        if (dbName.db() == "local") {
             hasLocalDatabase = true;
             continue;
         }
-        writeConflictRetry(opCtx, "dropReplicatedDatabases", tenantDbName.dbName(), [&] {
-            if (auto db = databaseHolder->getDb(opCtx, tenantDbName)) {
+        writeConflictRetry(opCtx, "dropReplicatedDatabases", dbName.toString(), [&] {
+            if (auto db = databaseHolder->getDb(opCtx, dbName)) {
                 databaseHolder->dropDb(opCtx, db);
             } else {
                 // This is needed since dropDatabase can't be rolled back.
@@ -441,7 +443,7 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
                       "database names but before drop: {dbName}",
                       "dropReplicatedDatabases - database disappeared after retrieving list of "
                       "database names but before drop",
-                      "dbName"_attr = tenantDbName);
+                      "dbName"_attr = dbName);
             }
         });
     }
@@ -449,7 +451,7 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
     LOGV2(21756,
           "dropReplicatedDatabases - dropped {numDatabases} databases",
           "dropReplicatedDatabases - dropped databases",
-          "numDatabases"_attr = tenantDbNames.size());
+          "numDatabases"_attr = dbNames.size());
 
     return Status::OK();
 }

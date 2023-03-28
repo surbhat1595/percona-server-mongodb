@@ -5,10 +5,6 @@
       <Component Id="InstallCompass" Guid="FDB7B7C4-B78F-4A85-8F98-E8E49F6027B2">
         <File Id="InstallCompassScript" Name="InstallCompass.ps1" Source="$(var.BinarySource)\Install-Compass.ps1" />
       </Component>
-      <Component Id="c_mongo" Guid="395C3DA5-A905-409C-AD96-29BFFF5E12D6">
-        <File Id="f_mongo" Name="mongo.exe" Source="$(var.BinarySource)\mongo.exe"
-              DiskId ="1" KeyPath="yes"/>
-      </Component>
       <Component Id="c_mongod" Guid="7EDFB4A2-5A45-4C41-8F6D-976558B3A9D6">
         <File Id="f_mongod" Name="mongod.exe" Source="$(var.BinarySource)\mongod.exe"
               DiskId ="1" KeyPath="yes"/>
@@ -97,23 +93,23 @@
     <?if $(var.Edition) = Enterprise ?>
       <DirectoryRef Id="SNMP">
       <Component Id="c_snmpReadme" Guid="B968FBAC-1813-4039-9FED-A607A0E4CBB3">
-          <File Id="f_snmpReadme" Name="README-snmp.txt" Source="$(var.EnterpriseBase)\docs\README-snmp.txt"
+          <File Id="f_snmpReadme" Name="README-snmp.txt" Source="$(var.EnterpriseBase)\docs\snmp\README-snmp.txt"
                 DiskId="1" KeyPath="yes" />
         </Component>
         <Component Id="c_snmpConfMaster" Guid="0C8CAA6C-1473-4B14-9EE5-AF5A35B1DD8D">
-          <File Id="f_snmpConfMaster" Name="mongod.conf.master" Source="$(var.EnterpriseBase)\docs\mongod.conf.master"
+          <File Id="f_snmpConfMaster" Name="mongod.conf.master" Source="$(var.EnterpriseBase)\docs\snmp\mongod.conf.master"
                 DiskId="1" KeyPath="yes" />
         </Component>
         <Component Id="c_snmpConfSubagent" Guid="6FB66102-41A7-41BD-BB1F-1987E150FA78">
-          <File Id="f_snmpConfSubagent" Name="mongod.conf.subagent" Source="$(var.EnterpriseBase)\docs\mongod.conf.subagent"
+          <File Id="f_snmpConfSubagent" Name="mongod.conf.subagent" Source="$(var.EnterpriseBase)\docs\snmp\mongod.conf.subagent"
                 DiskId="1" KeyPath="yes" />
         </Component>
         <Component Id="c_snmpMongodMib" Guid="F3E98C6B-FE42-44E7-8A1F-E47BDDD0A3D7">
-          <File Id="f_snmpMongodMib" Name="MONGOD-MIB.txt" Source="$(var.EnterpriseBase)\docs\MONGOD-MIB.txt"
+          <File Id="f_snmpMongodMib" Name="MONGOD-MIB.txt" Source="$(var.EnterpriseBase)\docs\snmp\MONGOD-MIB.txt"
                 DiskId="1" KeyPath="yes" />
         </Component>
         <Component Id="c_snmpMongodbincMib" Guid="58c6bd8e-a785-48a0-af48-42f6bf9f68b4">
-          <File Id="f_snmpMongodbincMib" Name="MONGODBINC-MIB.txt" Source="$(var.EnterpriseBase)\docs\MONGODBINC-MIB.txt"
+          <File Id="f_snmpMongodbincMib" Name="MONGODBINC-MIB.txt" Source="$(var.EnterpriseBase)\docs\snmp\MONGODBINC-MIB.txt"
                 DiskId="1" KeyPath="yes" />
         </Component>
       </DirectoryRef>

@@ -239,8 +239,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest,
        ShouldErrorIfDatabaseMismatchOnCollectionlessNss) {
     auto expCtx = getExpCtx();
 
-    expCtx->ns =
-        NamespaceString::makeCollectionlessAggregateNSS(TenantDatabaseName(boost::none, "test"));
+    expCtx->ns = NamespaceString::makeCollectionlessAggregateNSS(DatabaseName(boost::none, "test"));
 
     // Set up the lookup change post image stage.
     auto lookupChangeStage = DocumentSourceChangeStreamAddPostImage::create(expCtx, getSpec());
@@ -265,8 +264,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest,
 TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPassIfDatabaseMatchesOnCollectionlessNss) {
     auto expCtx = getExpCtx();
 
-    expCtx->ns =
-        NamespaceString::makeCollectionlessAggregateNSS(TenantDatabaseName(boost::none, "test"));
+    expCtx->ns = NamespaceString::makeCollectionlessAggregateNSS(DatabaseName(boost::none, "test"));
 
     // Set up the lookup change post image stage.
     auto lookupChangeStage = DocumentSourceChangeStreamAddPostImage::create(expCtx, getSpec());
@@ -377,5 +375,6 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPropagatePauses) {
     ASSERT_TRUE(lookupChangeStage->getNext().isEOF());
     ASSERT_TRUE(lookupChangeStage->getNext().isEOF());
 }
+
 }  // namespace
 }  // namespace mongo

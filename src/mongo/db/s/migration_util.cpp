@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
 
 #include "mongo/platform/basic.h"
 
@@ -77,6 +76,9 @@
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/future_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
+
 
 namespace mongo {
 namespace migrationutil {
@@ -198,7 +200,8 @@ void sendWriteCommandToRecipient(OperationContext* opCtx,
 void retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
     OperationContext* opCtx,
     StringData taskDescription,
-    std::function<void(OperationContext*)> doWork) {
+    std::function<void(OperationContext*)> doWork,
+    boost::optional<Backoff> backoff = boost::none) {
     const std::string newClientName = "{}-{}"_format(getThreadName(), taskDescription);
     const auto initialTerm = repl::ReplicationCoordinator::get(opCtx)->getTerm();
 
@@ -236,6 +239,10 @@ void retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
             doWork(newOpCtx.get());
             break;
         } catch (DBException& ex) {
+            if (backoff) {
+                sleepFor(backoff->nextSleep());
+            }
+
             if (attempt % kLogRetryAttemptThreshold == 1) {
                 LOGV2_WARNING(23937,
                               "Retrying task after failed attempt",
@@ -365,7 +372,7 @@ ExecutorFuture<void> cleanUpRange(ServiceContext* serviceContext,
                }
                auto uniqueOpCtx = tc->makeOperationContext();
                auto opCtx = uniqueOpCtx.get();
-               opCtx->setAlwaysInterruptAtStepDownOrUp();
+               opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
                const NamespaceString& nss = deletionTask.getNss();
 
@@ -443,7 +450,7 @@ ExecutorFuture<void> submitRangeDeletionTask(OperationContext* opCtx,
                                    tc->setSystemOperationKillableByStepdown(lk);
                                }
                                auto uniqueOpCtx = tc->makeOperationContext();
-                               uniqueOpCtx->setAlwaysInterruptAtStepDownOrUp();
+                               uniqueOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
                                LOGV2(55557,
                                      "cleanUpRange failed due to keyPattern shorter than range "
@@ -510,7 +517,7 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
             }
 
             auto opCtx = tc->makeOperationContext();
-            opCtx->setAlwaysInterruptAtStepDownOrUp();
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
             DBDirectClient client(opCtx.get());
             FindCommandRequest findCommand(NamespaceString::kRangeDeletionNamespace);
@@ -533,7 +540,7 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
             }
 
             auto opCtx = tc->makeOperationContext();
-            opCtx->setAlwaysInterruptAtStepDownOrUp();
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
             submitPendingDeletions(opCtx.get());
         })
@@ -637,14 +644,13 @@ void submitOrphanRanges(OperationContext* opCtx, const NamespaceString& nss, con
 
 void submitOrphanRangesForCleanup(OperationContext* opCtx) {
     auto catalog = CollectionCatalog::get(opCtx);
-    const auto& tenantDbNames = catalog->getAllDbNames();
+    const auto& dbNames = catalog->getAllDbNames();
 
-    for (const auto& tenantDbName : tenantDbNames) {
-        if (tenantDbName.dbName() == NamespaceString::kLocalDb)
+    for (const auto& dbName : dbNames) {
+        if (dbName.db() == NamespaceString::kLocalDb)
             continue;
 
-        for (auto collIt = catalog->begin(opCtx, tenantDbName); collIt != catalog->end(opCtx);
-             ++collIt) {
+        for (auto collIt = catalog->begin(opCtx, dbName); collIt != catalog->end(opCtx); ++collIt) {
             auto uuid = collIt.uuid().get();
             auto nss = catalog->lookupNSSByUUID(opCtx, uuid).get();
             LOGV2_DEBUG(22034,
@@ -758,9 +764,9 @@ void notifyChangeStreamsOnRecipientFirstChunk(OperationContext* opCtx,
         << " with no chunks for this collection";
 
     // The message expected by change streams
-    const auto o2Message = BSON("type"
-                                << "migrateChunkToNewShard"
-                                << "from" << fromShardId << "to" << toShardId);
+    const auto o2Message =
+        BSON("migrateChunkToNewShard" << collNss.toString() << "fromShardId" << fromShardId
+                                      << "toShardId" << toShardId);
 
     auto const serviceContext = opCtx->getClient()->getServiceContext();
 
@@ -1242,8 +1248,9 @@ ExecutorFuture<void> launchReleaseCriticalSectionOnRecipientFuture(
                           "shardId"_attr = recipientShardId,
                           "sessionId"_attr = sessionId,
                           "error"_attr = exShardNotFound);
-                };
-            });
+                }
+            },
+            Backoff(Seconds(1), Milliseconds::max()));
     });
 }
 
@@ -1302,10 +1309,15 @@ void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx) {
             const auto& nss = doc.getNss();
 
             // Register this receiveChunk on the ActiveMigrationsRegistry before completing step-up
-            // to prevent a new migration from starting while a receiveChunk was ongoing.
+            // to prevent a new migration from starting while a receiveChunk was ongoing. Wait for
+            // any migrations that began in a previous term to complete if there are any.
             auto scopedReceiveChunk(
                 uassertStatusOK(ActiveMigrationsRegistry::get(opCtx).registerReceiveChunk(
-                    opCtx, nss, doc.getRange(), doc.getDonorShardIdForLoggingPurposesOnly())));
+                    opCtx,
+                    nss,
+                    doc.getRange(),
+                    doc.getDonorShardIdForLoggingPurposesOnly(),
+                    true /* waitForOngoingMigrations */)));
 
             const auto mdm = MigrationDestinationManager::get(opCtx);
             uassertStatusOK(

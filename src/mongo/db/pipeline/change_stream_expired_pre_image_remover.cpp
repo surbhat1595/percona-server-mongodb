@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -51,6 +50,9 @@
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 // Fail point to set current time for time-based expiration of pre-images.
@@ -363,9 +365,10 @@ void deleteExpiredChangeStreamPreImages(Client* client, Date_t currentTimeForTim
                                auto params = std::make_unique<DeleteStageParams>();
                                params->isMulti = true;
 
-                               std::unique_ptr<BatchedDeleteStageBatchParams> batchParams;
+                               std::unique_ptr<BatchedDeleteStageParams> batchedDeleteParams;
                                if (isBatchedRemoval) {
-                                   batchParams = std::make_unique<BatchedDeleteStageBatchParams>();
+                                   batchedDeleteParams =
+                                       std::make_unique<BatchedDeleteStageParams>();
                                }
 
                                auto exec = InternalPlanner::deleteWithCollectionScan(
@@ -376,7 +379,7 @@ void deleteExpiredChangeStreamPreImages(Client* client, Date_t currentTimeForTim
                                    InternalPlanner::Direction::FORWARD,
                                    RecordIdBound(collectionRange.first),
                                    RecordIdBound(collectionRange.second),
-                                   std::move(batchParams));
+                                   std::move(batchedDeleteParams));
                                numberOfRemovals += exec->executeDelete();
                            });
     }

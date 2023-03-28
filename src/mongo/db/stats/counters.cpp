@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "mongo/platform/basic.h"
 
@@ -39,13 +38,16 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/logv2/log.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
+
 namespace mongo {
 
 namespace {
 using namespace fmt::literals;
 }
 
-void OpCounters::_checkWrap(CacheAligned<AtomicWord<long long>> OpCounters::*counter, int n) {
+void OpCounters::_checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::*counter, int n) {
     static constexpr auto maxCount = 1LL << 60;
     auto oldValue = (this->*counter)->fetchAndAddRelaxed(n);
     if (oldValue > maxCount) {
@@ -187,7 +189,7 @@ void NetworkCounter::incrementNumSlowSSLOperations() {
 }
 
 void NetworkCounter::acceptedTFOIngress() {
-    _tfo->accepted.fetchAndAddRelaxed(1);
+    _tfoAccepted->fetchAndAddRelaxed(1);
 }
 
 void NetworkCounter::append(BSONObjBuilder& b) {
@@ -201,11 +203,11 @@ void NetworkCounter::append(BSONObjBuilder& b) {
 
     BSONObjBuilder tfo;
 #ifdef __linux__
-    tfo.append("kernelSetting", _tfo->kernelSetting);
+    tfo.append("kernelSetting", _tfoKernelSetting);
 #endif
-    tfo.append("serverSupported", _tfo->kernelSupportServer);
-    tfo.append("clientSupported", _tfo->kernelSupportClient);
-    tfo.append("accepted", _tfo->accepted.loadRelaxed());
+    tfo.append("serverSupported", _tfoKernelSupportServer);
+    tfo.append("clientSupported", _tfoKernelSupportClient);
+    tfo.append("accepted", _tfoAccepted->loadRelaxed());
     b.append("tcpFastOpen", tfo.obj());
 }
 

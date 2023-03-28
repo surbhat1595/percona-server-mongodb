@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
@@ -43,6 +42,10 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/util/fail_point.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
+
+
+MONGO_FAIL_POINT_DEFINE(fleCompactFailBeforeECOCRead);
 MONGO_FAIL_POINT_DEFINE(fleCompactHangBeforeESCPlaceholderInsert);
 MONGO_FAIL_POINT_DEFINE(fleCompactHangAfterESCPlaceholderInsert);
 MONGO_FAIL_POINT_DEFINE(fleCompactHangBeforeECCPlaceholderInsert);
@@ -617,6 +620,10 @@ CompactStats processFLECompact(OperationContext* opCtx,
     auto eccStats = std::make_shared<ECStats>();
     auto c = std::make_shared<stdx::unordered_set<ECOCCompactionDocument>>();
 
+    if (MONGO_unlikely(fleCompactFailBeforeECOCRead.shouldFail())) {
+        uasserted(6599901, "Failed compact due to fleCompactFailBeforeECOCRead fail point");
+    }
+
     // Read the ECOC documents in a transaction
     {
         std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx);
@@ -630,7 +637,7 @@ CompactStats processFLECompact(OperationContext* opCtx,
             opCtx,
             [sharedBlock, c, ecocStats](const txn_api::TransactionClient& txnClient,
                                         ExecutorPtr txnExec) {
-                FLEQueryInterfaceImpl queryImpl(txnClient);
+                FLEQueryInterfaceImpl queryImpl(txnClient, getGlobalServiceContext());
 
                 auto [request2, namespaces2] = *sharedBlock.get();
 
@@ -659,7 +666,7 @@ CompactStats processFLECompact(OperationContext* opCtx,
             opCtx,
             [sharedBlock, escStats, eccStats](const txn_api::TransactionClient& txnClient,
                                               ExecutorPtr txnExec) {
-                FLEQueryInterfaceImpl queryImpl(txnClient);
+                FLEQueryInterfaceImpl queryImpl(txnClient, getGlobalServiceContext());
 
                 auto [ecocDoc2, namespaces2] = *sharedBlock.get();
 

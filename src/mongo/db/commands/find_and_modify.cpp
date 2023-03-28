@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -77,6 +76,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -358,7 +360,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->enter_inlock(
             nsString.ns().c_str(),
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.db()));
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, nsString);
@@ -401,7 +403,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
         docUnitsReturned.observeOne(docFound->objsize());
 
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-        metricsCollector.incrementDocUnitsReturned(docUnitsReturned);
+        metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
     }
 
     return buildResponse(exec.get(), request.getRemove().value_or(false), docFound);
@@ -423,7 +425,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->enter_inlock(
             nsString.ns().c_str(),
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.db()));
+            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, nsString);
@@ -504,7 +506,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
         docUnitsReturned.observeOne(docFound->objsize());
 
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-        metricsCollector.incrementDocUnitsReturned(docUnitsReturned);
+        metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
     }
 
     return buildResponse(exec.get(), request.getRemove().value_or(false), docFound);
@@ -550,14 +552,15 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
     const BSONObj& cmdObj = this->request().toBSON(BSONObj() /* commandPassthroughFields */);
     validate(this->request());
 
-    auto request = [&]() {
+    auto requestAndMsg = [&]() {
         if (this->request().getEncryptionInformation().has_value() &&
             !this->request().getEncryptionInformation()->getCrudProcessed().get_value_or(false)) {
             return processFLEFindAndModifyExplainMongod(opCtx, this->request());
         } else {
-            return this->request();
+            return std::pair{this->request(), OpMsgRequest()};
         }
     }();
+    auto request = requestAndMsg.first;
 
     const NamespaceString& nsString = request.getNamespace();
     uassertStatusOK(userAllowedWriteNS(opCtx, nsString));

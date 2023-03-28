@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -71,6 +70,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 
@@ -149,10 +151,8 @@ void validateTxnNumber(OperationContext* opCtx, int64_t cursorId, const ClientCu
 void validateAuthorization(const OperationContext* opCtx, const ClientCursor& cursor) {
 
     auto authzSession = AuthorizationSession::get(opCtx->getClient());
-    // A user can only call getMore on their own cursor. If there were multiple users
-    // authenticated when the cursor was created, then at least one of them must be
-    // authenticated in order to run getMore on the cursor.
-    if (!authzSession->isCoauthorizedWith(cursor.getAuthenticatedUsers())) {
+    // A user can only call getMore on their own cursor.
+    if (!authzSession->isCoauthorizedWith(cursor.getAuthenticatedUser())) {
         uasserted(ErrorCodes::Unauthorized,
                   str::stream() << "cursor id " << cursor.cursorid()
                                 << " was not created by the authenticated user");
@@ -496,7 +496,7 @@ public:
                         nss,
                         Top::LockType::NotLocked,
                         AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.db()));
+                        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
                 }
             } else {
                 invariant(cursorPin->getExecutor()->lockPolicy() ==
@@ -526,7 +526,7 @@ public:
                     nss,
                     Top::LockType::ReadLocked,
                     AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                    CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.db()));
+                    CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
 
                 // Check whether we are allowed to read from this node after acquiring our locks.
                 uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->checkCanServeReadsFor(
@@ -713,7 +713,7 @@ public:
             // Increment this metric once we have generated a response and we know it will return
             // documents.
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-            metricsCollector.incrementDocUnitsReturned(docUnitsReturned);
+            metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
             cursorPin->incNReturnedSoFar(numResults);
             cursorPin->incNBatches();
 

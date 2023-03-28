@@ -166,6 +166,10 @@ const NamespaceString NamespaceString::kCompactStructuredEncryptionCoordinatorNa
 const NamespaceString NamespaceString::kClusterParametersNamespace(NamespaceString::kConfigDb,
                                                                    "clusterParameters");
 
+// TODO (SERVER-66431): replace all usages of ShardType::ConfigNS by kConfigsvrShardsNamespace
+const NamespaceString NamespaceString::kConfigsvrShardsNamespace(NamespaceString::kConfigDb,
+                                                                 "shards");
+
 NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(StringData ns) {
     if (!gMultitenancySupport) {
         return NamespaceString(ns, boost::none);
@@ -239,6 +243,10 @@ bool NamespaceString::isLegalClientSystemNS(
         return true;
     }
 
+    if (isChangeStreamChangeCollection()) {
+        return true;
+    }
+
     return false;
 }
 
@@ -252,22 +260,26 @@ bool NamespaceString::isLegalClientSystemNS(
  *
  * Process updates to config.tenantMigrationRecipients individually so they serialize after inserts
  * into config.donatedFiles.<migrationId>.
+ *
+ * Oplog entries on 'config.shards' should be processed one at a time, otherwise the in-memory state
+ * that its kept on the TopologyTimeTicker might be wrong.
+ *
  */
 bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
     return isSystemDotViews() || isServerConfigurationCollection() || isPrivilegeCollection() ||
         _ns == kDonorReshardingOperationsNamespace.ns() ||
         _ns == kForceOplogBatchBoundaryNamespace.ns() ||
-        _ns == kTenantMigrationRecipientsNamespace.ns();
+        _ns == kTenantMigrationRecipientsNamespace.ns() || _ns == kConfigsvrShardsNamespace.ns();
 }
 
-NamespaceString NamespaceString::makeListCollectionsNSS(const TenantDatabaseName& dbName) {
+NamespaceString NamespaceString::makeListCollectionsNSS(const DatabaseName& dbName) {
     NamespaceString nss(dbName, listCollectionsCursorCol);
     dassert(nss.isValid());
     dassert(nss.isListCollectionsCursorNS());
     return nss;
 }
 
-NamespaceString NamespaceString::makeCollectionlessAggregateNSS(const TenantDatabaseName& dbName) {
+NamespaceString NamespaceString::makeCollectionlessAggregateNSS(const DatabaseName& dbName) {
     NamespaceString nss(dbName, collectionlessAggregateCursorCol);
     dassert(nss.isValid());
     dassert(nss.isCollectionlessAggregateNS());
@@ -392,6 +404,10 @@ bool NamespaceString::isChangeStreamPreImagesCollection() const {
     return ns() == kChangeStreamPreImagesNamespace.ns();
 }
 
+bool NamespaceString::isChangeStreamChangeCollection() const {
+    return db() == kConfigDb && coll() == kChangeStreamChangeCollection;
+}
+
 bool NamespaceString::isConfigImagesCollection() const {
     return ns() == kConfigImagesNamespace.ns();
 }
@@ -416,7 +432,8 @@ NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
 }
 
 bool NamespaceString::isImplicitlyReplicated() const {
-    if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() || isChangeCollection()) {
+    if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() || isChangeCollection() ||
+        isChangeStreamChangeCollection()) {
         // Implicitly replicated namespaces are replicated, although they only replicate a subset of
         // writes.
         invariant(isReplicated());

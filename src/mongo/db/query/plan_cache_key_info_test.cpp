@@ -429,8 +429,8 @@ TEST(PlanCacheKeyInfoTest, DifferentQueryEngines) {
         return makeKey(*cq, indexCores);
     };
 
-    const auto classicEngineKey = constructPlanCacheKey(false);
-    const auto noClassicEngineKey = constructPlanCacheKey(true);
+    const auto classicEngineKey = constructPlanCacheKey(true);
+    const auto noClassicEngineKey = constructPlanCacheKey(false);
 
     // Check that the two plan cache keys are not equal because the plans were created under
     // different engines.

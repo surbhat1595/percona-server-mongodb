@@ -1,17 +1,15 @@
 /**
  * Tests batch-deleting a large range of data.
+ * This test does not rely on getMores on purpose, as this is a requirement for running on
+ * tenant migration passthroughs.
  *
  * @tags: [
- *  # TODO (SERVER-66071): support sharded collections
- *  assumes_unsharded_collection,
  *  does_not_support_retryable_writes,
  *  # TODO (SERVER-55909): make WUOW 'groupOplogEntries' the only mode of operation.
  *  does_not_support_transactions,
- *  featureFlagBatchMultiDeletes,
  *  multiversion_incompatible,
  *  no_selinux,
- *  requires_fcv_60,
- *  requires_getmore,
+ *  requires_fcv_61,
  *  requires_non_retryable_writes,
  * ]
  */
@@ -23,13 +21,12 @@ function populateAndMassDelete(queryPredicate) {
     const testDB = db.getSiblingDB('test');
     const coll = testDB['c'];
 
-    const collCount =
-        54321;  // Intentionally not a multiple of BatchedDeleteStageBatchParams::targetBatchDocs.
+    const collCount = 94321;  // Intentionally not a multiple of batchedDeletesTargetBatchDocs.
 
     coll.drop();
     assert.commandWorked(coll.insertMany([...Array(collCount).keys()].map(x => ({_id: x, a: x}))));
 
-    assert.eq(collCount, coll.find().itcount());
+    assert.eq(collCount, coll.count());
 
     // Verify the delete will involve the BATCHED_DELETE stage.
     const expl = testDB.runCommand({
@@ -49,9 +46,9 @@ function populateAndMassDelete(queryPredicate) {
     }
 
     // Execute and verify the deletion.
-    assert.eq(collCount, coll.find().itcount());
+    assert.eq(collCount, coll.count());
     assert.commandWorked(coll.deleteMany(queryPredicate));
-    assert.eq(0, coll.find().itcount());
+    assert.eq(null, coll.findOne());
 }
 
 populateAndMassDelete({_id: {$gte: 0}});

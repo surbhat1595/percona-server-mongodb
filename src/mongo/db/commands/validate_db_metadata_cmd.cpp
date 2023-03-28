@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -44,6 +43,9 @@
 #include "mongo/db/multitenancy.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -122,21 +124,21 @@ public:
 
             // If there is no database name present in the input, run validation against all the
             // databases.
-            auto tenantDbNames = validateCmdRequest.getDb()
-                ? std::vector<TenantDatabaseName>{TenantDatabaseName(
-                      getActiveTenant(opCtx), validateCmdRequest.getDb()->toString())}
+            auto dbNames = validateCmdRequest.getDb()
+                ? std::vector<DatabaseName>{DatabaseName(getActiveTenant(opCtx),
+                                                         validateCmdRequest.getDb()->toString())}
                 : collectionCatalog->getAllDbNames();
 
-            for (const auto& tenantDbName : tenantDbNames) {
-                AutoGetDb autoDb(opCtx, tenantDbName.dbName(), LockMode::MODE_IS);
+            for (const auto& dbName : dbNames) {
+                AutoGetDb autoDb(opCtx, dbName.db(), LockMode::MODE_IS);
                 if (!autoDb.getDb()) {
                     continue;
                 }
 
                 if (validateCmdRequest.getCollection()) {
-                    if (!_validateNamespace(opCtx,
-                                            NamespaceString(tenantDbName.dbName(),
-                                                            *validateCmdRequest.getCollection()))) {
+                    if (!_validateNamespace(
+                            opCtx,
+                            NamespaceString(dbName.db(), *validateCmdRequest.getCollection()))) {
                         return;
                     }
                     continue;
@@ -145,11 +147,11 @@ public:
                 // If there is no collection name present in the input, run validation against all
                 // the collections.
                 collectionCatalog->iterateViews(
-                    opCtx, tenantDbName, [this, opCtx](const ViewDefinition& view) {
+                    opCtx, dbName, [this, opCtx](const ViewDefinition& view) {
                         return _validateView(opCtx, view);
                     });
 
-                for (auto collIt = collectionCatalog->begin(opCtx, tenantDbName);
+                for (auto collIt = collectionCatalog->begin(opCtx, dbName);
                      collIt != collectionCatalog->end(opCtx);
                      ++collIt) {
                     if (!_validateNamespace(

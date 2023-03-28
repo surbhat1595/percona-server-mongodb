@@ -26,7 +26,6 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -148,8 +147,7 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
     DocumentSourceSort::parseBoundedSort,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    boost::
-        none /* TODO SERVER-52286 feature_flags::gFeatureFlagBucketUnpackWithSort.getVersion() */,
+    feature_flags::gFeatureFlagBucketUnpackWithSort.getVersion(),
     feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabledAndIgnoreFCV());
 
 DocumentSource::GetNextResult::ReturnStatus DocumentSourceSort::timeSorterPeek() {
@@ -245,13 +243,9 @@ DocumentSource::GetNextResult DocumentSourceSort::doGetNext() {
                         _timeSorter->getState() != TimeSorterInterface::State::kWait);
                     continue;
                 case GetNextResult::ReturnStatus::kAdvanced:
-                    Document doc = timeSorterGetNext();
-                    auto time =
-                        doc.getField(_sortExecutor->sortPattern().back().fieldPath->fullPath());
-                    uassert(6369909,
-                            "$_internalBoundedSort only handles Date values",
-                            time.getType() == Date);
-                    _timeSorter->add({time.getDate()}, doc);
+                    auto [time, doc] = extractTime(timeSorterGetNext());
+
+                    _timeSorter->add({time}, doc);
                     continue;
             }
         }
@@ -277,8 +271,9 @@ DocumentSource::GetNextResult DocumentSourceSort::doGetNext() {
     return GetNextResult{_sortExecutor->getNext().second};
 }
 
-boost::intrusive_ptr<DocumentSource> DocumentSourceSort::clone() const {
-    return create(pExpCtx,
+boost::intrusive_ptr<DocumentSource> DocumentSourceSort::clone(
+    const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const {
+    return create(newExpCtx ? newExpCtx : pExpCtx,
                   getSortKeyPattern(),
                   _sortExecutor->getLimit(),
                   _sortExecutor->getMaxMemoryBytes());
@@ -617,6 +612,24 @@ std::pair<Value, Document> DocumentSourceSort::extractSortKey(Document&& doc) co
     }
 }
 
+std::pair<Date_t, Document> DocumentSourceSort::extractTime(Document&& doc) const {
+    auto time = doc.getField(_sortExecutor->sortPattern().back().fieldPath->fullPath());
+    uassert(6369909, "$_internalBoundedSort only handles Date values", time.getType() == Date);
+    auto date = time.getDate();
+
+    if (pExpCtx->needsMerge) {
+        // If this sort stage is part of a merged pipeline, make sure that each Document's sort key
+        // gets saved with its metadata.
+        Value sortKey = _sortKeyGen->computeSortKeyFromDocument(doc);
+        MutableDocument toBeSorted(std::move(doc));
+        toBeSorted.metadata().setSortKey(sortKey, _sortKeyGen->isSingleElementKey());
+
+        return std::make_pair(date, toBeSorted.freeze());
+    }
+
+    return std::make_pair(date, std::move(doc));
+}
+
 boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceSort::distributedPlanLogic() {
     uassert(6369906,
             "$_internalBoundedSort cannot be the first stage on the merger, because it requires "
@@ -629,7 +642,7 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceSort::distri
                                  .serialize(SortPattern::SortKeySerialization::kForSortKeyMerging)
                                  .toBson();
     if (auto limit = getLimit()) {
-        split.mergingStage = DocumentSourceLimit::create(pExpCtx, *limit);
+        split.mergingStages = {DocumentSourceLimit::create(pExpCtx, *limit)};
     }
     return split;
 }
@@ -663,6 +676,9 @@ std::string nextFileName() {
 }  // namespace mongo
 
 #include "mongo/db/sorter/sorter.cpp"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 template class ::mongo::BoundedSorter<::mongo::DocumentSourceSort::SortableDate,
                                       ::mongo::Document,
                                       ::mongo::CompAsc,

@@ -230,8 +230,9 @@ public:
     // The internal change events that are not exposed to the users.
     static constexpr StringData kReshardBeginOpType = "reshardBegin"_sd;
     static constexpr StringData kReshardDoneCatchUpOpType = "reshardDoneCatchUp"_sd;
+
     // Internal op type to signal mongos to open cursors on new shards.
-    static constexpr StringData kNewShardDetectedOpType = "kNewShardDetected"_sd;
+    static constexpr StringData kNewShardDetectedOpType = "migrateChunkToNewShard"_sd;
 
     // These events are guarded behind the 'showExpandedEvents' flag.
     static constexpr StringData kCreateOpType = "create"_sd;
@@ -239,6 +240,8 @@ public:
     static constexpr StringData kDropIndexesOpType = "dropIndexes"_sd;
     static constexpr StringData kShardCollectionOpType = "shardCollection"_sd;
     static constexpr StringData kMigrateLastChunkFromShardOpType = "migrateLastChunkFromShard"_sd;
+    static constexpr StringData kRefineCollectionShardKeyOpType = "refineCollectionShardKey"_sd;
+    static constexpr StringData kReshardCollectionOpType = "reshardCollection"_sd;
     static constexpr StringData kModifyOpType = "modify"_sd;
 
     // Default regex for collections match which prohibits system collections.

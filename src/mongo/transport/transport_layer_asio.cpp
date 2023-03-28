@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 #include "mongo/platform/basic.h"
 
@@ -74,6 +73,9 @@
 #endif
 
 #include "mongo/transport/session_asio.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
+
 
 namespace mongo {
 namespace transport {
@@ -297,8 +299,11 @@ TransportLayerASIO::Options::Options(const ServerGlobalParams* params,
       maxConns(params->maxConns) {
 }
 
-TransportLayerASIO::TimerService::TimerService()
-    : _reactor(std::make_shared<TransportLayerASIO::ASIOReactor>()) {}
+TransportLayerASIO::TimerService::TimerService(Options opt)
+    : _reactor(std::make_shared<TransportLayerASIO::ASIOReactor>()) {
+    if (opt.spawn)
+        _spawn = std::move(opt.spawn);
+}
 
 TransportLayerASIO::TimerService::~TimerService() {
     stop();
@@ -316,7 +321,7 @@ void TransportLayerASIO::TimerService::start() {
     auto lk = stdx::lock_guard(_mutex);
     auto precondition = State::kInitialized;
     if (_state.compareAndSwap(&precondition, State::kStarted)) {
-        _thread = stdx::thread([reactor = _reactor] {
+        _thread = _spawn([reactor = _reactor] {
             LOGV2_INFO(5490002, "Started a new thread for the timer service");
             reactor->run();
             LOGV2_INFO(5490003, "Returning from the timer service thread");

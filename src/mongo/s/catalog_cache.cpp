@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #define LOGV2_FOR_CATALOG_REFRESH(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(                                    \
@@ -52,6 +51,9 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -692,7 +694,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
             // Otherwise, we are making a whole new routing table.
             if (isIncremental &&
                 existingHistory->optRt->getVersion().isSameCollection(
-                    collectionAndChunks.timestamp)) {
+                    {collectionAndChunks.epoch, collectionAndChunks.timestamp})) {
                 return existingHistory->optRt->makeUpdated(collectionAndChunks.timeseriesFields,
                                                            collectionAndChunks.reshardingFields,
                                                            maxChunkSize,

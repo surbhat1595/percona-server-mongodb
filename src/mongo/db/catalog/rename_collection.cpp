@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -62,6 +61,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -98,9 +100,7 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
         return {ErrorCodes::IllegalOperation,
                 "Cannot rename collections between a replicated and an unreplicated database"};
 
-    // TODO SERVER-64608 Use the tenantID from 'source' to construct the DatabaseName
-    const TenantDatabaseName tenantDbName(boost::none, source.db());
-    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, tenantDbName);
+    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, source.dbName());
     if (!db || db->isDropPending(opCtx))
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream()
@@ -151,7 +151,7 @@ Status renameTargetCollectionToTmp(OperationContext* opCtx,
 
     // The generated unique collection name is only guaranteed to exist if the database is
     // exclusively locked.
-    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name().dbName(), LockMode::MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name().db(), LockMode::MODE_X));
     auto tmpNameResult = targetDB->makeUniqueCollectionNamespace(opCtx, "tmp%%%%%.rename");
     if (!tmpNameResult.isOK()) {
         return tmpNameResult.getStatus().withContext(
@@ -319,8 +319,7 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
         sourceLock.emplace(opCtx, source, MODE_X);
     }
 
-    const TenantDatabaseName tenantDbName(boost::none, source.db());
-    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, tenantDbName);
+    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, source.dbName());
     auto catalog = CollectionCatalog::get(opCtx);
     const auto sourceColl = catalog->lookupCollectionByNamespace(opCtx, source);
     const auto targetColl = catalog->lookupCollectionByNamespace(opCtx, target);
@@ -338,7 +337,7 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
         source,
         Top::LockType::NotLocked,
         AutoStatsTracker::LogMode::kUpdateCurOp,
-        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(source.db()));
+        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(source.dbName()));
 
     if (!targetColl) {
         return renameCollectionDirectly(opCtx, db, sourceColl->uuid(), source, target, options);
@@ -370,8 +369,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
     if (!status.isOK())
         return status;
 
-    const TenantDatabaseName tenantDbName(boost::none, source.db());
-    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, tenantDbName);
+    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, source.dbName());
     const auto sourceColl =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, source);
 
@@ -380,7 +378,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
         source,
         Top::LockType::NotLocked,
         AutoStatsTracker::LogMode::kUpdateCurOp,
-        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(source.db()));
+        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(source.dbName()));
 
     return writeConflictRetry(opCtx, "renameCollection", target.ns(), [&] {
         auto targetColl = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, target);
@@ -502,8 +500,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
 
     DisableDocumentValidation validationDisabler(opCtx);
 
-    const TenantDatabaseName sourceTenantDbName(boost::none, source.db());
-    auto sourceDB = DatabaseHolder::get(opCtx)->getDb(opCtx, sourceTenantDbName);
+    auto sourceDB = DatabaseHolder::get(opCtx)->getDb(opCtx, source.dbName());
     if (!sourceDB)
         return Status(ErrorCodes::NamespaceNotFound, "source namespace does not exist");
 
@@ -513,7 +510,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
         source,
         Top::LockType::NotLocked,
         AutoStatsTracker::LogMode::kUpdateCurOp,
-        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(source.db()));
+        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(source.dbName()));
 
     auto catalog = CollectionCatalog::get(opCtx);
     const auto sourceColl = catalog->lookupCollectionByNamespace(opCtx, source);
@@ -530,8 +527,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
 
     IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(sourceColl->uuid());
 
-    const TenantDatabaseName targetTenantDbName(boost::none, target.db());
-    auto targetDB = DatabaseHolder::get(opCtx)->getDb(opCtx, targetTenantDbName);
+    auto targetDB = DatabaseHolder::get(opCtx)->getDb(opCtx, target.dbName());
 
     // Check if the target namespace exists and if dropTarget is true.
     // Return a non-OK status if target exists and dropTarget is not true or if the collection
@@ -556,13 +552,12 @@ Status renameBetweenDBs(OperationContext* opCtx,
     // Create a temporary collection in the target database. It will be removed if we fail to
     // copy the collection, or on restart, so there is no need to replicate these writes.
     if (!targetDB) {
-        const TenantDatabaseName tenantDbName(boost::none, target.db());
-        targetDB = DatabaseHolder::get(opCtx)->openDb(opCtx, tenantDbName);
+        targetDB = DatabaseHolder::get(opCtx)->openDb(opCtx, target.dbName());
     }
 
     // The generated unique collection name is only guaranteed to exist if the database is
     // exclusively locked.
-    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name().dbName(), LockMode::MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name().db(), LockMode::MODE_X));
 
     // Note that this temporary collection name is used by MongoMirror and thus must not be changed
     // without consultation.
@@ -721,7 +716,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
 
                 // Used to make sure that a WCE can be handled by this logic without data loss.
                 if (MONGO_unlikely(writeConflictInRenameCollCopyToTmp.shouldFail())) {
-                    throw WriteConflictException();
+                    throwWriteConflictException();
                 }
 
                 wunit.commit();

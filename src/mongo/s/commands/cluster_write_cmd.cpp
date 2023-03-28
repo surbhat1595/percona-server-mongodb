@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/s/commands/cluster_write_cmd.h"
 
@@ -57,6 +56,9 @@
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -653,6 +655,9 @@ void ClusterWriteCmd::InvocationBase::explain(OperationContext* opCtx,
         (_batchedRequest.getBatchType() == BatchedCommandRequest::BatchType_Delete ||
          _batchedRequest.getBatchType() == BatchedCommandRequest::BatchType_Update)) {
         req = processFLEBatchExplain(opCtx, _batchedRequest);
+        tassert(6636600,
+                "encryptionInformation should be stripped from request after rewriting for explain",
+                !req->hasEncryptionInformation());
     }
 
     auto nss = req ? req->getNS() : _batchedRequest.getNS();

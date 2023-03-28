@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 #define LOGV2_FOR_TRANSACTION(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kTransaction}, MESSAGE, ##__VA_ARGS__)
@@ -66,6 +65,7 @@
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/server_transactions_metrics.h"
+#include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/storage/flow_control.h"
 #include "mongo/db/transaction_history_iterator.h"
@@ -78,6 +78,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_with_sampling.h"
 #include "mongo/util/net/socket_utils.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 
 namespace mongo {
 using namespace fmt::literals;
@@ -178,6 +181,20 @@ auto performReadWithNoTimestampDBDirectClient(OperationContext* opCtx, Callable&
     // ticket to be obtained.
     FlowControl::Bypass flowControlBypass(opCtx);
     return callable(&client);
+}
+
+void rethrowPartialIndexQueryBadValueWithContext(const DBException& ex) {
+    if (ex.reason().find("hint provided does not correspond to an existing index")) {
+        uassertStatusOKWithContext(
+            ex.toStatus(),
+            str::stream()
+                << "Failed to find partial index for "
+                << NamespaceString::kSessionTransactionsTableNamespace.ns()
+                << ". Please create an index directly on this replica set with the specification: "
+                << MongoDSessionCatalog::getConfigTxnPartialIndexSpec() << " or drop the "
+                << NamespaceString::kSessionTransactionsTableNamespace.ns()
+                << " collection and step up a new primary.");
+    }
 }
 
 struct ActiveTransactionHistory {
@@ -322,38 +339,39 @@ TxnNumber fetchHighestTxnNumberWithInternalSessions(OperationContext* opCtx,
     TxnNumber highestTxnNumber{kUninitializedTxnNumber};
 
     const auto sessionCatalog = SessionCatalog::get(opCtx);
-    SessionKiller::Matcher matcher(
-        KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx, parentLsid)});
-    sessionCatalog->scanSessions(matcher, [&](const ObservableSession& osession) {
-        const auto lsid = osession.getSessionId();
-        if (getParentSessionId(lsid) == parentLsid && isInternalSessionForRetryableWrite(lsid)) {
-            highestTxnNumber = std::max(highestTxnNumber, *osession.getSessionId().getTxnNumber());
-        }
+    sessionCatalog->scanSession(parentLsid, [&](const ObservableSession& osession) {
+        highestTxnNumber = osession.getHighestTxnNumberWithChildSessions();
     });
 
-    performReadWithNoTimestampDBDirectClient(opCtx, [&](DBDirectClient* client) {
-        FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
-        findRequest.setFilter(BSON(
-            SessionTxnRecord::kParentSessionIdFieldName
-            << parentLsid.toBSON()
-            << (SessionTxnRecord::kSessionIdFieldName + "." + LogicalSessionId::kTxnNumberFieldName)
-            << BSON("$gte" << highestTxnNumber)));
-        findRequest.setSort(BSON(
-            (SessionTxnRecord::kSessionIdFieldName + "." + LogicalSessionId::kTxnNumberFieldName)
-            << -1));
-        findRequest.setProjection(BSON(SessionTxnRecord::kSessionIdFieldName << 1));
-        findRequest.setLimit(1);
+    try {
+        performReadWithNoTimestampDBDirectClient(opCtx, [&](DBDirectClient* client) {
+            FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
+            findRequest.setFilter(BSON(SessionTxnRecord::kParentSessionIdFieldName
+                                       << parentLsid.toBSON()
+                                       << (SessionTxnRecord::kSessionIdFieldName + "." +
+                                           LogicalSessionId::kTxnNumberFieldName)
+                                       << BSON("$gte" << highestTxnNumber)));
+            findRequest.setSort(BSON((SessionTxnRecord::kSessionIdFieldName + "." +
+                                      LogicalSessionId::kTxnNumberFieldName)
+                                     << -1));
+            findRequest.setProjection(BSON(SessionTxnRecord::kSessionIdFieldName << 1));
+            findRequest.setLimit(1);
+            findRequest.setHint(BSON("$hint" << MongoDSessionCatalog::kConfigTxnsPartialIndexName));
 
-        auto cursor = client->find(findRequest);
+            auto cursor = client->find(findRequest);
 
-        while (cursor->more()) {
-            const auto doc = cursor->next();
-            const auto childLsid = LogicalSessionId::parse(
-                IDLParserErrorContext("LogicalSessionId"), doc.getObjectField("_id"));
-            highestTxnNumber = std::max(highestTxnNumber, *childLsid.getTxnNumber());
-            invariant(!cursor->more());
-        }
-    });
+            while (cursor->more()) {
+                const auto doc = cursor->next();
+                const auto childLsid = LogicalSessionId::parse(
+                    IDLParserErrorContext("LogicalSessionId"), doc.getObjectField("_id"));
+                highestTxnNumber = std::max(highestTxnNumber, *childLsid.getTxnNumber());
+                invariant(!cursor->more());
+            }
+        });
+    } catch (const ExceptionFor<ErrorCodes::BadValue>& ex) {
+        rethrowPartialIndexQueryBadValueWithContext(ex);
+        throw;
+    }
 
     return highestTxnNumber;
 }
@@ -403,7 +421,7 @@ void updateSessionEntry(OperationContext* opCtx,
         auto status = collection->insertDocument(opCtx, InsertStatement(updateMod), nullptr, false);
 
         if (status == ErrorCodes::DuplicateKey) {
-            throw WriteConflictException(
+            throwWriteConflictException(
                 str::stream() << "Updating session entry failed with duplicate key, session "_sd
                               << sessionId << ", transaction "_sd << txnNum);
         }
@@ -431,7 +449,7 @@ void updateSessionEntry(OperationContext* opCtx,
         fassert(40673, MatchExpressionParser::parse(updateRequest.getQuery(), std::move(expCtx)));
     if (!matcher->matchesBSON(originalDoc)) {
         // Document no longer match what we expect so throw WCE to make the caller re-examine.
-        throw WriteConflictException(
+        throwWriteConflictException(
             str::stream() << "Updating session entry failed as document no longer matches, "_sd
                           << "session "_sd << sessionId << ", transaction "_sd << txnNum);
     }
@@ -553,9 +571,8 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
         Lock::DBLock dbLock(opCtx.get(), nss.db(), MODE_IS, deadline);
         Lock::CollectionLock collLock(opCtx.get(), nss, MODE_IS, deadline);
 
-        const TenantDatabaseName tenantDbName(boost::none, nss.db());
         auto databaseHolder = DatabaseHolder::get(opCtx.get());
-        auto db = databaseHolder->getDb(opCtx.get(), tenantDbName);
+        auto db = databaseHolder->getDb(opCtx.get(), nss.dbName());
         if (!db) {
             // There is no config database, so there cannot be any active transactions.
             return boost::none;
@@ -1404,6 +1421,38 @@ void TransactionParticipant::Participant::unstashTransactionResources(OperationC
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(opCtx->getTxnNumber());
 
+    // Verify that transaction number and mode are as expected.
+    if (opCtx->inMultiDocumentTransaction()) {
+        uassert(ErrorCodes::NoSuchTransaction,
+                str::stream() << "Attempted to run '" << cmdName << "' inside a transaction with "
+                              << "session id" << _sessionId() << " and transaction number "
+                              << *opCtx->getTxnNumber()
+                              << " but the active transaction number on the session is "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber(),
+                *opCtx->getTxnNumber() == o().activeTxnNumberAndRetryCounter.getTxnNumber());
+
+        uassert(6611000,
+                str::stream() << "Attempted to use the active transaction number "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " in session "
+                              << _sessionId()
+                              << " to run a transaction but it corresponds to a retryable write",
+                !o().txnState.isInRetryableWriteMode());
+    } else {
+        uassert(6564100,
+                str::stream() << "Attempted to run '" << cmdName << "' as a retryable write with "
+                              << "session id" << _sessionId() << " and transaction number "
+                              << *opCtx->getTxnNumber()
+                              << " but the active transaction number on the session is "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber(),
+                *opCtx->getTxnNumber() == o().activeTxnNumberAndRetryCounter.getTxnNumber());
+        uassert(6611001,
+                str::stream() << "Attempted to use the active transaction number "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " in session "
+                              << _sessionId()
+                              << " to run a retryable write but it corresponds to a transaction",
+                o().txnState.isInRetryableWriteMode());
+    }
+
     // If this is not a multi-document transaction, there is nothing to unstash.
     if (o().txnState.isInRetryableWriteMode()) {
         invariant(!o().txnResourceStash);
@@ -2207,8 +2256,8 @@ void TransactionParticipant::Participant::_checkIsCommandValidWithTxnState(
     uassert(ErrorCodes::TransactionCommitted,
             str::stream() << "Transaction with " << requestTxnNumberAndRetryCounter.toBSON()
                           << " has been committed.",
-            cmdName == "commitTransaction" || !o().txnState.isCommitted() ||
-                (_isInternalSessionForRetryableWrite() && o().txnState.isCommitted()));
+            !o().txnState.isCommitted() || cmdName == "commitTransaction" ||
+                _isInternalSessionForRetryableWrite());
 
     // Disallow operations other than abort, prepare or commit on a prepared transaction
     uassert(ErrorCodes::PreparedTransactionInProgress,
@@ -2805,7 +2854,9 @@ void TransactionParticipant::Participant::_refreshSelfFromStorageIfNeeded(Operat
         }
     }
 
-    if (!_isInternalSession()) {
+    if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        !_isInternalSession()) {
         const auto txnNumber = fetchHighestTxnNumberWithInternalSessions(opCtx, _sessionId());
         if (txnNumber > o().activeTxnNumberAndRetryCounter.getTxnNumber()) {
             _setNewTxnNumberAndRetryCounter(opCtx, {txnNumber, kUninitializedTxnRetryCounter});
@@ -2838,46 +2889,61 @@ void TransactionParticipant::Participant::_refreshActiveTransactionParticipantsF
         // Add parent Participant.
         retryableWriteTxnParticipantCatalog.addParticipant(parentTxnParticipant);
 
-        // Add child participants.
-        std::vector<TransactionParticipant::Participant> childTxnParticipants;
+        if (feature_flags::gFeatureFlagInternalTransactions.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            // Add child participants.
+            std::vector<TransactionParticipant::Participant> childTxnParticipants;
 
-        // Make sure that every child session has a corresponding Session/TransactionParticipant.
-        performReadWithNoTimestampDBDirectClient(opCtx, [&](DBDirectClient* client) {
-            FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
-            findRequest.setFilter(BSON(SessionTxnRecord::kParentSessionIdFieldName
-                                       << parentTxnParticipant._sessionId().toBSON()
-                                       << (SessionTxnRecord::kSessionIdFieldName + "." +
-                                           LogicalSessionId::kTxnNumberFieldName)
-                                       << BSON("$gte" << *activeRetryableWriteTxnNumber)));
-            findRequest.setProjection(BSON("_id" << 1));
+            // Make sure that every child session has a corresponding
+            // Session/TransactionParticipant.
+            try {
+                performReadWithNoTimestampDBDirectClient(opCtx, [&](DBDirectClient* client) {
+                    FindCommandRequest findRequest{
+                        NamespaceString::kSessionTransactionsTableNamespace};
+                    findRequest.setFilter(BSON(SessionTxnRecord::kParentSessionIdFieldName
+                                               << parentTxnParticipant._sessionId().toBSON()
+                                               << (SessionTxnRecord::kSessionIdFieldName + "." +
+                                                   LogicalSessionId::kTxnNumberFieldName)
+                                               << BSON("$gte" << *activeRetryableWriteTxnNumber)));
+                    findRequest.setProjection(BSON(SessionTxnRecord::kSessionIdFieldName << 1));
+                    findRequest.setHint(
+                        BSON("$hint" << MongoDSessionCatalog::kConfigTxnsPartialIndexName));
 
-            auto cursor = client->find(findRequest);
+                    auto cursor = client->find(findRequest);
 
-            while (cursor->more()) {
-                const auto doc = cursor->next();
-                const auto childLsid = LogicalSessionId::parse(
-                    IDLParserErrorContext("LogicalSessionId"), doc.getObjectField("_id"));
-                uassert(6202001,
-                        str::stream()
-                            << "Refresh expected the highest transaction number in the session "
-                            << parentTxnParticipant._sessionId() << " to be "
-                            << *activeRetryableWriteTxnNumber << " found a "
-                            << NamespaceString::kSessionTransactionsTableNamespace
-                            << " entry for an internal transaction for retryable writes with "
-                            << "transaction number " << *childLsid.getTxnNumber(),
-                        *childLsid.getTxnNumber() == *activeRetryableWriteTxnNumber);
-                auto sessionCatalog = SessionCatalog::get(opCtx);
-                sessionCatalog->createSessionIfDoesNotExist(childLsid);
-                sessionCatalog->scanSession(childLsid, [&](const ObservableSession& osession) {
-                    auto childTxnParticipant = TransactionParticipant::get(opCtx, osession.get());
-                    childTxnParticipants.push_back(childTxnParticipant);
+                    while (cursor->more()) {
+                        const auto doc = cursor->next();
+                        const auto childLsid = LogicalSessionId::parse(
+                            IDLParserErrorContext("LogicalSessionId"), doc.getObjectField("_id"));
+                        uassert(
+                            6202001,
+                            str::stream()
+                                << "Refresh expected the highest transaction number in the session "
+                                << parentTxnParticipant._sessionId() << " to be "
+                                << *activeRetryableWriteTxnNumber << " found a "
+                                << NamespaceString::kSessionTransactionsTableNamespace
+                                << " entry for an internal transaction for retryable writes with "
+                                << "transaction number " << *childLsid.getTxnNumber(),
+                            *childLsid.getTxnNumber() == *activeRetryableWriteTxnNumber);
+                        auto sessionCatalog = SessionCatalog::get(opCtx);
+                        sessionCatalog->createSessionIfDoesNotExist(childLsid);
+                        sessionCatalog->scanSession(
+                            childLsid, [&](const ObservableSession& osession) {
+                                auto childTxnParticipant =
+                                    TransactionParticipant::get(opCtx, osession.get());
+                                childTxnParticipants.push_back(childTxnParticipant);
+                            });
+                    }
                 });
+            } catch (const ExceptionFor<ErrorCodes::BadValue>& ex) {
+                rethrowPartialIndexQueryBadValueWithContext(ex);
+                throw;
             }
-        });
 
-        for (auto& childTxnParticipant : childTxnParticipants) {
-            childTxnParticipant._refreshSelfFromStorageIfNeeded(opCtx, fetchOplogEntries);
-            retryableWriteTxnParticipantCatalog.addParticipant(childTxnParticipant);
+            for (auto& childTxnParticipant : childTxnParticipants) {
+                childTxnParticipant._refreshSelfFromStorageIfNeeded(opCtx, fetchOplogEntries);
+                retryableWriteTxnParticipantCatalog.addParticipant(childTxnParticipant);
+            }
         }
     } else {
         retryableWriteTxnParticipantCatalog.reset();

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -54,6 +53,9 @@
 #include "mongo/util/md5.hpp"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/timer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -232,7 +234,7 @@ public:
         std::set<std::string> cappedCollectionSet;
 
         bool noError = true;
-        const TenantDatabaseName tenantDbName(boost::none, dbname);
+        const DatabaseName tenantDbName(boost::none, dbname);
         catalog::forEachCollectionFromDb(
             opCtx, tenantDbName, MODE_IS, [&](const CollectionPtr& collection) {
                 auto collNss = collection->ns();
@@ -342,7 +344,7 @@ private:
                                   << minSnapshot->toString(),
                     !minSnapshot || *mySnapshot >= *minSnapshot);
         } else {
-            invariant(opCtx->lockState()->isDbLockedForMode(db->name().dbName(), MODE_S));
+            invariant(opCtx->lockState()->isDbLockedForMode(db->name().db(), MODE_S));
         }
 
         auto desc = collection->getIndexCatalog()->findIdIndex(opCtx);

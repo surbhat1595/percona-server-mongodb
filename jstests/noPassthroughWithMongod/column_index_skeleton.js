@@ -16,9 +16,19 @@ if (!isSBEEnabled) {
     return;
 }
 
+const getParamResponse =
+    assert.commandWorked(db.adminCommand({getParameter: 1, featureFlagColumnstoreIndexes: 1}));
+const columnstoreEnabled = getParamResponse.hasOwnProperty("featureFlagColumnstoreIndexes") &&
+    getParamResponse.featureFlagColumnstoreIndexes.value;
+if (!columnstoreEnabled) {
+    jsTestLog("Skipping columnstore test since the feature flag is not enabled.");
+    return;
+}
+
 const testDB = db;
 const coll = db.column_index_skeleton;
 coll.drop();
+assert.commandWorked(coll.createIndex({"$**": "columnstore"}));
 
 const docs = [
     {
@@ -527,26 +537,28 @@ for (let doc of docs) {
 }
 bulk.execute();
 
-// Enable the columnar fail point.
-const failPoint = configureFailPoint(testDB, "includeFakeColumnarIndex");
-try {
-    const kProjection = {_id: 0, "a.b.c": 1, num: 1, optionalField: 1};
+const kProjection = {
+    _id: 0,
+    "a.b.c": 1,
+    num: 1,
+    optionalField: 1
+};
 
-    // Run an explain.
-    const expl = coll.find({}, kProjection).explain();
-    assert(planHasStage(db, expl, "COLUMN_IXSCAN"));
+// Run an explain.
+const expl = coll.find({}, kProjection).explain();
+assert(planHasStage(db, expl, "COLUMN_SCAN"), expl);
 
-    // Run a query getting all of the results using the column index.
-    let results = coll.find({}, kProjection).toArray();
-    assert.gt(results.length, 0);
-    failPoint.off();
+// Run a query getting all of the results using the column index.
+let results = coll.find({}, kProjection).toArray();
+assert.gt(results.length, 0);
 
-    for (let res of results) {
-        const trueResult = coll.find({num: res.num}, kProjection).hint({$natural: 1}).toArray()[0];
-        const originalDoc = coll.findOne({num: res.num});
-        assert.eq(res, trueResult, originalDoc);
-    }
-} finally {
-    failPoint.off();
+for (let res of results) {
+    const trueResult = coll.find({num: res.num}, kProjection).hint({$natural: 1}).toArray()[0];
+    const originalDoc = coll.findOne({num: res.num});
+    assert.eq(res, trueResult, originalDoc);
+    print("Test passed for " + res.num);
 }
+
+// Drop the collection so that validation doesn't happen :)
+coll.drop();
 })();

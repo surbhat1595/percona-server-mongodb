@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -39,6 +38,9 @@
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/store_possible_cursor.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -125,10 +127,8 @@ BSONObj rewriteCommandForListingOwnCollections(OperationContext* opCtx,
 
     // Compute the set of collection names which would be permissible to return.
     std::set<std::string> collectionNames;
-    for (UserNameIterator nameIter = authzSession->getAuthenticatedUserNames(); nameIter.more();
-         nameIter.next()) {
-        User* authUser = authzSession->lookupUser(*nameIter);
-        for (const auto& [resource, privilege] : authUser->getPrivileges()) {
+    if (auto authUser = authzSession->getAuthenticatedUser()) {
+        for (const auto& [resource, privilege] : authUser.get()->getPrivileges()) {
             if (resource.isCollectionPattern() ||
                 (resource.isExactNamespacePattern() && resource.databaseToMatch() == dbName)) {
                 collectionNames.emplace(resource.collectionToMatch().toString());
@@ -222,8 +222,7 @@ public:
                               BSONObjBuilder& output) final {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
 
-        const auto nss(
-            NamespaceString::makeListCollectionsNSS(TenantDatabaseName(boost::none, dbName)));
+        const auto nss(NamespaceString::makeListCollectionsNSS(DatabaseName(boost::none, dbName)));
 
         BSONObj newCmd = cmdObj;
 

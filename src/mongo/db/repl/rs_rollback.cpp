@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
 
 #include "mongo/platform/basic.h"
 
@@ -82,6 +81,9 @@
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
+
 
 namespace mongo {
 
@@ -1088,7 +1090,7 @@ void renameOutOfTheWay(OperationContext* opCtx, RenameCollectionInfo info, Datab
 
     // The generated unique collection name is only guaranteed to exist if the database is
     // exclusively locked.
-    invariant(opCtx->lockState()->isDbLockedForMode(db->name().dbName(), LockMode::MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(db->name().db(), LockMode::MODE_X));
     // Creates the oplog entry to temporarily rename the collection that is
     // preventing the renameCollection command from rolling back to a unique
     // namespace.
@@ -1139,8 +1141,8 @@ void renameOutOfTheWay(OperationContext* opCtx, RenameCollectionInfo info, Datab
  */
 void rollbackRenameCollection(OperationContext* opCtx, UUID uuid, RenameCollectionInfo info) {
 
-    auto dbName = info.renameFrom.db();
-    const TenantDatabaseName tenantDbName(boost::none, dbName);
+    auto dbString = info.renameFrom.db();
+    const DatabaseName dbName(boost::none, dbString);
 
     LOGV2(21679,
           "Attempting to rename collection with UUID: {uuid}, from: {renameFrom}, to: "
@@ -1149,9 +1151,9 @@ void rollbackRenameCollection(OperationContext* opCtx, UUID uuid, RenameCollecti
           "uuid"_attr = uuid,
           "renameFrom"_attr = info.renameFrom,
           "renameTo"_attr = info.renameTo);
-    Lock::DBLock dbLock(opCtx, dbName, MODE_X);
+    Lock::DBLock dbLock(opCtx, dbString, MODE_X);
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto db = databaseHolder->openDb(opCtx, tenantDbName);
+    auto db = databaseHolder->openDb(opCtx, dbName);
     invariant(db);
 
     auto status = renameCollectionForRollback(opCtx, info.renameTo, uuid);
@@ -1578,11 +1580,10 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
                   "namespace"_attr = *nss,
                   "uuid"_attr = uuid);
 
-            const TenantDatabaseName tenantDbName(boost::none, nss->db());
             Lock::DBLock dbLock(opCtx, nss->db(), MODE_X);
 
             auto databaseHolder = DatabaseHolder::get(opCtx);
-            auto db = databaseHolder->openDb(opCtx, tenantDbName);
+            auto db = databaseHolder->openDb(opCtx, nss->dbName());
             invariant(db);
 
             CollectionWriter collection(opCtx, uuid);

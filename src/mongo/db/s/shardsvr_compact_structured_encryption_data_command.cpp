@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -40,6 +39,9 @@
 #include "mongo/db/s/compact_structured_encryption_data_coordinator_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/cluster_commands_helpers.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 namespace {
@@ -77,7 +79,7 @@ public:
         Reply typedRun(OperationContext* opCtx) {
             // TODO (SERVER-65077): Remove FCV check once 6.0 is released
             uassert(6350499,
-                    "FLE 2 is only supported when FCV supports 6.0",
+                    "Queryable Encryption is only supported when FCV supports 6.0",
                     gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
             FixedFCVRegion fixedFcvRegion(opCtx);
 

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/platform/basic.h"
 
@@ -35,6 +34,9 @@
 
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 namespace plan_cache_util {
@@ -110,9 +112,9 @@ plan_cache_debug_info::DebugInfo buildDebugInfo(
 
     plan_cache_debug_info::CreatedFromQuery createdFromQuery =
         plan_cache_debug_info::CreatedFromQuery{
-            findCommand.getFilter(),
-            findCommand.getSort(),
-            projBuilder.obj(),
+            findCommand.getFilter().getOwned(),
+            findCommand.getSort().getOwned(),
+            projBuilder.obj().getOwned(),
             query.getCollator() ? query.getCollator()->getSpec().toBSON() : BSONObj()};
 
     return {std::move(createdFromQuery), std::move(decision)};

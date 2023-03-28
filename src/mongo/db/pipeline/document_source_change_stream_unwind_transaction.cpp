@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -37,6 +36,9 @@
 #include "mongo/db/pipeline/change_stream_rewrite_helpers.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/transaction_history_iterator.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 
 namespace mongo {
 
@@ -62,6 +64,13 @@ std::unique_ptr<MatchExpression> buildUnwindTransactionFilter(
     // includes a namespace filter, which ensures that it will discard all documents that would be
     // filtered out by the default 'ns' filter this stage gets initialized with.
     auto unwindFilter = std::make_unique<AndMatchExpression>(buildOperationFilter(expCtx, nullptr));
+
+    // To correctly handle filtering out entries of direct write operations on orphaned documents,
+    // we include a filter for "fromMigrate" flagged operations, unless "fromMigrate" events are
+    // explicitly requested in the spec.
+    if (!expCtx->changeStreamSpec->getShowMigrationEvents()) {
+        unwindFilter->add(buildNotFromMigrateFilter(expCtx, userMatch));
+    }
 
     // Attempt to rewrite the user's filter and combine it with the standard operation filter. We do
     // this separately because we need to exclude certain fields from the user's filters. Unwound

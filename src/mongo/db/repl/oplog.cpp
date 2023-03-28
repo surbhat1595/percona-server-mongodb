@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 #include "mongo/platform/basic.h"
 
@@ -109,6 +108,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/file.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+
 
 namespace mongo {
 
@@ -198,9 +200,8 @@ void createIndexForApplyOps(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(indexNss, MODE_X));
 
     // Check if collection exists.
-    const TenantDatabaseName tenantDbName(boost::none, indexNss.db());
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    auto db = databaseHolder->getDb(opCtx, tenantDbName);
+    auto db = databaseHolder->getDb(opCtx, indexNss.dbName());
     auto indexCollection =
         db ? CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, indexNss) : nullptr;
     uassert(ErrorCodes::NamespaceNotFound,
@@ -289,10 +290,27 @@ void writeToImageCollection(OperationContext* opCtx,
     DisableDocumentValidation documentValidationDisabler(
         opCtx, DocumentValidationSettings::kDisableInternalValidation);
 
+    BSONObj existingImageEntryBson;
+    Helpers::findOne(opCtx,
+                     autoColl.getCollection(),
+                     BSON("_id" << imageEntry.get_id().toBSON() << "ts" << imageEntry.getTs()),
+                     existingImageEntryBson);
+    if (!existingImageEntryBson.isEmpty()) {
+        auto existingImageEntry = repl::ImageEntry::parse(
+            IDLParserErrorContext("writeToImageCollection"), existingImageEntryBson);
+        uassert(
+            6652600,
+            str::stream()
+                << "Found an existing findAndModify image entry with unexpected content. Found: "
+                << existingImageEntry.toBSON() << ". Expected: " << imageEntry.toBSON(),
+            existingImageEntry.toBSON().woCompare(imageEntry.toBSON()) == 0);
+        return;
+    }
+
     UpdateRequest request;
     request.setNamespaceString(NamespaceString::kConfigImagesNamespace);
     request.setQuery(
-        BSON("_id" << imageEntry.get_id().toBSON() << "ts" << BSON("$lt" << imageEntry.getTs())));
+        BSON("_id" << imageEntry.get_id().toBSON() << "ts" << BSON("$lte" << imageEntry.getTs())));
     request.setUpsert(*upsertConfigImage);
     request.setUpdateModification(
         write_ops::UpdateModification::parseFromClassicUpdate(imageEntry.toBSON()));
@@ -303,7 +321,7 @@ void writeToImageCollection(OperationContext* opCtx,
     } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
         // We can get a duplicate key when two upserts race on inserting a document.
         *upsertConfigImage = false;
-        throw WriteConflictException();
+        throwWriteConflictException();
     }
 }
 
@@ -551,7 +569,7 @@ std::vector<OpTime> logInsertOps(
                         "namespace"_attr = nss,
                         "document"_attr = begin[i].doc);
 
-            oplogEntry.setFromMigrateIfTrue(true);
+            oplogEntry.setFromMigrate(true);
         }
         appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, begin[i].stmtIds);
 
@@ -1918,7 +1936,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
             case ErrorCodes::WriteConflict: {
                 // Need to throw this up to a higher level where it will be caught and the
                 // operation retried.
-                throw WriteConflictException();
+                throwWriteConflictException();
             }
             case ErrorCodes::BackgroundOperationInProgressForDatabase: {
                 invariant(mode == OplogApplication::Mode::kInitialSync);

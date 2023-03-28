@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 #include "mongo/platform/basic.h"
 
@@ -87,6 +86,9 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
+
 
 namespace mongo {
 namespace {
@@ -925,6 +927,11 @@ struct UMCGetUserCacheGenParams {
     static constexpr bool skipApiVersionCheck = true;
 };
 
+template <typename T>
+using HasGetCmdParamOp = std::remove_cv_t<decltype(std::declval<T>().getCommandParameter())>;
+template <typename T>
+constexpr bool hasGetCmdParamStringData =
+    stdx::is_detected_exact_v<StringData, HasGetCmdParamOp, T>;
 
 template <typename RequestT, typename Params = UMCStdParams>
 class CmdUMCTyped : public TypedCommand<CmdUMCTyped<RequestT, Params>> {
@@ -950,7 +957,11 @@ public:
         }
 
         NamespaceString ns() const final {
-            return NamespaceString(request().getDbName(), "");
+            const auto& cmd = request();
+            if constexpr (hasGetCmdParamStringData<RequestT>) {
+                return NamespaceString(cmd.getDbName(), cmd.getCommandParameter());
+            }
+            return NamespaceString(cmd.getDbName(), "");
         }
     };
 

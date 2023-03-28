@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
 
 #include "mongo/platform/basic.h"
 
@@ -41,9 +40,8 @@
 #include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/exception_util_gen.h"
-#include "mongo/db/concurrency/temporarily_unavailable_exception.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/server_options_general_gen.h"
 #include "mongo/db/snapshot_window_options_gen.h"
@@ -62,9 +60,12 @@
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 
-// From src/third_party/wiredtiger/src/include/txn.h
-#define WT_TXN_ROLLBACK_REASON_CACHE "oldest pinned transaction ID rolled back for eviction"
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
 
+
+// From src/third_party/wiredtiger/src/include/txn.h
+#define WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION \
+    "oldest pinned transaction ID rolled back for eviction"
 namespace mongo {
 
 MONGO_FAIL_POINT_DEFINE(crashAfterUpdatingFirstTableLoggingSettings);
@@ -169,9 +170,9 @@ bool wasRollbackReasonCachePressure(WT_SESSION* session) {
     if (session) {
         const auto reason = session->get_rollback_reason(session);
         if (reason) {
-            return strncmp(WT_TXN_ROLLBACK_REASON_CACHE,
+            return strncmp(WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION,
                            reason,
-                           sizeof(WT_TXN_ROLLBACK_REASON_CACHE)) == 0;
+                           sizeof(WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION)) == 0;
         }
     }
     return false;
@@ -187,11 +188,11 @@ Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
             str::stream s;
             if (!prefix.empty())
                 s << prefix << " ";
-            s << retCode << ": " << WT_TXN_ROLLBACK_REASON_CACHE;
-            throw TemporarilyUnavailableException(s);
+            s << retCode << ": " << WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION;
+            throwTemporarilyUnavailableException(s);
         }
 
-        throw WriteConflictException(prefix);
+        throwWriteConflictException(prefix);
     }
 
     // Don't abort on WT_PANIC when repairing, as the error will be handled at a higher layer.
@@ -1276,7 +1277,7 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
         cfg << ",";
 
         int level;
-        if (severity.toInt() >= logv2::LogSeverity::Debug(1).toInt())
+        if (severity.toInt() >= logv2::LogSeverity::Debug(2).toInt())
             level = WT_VERBOSE_DEBUG;
         else
             level = WT_VERBOSE_INFO;

@@ -49,7 +49,6 @@ namespace mongo {
 class OperationContext;
 class ReshardingOplogApplier;
 class ReshardingCollectionCloner;
-class ReshardingMetrics;
 class ReshardingOplogFetcher;
 class ReshardingTxnCloner;
 class ServiceContext;
@@ -142,7 +141,6 @@ public:
     static std::unique_ptr<ReshardingDataReplicationInterface> make(
         OperationContext* opCtx,
         ReshardingMetrics* metrics,
-        ReshardingMetricsNew* metricsNew,
         ReshardingApplierMetricsMap* applierMetricsMap,
         CommonReshardingMetadata metadata,
         const std::vector<DonorShardFetchTimestamp>& donorShards,
@@ -199,7 +197,6 @@ public:
 private:
     static std::unique_ptr<ReshardingCollectionCloner> _makeCollectionCloner(
         ReshardingMetrics* metrics,
-        ReshardingMetricsNew* metricsNew,
         const CommonReshardingMetadata& metadata,
         const ShardId& myShardId,
         Timestamp cloneTimestamp);
@@ -211,7 +208,6 @@ private:
     static std::vector<std::unique_ptr<ReshardingOplogFetcher>> _makeOplogFetchers(
         OperationContext* opCtx,
         ReshardingMetrics* metrics,
-        ReshardingMetricsNew* metricsNew,
         const CommonReshardingMetadata& metadata,
         const std::vector<DonorShardFetchTimestamp>& donorShards,
         const ShardId& myShardId);
@@ -220,7 +216,6 @@ private:
 
     static std::vector<std::unique_ptr<ReshardingOplogApplier>> _makeOplogAppliers(
         OperationContext* opCtx,
-        ReshardingMetrics* metrics,
         ReshardingApplierMetricsMap* applierMetricsMap,
         const CommonReshardingMetadata& metadata,
         const std::vector<DonorShardFetchTimestamp>& donorShards,

@@ -167,6 +167,7 @@ void stopFLECrud() {
     // Check if it was started
     if (_fleCrudExecutor.get() != nullptr) {
         _fleCrudExecutor->shutdown();
+        _fleCrudExecutor->join();
     }
 }
 
@@ -283,7 +284,13 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
                                 const BSONObj& query) {
     auto expCtx = make_intrusive<ExpressionContext>(
         opCtx, fle::collatorFromBSON(opCtx, collation), nss, runtimeConstants, letParameters);
-    return fle::rewriteQuery(opCtx, expCtx, nss, info, query, &getTransactionWithRetriesForMongoD);
+    return fle::rewriteQuery(opCtx,
+                             expCtx,
+                             nss,
+                             info,
+                             query,
+                             &getTransactionWithRetriesForMongoD,
+                             fle::HighCardinalityModeAllowed::kAllow);
 }
 
 std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>

@@ -30,6 +30,7 @@ import shlex
 import tempfile
 import textwrap
 
+from collections import OrderedDict
 from glob import glob
 from os.path import join as joinpath
 from os.path import splitext
@@ -477,7 +478,7 @@ class NinjaState:
         self.rules = {
             "CMD": {
                 "command": "cmd /c $env$cmd" if sys.platform == "win32" else "$env$cmd",
-                "description": "Building $out",
+                "description": "Built $out",
                 "pool": "local_pool",
             },
             # We add the deps processing variables to this below. We
@@ -487,19 +488,19 @@ class NinjaState:
             # command.
             "CC": {
                 "command": "$env$CC @$out.rsp",
-                "description": "Compiling $out",
+                "description": "Compiled $out",
                 "rspfile": "$out.rsp",
                 "rspfile_content": "$rspc",
             },
             "CXX": {
                 "command": "$env$CXX @$out.rsp",
-                "description": "Compiling $out",
+                "description": "Compiled $out",
                 "rspfile": "$out.rsp",
                 "rspfile_content": "$rspc",
             },
             "LINK": {
                 "command": "$env$LINK @$out.rsp",
-                "description": "Linking $out",
+                "description": "Linked $out",
                 "rspfile": "$out.rsp",
                 "rspfile_content": "$rspc",
                 "pool": "local_pool",
@@ -515,7 +516,7 @@ class NinjaState:
                     "{}$env$AR @$out.rsp".format('' if sys.platform == "win32" else "rm -f $out && "
                                                  ),
                 "description":
-                    "Archiving $out",
+                    "Archived $out",
                 "rspfile":
                     "$out.rsp",
                 "rspfile_content":
@@ -526,16 +527,16 @@ class NinjaState:
             "SYMLINK": {
                 "command": (
                     "cmd /c mklink $out $in" if sys.platform == "win32" else "ln -s $in $out"),
-                "description": "Symlink $in -> $out",
+                "description": "Symlinked $in -> $out",
             },
             "NOOP": {
                 "command": "$NOOP",
-                "description": "Checking $out",
+                "description": "Checked $out",
                 "pool": "local_pool",
             },
             "INSTALL": {
                 "command": "$COPY $in $out",
-                "description": "Install $out",
+                "description": "Installed $out",
                 "pool": "install_pool",
                 # On Windows cmd.exe /c copy does not always correctly
                 # update the timestamp on the output file. This leads
@@ -549,7 +550,7 @@ class NinjaState:
             },
             "TEMPLATE": {
                 "command": "$SCONS_INVOCATION $out",
-                "description": "Rendering $out",
+                "description": "Rendered $out",
                 "pool": "scons_pool",
                 "restat": 1,
             },
@@ -577,7 +578,7 @@ class NinjaState:
             },
             "REGENERATE": {
                 "command": "$SCONS_INVOCATION_W_TARGETS",
-                "description": "Regenerating $self",
+                "description": "Regenerated $self",
                 "depfile": os.path.join(get_path(env['NINJA_BUILDDIR']), '$out.depfile'),
                 "generator": 1,
                 # Console pool restricts to 1 job running at a time,
@@ -707,7 +708,8 @@ class NinjaState:
 
             if generated_source_files:
                 generated_sources_alias = "_ninja_generated_sources"
-                ninja.build(
+                ninja_sorted_build(
+                    ninja,
                     outputs=generated_sources_alias,
                     rule="phony",
                     implicit=generated_source_files,
@@ -786,7 +788,8 @@ class NinjaState:
                 )
 
                 if remaining_outputs:
-                    ninja.build(
+                    ninja_sorted_build(
+                        ninja,
                         outputs=sorted(remaining_outputs),
                         rule="phony",
                         implicit=first_output,
@@ -808,7 +811,7 @@ class NinjaState:
             if "inputs" in build:
                 build["inputs"].sort()
 
-            ninja.build(**build)
+            ninja_sorted_build(ninja, **build)
 
         template_builds = {'rule': "TEMPLATE"}
         for template_builder in template_builders:
@@ -828,7 +831,7 @@ class NinjaState:
                 template_builds[agg_key] = new_val
 
         if template_builds.get("outputs", []):
-            ninja.build(**template_builds)
+            ninja_sorted_build(ninja, **template_builds)
 
         # We have to glob the SCons files here to teach the ninja file
         # how to regenerate itself. We'll never see ourselves in the
@@ -853,8 +856,9 @@ class NinjaState:
             self.env['NINJA_REGENERATE_DEPS'],
         )
 
-        ninja.build(
-            ninja_in_file_path,
+        ninja_sorted_build(
+            ninja,
+            outputs=ninja_in_file_path,
             rule="REGENERATE",
             variables={
                 "self": ninja_file_path,
@@ -864,8 +868,9 @@ class NinjaState:
         # This sets up a dependency edge between build.ninja.in and build.ninja
         # without actually taking any action to transform one into the other
         # because we write both files ourselves later.
-        ninja.build(
-            ninja_file_path,
+        ninja_sorted_build(
+            ninja,
+            outputs=ninja_file_path,
             rule="NOOP",
             inputs=[ninja_in_file_path],
             implicit=[__file__],
@@ -874,8 +879,9 @@ class NinjaState:
         # If we ever change the name/s of the rules that include
         # compile commands (i.e. something like CC) we will need to
         # update this build to reflect that complete list.
-        ninja.build(
-            "compile_commands.json",
+        ninja_sorted_build(
+            ninja,
+            outputs="compile_commands.json",
             rule="CMD",
             pool="console",
             implicit=[ninja_file],
@@ -887,8 +893,9 @@ class NinjaState:
             order_only=[generated_sources_alias],
         )
 
-        ninja.build(
-            "compiledb",
+        ninja_sorted_build(
+            ninja,
+            outputs="compiledb",
             rule="phony",
             implicit=["compile_commands.json"],
         )
@@ -957,9 +964,27 @@ def get_comstr(env, action, targets, sources):
     return action.genstring(targets, sources, env)
 
 
+def ninja_recursive_sorted_dict(build):
+    sorted_dict = OrderedDict()
+    for key, val in sorted(build.items()):
+        if isinstance(val, dict):
+            sorted_dict[key] = ninja_recursive_sorted_dict(val)
+        elif isinstance(val, list) and key in ('inputs', 'outputs', 'implicit', 'order_only',
+                                               'implicit_outputs'):
+            sorted_dict[key] = sorted(val)
+        else:
+            sorted_dict[key] = val
+    return sorted_dict
+
+
+def ninja_sorted_build(ninja, **build):
+    sorted_dict = ninja_recursive_sorted_dict(build)
+    ninja.build(**sorted_dict)
+
+
 def get_command_env(env, target, source):
     """
-    Return a string that sets the enrivonment for any environment variables that
+    Return a string that sets the environment for any environment variables that
     differ between the OS environment and the SCons command ENV.
 
     It will be compatible with the default shell of the operating system.
@@ -981,7 +1006,7 @@ def get_command_env(env, target, source):
 
     windows = env["PLATFORM"] == "win32"
     command_env = ""
-    for key, value in scons_specified_env.items():
+    for key, value in sorted(scons_specified_env.items()):
         # Ensure that the ENV values are all strings:
         if is_List(value):
             # If the value is a list, then we assume it is a
@@ -1339,7 +1364,7 @@ def CheckNinjaCompdbExpand(env, context):
         text=textwrap.dedent("""
             rule CMD_RSP
               command = $cmd @$out.rsp > fake_output.txt
-              description = Building $out
+              description = Built $out
               rspfile = $out.rsp
               rspfile_content = $rspc
             build fake_output.txt: CMD_RSP fake_input.txt

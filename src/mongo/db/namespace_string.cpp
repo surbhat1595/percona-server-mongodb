@@ -57,6 +57,7 @@ constexpr StringData NamespaceString::kAdminDb;
 constexpr StringData NamespaceString::kLocalDb;
 constexpr StringData NamespaceString::kConfigDb;
 constexpr StringData NamespaceString::kSystemDotViewsCollectionName;
+constexpr StringData NamespaceString::kSystemDotJavascriptCollectionName;
 constexpr StringData NamespaceString::kOrphanCollectionPrefix;
 constexpr StringData NamespaceString::kOrphanCollectionDb;
 
@@ -94,8 +95,8 @@ const NamespaceString NamespaceString::kTenantMigrationRecipientsNamespace(
 const NamespaceString NamespaceString::kTenantMigrationOplogView(
     NamespaceString::kLocalDb, "system.tenantMigration.oplogView");
 
-const NamespaceString NamespaceString::kTenantSplitDonorsNamespace(NamespaceString::kConfigDb,
-                                                                   "tenantSplitDonors");
+const NamespaceString NamespaceString::kShardSplitDonorsNamespace(NamespaceString::kConfigDb,
+                                                                  "shardSplitDonors");
 
 const NamespaceString NamespaceString::kShardConfigCollectionsNamespace(NamespaceString::kConfigDb,
                                                                         "cache.collections");
@@ -166,7 +167,6 @@ const NamespaceString NamespaceString::kCompactStructuredEncryptionCoordinatorNa
 const NamespaceString NamespaceString::kClusterParametersNamespace(NamespaceString::kConfigDb,
                                                                    "clusterParameters");
 
-// TODO (SERVER-66431): replace all usages of ShardType::ConfigNS by kConfigsvrShardsNamespace
 const NamespaceString NamespaceString::kConfigsvrShardsNamespace(NamespaceString::kConfigDb,
                                                                  "shards");
 
@@ -243,7 +243,7 @@ bool NamespaceString::isLegalClientSystemNS(
         return true;
     }
 
-    if (isChangeStreamChangeCollection()) {
+    if (isChangeCollection()) {
         return true;
     }
 
@@ -269,6 +269,7 @@ bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
     return isSystemDotViews() || isServerConfigurationCollection() || isPrivilegeCollection() ||
         _ns == kDonorReshardingOperationsNamespace.ns() ||
         _ns == kForceOplogBatchBoundaryNamespace.ns() ||
+        _ns == kTenantMigrationDonorsNamespace.ns() ||
         _ns == kTenantMigrationRecipientsNamespace.ns() || _ns == kConfigsvrShardsNamespace.ns();
 }
 
@@ -284,6 +285,12 @@ NamespaceString NamespaceString::makeCollectionlessAggregateNSS(const DatabaseNa
     dassert(nss.isValid());
     dassert(nss.isCollectionlessAggregateNS());
     return nss;
+}
+
+NamespaceString NamespaceString::makeChangeCollectionNSS(
+    const boost::optional<TenantId>& tenantId) {
+    // TODO: SERVER-65950 create namespace for a particular tenant.
+    return NamespaceString{NamespaceString::kConfigDb, NamespaceString::kChangeCollectionName};
 }
 
 std::string NamespaceString::getSisterNS(StringData local) const {
@@ -404,8 +411,8 @@ bool NamespaceString::isChangeStreamPreImagesCollection() const {
     return ns() == kChangeStreamPreImagesNamespace.ns();
 }
 
-bool NamespaceString::isChangeStreamChangeCollection() const {
-    return db() == kConfigDb && coll() == kChangeStreamChangeCollection;
+bool NamespaceString::isChangeCollection() const {
+    return db() == kConfigDb && coll() == kChangeCollectionName;
 }
 
 bool NamespaceString::isConfigImagesCollection() const {
@@ -422,6 +429,10 @@ bool NamespaceString::isFLE2StateCollection() const {
          coll().endsWith(fle2EcocSuffix));
 }
 
+bool NamespaceString::isOplogOrChangeCollection() const {
+    return isOplog() || isChangeCollection();
+}
+
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {
     return {db(), kTimeseriesBucketsCollectionPrefix.toString() + coll()};
 }
@@ -432,8 +443,7 @@ NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
 }
 
 bool NamespaceString::isImplicitlyReplicated() const {
-    if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() || isChangeCollection() ||
-        isChangeStreamChangeCollection()) {
+    if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() || isChangeCollection()) {
         // Implicitly replicated namespaces are replicated, although they only replicate a subset of
         // writes.
         invariant(isReplicated());

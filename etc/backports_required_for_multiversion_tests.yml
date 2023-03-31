@@ -9,7 +9,7 @@
 # not yet been backported to the last-lts or last-continuous branch and will be excluded from the
 # multiversion suite corresponding to the root level suite key.
 #
-# Example:
+# Example: To prevent 'my_test_file.js' from running in the 'replica_sets_multiversion' suite with the last-continuous binary
 # replica_sets_multiversion:
 #   - ticket: SERVER-1000
 #     test_file: jstests/core/my_test_file.js
@@ -68,7 +68,7 @@ last-continuous:
       test_file: jstests/replsets/sessions_collection_reaping.js
     - ticket: SERVER-58203
       test_file: jstests/sharding/query/pipeline_length_limit.js
-    - ticket: SERVER-56887
+    - ticket: SERVER-65101
       test_file: jstests/sharding/database_versioning_all_commands.js
     - ticket: SERVER-57617
       test_file: jstests/replsets/tenant_migration_recipient_fetches_retryable_writes_oplog_entries.js
@@ -220,6 +220,8 @@ last-continuous:
       test_file: jstests/core/wildcard_index_cached_plans.js
     - ticket: SERVER-66719
       test_file: jstests/replsets/dbhash_lock_acquisition.js
+    - ticket: SERVER-62272
+      test_file: jstests/sharding/chunk_migration_with_schema_validation.js
     - ticket: SERVER-60829
       test_file: jstests/replsets/tenant_migration_donor_resume_on_stepup_and_restart.js
     - ticket: SERVER-65188
@@ -252,6 +254,16 @@ last-continuous:
       test_file: jstests/sharding/resharding_metrics_increment.js
     - ticket: SERVER-64395
       test_file: jstests/sharding/resharding_abort_command.js
+    - ticket: SERVER-66078
+      test_file: jstests/sharding/data_size_aware_balancing_sessions_collection.js
+    - ticket: SERVER-66379
+      test_file: jstests/core/or_to_in.js
+    - ticket: SERVER-66422
+      test_file: jstests/sharding/resharding_metrics.js
+    - ticket: SERVER-50792
+      test_file: jstests/core/check_shard_index.js
+    - ticket: SERVER-50792
+      test_file: jstests/sharding/refine_collection_shard_key_basic.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:
@@ -283,7 +295,7 @@ last-lts:
       test_file: jstests/replsets/check_replication_hello_response_fields.js
     - ticket: SERVER-50640
       test_file: jstests/core/views/views_all_commands.js
-    - ticket: SERVER-56887
+    - ticket: SERVER-65101
       test_file: jstests/sharding/database_versioning_all_commands.js
     - ticket: SERVER-49988
       test_file: jstests/sharding/hello_response_validation.js
@@ -605,6 +617,8 @@ last-lts:
       test_file: jstests/core/wildcard_index_cached_plans.js
     - ticket: SERVER-66719
       test_file: jstests/replsets/dbhash_lock_acquisition.js
+    - ticket: SERVER-62272
+      test_file: jstests/sharding/chunk_migration_with_schema_validation.js
     - ticket: SERVER-60829
       test_file: jstests/replsets/tenant_migration_donor_resume_on_stepup_and_restart.js
     - ticket: SERVER-65188
@@ -637,6 +651,16 @@ last-lts:
       test_file: jstests/sharding/resharding_metrics_increment.js
     - ticket: SERVER-64395
       test_file: jstests/sharding/resharding_abort_command.js
+    - ticket: SERVER-66078
+      test_file: jstests/sharding/data_size_aware_balancing_sessions_collection.js
+    - ticket: SERVER-66379
+      test_file: jstests/core/or_to_in.js
+    - ticket: SERVER-66422
+      test_file: jstests/sharding/resharding_metrics.js
+    - ticket: SERVER-50792
+      test_file: jstests/core/check_shard_index.js
+    - ticket: SERVER-50792
+      test_file: jstests/sharding/refine_collection_shard_key_basic.js
 
   # Tests that should only be excluded from particular suites should be listed under that suite.
   suites:

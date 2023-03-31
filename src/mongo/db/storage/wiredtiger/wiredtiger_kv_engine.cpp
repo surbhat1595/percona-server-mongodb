@@ -48,6 +48,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 
 #include <boost/filesystem.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/system/error_code.hpp>
@@ -819,6 +820,12 @@ WiredTigerKVEngine::WiredTigerKVEngine(
 
     if (WiredTigerUtil::willRestoreFromBackup()) {
         ss << WiredTigerUtil::generateRestoreConfig() << ",";
+    }
+
+    // If we've requested an ephemeral instance we store everything into memory instead of backing
+    // it onto disk. Logging is not supported in this instance, thus we also have to disable it.
+    if (_ephemeral) {
+        ss << "in_memory=true,log=(enabled=false),";
     }
 
     string config = ss.str();
@@ -3307,6 +3314,11 @@ bool WiredTigerKVEngine::supportsDirectoryPerDB() const {
 }
 
 void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
+    // Ephemeral WiredTiger instances cannot do a checkpoint to disk as there is no disk backing
+    // the data.
+    if (_ephemeral) {
+        return;
+    }
     // TODO: SERVER-64507: Investigate whether we can smartly rely on one checkpointer if two or
     // more threads checkpoint at the same time.
     stdx::lock_guard lk(_checkpointMutex);

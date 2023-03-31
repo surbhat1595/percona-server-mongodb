@@ -26,14 +26,16 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <fstream>
+#include <algorithm>
 #include <iostream>
 #include <string>
 
-#include "test_harness/util/logger.h"
-#include "test_harness/test.h"
+#include "src/common/logger.h"
+#include "src/main/test.h"
 
+#include "bounded_cursor_perf.cpp"
 #include "burst_inserts.cpp"
+#include "cache_resize.cpp"
 #include "cursor_bound_01.cpp"
 #include "hs_cleanup.cpp"
 #include "operations_test.cpp"
@@ -41,7 +43,10 @@
 #include "search_near_02.cpp"
 #include "search_near_03.cpp"
 #include "test_template.cpp"
-#include "bounded_cursor_perf.cpp"
+
+extern "C" {
+#include "test_util.h"
+}
 
 /* Declarations to avoid the error raised by -Werror=missing-prototypes. */
 const std::string parse_configuration_from_file(const std::string &filename);
@@ -119,25 +124,29 @@ run_test(const std::string &test_name, const std::string &config, const std::str
     int error_code = 0;
 
     test_harness::logger::log_msg(LOG_TRACE, "Configuration\t:" + config);
+    test_harness::test_args args = {
+      .test_config = config, .test_name = test_name, .wt_open_config = wt_open_config};
 
-    if (test_name == "hs_cleanup")
-        hs_cleanup(test_harness::test_args{config, test_name, wt_open_config}).run();
+    if (test_name == "bounded_cursor_perf")
+        bounded_cursor_perf(args).run();
     else if (test_name == "burst_inserts")
-        burst_inserts(test_harness::test_args{config, test_name, wt_open_config}).run();
+        burst_inserts(args).run();
+    else if (test_name == "cache_resize")
+        cache_resize(args).run();
     else if (test_name == "cursor_bound_01")
-        cursor_bound_01(test_harness::test_args{config, test_name, wt_open_config}).run();
+        cursor_bound_01(args).run();
+    else if (test_name == "hs_cleanup")
+        hs_cleanup(args).run();
     else if (test_name == "operations_test")
-        operations_test(test_harness::test_args{config, test_name, wt_open_config}).run();
+        operations_test(args).run();
     else if (test_name == "search_near_01")
-        search_near_01(test_harness::test_args{config, test_name, wt_open_config}).run();
+        search_near_01(args).run();
     else if (test_name == "search_near_02")
-        search_near_02(test_harness::test_args{config, test_name, wt_open_config}).run();
+        search_near_02(args).run();
     else if (test_name == "search_near_03")
-        search_near_03(test_harness::test_args{config, test_name, wt_open_config}).run();
+        search_near_03(args).run();
     else if (test_name == "test_template")
-        test_template(test_harness::test_args{config, test_name, wt_open_config}).run();
-    else if (test_name == "bounded_cursor_perf")
-        bounded_cursor_perf(test_harness::test_args{config, test_name, wt_open_config}).run();
+        test_template(args).run();
     else {
         test_harness::logger::log_msg(LOG_ERROR, "Test not found: " + test_name);
         error_code = -1;
@@ -160,10 +169,9 @@ main(int argc, char *argv[])
 {
     std::string cfg, config_filename, current_cfg, current_test_name, test_name, wt_open_config;
     int64_t error_code = 0;
-
     const std::vector<std::string> all_tests = {"bounded_cursor_perf", "burst_inserts",
-      "cursor_bound_01", "hs_cleanup", "operations_test", "search_near_01", "search_near_02",
-      "search_near_03", "test_template"};
+      "cache_resize", "cursor_bound_01", "hs_cleanup", "operations_test", "search_near_01",
+      "search_near_02", "search_near_03", "test_template"};
 
     /* Set the program name for error messages. */
     (void)testutil_set_progname(argv);
@@ -237,6 +245,13 @@ main(int argc, char *argv[])
                     current_cfg = cfg;
 
                 error_code = run_test(current_test_name, current_cfg, wt_open_config);
+                /*
+                 * The connection is usually closed using the destructor of the connection manager.
+                 * Because it is a singleton and we are executing all tests, we are not going
+                 * through its destructor between each test, we need to close the connection
+                 * manually before starting the next test.
+                 */
+                connection_manager::instance().close();
                 if (error_code != 0)
                     break;
             }

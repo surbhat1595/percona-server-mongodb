@@ -35,10 +35,12 @@
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <cstdio>
-#include <pcrecpp.h>
 #include <utility>
 #include <vector>
 
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -46,6 +48,7 @@
 #include "mongo/db/hasher.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_parser_gen.h"
 #include "mongo/db/pipeline/variable_validation.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/sort_pattern.h"
@@ -53,7 +56,9 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/platform/bits.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/util/regex_util.h"
+#include "mongo/util/errno_util.h"
+#include "mongo/util/pcre.h"
+#include "mongo/util/pcre_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/summation.h"
@@ -304,111 +309,173 @@ const char* ExpressionAbs::getOpName() const {
 
 /* ------------------------- ExpressionAdd ----------------------------- */
 
-StatusWith<Value> ExpressionAdd::apply(Value lhs, Value rhs) {
-    BSONType diffType = Value::getWidestNumeric(rhs.getType(), lhs.getType());
+namespace {
 
-    if (diffType == NumberDecimal) {
-        Decimal128 left = lhs.coerceToDecimal();
-        Decimal128 right = rhs.coerceToDecimal();
-        return Value(left.add(right));
-    } else if (diffType == NumberDouble) {
-        double right = rhs.coerceToDouble();
-        double left = lhs.coerceToDouble();
-        return Value(left + right);
-    } else if (diffType == NumberLong) {
-        long long result;
+/**
+ * We'll try to return the narrowest possible result value while avoiding overflow or implicit use
+ * of decimal types. To do that, compute separate sums for long, double and decimal values, and
+ * track the current widest type. The long sum will be converted to double when the first double
+ * value is seen or when long arithmetic would overflow.
+ */
+class AddState {
+    long long longTotal = 0;
+    double doubleTotal = 0;
+    Decimal128 decimalTotal;
+    BSONType widestType = NumberInt;
+    bool isDate = false;
 
-        // If there is an overflow, convert the values to doubles.
-        if (overflow::add(lhs.coerceToLong(), rhs.coerceToLong(), &result)) {
-            return Value(lhs.coerceToDouble() + rhs.coerceToDouble());
+public:
+    /**
+     * Update the internal state with another operand. It is up to the caller to validate that the
+     * operand is of a proper type.
+     */
+    void operator+=(const Value& operand) {
+        auto oldWidestType = widestType;
+        // Dates are represented by the long number of milliseconds since the unix epoch, so we can
+        // treat them as regular numeric values for the purposes of addition after making sure that
+        // only one date is present in the operand list.
+        Value valToAdd;
+        if (operand.getType() == Date) {
+            uassert(16612, "only one date allowed in an $add expression", !isDate);
+            isDate = true;
+            valToAdd = Value(operand.getDate().toMillisSinceEpoch());
+        } else {
+            widestType = Value::getWidestNumeric(widestType, operand.getType());
+            valToAdd = operand;
         }
-        return Value(result);
-    } else if (diffType == NumberInt) {
-        long long right = rhs.coerceToLong();
-        long long left = lhs.coerceToLong();
-        return Value::createIntOrLong(left + right);
-    } else if (lhs.nullish() || rhs.nullish()) {
-        return Value(BSONNULL);
-    } else {
-        return Status(ErrorCodes::TypeMismatch,
-                      str::stream() << "cannot $add a" << typeName(rhs.getType()) << " from a "
-                                    << typeName(lhs.getType()));
+
+        // If this operation widens the return type, perform any necessary type conversions.
+        if (oldWidestType != widestType) {
+            switch (widestType) {
+                case NumberLong:
+                    // Int -> Long is handled by the same sum.
+                    break;
+                case NumberDouble:
+                    // Int/Long -> Double converts the existing longTotal to a doubleTotal.
+                    doubleTotal = longTotal;
+                    break;
+                case NumberDecimal:
+                    // Convert the right total to NumberDecimal by looking at the old widest type.
+                    switch (oldWidestType) {
+                        case NumberInt:
+                        case NumberLong:
+                            decimalTotal = Decimal128(longTotal);
+                            break;
+                        case NumberDouble:
+                            decimalTotal = Decimal128(doubleTotal, Decimal128::kRoundTo34Digits);
+                            break;
+                        default:
+                            MONGO_UNREACHABLE;
+                    }
+                    break;
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+
+        // Perform the add operation.
+        switch (widestType) {
+            case NumberInt:
+            case NumberLong:
+                // If the long long arithmetic overflows, promote the result to a NumberDouble and
+                // start incrementing the doubleTotal.
+                long long newLongTotal;
+                if (overflow::add(longTotal, valToAdd.coerceToLong(), &newLongTotal)) {
+                    widestType = NumberDouble;
+                    doubleTotal = longTotal + valToAdd.coerceToDouble();
+                } else {
+                    longTotal = newLongTotal;
+                }
+                break;
+            case NumberDouble:
+                doubleTotal += valToAdd.coerceToDouble();
+                break;
+            case NumberDecimal:
+                decimalTotal = decimalTotal.add(valToAdd.coerceToDecimal());
+                break;
+            default:
+                uasserted(ErrorCodes::TypeMismatch,
+                          str::stream() << "$add only supports numeric or date types, not "
+                                        << typeName(valToAdd.getType()));
+        }
     }
+
+    Value getValue() const {
+        // If one of the operands was a date, then convert the result to a date.
+        if (isDate) {
+            switch (widestType) {
+                case NumberInt:
+                case NumberLong:
+                    return Value(Date_t::fromMillisSinceEpoch(longTotal));
+                case NumberDouble:
+                    using limits = std::numeric_limits<long long>;
+                    uassert(ErrorCodes::Overflow,
+                            "date overflow in $add",
+                            // The upper bound is exclusive because it rounds up when it is cast to
+                            // a double.
+                            doubleTotal >= limits::min() &&
+                                doubleTotal < static_cast<double>(limits::max()));
+                    return Value(Date_t::fromMillisSinceEpoch(llround(doubleTotal)));
+                case NumberDecimal:
+                    // Decimal dates are not checked for overflow.
+                    return Value(Date_t::fromMillisSinceEpoch(decimalTotal.toLong()));
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        } else {
+            switch (widestType) {
+                case NumberInt:
+                    return Value::createIntOrLong(longTotal);
+                case NumberLong:
+                    return Value(longTotal);
+                case NumberDouble:
+                    return Value(doubleTotal);
+                case NumberDecimal:
+                    return Value(decimalTotal);
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+    }
+};
+
+Status checkAddOperandType(Value val) {
+    if (!val.numeric() && val.getType() != Date) {
+        return Status(ErrorCodes::TypeMismatch,
+                      str::stream() << "$add only supports numeric or date types, not "
+                                    << typeName(val.getType()));
+    }
+
+    return Status::OK();
+}
+}  // namespace
+
+StatusWith<Value> ExpressionAdd::apply(Value lhs, Value rhs) {
+    if (lhs.nullish())
+        return Value(BSONNULL);
+    if (Status s = checkAddOperandType(lhs); !s.isOK())
+        return s;
+    if (rhs.nullish())
+        return Value(BSONNULL);
+    if (Status s = checkAddOperandType(rhs); !s.isOK())
+        return s;
+
+    AddState state;
+    state += lhs;
+    state += rhs;
+    return state.getValue();
 }
 
 Value ExpressionAdd::evaluate(const Document& root, Variables* variables) const {
-    // We'll try to return the narrowest possible result value while avoiding overflow, loss
-    // of precision due to intermediate rounding or implicit use of decimal types. To do that,
-    // compute a compensated sum for non-decimal values and a separate decimal sum for decimal
-    // values, and track the current narrowest type.
-    DoubleDoubleSummation nonDecimalTotal;
-    Decimal128 decimalTotal;
-    BSONType totalType = NumberInt;
-    bool haveDate = false;
-
-    const size_t n = _children.size();
-    for (size_t i = 0; i < n; ++i) {
-        Value val = _children[i]->evaluate(root, variables);
-
-        switch (val.getType()) {
-            case NumberDecimal:
-                decimalTotal = decimalTotal.add(val.getDecimal());
-                totalType = NumberDecimal;
-                break;
-            case NumberDouble:
-                nonDecimalTotal.addDouble(val.getDouble());
-                if (totalType != NumberDecimal)
-                    totalType = NumberDouble;
-                break;
-            case NumberLong:
-                nonDecimalTotal.addLong(val.getLong());
-                if (totalType == NumberInt)
-                    totalType = NumberLong;
-                break;
-            case NumberInt:
-                nonDecimalTotal.addDouble(val.getInt());
-                break;
-            case Date:
-                uassert(16612, "only one date allowed in an $add expression", !haveDate);
-                haveDate = true;
-                nonDecimalTotal.addLong(val.getDate().toMillisSinceEpoch());
-                break;
-            default:
-                uassert(16554,
-                        str::stream() << "$add only supports numeric or date types, not "
-                                      << typeName(val.getType()),
-                        val.nullish());
-                return Value(BSONNULL);
-        }
+    AddState state;
+    for (auto&& child : _children) {
+        Value val = child->evaluate(root, variables);
+        if (val.nullish())
+            return Value(BSONNULL);
+        uassertStatusOK(checkAddOperandType(val));
+        state += val;
     }
-
-    if (haveDate) {
-        int64_t longTotal;
-        if (totalType == NumberDecimal) {
-            longTotal = decimalTotal.add(nonDecimalTotal.getDecimal()).toLong();
-        } else {
-            uassert(ErrorCodes::Overflow, "date overflow in $add", nonDecimalTotal.fitsLong());
-            longTotal = nonDecimalTotal.getLong();
-        }
-        return Value(Date_t::fromMillisSinceEpoch(longTotal));
-    }
-    switch (totalType) {
-        case NumberDecimal:
-            return Value(decimalTotal.add(nonDecimalTotal.getDecimal()));
-        case NumberLong:
-            dassert(nonDecimalTotal.isInteger());
-            if (nonDecimalTotal.fitsLong())
-                return Value(nonDecimalTotal.getLong());
-            [[fallthrough]];
-        case NumberInt:
-            if (nonDecimalTotal.fitsLong())
-                return Value::createIntOrLong(nonDecimalTotal.getLong());
-            [[fallthrough]];
-        case NumberDouble:
-            return Value(nonDecimalTotal.getDouble());
-        default:
-            massert(16417, "$add resulted in a non-numeric type", false);
-    }
+    return state.getValue();
 }
 
 REGISTER_STABLE_EXPRESSION(add, ExpressionAdd::parse);
@@ -3253,7 +3320,7 @@ Value ExpressionMultiply::evaluate(const Document& root, Variables* variables) c
         if (val.nullish())
             return Value(BSONNULL);
         uassertStatusOK(checkMultiplyNumeric(val));
-        state *= child->evaluate(root, variables);
+        state *= val;
     }
     return state.getValue();
 }
@@ -3740,6 +3807,123 @@ Value ExpressionLog10::evaluateNumericArg(const Value& numericArg) const {
 REGISTER_STABLE_EXPRESSION(log10, ExpressionLog10::parse);
 const char* ExpressionLog10::getOpName() const {
     return "$log10";
+}
+
+/* ----------------------- ExpressionInternalFLEEqual ---------------------------- */
+constexpr auto kInternalFleEq = "$_internalFleEq"_sd;
+
+ExpressionInternalFLEEqual::ExpressionInternalFLEEqual(ExpressionContext* const expCtx,
+                                                       boost::intrusive_ptr<Expression> field,
+                                                       ConstDataRange serverToken,
+                                                       int64_t contentionFactor,
+                                                       ConstDataRange edcToken)
+    : Expression(expCtx, {std::move(field)}),
+      _serverToken(PrfBlockfromCDR(serverToken)),
+      _edcToken(PrfBlockfromCDR(edcToken)),
+      _contentionFactor(contentionFactor) {
+    expCtx->sbeCompatible = false;
+
+    auto tokens =
+        EDCServerCollection::generateEDCTokens(ConstDataRange(_edcToken), _contentionFactor);
+
+    for (auto& token : tokens) {
+        _cachedEDCTokens.insert(std::move(token.data));
+    }
+}
+
+void ExpressionInternalFLEEqual::_doAddDependencies(DepsTracker* deps) const {
+    for (auto&& operand : _children) {
+        operand->addDependencies(deps);
+    }
+}
+
+REGISTER_EXPRESSION_WITH_MIN_VERSION(_internalFleEq,
+                                     ExpressionInternalFLEEqual::parse,
+                                     AllowedWithApiStrict::kAlways,
+                                     AllowedWithClientType::kAny,
+                                     multiversion::FeatureCompatibilityVersion::kVersion_6_0);
+
+intrusive_ptr<Expression> ExpressionInternalFLEEqual::parse(ExpressionContext* const expCtx,
+                                                            BSONElement expr,
+                                                            const VariablesParseState& vps) {
+
+    IDLParserErrorContext ctx(kInternalFleEq);
+    auto fleEq = InternalFleEqStruct::parse(ctx, expr.Obj());
+
+    auto fieldExpr = Expression::parseOperand(expCtx, fleEq.getField().getElement(), vps);
+
+    auto serverTokenPair = fromEncryptedConstDataRange(fleEq.getServerEncryptionToken());
+
+    uassert(6672405,
+            "Invalid server token",
+            serverTokenPair.first == EncryptedBinDataType::kFLE2TransientRaw &&
+                serverTokenPair.second.length() == sizeof(PrfBlock));
+
+    auto edcTokenPair = fromEncryptedConstDataRange(fleEq.getEdcDerivedToken());
+
+    uassert(6672406,
+            "Invalid edc token",
+            edcTokenPair.first == EncryptedBinDataType::kFLE2TransientRaw &&
+                edcTokenPair.second.length() == sizeof(PrfBlock));
+
+
+    auto cf = fleEq.getMaxCounter();
+    uassert(6672408, "Contention factor must be between 0 and 10000", cf >= 0 && cf < 10000);
+
+    return new ExpressionInternalFLEEqual(expCtx,
+                                          std::move(fieldExpr),
+                                          serverTokenPair.second,
+                                          fleEq.getMaxCounter(),
+                                          edcTokenPair.second);
+}
+
+Value toValue(const std::array<std::uint8_t, 32>& buf) {
+    auto vec = toEncryptedVector(EncryptedBinDataType::kFLE2TransientRaw, buf);
+    return Value(BSONBinData(vec.data(), vec.size(), BinDataType::Encrypt));
+}
+
+Value ExpressionInternalFLEEqual::serialize(bool explain) const {
+    return Value(Document{{kInternalFleEq,
+                           Document{{"field", _children[0]->serialize(explain)},
+                                    {"edc", toValue(_edcToken)},
+                                    {"counter", Value(static_cast<long long>(_contentionFactor))},
+                                    {"server", toValue(_serverToken)}}}});
+}
+
+Value ExpressionInternalFLEEqual::evaluate(const Document& root, Variables* variables) const {
+    // Inputs
+    // 1. Value for FLE2IndexedEqualityEncryptedValue field
+
+    Value fieldValue = _children[0]->evaluate(root, variables);
+
+    if (fieldValue.nullish()) {
+        return Value(BSONNULL);
+    }
+
+    if (fieldValue.getType() != BinData) {
+        return Value(false);
+    }
+
+    auto fieldValuePair = fromEncryptedBinData(fieldValue);
+
+    uassert(6672407,
+            "Invalid encrypted indexed field",
+            fieldValuePair.first == EncryptedBinDataType::kFLE2EqualityIndexedValue);
+
+    // Value matches if
+    // 1. Decrypt field is successful
+    // 2. EDC_u Token is in GenTokens(EDC Token, ContentionFactor)
+    //
+    auto swIndexed =
+        EDCServerCollection::decryptAndParse(ConstDataRange(_serverToken), fieldValuePair.second);
+    uassertStatusOK(swIndexed);
+    auto indexed = swIndexed.getValue();
+
+    return Value(_cachedEDCTokens.count(indexed.edc.data) == 1);
+}
+
+const char* ExpressionInternalFLEEqual::getOpName() const {
+    return kInternalFleEq.rawData();
 }
 
 /* ------------------------ ExpressionNary ----------------------------- */
@@ -6855,105 +7039,46 @@ ExpressionRegex::RegexExecutionState ExpressionRegex::buildInitialState(
     return executionState;
 }
 
-int ExpressionRegex::execute(RegexExecutionState* regexState) const {
+pcre::MatchData ExpressionRegex::execute(RegexExecutionState* regexState) const {
     invariant(regexState);
     invariant(!regexState->nullish());
     invariant(regexState->pcrePtr);
 
-    int execResult = pcre_exec(regexState->pcrePtr.get(),
-                               nullptr,
-                               regexState->input->c_str(),
-                               regexState->input->size(),
-                               regexState->startBytePos,
-                               0,  // No need to overwrite the options set during pcre_compile.
-                               &(regexState->capturesBuffer.front()),
-                               regexState->capturesBuffer.size());
-    // The 'execResult' will be -1 if there is no match, 0 < execResult <= (numCaptures + 1)
-    // depending on how many capture groups match, negative (other than -1) if there is an error
-    // during execution, and zero if capturesBuffer's capacity is not sufficient to hold all the
-    // results. The latter scenario should never occur.
+    StringData in = *regexState->input;
+    auto m = regexState->pcrePtr->matchView(in, {}, regexState->startBytePos);
     uassert(51156,
             str::stream() << "Error occurred while executing the regular expression in " << _opName
-                          << ". Result code: " << execResult,
-            execResult == -1 || (execResult > 0 && execResult <= (regexState->numCaptures + 1)));
-    return execResult;
+                          << ". Result code: " << errorMessage(m.error()),
+            m || m.error() == pcre::Errc::ERROR_NOMATCH);
+    return m;
 }
 
 Value ExpressionRegex::nextMatch(RegexExecutionState* regexState) const {
-    int execResult = execute(regexState);
-
-    // No match.
-    if (execResult < 0) {
+    auto m = execute(regexState);
+    if (!m)
+        // No match.
         return Value(BSONNULL);
-    }
 
-    // Use 'input' as StringData throughout the function to avoid copying the string on 'substr'
-    // calls.
-    StringData input = *(regexState->input);
-
-    auto verifyBounds = [&input, this](auto startPos, auto limitPos, auto isCapture) {
-        // If a capture group was not matched, then the 'startPos' and 'limitPos' will both be -1.
-        // These bounds cannot occur for a match on the full string.
-        if (startPos == -1 || limitPos == -1) {
-            massert(31304,
-                    str::stream() << "Unexpected error occurred while executing " << _opName
-                                  << ". startPos: " << startPos << ", limitPos: " << limitPos,
-                    isCapture && startPos == -1 && limitPos == -1);
-            return;
-        }
-
-        massert(31305,
-                str::stream() << "Unexpected error occurred while executing " << _opName
-                              << ". startPos: " << startPos,
-                (startPos >= 0 && static_cast<size_t>(startPos) <= input.size()));
-        massert(31306,
-                str::stream() << "Unexpected error occurred while executing " << _opName
-                              << ". limitPos: " << limitPos,
-                (limitPos >= 0 && static_cast<size_t>(limitPos) <= input.size()));
-        massert(31307,
-                str::stream() << "Unexpected error occurred while executing " << _opName
-                              << ". startPos: " << startPos << ", limitPos: " << limitPos,
-                startPos <= limitPos);
-    };
-
-    // The first and second entries of the 'capturesBuffer' will have the start and (end+1) indices
-    // of the matched string, as byte offsets. '(limit - startIndex)' would be the length of the
-    // captured string.
-    verifyBounds(regexState->capturesBuffer[0], regexState->capturesBuffer[1], false);
-    const int matchStartByteIndex = regexState->capturesBuffer[0];
-    StringData matchedStr =
-        input.substr(matchStartByteIndex, regexState->capturesBuffer[1] - matchStartByteIndex);
-
-    // We iterate through the input string's contents preceding the match index, in order to convert
-    // the byte offset to a code point offset.
-    for (int byteIx = regexState->startBytePos; byteIx < matchStartByteIndex;
-         ++(regexState->startCodePointPos)) {
-        byteIx += str::getCodePointLength(input[byteIx]);
-    }
+    StringData beforeMatch(m.input().begin() + m.startPos(), m[0].begin());
+    regexState->startCodePointPos += str::lengthInUTF8CodePoints(beforeMatch);
 
     // Set the start index for match to the new one.
-    regexState->startBytePos = matchStartByteIndex;
+    regexState->startBytePos = m[0].begin() - m.input().begin();
 
     std::vector<Value> captures;
-    captures.reserve(regexState->numCaptures);
+    captures.reserve(m.captureCount());
 
-    // The next '2 * numCaptures' entries (after the first two entries) of 'capturesBuffer' will
-    // hold the start index and limit pairs, for each of the capture groups. We skip the first two
-    // elements and start iteration from 3rd element so that we only construct the strings for
-    // capture groups.
-    for (int i = 0; i < regexState->numCaptures; ++i) {
-        const int start = regexState->capturesBuffer[2 * (i + 1)];
-        const int limit = regexState->capturesBuffer[2 * (i + 1) + 1];
-        verifyBounds(start, limit, true);
-
-        // The 'start' and 'limit' will be set to -1, if the 'input' didn't match the current
-        // capture group. In this case we put a 'null' placeholder in place of the capture group.
-        captures.push_back(start == -1 && limit == -1 ? Value(BSONNULL)
-                                                      : Value(input.substr(start, limit - start)));
+    for (size_t i = 1; i < m.captureCount() + 1; ++i) {
+        if (StringData cap = m[i]; !cap.rawData()) {
+            // Use BSONNULL placeholder for unmatched capture groups.
+            captures.push_back(Value(BSONNULL));
+        } else {
+            captures.push_back(Value(cap));
+        }
     }
 
     MutableDocument match;
-    match.addField("match", Value(matchedStr));
+    match.addField("match", Value(m[0]));
     match.addField("idx", Value(regexState->startCodePointPos));
     match.addField("captures", Value(captures));
     return match.freezeToValue();
@@ -6978,41 +7103,20 @@ boost::intrusive_ptr<Expression> ExpressionRegex::optimize() {
 }
 
 void ExpressionRegex::_compile(RegexExecutionState* executionState) const {
-
-    const auto pcreOptions =
-        regex_util::flagsToPcreOptions(executionState->options.value_or(""), _opName).all_options();
-
     if (!executionState->pattern) {
         return;
     }
 
-    const char* compile_error;
-    int eoffset;
-
-    // The C++ interface pcreccp.h doesn't have a way to capture the matched string (or the index of
-    // the match). So we are using the C interface. First we compile all the regex options to
-    // generate pcre object, which will later be used to match against the input string.
-    executionState->pcrePtr = std::shared_ptr<pcre>(
-        pcre_compile(
-            executionState->pattern->c_str(), pcreOptions, &compile_error, &eoffset, nullptr),
-        pcre_free);
+    auto re = std::make_shared<pcre::Regex>(
+        *executionState->pattern,
+        pcre_util::flagsToOptions(executionState->options.value_or(""), _opName));
     uassert(51111,
-            str::stream() << "Invalid Regex in " << _opName << ": " << compile_error,
-            executionState->pcrePtr);
+            str::stream() << "Invalid Regex in " << _opName << ": " << errorMessage(re->error()),
+            *re);
+    executionState->pcrePtr = std::move(re);
 
     // Calculate the number of capture groups present in 'pattern' and store in 'numCaptures'.
-    const int pcre_retval = pcre_fullinfo(executionState->pcrePtr.get(),
-                                          nullptr,
-                                          PCRE_INFO_CAPTURECOUNT,
-                                          &executionState->numCaptures);
-    invariant(pcre_retval == 0);
-
-    // The first two-thirds of the vector is used to pass back captured substrings' start and
-    // (end+1) indexes. The remaining third of the vector is used as workspace by pcre_exec() while
-    // matching capturing subpatterns, and is not available for passing back information.
-    // pcre_compile will error if there are too many capture groups in the pattern. As long as this
-    // memory is allocated after compile, the amount of memory allocated will not be too high.
-    executionState->capturesBuffer.resize((1 + executionState->numCaptures) * 3);
+    executionState->numCaptures = executionState->pcrePtr->captureCount();
 }
 
 Value ExpressionRegex::serialize(bool explain) const {
@@ -7237,9 +7341,11 @@ boost::intrusive_ptr<Expression> ExpressionRegexMatch::parse(ExpressionContext* 
 }
 
 Value ExpressionRegexMatch::evaluate(const Document& root, Variables* variables) const {
-    auto executionState = buildInitialState(root, variables);
-    // Return output of execute only if regex is not nullish.
-    return executionState.nullish() ? Value(false) : Value(execute(&executionState) > 0);
+    auto state = buildInitialState(root, variables);
+    if (state.nullish())
+        return Value(false);
+    pcre::MatchData m = execute(&state);
+    return Value(!!m);
 }
 
 /* -------------------------- ExpressionRandom ------------------------------ */

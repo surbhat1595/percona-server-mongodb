@@ -62,9 +62,12 @@ std::vector<ABT::reference_type> collectComposed(const ABT& n) {
     return {n.ref()};
 }
 
-FieldNameType getSimpleField(const ABT& node) {
-    const PathGet* pathGet = node.cast<PathGet>();
-    return pathGet != nullptr ? pathGet->name() : "";
+bool isSimplePath(const ABT& node) {
+    if (auto getPtr = node.cast<PathGet>();
+        getPtr != nullptr && getPtr->getPath().is<PathIdentity>()) {
+        return true;
+    }
+    return false;
 }
 
 std::string PrefixId::getNextId(const std::string& key) {
@@ -318,10 +321,10 @@ public:
 private:
     void extractFromABT(VariableNameSetType& vars, const ABT& v) {
         const auto& result = VariableEnvironment::getVariables(v);
-        for (const Variable* var : result._variables) {
-            if (result._definedVars.count(var->name()) == 0) {
+        for (const Variable& var : result._variables) {
+            if (result._definedVars.count(var.name()) == 0) {
                 // We are interested in either free variables, or variables defined on other nodes.
-                vars.insert(var->name());
+                vars.insert(var.name());
             }
         }
     }
@@ -337,52 +340,45 @@ VariableNameSetType collectVariableReferences(const ABT& n) {
     return NodeVariableTracker::collect(n);
 }
 
-PartialSchemaReqConversion::PartialSchemaReqConversion()
-    : _success(false),
-      _bound(),
-      _reqMap(),
-      _hasIntersected(false),
-      _hasTraversed(false),
-      _hasEmptyInterval(false) {}
-
 PartialSchemaReqConversion::PartialSchemaReqConversion(PartialSchemaRequirements reqMap)
-    : _success(true),
-      _bound(),
+    : _bound(),
       _reqMap(std::move(reqMap)),
       _hasIntersected(false),
       _hasTraversed(false),
-      _hasEmptyInterval(false) {}
+      _hasEmptyInterval(false),
+      _retainPredicate(false) {}
 
 PartialSchemaReqConversion::PartialSchemaReqConversion(ABT bound)
-    : _success(true),
-      _bound(std::move(bound)),
+    : _bound(std::move(bound)),
       _reqMap(),
       _hasIntersected(false),
       _hasTraversed(false),
-      _hasEmptyInterval(false) {}
+      _hasEmptyInterval(false),
+      _retainPredicate(false) {}
 
 /**
  * Helper class that builds PartialSchemaRequirements property from an EvalFilter or an EvalPath.
  */
 class PartialSchemaReqConverter {
 public:
-    PartialSchemaReqConverter() = default;
+    using ResultType = boost::optional<PartialSchemaReqConversion>;
 
-    PartialSchemaReqConversion handleEvalPathAndEvalFilter(PartialSchemaReqConversion pathResult,
-                                                           PartialSchemaReqConversion inputResult) {
-        if (!pathResult._success || !inputResult._success) {
+    PartialSchemaReqConverter(const bool isFilterContext) : _isFilterContext(isFilterContext) {}
+
+    ResultType handleEvalPathAndEvalFilter(ResultType pathResult, ResultType inputResult) {
+        if (!pathResult || !inputResult) {
             return {};
         }
-        if (pathResult._bound.has_value() || !inputResult._bound.has_value() ||
-            !inputResult._reqMap.empty()) {
+        if (pathResult->_bound.has_value() || !inputResult->_bound.has_value() ||
+            !inputResult->_reqMap.empty()) {
             return {};
         }
 
-        if (auto boundPtr = inputResult._bound->cast<Variable>(); boundPtr != nullptr) {
+        if (auto boundPtr = inputResult->_bound->cast<Variable>(); boundPtr != nullptr) {
             const ProjectionName& boundVarName = boundPtr->name();
             PartialSchemaRequirements newMap;
 
-            for (auto& [key, req] : pathResult._reqMap) {
+            for (auto& [key, req] : pathResult->_reqMap) {
                 if (!key._projectionName.empty()) {
                     return {};
                 }
@@ -390,43 +386,44 @@ public:
             }
 
             PartialSchemaReqConversion result{std::move(newMap)};
-            result._hasEmptyInterval = pathResult._hasEmptyInterval;
+            result._hasEmptyInterval = pathResult->_hasEmptyInterval;
+            result._retainPredicate = pathResult->_retainPredicate;
             return result;
         }
 
         return {};
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const EvalPath& evalPath,
-                                         PartialSchemaReqConversion pathResult,
-                                         PartialSchemaReqConversion inputResult) {
+    ResultType transport(const ABT& n,
+                         const EvalPath& evalPath,
+                         ResultType pathResult,
+                         ResultType inputResult) {
         return handleEvalPathAndEvalFilter(std::move(pathResult), std::move(inputResult));
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const EvalFilter& evalFilter,
-                                         PartialSchemaReqConversion pathResult,
-                                         PartialSchemaReqConversion inputResult) {
+    ResultType transport(const ABT& n,
+                         const EvalFilter& evalFilter,
+                         ResultType pathResult,
+                         ResultType inputResult) {
         return handleEvalPathAndEvalFilter(std::move(pathResult), std::move(inputResult));
     }
 
-    static PartialSchemaReqConversion handleComposition(const bool isMultiplicative,
-                                                        PartialSchemaReqConversion leftResult,
-                                                        PartialSchemaReqConversion rightResult) {
-        if (!leftResult._success || !rightResult._success) {
+    static ResultType handleComposition(const bool isMultiplicative,
+                                        ResultType leftResult,
+                                        ResultType rightResult) {
+        if (!leftResult || !rightResult) {
             return {};
         }
-        if (leftResult._bound.has_value() || rightResult._bound.has_value()) {
+        if (leftResult->_bound.has_value() || rightResult->_bound.has_value()) {
             return {};
         }
 
-        auto& leftReq = leftResult._reqMap;
-        auto& rightReq = rightResult._reqMap;
+        auto& leftReqMap = leftResult->_reqMap;
+        auto& rightReqMap = rightResult->_reqMap;
         if (isMultiplicative) {
             {
                 ProjectionRenames projectionRenames;
-                if (!intersectPartialSchemaReq(leftReq, rightReq, projectionRenames)) {
+                if (!intersectPartialSchemaReq(leftReqMap, rightReqMap, projectionRenames)) {
                     return {};
                 }
                 if (!projectionRenames.empty()) {
@@ -434,57 +431,136 @@ public:
                 }
             }
 
-            if (!leftResult._hasTraversed && !rightResult._hasTraversed) {
+            if (!leftResult->_hasTraversed && !rightResult->_hasTraversed) {
                 // Intersect intervals only if we have not traversed. E.g. (-inf, 90) ^ (70, +inf)
                 // becomes (70, 90).
-                for (auto& [key, req] : leftReq) {
+                for (auto& [key, req] : leftReqMap) {
                     auto newIntervals = intersectDNFIntervals(req.getIntervals());
                     if (newIntervals) {
                         req.getIntervals() = std::move(newIntervals.get());
                     } else {
-                        leftResult._hasEmptyInterval = true;
+                        leftResult->_hasEmptyInterval = true;
                         break;
                     }
                 }
-            } else if (leftReq.size() > 1) {
+            } else if (leftReqMap.size() > 1) {
                 // Reject if we have traversed, and composed requirements are more than one.
                 return {};
             }
 
-            leftResult._hasIntersected = true;
+            leftResult->_hasIntersected = true;
             return leftResult;
         }
 
         // We can only perform additive composition (OR) if we have a single matching key on both
         // sides.
-        if (leftReq.size() != 1 || rightReq.size() != 1) {
+        if (leftReqMap.size() != 1 || rightReqMap.size() != 1) {
             return {};
         }
 
-        auto leftEntry = leftReq.begin();
-        auto rightEntry = rightReq.begin();
-        if (!(leftEntry->first == rightEntry->first)) {
+        auto leftEntry = leftReqMap.begin();
+        auto rightEntry = rightReqMap.begin();
+        auto& [leftKey, leftReq] = *leftEntry;
+        auto& [rightKey, rightReq] = *rightEntry;
+
+        if (leftKey == rightKey) {
+            combineIntervalsDNF(false /*intersect*/,
+                                leftEntry->second.getIntervals(),
+                                rightEntry->second.getIntervals());
+            return leftResult;
+        }
+
+        // Here we can combine if paths differ only by a Traverse element and both intervals
+        // are the same, with array bounds. For example:
+        //      Left:   Id,          [[1, 2, 3], [1, 2, 3]]
+        //      Right:  Traverse Id  [[1, 2, 3], [1, 2, 3]]
+        // We can then combine into:
+        //    Traverse Id:           [[1, 2, 3], [1, 2, 3]] OR [1, 1]
+        // We also need to retain the original filter.
+
+        if (leftKey._projectionName != rightKey._projectionName) {
+            return {};
+        }
+        if (leftReq.hasBoundProjectionName() || rightReq.hasBoundProjectionName()) {
             return {};
         }
 
-        combineIntervalsDNF(false /*intersect*/,
-                            leftEntry->second.getIntervals(),
-                            rightEntry->second.getIntervals());
-        return leftResult;
+        auto& leftIntervals = leftReq.getIntervals();
+        auto& rightIntervals = rightReq.getIntervals();
+        const auto& leftInterval = IntervalReqExpr::getSingularDNF(leftIntervals);
+        const auto& rightInterval = IntervalReqExpr::getSingularDNF(rightIntervals);
+        if (!leftInterval || !rightInterval || leftInterval != rightInterval) {
+            return {};
+        }
+        if (!leftInterval->isEquality() || !rightInterval->isEquality()) {
+            // For now only supporting equalities.
+            return {};
+        }
+
+        const ABT& bound = leftInterval->getLowBound().getBound();
+        const auto constBoundPtr = bound.cast<Constant>();
+        if (constBoundPtr == nullptr) {
+            return {};
+        }
+        const auto [tag, val] = constBoundPtr->get();
+        if (tag != sbe::value::TypeTags::Array) {
+            return {};
+        }
+        const sbe::value::Array* arr = sbe::value::getArrayView(val);
+        if (arr->size() == 0) {
+            // For now we do not support empty arrays. Need to translate into null bounds.
+            return {};
+        }
+
+        const auto [elTag, elVal] = arr->getAt(0);
+        const auto [elTagCopy, elValCopy] = sbe::value::copyValue(elTag, elVal);
+        ABT elementBound = make<Constant>(elTagCopy, elValCopy);
+        // Create new interval which uses the first element of the array.
+        const IntervalReqExpr::Node& newInterval =
+            IntervalReqExpr::makeSingularDNF(IntervalRequirement{
+                {true /*inclusive*/, elementBound}, {true /*inclusive*/, elementBound}});
+
+        const ABT& leftPath = leftKey._path;
+        const ABT& rightPath = rightKey._path;
+        if (const auto leftTraversePtr = leftPath.cast<PathTraverse>();
+            leftTraversePtr != nullptr && leftTraversePtr->getPath().is<PathIdentity>() &&
+            rightPath.is<PathIdentity>()) {
+            // leftPath = Id, rightPath = Traverse Id.
+            combineIntervalsDNF(false /*intersect*/, leftIntervals, newInterval);
+            leftResult->_retainPredicate = true;
+            return leftResult;
+        } else if (const auto rightTraversePtr = rightPath.cast<PathTraverse>();
+                   rightTraversePtr != nullptr && rightTraversePtr->getPath().is<PathIdentity>() &&
+                   leftPath.is<PathIdentity>()) {
+            // leftPath = Traverse Id, rightPath = Id.
+            combineIntervalsDNF(false /*intersect*/, rightIntervals, newInterval);
+            rightResult->_retainPredicate = true;
+            return rightResult;
+        }
+
+        return {};
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const PathComposeM& pathComposeM,
-                                         PartialSchemaReqConversion leftResult,
-                                         PartialSchemaReqConversion rightResult) {
+    ResultType transport(const ABT& n,
+                         const PathComposeM& pathComposeM,
+                         ResultType leftResult,
+                         ResultType rightResult) {
+        if (!_isFilterContext) {
+            return {};
+        }
+
         return handleComposition(
             true /*isMultiplicative*/, std::move(leftResult), std::move(rightResult));
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const PathComposeA& pathComposeA,
-                                         PartialSchemaReqConversion leftResult,
-                                         PartialSchemaReqConversion rightResult) {
+    ResultType transport(const ABT& n,
+                         const PathComposeA& pathComposeA,
+                         ResultType leftResult,
+                         ResultType rightResult) {
+        if (!_isFilterContext) {
+            return {};
+        }
+
         const auto& path1 = pathComposeA.getPath1();
         const auto& path2 = pathComposeA.getPath2();
         const auto& eqNull = make<PathCompare>(Operations::Eq, Constant::null());
@@ -496,9 +572,9 @@ public:
 
             auto intervalExpr = IntervalReqExpr::makeSingularDNF(IntervalRequirement{
                 {true /*inclusive*/, Constant::null()}, {true /*inclusive*/, Constant::null()}});
-            return {PartialSchemaRequirements{
+            return {{PartialSchemaRequirements{
                 {PartialSchemaKey{},
-                 PartialSchemaRequirement{"" /*boundProjectionName*/, std::move(intervalExpr)}}}};
+                 PartialSchemaRequirement{"" /*boundProjectionName*/, std::move(intervalExpr)}}}}};
         }
 
         return handleComposition(
@@ -506,19 +582,18 @@ public:
     }
 
     template <class T>
-    static PartialSchemaReqConversion handleGetAndTraverse(const ABT& n,
-                                                           PartialSchemaReqConversion inputResult) {
-        if (!inputResult._success) {
+    static ResultType handleGetAndTraverse(const ABT& n, ResultType inputResult) {
+        if (!inputResult) {
             return {};
         }
-        if (inputResult._bound.has_value()) {
+        if (inputResult->_bound.has_value()) {
             return {};
         }
 
         // New map has keys with appended paths.
         PartialSchemaRequirements newMap;
 
-        for (auto& entry : inputResult._reqMap) {
+        for (auto& entry : inputResult->_reqMap) {
             if (!entry.first._projectionName.empty()) {
                 return {};
             }
@@ -533,41 +608,39 @@ public:
             newMap.emplace(PartialSchemaKey{"", std::move(path)}, std::move(entry.second));
         }
 
-        inputResult._reqMap = std::move(newMap);
+        inputResult->_reqMap = std::move(newMap);
         return inputResult;
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const PathGet& pathGet,
-                                         PartialSchemaReqConversion inputResult) {
+    ResultType transport(const ABT& n, const PathGet& pathGet, ResultType inputResult) {
         return handleGetAndTraverse<PathGet>(n, std::move(inputResult));
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const PathTraverse& pathTraverse,
-                                         PartialSchemaReqConversion inputResult) {
-        if (inputResult._reqMap.size() > 1) {
+    ResultType transport(const ABT& n, const PathTraverse& pathTraverse, ResultType inputResult) {
+        if (!inputResult) {
+            return {};
+        }
+        if (inputResult->_reqMap.size() > 1) {
             // Cannot append traverse if we have more than one requirement.
             return {};
         }
 
-        PartialSchemaReqConversion result =
-            handleGetAndTraverse<PathTraverse>(n, std::move(inputResult));
-        result._hasTraversed = true;
+        auto result = handleGetAndTraverse<PathTraverse>(n, std::move(inputResult));
+        if (result) {
+            result->_hasTraversed = true;
+        }
         return result;
     }
 
-    PartialSchemaReqConversion transport(const ABT& n,
-                                         const PathCompare& pathCompare,
-                                         PartialSchemaReqConversion inputResult) {
-        if (!inputResult._success) {
+    ResultType transport(const ABT& n, const PathCompare& pathCompare, ResultType inputResult) {
+        if (!inputResult) {
             return {};
         }
-        if (!inputResult._bound.has_value() || !inputResult._reqMap.empty()) {
+        if (!inputResult->_bound.has_value() || !inputResult->_reqMap.empty()) {
             return {};
         }
 
-        const auto& bound = inputResult._bound;
+        const auto& bound = inputResult->_bound;
         bool lowBoundInclusive = false;
         boost::optional<ABT> lowBound;
         bool highBoundInclusive = false;
@@ -603,51 +676,53 @@ public:
 
         auto intervalExpr = IntervalReqExpr::makeSingularDNF(IntervalRequirement{
             {lowBoundInclusive, std::move(lowBound)}, {highBoundInclusive, std::move(highBound)}});
-        return {PartialSchemaRequirements{
+        return {{PartialSchemaRequirements{
             {PartialSchemaKey{},
-             PartialSchemaRequirement{"" /*boundProjectionName*/, std::move(intervalExpr)}}}};
+             PartialSchemaRequirement{"" /*boundProjectionName*/, std::move(intervalExpr)}}}}};
     }
 
-    PartialSchemaReqConversion transport(const ABT& n, const PathIdentity& pathIdentity) {
-        return {PartialSchemaRequirements{{{}, {}}}};
+    ResultType transport(const ABT& n, const PathIdentity& pathIdentity) {
+        return {{PartialSchemaRequirements{{{}, {}}}}};
     }
 
-    PartialSchemaReqConversion transport(const ABT& n, const Constant& c) {
+    ResultType transport(const ABT& n, const Constant& c) {
         if (c.isNull()) {
             // Cannot create bounds with just NULL.
             return {};
         }
-        return {n};
+        return {{n}};
     }
 
     template <typename T, typename... Ts>
-    PartialSchemaReqConversion transport(const ABT& n, const T& node, Ts&&...) {
+    ResultType transport(const ABT& n, const T& node, Ts&&...) {
         if constexpr (std::is_base_of_v<ExpressionSyntaxSort, T>) {
             // We allow expressions to participate in bounds.
-            return {n};
+            return {{n}};
         }
         // General case. Reject conversion.
         return {};
     }
 
-    PartialSchemaReqConversion convert(const ABT& input) {
+    ResultType convert(const ABT& input) {
         return algebra::transport<true>(input, *this);
     }
+
+private:
+    const bool _isFilterContext;
 };
 
-PartialSchemaReqConversion convertExprToPartialSchemaReq(const ABT& expr) {
-    PartialSchemaReqConverter converter;
-    PartialSchemaReqConversion result = converter.convert(expr);
-    if (result._reqMap.empty()) {
-        result._success = false;
-        return result;
+boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
+    const ABT& expr, const bool isFilterContext) {
+    PartialSchemaReqConverter converter(isFilterContext);
+    auto result = converter.convert(expr);
+    if (!result || result->_reqMap.empty()) {
+        return {};
     }
 
-    for (const auto& entry : result._reqMap) {
+    for (const auto& entry : result->_reqMap) {
         if (entry.first.emptyPath() && isIntervalReqFullyOpenDNF(entry.second.getIntervals())) {
             // We need to determine either path or interval (or both).
-            result._success = false;
-            return result;
+            return {};
         }
     }
     return result;

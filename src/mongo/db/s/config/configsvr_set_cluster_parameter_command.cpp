@@ -62,37 +62,18 @@ public:
                     serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
 
             const auto coordinatorCompletionFuture = [&]() -> SharedSemiFuture<void> {
-                FixedFCVRegion fcvRegion(opCtx);
-                uassert(ErrorCodes::IllegalOperation,
-                        "featureFlagClusterWideConfig not enabled",
-                        gFeatureFlagClusterWideConfig.isEnabled(
-                            serverGlobalParams.featureCompatibility));
+                std::unique_ptr<ServerParameterService> sps =
+                    std::make_unique<ClusterParameterService>();
+                DBDirectClient dbClient(opCtx);
+                ClusterParameterDBClientService dbService(dbClient);
+                BSONObj cmdParamObj = request().getCommandParameter();
+                StringData parameterName = cmdParamObj.firstElement().fieldName();
+                ServerParameter* serverParameter = sps->get(parameterName);
 
-                // Validate parameter before creating coordinator.
-                {
-                    BSONObj cmdParamObj = request().getCommandParameter();
-                    BSONElement commandElement = cmdParamObj.firstElement();
-                    StringData parameterName = commandElement.fieldName();
-                    std::unique_ptr<ServerParameterService> sps =
-                        std::make_unique<ClusterParameterService>();
-                    const ServerParameter* serverParameter = sps->getIfExists(parameterName);
+                SetClusterParameterInvocation invocation{std::move(sps), dbService};
 
-                    uassert(ErrorCodes::IllegalOperation,
-                            str::stream() << "Unknown Cluster Parameter " << parameterName,
-                            serverParameter != nullptr);
-
-                    uassert(ErrorCodes::IllegalOperation,
-                            "Cluster parameter value must be an object",
-                            BSONType::Object == commandElement.type());
-
-                    BSONObjBuilder clusterParamBuilder;
-                    clusterParamBuilder << "_id" << parameterName;
-                    clusterParamBuilder.appendElements(commandElement.Obj());
-
-                    BSONObj clusterParam = clusterParamBuilder.obj();
-
-                    uassertStatusOK(serverParameter->validate(clusterParam));
-                }
+                invocation.normalizeParameter(
+                    opCtx, cmdParamObj, boost::none, serverParameter, parameterName);
 
                 SetClusterParameterCoordinatorDocument coordinatorDoc;
                 coordinatorDoc.setConfigsvrCoordinatorMetadata(

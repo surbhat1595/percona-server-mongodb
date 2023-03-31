@@ -34,8 +34,6 @@
 
 #include <fmt/format.h>
 
-#include "mongo/bson/util/bsoncolumn.h"
-#include "mongo/bson/util/bsoncolumnbuilder.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_consistency.h"
@@ -46,7 +44,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/storage/key_string.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
@@ -80,8 +77,7 @@ void _validateIndexesInternalStructure(OperationContext* opCtx,
     // Need to use the IndexCatalog here because the 'validateState->indexes' object hasn't been
     // constructed yet. It must be initialized to ensure we're validating all indexes.
     const IndexCatalog* indexCatalog = validateState->getCollection()->getIndexCatalog();
-    const std::unique_ptr<IndexCatalog::IndexIterator> it =
-        indexCatalog->getIndexIterator(opCtx, false);
+    const auto it = indexCatalog->getIndexIterator(opCtx, IndexCatalog::InclusionPolicy::kReady);
 
     // Validate Indexes Internal Structure, checking if index files have been compromised or
     // corrupted.
@@ -412,7 +408,10 @@ void _validateCatalogEntry(OperationContext* opCtx,
     }
 
     const auto& indexCatalog = collection->getIndexCatalog();
-    auto indexIt = indexCatalog->getIndexIterator(opCtx, /*includeUnfinishedIndexes=*/true);
+    auto indexIt = indexCatalog->getIndexIterator(opCtx,
+                                                  IndexCatalog::InclusionPolicy::kReady |
+                                                      IndexCatalog::InclusionPolicy::kUnfinished |
+                                                      IndexCatalog::InclusionPolicy::kFrozen);
 
     while (indexIt->more()) {
         const IndexCatalogEntry* indexEntry = indexIt->next();
@@ -452,108 +451,6 @@ void _validateCatalogEntry(OperationContext* opCtx,
                             indexName,
                             multikeyPathsToString(multikeyPaths)));
         }
-    }
-}
-
-void _validateBSONColumnRoundtrip(OperationContext* opCtx,
-                                  ValidateState* validateState,
-                                  ValidateResults* results) {
-    LOGV2(6104700,
-          "Validating BSONColumn compression/decompression",
-          "namespace"_attr = validateState->nss());
-    std::deque<BSONObj> original;
-    auto cursor = validateState->getCollection()->getRecordStore()->getCursor(opCtx);
-
-    // This function is memory intensive as it needs to store the original documents prior to
-    // compressing and decompressing them to check that the documents are the same afterwards. We'll
-    // limit the number of original documents we hold in-memory to be approximately 25MB to avoid
-    // running out of memory.
-    constexpr size_t kMaxMemoryUsageBytes = 25 * 1024 * 1024;
-    size_t currentMemoryUsageBytes = 0;
-
-    BSONColumnBuilder columnBuilder("", /*arrayCompression=*/true);
-
-    auto doBSONColumnRoundtrip = [&]() {
-        ON_BLOCK_EXIT([&] {
-            // Reset the in-memory state to prepare for the next round of BSONColumn roundtripping.
-            original.clear();
-            columnBuilder = BSONColumnBuilder("", /*arrayCompression=*/true);
-            currentMemoryUsageBytes = 0;
-        });
-
-        BSONObjBuilder compressed;
-        try {
-            compressed.append(""_sd, columnBuilder.finalize());
-
-            BSONColumn column(compressed.done().firstElement());
-            size_t index = 0;
-            for (const auto& decompressed : column) {
-                if (!decompressed.binaryEqual(original[index].firstElement())) {
-                    results->valid = false;
-                    results->errors.push_back(
-                        fmt::format("Roundtripping via BSONColumn failed. Index: {}, Original: {}, "
-                                    "Roundtripped: {}",
-                                    index,
-                                    original[index].toString(),
-                                    decompressed.toString()));
-                    return;
-                }
-                ++index;
-            }
-            if (index != original.size()) {
-                results->valid = false;
-                results->errors.push_back(fmt::format(
-                    "Roundtripping via BSONColumn failed. Original size: {}, Roundtripped size: {}",
-                    original.size(),
-                    index));
-            }
-        } catch (const DBException&) {
-            // We swallow any other DBException so we do not interfere with the rest of Collection
-            // validation.
-            return;
-        }
-    };
-
-    while (auto record = cursor->next()) {
-        try {
-            BSONObjBuilder wrapper;
-            wrapper.append(""_sd, record->data.toBson());
-            original.push_back(wrapper.obj());
-            currentMemoryUsageBytes += original.back().objsize();
-        } catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
-            // Improbable but possible, wrapping the data in a new BSONObj may push it over the
-            // limit.
-            continue;
-        } catch (const DBException&) {
-            // We swallow any other DBException so we do not interfere with the rest of Collection
-            // validation. We could have a corrupt document for example.
-            return;
-        }
-
-        try {
-            columnBuilder.append(original.back().firstElement());
-        } catch (const ExceptionFor<ErrorCodes::InvalidBSONType>&) {
-            // Skip this document if it contained MinKey or MaxKey as that's incompatible with
-            // BSONColumn
-            original.pop_back();
-        } catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
-            // If we produced a too large large BSONObj then skip the operation.
-            return;
-        } catch (const DBException&) {
-            // We swallow any other DBException as above. The most likely error to get here is when
-            // we allocate over 64MB in the internal BufBuilder inside BSONColumnBuilder.
-            return;
-        }
-
-        if (currentMemoryUsageBytes >= kMaxMemoryUsageBytes) {
-            doBSONColumnRoundtrip();
-        }
-    }
-
-    if (currentMemoryUsageBytes > 0) {
-        // We've exhausted the cursor but we haven't reached the memory usage threshold to do the
-        // BSONColumn roundtrip yet, so do it now.
-        doBSONColumnRoundtrip();
     }
 }
 }  // namespace
@@ -718,10 +615,6 @@ Status validate(OperationContext* opCtx,
         // At this point, validation is complete and successful.
         // Report the validation results for the user to see.
         _reportValidationResults(opCtx, &validateState, results, output);
-
-        if (MONGO_unlikely(gRoundtripBsonColumnOnValidate && getTestCommandsEnabled())) {
-            _validateBSONColumnRoundtrip(opCtx, &validateState, results);
-        }
 
         LOGV2_OPTIONS(20306,
                       {LogComponent::kIndex},

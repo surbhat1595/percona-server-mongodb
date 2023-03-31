@@ -108,6 +108,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/base",
         "$BUILD_DIR/mongo/db/concurrency/deferred_writer",
+        '$BUILD_DIR/mongo/db/namespace_string',
         "$BUILD_DIR/mongo/db/service_context",
         "$BUILD_DIR/mongo/idl/idl_parser",
         'collection_options',
@@ -428,7 +429,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/bson/util/bson_column',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/db_raii',
@@ -502,6 +502,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/index_commands_idl',
         '$BUILD_DIR/mongo/db/multitenancy',
+        '$BUILD_DIR/mongo/db/ops/write_ops',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
@@ -510,7 +511,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/views/view_catalog_helpers',
         '$BUILD_DIR/mongo/db/views/views',
-        '$BUILD_DIR/mongo/db/write_ops',
         'cannot_convert_index_to_unique_info',
         'clustered_collection_options',
         'collection',
@@ -537,6 +537,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/query_plan_cache',
         '$BUILD_DIR/mongo/db/query/query_planner',
         '$BUILD_DIR/mongo/db/update_index_data',
+        'collection',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -557,6 +558,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
@@ -663,12 +665,14 @@ if wiredtiger:
             '$BUILD_DIR/mongo/unittest/unittest',
             '$BUILD_DIR/mongo/util/clock_source_mock',
             '$BUILD_DIR/mongo/util/fail_point',
+            '$BUILD_DIR/mongo/util/pcre_wrapper',
             'catalog_control',
             'catalog_helpers',
             'catalog_test_fixture',
             'collection',
             'collection_catalog',
             'collection_options',
+            'collection_query_info',
             'collection_validation',
             'commit_quorum_options',
             'database_holder',

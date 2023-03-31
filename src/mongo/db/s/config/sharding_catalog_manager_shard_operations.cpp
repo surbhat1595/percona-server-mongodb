@@ -33,7 +33,6 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 
 #include <iomanip>
-#include <pcrecpp.h>
 #include <set>
 
 #include "mongo/base/status_with.h"
@@ -120,7 +119,7 @@ StatusWith<std::string> generateNewShardName(OperationContext* opCtx) {
         opCtx,
         kConfigReadSelector,
         repl::ReadConcernLevel::kLocalReadConcern,
-        ShardType::ConfigNS,
+        NamespaceString::kConfigsvrShardsNamespace,
         shardNameRegex.obj(),
         BSON(ShardType::name() << -1),
         1);
@@ -748,7 +747,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
 
         Status result = Grid::get(opCtx)->catalogClient()->insertConfigDocument(
             opCtx,
-            ShardType::ConfigNS,
+            NamespaceString::kConfigsvrShardsNamespace,
             shardType.toBSON(),
             ShardingCatalogClient::kLocalWriteConcern);
         if (!result.isOK()) {
@@ -821,7 +820,7 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
         configShard->exhaustiveFindOnConfig(opCtx,
                                             kConfigReadSelector,
                                             repl::ReadConcernLevel::kLocalReadConcern,
-                                            ShardType::ConfigNS,
+                                            NamespaceString::kConfigsvrShardsNamespace,
                                             BSON(ShardType::name() << name),
                                             BSONObj(),
                                             1));
@@ -833,7 +832,7 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
     // Find how many *other* shards exist, which are *not* currently draining
     const auto countOtherNotDrainingShards = uassertStatusOK(_runCountCommandOnConfig(
         opCtx,
-        ShardType::ConfigNS,
+        NamespaceString::kConfigsvrShardsNamespace,
         BSON(ShardType::name() << NE << name << ShardType::draining.ne(true))));
     uassert(ErrorCodes::IllegalOperation,
             "Operation not allowed because it would remove the last shard",
@@ -854,7 +853,7 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
     const bool isShardCurrentlyDraining =
         uassertStatusOK(_runCountCommandOnConfig(
             opCtx,
-            ShardType::ConfigNS,
+            NamespaceString::kConfigsvrShardsNamespace,
             BSON(ShardType::name() << name << ShardType::draining(true)))) > 0;
 
     auto* const catalogClient = Grid::get(opCtx)->catalogClient();
@@ -875,7 +874,7 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
 
         uassertStatusOKWithContext(
             catalogClient->updateConfigDocument(opCtx,
-                                                ShardType::ConfigNS,
+                                                NamespaceString::kConfigsvrShardsNamespace,
                                                 BSON(ShardType::name() << name),
                                                 BSON("$set" << BSON(ShardType::draining(true))),
                                                 false,
@@ -930,7 +929,7 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
         configShard->exhaustiveFindOnConfig(opCtx,
                                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                             repl::ReadConcernLevel::kLocalReadConcern,
-                                            ShardType::ConfigNS,
+                                            NamespaceString::kConfigsvrShardsNamespace,
                                             BSON(ShardType::name.ne(name)),
                                             {},
                                             1);
@@ -1201,9 +1200,6 @@ void ShardingCatalogManager::_pushClusterParametersToNewShard(
 
 void ShardingCatalogManager::_standardizeClusterParameters(OperationContext* opCtx,
                                                            RemoteCommandTargeter* targeter) {
-    if (!gFeatureFlagClusterWideConfig.isEnabled(serverGlobalParams.featureCompatibility))
-        return;
-
     auto clusterParameterDocs =
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
             opCtx,
@@ -1219,7 +1215,7 @@ void ShardingCatalogManager::_standardizeClusterParameters(OperationContext* opC
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
             repl::ReadConcernLevel::kLocalReadConcern,
-            ShardType::ConfigNS,
+            NamespaceString::kConfigsvrShardsNamespace,
             BSONObj(),
             BSONObj(),
             boost::none));
@@ -1240,7 +1236,7 @@ void ShardingCatalogManager::_removeShardInTransaction(OperationContext* opCtx,
                                                        const Timestamp& newTopologyTime) {
     auto removeShardFn = [removedShardName, controlShardName, newTopologyTime](
                              const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
-        write_ops::DeleteCommandRequest deleteOp(ShardType::ConfigNS);
+        write_ops::DeleteCommandRequest deleteOp(NamespaceString::kConfigsvrShardsNamespace);
         deleteOp.setDeletes({[&]() {
             write_ops::DeleteOpEntry entry;
             entry.setMulti(false);
@@ -1253,7 +1249,8 @@ void ShardingCatalogManager::_removeShardInTransaction(OperationContext* opCtx,
                       auto deleteResponse) {
                 uassertStatusOK(deleteResponse.toStatus());
 
-                write_ops::UpdateCommandRequest updateOp(ShardType::ConfigNS);
+                write_ops::UpdateCommandRequest updateOp(
+                    NamespaceString::kConfigsvrShardsNamespace);
                 updateOp.setUpdates({[&]() {
                     write_ops::UpdateOpEntry entry;
                     entry.setUpsert(false);

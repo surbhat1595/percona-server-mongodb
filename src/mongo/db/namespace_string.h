@@ -76,8 +76,11 @@ public:
     // Name for the system views collection
     static constexpr StringData kSystemDotViewsCollectionName = "system.views"_sd;
 
+    // Name for the system.js collection
+    static constexpr StringData kSystemDotJavascriptCollectionName = "system.js"_sd;
+
     // Name for the change stream change collection.
-    static constexpr StringData kChangeStreamChangeCollection = "system.change_collection"_sd;
+    static constexpr StringData kChangeCollectionName = "system.change_collection"_sd;
 
     // Names of privilege document collections
     static constexpr StringData kSystemUsers = "system.users"_sd;
@@ -153,7 +156,7 @@ public:
     static const NamespaceString kTenantMigrationOplogView;
 
     // Namespace for storing the persisted state of tenant split donors.
-    static const NamespaceString kTenantSplitDonorsNamespace;
+    static const NamespaceString kShardSplitDonorsNamespace;
 
     // Namespace for replica set configuration settings.
     static const NamespaceString kSystemReplSetNamespace;
@@ -230,57 +233,50 @@ public:
     /**
      * Constructs an empty NamespaceString.
      */
-    NamespaceString() : _ns(), _dotIndex(std::string::npos), _dbName() {}
+    NamespaceString() = default;
 
     /**
      * Constructs a NamespaceString from the fully qualified namespace named in "ns" and the
      * tenantId. "ns" is NOT expected to contain the tenantId.
      */
     explicit NamespaceString(boost::optional<TenantId> tenantId, StringData ns) {
-        _ns = tenantId ? tenantId->toString() + "_" + ns.toString()
-                       : ns.toString();  // copy to our buffer
-        _dotIndex = _ns.find('.');
+        _dotIndex = ns.find(".");
+
         uassert(ErrorCodes::InvalidNamespace,
                 "namespaces cannot have embedded null characters",
-                _ns.find('\0') == std::string::npos);
+                ns.find('\0') == std::string::npos);
 
-        auto db = _dotIndex == std::string::npos ? ns : ns.substr(0, ns.find('.'));
-        _dbName = DatabaseName(tenantId, db);
+        StringData db = ns.substr(0, _dotIndex);
+        _dbName = DatabaseName(std::move(tenantId), db);
+        _ns = ns.toString();
     }
 
     // TODO SERVER-65920 Remove this constructor once all constructor call sites have been updated
     // to pass tenantId explicitly
     explicit NamespaceString(StringData ns, boost::optional<TenantId> tenantId = boost::none)
-        : NamespaceString(tenantId, ns) {}
+        : NamespaceString(std::move(tenantId), ns) {}
 
     /**
      * Constructs a NamespaceString for the given database and collection names.
      * "dbName" must not contain a ".", and "collectionName" must not start with one.
      */
     NamespaceString(DatabaseName dbName, StringData collectionName)
-        : _ns(dbName.toString().size() + collectionName.size() + 1, '\0') {
+        : _dbName(std::move(dbName)), _ns(str::stream() << _dbName.db() << '.' << collectionName) {
+        auto db = _dbName.db();
+
         uassert(ErrorCodes::InvalidNamespace,
-                "'.' is an invalid character in the database name: " + dbName.db(),
-                dbName.db().find('.') == std::string::npos);
+                "'.' is an invalid character in the database name: " + db,
+                db.find('.') == std::string::npos);
         uassert(ErrorCodes::InvalidNamespace,
                 "Collection names cannot start with '.': " + collectionName,
                 collectionName.empty() || collectionName[0] != '.');
 
-        auto db = dbName.toString();
-        std::string::iterator it = std::copy(db.begin(), db.end(), _ns.begin());
-        *it = '.';
-        ++it;
-        it = std::copy(collectionName.begin(), collectionName.end(), it);
         _dotIndex = db.size();
-
-        dassert(it == _ns.end());
         dassert(_ns[_dotIndex] == '.');
 
         uassert(ErrorCodes::InvalidNamespace,
                 "namespaces cannot have embedded null characters",
                 _ns.find('\0') == std::string::npos);
-
-        _dbName = std::move(dbName);
     }
 
     /**
@@ -289,14 +285,14 @@ public:
      * NOT expected to contain a tenantId.
      */
     NamespaceString(boost::optional<TenantId> tenantId, StringData db, StringData collectionName)
-        : NamespaceString(DatabaseName(tenantId, db), collectionName) {}
+        : NamespaceString(DatabaseName(std::move(tenantId), db), collectionName) {}
 
     // TODO SERVER-65920 Remove this constructor once all constructor call sites have been updated
     // to pass tenantId explicitly
     NamespaceString(StringData db,
                     StringData collectionName,
                     boost::optional<TenantId> tenantId = boost::none)
-        : NamespaceString(DatabaseName(tenantId, db), collectionName) {}
+        : NamespaceString(DatabaseName(std::move(tenantId), db), collectionName) {}
 
     /**
      * Constructs a NamespaceString from the string 'ns'. Should only be used when reading a
@@ -309,6 +305,11 @@ public:
      * aggregation commands with the format {aggregate: 1}.
      */
     static NamespaceString makeCollectionlessAggregateNSS(const DatabaseName& dbName);
+
+    /**
+     * Constructs the change collection namespace for the specified tenant.
+     */
+    static NamespaceString makeChangeCollectionNSS(const boost::optional<TenantId>& tenantId);
 
     /**
      * Constructs a NamespaceString representing a listCollections namespace. The format for this
@@ -333,7 +334,7 @@ public:
 
     StringData db() const {
         // TODO SERVER-65456 Remove this function.
-        return StringData(_dbName.toString());
+        return _dbName.db();
     }
 
     const DatabaseName& dbName() const {
@@ -351,6 +352,13 @@ public:
     }
 
     const std::string& toString() const {
+        return ns();
+    }
+
+    std::string toStringWithTenantId() const {
+        if (auto tenantId = _dbName.tenantId())
+            return str::stream() << *tenantId << '_' << ns();
+
         return ns();
     }
 
@@ -384,11 +392,11 @@ public:
     bool isSystemDotProfile() const {
         return coll() == "system.profile";
     }
-    bool isChangeCollection() const {
-        return (db() == kConfigDb) && coll().startsWith("changes.");
-    }
     bool isSystemDotViews() const {
         return coll() == kSystemDotViewsCollectionName;
+    }
+    bool isSystemDotJavascript() const {
+        return coll() == kSystemDotJavascriptCollectionName;
     }
     bool isServerConfigurationCollection() const {
         return (db() == kAdminDb) && (coll() == "system.version");
@@ -461,7 +469,7 @@ public:
     /**
      * Returns whether the specified namespace is config.system.changeCollection.
      */
-    bool isChangeStreamChangeCollection() const;
+    bool isChangeCollection() const;
 
     /**
      * Returns whether the specified namespace is config.image_collection.
@@ -477,6 +485,11 @@ public:
      * Returns whether the specified namespace is <database>.enxcol_.<.+>.(esc|ecc|ecoc).
      */
     bool isFLE2StateCollection() const;
+
+    /**
+     * Returns true if the namespace is an oplog or a change collection, false otherwise.
+     */
+    bool isOplogOrChangeCollection() const;
 
     /**
      * Returns the time-series buckets namespace for this view.
@@ -597,8 +610,13 @@ public:
      *                                 contain a $ should be checked explicitly.
      * @return if db is an allowed database name
      */
-    static bool validDBName(StringData dbString,
+    static bool validDBName(StringData dbName,
                             DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow);
+
+    static bool validDBName(const DatabaseName& dbName,
+                            DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow) {
+        return validDBName(dbName.db(), behavior);
+    }
 
     /**
      * Takes a fully qualified namespace (ie dbname.collectionName), and returns true if
@@ -629,26 +647,35 @@ public:
 
     // Relops among `NamespaceString`.
     friend bool operator==(const NamespaceString& a, const NamespaceString& b) {
-        return a.ns() == b.ns();
+        return (a.tenantId() == b.tenantId()) && (a.ns() == b.ns());
     }
     friend bool operator!=(const NamespaceString& a, const NamespaceString& b) {
-        return a.ns() != b.ns();
+        return !(a == b);
     }
     friend bool operator<(const NamespaceString& a, const NamespaceString& b) {
+        if (a.tenantId() != b.tenantId()) {
+            return a.tenantId() < b.tenantId();
+        }
         return a.ns() < b.ns();
     }
     friend bool operator>(const NamespaceString& a, const NamespaceString& b) {
+        if (a.tenantId() != b.tenantId()) {
+            return a.tenantId() > b.tenantId();
+        }
         return a.ns() > b.ns();
     }
     friend bool operator<=(const NamespaceString& a, const NamespaceString& b) {
-        return a.ns() <= b.ns();
+        return !(a > b);
     }
     friend bool operator>=(const NamespaceString& a, const NamespaceString& b) {
-        return a.ns() >= b.ns();
+        return !(a < b);
     }
 
     template <typename H>
     friend H AbslHashValue(H h, const NamespaceString& nss) {
+        if (nss.tenantId()) {
+            return H::combine(std::move(h), nss._dbName.tenantId().get(), nss._ns);
+        }
         return H::combine(std::move(h), nss._ns);
     }
 
@@ -657,9 +684,9 @@ public:
     }
 
 private:
-    std::string _ns;
-    size_t _dotIndex = 0;
     DatabaseName _dbName;
+    std::string _ns;
+    size_t _dotIndex = std::string::npos;
 };
 
 /**
@@ -693,12 +720,14 @@ public:
 
     /**
      * Returns database name if this object was initialized with a UUID.
+     *
+     * TODO SERVER-66887 remove this function for better clarity once call sites have been changed
      */
     std::string dbname() const {
         return _dbname ? _dbname->db() : "";
     }
 
-    const boost::optional<DatabaseName>& dbnameWithTenant() const {
+    const boost::optional<DatabaseName>& dbName() const {
         return _dbname;
     }
 

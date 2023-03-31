@@ -529,7 +529,7 @@ Status AuthorizationManagerImpl::getRolesAsUserFragment(
 
 Status AuthorizationManagerImpl::getRoleDescriptionsForDB(
     OperationContext* opCtx,
-    StringData dbname,
+    const DatabaseName& dbname,
     PrivilegeFormat privileges,
     AuthenticationRestrictionsFormat restrictions,
     bool showBuiltinRoles,

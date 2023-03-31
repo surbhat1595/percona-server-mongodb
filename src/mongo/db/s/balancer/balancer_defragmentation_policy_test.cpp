@@ -32,6 +32,7 @@
 #include "mongo/db/s/balancer/balancer_random.h"
 #include "mongo/db/s/balancer/cluster_statistics_mock.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
+#include "mongo/idl/server_parameter_test_util.h"
 
 namespace mongo {
 namespace {
@@ -46,7 +47,7 @@ protected:
     const ShardId kShardId1 = ShardId("shard1");
     const ShardId kShardId2 = ShardId("shard2");
     const ShardId kShardId3 = ShardId("shard3");
-    const ChunkVersion kCollectionVersion = ChunkVersion(1, 1, OID::gen(), Timestamp(10));
+    const ChunkVersion kCollectionVersion = ChunkVersion({OID::gen(), Timestamp(10)}, {1, 1});
     const KeyPattern kShardKeyPattern = KeyPattern(BSON("x" << 1));
     const BSONObj kKeyAtMin = BSONObjBuilder().appendMinKey("x").obj();
     const BSONObj kKeyAtZero = BSON("x" << 0);
@@ -321,7 +322,26 @@ TEST_F(BalancerDefragmentationPolicyTest, TestRemoveCollectionEndsDefragmentatio
     ASSERT_FALSE(_defragmentationPolicy.isDefragmentingCollection(coll.getUuid()));
 }
 
+TEST_F(BalancerDefragmentationPolicyTest, TestPhaseOneUserCancellationFinishesDefragmentation) {
+    auto coll = setupCollectionWithPhase({makeConfigChunkEntry()});
+    _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
+
+    // Collection should be in phase 1
+    verifyExpectedDefragmentationPhaseOndisk(DefragmentationPhaseEnum::kMergeAndMeasureChunks);
+
+    // User cancellation of defragmentation
+    _defragmentationPolicy.abortCollectionDefragmentation(operationContext(), kNss);
+
+    // Defragmentation should complete since the NoMoreAutoSplitter feature flag is enabled
+    auto nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
+    ASSERT_TRUE(nextAction == boost::none);
+    ASSERT_FALSE(_defragmentationPolicy.isDefragmentingCollection(coll.getUuid()));
+    verifyExpectedDefragmentationPhaseOndisk(boost::none);
+}
+
 TEST_F(BalancerDefragmentationPolicyTest, TestPhaseOneUserCancellationBeginsPhase3) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry()});
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
 
@@ -474,7 +494,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseOneAllConsecutive) {
         ChunkType chunk(
             kUuid,
             ChunkRange(minKey, maxKey),
-            ChunkVersion(1, i, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+            ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()},
+                         {1, uint32_t(i)}),
             kShardId0);
         chunkList.push_back(chunk);
     }
@@ -484,7 +505,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseOneAllConsecutive) {
         ChunkType chunk(
             kUuid,
             ChunkRange(minKey, maxKey),
-            ChunkVersion(1, i, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+            ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()},
+                         {1, uint32_t(i)}),
             kShardId1);
         chunkList.push_back(chunk);
     }
@@ -523,7 +545,8 @@ TEST_F(BalancerDefragmentationPolicyTest, PhaseOneNotConsecutive) {
         ChunkType chunk(
             kUuid,
             ChunkRange(minKey, maxKey),
-            ChunkVersion(1, i, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+            ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()},
+                         {1, uint32_t(i)}),
             chosenShard);
         chunkList.push_back(chunk);
     }
@@ -600,13 +623,13 @@ TEST_F(BalancerDefragmentationPolicyTest, TestPhaseTwoChunkCanBeMovedAndMergedWi
     ChunkType biggestChunk(
         kUuid,
         ChunkRange(kKeyAtMin, kKeyAtZero),
-        ChunkVersion(1, 0, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 0}),
         kShardId0);
     biggestChunk.setEstimatedSizeBytes(2048);
     ChunkType smallestChunk(
         kUuid,
         ChunkRange(kKeyAtZero, kKeyAtMax),
-        ChunkVersion(1, 1, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 1}),
         kShardId1);
     smallestChunk.setEstimatedSizeBytes(1024);
 
@@ -662,42 +685,42 @@ TEST_F(BalancerDefragmentationPolicyTest,
     ChunkType firstChunkOnShard0(
         kUuid,
         ChunkRange(kKeyAtMin, kKeyAtZero),
-        ChunkVersion(1, 0, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 0}),
         kShardId0);
     firstChunkOnShard0.setEstimatedSizeBytes(1);
 
     ChunkType firstChunkOnShard1(
         kUuid,
         ChunkRange(kKeyAtZero, kKeyAtTen),
-        ChunkVersion(1, 1, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 1}),
         kShardId1);
     firstChunkOnShard1.setEstimatedSizeBytes(1);
 
     ChunkType chunkOnShard2(
         kUuid,
         ChunkRange(kKeyAtTen, kKeyAtTwenty),
-        ChunkVersion(1, 2, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 2}),
         kShardId2);
     chunkOnShard2.setEstimatedSizeBytes(1);
 
     ChunkType chunkOnShard3(
         kUuid,
         ChunkRange(kKeyAtTwenty, kKeyAtThirty),
-        ChunkVersion(1, 3, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 3}),
         kShardId3);
     chunkOnShard3.setEstimatedSizeBytes(1);
 
     ChunkType secondChunkOnShard0(
         kUuid,
         ChunkRange(kKeyAtThirty, kKeyAtForty),
-        ChunkVersion(1, 4, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 4}),
         kShardId0);
     secondChunkOnShard0.setEstimatedSizeBytes(1);
 
     ChunkType secondChunkOnShard1(
         kUuid,
         ChunkRange(kKeyAtForty, kKeyAtMax),
-        ChunkVersion(1, 5, kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()),
+        ChunkVersion({kCollectionVersion.epoch(), kCollectionVersion.getTimestamp()}, {1, 5}),
         kShardId1);
     secondChunkOnShard1.setEstimatedSizeBytes(1);
 
@@ -728,6 +751,8 @@ TEST_F(BalancerDefragmentationPolicyTest,
  */
 
 TEST_F(BalancerDefragmentationPolicyTest, DefragmentationBeginsWithPhase3FromPersistedSetting) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     // Defragmentation does not start until startCollectionDefragmentation is called
@@ -742,6 +767,8 @@ TEST_F(BalancerDefragmentationPolicyTest, DefragmentationBeginsWithPhase3FromPer
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, SingleLargeChunkCausesAutoSplitAndSplitActions) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     auto nextAction = _defragmentationPolicy.getNextStreamingAction(operationContext());
@@ -759,6 +786,8 @@ TEST_F(BalancerDefragmentationPolicyTest, SingleLargeChunkCausesAutoSplitAndSpli
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, CollectionMaxChunkSizeIsUsedForPhase3) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     // One chunk > 1KB should trigger AutoSplitVector
     auto coll = setupCollectionWithPhase(
         {makeConfigChunkEntry(2 * 1024)}, DefragmentationPhaseEnum::kSplitChunks, 1024);
@@ -777,6 +806,8 @@ TEST_F(BalancerDefragmentationPolicyTest, CollectionMaxChunkSizeIsUsedForPhase3)
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, TestRetryableFailedAutoSplitActionGetsReissued) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
@@ -805,6 +836,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestRetryableFailedAutoSplitActionGets
 
 TEST_F(BalancerDefragmentationPolicyTest,
        TestAcknowledgeAutoSplitActionTriggersSplitOnResultingRange) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
@@ -832,6 +865,8 @@ TEST_F(BalancerDefragmentationPolicyTest,
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, TestAutoSplitWithNoSplitPointsDoesNotTriggerSplit) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
@@ -848,6 +883,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestAutoSplitWithNoSplitPointsDoesNotT
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, TestMoreThan16MBSplitPointsTriggersSplitAndAutoSplit) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
@@ -877,6 +914,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestMoreThan16MBSplitPointsTriggersSpl
 }
 
 TEST_F(BalancerDefragmentationPolicyTest, TestFailedSplitChunkActionGetsReissued) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);
@@ -910,6 +949,8 @@ TEST_F(BalancerDefragmentationPolicyTest, TestFailedSplitChunkActionGetsReissued
 
 TEST_F(BalancerDefragmentationPolicyTest,
        TestAcknowledgeLastSuccessfulSplitActionEndsDefragmentation) {
+    RAIIServerParameterControllerForTest featureFlagNoMoreAutoSplitterOff{
+        "featureFlagNoMoreAutoSplitter", false};
     auto coll = setupCollectionWithPhase({makeConfigChunkEntry(kPhase3DefaultChunkSize)},
                                          DefragmentationPhaseEnum::kSplitChunks);
     _defragmentationPolicy.startCollectionDefragmentation(operationContext(), coll);

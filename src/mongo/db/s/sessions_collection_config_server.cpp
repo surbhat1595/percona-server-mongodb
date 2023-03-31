@@ -118,6 +118,24 @@ void SessionsCollectionConfigServer::setupSessionsCollection(OperationContext* o
 
     _shardCollectionIfNeeded(opCtx);
     _generateIndexesIfNeeded(opCtx);
+    static constexpr int64_t kAverageSessionDocSizeBytes = 200;
+    static constexpr int64_t kDesiredDocsInChunks = 1000;
+    static constexpr int64_t kMaxChunkSizeBytes =
+        kAverageSessionDocSizeBytes * kDesiredDocsInChunks;
+    auto filterQuery =
+        BSON("_id" << NamespaceString::kLogicalSessionsNamespace.ns()
+                   << CollectionType::kMaxChunkSizeBytesFieldName << BSON("$exists" << false));
+    auto updateQuery = BSON("$set" << BSON(CollectionType::kMaxChunkSizeBytesFieldName
+                                           << kMaxChunkSizeBytes
+                                           << CollectionType::kNoAutoSplitFieldName << true));
+
+    uassertStatusOK(Grid::get(opCtx)->catalogClient()->updateConfigDocument(
+        opCtx,
+        CollectionType::ConfigNS,
+        filterQuery,
+        updateQuery,
+        false,
+        ShardingCatalogClient::kMajorityWriteConcern));
 }
 
 }  // namespace mongo

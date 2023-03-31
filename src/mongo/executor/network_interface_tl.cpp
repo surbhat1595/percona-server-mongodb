@@ -33,7 +33,7 @@
 #include <fmt/format.h>
 
 #include "mongo/config.h"
-#include "mongo/db/auth/security_token.h"
+#include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/connection_pool_tl.h"
@@ -71,9 +71,7 @@ Status appendMetadata(RemoteCommandRequestOnAny* request,
     if (!request->opCtx)
         return Status::OK();
 
-    if (auto securityToken = auth::getSecurityToken(request->opCtx)) {
-        request->securityToken = securityToken->toBSON();
-    }
+    request->validatedTenancyScope = auth::ValidatedTenancyScope::get(request->opCtx);
 
     return Status::OK();
 }
@@ -378,7 +376,7 @@ NetworkInterfaceTL::CommandState::CommandState(NetworkInterfaceTL* interface_,
                                                RemoteCommandRequestOnAny request_,
                                                const TaskExecutor::CallbackHandle& cbHandle_)
     : CommandStateBase(interface_, std::move(request_), cbHandle_),
-      hedgeCount(requestOnAny.hedgeOptions ? requestOnAny.hedgeOptions->count + 1 : 1) {}
+      hedgeCount(requestOnAny.options.isHedgeEnabled ? requestOnAny.options.hedgeCount + 1 : 1) {}
 
 auto NetworkInterfaceTL::CommandState::make(NetworkInterfaceTL* interface,
                                             RemoteCommandRequestOnAny request,
@@ -560,7 +558,7 @@ Status NetworkInterfaceTL::startCommand(const TaskExecutor::CallbackHandle& cbHa
 
     bool targetHostsInAlphabeticalOrder =
         MONGO_unlikely(networkInterfaceSendRequestsToTargetHostsInAlphabeticalOrder.shouldFail(
-            [request](const BSONObj&) { return request.hedgeOptions != boost::none; }));
+            [request](const BSONObj&) { return request.options.isHedgeEnabled; }));
 
     if (targetHostsInAlphabeticalOrder) {
         // Sort the target hosts by host names.
@@ -571,7 +569,7 @@ Status NetworkInterfaceTL::startCommand(const TaskExecutor::CallbackHandle& cbHa
                   });
     }
 
-    if ((request.target.size() > 1) && !request.hedgeOptions &&
+    if ((request.target.size() > 1) && !request.options.isHedgeEnabled &&
         !gOpportunisticSecondaryTargeting.load()) {
         request.target.resize(1);
     }
@@ -582,7 +580,7 @@ Status NetworkInterfaceTL::startCommand(const TaskExecutor::CallbackHandle& cbHa
     }
     cmdState->baton = baton;
 
-    if (_svcCtx && cmdState->requestOnAny.hedgeOptions) {
+    if (_svcCtx && cmdState->requestOnAny.options.isHedgeEnabled) {
         auto hm = HedgingMetrics::get(_svcCtx);
         invariant(hm);
         hm->incrementNumTotalOperations();
@@ -836,10 +834,10 @@ void NetworkInterfaceTL::RequestManager::trySend(
     auto request = &requestState->request.get();
 
     if (requestState->isHedge) {
-        invariant(request->hedgeOptions);
+        invariant(request->options.isHedgeEnabled);
         invariant(WireSpec::instance().get()->isInternalClient);
 
-        auto hedgingMaxTimeMS = Milliseconds(request->hedgeOptions->maxTimeMSForHedgedReads);
+        auto hedgingMaxTimeMS = Milliseconds(request->options.maxTimeMSForHedgedReads);
         if (request->timeout == RemoteCommandRequest::kNoTimeout ||
             hedgingMaxTimeMS < request->timeout) {
             LOGV2_DEBUG(4647200,

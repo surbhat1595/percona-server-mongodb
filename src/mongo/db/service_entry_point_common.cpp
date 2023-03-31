@@ -41,7 +41,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/impersonation_session.h"
 #include "mongo/db/auth/ldap_cumulative_operation_stats.h"
-#include "mongo/db/auth/security_token.h"
+#include "mongo/db/auth/security_token_authentication_guard.h"
 #include "mongo/db/client.h"
 #include "mongo/db/command_can_run_here.h"
 #include "mongo/db/commands.h"
@@ -101,7 +101,7 @@
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
-#include "mongo/rpc/warn_deprecated_wire_ops.h"
+#include "mongo/rpc/warn_unsupported_wire_ops.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/hello_metrics.h"
@@ -489,9 +489,18 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
                                          const std::string& commandName,
                                          boost::optional<ErrorCodes::Error> code,
                                          boost::optional<ErrorCodes::Error> wcCode,
-                                         bool isInternalClient) {
-    auto errorLabels = getErrorLabels(
-        opCtx, sessionOptions, commandName, code, wcCode, isInternalClient, false /* isMongos */);
+                                         bool isInternalClient,
+                                         const repl::OpTime& lastOpBeforeRun,
+                                         const repl::OpTime& lastOpAfterRun) {
+    auto errorLabels = getErrorLabels(opCtx,
+                                      sessionOptions,
+                                      commandName,
+                                      code,
+                                      wcCode,
+                                      isInternalClient,
+                                      false /* isMongos */,
+                                      lastOpBeforeRun,
+                                      lastOpAfterRun);
     commandBodyFieldsBob->appendElements(errorLabels);
 
     const auto isNotPrimaryError =
@@ -519,6 +528,34 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
     BSONObjBuilder topologyVersionBuilder(commandBodyFieldsBob->subobjStart("topologyVersion"));
     topologyVersion.serialize(&topologyVersionBuilder);
 }
+
+class RunCommandOpTimes {
+public:
+    RunCommandOpTimes(OperationContext* opCtx) : _lastOpBeforeRun(getLastOp(opCtx)) {}
+
+    void onCommandFinished(OperationContext* opCtx) {
+        if (!_lastOpAfterRun.isNull()) {
+            return;
+        }
+        _lastOpAfterRun = getLastOp(opCtx);
+    }
+
+    const repl::OpTime& getLastOpBeforeRun() const {
+        return _lastOpBeforeRun;
+    }
+
+    const repl::OpTime& getLastOpAfterRun() const {
+        return _lastOpAfterRun;
+    }
+
+private:
+    repl::OpTime getLastOp(OperationContext* opCtx) {
+        return repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    }
+
+    repl::OpTime _lastOpBeforeRun;
+    repl::OpTime _lastOpAfterRun;
+};
 
 class ExecCommandDatabase {
 public:
@@ -569,6 +606,31 @@ public:
         return _startOperationTime;
     }
 
+    void onCommandFinished() {
+        if (!_runCommandOpTimes) {
+            return;
+        }
+        _runCommandOpTimes->onCommandFinished(_execContext->getOpCtx());
+    }
+
+    const boost::optional<RunCommandOpTimes>& getRunCommandOpTimes() {
+        return _runCommandOpTimes;
+    }
+
+    repl::OpTime getLastOpBeforeRun() {
+        if (!_runCommandOpTimes) {
+            return repl::OpTime{};
+        }
+        return _runCommandOpTimes->getLastOpBeforeRun();
+    }
+
+    repl::OpTime getLastOpAfterRun() {
+        if (!_runCommandOpTimes) {
+            return repl::OpTime{};
+        }
+        return _runCommandOpTimes->getLastOpAfterRun();
+    }
+
     bool isHello() const {
         return _execContext->getCommand()->getName() == "hello"_sd ||
             _execContext->getCommand()->getName() == "isMaster"_sd;
@@ -592,6 +654,7 @@ private:
         CommandHelpers::uassertShouldAttemptParse(opCtx, command, request);
         _startOperationTime = getClientOperationTime(opCtx);
 
+        rpc::readRequestMetadata(opCtx, request, command->requiresAuth());
         _invocation = command->parse(opCtx, request);
         CommandInvocation::set(opCtx, _invocation);
 
@@ -638,6 +701,7 @@ private:
     std::shared_ptr<CommandInvocation> _invocation;
     LogicalTime _startOperationTime;
     OperationSessionInfoFromClient _sessionOptions;
+    boost::optional<RunCommandOpTimes> _runCommandOpTimes;
     boost::optional<ResourceConsumption::ScopedMetricsCollector> _scopedMetrics;
     boost::optional<ImpersonationSessionGuard> _impersonationSessionGuard;
     boost::optional<auth::SecurityTokenAuthenticationGuard> _tokenAuthorizationSessionGuard;
@@ -725,7 +789,6 @@ private:
 
     // Allows changing the write concern while running the command and resetting on destruction.
     const WriteConcernOptions _oldWriteConcern;
-    boost::optional<repl::OpTime> _lastOpBeforeRun;
     boost::optional<WriteConcernOptions> _extractedWriteConcern;
 };
 
@@ -1101,6 +1164,7 @@ void RunCommandImpl::_epilogue() {
     auto command = execContext->getCommand();
     auto replyBuilder = execContext->getReplyBuilder();
     auto& behaviors = *execContext->behaviors;
+    _ecd->onCommandFinished();
 
     // This fail point blocks all commands which are running on the specified namespace, or which
     // are present in the given list of commands, or which match a given comment. If no namespace,
@@ -1161,7 +1225,9 @@ void RunCommandImpl::_epilogue() {
                                             command->getName(),
                                             code,
                                             wcCode,
-                                            _isInternalClient());
+                                            _isInternalClient(),
+                                            _ecd->getLastOpBeforeRun(),
+                                            _ecd->getLastOpAfterRun());
     }
 
     auto commandBodyBob = replyBuilder->getBodyBuilder();
@@ -1179,7 +1245,7 @@ Future<void> RunCommandImpl::_runImpl() {
 
 Future<void> RunCommandImpl::_runCommand() {
     auto shouldCheckoutSession = _ecd->getSessionOptions().getTxnNumber() &&
-        !shouldCommandSkipSessionCheckout(_ecd->getInvocation()->definition()->getName());
+        _ecd->getInvocation()->definition()->shouldCheckoutSession();
     if (shouldCheckoutSession) {
         return future_util::makeState<CheckoutSessionAndInvokeCommand>(_ecd).thenWithState(
             [](auto* path) { return path->run(); });
@@ -1211,12 +1277,13 @@ void RunCommandAndWaitForWriteConcern::_waitForWriteConcern(BSONObjBuilder& bb) 
     }
 
     CurOp::get(opCtx)->debug().writeConcern.emplace(opCtx->getWriteConcern());
-    _execContext->behaviors->waitForWriteConcern(opCtx, invocation, _lastOpBeforeRun.get(), bb);
+    _execContext->behaviors->waitForWriteConcern(opCtx, invocation, _ecd->getLastOpBeforeRun(), bb);
 }
 
 Future<void> RunCommandAndWaitForWriteConcern::_runImpl() {
     _setup();
     return _runCommandWithFailPoint().onCompletion([this](Status status) mutable {
+        _ecd->onCommandFinished();
         if (status.isOK()) {
             return _checkWriteConcern();
         } else {
@@ -1231,8 +1298,6 @@ void RunCommandAndWaitForWriteConcern::_setup() {
     const Command* command = invocation->definition();
     const OpMsgRequest& request = _execContext->getRequest();
 
-    _lastOpBeforeRun.emplace(repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp());
-
     if (command->getLogicalOp() == LogicalOp::opGetMore) {
         // WriteConcern will be set up during command processing, it must not be specified on
         // the command body.
@@ -1244,7 +1309,7 @@ void RunCommandAndWaitForWriteConcern::_setup() {
         // server defaults.  So, warn if the operation has not specified writeConcern and is on
         // a shard/config server.
         if (!opCtx->getClient()->isInDirectClient() &&
-            (!opCtx->inMultiDocumentTransaction() || isTransactionCommand(command->getName()))) {
+            (!opCtx->inMultiDocumentTransaction() || command->isTransactionCommand())) {
             if (_isInternalClient()) {
                 // WriteConcern should always be explicitly specified by operations received
                 // from internal clients (ie. from a mongos or mongod), even if it is empty
@@ -1341,6 +1406,14 @@ void ExecCommandDatabase::_initiateCommand() {
 
     Client* client = opCtx->getClient();
 
+    if (auto scope = request.validatedTenancyScope; scope && scope->hasAuthenticatedUser()) {
+        uassert(ErrorCodes::Unauthorized,
+                str::stream() << "Command " << command->getName()
+                              << " is not supported in multitenancy mode",
+                command->allowedWithSecurityToken());
+        _tokenAuthorizationSessionGuard.emplace(opCtx, request.validatedTenancyScope.get());
+    }
+
     if (isHello()) {
         // Preload generic ClientMetadata ahead of our first hello request. After the first
         // request, metaElement should always be empty.
@@ -1364,13 +1437,6 @@ void ExecCommandDatabase::_initiateCommand() {
         }
     });
 
-    rpc::readRequestMetadata(opCtx, request, command->requiresAuth());
-    uassert(ErrorCodes::Unauthorized,
-            str::stream() << "Command " << command->getName()
-                          << " is not supported in multitenancy mode",
-            command->allowedWithSecurityToken() || auth::getSecurityToken(opCtx) == boost::none);
-    _tokenAuthorizationSessionGuard.emplace(opCtx);
-
     rpc::TrackingMetadata::get(opCtx).initWithOperName(command->getName());
 
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -1384,7 +1450,6 @@ void ExecCommandDatabase::_initiateCommand() {
 
     // Start authz contract tracking before we evaluate failpoints
     auto authzSession = AuthorizationSession::get(client);
-
     authzSession->startContractTracking();
 
     CommandHelpers::evaluateFailCommandFailPoint(opCtx, _invocation.get());
@@ -1618,7 +1683,7 @@ void ExecCommandDatabase::_initiateCommand() {
 
         boost::optional<ChunkVersion> shardVersion;
         if (auto shardVersionElem = request.body[ChunkVersion::kShardVersionField]) {
-            shardVersion = ChunkVersion::fromBSONPositionalOrNewerFormat(shardVersionElem);
+            shardVersion = ChunkVersion::parse(shardVersionElem);
         }
 
         boost::optional<DatabaseVersion> databaseVersion;
@@ -1673,6 +1738,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
     }
 
     auto runCommand = [&] {
+        _runCommandOpTimes.emplace(opCtx);
         if (getInvocation()->supportsWriteConcern() ||
             getInvocation()->definition()->getLogicalOp() == LogicalOp::opGetMore) {
             // getMore operations inherit a WriteConcern from their originating cursor. For example,
@@ -1806,6 +1872,7 @@ void ExecCommandDatabase::_handleFailure(Status status) {
     auto command = _execContext->getCommand();
     auto replyBuilder = _execContext->getReplyBuilder();
     const auto& behaviors = *_execContext->behaviors;
+    onCommandFinished();
 
     // Append the error labels for transient transaction errors.
     auto response = _extraFieldsBuilder.asTempObj();
@@ -1819,7 +1886,9 @@ void ExecCommandDatabase::_handleFailure(Status status) {
                                         command->getName(),
                                         status.code(),
                                         wcCode,
-                                        _isInternalClient());
+                                        _isInternalClient(),
+                                        getLastOpBeforeRun(),
+                                        getLastOpAfterRun());
 
     BSONObjBuilder metadataBob;
     behaviors.appendReplyMetadata(opCtx, request, &metadataBob);
@@ -1881,10 +1950,11 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
 
 Future<void> parseCommand(std::shared_ptr<HandleRequest::ExecutionContext> execContext) try {
     const auto& msg = execContext->getMessage();
-    auto opMsgReq = rpc::opMsgRequestFromAnyProtocol(msg);
+    auto client = execContext->getOpCtx()->getClient();
+    auto opMsgReq = rpc::opMsgRequestFromAnyProtocol(msg, client);
+
     if (msg.operation() == dbQuery) {
-        checkAllowedOpQueryCommand(*(execContext->getOpCtx()->getClient()),
-                                   opMsgReq.getCommandName());
+        checkAllowedOpQueryCommand(*client, opMsgReq.getCommandName());
     }
     execContext->setRequest(opMsgReq);
     return Status::OK();
@@ -2066,8 +2136,8 @@ struct QueryOpRunner : SynchronousOpRunner {
         invariant(!executionContext->nsString().isCommand());
 
         globalOpCounters.gotQueryDeprecated();
-        warnDeprecation(executionContext->client(), networkOpToString(dbQuery));
-        return makeErrorResponseToDeprecatedOpQuery("OP_QUERY is no longer supported");
+        warnUnsupportedOp(executionContext->client(), networkOpToString(dbQuery));
+        return makeErrorResponseToUnsupportedOpQuery("OP_QUERY is no longer supported");
     }
 };
 
@@ -2075,8 +2145,8 @@ struct GetMoreOpRunner : SynchronousOpRunner {
     using SynchronousOpRunner::SynchronousOpRunner;
     DbResponse runSync() override {
         globalOpCounters.gotGetMoreDeprecated();
-        warnDeprecation(executionContext->client(), networkOpToString(dbGetMore));
-        return makeErrorResponseToDeprecatedOpQuery("OP_GET_MORE is no longer supported");
+        warnUnsupportedOp(executionContext->client(), networkOpToString(dbGetMore));
+        return makeErrorResponseToUnsupportedOpQuery("OP_GET_MORE is no longer supported");
     }
 };
 
@@ -2168,7 +2238,7 @@ std::unique_ptr<HandleRequest::OpRunner> HandleRequest::makeOpRunner() {
 }
 
 DbResponse FireAndForgetOpRunner::runSync() {
-    warnDeprecation(executionContext->client(), networkOpToString(executionContext->op()));
+    warnUnsupportedOp(executionContext->client(), networkOpToString(executionContext->op()));
     runAndForget();
     return {};
 }

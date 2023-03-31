@@ -84,6 +84,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
+#include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
 #include "mongo/db/query/sbe_cached_solution_planner.h"
@@ -284,7 +285,8 @@ void fillOutIndexEntries(OperationContext* opCtx,
                          const CollectionPtr& collection,
                          std::vector<IndexEntry>& entries,
                          std::vector<ColumnIndexEntry>& columnEntries) {
-    auto ii = collection->getIndexCatalog()->getIndexIterator(opCtx, false);
+    auto ii = collection->getIndexCatalog()->getIndexIterator(
+        opCtx, IndexCatalog::InclusionPolicy::kReady);
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();
 
@@ -595,10 +597,10 @@ public:
     PrepareExecutionHelper(OperationContext* opCtx,
                            CanonicalQuery* cq,
                            PlanYieldPolicy* yieldPolicy,
-                           size_t plannerOptions)
+                           const QueryPlannerParams& plannerOptions)
         : _opCtx{opCtx}, _cq{cq}, _yieldPolicy{yieldPolicy} {
         invariant(_cq);
-        _plannerParams.options = plannerOptions;
+        _plannerParams = plannerOptions;
     }
 
     /**
@@ -645,7 +647,7 @@ public:
             _cq->setCollator(mainColl->getDefaultCollator()->clone());
         }
 
-        auto planCacheKey = plan_cache_key_factory::make<KeyType>(*_cq, mainColl);
+        auto planCacheKey = buildPlanCacheKey();
         // Fill in some opDebug information, unless it has already been filled by an outer pipeline.
         OpDebug& opDebug = CurOp::get(_opCtx)->debug();
         if (!opDebug.queryHash) {
@@ -741,6 +743,11 @@ protected:
     virtual PlanStageType buildExecutableTree(const QuerySolution& solution) const = 0;
 
     /**
+     * Constructs the plan cache key.
+     */
+    virtual KeyType buildPlanCacheKey() const = 0;
+
+    /**
      * Either constructs a PlanStage tree from a cached plan (if exists in the plan cache), or
      * constructs a "id hack" PlanStage tree. Returns nullptr if no cached plan or id hack plan can
      * be constructed.
@@ -789,7 +796,7 @@ public:
                                   WorkingSet* ws,
                                   CanonicalQuery* cq,
                                   PlanYieldPolicy* yieldPolicy,
-                                  size_t plannerOptions)
+                                  const QueryPlannerParams& plannerOptions)
         : PrepareExecutionHelper{opCtx, std::move(cq), yieldPolicy, plannerOptions},
           _collection(collection),
           _ws{ws} {}
@@ -875,6 +882,10 @@ protected:
 
         result->emplace(std::move(stage), nullptr /* solution */);
         return result;
+    }
+
+    PlanCacheKey buildPlanCacheKey() const {
+        return plan_cache_key_factory::make<PlanCacheKey>(*_cq, _collection);
     }
 
     std::unique_ptr<ClassicPrepareExecutionResult> buildCachedPlan(
@@ -984,7 +995,10 @@ public:
                                     CanonicalQuery* cq,
                                     PlanYieldPolicy* yieldPolicy,
                                     size_t plannerOptions)
-        : PrepareExecutionHelper{opCtx, std::move(cq), yieldPolicy, plannerOptions},
+        : PrepareExecutionHelper{opCtx,
+                                 std::move(cq),
+                                 yieldPolicy,
+                                 QueryPlannerParams{plannerOptions}},
           _collections(collections) {}
 
     const CollectionPtr& getMainCollection() const override {
@@ -1078,13 +1092,17 @@ protected:
         return result;
     }
 
+    sbe::PlanCacheKey buildPlanCacheKey() const {
+        return plan_cache_key_factory::make(*_cq, _collections);
+    }
+
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildCachedPlan(
         const sbe::PlanCacheKey& planCacheKey) final {
         if (shouldCacheQuery(*_cq)) {
-            // TODO SERVER-61507: remove _cq->pipeline().empty() check when $group pushdown is
+            // TODO SERVER-61507: remove canUseSbePlanCache check when $group pushdown is
             // integrated with SBE plan cache.
             if (!feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() ||
-                !_cq->pipeline().empty()) {
+                !canonical_query_encoder::canUseSbePlanCache(*_cq)) {
                 // If the feature flag is off, we first try to build an "id hack" plan because the
                 // id hack plans are not cached in the classic cache. We then fall back to use the
                 // classic plan cache.
@@ -1188,7 +1206,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getClassicExecu
     const CollectionPtr& collection,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
-    size_t plannerOptions) {
+    const QueryPlannerParams& plannerParams) {
     // Mark that this query uses the classic engine, unless this has already been set.
     OpDebug& opDebug = CurOp::get(opCtx)->debug();
     if (!opDebug.classicEngineUsed) {
@@ -1196,7 +1214,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getClassicExecu
     }
     auto ws = std::make_unique<WorkingSet>();
     ClassicPrepareExecutionHelper helper{
-        opCtx, collection, ws.get(), canonicalQuery.get(), nullptr, plannerOptions};
+        opCtx, collection, ws.get(), canonicalQuery.get(), nullptr, plannerParams};
     auto executionResult = helper.prepare();
     if (!executionResult.isOK()) {
         return executionResult.getStatus();
@@ -1211,7 +1229,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getClassicExecu
                                        std::move(root),
                                        &collection,
                                        yieldPolicy,
-                                       plannerOptions,
+                                       plannerParams.options,
                                        {},
                                        std::move(solution));
 }
@@ -1295,13 +1313,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
     OperationContext* opCtx,
     const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> cq,
-    std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy requestedYieldPolicy,
-    size_t plannerOptions) {
-    invariant(cq);
-    if (extractAndAttachPipelineStages) {
-        extractAndAttachPipelineStages(cq.get());
-    }
+    const QueryPlannerParams& plannerParams) {
     // Mark that this query uses the SBE engine, unless this has already been set.
     OpDebug& opDebug = CurOp::get(opCtx)->debug();
     if (!opDebug.classicEngineUsed) {
@@ -1314,7 +1327,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
     auto nss = cq->nss();
     auto yieldPolicy = makeSbeYieldPolicy(opCtx, requestedYieldPolicy, mainColl, nss);
     SlotBasedPrepareExecutionHelper helper{
-        opCtx, collections, cq.get(), yieldPolicy.get(), plannerOptions};
+        opCtx, collections, cq.get(), yieldPolicy.get(), plannerParams.options};
     auto planningResultWithStatus = helper.prepare();
     if (!planningResultWithStatus.isOK()) {
         return planningResultWithStatus.getStatus();
@@ -1331,7 +1344,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                                   planningResult->decisionWorks(),
                                                   planningResult->needsSubplanning(),
                                                   yieldPolicy.get(),
-                                                  plannerOptions)) {
+                                                  plannerParams.options)) {
         // Do the runtime planning and pick the best candidate plan.
         auto candidates = planner->plan(std::move(solutions), std::move(roots));
 
@@ -1339,25 +1352,26 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                            std::move(cq),
                                            std::move(candidates),
                                            collections,
-                                           plannerOptions,
+                                           plannerParams.options,
                                            std::move(nss),
                                            std::move(yieldPolicy));
     }
     // No need for runtime planning, just use the constructed plan stage tree.
     invariant(solutions.size() == 1);
     invariant(roots.size() == 1);
-    if (!cq->pipeline().empty()) {
-        // Need to extend the solution with the agg pipeline and rebuild the execution tree.
-        solutions[0] = QueryPlanner::extendWithAggPipeline(
-            *cq,
-            std::move(solutions[0]),
-            fillOutSecondaryCollectionsInformation(opCtx, collections, cq.get()));
-        roots[0] = helper.buildExecutableTree(*(solutions[0]));
-    }
     auto&& [root, data] = roots[0];
+
     if (!planningResult->recoveredPinnedCacheEntry()) {
-        plan_cache_util::updatePlanCache(
-            opCtx, collections.getMainCollection(), *cq, *solutions[0], *root, data);
+        if (!cq->pipeline().empty()) {
+            // Need to extend the solution with the agg pipeline and rebuild the execution tree.
+            solutions[0] = QueryPlanner::extendWithAggPipeline(
+                *cq,
+                std::move(solutions[0]),
+                fillOutSecondaryCollectionsInformation(opCtx, collections, cq.get()));
+            roots[0] = helper.buildExecutableTree(*(solutions[0]));
+        }
+
+        plan_cache_util::updatePlanCache(opCtx, collections, *cq, *solutions[0], *root, data);
     }
 
     // Prepare the SBE tree for execution.
@@ -1370,7 +1384,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                        std::move(roots[0]),
                                        {},
                                        collections,
-                                       plannerOptions,
+                                       plannerParams.options,
                                        std::move(nss),
                                        std::move(yieldPolicy));
 }
@@ -1382,19 +1396,30 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
-    size_t plannerOptions) {
+    const QueryPlannerParams& plannerParams) {
+    invariant(canonicalQuery);
     const auto& mainColl = collections.getMainCollection();
     canonicalQuery->setSbeCompatible(
-        sbe::isQuerySbeCompatible(&mainColl, canonicalQuery.get(), plannerOptions));
-    return !canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()
-        ? getSlotBasedExecutor(opCtx,
-                               collections,
-                               std::move(canonicalQuery),
-                               extractAndAttachPipelineStages,
-                               yieldPolicy,
-                               plannerOptions)
-        : getClassicExecutor(
-              opCtx, mainColl, std::move(canonicalQuery), yieldPolicy, plannerOptions);
+        sbe::isQuerySbeCompatible(&mainColl, canonicalQuery.get(), plannerParams.options));
+
+    // Use SBE if 'canonicalQuery' is SBE compatible.
+    if (!canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()) {
+        if (extractAndAttachPipelineStages) {
+            extractAndAttachPipelineStages(canonicalQuery.get());
+        }
+        // Use SBE if we find any $group/$lookup stages eligible for execution in SBE or if SBE
+        // is fully enabled. Otherwise, fallback to the classic engine.
+        if (canonicalQuery->pipeline().empty() &&
+            !feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
+            canonicalQuery->setSbeCompatible(false);
+        } else {
+            return getSlotBasedExecutor(
+                opCtx, collections, std::move(canonicalQuery), yieldPolicy, plannerParams);
+        }
+    }
+
+    return getClassicExecutor(
+        opCtx, mainColl, std::move(canonicalQuery), yieldPolicy, plannerParams);
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
@@ -1410,7 +1435,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
                        std::move(canonicalQuery),
                        extractAndAttachPipelineStages,
                        yieldPolicy,
-                       plannerOptions);
+                       QueryPlannerParams{plannerOptions});
 }
 
 //
@@ -1423,13 +1448,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*)> extractAndAttachPipelineStages,
     bool permitYield,
-    size_t plannerOptions) {
+    QueryPlannerParams plannerParams) {
     auto yieldPolicy = (permitYield && !opCtx->inMultiDocumentTransaction())
         ? PlanYieldPolicy::YieldPolicy::YIELD_AUTO
         : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
 
     if (OperationShardingState::isComingFromRouter(opCtx)) {
-        plannerOptions |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
+        plannerParams.options |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
     }
 
     return getExecutor(opCtx,
@@ -1437,7 +1462,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                        std::move(canonicalQuery),
                        extractAndAttachPipelineStages,
                        yieldPolicy,
-                       plannerOptions);
+                       plannerParams);
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
@@ -1453,7 +1478,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                            std::move(canonicalQuery),
                            extractAndAttachPipelineStages,
                            permitYield,
-                           plannerOptions);
+                           QueryPlannerParams{plannerOptions});
 }
 
 namespace {
@@ -2384,8 +2409,8 @@ QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
     // If the caller did not request a "strict" distinct scan then we may choose a plan which
     // unwinds arrays and treats each element in an array as its own key.
     const bool mayUnwindArrays = !(plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY);
-    std::unique_ptr<IndexCatalog::IndexIterator> ii =
-        collection->getIndexCatalog()->getIndexIterator(opCtx, false);
+    auto ii = collection->getIndexCatalog()->getIndexIterator(
+        opCtx, IndexCatalog::InclusionPolicy::kReady);
     auto query = parsedDistinct.getQuery()->getFindCommandRequest().getFilter();
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();

@@ -479,11 +479,14 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"setIntersection", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::setIntersection, false}},
     {"setDifference",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::setDifference, false}},
+    {"setEquals", BuiltinFn{[](size_t n) { return n >= 2; }, vm::Builtin::setEquals, false}},
     {"collSetUnion", BuiltinFn{[](size_t n) { return n >= 1; }, vm::Builtin::collSetUnion, false}},
     {"collSetIntersection",
      BuiltinFn{[](size_t n) { return n >= 1; }, vm::Builtin::collSetIntersection, false}},
     {"collSetDifference",
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::collSetDifference, false}},
+    {"collSetEquals",
+     BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::collSetEquals, false}},
     {"runJsPredicate",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::runJsPredicate, false}},
     {"regexCompile", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::regexCompile, false}},
@@ -506,7 +509,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"hash", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::hash, false}},
     {"ftsMatch", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::ftsMatch, false}},
     {"generateSortKey",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::generateSortKey, false}},
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::generateSortKey, false}},
     {"tsSecond", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsSecond, false}},
     {"tsIncrement", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsIncrement, false}},
     {"typeMatch", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::typeMatch, false}},
@@ -579,6 +582,11 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"collMin", InstrFn{[](size_t n) { return n == 2; }, &vm::CodeFragment::appendCollMin, true}},
     {"collMax", InstrFn{[](size_t n) { return n == 2; }, &vm::CodeFragment::appendCollMax, true}},
     {"mod", InstrFn{[](size_t n) { return n == 2; }, &vm::CodeFragment::appendMod, false}},
+    // Note that we do not provide a pointer to a function for appending the 'applyClassicMatcher'
+    // instruction, because it's required that the first argument to applyClassicMatcher be a
+    // constant MatchExpression. This constant is stored as part of the bytecode itself, to avoid
+    // the stack manipulation overhead.
+    {"applyClassicMatcher", InstrFn{[](size_t n) { return n == 2; }, nullptr, false}},
 };
 }  // namespace
 
@@ -599,7 +607,7 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
             uassert(4822844,
                     str::stream() << "aggregate function call: " << _name
                                   << " occurs in the non-aggregate context.",
-                    ctx.aggExpression);
+                    ctx.aggExpression && ctx.accumulator);
 
             code.appendMoveVal(ctx.accumulator);
             ++arity;
@@ -622,7 +630,7 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
             uassert(4822846,
                     str::stream() << "aggregate function call: " << _name
                                   << " occurs in the non-aggregate context.",
-                    ctx.aggExpression);
+                    ctx.aggExpression && ctx.accumulator);
 
             code.appendAccessVal(ctx.accumulator);
         }
@@ -653,6 +661,51 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
 
                 return code;
             }
+        } else if (_name == "traverseF" && _nodes[1]->as<ELocalLambda>() &&
+                   _nodes[2]->as<EConstant>()) {
+            auto lambda = _nodes[1]->as<ELocalLambda>();
+            auto [tag, val] = _nodes[2]->as<EConstant>()->getConstant();
+
+            auto body = lambda->compileBodyDirect(ctx);
+            // Jump around the body.
+            code.appendJump(body.instrs().size());
+
+            // Remember the position and append the body.
+            auto bodyPosition = code.instrs().size();
+            code.appendNoStack(std::move(body));
+
+            code.append(_nodes[0]->compileDirect(ctx));
+            code.appendTraverseF(bodyPosition,
+                                 value::bitcastTo<bool>(val) ? vm::Instruction::True
+                                                             : vm::Instruction::False);
+            return code;
+        } else if (_name == "traverseP" && _nodes[1]->as<ELocalLambda>()) {
+            auto lambda = _nodes[1]->as<ELocalLambda>();
+
+            auto body = lambda->compileBodyDirect(ctx);
+            // Jump around the body.
+            code.appendJump(body.instrs().size());
+
+            // Remember the position and append the body.
+            auto bodyPosition = code.instrs().size();
+            code.appendNoStack(std::move(body));
+
+            code.append(_nodes[0]->compileDirect(ctx));
+            code.appendTraverseP(bodyPosition);
+
+            return code;
+        } else if (_name == "applyClassicMatcher") {
+            tassert(6681400,
+                    "First argument to applyClassicMatcher must be constant",
+                    _nodes[0]->as<EConstant>());
+            auto [matcherTag, matcherVal] = _nodes[0]->as<EConstant>()->getConstant();
+            tassert(6681409,
+                    "First argument to applyClassicMatcher must be a classic matcher",
+                    matcherTag == value::TypeTags::classicMatchExpresion);
+
+            code.append(_nodes[1]->compileDirect(ctx));
+            code.appendApplyClassicMatcher(value::getClassicMatchExpressionView(matcherVal));
+            return code;
         }
 
         // The order of evaluation is flipped for instruction functions. We may want to change the
@@ -802,9 +855,7 @@ std::unique_ptr<EExpression> ELocalLambda::clone() const {
     return std::make_unique<ELocalLambda>(_frameId, _nodes.back()->clone());
 }
 
-vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
-    vm::CodeFragment code;
-
+vm::CodeFragment ELocalLambda::compileBodyDirect(CompileCtx& ctx) const {
     // Compile the body first so we know its size.
     auto body = _nodes.back()->compileDirect(ctx);
     body.appendRet();
@@ -812,6 +863,14 @@ vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
     body.fixup(1);
     // Lambda parameter is no longer accessible after this point so remove any fixup information.
     body.removeFixup(_frameId);
+
+    return body;
+}
+
+vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
+    vm::CodeFragment code;
+
+    auto body = compileBodyDirect(ctx);
 
     // Jump around the body.
     code.appendJump(body.instrs().size());

@@ -71,6 +71,7 @@
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/task_executor_pool.h"
+#include "mongo/idl/cluster_server_parameter_refresher.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
@@ -653,7 +654,6 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     ThreadClient tc("mongosMain", serviceContext);
 
     logMongosVersionInfo(nullptr);
-    audit::logStartupOptions(tc.get(), serverGlobalParams.parsedOpts);
 
     // Set up the periodic runner for background job execution
     {
@@ -772,6 +772,10 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     clusterCursorCleanupJob.go();
 
     UserCacheInvalidator::start(serviceContext, opCtx);
+    if (gFeatureFlagClusterWideConfigM2.isEnabled(serverGlobalParams.featureCompatibility)) {
+        ClusterServerParameterRefresher::start(serviceContext, opCtx);
+    }
+
     if (audit::initializeSynchronizeJob) {
         audit::initializeSynchronizeJob(serviceContext);
     }
@@ -822,10 +826,18 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         return EXIT_NET_ERROR;
     }
 
+    if (!initialize_server_global_state::writePidFile()) {
+        return EXIT_ABRUPT;
+    }
+
+    // Startup options are written to the audit log at the end of startup so that cluster server
+    // parameters are guaranteed to have been initialized from disk at this point.
+    audit::logStartupOptions(tc.get(), serverGlobalParams.parsedOpts);
+
     serviceContext->notifyStartupComplete();
 
 #if !defined(_WIN32)
-    signalForkSuccess();
+    initialize_server_global_state::signalForkSuccess();
 #else
     if (ntservice::shouldStartService()) {
         ntservice::reportStatus(SERVICE_RUNNING);
@@ -891,7 +903,7 @@ ExitCode main(ServiceContext* serviceContext) {
 
 MONGO_INITIALIZER_GENERAL(ForkServer, ("EndStartupOptionHandling"), ("default"))
 (InitializerContext* context) {
-    forkServerOrDie();
+    initialize_server_global_state::forkServerOrDie();
 }
 
 // Initialize the featureCompatibilityVersion server parameter since mongos does not have a
@@ -975,7 +987,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
     logCommonStartupWarnings(serverGlobalParams);
 
     try {
-        if (!initializeServerGlobalState(service))
+        if (!initialize_server_global_state::checkSocketPath())
             return EXIT_ABRUPT;
 
         startSignalProcessingThread();

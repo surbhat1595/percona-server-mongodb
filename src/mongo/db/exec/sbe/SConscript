@@ -28,7 +28,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/datetime/date_time_support',
         '$BUILD_DIR/mongo/db/query/query_index_bounds',
         '$BUILD_DIR/mongo/db/storage/key_string',
-        '$BUILD_DIR/mongo/util/regex_util',
+        '$BUILD_DIR/mongo/util/pcre_util',
     ],
 )
 
@@ -223,6 +223,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        '$BUILD_DIR/mongo/util/pcre_wrapper',
         'sbe_plan_stage_test',
     ],
 )

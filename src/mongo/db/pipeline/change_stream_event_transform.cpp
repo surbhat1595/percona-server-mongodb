@@ -213,13 +213,18 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
                 if (_changeStreamSpec.getShowRawUpdateDescription()) {
                     updateDescription = input[repl::OplogEntry::kObjectFieldName];
                 } else {
+                    const auto showDisambiguatedPaths = _changeStreamSpec.getShowExpandedEvents() &&
+                        feature_flags::gFeatureFlagChangeStreamsFurtherEnrichedEvents.isEnabled(
+                            serverGlobalParams.featureCompatibility);
                     const auto& deltaDesc = change_stream_document_diff_parser::parseDiff(
                         diffObj.getDocument().toBson());
 
-                    updateDescription =
-                        Value(Document{{"updatedFields", deltaDesc.updatedFields},
-                                       {"removedFields", deltaDesc.removedFields},
-                                       {"truncatedArrays", deltaDesc.truncatedArrays}});
+                    updateDescription = Value(Document{
+                        {"updatedFields", deltaDesc.updatedFields},
+                        {"removedFields", std::move(deltaDesc.removedFields)},
+                        {"truncatedArrays", std::move(deltaDesc.truncatedArrays)},
+                        {"disambiguatedPaths",
+                         showDisambiguatedPaths ? Value(deltaDesc.disambiguatedPaths) : Value()}});
                 }
             } else if (id.missing()) {
                 operationType = DocumentSourceChangeStream::kUpdateOpType;

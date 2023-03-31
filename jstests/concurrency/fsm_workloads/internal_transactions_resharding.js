@@ -8,7 +8,8 @@
  * @tags: [
  *  requires_fcv_60,
  *  requires_sharding,
- *  uses_transactions
+ *  uses_transactions,
+ *  antithesis_incompatible
  * ]
  */
 load('jstests/concurrency/fsm_libs/extend_workload.js');
@@ -41,6 +42,12 @@ var $config = extendWorkload($config, function($config, $super) {
         assert.neq(partition, null);
         doc[customShardKeyFieldName] = this.generateRandomInt(partition.lower, partition.upper - 1);
         return doc;
+    };
+
+    $config.data.isAcceptableAggregateCmdError = function isAcceptableAggregateCmdError(res) {
+        // The aggregate command is expected to involve running getMore commands which are not
+        // retryable after a collection rename (done by resharding).
+        return res && (res.code == ErrorCodes.QueryPlanKilled);
     };
 
     $config.data.isAcceptableRetryError = function isAcceptableRetryError(res) {

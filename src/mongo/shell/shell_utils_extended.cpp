@@ -36,6 +36,7 @@
 #endif
 
 #include <boost/filesystem.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <fmt/format.h>
 #include <fstream>
 
@@ -511,7 +512,8 @@ BSONObj readDumpFile(const BSONObj& a, void*) {
         uassertStatusOK(swObj);
 
         const auto obj = swObj.getValue();
-        uassertStatusOK(validateBSON(obj.objdata(), valid));
+        uassertStatusOKWithContext(validateBSON(obj.objdata(), valid),
+                                   str::stream() << " at offset " << cursor.debug_offset());
 
         array.append(obj);
     }

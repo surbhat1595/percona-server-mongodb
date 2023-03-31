@@ -31,6 +31,7 @@
 #include "mongo/platform/basic.h"
 
 #include <fstream>
+#include <signal.h>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -39,7 +40,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/auth/security_token.h"
+#include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/bson_formatter.h"
 #include "mongo/logv2/component_settings_filter.h"
@@ -59,6 +60,7 @@
 #include "mongo/logv2/uassert_sink.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/string_map.h"
@@ -285,6 +287,12 @@ public:
         _attachedSinks.push_back(sink);
     }
 
+    void popSink() {
+        auto sink = _attachedSinks.back();
+        boost::log::core::get()->remove_sink(sink);
+        _attachedSinks.pop_back();
+    }
+
     template <typename Fmt>
     LineCapture makeLineCapture(Fmt&& formatter, bool stripEol = true) {
         LineCapture ret(stripEol);
@@ -353,12 +361,80 @@ TEST_F(LogV2Test, Basic) {
     // Message string is selected when using API that also take a format string
     LOGV2(20084, "fmtstr {name}", "msgstr", "name"_attr = 1);
     ASSERT_EQUALS(lines.back(), "msgstr");
+}
 
-    // Test that logging exceptions does not propagate out to user code in release builds
+TEST_F(LogV2Test, MismatchAttrInLogging) {
+    auto lines = makeLineCapture(PlainFormatter());
     if (!kDebugBuild) {
         LOGV2(4638203, "mismatch {name}", "not_name"_attr = 1);
         ASSERT(StringData(lines.back()).startsWith("Exception during log"_sd));
     }
+}
+
+TEST_F(LogV2Test, MissingAttrInLogging) {
+    auto lines = makeLineCapture(PlainFormatter());
+    if (!kDebugBuild) {
+        LOGV2(6636803, "Log missing {attr}");
+        ASSERT(StringData(lines.back()).startsWith("Exception during log"_sd));
+    }
+}
+
+namespace bl_sinks = boost::log::sinks;
+// Sink backend which will grab a mutex, then immediately segfault.
+class ConsumeSegfaultsBackend
+    : public bl_sinks::basic_formatted_sink_backend<char, bl_sinks::synchronized_feeding> {
+public:
+    static auto create() {
+        return boost::make_shared<bl_sinks::synchronous_sink<ConsumeSegfaultsBackend>>(
+            boost::make_shared<ConsumeSegfaultsBackend>());
+    }
+
+    void consume(boost::log::record_view const& rec, string_type const& formattedString) {
+        if (firstRun) {
+            firstRun = false;
+            raise(SIGSEGV);
+        } else {
+            // Reentrance of consume(), which could cause deadlock. Exit normally, causing the death
+            // test to fail.
+            exit(0);
+        }
+    }
+
+private:
+    bool firstRun = true;
+};
+
+// Test that signals thrown during logging will not hang process death. Uses the
+// ConsumeSegfaultsBackend so that upon the initial log call, ConsumeSegfaultsBackend::consume will
+// be called, sending SIGSEGV. If the signal handler incorrectly invokes the logging subsystem, the
+// ConsumeSegfaultsBackend::consume function will be again invoked, failing the test since this
+// could result in deadlock.
+DEATH_TEST_F(LogV2Test, SIGSEGVDoesNotHang, "Got signal: ") {
+    auto sink = ConsumeSegfaultsBackend::create();
+    attachSink(sink);
+    LOGV2(6384304, "will SIGSEGV {str}", "str"_attr = "sigsegv");
+    // If we get here, we didn't segfault, and the test will fail.
+}
+
+class ConsumeThrowsBackend
+    : public bl_sinks::basic_formatted_sink_backend<char, bl_sinks::synchronized_feeding> {
+public:
+    struct LocalException : std::exception {};
+    static auto create() {
+        return boost::make_shared<bl_sinks::synchronous_sink<ConsumeThrowsBackend>>(
+            boost::make_shared<ConsumeThrowsBackend>());
+    }
+
+    void consume(boost::log::record_view const& rec, string_type const& formattedString) {
+        throw LocalException();
+    }
+};
+
+TEST_F(LogV2Test, ExceptInLogging) {
+    auto sink = ConsumeThrowsBackend::create();
+    attachSink(sink);
+    ASSERT_THROWS(LOGV2(6636801, "will throw exception"), ConsumeThrowsBackend::LocalException);
+    popSink();
 }
 
 class LogV2TypesTest : public LogV2Test {

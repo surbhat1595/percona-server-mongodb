@@ -18,7 +18,7 @@ assert.commandWorked(coll.insert({_id: {a: 1, b: 1}, a: 1, c: {d: 1}, e: ['elem1
 
 let indexSpec = {a: 1, 'c.d': 1, 'e.0': 1};
 
-const groupPushdownEnabled = checkSBEEnabled(db, ["featureFlagSBEGroupPushdown"]);
+const groupPushdownEnabled = checkSBEEnabled(db);
 
 /**
  * Helper to test that for a given pipeline, the same results are returned whether or not an
@@ -128,6 +128,11 @@ assertResultsMatch({
     pipeline: [{$sort: {a: 1}}, {$project: {_id: 1, b: 1}}],
     expectProjectToCoalesce: true,
     pipelineOptimizedAway: true
+});
+assertResultsMatch({
+    pipeline: [{$sort: {a: 1}}, {$group: {_id: "$_id", a: {$sum: "$a"}}}, {$project: {arr: 1}}],
+    expectProjectToCoalesce:
+        !groupPushdownEnabled,  // lowering $group into SBE prevents coalesing of projects
 });
 
 // Test that projections with computed fields are removed from the pipeline.

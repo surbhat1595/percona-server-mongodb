@@ -46,7 +46,6 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
-#include "mongo/db/s/resharding/resharding_metrics_new.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
@@ -99,18 +98,12 @@ public:
             OldClientContext ctx(_opCtx, NamespaceString::kRsOplogNamespace.ns());
         }
 
-        // Initialize ReshardingMetrics to a recipient state compatible with fetching.
-        _metrics = std::make_unique<ReshardingMetrics>(_svcCtx);
-        _metrics->onStart(ReshardingMetrics::Role::kRecipient,
-                          _svcCtx->getFastClockSource()->now());
-        _metrics->setRecipientState(RecipientStateEnum::kCloning);
-        _metricsNew =
-            ReshardingMetricsNew::makeInstance(_reshardingUUID,
-                                               BSON("y" << 1),
-                                               NamespaceString{""},
-                                               ReshardingMetricsNew::Role::kRecipient,
-                                               getServiceContext()->getFastClockSource()->now(),
-                                               getServiceContext());
+        _metrics = ReshardingMetrics::makeInstance(_reshardingUUID,
+                                                   BSON("y" << 1),
+                                                   NamespaceString{""},
+                                                   ReshardingMetrics::Role::kRecipient,
+                                                   getServiceContext()->getFastClockSource()->now(),
+                                                   getServiceContext());
 
         for (const auto& shardId : kTwoShardIdList) {
             auto shardTargeter = RemoteCommandTargeterMock::get(
@@ -138,8 +131,7 @@ public:
     }
 
     auto makeFetcherEnv() {
-        return std::make_unique<ReshardingOplogFetcher::Env>(
-            _svcCtx, _metrics.get(), _metricsNew.get());
+        return std::make_unique<ReshardingOplogFetcher::Env>(_svcCtx, _metrics.get());
     }
 
     /**
@@ -306,7 +298,8 @@ public:
                     BSON(
                         "msg" << fmt::format("Writes to {} are temporarily blocked for resharding.",
                                              dataColl.getCollection()->ns().toString())),
-                    BSON("type" << kReshardFinalOpLogType << "reshardingUUID" << _reshardingUUID),
+                    BSON("type" << resharding::kReshardFinalOpLogType << "reshardingUUID"
+                                << _reshardingUUID),
                     boost::none,
                     boost::none,
                     boost::none,
@@ -324,9 +317,8 @@ public:
     }
 
     long long metricsFetchedCount() const {
-        BSONObjBuilder bob;
-        _metrics->serializeCurrentOpMetrics(&bob, ReshardingMetrics::Role::kRecipient);
-        return bob.obj()["oplogEntriesFetched"_sd].Long();
+        auto curOp = _metrics->reportForCurrentOp();
+        return curOp["oplogEntriesFetched"_sd].Long();
     }
 
     CancelableOperationContextFactory makeCancelableOpCtx() {
@@ -352,7 +344,6 @@ protected:
     ShardId _donorShard;
     ShardId _destinationShard;
     std::unique_ptr<ReshardingMetrics> _metrics;
-    std::unique_ptr<ReshardingMetricsNew> _metricsNew;
 
 private:
     static HostAndPort makeHostAndPort(const ShardId& shardId) {

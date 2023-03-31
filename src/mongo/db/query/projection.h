@@ -46,9 +46,10 @@ struct ProjectionDependencies {
     // Whether the entire document is required to do the projection.
     bool requiresDocument = false;
     bool hasExpressions = false;
+    bool containsElemMatch = false;
 
     // Which fields are necessary to perform the projection, or boost::none if all are required.
-    boost::optional<std::vector<std::string>> requiredFields;
+    boost::optional<std::set<std::string>> requiredFields;
 
     bool hasDottedPath = false;
 
@@ -94,7 +95,7 @@ public:
      * Return which fields are required to compute the projection, assuming the entire document is
      * not needed.
      */
-    const std::vector<std::string>& getRequiredFields() const {
+    const std::set<std::string>& getRequiredFields() const {
         invariant(_type == ProjectType::kInclusion);
         return *_deps.requiredFields;
     }
@@ -135,6 +136,10 @@ public:
     bool isInclusionOnly() const {
         return _type == ProjectType::kInclusion && !_deps.requiresMatchDetails &&
             _deps.metadataRequested.none() && !_deps.requiresDocument && !_deps.hasExpressions;
+    }
+
+    bool containsElemMatch() const {
+        return _deps.containsElemMatch;
     }
 
 private:

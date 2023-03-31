@@ -109,7 +109,7 @@ private:
     boost::optional<Callback> _runOnMockingNextResponse;
 
     ShardingDataTransformCumulativeMetrics _cumulativeMetrics{"dummyForTest"};
-    std::shared_ptr<ReshardingMetricsNew> _metrics;
+    std::shared_ptr<ReshardingMetrics> _metrics;
 };
 
 auto makeExecutor() {
@@ -121,11 +121,6 @@ auto makeExecutor() {
 
 void CoordinatorCommitMonitorTest::setUp() {
     ConfigServerTestFixture::setUp();
-
-    auto clockSource = getServiceContext()->getFastClockSource();
-    auto metrics = ReshardingMetrics::get(getServiceContext());
-    metrics->onStart(ReshardingMetrics::Role::kCoordinator, clockSource->now());
-    metrics->setCoordinatorState(CoordinatorStateEnum::kApplying);
 
     auto hostNameForShard = [](const ShardId& shard) -> std::string {
         return fmt::format("{}:1234", shard.toString());
@@ -155,7 +150,8 @@ void CoordinatorCommitMonitorTest::setUp() {
 
     _cancellationSource = std::make_unique<CancellationSource>();
 
-    _metrics = std::make_shared<ReshardingMetricsNew>(
+    auto clockSource = getServiceContext()->getFastClockSource();
+    _metrics = std::make_shared<ReshardingMetrics>(
         UUID::gen(),
         BSON("y" << 1),
         _ns,

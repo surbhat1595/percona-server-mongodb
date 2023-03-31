@@ -85,61 +85,6 @@
 namespace mongo::stage_builder {
 namespace {
 /**
- * Tree representing index key pattern or a subset of it.
- *
- * For example, the key pattern {a.b: 1, x: 1, a.c: 1} would look like:
- *
- *         <root>
- *         /   |
- *        a    x
- *       / \
- *      b   c
- *
- * This tree is used for building SBE subtrees to re-hydrate index keys and for covered projections.
- */
-struct IndexKeyPatternTreeNode {
-    IndexKeyPatternTreeNode* emplace(StringData fieldComponent) {
-        auto newNode = std::make_unique<IndexKeyPatternTreeNode>();
-        const auto newNodeRaw = newNode.get();
-        children.emplace(fieldComponent, std::move(newNode));
-        childrenOrder.push_back(fieldComponent.toString());
-
-        return newNodeRaw;
-    }
-
-    /**
-     * Returns leaf node matching field path. If the field path provided resolves to a non-leaf
-     * node, null will be returned.
-     *
-     * For example, if tree was built for key pattern {a: 1, a.b: 1}, this method will return
-     * nullptr for field path "a". On the other hand, this method will return corresponding node for
-     * field path "a.b".
-     */
-    IndexKeyPatternTreeNode* findLeafNode(const FieldRef& fieldRef, size_t currentIndex = 0) {
-        if (currentIndex == fieldRef.numParts()) {
-            if (children.empty()) {
-                return this;
-            }
-            return nullptr;
-        }
-
-        auto currentPart = fieldRef.getPart(currentIndex);
-        if (auto it = children.find(currentPart); it != children.end()) {
-            return it->second->findLeafNode(fieldRef, currentIndex + 1);
-        } else {
-            return nullptr;
-        }
-    }
-
-    StringMap<std::unique_ptr<IndexKeyPatternTreeNode>> children;
-    std::vector<std::string> childrenOrder;
-
-    // Which slot the index key for this component is stored in. May be boost::none for non-leaf
-    // nodes.
-    boost::optional<sbe::value::SlotId> indexKeySlot;
-};
-
-/**
  * For covered projections, each of the projection field paths represent respective index key. To
  * rehydrate index keys into the result object, we first need to convert projection AST into
  * 'IndexKeyPatternTreeNode' structure. Context structure and visitors below are used for this
@@ -244,94 +189,6 @@ public:
         }
     }
 };
-
-/**
- * Given a key pattern and an array of slots of equal size, builds an IndexKeyPatternTreeNode
- * representing the mapping between key pattern component and slot.
- *
- * Note that this will "short circuit" in cases where the index key pattern contains two components
- * where one is a subpath of the other. For example with the key pattern {a:1, a.b: 1}, the "a.b"
- * component will not be represented in the output tree. For the purpose of rehydrating index keys,
- * this is fine (and actually preferable).
- */
-std::unique_ptr<IndexKeyPatternTreeNode> buildKeyPatternTree(const BSONObj& keyPattern,
-                                                             const sbe::value::SlotVector& slots) {
-    size_t i = 0;
-
-    auto root = std::make_unique<IndexKeyPatternTreeNode>();
-    for (auto&& elem : keyPattern) {
-        auto* node = root.get();
-        bool skipElem = false;
-
-        FieldRef fr(elem.fieldNameStringData());
-        for (FieldIndex j = 0; j < fr.numParts(); ++j) {
-            const auto part = fr.getPart(j);
-            if (auto it = node->children.find(part); it != node->children.end()) {
-                node = it->second.get();
-                if (node->indexKeySlot) {
-                    // We're processing the a sub-path of a path that's already indexed.  We can
-                    // bail out here since we won't use the sub-path when reconstructing the
-                    // object.
-                    skipElem = true;
-                    break;
-                }
-            } else {
-                node = node->emplace(part);
-            }
-        }
-
-        if (!skipElem) {
-            node->indexKeySlot = slots[i];
-        }
-
-        ++i;
-    }
-
-    return root;
-}
-
-/**
- * Given a root IndexKeyPatternTreeNode, this function will construct an SBE expression for
- * producing a partial object from an index key.
- *
- * For example, given the index key pattern {a.b: 1, x: 1, a.c: 1} and the index key
- * {"": 1, "": 2, "": 3}, the SBE expression would produce the object {a: {b:1, c: 3}, x: 2}.
- */
-std::unique_ptr<sbe::EExpression> buildNewObjExpr(const IndexKeyPatternTreeNode* kpTree) {
-
-    sbe::EExpression::Vector args;
-    for (auto&& fieldName : kpTree->childrenOrder) {
-        auto it = kpTree->children.find(fieldName);
-
-        args.emplace_back(makeConstant(fieldName));
-        if (it->second->indexKeySlot) {
-            args.emplace_back(makeVariable(*it->second->indexKeySlot));
-        } else {
-            // The reason this is in an else branch is that in the case where we have an index key
-            // like {a.b: ..., a: ...}, we've already made the logic for reconstructing the 'a'
-            // portion, so the 'a.b' subtree can be skipped.
-            args.push_back(buildNewObjExpr(it->second.get()));
-        }
-    }
-
-    return sbe::makeE<sbe::EFunction>("newObj", std::move(args));
-}
-
-/**
- * Given a stage, and index key pattern a corresponding array of slot IDs, this function
- * add a ProjectStage to the tree which rehydrates the index key and stores the result in
- * 'resultSlot.'
- */
-std::unique_ptr<sbe::PlanStage> rehydrateIndexKey(std::unique_ptr<sbe::PlanStage> stage,
-                                                  const BSONObj& indexKeyPattern,
-                                                  PlanNodeId nodeId,
-                                                  const sbe::value::SlotVector& indexKeySlots,
-                                                  sbe::value::SlotId resultSlot) {
-    auto kpTree = buildKeyPatternTree(indexKeyPattern, indexKeySlots);
-    auto keyExpr = buildNewObjExpr(kpTree.get());
-
-    return sbe::makeProjectStage(std::move(stage), nodeId, resultSlot, std::move(keyExpr));
-}
 
 /**
  * Generates an EOF plan. Note that even though this plan will return nothing, it will still define
@@ -462,9 +319,6 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
         }
     }
 
-    // TODO SERVER-66039: Add dassert on sbe::validateInputParamsBindings().
-    // If the cached plan is parameterized, bind new values for the parameters into the runtime
-    // environment.
     input_params::bind(cq, data->inputParamToSlotMap, env, preparingFromCache);
 
     for (auto&& indexBoundsInfo : data->indexBoundsEvaluationInfos) {
@@ -1417,17 +1271,24 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         orderBy = _slotIdGenerator.generateMultiple(1);
         direction = {sbe::value::SortDirection::Ascending};
 
+        auto sortSpec = std::make_unique<sbe::value::SortSpec>(sn->pattern);
         auto sortSpecExpr =
             makeConstant(sbe::value::TypeTags::sortSpec,
-                         sbe::value::bitcastFrom<sbe::value::SortSpec*>(
-                             new sbe::value::SortSpec(sn->pattern, _cq.getCollator())));
+                         sbe::value::bitcastFrom<sbe::value::SortSpec*>(sortSpec.release()));
 
-        inputStage = sbe::makeProjectStage(std::move(inputStage),
-                                           root->nodeId(),
-                                           orderBy[0],
-                                           makeFunction("generateSortKey",
-                                                        std::move(sortSpecExpr),
-                                                        makeVariable(outputs.get(kResult))));
+        auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
+
+        inputStage =
+            sbe::makeProjectStage(std::move(inputStage),
+                                  root->nodeId(),
+                                  orderBy[0],
+                                  collatorSlot ? makeFunction("generateSortKey",
+                                                              std::move(sortSpecExpr),
+                                                              makeVariable(outputs.get(kResult)),
+                                                              makeVariable(*collatorSlot))
+                                               : makeFunction("generateSortKey",
+                                                              std::move(sortSpecExpr),
+                                                              makeVariable(outputs.get(kResult))));
     }
 
     outputs.forEachSlot(childReqs, [&](auto&& slot) { forwardedSlots.push_back(slot); });
@@ -1633,7 +1494,7 @@ SlotBasedStageBuilder::buildProjectionSimple(const QuerySolutionNode* root,
                                                    childResult,
                                                    sbe::MakeBsonObjStage::FieldBehavior::keep,
                                                    pn->proj.getRequiredFields(),
-                                                   std::vector<std::string>{},
+                                                   std::set<std::string>{},
                                                    sbe::value::SlotVector{},
                                                    true,
                                                    false,
@@ -2938,7 +2799,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         boost::none,
         boost::none,
         std::vector<std::string>{},
-        projectFields,
+        std::move(projectFields),
         fieldSlots,
         true,
         false,

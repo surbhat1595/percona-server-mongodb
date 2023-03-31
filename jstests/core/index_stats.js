@@ -8,6 +8,7 @@
 //   # key.
 //   assumes_unsharded_collection,
 //   does_not_support_stepdowns,
+//   does_not_support_repeated_reads,
 //   requires_non_retryable_writes,
 //   # Tenant migrations passthrough suites automatically retry operations on TenantMigrationAborted
 //   # errors.
@@ -234,7 +235,7 @@ assert.eq(2,
                  ])
                   .itcount());
 assert.eq(1, getUsageCount("_id_", col), "Expected aggregation to use _id index");
-if (!checkSBEEnabled(db, ["featureFlagSBELookupPushdown"])) {
+if (!checkSBEEnabled(db)) {
     assert.eq(2,
               getUsageCount("_id_", foreignCollection),
               "Expected each lookup to be tracked as an index use");
@@ -272,7 +273,7 @@ const pipeline = [
 ];
 assert.eq(2, col.aggregate(pipeline).itcount());
 assert.eq(1, getUsageCount("_id_", col), "Expected aggregation to use _id index");
-if (!checkSBEEnabled(db, ["featureFlagSBELookupPushdown"])) {
+if (!checkSBEEnabled(db)) {
     assert.eq(2,
               getUsageCount("_id_", foreignCollection),
               "Expected each lookup to be tracked as an index use");

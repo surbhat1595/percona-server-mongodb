@@ -639,8 +639,9 @@ var ShardingTest = function(params) {
      * least loaded shard to be 0 or 1, indicating that the collection is well balanced. This should
      * only be called after creating a big enough chunk difference to trigger balancing.
      */
-    this.awaitBalance = function(collName, dbName, timeToWait) {
+    this.awaitBalance = function(collName, dbName, timeToWait, interval) {
         timeToWait = timeToWait || 60000;
+        interval = interval || 200;
 
         const mongos = this.s;
         assert.soon(function() {
@@ -648,7 +649,7 @@ var ShardingTest = function(params) {
                 .commandWorked(
                     mongos.adminCommand({balancerCollectionStatus: dbName + '.' + collName}))
                 .balancerCompliant;
-        }, 'Timed out waiting for the collection to be balanced', timeToWait /* timeout */);
+        }, 'Timed out waiting for the collection to be balanced', timeToWait, interval);
     };
 
     this.getShard = function(coll, query, includeEmpty) {
@@ -724,8 +725,13 @@ var ShardingTest = function(params) {
         var result;
         for (var i = 0; i < 5; i++) {
             var otherShard = this.getOther(this.getPrimaryShard(dbName)).name;
-            result = this.s.adminCommand(
-                {movechunk: c, find: move, to: otherShard, _waitForDelete: waitForDelete});
+            let cmd = {movechunk: c, find: move, to: otherShard};
+
+            if (waitForDelete != null) {
+                cmd._waitForDelete = waitForDelete;
+            }
+
+            result = this.s.adminCommand(cmd);
             if (result.ok)
                 break;
 
@@ -1413,7 +1419,6 @@ var ShardingTest = function(params) {
 
         // Do replication.
         rst.awaitNodesAgreeOnPrimary();
-        rst.getPrimary().getDB("admin").foo.save({x: 1});
         if (rst.keyFile) {
             authutil.asCluster(rst.nodes, rst.keyFile, function() {
                 rst.awaitReplication();

@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include <fmt/format.h>
 
 #include "mongo/db/cancelable_operation_context.h"
@@ -44,7 +41,6 @@
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
-#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
@@ -64,7 +60,6 @@
 #include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
-
 
 namespace mongo {
 namespace {
@@ -159,19 +154,14 @@ public:
 
         _cm = createChunkManagerForOriginalColl();
 
-        _metrics = std::make_unique<ReshardingMetrics>(getServiceContext());
-        _metricsNew =
-            ReshardingMetricsNew::makeInstance(kCrudUUID,
-                                               BSON("y" << 1),
-                                               kCrudNs,
-                                               ReshardingMetricsNew::Role::kRecipient,
-                                               getServiceContext()->getFastClockSource()->now(),
-                                               getServiceContext());
+        _metrics = ReshardingMetrics::makeInstance(kCrudUUID,
+                                                   BSON("y" << 1),
+                                                   kCrudNs,
+                                                   ReshardingMetrics::Role::kRecipient,
+                                                   getServiceContext()->getFastClockSource()->now(),
+                                                   getServiceContext());
         _applierMetrics =
-            std::make_unique<ReshardingOplogApplierMetrics>(_metricsNew.get(), boost::none);
-        _metrics->onStart(ReshardingMetrics::Role::kRecipient,
-                          getServiceContext()->getFastClockSource()->now());
-        _metrics->setRecipientState(RecipientStateEnum::kApplying);
+            std::make_unique<ReshardingOplogApplierMetrics>(_metrics.get(), boost::none);
 
         _executor = makeTaskExecutorForApplier();
         _executor->startup();
@@ -200,17 +190,17 @@ public:
                 kCrudUUID,
                 ChunkRange{BSON(kOriginalShardKey << MINKEY),
                            BSON(kOriginalShardKey << -std::numeric_limits<double>::infinity())},
-                ChunkVersion(1, 0, epoch, Timestamp(1, 1)),
+                ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                 _sourceId.getShardId()},
             ChunkType{
                 kCrudUUID,
                 ChunkRange{BSON(kOriginalShardKey << -std::numeric_limits<double>::infinity()),
                            BSON(kOriginalShardKey << 0)},
-                ChunkVersion(1, 0, epoch, Timestamp(1, 1)),
+                ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                 kOtherShardId},
             ChunkType{kCrudUUID,
                       ChunkRange{BSON(kOriginalShardKey << 0), BSON(kOriginalShardKey << MAXKEY)},
-                      ChunkVersion(1, 0, epoch, Timestamp(1, 1)),
+                      ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                       _sourceId.getShardId()}};
 
         auto rt = RoutingTableHistory::makeNew(kCrudNs,
@@ -292,15 +282,12 @@ public:
     }
 
     BSONObj getMetricsOpCounters() {
-        BSONObjBuilder bob;
-        _metrics->serializeCumulativeOpMetrics(&bob);
-        return bob.obj().getObjectField("opcounters").getOwned();
+        return _metrics->reportForCurrentOp();
     }
 
     long long metricsAppliedCount() const {
-        BSONObjBuilder bob;
-        _metrics->serializeCurrentOpMetrics(&bob, ReshardingMetrics::Role::kRecipient);
-        return bob.obj()["oplogEntriesApplied"_sd].Long();
+        auto fullCurOp = _metrics->reportForCurrentOp();
+        return fullCurOp["oplogEntriesApplied"_sd].Long();
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> getExecutor() {
@@ -314,8 +301,8 @@ public:
 
 protected:
     auto makeApplierEnv() {
-        return std::make_unique<ReshardingOplogApplier::Env>(
-            getServiceContext(), _metrics.get(), _applierMetrics.get());
+        return std::make_unique<ReshardingOplogApplier::Env>(getServiceContext(),
+                                                             _applierMetrics.get());
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> makeTaskExecutorForApplier() {
@@ -372,7 +359,6 @@ protected:
 
     const ReshardingSourceId _sourceId{UUID::gen(), kMyShardId};
     std::unique_ptr<ReshardingMetrics> _metrics;
-    std::unique_ptr<ReshardingMetricsNew> _metricsNew;
     std::unique_ptr<ReshardingOplogApplierMetrics> _applierMetrics;
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
@@ -869,9 +855,9 @@ TEST_F(ReshardingOplogApplierTest, MetricsAreReported) {
     ASSERT_OK(future.getNoThrow());
 
     auto opCountersObj = getMetricsOpCounters();
-    ASSERT_EQ(opCountersObj.getIntField("insert"), 2);
-    ASSERT_EQ(opCountersObj.getIntField("update"), 1);
-    ASSERT_EQ(opCountersObj.getIntField("delete"), 2);
+    ASSERT_EQ(opCountersObj.getIntField("insertsApplied"), 2);
+    ASSERT_EQ(opCountersObj.getIntField("updatesApplied"), 1);
+    ASSERT_EQ(opCountersObj.getIntField("deletesApplied"), 2);
 
     // The in-memory metrics should show the 5 ops above + the final oplog entry, but on disk should
     // not include the final entry in its count.

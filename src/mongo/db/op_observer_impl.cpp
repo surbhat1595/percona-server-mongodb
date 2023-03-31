@@ -67,6 +67,7 @@
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_write_router.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
@@ -192,6 +193,9 @@ struct ImageBundle {
 OpTimeBundle replLogUpdate(OperationContext* opCtx,
                            const OplogUpdateEntryArgs& args,
                            MutableOplogEntry* oplogEntry) {
+    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
+    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        oplogEntry->setTid(args.nss.tenantId());
     oplogEntry->setNss(args.nss);
     oplogEntry->setUuid(args.uuid);
 
@@ -267,6 +271,9 @@ OpTimeBundle replLogDelete(OperationContext* opCtx,
                            StmtId stmtId,
                            bool fromMigrate,
                            const boost::optional<BSONObj>& deletedDoc) {
+    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
+    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        oplogEntry->setTid(nss.tenantId());
     oplogEntry->setNss(nss);
     oplogEntry->setUuid(uuid);
     oplogEntry->setDestinedRecipient(destinedRecipientDecoration(opCtx));
@@ -599,6 +606,9 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             };
 
         MutableOplogEntry oplogEntryTemplate;
+        // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
+        if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+            oplogEntryTemplate.setTid(nss.tenantId());
         oplogEntryTemplate.setNss(nss);
         oplogEntryTemplate.setUuid(uuid);
         oplogEntryTemplate.setFromMigrateIfTrue(fromMigrate);
@@ -2276,14 +2286,6 @@ void OpObserverImpl::_onReplicationRollback(OperationContext* opCtx,
     // Check if the shard identity document rolled back.
     if (rbInfo.shardIdentityRolledBack) {
         fassertFailedNoTrace(50712);
-    }
-
-    // Force the config server to update its shard registry on next access. Otherwise it may have
-    // the stale data that has been just rolled back.
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        if (auto shardRegistry = Grid::get(opCtx)->shardRegistry()) {
-            shardRegistry->clearEntries();
-        }
     }
 
     // Force the default read/write concern cache to reload on next access in case the defaults

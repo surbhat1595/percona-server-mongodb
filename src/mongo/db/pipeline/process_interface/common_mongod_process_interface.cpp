@@ -202,7 +202,8 @@ std::vector<Document> CommonMongodProcessInterface::getIndexStats(OperationConte
         auto idxCatalog = collection->getIndexCatalog();
         auto idx = idxCatalog->findIndexByName(opCtx,
                                                indexName,
-                                               /* includeUnfinishedIndexes */ true);
+                                               IndexCatalog::InclusionPolicy::kReady |
+                                                   IndexCatalog::InclusionPolicy::kUnfinished);
         uassert(ErrorCodes::IndexNotFound,
                 "Could not find entry in IndexCatalog for index " + indexName,
                 idx);
@@ -364,12 +365,6 @@ Status CommonMongodProcessInterface::appendQueryExecStats(OperationContext* opCt
                                                           const NamespaceString& nss,
                                                           BSONObjBuilder* builder) const {
     AutoGetCollectionForReadCommand collection(opCtx, nss);
-
-    if (!collection.getDb()) {
-        return {ErrorCodes::NamespaceNotFound,
-                str::stream() << "Database [" << nss.db().toString() << "] not found."};
-    }
-
     if (!collection) {
         return {ErrorCodes::NamespaceNotFound,
                 str::stream() << "Collection [" << nss.toString() << "] not found."};
@@ -397,9 +392,6 @@ BSONObj CommonMongodProcessInterface::getCollectionOptionsLocally(OperationConte
                                                                   const NamespaceString& nss) {
     AutoGetCollectionForReadCommand collection(opCtx, nss);
     BSONObj collectionOptions = {};
-    if (!collection.getDb()) {
-        return collectionOptions;
-    }
     if (!collection) {
         return collectionOptions;
     }
@@ -435,14 +427,8 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline*
 
     // Reparse 'pipeline' to discover whether there are secondary namespaces that we need to lock
     // when constructing our query executor.
-    std::vector<NamespaceStringOrUUID> secondaryNamespaces = [&]() {
-        if (feature_flags::gFeatureFlagSBELookupPushdown.isEnabledAndIgnoreFCV()) {
-            auto lpp = LiteParsedPipeline(expCtx->ns, pipeline->serializeToBson());
-            return lpp.getForeignExecutionNamespaces();
-        } else {
-            return std::vector<NamespaceStringOrUUID>{};
-        }
-    }();
+    auto lpp = LiteParsedPipeline(expCtx->ns, pipeline->serializeToBson());
+    std::vector<NamespaceStringOrUUID> secondaryNamespaces = lpp.getForeignExecutionNamespaces();
 
     autoColl.emplace(expCtx->opCtx,
                      nsOrUUID,
@@ -573,7 +559,8 @@ std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStat
                                      collVersion = collQueryInfo.getPlanCacheInvalidatorVersion()](
                                         const sbe::PlanCacheKey& key) {
             // Only fetch plan cache entries with keys matching given UUID and collectionVersion.
-            return uuid == key.getCollectionUuid() && collVersion == key.getCollectionVersion();
+            return uuid == key.getMainCollectionState().uuid &&
+                collVersion == key.getMainCollectionState().version;
         };
 
         auto planCacheEntriesSBE =
@@ -605,7 +592,8 @@ bool CommonMongodProcessInterface::fieldsHaveSupportingUniqueIndex(
         return fieldPaths == std::set<FieldPath>{"_id"};
     }
 
-    auto indexIterator = collection->getIndexCatalog()->getIndexIterator(opCtx, false);
+    auto indexIterator = collection->getIndexCatalog()->getIndexIterator(
+        opCtx, IndexCatalog::InclusionPolicy::kReady);
     while (indexIterator->more()) {
         const IndexCatalogEntry* entry = indexIterator->next();
         if (supportsUniqueKey(expCtx, entry, fieldPaths)) {
@@ -881,8 +869,7 @@ boost::optional<Document> CommonMongodProcessInterface::lookupSingleDocumentLoca
     const Document& documentKey) {
     AutoGetCollectionForRead autoColl(expCtx->opCtx, nss);
     BSONObj document;
-    if (!Helpers::findById(
-            expCtx->opCtx, autoColl.getDb(), nss.ns(), documentKey.toBson(), document)) {
+    if (!Helpers::findById(expCtx->opCtx, nss.ns(), documentKey.toBson(), document)) {
         return boost::none;
     }
     return Document(document).getOwned();

@@ -375,7 +375,7 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
         for (const auto& spec : specs) {
             uassert(6100900,
                     "Cannot implicitly create a new collection with createIndex 'clustered' option",
-                    !spec["clustered"]);
+                    !spec[IndexDescriptor::kClusteredFieldName]);
         }
 
         // We need to create the collection.
@@ -497,7 +497,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
     boost::optional<UUID> collectionUUID;
     CreateIndexesReply reply;
     {
-        Lock::DBLock dbLock(opCtx, ns.db(), MODE_IS);
+        Lock::DBLock dbLock(opCtx, ns.db(), MODE_IX);
         checkDatabaseShardingState(opCtx, ns);
         if (!repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, ns)) {
             uasserted(ErrorCodes::NotWritablePrimary,
@@ -505,7 +505,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
         }
 
         bool indexExists = writeConflictRetry(opCtx, "createCollectionWithIndexes", ns.ns(), [&] {
-            AutoGetCollection collection(opCtx, ns, MODE_IS);
+            AutoGetCollection collection(opCtx, ns, MODE_IX);
             CollectionShardingState::get(opCtx, ns)->checkShardVersionOrThrow(opCtx);
 
             checkCollectionUUIDMismatch(
@@ -515,8 +515,6 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
             // exist while holding an intent lock.
             if (collection &&
                 indexesAlreadyExist(opCtx, collection.getCollection(), specs, &reply)) {
-                repl::ReplClientInfo::forClient(opCtx->getClient())
-                    .setLastOpToSystemLastOpTime(opCtx);
                 return true;
             }
 
@@ -718,6 +716,13 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
  * { createIndexes : "bar",
  *   indexes : [ { ns : "test.bar", key : { x : 1 }, name: "x_1" } ],
  *   commitQuorum: "majority" }
+ *
+ * commitQuorum specifies which or how many replica set members must be ready to commit before the
+ * primary will commit the index. The same values can be used for commitQuorum as writeConcern, with
+ * the addition of 'votingMembers', the default. It is used to ensure secondaries can commit indexes
+ * quickly, minimizing replication lag (secondaries block replication on receipt of commitIndexBuild
+ * while completing the associated index). Note that commitQuorum is NOT like writeConcern: there is
+ * no guarantee that indexes on secondaries are ready for use after the command returns.
  */
 class CmdCreateIndexes : public CreateIndexesCmdVersion1Gen<CmdCreateIndexes> {
 public:
@@ -807,6 +812,10 @@ public:
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return AllowedOnSecondary::kNever;
+    }
+
+    bool allowedInTransactions() const final {
+        return true;
     }
 
 } cmdCreateIndex;

@@ -65,7 +65,6 @@ types:
         serializer: "::mongo::write_ops::opTimeSerializerWithTermCheck"
         deserializer: "::mongo::write_ops::opTimeParser"
 
-    # TODO (SERVER-64449): Use IDL directly instead of this custom parser/serialiser
     write_error:
         bson_serialization_type: object
         description: "Structure used to report a single error entry resulting from a batch write
@@ -383,6 +382,10 @@ commands:
                 type: LegacyRuntimeConstants
                 optional: true
                 unstable: false
+            mirrored:
+                description: "Indicates whether the operation is a mirrored read"
+                type: optionalBool
+                unstable: true
 
     delete:
         description: "Parser for the 'delete' command."
@@ -531,4 +534,8 @@ commands:
                 description: "Encryption Information schema and other tokens for CRUD commands"
                 type: EncryptionInformation
                 optional: true
+                unstable: true
+            mirrored:
+                description: "Indicates whether the operation is a mirrored read"
+                type: optionalBool
                 unstable: true

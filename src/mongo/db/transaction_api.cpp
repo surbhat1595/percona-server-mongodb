@@ -57,6 +57,7 @@
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/reply_interface.h"
+#include "mongo/s/is_mongos.h"
 #include "mongo/stdx/future.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/cancellation.h"
@@ -81,6 +82,7 @@ SyncTransactionWithRetries::SyncTransactionWithRetries(
       _txn(std::make_shared<details::TransactionWithRetries>(
           opCtx,
           executor,
+          _source.token(),
           txnClient ? std::move(txnClient)
                     : std::make_unique<details::SEPTransactionClient>(
                           opCtx,
@@ -100,6 +102,8 @@ StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext
     }
 
     auto txnResult = _txn->run(std::move(callback)).getNoThrow(opCtx);
+    // Cancel the source to guarantee the transaction will terminate if our opCtx was interrupted.
+    _source.cancel();
 
     // Post transaction processing, which must also happen inline.
     OperationTimeTracker::get(opCtx)->updateOperationTime(_txn->getOperationTime());
@@ -187,8 +191,7 @@ SemiFuture<CommitResult> TransactionWithRetries::run(Callback callback) noexcept
             return txnStatus.isOK() || txnStatus != ErrorCodes::TransactionAPIMustRetryTransaction;
         })
         .withBackoffBetweenIterations(kExponentialBackoff)
-        // Cancellation happens by interrupting the caller's opCtx.
-        .on(_executor, CancellationToken::uncancelable())
+        .on(_executor, _token)
         // Safe to inline because the continuation only holds state.
         .unsafeToInlineFuture()
         .tapAll([anchor = shared_from_this()](auto&&) {})
@@ -256,8 +259,7 @@ ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitWithRetries() {
             return swResult.isOK() || swResult != ErrorCodes::TransactionAPIMustRetryCommit;
         })
         .withBackoffBetweenIterations(kExponentialBackoff)
-        // Cancellation happens by interrupting the caller's opCtx.
-        .on(_executor, CancellationToken::uncancelable());
+        .on(_executor, _token);
 }
 
 ExecutorFuture<void> TransactionWithRetries::_bestEffortAbort() {
@@ -271,11 +273,14 @@ ExecutorFuture<void> TransactionWithRetries::_bestEffortAbort() {
 
 // Sets the appropriate options on the given client and operation context for running internal
 // commands.
-void primeInternalClientAndOpCtx(Client* client, OperationContext* opCtx) {
+void primeInternalClient(Client* client) {
     auto as = AuthorizationSession::get(client);
     if (as) {
         as->grantInternalAuthorization(client);
     }
+
+    stdx::lock_guard<Client> lk(*client);
+    client->setSystemOperationKillableByStepdown(lk);
 }
 
 Future<DbResponse> DefaultSEPTransactionClientBehaviors::handleRequest(
@@ -293,8 +298,12 @@ SemiFuture<BSONObj> SEPTransactionClient::runCommand(StringData dbName, BSONObj 
     invariant(!haveClient());
     auto client = _serviceContext->makeClient("SEP-internal-txn-client");
     AlternativeClientRegion clientRegion(client);
-    auto cancellableOpCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-    primeInternalClientAndOpCtx(&cc(), cancellableOpCtx.get());
+    // Note that _token is only cancelled once the caller of the transaction no longer cares about
+    // its result, so CancelableOperationContexts only being interrupted by ErrorCodes::Interrupted
+    // shouldn't impact any upstream retry logic.
+    CancelableOperationContextFactory opCtxFactory(_token, _executor);
+    auto cancellableOpCtx = opCtxFactory.makeOperationContext(&cc());
+    primeInternalClient(&cc());
 
     auto opMsgRequest = OpMsgRequest::fromDBAndBody(dbName, cmdBuilder.obj());
     auto requestMessage = opMsgRequest.serialize();
@@ -379,7 +388,7 @@ SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
                     // an error upon fetching more documents.
                     return result != ErrorCodes::InternalTransactionsExhaustiveFindHasMore;
                 })
-                .on(_executor, CancellationToken::uncancelable())
+                .on(_executor, _token)
                 .then([response = std::move(response)] { return std::move(*response); });
         })
         .semi();
@@ -490,6 +499,29 @@ int getMaxRetries() {
                                                                                 : kTxnRetryLimit;
 }
 
+bool isLocalTransactionFatalResult(const StatusWith<CommitResult>& swResult) {
+    // If the local node is shutting down all retries would fail and if the node has failed over,
+    // retries could eventually succeed on the new primary, but we want to prevent that since
+    // whatever command that ran the internal transaction will fail with this error and may be
+    // retried itself.
+    auto isLocalFatalStatus = [](Status status) -> bool {
+        return status.isA<ErrorCategory::NotPrimaryError>() ||
+            status.isA<ErrorCategory::ShutdownError>();
+    };
+
+    if (!swResult.isOK()) {
+        return isLocalFatalStatus(swResult.getStatus());
+    }
+    return isLocalFatalStatus(swResult.getValue().getEffectiveStatus());
+}
+
+// True if the transaction is running entirely against the local node, e.g. a single replica set
+// transaction on a mongod. False for remote transactions from a mongod or all transactions from a
+// mongos.
+bool isRunningLocalTransaction(const TransactionClient& txnClient) {
+    return !isMongos() && !txnClient.runsClusterOperations();
+}
+
 Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitResult>& swResult,
                                                         int attemptCounter) const noexcept {
     stdx::lock_guard<Latch> lg(_mutex);
@@ -506,6 +538,11 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
 
     if (_execContext == ExecutionContext::kClientTransaction) {
         // If we're nested in another transaction, let the outer most client decide on errors.
+        return ErrorHandlingStep::kDoNotRetry;
+    }
+
+    // If we're running locally, some errors mean we should not retry, like a failover or shutdown.
+    if (isRunningLocalTransaction(*_txnClient) && isLocalTransactionFatalResult(swResult)) {
         return ErrorHandlingStep::kDoNotRetry;
     }
 
@@ -679,7 +716,7 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
             "Transaction API does not currently support use within operations with shard or "
             "database versions without using router commands",
             !OperationShardingState::isComingFromRouter(opCtx) ||
-                _txnClient->canRunInShardedOperations());
+                _txnClient->runsClusterOperations());
 
     stdx::lock_guard<Latch> lg(_mutex);
 
@@ -707,6 +744,11 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
                         {true} /* startTransaction */);
         _execContext = ExecutionContext::kClientSession;
     } else if (!clientInMultiDocumentTransaction) {
+        uassert(6648100,
+                "Cross-shard internal transactions are not supported when run under a retryable "
+                "write directly on a shard.",
+                !_txnClient->runsClusterOperations() || isMongos());
+
         _setSessionInfo(lg,
                         makeLogicalSessionIdWithTxnNumberAndUUID(*clientSession, *clientTxnNumber),
                         0 /* txnNumber */,
@@ -721,6 +763,11 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
         // case always uses a client that runs commands against the local process service entry
         // point, which we verify with this invariant.
         invariant(_txnClient->supportsClientTransactionContext());
+
+        uassert(6648101,
+                "Cross-shard internal transactions are not supported when run under a client "
+                "transaction directly on a shard.",
+                !_txnClient->runsClusterOperations() || isMongos());
 
         _setSessionInfo(lg, *clientSession, *clientTxnNumber, boost::none /* startTransaction */);
         _execContext = ExecutionContext::kClientTransaction;

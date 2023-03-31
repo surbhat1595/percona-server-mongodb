@@ -99,6 +99,7 @@ env.Library(
         'expression_context.cpp',
         'expression_function.cpp',
         'expression_js_emit.cpp',
+        'expression_parser.idl',
         'expression_test_api_version.cpp',
         'expression_trigonometric.cpp',
         'javascript_execution.cpp',
@@ -106,6 +107,7 @@ env.Library(
         'variables.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/crypto/fle_crypto',
         '$BUILD_DIR/mongo/db/bson/dotted_path_support',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
@@ -119,7 +121,7 @@ env.Library(
         '$BUILD_DIR/mongo/scripting/scripting',
         '$BUILD_DIR/mongo/scripting/scripting_common',
         '$BUILD_DIR/mongo/util/intrusive_counter',
-        '$BUILD_DIR/mongo/util/regex_util',
+        '$BUILD_DIR/mongo/util/pcre_util',
         '$BUILD_DIR/mongo/util/summation',
         'aggregation_request_helper',
         'dependencies',
@@ -128,6 +130,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/mongohasher',
         '$BUILD_DIR/mongo/db/vector_clock',
+        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
 
@@ -179,7 +182,8 @@ env.Library(
         'field_path',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/exec/sort_executor', '$BUILD_DIR/mongo/db/index/key_generator'
+        '$BUILD_DIR/mongo/db/exec/sort_executor',
+        '$BUILD_DIR/mongo/db/index/key_generator',
     ],
 )
 
@@ -545,6 +549,7 @@ env.CppUnitTest(
         'accumulator_js_test.cpp' if get_option('js-engine') != 'none' else [],
         'accumulator_test.cpp',
         'aggregation_request_test.cpp',
+        'change_stream_document_diff_parser_test.cpp',
         'change_stream_event_transform_test.cpp',
         'change_stream_expired_pre_image_remover_test.cpp',
         'change_stream_rewrites_test.cpp',

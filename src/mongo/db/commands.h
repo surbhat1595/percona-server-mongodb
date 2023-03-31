@@ -603,6 +603,35 @@ public:
         return nullptr;
     }
 
+    /**
+     * Returns true if this command supports apply once semantic when retried.
+     */
+    virtual bool supportsRetryableWrite() const {
+        return false;
+    }
+
+    /**
+     * Returns true if sessions should be checked out when lsid and txnNumber is present in the
+     * request.
+     */
+    virtual bool shouldCheckoutSession() const {
+        return true;
+    }
+
+    /**
+     * Returns true if this is a command related to managing the lifecycle of a transaction.
+     */
+    virtual bool isTransactionCommand() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this command can be run in a transaction.
+     */
+    virtual bool allowedInTransactions() const {
+        return false;
+    }
+
 private:
     // The full name of the command
     const std::string _name;
@@ -728,6 +757,20 @@ public:
     }
 
     /**
+     * Returns if this invocation is a mirrored read.
+     */
+    bool isMirrored() const {
+        return _mirrored;
+    }
+
+    /**
+     * Sets that this operation is a mirrored read.
+     */
+    void markMirrored() {
+        _mirrored = true;
+    }
+
+    /**
      * Returns true if command allows afterClusterTime in its readConcern. The command may not allow
      * it if it is specifically intended not to take any LockManager locks. Waiting for
      * afterClusterTime takes the MODE_IS lock.
@@ -785,6 +828,8 @@ private:
     virtual void doCheckAuthorization(OperationContext* opCtx) const = 0;
 
     const Command* const _definition;
+
+    bool _mirrored = false;
 };
 
 /**

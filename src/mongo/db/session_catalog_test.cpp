@@ -344,32 +344,6 @@ TEST_F(SessionCatalogTest, ScanSession) {
     });
 }
 
-TEST_F(SessionCatalogTestWithDefaultOpCtx, GetHighestTxnNumberWithChildSessions) {
-    auto parentLsid = makeLogicalSessionIdForTest();
-    auto childLsid0 = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid, 1);
-    auto childLsid1 = makeLogicalSessionIdWithTxnUUIDForTest(parentLsid);
-    auto childLsid2 = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid, 5);
-    auto childLsid3 = makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid, 3);
-    auto childLsid4 = makeLogicalSessionIdWithTxnUUIDForTest(parentLsid);
-    std::vector<LogicalSessionId> lsids{
-        parentLsid, childLsid0, childLsid1, childLsid2, childLsid3, childLsid4};
-
-    createSession(parentLsid);
-    catalog()->scanSession(parentLsid, [](const ObservableSession& session) {
-        ASSERT_EQ(session.getHighestTxnNumberWithChildSessions(),
-                  TxnNumber{kUninitializedTxnNumber});
-    });
-
-    for (const auto& lsid : lsids) {
-        createSession(lsid);
-    }
-    for (const auto& lsid : lsids) {
-        catalog()->scanSession(lsid, [](const ObservableSession& session) {
-            ASSERT_EQ(session.getHighestTxnNumberWithChildSessions(), TxnNumber{5});
-        });
-    }
-}
-
 TEST_F(SessionCatalogTestWithDefaultOpCtx, ScanSessionsForReapWhenSessionIsIdle) {
     auto parentLsid = makeLogicalSessionIdForTest();
     auto childLsid0 = makeLogicalSessionIdWithTxnUUIDForTest(parentLsid);
@@ -1183,7 +1157,7 @@ TEST_F(SessionCatalogTest, KillSessionWhenChildSessionIsNotCheckedOut) {
     runTest(parentLsid, makeLogicalSessionIdWithTxnUUIDForTest(parentLsid));
 }
 
-TEST_F(SessionCatalogTest, KillingChildSessionInterruptsParentSession) {
+TEST_F(SessionCatalogTest, KillingChildSessionDoesNotInterruptParentSession) {
     auto runTest = [&](const LogicalSessionId& parentLsid, const LogicalSessionId& childLsid) {
         auto killToken = [this, &parentLsid, &childLsid] {
             assertCanCheckoutSession(childLsid);
@@ -1194,9 +1168,8 @@ TEST_F(SessionCatalogTest, KillingChildSessionInterruptsParentSession) {
 
             auto killToken = catalog()->killSession(childLsid);
 
-            // Make sure the owning operation context is interrupted
-            ASSERT_THROWS_CODE(
-                opCtx->checkForInterrupt(), AssertionException, ErrorCodes::Interrupted);
+            // Make sure the owning operation context is not interrupted.
+            opCtx->checkForInterrupt();
 
             // Make sure that the checkOutForKill call will wait for the owning operation context to
             // check the session back in
@@ -1426,7 +1399,7 @@ TEST_F(SessionCatalogTest, MarkSessionAsKilledCanBeCalledMoreThanOnce) {
     runTest(makeLogicalSessionIdWithTxnUUIDForTest());
 }
 
-TEST_F(SessionCatalogTest, MarkSessionsAsKilledWhenSessionDoesNotExist) {
+TEST_F(SessionCatalogTest, MarkNonExistentSessionAsKilled) {
     auto runTest = [&](const LogicalSessionId& nonExistentLsid) {
         ASSERT_THROWS_CODE(
             catalog()->killSession(nonExistentLsid), AssertionException, ErrorCodes::NoSuchSession);
@@ -1435,6 +1408,61 @@ TEST_F(SessionCatalogTest, MarkSessionsAsKilledWhenSessionDoesNotExist) {
     runTest(makeLogicalSessionIdForTest());
     runTest(makeLogicalSessionIdWithTxnNumberAndUUIDForTest());
     runTest(makeLogicalSessionIdWithTxnUUIDForTest());
+}
+
+TEST_F(SessionCatalogTest, MarkNonExistentChildSessionAsKilledWhenParentSessionExists) {
+    auto runTest = [&](const LogicalSessionId& parentLsid,
+                       const LogicalSessionId& nonExistentChildLsid) {
+        createSession(parentLsid);
+        ASSERT_THROWS_CODE(catalog()->killSession(nonExistentChildLsid),
+                           AssertionException,
+                           ErrorCodes::NoSuchSession);
+    };
+
+    {
+        auto parentLsid = makeLogicalSessionIdForTest();
+        runTest(parentLsid, makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid));
+    }
+
+    {
+        auto parentLsid = makeLogicalSessionIdForTest();
+        runTest(parentLsid, makeLogicalSessionIdWithTxnUUIDForTest(parentLsid));
+    }
+}
+
+
+TEST_F(SessionCatalogTest, MarkNonExistentChildSessionAsKilledWhenOtherChildSessionExists) {
+    auto runTest = [&](const LogicalSessionId& existentChildLsid,
+                       const LogicalSessionId& nonExistentChildLsid) {
+        createSession(existentChildLsid);
+        ASSERT_THROWS_CODE(catalog()->killSession(nonExistentChildLsid),
+                           AssertionException,
+                           ErrorCodes::NoSuchSession);
+    };
+
+    {
+        auto parentLsid = makeLogicalSessionIdForTest();
+        runTest(makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid),
+                makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid));
+    }
+
+    {
+        auto parentLsid = makeLogicalSessionIdForTest();
+        runTest(makeLogicalSessionIdWithTxnUUIDForTest(parentLsid),
+                makeLogicalSessionIdWithTxnUUIDForTest(parentLsid));
+    }
+
+    {
+        auto parentLsid = makeLogicalSessionIdForTest();
+        runTest(makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid),
+                makeLogicalSessionIdWithTxnUUIDForTest(parentLsid));
+    }
+
+    {
+        auto parentLsid = makeLogicalSessionIdForTest();
+        runTest(makeLogicalSessionIdWithTxnUUIDForTest(parentLsid),
+                makeLogicalSessionIdWithTxnNumberAndUUIDForTest(parentLsid));
+    }
 }
 
 TEST_F(SessionCatalogTestWithDefaultOpCtx, SessionDiscarOperationContextAfterCheckIn) {

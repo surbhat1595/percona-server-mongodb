@@ -502,6 +502,7 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
         _debug.report(
             opCtx, (lockerInfo ? &lockerInfo->stats : nullptr), operationMetricsPtr, &attr);
 
+        // TODO SERVER-67020 Ensure the ns in attr has the tenantId as the db prefix
         LOGV2_OPTIONS(51803, {component}, "Slow query", attr);
 
         _checkForFailpointsAfterCommandLogged();
@@ -960,6 +961,12 @@ void OpDebug::report(OperationContext* opCtx,
 
     if (iscommand) {
         pAttrs->add("protocol", getProtoString(networkOp));
+    }
+
+    if (const auto& invocation = CommandInvocation::get(opCtx);
+        invocation && invocation->isMirrored()) {
+        const bool mirrored = true;
+        OPDEBUG_TOATTR_HELP_BOOL(mirrored);
     }
 
     if (remoteOpWaitTime) {

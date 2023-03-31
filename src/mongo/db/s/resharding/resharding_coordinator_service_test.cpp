@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include <boost/optional.hpp>
 #include <functional>
 
@@ -42,7 +39,6 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
-#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
@@ -59,7 +55,6 @@
 #include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
-
 
 namespace mongo {
 namespace {
@@ -198,11 +193,13 @@ public:
         CoordinatorStateEnum state, boost::optional<Timestamp> fetchTimestamp = boost::none) {
         CommonReshardingMetadata meta(
             _reshardingUUID, _originalNss, UUID::gen(), _tempNss, _newShardKey.toBSON());
+        meta.setStartTime(getServiceContext()->getFastClockSource()->now());
+
         ReshardingCoordinatorDocument doc(state,
                                           {DonorShardEntry(ShardId("shard0000"), {})},
                                           {RecipientShardEntry(ShardId("shard0001"), {})});
         doc.setCommonReshardingMetadata(meta);
-        emplaceCloneTimestampIfExists(doc, cloneTimestamp);
+        resharding::emplaceCloneTimestampIfExists(doc, cloneTimestamp);
         return doc;
     }
 
@@ -371,10 +368,11 @@ public:
 
         TypeCollectionReshardingFields reshardingFields(coordinatorDoc.getReshardingUUID());
         reshardingFields.setState(coordinatorDoc.getState());
-        reshardingFields.setDonorFields(TypeCollectionDonorFields(
-            coordinatorDoc.getTempReshardingNss(),
-            coordinatorDoc.getReshardingKey(),
-            extractShardIdsFromParticipantEntries(coordinatorDoc.getRecipientShards())));
+        reshardingFields.setDonorFields(
+            TypeCollectionDonorFields(coordinatorDoc.getTempReshardingNss(),
+                                      coordinatorDoc.getReshardingKey(),
+                                      resharding::extractShardIdsFromParticipantEntries(
+                                          coordinatorDoc.getRecipientShards())));
 
         auto originalNssCatalogEntry = makeOriginalCollectionCatalogEntry(
             coordinatorDoc,
@@ -413,7 +411,7 @@ public:
             _newShardKey.isShardKey(shardKey.toBSON()) ? _newChunkRanges : _oldChunkRanges;
 
         // Create two chunks, one on each shard with the given namespace and epoch
-        ChunkVersion version(1, 0, epoch, timestamp);
+        ChunkVersion version({epoch, timestamp}, {1, 0});
         ChunkType chunk1(uuid, chunkRanges[0], version, ShardId("shard0000"));
         chunk1.setName(ids[0]);
         version.incMinor();
@@ -798,22 +796,12 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
 
         stateTransitionsGuard.wait(state);
 
-
         stepDown(opCtx);
 
         ASSERT_EQ(coordinator->getCompletionFuture().getNoThrow(),
                   ErrorCodes::InterruptedDueToReplStateChange);
 
         coordinator.reset();
-
-        // Metrics should be cleared after step down.
-        {
-            auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
-            BSONObjBuilder metricsBuilder;
-            metrics->serializeCurrentOpMetrics(&metricsBuilder,
-                                               ReshardingMetrics::Role::kCoordinator);
-            ASSERT_BSONOBJ_EQ(BSONObj(), metricsBuilder.done());
-        }
 
         stepUp(opCtx);
 
@@ -827,12 +815,6 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
 
         // 'done' state is never written to storage so don't wait for it.
         waitUntilCommittedCoordinatorDocReach(opCtx, state);
-
-        // Metrics should not be empty after step up.
-        auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
-        BSONObjBuilder metricsBuilder;
-        metrics->serializeCurrentOpMetrics(&metricsBuilder, ReshardingMetrics::Role::kCoordinator);
-        ASSERT_BSONOBJ_NE(BSONObj(), metricsBuilder.done());
     }
 
     makeDonorsProceedToDone(opCtx);
@@ -841,14 +823,6 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
     // Join the coordinator if it has not yet been cleaned up.
     if (auto coordinator = getCoordinatorIfExists(opCtx, instanceId)) {
         coordinator->getCompletionFuture().get(opCtx);
-    }
-
-    // Metrics should be cleared after commit.
-    {
-        auto metrics = ReshardingMetrics::get(opCtx->getServiceContext());
-        BSONObjBuilder metricsBuilder;
-        metrics->serializeCurrentOpMetrics(&metricsBuilder, ReshardingMetrics::Role::kCoordinator);
-        ASSERT_BSONOBJ_EQ(BSONObj(), metricsBuilder.done());
     }
 
     {

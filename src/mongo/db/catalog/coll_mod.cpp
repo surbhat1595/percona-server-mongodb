@@ -177,13 +177,11 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         }
 
         if (const auto& cappedSize = cmr.getCappedSize()) {
-            static constexpr long long minCappedSize = 4096;
             auto swCappedSize = CollectionOptions::checkAndAdjustCappedSize(*cappedSize);
             if (!swCappedSize.isOK()) {
                 return swCappedSize.getStatus();
             }
-            parsed.cappedSize =
-                (swCappedSize.getValue() < minCappedSize) ? minCappedSize : swCappedSize.getValue();
+            parsed.cappedSize = swCappedSize.getValue();
             oplogEntryBuilder.append(CollMod::kCappedSizeFieldName, *cappedSize);
         }
         if (const auto& cappedMax = cmr.getCappedMax()) {
@@ -288,7 +286,8 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
             }
         } else {
             std::vector<const IndexDescriptor*> indexes;
-            coll->getIndexCatalog()->findIndexesByKeyPattern(opCtx, keyPattern, false, &indexes);
+            coll->getIndexCatalog()->findIndexesByKeyPattern(
+                opCtx, keyPattern, IndexCatalog::InclusionPolicy::kReady, &indexes);
 
             if (indexes.size() > 1) {
                 return {ErrorCodes::AmbiguousIndexKeyPattern,
@@ -670,6 +669,7 @@ StatusWith<const IndexDescriptor*> _setUpCollModIndexUnique(OperationContext* op
 
     const auto& collection = coll.getCollection();
     if (!collection) {
+        checkCollectionUUIDMismatch(opCtx, nss, nullptr, cmd.getCollectionUUID());
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "ns does not exist for unique index conversion: " << nss);
     }

@@ -272,6 +272,8 @@ template <class Derived, class Element, class Value>
 class FlatBSON {
 public:
     enum class UpdateStatus { Updated, Failed, NoChange };
+    static std::string updateStatusString(UpdateStatus updateStatus);
+
     /**
      * Updates the stored fields provided by 'doc', ignoring the 'metaField' field.
      */
@@ -422,6 +424,13 @@ public:
     BSONObj minUpdates();
     BSONObj maxUpdates();
 
+    /**
+     * Generates and returns a MinMax object from the passed in min and max documents.
+     */
+    static MinMax parseFromBSON(const BSONObj& min,
+                                const BSONObj& max,
+                                const StringData::ComparatorInterface* stringComparator);
+
 protected:
     static std::pair<UpdateStatus, MinMaxElement::UpdateContext> _shouldUpdateObj(
         MinMaxStore::Obj& obj, const BSONElement& elem, MinMaxElement::UpdateContext updateContext);
@@ -499,6 +508,14 @@ private:
  */
 class Schema : public FlatBSON<Schema, SchemaElement, BSONTypeValue> {
     friend class FlatBSON<Schema, SchemaElement, BSONTypeValue>;
+
+public:
+    /**
+     * Generates and returns a Schema object from the passed in min and max documents.
+     */
+    static Schema parseFromBSON(const BSONObj& min,
+                                const BSONObj& max,
+                                const StringData::ComparatorInterface* stringComparator);
 
 protected:
     static std::pair<UpdateStatus, typename SchemaElement::UpdateContext> _shouldUpdateObj(

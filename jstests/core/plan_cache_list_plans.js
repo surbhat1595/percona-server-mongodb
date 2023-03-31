@@ -11,6 +11,7 @@
 //   assumes_read_preference_unchanged,
 //   assumes_unsharded_collection,
 //   does_not_support_stepdowns,
+//   does_not_support_repeated_reads,
 //   inspects_whether_plan_cache_entry_is_active,
 // ]
 
@@ -23,7 +24,7 @@ load("jstests/libs/sbe_util.js");      // For checkSBEEnabled.
 let coll = db.jstests_plan_cache_list_plans;
 coll.drop();
 
-const isSBEAndPlanCacheOn = checkSBEEnabled(db, ["featureFlagSbePlanCache"]);
+const isSBEAndPlanCacheOn = checkSBEEnabled(db, ["featureFlagSbePlanCache", "featureFlagSbeFull"]);
 
 function dumpPlanCacheState() {
     return coll.aggregate([{$planCacheStats: {}}]).toArray();

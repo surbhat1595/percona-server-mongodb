@@ -31,6 +31,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/catalog_impl',
+        '$BUILD_DIR/mongo/db/catalog/database_holder',
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/index/index_access_method_factory',
         '$BUILD_DIR/mongo/db/index/index_access_methods',
@@ -154,6 +155,7 @@ env.Program(
         "$BUILD_DIR/mongo/db/mongohasher",
         "$BUILD_DIR/mongo/db/multitenancy",
         "$BUILD_DIR/mongo/db/op_observer_impl",
+        "$BUILD_DIR/mongo/db/ops/write_ops",
         "$BUILD_DIR/mongo/db/query/collation/collator_interface_mock",
         "$BUILD_DIR/mongo/db/query/command_request_response",
         "$BUILD_DIR/mongo/db/query/query_planner_test_lib",

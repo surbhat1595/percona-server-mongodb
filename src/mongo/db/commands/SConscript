@@ -326,6 +326,7 @@ env.Library(
     source=[
         "count_cmd.cpp",
         "cqf/cqf_aggregate.cpp",
+        "cqf/cqf_command_utils.cpp",
         "create_command.cpp",
         "create_indexes.cpp",
         "current_op.cpp",
@@ -369,6 +370,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/database_holder',
         '$BUILD_DIR/mongo/db/catalog/index_key_validate',
         '$BUILD_DIR/mongo/db/catalog/multi_index_block',
+        '$BUILD_DIR/mongo/db/change_stream_change_collection_manager',
         '$BUILD_DIR/mongo/db/command_can_run_here',
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
@@ -379,6 +381,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/index_commands_idl',
         '$BUILD_DIR/mongo/db/multitenancy',
+        '$BUILD_DIR/mongo/db/ops/write_ops',
         '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/pipeline/aggregation_request_helper',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongo_process_interface',
@@ -436,9 +439,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/db/db_raii',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/ops/write_ops',
         '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/query_exec',
-        '$BUILD_DIR/mongo/db/write_ops',
         'test_commands_enabled',
     ],
 )
@@ -471,6 +474,7 @@ env.Library(
         'rename_collection.idl',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
@@ -563,6 +567,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/exec/stagedebug_cmd',
         '$BUILD_DIR/mongo/db/fle_crud_mongod',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/introspect',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/pipeline/pipeline',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongo_process_interface',
@@ -582,11 +587,13 @@ env.Library(
         '$BUILD_DIR/mongo/db/s/user_writes_recoverable_critical_section',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/db/serverless/shard_split_donor_service',
         '$BUILD_DIR/mongo/db/tenant_id',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/transaction_api',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
+        'cluster_server_parameter_commands_invocation',
         'core',
         'create_command',
         'kill_common',
@@ -597,7 +604,6 @@ env.Library(
         'rwc_defaults_commands',
         'server_status',
         'servers',
-        'set_cluster_parameter_invocation',
         'set_feature_compatibility_version_idl',
         'set_index_commit_quorum_idl',
         'set_user_write_block_mode_idl',
@@ -611,12 +617,15 @@ env.Library(
 )
 
 env.Library(
-    target='set_cluster_parameter_invocation',
+    target='cluster_server_parameter_commands_invocation',
     source=[
+        'get_cluster_parameter_invocation.cpp',
         'set_cluster_parameter_invocation.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/audit',
+        '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/write_ops/cluster_write_ops',
         'cluster_server_parameter_cmds_idl',
     ],
@@ -820,11 +829,11 @@ env.CppUnitTest(
         "$BUILD_DIR/mongo/db/repl/storage_interface_impl",
         "$BUILD_DIR/mongo/db/service_context_d_test_fixture",
         '$BUILD_DIR/mongo/idl/idl_parser',
+        "cluster_server_parameter_commands_invocation",
         "core",
         "create_command",
         "mongod",
         "servers",
-        "set_cluster_parameter_invocation",
         "standalone",
     ],
 )

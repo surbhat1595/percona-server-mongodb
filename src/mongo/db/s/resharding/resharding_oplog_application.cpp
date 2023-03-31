@@ -45,7 +45,6 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
 #include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/stats/counters.h"
@@ -127,7 +126,6 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
     size_t myStashIdx,
     ShardId donorShardId,
     ChunkManager sourceChunkMgr,
-    ReshardingMetrics* metrics,
     ReshardingOplogApplierMetrics* applierMetrics)
     : _outputNss(std::move(outputNss)),
       _allStashNss(std::move(allStashNss)),
@@ -135,7 +133,6 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
       _myStashNss(_allStashNss.at(_myStashIdx)),
       _donorShardId(std::move(donorShardId)),
       _sourceChunkMgr(std::move(sourceChunkMgr)),
-      _metrics(metrics),
       _applierMetrics(applierMetrics) {}
 
 Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
@@ -176,23 +173,18 @@ Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
                 case repl::OpTypeEnum::kInsert:
                     _applyInsert_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
-                    if (ShardingDataTransformMetrics::isEnabled()) {
-                        _applierMetrics->onInsertApplied();
-                    }
+                    _applierMetrics->onInsertApplied();
+
                     break;
                 case repl::OpTypeEnum::kUpdate:
                     _applyUpdate_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
-                    if (ShardingDataTransformMetrics::isEnabled()) {
-                        _applierMetrics->onUpdateApplied();
-                    }
+                    _applierMetrics->onUpdateApplied();
                     break;
                 case repl::OpTypeEnum::kDelete:
                     _applyDelete_inlock(
                         opCtx, autoCollOutput.getDb(), *autoCollOutput, *autoCollStash, op);
-                    if (ShardingDataTransformMetrics::isEnabled()) {
-                        _applierMetrics->onDeleteApplied();
-                    }
+                    _applierMetrics->onDeleteApplied();
                     break;
                 default:
                     MONGO_UNREACHABLE;
@@ -245,7 +237,6 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
      * 4. If there exists a document with _id == [op _id] in the output collection and it is NOT
      * owned by this donor shard, insert the contents of 'op' into the conflict stash collection.
      */
-    _metrics->gotInsert();
 
     BSONObj oField = op.getObject();
 
@@ -261,7 +252,7 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
 
     // First, query the conflict stash collection using [op _id] as the query. If a doc exists,
     // apply rule #1 and run a replacement update on the stash collection.
-    auto stashCollDoc = _queryStashCollById(opCtx, db, stashColl, idQuery);
+    auto stashCollDoc = _queryStashCollById(opCtx, stashColl, idQuery);
     if (!stashCollDoc.isEmpty()) {
         auto request = UpdateRequest();
         request.setNamespaceString(_myStashNss);
@@ -273,9 +264,7 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
         UpdateResult ur = update(opCtx, db, request);
         invariant(ur.numMatched != 0);
 
-        if (ShardingDataTransformMetrics::isEnabled()) {
-            _applierMetrics->onWriteToStashCollections();
-        }
+        _applierMetrics->onWriteToStashCollections();
 
         return;
     }
@@ -318,9 +307,7 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
     uassertStatusOK(stashColl->insertDocument(
         opCtx, InsertStatement(oField), nullptr /* nullOpDebug */, false /* fromMigrate */));
 
-    if (ShardingDataTransformMetrics::isEnabled()) {
-        _applierMetrics->onWriteToStashCollections();
-    }
+    _applierMetrics->onWriteToStashCollections();
 }
 
 void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCtx,
@@ -342,7 +329,6 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
      * 4. If there exists a document with _id == [op _id] in the output collection and it is owned
      * by this donor shard, update the document from this collection.
      */
-    _metrics->gotUpdate();
 
     BSONObj oField = op.getObject();
     BSONObj o2Field;
@@ -362,7 +348,7 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
 
     // First, query the conflict stash collection using [op _id] as the query. If a doc exists,
     // apply rule #1 and update the doc from the stash collection.
-    auto stashCollDoc = _queryStashCollById(opCtx, db, stashColl, idQuery);
+    auto stashCollDoc = _queryStashCollById(opCtx, stashColl, idQuery);
     if (!stashCollDoc.isEmpty()) {
         auto request = UpdateRequest();
         request.setNamespaceString(_myStashNss);
@@ -374,9 +360,7 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
 
         invariant(ur.numMatched != 0);
 
-        if (ShardingDataTransformMetrics::isEnabled()) {
-            _applierMetrics->onWriteToStashCollections();
-        }
+        _applierMetrics->onWriteToStashCollections();
 
         return;
     }
@@ -431,7 +415,6 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
      * _id == [op _id] arbitrarily from among all resharding conflict stash collections to delete
      * from that resharding conflict stash collection and insert into the output collection.
      */
-    _metrics->gotDelete();
 
     BSONObj oField = op.getObject();
 
@@ -447,14 +430,12 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
 
     // First, query the conflict stash collection using [op _id] as the query. If a doc exists,
     // apply rule #1 and delete the doc from the stash collection.
-    auto stashCollDoc = _queryStashCollById(opCtx, db, stashColl, idQuery);
+    auto stashCollDoc = _queryStashCollById(opCtx, stashColl, idQuery);
     if (!stashCollDoc.isEmpty()) {
         auto nDeleted = deleteObjects(opCtx, stashColl, _myStashNss, idQuery, true /* justOne */);
         invariant(nDeleted != 0);
 
-        if (ShardingDataTransformMetrics::isEnabled()) {
-            _applierMetrics->onWriteToStashCollections();
-        }
+        _applierMetrics->onWriteToStashCollections();
 
         return;
     }
@@ -540,9 +521,7 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
             BSONObj res;
             auto state = exec->getNext(&res, nullptr);
 
-            if (ShardingDataTransformMetrics::isEnabled()) {
-                _applierMetrics->onWriteToStashCollections();
-            }
+            _applierMetrics->onWriteToStashCollections();
 
             if (PlanExecutor::ADVANCED == state) {
                 // We matched a document and deleted it, so break.
@@ -564,7 +543,6 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
 }
 
 BSONObj ReshardingOplogApplicationRules::_queryStashCollById(OperationContext* opCtx,
-                                                             Database* db,
                                                              const CollectionPtr& coll,
                                                              const BSONObj& idQuery) const {
     const IndexCatalog* indexCatalog = coll->getIndexCatalog();
@@ -573,7 +551,7 @@ BSONObj ReshardingOplogApplicationRules::_queryStashCollById(OperationContext* o
             indexCatalog->haveIdIndex(opCtx));
 
     BSONObj result;
-    Helpers::findById(opCtx, db, _myStashNss.ns(), idQuery, result);
+    Helpers::findById(opCtx, _myStashNss.ns(), idQuery, result);
     return result;
 }
 }  // namespace mongo

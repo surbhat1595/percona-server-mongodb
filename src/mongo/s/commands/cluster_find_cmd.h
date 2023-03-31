@@ -87,6 +87,10 @@ public:
         return false;
     }
 
+    bool allowedInTransactions() const final {
+        return true;
+    }
+
     std::string help() const override {
         return "query for documents";
     }
@@ -132,6 +136,8 @@ public:
             try {
                 const auto explainCmd =
                     ClusterExplain::wrapAsExplain(findCommand->toBSON(BSONObj()), verbosity);
+
+                Impl::checkCanRunHere(opCtx);
 
                 long long millisElapsed;
                 std::vector<AsyncRequestsSender::Response> shardResponses;
@@ -286,9 +292,6 @@ public:
             uassert(51202,
                     "Cannot specify runtime constants option to a mongos",
                     !findCommand->getLegacyRuntimeConstants());
-            uassert(5746101,
-                    "Cannot specify ntoreturn in a find command against mongos",
-                    findCommand->getNtoreturn() == boost::none);
 
             if (shouldDoFLERewrite(findCommand)) {
                 invariant(findCommand->getNamespaceOrUUID().nss());

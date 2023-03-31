@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/catalog_raii.h"
@@ -344,7 +342,6 @@ TEST_F(MigrationUtilsTest, TestUpdateNumberOfOrphans) {
     const auto collectionUuid = UUID::gen();
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
     auto rangeDeletionDoc = createDeletionTask(opCtx, kTestNss, collectionUuid, 0, 10);
-    rangeDeletionDoc.setNumOrphanDocs(0);
     store.add(opCtx, rangeDeletionDoc);
 
     migrationutil::persistUpdatedNumOrphans(opCtx, rangeDeletionDoc.getId(), collectionUuid, 5);
@@ -592,7 +589,7 @@ TEST_F(SubmitRangeDeletionTaskTest, SucceedsIfFilteringMetadataUUIDMatchesTaskUU
     _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(kDefaultDatabaseType);
     _mockCatalogCacheLoader->setCollectionRefreshReturnValue(coll);
     _mockCatalogCacheLoader->setChunkRefreshReturnValue(
-        makeChangedChunks(ChunkVersion(1, 0, kEpoch, kDefaultTimestamp)));
+        makeChangedChunks(ChunkVersion({kEpoch, kDefaultTimestamp}, {1, 0})));
     _mockCatalogClient->setCollections({coll});
     forceShardFilteringMetadataRefresh(opCtx, kTestNss);
 
@@ -620,7 +617,7 @@ TEST_F(
     _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(kDefaultDatabaseType);
     _mockCatalogCacheLoader->setCollectionRefreshReturnValue(coll);
     _mockCatalogCacheLoader->setChunkRefreshReturnValue(
-        makeChangedChunks(ChunkVersion(1, 0, kEpoch, kDefaultTimestamp)));
+        makeChangedChunks(ChunkVersion({kEpoch, kDefaultTimestamp}, {1, 0})));
     _mockCatalogClient->setCollections({coll});
 
     auto metadata = makeShardedMetadata(opCtx, collectionUUID);
@@ -655,7 +652,7 @@ TEST_F(SubmitRangeDeletionTaskTest,
     auto matchingColl = makeCollectionType(collectionUUID, kEpoch, kDefaultTimestamp);
     _mockCatalogCacheLoader->setCollectionRefreshReturnValue(matchingColl);
     _mockCatalogCacheLoader->setChunkRefreshReturnValue(
-        makeChangedChunks(ChunkVersion(10, 0, kEpoch, kDefaultTimestamp)));
+        makeChangedChunks(ChunkVersion({kEpoch, kDefaultTimestamp}, {10, 0})));
     _mockCatalogClient->setCollections({matchingColl});
 
     auto metadata = makeShardedMetadata(opCtx, collectionUUID);
@@ -685,7 +682,7 @@ TEST_F(SubmitRangeDeletionTaskTest,
     _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(kDefaultDatabaseType);
     _mockCatalogCacheLoader->setCollectionRefreshReturnValue(otherColl);
     _mockCatalogCacheLoader->setChunkRefreshReturnValue(
-        makeChangedChunks(ChunkVersion(1, 0, otherEpoch, otherTimestamp)));
+        makeChangedChunks(ChunkVersion({otherEpoch, otherTimestamp}, {1, 0})));
     _mockCatalogClient->setCollections({otherColl});
 
     // The task should not have been submitted, and the task's entry should have been removed from

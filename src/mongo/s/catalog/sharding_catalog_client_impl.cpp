@@ -32,8 +32,8 @@
 
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 
+#include <fmt/format.h>
 #include <iomanip>
-#include <pcrecpp.h>
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -65,7 +65,6 @@
 #include "mongo/s/client/shard_remote_gen.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/shard_util.h"
 #include "mongo/s/write_ops/batch_write_op.h"
@@ -73,6 +72,8 @@
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/pcre.h"
+#include "mongo/util/pcre_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
@@ -90,6 +91,8 @@ using std::vector;
 using str::stream;
 
 namespace {
+
+using namespace fmt::literals;
 
 const ReadPreferenceSetting kConfigReadSelector(ReadPreference::Nearest, TagSet{});
 const ReadPreferenceSetting kConfigPrimaryPreferredSelector(ReadPreference::PrimaryPreferred,
@@ -334,20 +337,14 @@ DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
 
     // The admin database is always hosted on the config server.
     if (dbName == NamespaceString::kAdminDb) {
-        DatabaseType adminDb{
-            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed()};
-        // TODO SERVER-63983: do not set sharded flag once 6.0 becomes lastLTS
-        adminDb.setSharded(true);
-        return adminDb;
+        return DatabaseType(
+            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
 
     // The config database's primary shard is always config, and it is always sharded.
     if (dbName == NamespaceString::kConfigDb) {
-        DatabaseType configDb{
-            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed()};
-        // TODO SERVER-63983: do not set sharded flag once 6.0 becomes lastLTS
-        configDb.setSharded(true);
-        return configDb;
+        return DatabaseType(
+            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
 
     auto result =
@@ -462,9 +459,7 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
     OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcernLevel) {
     BSONObjBuilder b;
     if (!dbName.empty())
-        b.appendRegex(CollectionType::kNssFieldName,
-                      std::string(str::stream()
-                                  << "^" << pcrecpp::RE::QuoteMeta(dbName.toString()) << "\\."));
+        b.appendRegex(CollectionType::kNssFieldName, "^{}\\."_format(pcre_util::quoteMeta(dbName)));
 
     auto collDocs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
                                                             kConfigReadSelector,
@@ -768,7 +763,7 @@ StatusWith<repl::OpTimeWith<std::vector<ShardType>>> ShardingCatalogClientImpl::
     auto findStatus = _exhaustiveFindOnConfig(opCtx,
                                               kConfigReadSelector,
                                               readConcern,
-                                              ShardType::ConfigNS,
+                                              NamespaceString::kConfigsvrShardsNamespace,
                                               BSONObj(),     // no query filter
                                               BSONObj(),     // no sort
                                               boost::none);  // no limit
@@ -974,49 +969,6 @@ Status ShardingCatalogClientImpl::insertConfigDocument(OperationContext* opCtx,
     }
 
     MONGO_UNREACHABLE;
-}
-
-void ShardingCatalogClientImpl::insertConfigDocumentsAsRetryableWrite(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    std::vector<BSONObj> docs,
-    const WriteConcernOptions& writeConcern) {
-    invariant(nss.db() == NamespaceString::kAdminDb || nss.db() == NamespaceString::kConfigDb);
-
-    AlternativeSessionRegion asr(opCtx);
-    TxnNumber currentTxnNumber = 0;
-
-    std::vector<BSONObj> workingBatch;
-    size_t workingBatchItemSize = 0;
-    int workingBatchDocSize = 0;
-
-    while (!docs.empty()) {
-        BSONObj toAdd = docs.back();
-        docs.pop_back();
-
-        const int docSizePlusOverhead =
-            toAdd.objsize() + write_ops::kRetryableAndTxnBatchWriteBSONSizeOverhead;
-        // Check if pushing this object will exceed the batch size limit or the max object size
-        if ((workingBatchItemSize + 1 > write_ops::kMaxWriteBatchSize) ||
-            (workingBatchDocSize + docSizePlusOverhead > BSONObjMaxUserSize)) {
-            sendRetryableWriteBatchRequestToConfig(
-                asr.opCtx(), nss, workingBatch, currentTxnNumber, writeConcern);
-            ++currentTxnNumber;
-
-            workingBatch.clear();
-            workingBatchItemSize = 0;
-            workingBatchDocSize = 0;
-        }
-
-        workingBatch.push_back(toAdd);
-        ++workingBatchItemSize;
-        workingBatchDocSize += docSizePlusOverhead;
-    }
-
-    if (!workingBatch.empty()) {
-        sendRetryableWriteBatchRequestToConfig(
-            asr.opCtx(), nss, workingBatch, currentTxnNumber, writeConcern);
-    }
 }
 
 StatusWith<bool> ShardingCatalogClientImpl::updateConfigDocument(

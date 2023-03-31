@@ -31,7 +31,6 @@
 #include "mongo/db/s/chunk_splitter.h"
 
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/client/query.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
@@ -338,7 +337,6 @@ void ChunkSplitter::_runAutosplit(std::shared_ptr<ChunkSplitStateDriver> chunkSp
             }
             return balancerConfig->getMaxChunkSizeBytes();
         }();
-        invariant(ChunkSizeSettingsType::checkMaxChunkSizeValid(maxChunkSizeBytes));
 
         LOGV2_DEBUG(21906,
                     1,

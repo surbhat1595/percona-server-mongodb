@@ -78,20 +78,20 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(const Source&
 }
 
 std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(const Variable& var) {
-    auto def = _env.getDefinition(&var);
+    auto def = _env.getDefinition(var);
 
     if (!def.definedBy.empty()) {
         if (auto let = def.definedBy.cast<Let>(); let) {
             auto it = _letMap.find(let);
             uassert(6624203, "incorrect let map", it != _letMap.end());
 
-            return sbe::makeE<sbe::EVariable>(it->second, 0, _env.isLastRef(&var));
+            return sbe::makeE<sbe::EVariable>(it->second, 0, _env.isLastRef(var));
         } else if (auto lam = def.definedBy.cast<LambdaAbstraction>(); lam) {
             // This is a lambda parameter.
             auto it = _lambdaMap.find(lam);
             uassert(6624204, "incorrect lambda map", it != _lambdaMap.end());
 
-            return sbe::makeE<sbe::EVariable>(it->second, 0, _env.isLastRef(&var));
+            return sbe::makeE<sbe::EVariable>(it->second, 0, _env.isLastRef(var));
         }
     }
     if (auto it = _slotMap.find(var.name()); it != _slotMap.end()) {
@@ -990,9 +990,20 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n, co
     generateSlots(fieldProjectionMap, ridSlot, rootSlot, fields, vars);
     uassert(6624233, "Cannot deliver root projection in this context", !rootSlot.has_value());
 
+    std::vector<std::pair<size_t, sbe::value::SlotId>> indexVars;
     sbe::IndexKeysInclusionSet indexKeysToInclude;
-    for (const std::string& fieldName : fields) {
-        indexKeysToInclude.set(decodeIndexKeyName(fieldName), true);
+
+    for (size_t index = 0; index < fields.size(); index++) {
+        const size_t indexFieldPos = decodeIndexKeyName(fields.at(index));
+        indexVars.emplace_back(indexFieldPos, vars.at(index));
+        indexKeysToInclude.set(indexFieldPos, true);
+    }
+
+    // Make sure vars are in sorted order on index field position.
+    std::sort(indexVars.begin(), indexVars.end());
+    vars.clear();
+    for (const auto& [indexFieldPos, slot] : indexVars) {
+        vars.push_back(slot);
     }
 
     auto lowerBoundExpr = convertBoundsToExpr(true /*isLower*/, indexDef, interval);

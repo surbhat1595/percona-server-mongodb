@@ -60,6 +60,9 @@ class SessionCatalog {
     friend class OperationContextSession;
 
 public:
+    using OnEagerlyReapedSessionsFn =
+        unique_function<void(ServiceContext*, std::vector<LogicalSessionId>)>;
+
     class ScopedCheckedOutSession;
     class SessionToKill;
 
@@ -96,16 +99,24 @@ public:
 
     /**
      * Iterates through the SessionCatalog under the SessionCatalog mutex and applies 'workerFn' to
-     * each Session which matches the specified 'matcher'. Does not support reaping.
+     * each Session which matches the specified 'lsid' or 'matcher'. Does not support reaping.
      *
      * NOTE: Since this method runs with the session catalog mutex, the work done by 'workerFn' is
      * not allowed to block, perform I/O or acquire any lock manager locks.
      * Iterates through the SessionCatalog and applies 'workerFn' to each Session. This locks the
      * SessionCatalog.
      */
-    void scanSession(const LogicalSessionId& lsid, const ScanSessionsCallbackFn& workerFn);
+    enum class ScanSessionCreateSession { kYes, kNo };
+    void scanSession(const LogicalSessionId& lsid,
+                     const ScanSessionsCallbackFn& workerFn,
+                     ScanSessionCreateSession createSession = ScanSessionCreateSession::kNo);
     void scanSessions(const SessionKiller::Matcher& matcher,
                       const ScanSessionsCallbackFn& workerFn);
+
+    /**
+     * Same as the above but only applies 'workerFn' to parent Sessions.
+     */
+    void scanParentSessions(const ScanSessionsCallbackFn& workerFn);
 
     /**
      * Same as the above but applies 'parentSessionWorkerFn' to the Session whose session id is
@@ -131,9 +142,13 @@ public:
     size_t size() const;
 
     /**
-     * Creates the session runtime info for 'lsid' if it doesn't exist.
+     * Registers a callback to run when sessions are "eagerly" reaped from the catalog, ie without
+     * waiting for a logical session cache refresh.
      */
-    void createSessionIfDoesNotExist(const LogicalSessionId& lsid);
+    void setOnEagerlyReapedSessionsFn(OnEagerlyReapedSessionsFn fn) {
+        invariant(!_onEagerlyReapedSessionsFn);
+        _onEagerlyReapedSessionsFn = std::move(fn);
+    }
 
 private:
     /**
@@ -144,18 +159,15 @@ private:
     struct SessionRuntimeInfo {
         SessionRuntimeInfo(LogicalSessionId lsid) : parentSession(std::move(lsid)) {
             // Can only create a SessionRuntimeInfo with a parent transaction session id.
-            invariant(!getParentSessionId(lsid));
+            invariant(isParentSessionId(lsid));
         }
 
-        Session* getSession(const LogicalSessionId& lsid);
+        Session* getSession(WithLock, const LogicalSessionId& lsid);
 
         // Must only be accessed by the OperationContext which currently has this logical session
         // checked out.
         Session parentSession;
         LogicalSessionIdMap<Session> childSessions;
-        // Highest transaction number in this logical session that has one or more child transaction
-        // sessions being tracked in the SessionCatalog.
-        TxnNumber highestTxnNumberWithChildSessions{kUninitializedTxnNumber};
 
         // Signaled when the state becomes available. Uses the transaction table's mutex to protect
         // the state transitions.
@@ -202,11 +214,18 @@ private:
     SessionRuntimeInfo* _getOrCreateSessionRuntimeInfo(WithLock lk, const LogicalSessionId& lsid);
 
     /**
-     * Makes a session, previously checked out through 'checkoutSession', available again.
+     * Makes a session, previously checked out through 'checkoutSession', available again. Will free
+     * any retryable sessions with txnNumbers before clientTxnNumberStarted if it is set.
      */
     void _releaseSession(SessionRuntimeInfo* sri,
                          Session* session,
-                         boost::optional<KillToken> killToken);
+                         boost::optional<KillToken> killToken,
+                         boost::optional<TxnNumber> clientTxnNumberStarted);
+
+    // Called when sessions are reaped from memory "eagerly" ie directly by the SessionCatalog
+    // without waiting for a logical session cache refresh. Note this is set at process startup
+    // before multi-threading is enabled, so no synchronization is necessary.
+    boost::optional<OnEagerlyReapedSessionsFn> _onEagerlyReapedSessionsFn;
 
     // Protects the state below
     mutable Mutex _mutex =
@@ -234,6 +253,7 @@ public:
 
     ScopedCheckedOutSession(ScopedCheckedOutSession&& other)
         : _catalog(other._catalog),
+          _clientTxnNumberStarted(other._clientTxnNumberStarted),
           _sri(other._sri),
           _session(other._session),
           _killToken(std::move(other._killToken)) {
@@ -246,7 +266,8 @@ public:
 
     ~ScopedCheckedOutSession() {
         if (_sri) {
-            _catalog._releaseSession(_sri, _session, std::move(_killToken));
+            _catalog._releaseSession(
+                _sri, _session, std::move(_killToken), _clientTxnNumberStarted);
         }
     }
 
@@ -270,9 +291,19 @@ public:
         return bool(_killToken);
     }
 
+    void observeNewClientTxnNumberStarted(TxnNumber txnNumber) {
+        _clientTxnNumberStarted = txnNumber;
+    }
+
 private:
     // The owning session catalog into which the session should be checked back
     SessionCatalog& _catalog;
+
+    // If this session began a retryable write or transaction while checked out, this is set to the
+    // "client txnNumber" of that transaction, which is the top-level txnNumber for a retryable
+    // write or transaction sent by a client or the txnNumber in the sessionId for a retryable
+    // child transaction.
+    boost::optional<TxnNumber> _clientTxnNumberStarted;
 
     SessionCatalog::SessionRuntimeInfo* _sri;
     Session* _session;
@@ -331,15 +362,6 @@ public:
      */
     const LogicalSessionId& getSessionId() const {
         return _session->_sessionId;
-    }
-
-    /**
-     * Returns the highest txnNumber in the logical session that this transaction session
-     * corresponds to that has one or more child transaction sessions being tracked in the
-     * SessionCatalog.
-     */
-    TxnNumber getHighestTxnNumberWithChildSessions() const {
-        return _sri->highestTxnNumberWithChildSessions;
     }
 
     /**
@@ -483,6 +505,14 @@ public:
     enum class CheckInReason { kDone, kYield };
     static void checkIn(OperationContext* opCtx, CheckInReason reason);
     static void checkOut(OperationContext* opCtx);
+
+    /**
+     * Notifies the session catalog when a new transaction/retryable write is begun on the operation
+     * context's checked out session.
+     */
+    static void observeNewTxnNumberStarted(OperationContext* opCtx,
+                                           const LogicalSessionId& lsid,
+                                           TxnNumber txnNumber);
 
 private:
     OperationContext* const _opCtx;

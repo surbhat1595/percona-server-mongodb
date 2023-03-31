@@ -469,7 +469,7 @@ public:
     executor::TaskExecutor::CallbackHandle getCatchupTakeoverCbh_forTest() const;
 
     /**
-     * Simple wrappers around _setLastOptime to make it easier to test.
+     * Simple wrappers around _setLastOptimeForMember to make it easier to test.
      */
     Status setLastAppliedOptime_forTest(long long cfgVer,
                                         long long memberId,
@@ -1099,8 +1099,19 @@ private:
      * This is only valid to call on replica sets.
      * "configVersion" will be populated with our config version if it and the configVersion
      * of "args" differ.
+     *
+     * If either applied or durable optime has changed, returns the later of the two (even if
+     * that's not the one which changed).  Otherwise returns a null optime.
      */
-    Status _setLastOptime(WithLock lk, const UpdatePositionArgs::UpdateInfo& args);
+    StatusWith<OpTime> _setLastOptimeForMember(WithLock lk,
+                                               const UpdatePositionArgs::UpdateInfo& args);
+
+    /**
+     * Helper for processReplSetUpdatePosition, companion to _setLastOptimeForMember above.  Updates
+     * replication coordinator state and notifies waiters after remote optime updates.  Must be
+     * called within the same critical section as _setLastOptimeForMember.
+     */
+    void _updateStateAfterRemoteOpTimeUpdates(WithLock lk, const OpTime& maxRemoteOpTime);
 
     /**
      * This function will report our position externally (like upstream) if necessary.
@@ -1434,6 +1445,13 @@ private:
      */
     void _updateLastCommittedOpTimeAndWallTime(WithLock lk);
 
+    /** Terms only increase, so if an incoming term is less than or equal to our
+     * current term (_termShadow), there is no need to take the mutex and call _updateTerm_inlock.
+     * Since _termShadow may be lagged, this may return true when the term does not need to be
+     * updated, which is harmless because _updateTerm_inlock will do nothing in that case.
+     */
+    bool _needToUpdateTerm(long long term);
+
     /**
      * Callback that attempts to set the current term in topology coordinator and
      * relinquishes primary if the term actually changes and we are primary.
@@ -1454,17 +1472,6 @@ private:
      * Returns the finish event which is invalid if the process has already finished.
      */
     EventHandle _processReplSetMetadata_inlock(const rpc::ReplSetMetadata& replMetadata);
-
-    /**
-     * Prepares a metadata object for ReplSetMetadata.
-     */
-    void _prepareReplSetMetadata_inlock(const OpTime& lastOpTimeFromClient,
-                                        BSONObjBuilder* builder) const;
-
-    /**
-     * Prepares a metadata object for OplogQueryMetadata.
-     */
-    void _prepareOplogQueryMetadata_inlock(int rbid, BSONObjBuilder* builder) const;
 
     /**
      * Blesses a snapshot to be used for new committed reads.
@@ -1711,9 +1718,6 @@ private:
 
     // Current ReplicaSet state.
     MemberState _memberState;  // (M)
-
-    // Used to signal threads waiting for changes to _memberState.
-    stdx::condition_variable _drainFinishedCond;  // (M)
 
     ReplicationCoordinator::ApplierState _applierState = ApplierState::Running;  // (M)
 

@@ -280,6 +280,14 @@ public:
         CmdFindAndModify::_updateMetrics.collectMetrics(request);
     }
 
+    bool supportsRetryableWrite() const final {
+        return true;
+    }
+
+    bool allowedInTransactions() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
@@ -630,6 +638,11 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
         return processFLEFindAndModify(opCtx, req);
     }
 
+    if (req.getMirrored().value_or(false)) {
+        const auto& invocation = CommandInvocation::get(opCtx);
+        invocation->markMirrored();
+    }
+
     const NamespaceString& nsString = req.getNamespace();
     uassertStatusOK(userAllowedWriteNS(opCtx, nsString));
     auto const curOp = CurOp::get(opCtx);
@@ -638,10 +651,15 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
     // Collect metrics.
     CmdFindAndModify::collectMetrics(req);
 
-    boost::optional<DisableDocumentValidation> maybeDisableValidation;
-    if (req.getBypassDocumentValidation().value_or(false)) {
-        maybeDisableValidation.emplace(opCtx);
-    }
+    auto disableDocumentValidation = req.getBypassDocumentValidation().value_or(false);
+    auto fleCrudProcessed =
+        write_ops_exec::getFleCrudProcessed(opCtx, req.getEncryptionInformation());
+
+    DisableDocumentSchemaValidationIfTrue docSchemaValidationDisabler(opCtx,
+                                                                      disableDocumentValidation);
+
+    DisableSafeContentValidationIfTrue safeContentValidationDisabler(
+        opCtx, disableDocumentValidation, fleCrudProcessed);
 
     const auto inTransaction = opCtx->inMultiDocumentTransaction();
     uassert(50781,

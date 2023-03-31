@@ -294,6 +294,7 @@ InitialSyncerInterface::Options createInitialSyncerOptions(
                                externalState](const OpTimeAndWallTime& opTimeAndWallTime) {
         // Note that setting the last applied opTime forward also advances the global timestamp.
         replCoord->setMyLastAppliedOpTimeAndWallTimeForward(opTimeAndWallTime);
+        signalOplogWaiters();
         // The oplog application phase of initial sync starts timestamping writes, causing
         // WiredTiger to pin this data in memory. Advancing the oldest timestamp in step with the
         // last applied optime here will permit WiredTiger to evict this data as it sees fit.
@@ -837,6 +838,7 @@ void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
 
         const auto lastApplied = opTimeStatus.getValue();
         _setMyLastAppliedOpTimeAndWallTime(lock, lastApplied, false);
+        signalOplogWaiters();
 
         _topCoord->resetMaintenanceCount();
     }
@@ -1338,7 +1340,6 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
     _updateMemberStateFromTopologyCoordinator(lk);
 
     LOGV2(21331, "Transition to primary complete; database writes are now permitted");
-    _drainFinishedCond.notify_all();
     _externalState->startNoopWriter(_getMyLastAppliedOpTime_inlock());
 }
 
@@ -1405,6 +1406,7 @@ void ReplicationCoordinatorImpl::setMyLastAppliedOpTimeAndWallTime(
     stdx::unique_lock<Latch> lock(_mutex);
     // The optime passed to this function is required to represent a consistent database state.
     _setMyLastAppliedOpTimeAndWallTime(lock, opTimeAndWallTime, false);
+    signalOplogWaiters();
     _reportUpstream_inlock(std::move(lock));
 }
 
@@ -1477,9 +1479,6 @@ void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
             return waitOpTime <= opTime;
         },
         opTime);
-
-    // Notify the oplog waiters after updating the local snapshot.
-    signalOplogWaiters();
 
     if (opTime.isNull()) {
         return;
@@ -1830,8 +1829,9 @@ Status ReplicationCoordinatorImpl::setLastDurableOptime_forTest(long long cfgVer
 
     const UpdatePositionArgs::UpdateInfo update(
         OpTime(), Date_t(), opTime, wallTime, cfgVer, memberId);
-    const auto status = _setLastOptime(lock, update);
-    return status;
+    const auto statusWithOpTime = _setLastOptimeForMember(lock, update);
+    _updateStateAfterRemoteOpTimeUpdates(lock, statusWithOpTime.getValue());
+    return statusWithOpTime.getStatus();
 }
 
 Status ReplicationCoordinatorImpl::setLastAppliedOptime_forTest(long long cfgVer,
@@ -1847,25 +1847,29 @@ Status ReplicationCoordinatorImpl::setLastAppliedOptime_forTest(long long cfgVer
 
     const UpdatePositionArgs::UpdateInfo update(
         opTime, wallTime, OpTime(), Date_t(), cfgVer, memberId);
-    const auto status = _setLastOptime(lock, update);
-    return status;
+    const auto statusWithOpTime = _setLastOptimeForMember(lock, update);
+    _updateStateAfterRemoteOpTimeUpdates(lock, statusWithOpTime.getValue());
+    return statusWithOpTime.getStatus();
 }
 
-Status ReplicationCoordinatorImpl::_setLastOptime(WithLock lk,
-                                                  const UpdatePositionArgs::UpdateInfo& args) {
-    auto result = _topCoord->setLastOptime(args, _replExecutor->now());
+StatusWith<OpTime> ReplicationCoordinatorImpl::_setLastOptimeForMember(
+    WithLock lk, const UpdatePositionArgs::UpdateInfo& args) {
+    auto result = _topCoord->setLastOptimeForMember(args, _replExecutor->now());
     if (!result.isOK())
         return result.getStatus();
     const bool advancedOpTime = result.getValue();
+    _rescheduleLivenessUpdate_inlock(args.memberId);
+    return advancedOpTime ? std::max(args.appliedOpTime, args.durableOpTime) : OpTime();
+}
+
+void ReplicationCoordinatorImpl::_updateStateAfterRemoteOpTimeUpdates(
+    WithLock lk, const OpTime& maxRemoteOpTime) {
     // Only update committed optime if the remote optimes increased.
-    if (advancedOpTime) {
+    if (!maxRemoteOpTime.isNull()) {
         _updateLastCommittedOpTimeAndWallTime(lk);
         // Wait up replication waiters on optime changes.
-        _wakeReadyWaiters(lk, std::max(args.appliedOpTime, args.durableOpTime));
+        _wakeReadyWaiters(lk, maxRemoteOpTime);
     }
-
-    _rescheduleLivenessUpdate_inlock(args.memberId);
-    return Status::OK();
 }
 
 bool ReplicationCoordinatorImpl::isCommitQuorumSatisfied(
@@ -3369,13 +3373,15 @@ void ReplicationCoordinatorImpl::processReplSetGetConfig(BSONObjBuilder* result,
 void ReplicationCoordinatorImpl::processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) {
     EventHandle evh;
 
-    {
-        stdx::lock_guard<Latch> lock(_mutex);
-        evh = _processReplSetMetadata_inlock(replMetadata);
-    }
+    if (_needToUpdateTerm(replMetadata.getTerm())) {
+        {
+            stdx::lock_guard<Latch> lock(_mutex);
+            evh = _processReplSetMetadata_inlock(replMetadata);
+        }
 
-    if (evh) {
-        _replExecutor->waitForEvent(evh);
+        if (evh) {
+            _replExecutor->waitForEvent(evh);
+        }
     }
 }
 
@@ -3386,6 +3392,9 @@ void ReplicationCoordinatorImpl::cancelAndRescheduleElectionTimeout() {
 
 EventHandle ReplicationCoordinatorImpl::_processReplSetMetadata_inlock(
     const rpc::ReplSetMetadata& replMetadata) {
+    // Note that public method processReplSetMetadata() above depends on this method not needing
+    // to do anything when the term is up to date.  If that changes, be sure to update that
+    // method as well.
     return _updateTerm_inlock(replMetadata.getTerm());
 }
 
@@ -4017,6 +4026,17 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
         _clearCommittedSnapshot_inlock();
     }
 
+    // If we have a split config, schedule heartbeats to each recipient member. It informs them of
+    // the new split config.
+    if (newConfig.isSplitConfig()) {
+        const auto now = _replExecutor->now();
+        const auto recipientConfig = newConfig.getRecipientConfig();
+        for (const auto& member : recipientConfig->members()) {
+            _scheduleHeartbeatToTarget_inlock(
+                member.getHostAndPort(), now, newConfig.getReplSetName().toString());
+        }
+    }
+
     lk.unlock();
     _performPostMemberStateUpdateAction(action);
 }
@@ -4399,7 +4419,7 @@ void ReplicationCoordinatorImpl::_errorOnPromisesIfHorizonChanged(WithLock lk,
         HelloMetrics::get(opCtx)->resetNumAwaitingTopologyChanges();
     }
 
-    if (oldIndex >= 0 && newIndex >= 0) {
+    if (oldIndex >= 0) {
         invariant(_sniToValidConfigPromiseMap.empty());
 
         const auto oldHorizonMappings = oldConfig.getMemberAt(oldIndex).getHorizonMappings();
@@ -5063,18 +5083,22 @@ void ReplicationCoordinatorImpl::_wakeReadyWaiters(WithLock lk, boost::optional<
 Status ReplicationCoordinatorImpl::processReplSetUpdatePosition(const UpdatePositionArgs& updates) {
     stdx::unique_lock<Latch> lock(_mutex);
     Status status = Status::OK();
-    bool somethingChanged = false;
+    bool gotValidUpdate = false;
+    OpTime maxRemoteOpTime;
     for (UpdatePositionArgs::UpdateIterator update = updates.updatesBegin();
          update != updates.updatesEnd();
          ++update) {
-        status = _setLastOptime(lock, *update);
-        if (!status.isOK()) {
+        auto statusWithOpTime = _setLastOptimeForMember(lock, *update);
+        if (!statusWithOpTime.isOK()) {
+            status = statusWithOpTime.getStatus();
             break;
         }
-        somethingChanged = true;
+        maxRemoteOpTime = std::max(maxRemoteOpTime, statusWithOpTime.getValue());
+        gotValidUpdate = true;
     }
+    _updateStateAfterRemoteOpTimeUpdates(lock, maxRemoteOpTime);
 
-    if (somethingChanged && !_getMemberState_inlock().primary()) {
+    if (gotValidUpdate && !_getMemberState_inlock().primary()) {
         lock.unlock();
         // Must do this outside _mutex
         _externalState->forwardSecondaryProgress();
@@ -5700,28 +5724,27 @@ void ReplicationCoordinatorImpl::prepareReplMetadata(const BSONObj& metadataRequ
         invariant(-1 != rbid);
     }
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    boost::optional<rpc::ReplSetMetadata> replSetMetadata;
+    boost::optional<rpc::OplogQueryMetadata> oplogQueryMetadata;
+    {
+        stdx::lock_guard<Latch> lk(_mutex);
 
-    if (hasReplSetMetadata) {
-        _prepareReplSetMetadata_inlock(lastOpTimeFromClient, builder);
+        if (hasReplSetMetadata) {
+            OpTime lastVisibleOpTime =
+                std::max(lastOpTimeFromClient, _getCurrentCommittedSnapshotOpTime_inlock());
+            replSetMetadata = _topCoord->prepareReplSetMetadata(lastVisibleOpTime);
+        }
+
+        if (hasOplogQueryMetadata) {
+            oplogQueryMetadata = _topCoord->prepareOplogQueryMetadata(rbid);
+        }
     }
 
-    if (hasOplogQueryMetadata) {
-        _prepareOplogQueryMetadata_inlock(rbid, builder);
-    }
-}
-
-void ReplicationCoordinatorImpl::_prepareReplSetMetadata_inlock(const OpTime& lastOpTimeFromClient,
-                                                                BSONObjBuilder* builder) const {
-    OpTime lastVisibleOpTime =
-        std::max(lastOpTimeFromClient, _getCurrentCommittedSnapshotOpTime_inlock());
-    auto metadata = _topCoord->prepareReplSetMetadata(lastVisibleOpTime);
-    metadata.writeToMetadata(builder).transitional_ignore();
-}
-
-void ReplicationCoordinatorImpl::_prepareOplogQueryMetadata_inlock(int rbid,
-                                                                   BSONObjBuilder* builder) const {
-    _topCoord->prepareOplogQueryMetadata(rbid).writeToMetadata(builder).transitional_ignore();
+    // Do BSON serialization outside lock.
+    if (replSetMetadata)
+        invariantStatusOK(replSetMetadata->writeToMetadata(builder));
+    if (oplogQueryMetadata)
+        invariantStatusOK(oplogQueryMetadata->writeToMetadata(builder));
 }
 
 bool ReplicationCoordinatorImpl::getWriteConcernMajorityShouldJournal() {
@@ -5785,7 +5808,14 @@ Status ReplicationCoordinatorImpl::processHeartbeatV1(const ReplSetHeartbeatArgs
 
     auto senderHost(args.getSenderHost());
     const Date_t now = _replExecutor->now();
-    result = _topCoord->prepareHeartbeatResponseV1(now, args, replSetName, response);
+    auto configChanged = _topCoord->prepareHeartbeatResponseV1(now, args, replSetName, response);
+    result = configChanged.getStatus();
+    if (configChanged.isOK() && configChanged.getValue()) {
+        // If the latest heartbeat indicates that the remote node's config has changed, we want to
+        // update it's member data as soon as possible. Send an immediate hearbeat, and update the
+        // member data on processing its response.
+        _scheduleHeartbeatToTarget_inlock(senderHost, now, replSetName);
+    }
 
     if ((result.isOK() || result == ErrorCodes::InvalidReplicaSetConfig) && _selfIndex < 0) {
         // If this node does not belong to the configuration it knows about, send heartbeats
@@ -5884,6 +5914,11 @@ Status ReplicationCoordinatorImpl::updateTerm(OperationContext* opCtx, long long
 
     // Check we haven't acquired any lock, because potential stepdown needs global lock.
     dassert(!opCtx->lockState()->isLocked() || opCtx->lockState()->isNoop());
+
+    // If the term is already up to date, we can skip the update and the mutex acquisition.
+    if (!_needToUpdateTerm(term))
+        return Status::OK();
+
     TopologyCoordinator::UpdateTermResult updateTermResult;
     EventHandle finishEvh;
 
@@ -5903,6 +5938,10 @@ Status ReplicationCoordinatorImpl::updateTerm(OperationContext* opCtx, long long
     }
 
     return Status::OK();
+}
+
+bool ReplicationCoordinatorImpl::_needToUpdateTerm(long long term) {
+    return term > _termShadow.load();
 }
 
 EventHandle ReplicationCoordinatorImpl::_updateTerm_inlock(

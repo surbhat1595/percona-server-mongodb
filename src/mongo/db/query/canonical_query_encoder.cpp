@@ -40,6 +40,7 @@
 #include "mongo/db/matcher/expression_text_noop.h"
 #include "mongo/db/matcher/expression_where.h"
 #include "mongo/db/matcher/expression_where_noop.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/query/analyze_regex.h"
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
@@ -86,6 +87,7 @@ const char kEncodeProjectionRequirementSeparator = '-';
 const char kEncodeRegexFlagsSeparator = '/';
 const char kEncodeSortSection = '~';
 const char kEncodeEngineSection = '@';
+const char kEncodePipelineSection = '^';
 
 // These special bytes are used in the encoding of auto-parameterized match expressions in the SBE
 // plan cache key.
@@ -135,6 +137,7 @@ void encodeUserString(StringData s, BuilderType* builder) {
             case kEncodeEngineSection:
             case kEncodeParamMarker:
             case kEncodeConstantLiteralMarker:
+            case kEncodePipelineSection:
             case '\\':
                 if constexpr (hasAppendChar<BuilderType>) {
                     builder->appendChar('\\');
@@ -431,6 +434,26 @@ void encodeCollation(const CollatorInterface* collation, StringBuilder* keyBuild
     // not be stable between versions.
 }
 
+void encodePipeline(const std::vector<std::unique_ptr<InnerPipelineStageInterface>>& pipeline,
+                    BufBuilder* bufBuilder) {
+    bufBuilder->appendChar(kEncodePipelineSection);
+    for (auto& stage : pipeline) {
+        std::vector<Value> serializedArray;
+        if (auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(stage->documentSource())) {
+            lookupStage->serializeToArray(serializedArray, boost::none);
+            tassert(6443201,
+                    "$lookup stage isn't serialized to a single bson object",
+                    serializedArray.size() == 1 && serializedArray[0].getType() == Object);
+            const auto bson = serializedArray[0].getDocument().toBson();
+            bufBuilder->appendBuf(bson.objdata(), bson.objsize());
+        } else {
+            tasserted(6443200,
+                      str::stream() << "Pipeline stage cannot be encoded in plan cache key: "
+                                    << stage->documentSource()->getSourceName());
+        }
+    }
+}
+
 template <class RegexIterator>
 void encodeRegexFlagsForMatch(RegexIterator first, RegexIterator last, StringBuilder* keyBuilder) {
     // We sort the flags, so that queries with the same regex flags in different orders will have
@@ -586,11 +609,11 @@ void encodeKeyForProj(const projection_ast::Projection* proj, StringBuilder* key
         return;
     }
 
-    std::vector<std::string> requiredFields = proj->getRequiredFields();
+    std::set<std::string> requiredFields = proj->getRequiredFields();
 
     // If the only requirement is that $sortKey be included with some value, we just act as if the
     // entire document is needed.
-    if (requiredFields.size() == 1 && requiredFields.front() == "$sortKey") {
+    if (requiredFields.size() == 1 && *requiredFields.begin() == "$sortKey") {
         return;
     }
 
@@ -599,7 +622,6 @@ void encodeKeyForProj(const projection_ast::Projection* proj, StringBuilder* key
     *keyBuilder << kEncodeProjectionSection;
 
     // Encode the fields required by the projection in order.
-    std::sort(requiredFields.begin(), requiredFields.end());
     bool isFirst = true;
     for (auto&& requiredField : requiredFields) {
         invariant(!requiredField.empty());
@@ -1086,6 +1108,8 @@ std::string encodeSBE(const CanonicalQuery& cq) {
 
     encodeFindCommandRequest(cq.getFindCommandRequest(), &bufBuilder);
 
+    encodePipeline(cq.pipeline(), &bufBuilder);
+
     return base64::encode(StringData(bufBuilder.buf(), bufBuilder.len()));
 }
 
@@ -1106,6 +1130,15 @@ CanonicalQuery::IndexFilterKey encodeForIndexFilters(const CanonicalQuery& cq) {
 
 uint32_t computeHash(StringData key) {
     return SimpleStringDataComparator::kInstance.hash(key);
+}
+
+bool canUseSbePlanCache(const CanonicalQuery& cq) {
+    for (auto& stage : cq.pipeline()) {
+        if (StringData{stage->documentSource()->getSourceName()} != "$lookup") {
+            return false;
+        }
+    }
+    return true;
 }
 }  // namespace canonical_query_encoder
 }  // namespace mongo

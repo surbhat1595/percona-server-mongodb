@@ -201,11 +201,10 @@ bool willOverrideLocalId(OperationContext* opCtx,
                          BSONObj min,
                          BSONObj max,
                          BSONObj shardKeyPattern,
-                         Database* db,
                          BSONObj remoteDoc,
                          BSONObj* localDoc) {
     *localDoc = BSONObj();
-    if (Helpers::findById(opCtx, db, nss.ns(), remoteDoc, *localDoc)) {
+    if (Helpers::findById(opCtx, nss.ns(), remoteDoc, *localDoc)) {
         return !isInRange(*localDoc, min, max, shardKeyPattern);
     }
 
@@ -564,6 +563,10 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
 
         try {
             while (true) {
+                DisableDocumentValidation documentValidationDisabler(
+                    applicationOpCtx.get(),
+                    DocumentValidationSettings::kDisableSchemaValidation |
+                        DocumentValidationSettings::kDisableInternalValidation);
                 auto nextBatch = batches.pop(applicationOpCtx.get());
                 if (!applyBatchFn(applicationOpCtx.get(), nextBatch)) {
                     return;
@@ -734,6 +737,10 @@ Status MigrationDestinationManager::exitCriticalSection(OperationContext* opCtx,
                         "requested"_attr = sessionId,
                         "current"_attr = _sessionId);
 
+            // No need to hold _mutex from here on. Release it because the lines below will acquire
+            // other locks and holding the mutex could lead to deadlocks.
+            lock.unlock();
+
             if (migrationRecipientRecoveryDocumentExists(opCtx, sessionId)) {
                 // This node may have stepped down and interrupted the migrateThread, which reset
                 // _sessionId. But the critical section may not have been released so it will be
@@ -811,7 +818,7 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
                                               Milliseconds(-1)));
 
     for (auto&& spec : indexes.docs) {
-        if (spec["clustered"]) {
+        if (spec[IndexDescriptor::kClusteredFieldName]) {
             // The 'clustered' index is implicitly created upon clustered collection creation.
         } else {
             donorIndexSpecs.push_back(spec);
@@ -1289,9 +1296,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             recipientDeletionTask.setPending(true);
             const auto currentTime = VectorClock::get(outerOpCtx)->getTime();
             recipientDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
-            if (feature_flags::gOrphanTracking.isEnabled(serverGlobalParams.featureCompatibility)) {
-                recipientDeletionTask.setNumOrphanDocs(0);
-            }
 
             // It is illegal to wait for write concern with a session checked out, so persist the
             // range deletion task with an immediately satsifiable write concern and then wait for
@@ -1371,14 +1375,22 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                         return toInsert;
                     }());
 
-                    const auto reply = write_ops_exec::performInserts(
-                        opCtx, insertOp, OperationSource::kFromMigrate);
-
-                    for (unsigned long i = 0; i < reply.results.size(); ++i) {
-                        uassertStatusOKWithContext(reply.results[i],
-                                                   str::stream()
-                                                       << "Insert of " << insertOp.getDocuments()[i]
-                                                       << " failed.");
+                    {
+                        // Disable the schema validation (during document inserts and updates)
+                        // and any internal validation for opCtx for performInserts()
+                        DisableDocumentValidation documentValidationDisabler(
+                            opCtx,
+                            DocumentValidationSettings::kDisableSchemaValidation |
+                                DocumentValidationSettings::kDisableInternalValidation);
+                        const auto reply = write_ops_exec::performInserts(
+                            opCtx, insertOp, OperationSource::kFromMigrate);
+                        for (unsigned long i = 0; i < reply.results.size(); ++i) {
+                            uassertStatusOKWithContext(reply.results[i],
+                                                       str::stream() << "Insert of "
+                                                                     << insertOp.getDocuments()[i]
+                                                                     << " failed.");
+                        }
+                        // Revert to the original DocumentValidationSettings for opCtx
                     }
 
                     migrationutil::persistUpdatedNumOrphans(
@@ -1761,7 +1773,7 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
 
             // Do not apply delete if doc does not belong to the chunk being migrated
             BSONObj fullObj;
-            if (Helpers::findById(opCtx, autoColl.getDb(), _nss.ns(), id, fullObj)) {
+            if (Helpers::findById(opCtx, _nss.ns(), id, fullObj)) {
                 if (!isInRange(fullObj, _min, _max, _shardKeyPattern)) {
                     if (MONGO_unlikely(failMigrationReceivedOutOfRangeOperation.shouldFail())) {
                         MONGO_UNREACHABLE;
@@ -1810,14 +1822,8 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
             }
 
             BSONObj localDoc;
-            if (willOverrideLocalId(opCtx,
-                                    _nss,
-                                    _min,
-                                    _max,
-                                    _shardKeyPattern,
-                                    autoColl.getDb(),
-                                    updatedDoc,
-                                    &localDoc)) {
+            if (willOverrideLocalId(
+                    opCtx, _nss, _min, _max, _shardKeyPattern, updatedDoc, &localDoc)) {
                 // Exception will abort migration cleanly
                 LOGV2_ERROR_OPTIONS(
                     16977,

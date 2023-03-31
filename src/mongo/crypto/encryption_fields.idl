@@ -45,6 +45,11 @@ feature_flags:
         default: true
         version: 6.0
 
+    featureFlagFLE2Range:
+      description: "Enable support for range indexes in Queryable Encryption"
+      cpp_varname: gFeatureFlagFLE2Range
+      default: false
+
 structs:
 
     QueryTypeConfig:
@@ -57,8 +62,8 @@ structs:
                 unstable: true
             contention:
                 description: "Contention factor for field, 0 means it has extremely high set number of distinct values"
-                type: long
-                default: 0
+                type: exactInt64
+                default: 4
                 unstable: true
                 validator: { gte: 0 }
 

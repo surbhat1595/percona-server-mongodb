@@ -86,19 +86,10 @@ void notifyChangeStreamsOnRefineCollectionShardKeyComplete(OperationContext* opC
 
 RefineCollectionShardKeyCoordinator::RefineCollectionShardKeyCoordinator(
     ShardingDDLCoordinatorService* service, const BSONObj& initialState)
-    : RefineCollectionShardKeyCoordinator(
-          service, initialState, true /* persistCoordinatorDocument */) {}
-
-RefineCollectionShardKeyCoordinator::RefineCollectionShardKeyCoordinator(
-    ShardingDDLCoordinatorService* service,
-    const BSONObj& initialState,
-    bool persistCoordinatorDocument)
-    : ShardingDDLCoordinator(service, initialState),
-      _doc(RefineCollectionShardKeyCoordinatorDocument::parse(
-          IDLParserErrorContext("RefineCollectionShardKeyCoordinatorDocument"), initialState)),
+    : RecoverableShardingDDLCoordinator(
+          service, "RefineCollectionShardKeyCoordinator", initialState),
       _request(_doc.getRefineCollectionShardKeyRequest()),
-      _newShardKey(_doc.getNewShardKey()),
-      _persistCoordinatorDocument(persistCoordinatorDocument) {}
+      _newShardKey(_doc.getNewShardKey()) {}
 
 void RefineCollectionShardKeyCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     // If we have two refine collections on the same namespace, then the arguments must be the same.
@@ -112,51 +103,8 @@ void RefineCollectionShardKeyCoordinator::checkIfOptionsConflict(const BSONObj& 
                 _request.toBSON() == otherDoc.getRefineCollectionShardKeyRequest().toBSON()));
 }
 
-boost::optional<BSONObj> RefineCollectionShardKeyCoordinator::reportForCurrentOp(
-    MongoProcessInterface::CurrentOpConnectionsMode connMode,
-    MongoProcessInterface::CurrentOpSessionsMode sessionMode) noexcept {
-    BSONObjBuilder cmdBob;
-    if (const auto& optComment = getForwardableOpMetadata().getComment()) {
-        cmdBob.append(optComment.get().firstElement());
-    }
-    cmdBob.appendElements(_request.toBSON());
-
-    BSONObjBuilder bob;
-    bob.append("type", "op");
-    bob.append("desc", "RefineCollectionShardKeyCoordinator");
-    bob.append("op", "command");
-    bob.append("ns", nss().toString());
-    bob.append("command", cmdBob.obj());
-    bob.append("active", true);
-    return bob.obj();
-}
-
-void RefineCollectionShardKeyCoordinator::_enterPhase(Phase newPhase) {
-    if (!_persistCoordinatorDocument) {
-        return;
-    }
-
-    StateDoc newDoc(_doc);
-    newDoc.setPhase(newPhase);
-
-    LOGV2_DEBUG(
-        6233200,
-        2,
-        "Refine collection shard key coordinator phase transition",
-        "namespace"_attr = nss(),
-        "newPhase"_attr = RefineCollectionShardKeyCoordinatorPhase_serializer(newDoc.getPhase()),
-        "oldPhase"_attr = RefineCollectionShardKeyCoordinatorPhase_serializer(_doc.getPhase()));
-
-    if (_doc.getPhase() == Phase::kUnset) {
-        newDoc = _insertStateDocument(std::move(newDoc));
-    } else {
-        newDoc = _updateStateDocument(cc().makeOperationContext().get(), std::move(newDoc));
-    }
-
-    {
-        stdx::unique_lock ul{_docMutex};
-        _doc = std::move(newDoc);
-    }
+void RefineCollectionShardKeyCoordinator::appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const {
+    cmdInfoBuilder->appendElements(_request.toBSON());
 }
 
 ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
@@ -193,9 +141,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                     _request.getEnforceUniquenessCheck());
                 auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
-                if (_persistCoordinatorDocument) {
-                    sharding_ddl_util::stopMigrations(opCtx, nss(), boost::none);
-                }
+                sharding_ddl_util::stopMigrations(opCtx, nss(), boost::none);
 
                 const auto cmdResponse = uassertStatusOK(configShard->runCommand(
                     opCtx,
@@ -205,15 +151,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                         configsvrRefineCollShardKey.toBSON({}), opCtx->getWriteConcern()),
                     Shard::RetryPolicy::kIdempotent));
 
-                try {
-                    uassertStatusOK(
-                        Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
-                } catch (const DBException&) {
-                    if (!_persistCoordinatorDocument) {
-                        _completeOnError = true;
-                    }
-                    throw;
-                }
+                uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
             }))
         .onError([this, anchor = shared_from_this()](const Status& status) {
             LOGV2_ERROR(5277700,
@@ -234,17 +172,10 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                     opCtx, nss(), _newShardKey, _oldShardKey, *_collectionUUID);
             }
 
-            if (_persistCoordinatorDocument) {
-                sharding_ddl_util::resumeMigrations(opCtx, nss(), boost::none);
-            }
+            sharding_ddl_util::resumeMigrations(opCtx, nss(), boost::none);
 
             return status;
         });
 }
-
-RefineCollectionShardKeyCoordinator_NORESILIENT::RefineCollectionShardKeyCoordinator_NORESILIENT(
-    ShardingDDLCoordinatorService* service, const BSONObj& initialState)
-    : RefineCollectionShardKeyCoordinator(
-          service, initialState, false /* persistCoordinatorDocument */) {}
 
 }  // namespace mongo

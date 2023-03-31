@@ -27,12 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/commands.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy_impl.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/db/s/balancer/migration_test_fixture.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 
@@ -121,14 +120,18 @@ protected:
 
 TEST_F(BalancerChunkSelectionTest, TagRangesOverlap) {
     // Set up two shards in the metadata.
-    ASSERT_OK(catalogClient()->insertConfigDocument(
-        operationContext(), ShardType::ConfigNS, kShard0, kMajorityWriteConcern));
-    ASSERT_OK(catalogClient()->insertConfigDocument(
-        operationContext(), ShardType::ConfigNS, kShard1, kMajorityWriteConcern));
+    ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    kShard0,
+                                                    kMajorityWriteConcern));
+    ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    kShard1,
+                                                    kMajorityWriteConcern));
 
     // Set up a database and a sharded collection in the metadata.
     const auto collUUID = UUID::gen();
-    ChunkVersion version(2, 0, OID::gen(), Timestamp(42));
+    ChunkVersion version({OID::gen(), Timestamp(42)}, {2, 0});
     setUpDatabase(kDbName, kShardId0);
     setUpCollection(kNamespace, collUUID, version);
 
@@ -173,19 +176,21 @@ TEST_F(BalancerChunkSelectionTest, TagRangesOverlap) {
 }
 
 TEST_F(BalancerChunkSelectionTest, TagRangeMaxNotAlignedWithChunkMax) {
+    RAIIServerParameterControllerForTest featureFlagBalanceAccordingToDataSize{
+        "featureFlagBalanceAccordingToDataSize", false};
     // Set up two shards in the metadata.
     ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    ShardType::ConfigNS,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
                                                     appendTags(kShard0, {"A"}),
                                                     kMajorityWriteConcern));
     ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    ShardType::ConfigNS,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
                                                     appendTags(kShard1, {"A"}),
                                                     kMajorityWriteConcern));
 
     // Set up a database and a sharded collection in the metadata.
     const auto collUUID = UUID::gen();
-    ChunkVersion version(2, 0, OID::gen(), Timestamp(42));
+    ChunkVersion version({OID::gen(), Timestamp(42)}, {2, 0});
     setUpDatabase(kDbName, kShardId0);
     setUpCollection(kNamespace, collUUID, version);
 
@@ -234,17 +239,17 @@ TEST_F(BalancerChunkSelectionTest, TagRangeMaxNotAlignedWithChunkMax) {
 TEST_F(BalancerChunkSelectionTest, ShardedTimeseriesCollectionsCanBeAutoSplitted) {
     // Set up two shards in the metadata, each one with its own tag
     ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    ShardType::ConfigNS,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
                                                     appendTags(kShard0, {"A"}),
                                                     kMajorityWriteConcern));
     ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    ShardType::ConfigNS,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
                                                     appendTags(kShard1, {"B"}),
                                                     kMajorityWriteConcern));
 
     // Set up a database and a sharded collection in the metadata.
     const auto collUUID = UUID::gen();
-    ChunkVersion version(2, 0, OID::gen(), Timestamp(42));
+    ChunkVersion version({OID::gen(), Timestamp(42)}, {2, 0});
     setUpDatabase(kDbName, kShardId0);
 
     TypeCollectionTimeseriesFields tsFields;
@@ -281,15 +286,21 @@ TEST_F(BalancerChunkSelectionTest, ShardedTimeseriesCollectionsCanBeAutoSplitted
 }
 
 TEST_F(BalancerChunkSelectionTest, ShardedTimeseriesCollectionsCanBeBalanced) {
+    RAIIServerParameterControllerForTest featureFlagBalanceAccordingToDataSize{
+        "featureFlagBalanceAccordingToDataSize", false};
     // Set up two shards in the metadata.
-    ASSERT_OK(catalogClient()->insertConfigDocument(
-        operationContext(), ShardType::ConfigNS, kShard0, kMajorityWriteConcern));
-    ASSERT_OK(catalogClient()->insertConfigDocument(
-        operationContext(), ShardType::ConfigNS, kShard1, kMajorityWriteConcern));
+    ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    kShard0,
+                                                    kMajorityWriteConcern));
+    ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    kShard1,
+                                                    kMajorityWriteConcern));
 
     // Set up a database and a sharded collection in the metadata.
     const auto collUUID = UUID::gen();
-    ChunkVersion version(2, 0, OID::gen(), Timestamp(42));
+    ChunkVersion version({OID::gen(), Timestamp(42)}, {2, 0});
     setUpDatabase(kDbName, kShardId0);
 
     TypeCollectionTimeseriesFields tsFields;

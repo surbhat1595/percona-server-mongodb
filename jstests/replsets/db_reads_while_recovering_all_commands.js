@@ -219,7 +219,6 @@ const allCommands = {
     fsync: {skip: isNotAUserDataRead},
     fsyncUnlock: {skip: isNotAUserDataRead},
     getAuditConfig: {skip: isNotAUserDataRead},
-    getChangeStreamOptions: {skip: isNotAUserDataRead},  // TODO SERVER-65353 remove in 6.1.
     getClusterParameter: {skip: isNotAUserDataRead},
     getCmdLineOpts: {skip: isNotAUserDataRead},
     getDatabaseVersion: {skip: isNotAUserDataRead},
@@ -335,7 +334,6 @@ const allCommands = {
     saslStart: {skip: isPrimaryOnly},
     serverStatus: {skip: isNotAUserDataRead},
     setAuditConfig: {skip: isNotAUserDataRead},
-    setChangeStreamOptions: {skip: isPrimaryOnly},  // TODO SERVER-65353 remove in 6.1.
     setCommittedSnapshot: {skip: isNotAUserDataRead},
     setDefaultRWConcern: {skip: isPrimaryOnly},
     setIndexCommitQuorum: {skip: isPrimaryOnly},

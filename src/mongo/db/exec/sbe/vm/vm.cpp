@@ -27,14 +27,12 @@
  *    it in the license file.
  */
 
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 
 #include <boost/algorithm/string.hpp>
-#include <pcre.h>
 
 #include "mongo/bson/oid.h"
 #include "mongo/db/client.h"
@@ -53,6 +51,7 @@
 #include "mongo/db/storage/key_string.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/pcre.h"
 #include "mongo/util/str.h"
 #include "mongo/util/summation.h"
 
@@ -114,7 +113,9 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     -1,  // collComparisonKey
     -1,  // getFieldOrElement
     -1,  // traverseP
+    0,   // traversePConst
     -2,  // traverseF
+    0,   // traverseFConst
     -2,  // setField
     0,   // getArraySize
 
@@ -151,6 +152,8 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,   // ret
 
     -1,  // fail
+
+    0,  // applyClassicMatcher
 };
 
 namespace {
@@ -209,9 +212,7 @@ std::string CodeFragment::toString() const {
             case Instruction::cmp3w:
             case Instruction::collCmp3w:
             case Instruction::fillEmpty:
-            case Instruction::fillEmptyConst:
             case Instruction::getField:
-            case Instruction::getFieldConst:
             case Instruction::getElement:
             case Instruction::getArraySize:
             case Instruction::collComparisonKey:
@@ -245,9 +246,15 @@ std::string CodeFragment::toString() const {
                 break;
             }
             // Instructions with a single integer argument.
+            case Instruction::pushLocalLambda:
+            case Instruction::traversePConst: {
+                auto offset = readFromMemory<int>(pcPointer);
+                pcPointer += sizeof(offset);
+                ss << "offset: " << offset;
+                break;
+            }
             case Instruction::pushLocalVal:
-            case Instruction::pushMoveLocalVal:
-            case Instruction::pushLocalLambda: {
+            case Instruction::pushMoveLocalVal: {
                 auto arg = readFromMemory<int>(pcPointer);
                 pcPointer += sizeof(arg);
                 ss << "arg: " << arg;
@@ -262,6 +269,21 @@ std::string CodeFragment::toString() const {
                 break;
             }
             // Instructions with other kinds of arguments.
+            case Instruction::traverseFConst: {
+                auto k = readFromMemory<Instruction::Constants>(pcPointer);
+                pcPointer += sizeof(k);
+                auto offset = readFromMemory<int>(pcPointer);
+                pcPointer += sizeof(offset);
+                ss << "k: " << Instruction::toStringConstants(k) << ", offset: " << offset;
+                break;
+            }
+            case Instruction::fillEmptyConst: {
+                auto k = readFromMemory<Instruction::Constants>(pcPointer);
+                pcPointer += sizeof(k);
+                ss << "k: " << Instruction::toStringConstants(k);
+                break;
+            }
+            case Instruction::getFieldConst:
             case Instruction::pushConstVal: {
                 auto tag = readFromMemory<value::TypeTags>(pcPointer);
                 pcPointer += sizeof(tag);
@@ -275,6 +297,12 @@ std::string CodeFragment::toString() const {
                 auto accessor = readFromMemory<value::SlotAccessor*>(pcPointer);
                 pcPointer += sizeof(accessor);
                 ss << "accessor: " << static_cast<void*>(accessor);
+                break;
+            }
+            case Instruction::applyClassicMatcher: {
+                const auto* matcher = readFromMemory<const MatchExpression*>(pcPointer);
+                pcPointer += sizeof(matcher);
+                ss << "matcher: " << static_cast<const void*>(matcher);
                 break;
             }
             case Instruction::numConvert: {
@@ -442,6 +470,17 @@ void CodeFragment::appendNumericConvert(value::TypeTags targetTag) {
     offset += writeToMemory(offset, targetTag);
 }
 
+void CodeFragment::appendApplyClassicMatcher(const MatchExpression* matcher) {
+    Instruction i;
+    i.tag = Instruction::applyClassicMatcher;
+    adjustStackSimple(i);
+
+    auto offset = allocateSpace(sizeof(Instruction) + sizeof(matcher));
+
+    offset += writeToMemory(offset, i);
+    offset += writeToMemory(offset, matcher);
+}
+
 void CodeFragment::appendSub() {
     appendSimpleInstruction(Instruction::sub);
 }
@@ -595,6 +634,35 @@ void CodeFragment::appendIsInfinity() {
 
 void CodeFragment::appendIsRecordId() {
     appendSimpleInstruction(Instruction::isRecordId);
+}
+
+void CodeFragment::appendTraverseP(int codePosition) {
+    Instruction i;
+    i.tag = Instruction::traversePConst;
+    adjustStackSimple(i);
+
+    auto size = sizeof(Instruction) + sizeof(codePosition);
+    auto offset = allocateSpace(size);
+
+    int codeOffset = codePosition - _instrs.size();
+
+    offset += writeToMemory(offset, i);
+    offset += writeToMemory(offset, codeOffset);
+}
+
+void CodeFragment::appendTraverseF(int codePosition, Instruction::Constants k) {
+    Instruction i;
+    i.tag = Instruction::traverseFConst;
+    adjustStackSimple(i);
+
+    auto size = sizeof(Instruction) + sizeof(codePosition) + sizeof(k);
+    auto offset = allocateSpace(size);
+
+    int codeOffset = codePosition - _instrs.size();
+
+    offset += writeToMemory(offset, i);
+    offset += writeToMemory(offset, k);
+    offset += writeToMemory(offset, codeOffset);
 }
 
 void CodeFragment::appendFunction(Builtin f, ArityType arity) {
@@ -851,20 +919,31 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseP(const CodeFr
     // Traverse a projection path - evaluate the input lambda on every element of the input array.
     // The traversal is recursive; i.e. we visit nested arrays if any.
     auto [lamOwn, lamTag, lamVal] = getFromStack(0);
-    auto [own, tag, val] = getFromStack(1);
+    popAndReleaseStack();
 
     if (lamTag != value::TypeTags::LocalLambda) {
+        popAndReleaseStack();
         return {false, value::TypeTags::Nothing, 0};
     }
     int64_t lamPos = value::bitcastTo<int64_t>(lamVal);
 
+    return traverseP(code, lamPos);
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseP(const CodeFragment* code,
+                                                                    int64_t position) {
+    auto [own, tag, val] = getFromStack(0);
+
+    value::ValueGuard input(own ? tag : value::TypeTags::Nothing, own ? val : 0);
+    popStack();
+
     if (value::isArray(tag)) {
-        return traverseP_nested(code, lamPos, tag, val);
+        return traverseP_nested(code, position, tag, val);
     } else {
         // Transfer the ownership to the lambda
-        setStack(1, false, value::TypeTags::Nothing, 0);
         pushStack(own, tag, val);
-        return runLambdaInternal(code, lamPos);
+        input.reset();
+        return runLambdaInternal(code, position);
     }
 }
 
@@ -900,14 +979,30 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseP_nested(const
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseF(const CodeFragment* code) {
     // Traverse a filter path - evaluate the input lambda (predicate) on every element of the input
     // array without resursion.
-    auto [lamOwn, lamTag, lamVal] = getFromStack(1);
-    auto [ownInput, tagInput, valInput] = getFromStack(2);
     auto [numberOwn, numberTag, numberVal] = getFromStack(0);
+    popAndReleaseStack();
+    auto [lamOwn, lamTag, lamVal] = getFromStack(0);
+    popAndReleaseStack();
 
     if (lamTag != value::TypeTags::LocalLambda) {
+        popAndReleaseStack();
         return {false, value::TypeTags::Nothing, 0};
     }
     int64_t lamPos = value::bitcastTo<int64_t>(lamVal);
+
+    bool compareArray = numberTag == value::TypeTags::Boolean && value::bitcastTo<bool>(numberVal);
+
+    return traverseF(code, lamPos, compareArray);
+}
+
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseF(const CodeFragment* code,
+                                                                    int64_t position,
+                                                                    bool compareArray) {
+    auto [ownInput, tagInput, valInput] = getFromStack(0);
+
+    value::ValueGuard input(ownInput ? tagInput : value::TypeTags::Nothing,
+                            ownInput ? valInput : 0);
+    popStack();
 
     if (value::isArray(tagInput)) {
         // Return true if any of the array elements is true.
@@ -915,7 +1010,7 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseF(const CodeFr
              enumerator.advance()) {
             auto [elemTag, elemVal] = enumerator.getViewOfValue();
             pushStack(false, elemTag, elemVal);
-            auto [retOwn, retTag, retVal] = runLambdaInternal(code, lamPos);
+            auto [retOwn, retTag, retVal] = runLambdaInternal(code, position);
 
             bool isTrue = (retTag == value::TypeTags::Boolean) && value::bitcastTo<bool>(retVal);
             if (retOwn) {
@@ -929,19 +1024,19 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::traverseF(const CodeFr
 
         // If this is a filter over a number path then run over the whole array. More details in
         // SERVER-27442.
-        if (numberTag == value::TypeTags::Boolean && value::bitcastTo<bool>(numberVal)) {
+        if (compareArray) {
             // Transfer the ownership to the lambda
-            setStack(2, false, value::TypeTags::Nothing, 0);
             pushStack(ownInput, tagInput, valInput);
-            return runLambdaInternal(code, lamPos);
+            input.reset();
+            return runLambdaInternal(code, position);
         }
 
         return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
     } else {
         // Transfer the ownership to the lambda
-        setStack(2, false, value::TypeTags::Nothing, 0);
         pushStack(ownInput, tagInput, valInput);
-        return runLambdaInternal(code, lamPos);
+        input.reset();
+        return runLambdaInternal(code, position);
     }
 }
 
@@ -1065,7 +1160,8 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::getArraySize(value::Ty
             }
             break;
         }
-        default: { return {false, value::TypeTags::Nothing, 0}; }
+        default:
+            return {false, value::TypeTags::Nothing, 0};
     }
 
     return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
@@ -3360,6 +3456,19 @@ std::tuple<bool, value::TypeTags, value::Value> setIntersection(
     return {true, resTag, resVal};
 }
 
+value::ValueSetType valueToSetHelper(const value::TypeTags& tag,
+                                     const value::Value& value,
+                                     const CollatorInterface* collator) {
+    value::ValueSetType setValues(0, value::ValueHash(collator), value::ValueEq(collator));
+    auto firstSetIter = value::ArrayEnumerator(tag, value);
+    while (!firstSetIter.atEnd()) {
+        auto [elTag, elVal] = firstSetIter.getViewOfValue();
+        setValues.insert({elTag, elVal});
+        firstSetIter.advance();
+    }
+    return setValues;
+}
+
 std::tuple<bool, value::TypeTags, value::Value> setDifference(
     value::TypeTags lhsTag,
     value::Value lhsVal,
@@ -3370,13 +3479,7 @@ std::tuple<bool, value::TypeTags, value::Value> setDifference(
     value::ValueGuard resGuard{resTag, resVal};
     auto resView = value::getArraySetView(resVal);
 
-    value::ValueSetType setValuesSecondArg(0, value::ValueHash(collator), value::ValueEq(collator));
-    auto rhsIter = value::ArrayEnumerator(rhsTag, rhsVal);
-    while (!rhsIter.atEnd()) {
-        auto [elTag, elVal] = rhsIter.getViewOfValue();
-        setValuesSecondArg.insert({elTag, elVal});
-        rhsIter.advance();
-    }
+    auto setValuesSecondArg = valueToSetHelper(rhsTag, rhsVal, collator);
 
     auto lhsIter = value::ArrayEnumerator(lhsTag, lhsVal);
     while (!lhsIter.atEnd()) {
@@ -3390,6 +3493,22 @@ std::tuple<bool, value::TypeTags, value::Value> setDifference(
 
     resGuard.reset();
     return {true, resTag, resVal};
+}
+
+std::tuple<bool, value::TypeTags, value::Value> setEquals(
+    const std::vector<value::TypeTags>& argTags,
+    const std::vector<value::Value>& argVals,
+    const CollatorInterface* collator = nullptr) {
+    auto setValuesFirstArg = valueToSetHelper(argTags[0], argVals[0], collator);
+
+    for (size_t idx = 1; idx < argVals.size(); ++idx) {
+        auto setValuesOtherArg = valueToSetHelper(argTags[idx], argVals[idx], collator);
+        if (setValuesFirstArg != setValuesOtherArg) {
+            return {false, value::TypeTags::Boolean, false};
+        }
+    }
+
+    return {false, value::TypeTags::Boolean, true};
 }
 }  // namespace
 
@@ -3494,6 +3613,30 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetDifferen
     return setDifference(lhsTag, lhsVal, rhsTag, rhsVal, value::getCollatorView(collVal));
 }
 
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetEquals(ArityType arity) {
+    invariant(arity >= 3);
+
+    auto [_, collTag, collVal] = getFromStack(0);
+    if (collTag != value::TypeTags::collator) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    std::vector<value::TypeTags> argTags;
+    std::vector<value::Value> argVals;
+
+    for (size_t idx = 1; idx < arity; ++idx) {
+        auto [owned, tag, val] = getFromStack(idx);
+        if (!value::isArray(tag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+
+        argTags.push_back(tag);
+        argVals.push_back(val);
+    }
+
+    return setEquals(argTags, argVals, value::getCollatorView(collVal));
+}
+
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetDifference(ArityType arity) {
     invariant(arity == 2);
 
@@ -3507,83 +3650,78 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetDifference(A
     return setDifference(lhsTag, lhsVal, rhsTag, rhsVal);
 }
 
+std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetEquals(ArityType arity) {
+    invariant(arity >= 2);
+
+    std::vector<value::TypeTags> argTags;
+    std::vector<value::Value> argVals;
+
+    for (size_t idx = 0; idx < arity; ++idx) {
+        auto [_, tag, val] = getFromStack(idx);
+        if (!value::isArray(tag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+
+        argTags.push_back(tag);
+        argVals.push_back(val);
+    }
+
+    return setEquals(argTags, argVals);
+}
+
 namespace {
 /**
- * A helper function to create the result object {"match" : .., "idx" : ..., "captures" :
- * ...} from the result of pcre_exec().
+ * A helper function to extract the next match in the subject string using the compiled regex
+ * pattern.
+ * - pcre: The wrapper object containing the compiled pcre expression
+ * - inputString: The subject string.
+ * - startBytePos: The position from where the search should start given in bytes.
+ * - codePointPos: The same position in terms of code points.
+ * - isMatch: Boolean flag to mark if the caller function is $regexMatch, in which case the result
+ * returned is true/false.
  */
-std::tuple<bool, value::TypeTags, value::Value> buildRegexMatchResultObject(
-    StringData inputString,
-    const std::vector<int>& capturesBuffer,
-    size_t numCaptures,
-    uint32_t& startBytePos,
-    uint32_t& codePointPos) {
-
-    auto verifyBounds = [&inputString](auto startPos, auto limitPos, auto isCapture) {
-        // If a capture group was not matched, then the 'startPos' and 'limitPos' will both be -1.
-        // These bounds cannot occur for a match on the full string.
-        if (startPos == -1 && limitPos == -1 && isCapture) {
-            return true;
-        }
-        if (startPos == -1 || limitPos == -1) {
-            LOGV2_ERROR(5073412,
-                        "Unexpected error occurred while executing regexFind.",
-                        "startPos"_attr = startPos,
-                        "limitPos"_attr = limitPos);
-            return false;
-        }
-        if (startPos < 0 || static_cast<size_t>(startPos) > inputString.size() || limitPos < 0 ||
-            static_cast<size_t>(limitPos) > inputString.size() || startPos > limitPos) {
-            LOGV2_ERROR(5073413,
-                        "Unexpected error occurred while executing regexFind.",
-                        "startPos"_attr = startPos,
-                        "limitPos"_attr = limitPos);
-            return false;
-        }
-        return true;
-    };
-
-    // Extract the matched string: its start and (end+1) indices are in the first two elements of
-    // capturesBuffer.
-    if (!verifyBounds(capturesBuffer[0], capturesBuffer[1], false)) {
+std::tuple<bool, value::TypeTags, value::Value> pcreNextMatch(pcre::Regex* pcre,
+                                                              StringData inputString,
+                                                              uint32_t& startBytePos,
+                                                              uint32_t& codePointPos,
+                                                              bool isMatch) {
+    pcre::MatchData m = pcre->matchView(inputString, {}, startBytePos);
+    if (!m && m.error() != pcre::Errc::ERROR_NOMATCH) {
+        LOGV2_ERROR(5073414,
+                    "Error occurred while executing regular expression.",
+                    "execResult"_attr = errorMessage(m.error()));
         return {false, value::TypeTags::Nothing, 0};
     }
-    auto matchStartIdx = capturesBuffer[0];
-    auto matchedString = inputString.substr(matchStartIdx, capturesBuffer[1] - matchStartIdx);
-    auto [matchedTag, matchedVal] = value::makeNewString(matchedString);
+
+    if (isMatch) {
+        // $regexMatch returns true or false.
+        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(!!m)};
+    }
+    // $regexFind and $regexFindAll build result object or return null.
+    if (!m) {
+        return {false, value::TypeTags::Null, 0};
+    }
+
+    // Create the result object {"match" : .., "idx" : ..., "captures" : ...}
+    // from the pcre::MatchData.
+    auto [matchedTag, matchedVal] = value::makeNewString(m[0]);
     value::ValueGuard matchedGuard{matchedTag, matchedVal};
 
-    // We iterate through the input string's contents preceding the match index, in order to convert
-    // the byte offset to a code point offset.
-    for (auto byteIdx = startBytePos; byteIdx < static_cast<uint32_t>(matchStartIdx);
-         ++codePointPos) {
-        byteIdx += str::getCodePointLength(inputString[byteIdx]);
-    }
-    startBytePos = matchStartIdx;
+    StringData precedesMatch(m.input().begin() + m.startPos(), m[0].begin());
+    codePointPos += str::lengthInUTF8CodePoints(precedesMatch);
+    startBytePos += precedesMatch.size();
 
     auto [arrTag, arrVal] = value::makeNewArray();
     value::ValueGuard arrGuard{arrTag, arrVal};
     auto arrayView = value::getArrayView(arrVal);
-    // The next '2 * numCaptures' entries (after the first two entries) of 'capturesBuffer'
-    // hold the (start, limit) pairs of indexes, for each of the capture groups. We skip the first
-    // two elements and start iteration from 3rd element so that we only construct the strings for
-    // capture groups.
-    if (numCaptures) {
-        arrayView->reserve(numCaptures);
-        for (size_t i = 0; i < numCaptures; ++i) {
-            const auto start = capturesBuffer[2 * (i + 1)];
-            const auto limit = capturesBuffer[2 * (i + 1) + 1];
-            if (!verifyBounds(start, limit, true)) {
-                return {false, value::TypeTags::Nothing, 0};
-            }
-
-            if (start == -1 && limit == -1) {
-                arrayView->push_back(value::TypeTags::Null, 0);
-            } else {
-                auto captureString = inputString.substr(start, limit - start);
-                auto [tag, val] = value::makeNewString(captureString);
-                arrayView->push_back(tag, val);
-            }
+    arrayView->reserve(m.captureCount());
+    for (size_t i = 0; i < m.captureCount(); ++i) {
+        StringData cap = m[i + 1];
+        if (!cap.rawData()) {
+            arrayView->push_back(value::TypeTags::Null, 0);
+        } else {
+            auto [tag, val] = value::makeNewString(cap);
+            arrayView->push_back(tag, val);
         }
     }
 
@@ -3599,75 +3737,6 @@ std::tuple<bool, value::TypeTags, value::Value> buildRegexMatchResultObject(
     resObjectView->push_back("captures", arrTag, arrVal);
     resGuard.reset();
     return {true, resTag, resVal};
-}
-
-/**
- * A helper function to extract the next match in the subject string using the compiled regex
- * pattern.
- * - pcre: The wrapper object containing the compiled pcre expression
- * - inputString: The subject string.
- * - capturesBuffer: Array to be populated with the found matched string and capture groups.
- * - startBytePos: The position from where the search should start given in bytes.
- * - codePointPos: The same position in terms of code points.
- * - isMatch: Boolean flag to mark if the caller function is $regexMatch, in which case the result
- * returned is true/false.
- */
-std::tuple<bool, value::TypeTags, value::Value> pcreNextMatch(value::PcreRegex* pcre,
-                                                              StringData inputString,
-                                                              std::vector<int>& capturesBuffer,
-                                                              uint32_t& startBytePos,
-                                                              uint32_t& codePointPos,
-                                                              bool isMatch = false) {
-    auto execResult = pcre->execute(inputString, startBytePos, capturesBuffer);
-
-    auto numCaptures = pcre->getNumberCaptures();
-    if (execResult < -1 || execResult > static_cast<int>(numCaptures) + 1) {
-        LOGV2_ERROR(5073414,
-                    "Error occurred while executing regular expression.",
-                    "execResult"_attr = execResult);
-        return {false, value::TypeTags::Nothing, 0};
-    }
-
-    if (isMatch) {
-        // $regexMatch returns true or false.
-        bool match = (execResult != PCRE_ERROR_NOMATCH);
-        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(match)};
-    } else {
-        // $regexFind and $regexFindAll build result object or return null.
-        if (execResult == PCRE_ERROR_NOMATCH) {
-            return {false, value::TypeTags::Null, 0};
-        }
-        return buildRegexMatchResultObject(
-            inputString, capturesBuffer, numCaptures, startBytePos, codePointPos);
-    }
-}
-
-/**
- * A helper function to extract the first match in the subject string using the compiled regex
- * pattern. See 'pcreNextMatch' function for parameters description.
- */
-std::tuple<bool, value::TypeTags, value::Value> pcreFirstMatch(
-    value::PcreRegex* pcre,
-    StringData inputString,
-    bool isMatch = false,
-    std::vector<int>* capturesBuffer = nullptr,
-    uint32_t* startBytePos = nullptr,
-    uint32_t* codePointPos = nullptr) {
-    std::vector<int> tmpCapturesBuffer;
-    uint32_t tmpStartBytePos = 0;
-    uint32_t tmpCodePointPos = 0;
-
-    capturesBuffer = capturesBuffer ? capturesBuffer : &tmpCapturesBuffer;
-    startBytePos = startBytePos ? startBytePos : &tmpStartBytePos;
-    codePointPos = codePointPos ? codePointPos : &tmpCodePointPos;
-
-    // The first two-thirds of the capturesBuffer is used to pass back captured substrings' start
-    // and (end+1) indexes. The remaining third of the vector is used as workspace by pcre_exec()
-    // while matching capturing subpatterns, and is not available for passing back information.
-    auto numCaptures = pcre->getNumberCaptures();
-    capturesBuffer->resize((1 + numCaptures) * 3);
-
-    return pcreNextMatch(pcre, inputString, *capturesBuffer, *startBytePos, *codePointPos, isMatch);
 }
 
 /**
@@ -3687,7 +3756,9 @@ std::tuple<bool, value::TypeTags, value::Value> genericPcreRegexSingleMatch(
     auto inputString = value::getStringOrSymbolView(typeTagInputStr, valueInputStr);
     auto pcreRegex = value::getPcreRegexView(valuePcreRegex);
 
-    return pcreFirstMatch(pcreRegex, inputString, isMatch);
+    uint32_t startBytePos = 0;
+    uint32_t codePointPos = 0;
+    return pcreNextMatch(pcreRegex, inputString, startBytePos, codePointPos, isMatch);
 }
 
 std::pair<value::TypeTags, value::Value> collComparisonKey(value::TypeTags tag,
@@ -3773,10 +3844,8 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexFindAll(Ar
     auto inputString = value::getStringView(typeTagInputStr, valueInputStr);
     auto pcre = value::getPcreRegexView(valuePcreRegex);
 
-    std::vector<int> capturesBuffer;
     uint32_t startBytePos = 0;
     uint32_t codePointPos = 0;
-    bool isFirstMatch = true;
 
     // Prepare the result array of matching objects.
     auto [arrTag, arrVal] = value::makeNewArray();
@@ -3785,14 +3854,8 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexFindAll(Ar
 
     int resultSize = 0;
     do {
-        auto [_, matchTag, matchVal] = [&]() {
-            if (isFirstMatch) {
-                isFirstMatch = false;
-                return pcreFirstMatch(
-                    pcre, inputString, false, &capturesBuffer, &startBytePos, &codePointPos);
-            }
-            return pcreNextMatch(pcre, inputString, capturesBuffer, startBytePos, codePointPos);
-        }();
+        auto [_, matchTag, matchVal] =
+            pcreNextMatch(pcre, inputString, startBytePos, codePointPos, false);
         value::ValueGuard matchGuard{matchTag, matchVal};
 
         if (matchTag == value::TypeTags::Null) {
@@ -4045,12 +4108,21 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetRegexFlags(A
 }
 
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateSortKey(ArityType arity) {
-    invariant(arity == 2);
+    invariant(arity == 2 || arity == 3);
 
     auto [ssOwned, ssTag, ssVal] = getFromStack(0);
     auto [objOwned, objTag, objVal] = getFromStack(1);
     if (ssTag != value::TypeTags::sortSpec || !value::isObject(objTag)) {
         return {false, value::TypeTags::Nothing, 0};
+    }
+
+    CollatorInterface* collator{nullptr};
+    if (arity == 3) {
+        auto [collatorOwned, collatorTag, collatorVal] = getFromStack(2);
+        if (collatorTag != value::TypeTags::collator) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+        collator = value::getCollatorView(collatorVal);
     }
 
     auto ss = value::getSortSpecView(ssVal);
@@ -4069,7 +4141,8 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateSortKey
 
     return {true,
             value::TypeTags::ksValue,
-            value::bitcastFrom<KeyString::Value*>(new KeyString::Value(ss->generateSortKey(obj)))};
+            value::bitcastFrom<KeyString::Value*>(
+                new KeyString::Value(ss->generateSortKey(obj, collator)))};
 }
 
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::builtinReverseArray(ArityType arity) {
@@ -4498,12 +4571,16 @@ std::tuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builti
             return builtinSetIntersection(arity);
         case Builtin::setDifference:
             return builtinSetDifference(arity);
+        case Builtin::setEquals:
+            return builtinSetEquals(arity);
         case Builtin::collSetUnion:
             return builtinCollSetUnion(arity);
         case Builtin::collSetIntersection:
             return builtinCollSetIntersection(arity);
         case Builtin::collSetDifference:
             return builtinCollSetDifference(arity);
+        case Builtin::collSetEquals:
+            return builtinCollSetEquals(arity);
         case Builtin::runJsPredicate:
             return builtinRunJsPredicate(arity);
         case Builtin::regexCompile:
@@ -4576,9 +4653,9 @@ void ByteCode::swapStack() {
 std::tuple<bool, value::TypeTags, value::Value> ByteCode::runLambdaInternal(
     const CodeFragment* code, int64_t position) {
     runInternal(code, value::bitcastTo<int64_t>(position));
-    swapStack();
-    popStack();
     auto [retOwn, retTag, retVal] = getFromStack(0);
+    swapStack();
+    popAndReleaseStack();
     popStack();
 
     return {retOwn, retTag, retVal};
@@ -5253,18 +5330,36 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 }
                 case Instruction::traverseP: {
                     auto [owned, tag, val] = traverseP(code);
-                    for (uint8_t cnt = 0; cnt < 2; ++cnt) {
-                        popAndReleaseStack();
-                    }
+
+                    pushStack(owned, tag, val);
+                    break;
+                }
+                case Instruction::traversePConst: {
+                    auto offset = readFromMemory<int>(pcPointer);
+                    pcPointer += sizeof(offset);
+                    auto codePosition = pcPointer - code->instrs().data() + offset;
+
+                    auto [owned, tag, val] = traverseP(code, codePosition);
 
                     pushStack(owned, tag, val);
                     break;
                 }
                 case Instruction::traverseF: {
                     auto [owned, tag, val] = traverseF(code);
-                    for (uint8_t cnt = 0; cnt < 3; ++cnt) {
-                        popAndReleaseStack();
-                    }
+
+                    pushStack(owned, tag, val);
+                    break;
+                }
+                case Instruction::traverseFConst: {
+                    auto k = readFromMemory<Instruction::Constants>(pcPointer);
+                    pcPointer += sizeof(k);
+
+                    auto offset = readFromMemory<int>(pcPointer);
+                    pcPointer += sizeof(offset);
+                    auto codePosition = pcPointer - code->instrs().data() + offset;
+
+                    auto [owned, tag, val] =
+                        traverseF(code, codePosition, k == Instruction::True ? true : false);
 
                     pushStack(owned, tag, val);
                     break;
@@ -5688,6 +5783,31 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
 
                     uasserted(code, message);
 
+                    break;
+                }
+                case Instruction::applyClassicMatcher: {
+                    const auto* matcher = readFromMemory<const MatchExpression*>(pcPointer);
+                    pcPointer += sizeof(matcher);
+
+                    auto [ownedObj, tagObj, valObj] = getFromStack(0);
+
+                    BSONObj bsonObjForMatching;
+                    if (tagObj == value::TypeTags::Object) {
+                        BSONObjBuilder builder;
+                        sbe::bson::convertToBsonObj(builder, sbe::value::getObjectView(valObj));
+                        bsonObjForMatching = builder.obj();
+                    } else if (tagObj == value::TypeTags::bsonObject) {
+                        auto bson = value::getRawPointerView(valObj);
+                        bsonObjForMatching = BSONObj(bson);
+                    } else {
+                        MONGO_UNREACHABLE_TASSERT(6681402);
+                    }
+
+                    bool res = matcher->matchesBSON(bsonObjForMatching);
+                    if (ownedObj) {
+                        value::releaseValue(tagObj, valObj);
+                    }
+                    topStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(res));
                     break;
                 }
                 default:

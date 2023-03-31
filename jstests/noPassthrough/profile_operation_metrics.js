@@ -1,18 +1,17 @@
 /**
  * Tests that resource consumption metrics are reported in the profiler.
  *
- * TODO: SERVER-66644 Re-enable this test by removing the `__TEMPORARILY_DISABLED__` tag.
  * @tags: [
  *   requires_capped,
  *   requires_replication,
  *   requires_wiredtiger,
- *   __TEMPORARILY_DISABLED__
  * ]
  */
 (function() {
 "use strict";
 
-load("jstests/libs/fixture_helpers.js");  // For isReplSet().
+load("jstests/core/timeseries/libs/timeseries.js");  // For 'TimeseriesTest'.
+load("jstests/libs/fixture_helpers.js");             // For isReplSet().
 
 const dbName = jsTestName();
 const collName = 'coll';
@@ -25,10 +24,7 @@ const isGroupPushdownEnabled = (db) => {
     const internalQueryForceClassicEngine =
         assert.commandWorked(db.adminCommand({getParameter: 1, internalQueryForceClassicEngine: 1}))
             .internalQueryForceClassicEngine;
-    const featureFlagSBEGroupPushdown =
-        assert.commandWorked(db.adminCommand({getParameter: 1, featureFlagSBEGroupPushdown: 1}))
-            .featureFlagSBEGroupPushdown.value;
-    return !internalQueryForceClassicEngine && featureFlagSBEGroupPushdown;
+    return !internalQueryForceClassicEngine;
 };
 
 const assertMetricsExist = (profilerEntry) => {
@@ -1049,7 +1045,8 @@ const operations = [
         name: 'groupStage',
         command: (db) => {
             // There should be 10 distinct values for 'a'.
-            let cur = db[collName].aggregate([{$group: {_id: "$a", count: {$sum: 1}}}]);
+            let cur = db[collName].aggregate([{$group: {_id: "$a", count: {$sum: 1}}}],
+                                             {allowDiskUse: false});
             assert.eq(cur.itcount(), 10);
         },
         profileFilter: {op: 'command', 'command.aggregate': collName},
@@ -1309,7 +1306,11 @@ const operations = [
             assert.eq(profileDoc.docUnitsRead, 0);
             assert.eq(profileDoc.idxEntryBytesRead, 0);
             assert.eq(profileDoc.idxEntryUnitsRead, 0);
-            assert.eq(profileDoc.docBytesWritten, 207);
+            if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
+                assert.eq(profileDoc.docBytesWritten, 216);
+            } else {
+                assert.eq(profileDoc.docBytesWritten, 207);
+            }
             assert.eq(profileDoc.docUnitsWritten, 2);
             assert.eq(profileDoc.idxEntryBytesWritten, 0);
             assert.eq(profileDoc.idxEntryUnitsWritten, 0);
@@ -1331,7 +1332,11 @@ const operations = [
             assert.eq(profileDoc.docUnitsRead, 0);
             assert.eq(profileDoc.idxEntryBytesRead, 0);
             assert.eq(profileDoc.idxEntryUnitsRead, 0);
-            assert.eq(profileDoc.docBytesWritten, 207);
+            if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
+                assert.eq(profileDoc.docBytesWritten, 216);
+            } else {
+                assert.eq(profileDoc.docBytesWritten, 207);
+            }
             assert.eq(profileDoc.docUnitsWritten, 2);
             assert.eq(profileDoc.idxEntryBytesWritten, 0);
             assert.eq(profileDoc.idxEntryUnitsWritten, 0);
@@ -1349,11 +1354,16 @@ const operations = [
         },
         profileFilter: {op: 'insert', 'command.insert': 'ts', 'command.ordered': true},
         profileAssert: (db, profileDoc) => {
-            assert.eq(profileDoc.docBytesRead, 207);
+            if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
+                assert.eq(profileDoc.docBytesRead, 216);
+                assert.eq(profileDoc.docBytesWritten, 242);
+            } else {
+                assert.eq(profileDoc.docBytesRead, 207);
+                assert.eq(profileDoc.docBytesWritten, 233);
+            }
             assert.eq(profileDoc.docUnitsRead, 2);
             assert.eq(profileDoc.idxEntryBytesRead, 0);
             assert.eq(profileDoc.idxEntryUnitsRead, 0);
-            assert.eq(profileDoc.docBytesWritten, 233);
             assert.eq(profileDoc.docUnitsWritten, 2);
             assert.eq(profileDoc.idxEntryBytesWritten, 0);
             assert.eq(profileDoc.idxEntryUnitsWritten, 0);
@@ -1371,11 +1381,16 @@ const operations = [
         },
         profileFilter: {op: 'insert', 'command.insert': 'ts', 'command.ordered': false},
         profileAssert: (db, profileDoc) => {
-            assert.eq(profileDoc.docBytesRead, 207);
+            if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
+                assert.eq(profileDoc.docBytesRead, 216);
+                assert.eq(profileDoc.docBytesWritten, 242);
+            } else {
+                assert.eq(profileDoc.docBytesRead, 207);
+                assert.eq(profileDoc.docBytesWritten, 233);
+            }
             assert.eq(profileDoc.docUnitsRead, 2);
             assert.eq(profileDoc.idxEntryBytesRead, 0);
             assert.eq(profileDoc.idxEntryUnitsRead, 0);
-            assert.eq(profileDoc.docBytesWritten, 233);
             assert.eq(profileDoc.docUnitsWritten, 2);
             assert.eq(profileDoc.idxEntryBytesWritten, 0);
             assert.eq(profileDoc.idxEntryUnitsWritten, 0);
@@ -1391,7 +1406,11 @@ const operations = [
         },
         profileFilter: {op: 'query', 'command.find': 'ts'},
         profileAssert: (db, profileDoc) => {
-            assert.eq(profileDoc.docBytesRead, 466);
+            if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
+                assert.eq(profileDoc.docBytesRead, 484);
+            } else {
+                assert.eq(profileDoc.docBytesRead, 466);
+            }
             assert.eq(profileDoc.docUnitsRead, 4);
             assert.eq(profileDoc.idxEntryBytesRead, 0);
             assert.eq(profileDoc.idxEntryUnitsRead, 0);

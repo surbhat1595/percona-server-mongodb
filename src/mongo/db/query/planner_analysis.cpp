@@ -33,6 +33,7 @@
 #include <set>
 #include <vector>
 
+#include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/index/expression_params.h"
@@ -322,9 +323,9 @@ void geoSkipValidationOn(const std::set<StringData>& twoDSphereFields,
 /**
  * If any field is missing from the list of fields the projection wants, we are not covered.
  */
-auto providesAllFields(const vector<std::string>& fields, const QuerySolutionNode& solnRoot) {
-    for (size_t i = 0; i < fields.size(); ++i) {
-        if (!solnRoot.hasField(fields[i]))
+auto providesAllFields(const std::set<std::string>& fields, const QuerySolutionNode& solnRoot) {
+    for (auto&& field : fields) {
+        if (!solnRoot.hasField(field))
             return false;
     }
     return true;
@@ -540,6 +541,20 @@ bool canUseSimpleSort(const QuerySolutionNode& solnRoot,
         !(plannerParams.options & QueryPlannerParams::PRESERVE_RECORD_ID);
 }
 
+/**
+ * Returns true if 'setS' is a non-strict subset of 'setT'.
+ *
+ * The types of the sets are permitted to be different to allow checking something with compatible
+ * but different types e.g. std::set<std::string> and StringDataUnorderedMap.
+ */
+template <typename SetL, typename SetR>
+bool isSubset(const SetL& setL, const SetR& setR) {
+    return setL.size() <= setR.size() &&
+        std::all_of(setL.begin(), setL.end(), [&setR](auto&& lElem) {
+               return setR.find(lElem) != setR.end();
+           });
+}
+
 void removeProjectSimpleBelowGroupRecursive(QuerySolutionNode* solnRoot) {
     if (solnRoot == nullptr) {
         return;
@@ -562,37 +577,22 @@ void removeProjectSimpleBelowGroupRecursive(QuerySolutionNode* solnRoot) {
             // projection, it would have type PROJECTION_DEFAULT.
             return;
         }
-
         // Check to see if the projectNode's field set is a super set of the groupNodes.
-        auto projectNode = static_cast<ProjectionNodeSimple*>(projectNodeCandidate);
-        auto projectFields = projectNode->proj.getRequiredFields();
-        if (!std::any_of(projectFields.begin(), projectFields.end(), [groupNode](auto&& fld) {
-                return groupNode->requiredFields.contains(fld);
-            })) {
+        if (!isSubset(groupNode->requiredFields,
+                      checked_cast<ProjectionNodeSimple*>(projectNodeCandidate)
+                          ->proj.getRequiredFields())) {
             // The dependency set of the GROUP stage is wider than the projectNode field set.
             return;
-        };
+        }
 
         // Attach the projectNode's child to the groupNode's child.
-        groupNode->children[0] = std::move(projectNode->children[0]);
+        groupNode->children[0] = std::move(projectNodeCandidate->children[0]);
     } else {
         // Keep traversing the tree in search of a GROUP stage.
         for (size_t i = 0; i < solnRoot->children.size(); ++i) {
             removeProjectSimpleBelowGroupRecursive(solnRoot->children[i].get());
         }
     }
-}
-}  // namespace
-
-// static
-std::unique_ptr<QuerySolution> QueryPlannerAnalysis::removeProjectSimpleBelowGroup(
-    std::unique_ptr<QuerySolution> soln) {
-    auto root = soln->extractRoot();
-
-    removeProjectSimpleBelowGroupRecursive(root.get());
-
-    soln->setRoot(std::move(root));
-    return soln;
 }
 
 // Checks if the foreign collection is eligible for the hash join algorithm. We conservatively
@@ -607,13 +607,36 @@ bool isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
         internalQueryCollectionMaxStorageSizeBytesToChooseHashJoin.load();
 }
 
+// Determines whether 'index' is eligible for executing the right side of a pushed down $lookup over
+// 'foreignField'.
+bool isIndexEligibleForRightSideOfLookupPushdown(const IndexEntry& index,
+                                                 const CollatorInterface* collator,
+                                                 const std::string& foreignField) {
+    return (index.type == INDEX_BTREE || index.type == INDEX_HASHED) &&
+        index.keyPattern.firstElement().fieldName() == foreignField && !index.filterExpr &&
+        !index.sparse && CollatorInterface::collatorsMatch(collator, index.collator);
+}
+}  // namespace
+
 // static
-void QueryPlannerAnalysis::determineLookupStrategy(
-    EqLookupNode* eqLookupNode,
+std::unique_ptr<QuerySolution> QueryPlannerAnalysis::removeProjectSimpleBelowGroup(
+    std::unique_ptr<QuerySolution> soln) {
+    auto root = soln->extractRoot();
+
+    removeProjectSimpleBelowGroupRecursive(root.get());
+
+    soln->setRoot(std::move(root));
+    return soln;
+}
+
+// static
+std::pair<EqLookupNode::LookupStrategy, boost::optional<IndexEntry>>
+QueryPlannerAnalysis::determineLookupStrategy(
+    const std::string& foreignCollName,
+    const std::string& foreignField,
     const std::map<NamespaceString, SecondaryCollectionInfo>& collectionsInfo,
     bool allowDiskUse,
     const CollatorInterface* collator) {
-    const auto& foreignCollName = eqLookupNode->foreignCollection;
     auto foreignCollItr = collectionsInfo.find(NamespaceString(foreignCollName));
     tassert(5842600,
             str::stream() << "Expected collection info, but found none; target collection: "
@@ -641,11 +664,7 @@ void QueryPlannerAnalysis::determineLookupStrategy(
             });
 
         for (const auto& index : indexes) {
-            if ((index.type == INDEX_BTREE || index.type == INDEX_HASHED) &&
-                index.keyPattern.firstElement().fieldName() ==
-                    eqLookupNode->joinFieldForeign.fullPath() &&
-                !index.filterExpr && !index.sparse &&
-                CollatorInterface::collatorsMatch(collator, index.collator)) {
+            if (isIndexEligibleForRightSideOfLookupPushdown(index, collator, foreignField)) {
                 return index;
             }
         }
@@ -654,14 +673,13 @@ void QueryPlannerAnalysis::determineLookupStrategy(
     }();
 
     if (!foreignCollItr->second.exists) {
-        eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kNonExistentForeignCollection;
+        return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
     } else if (foreignIndex) {
-        eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kIndexedLoopJoin;
-        eqLookupNode->idxEntry = foreignIndex;
+        return {EqLookupNode::LookupStrategy::kIndexedLoopJoin, std::move(foreignIndex)};
     } else if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {
-        eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kHashJoin;
+        return {EqLookupNode::LookupStrategy::kHashJoin, boost::none};
     } else {
-        eqLookupNode->lookupStrategy = EqLookupNode::LookupStrategy::kNestedLoopJoin;
+        return {EqLookupNode::LookupStrategy::kNestedLoopJoin, boost::none};
     }
 }
 
@@ -855,6 +873,41 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
     return true;
 }
 
+// This function is used to check if the given index pattern and direction in the traversal
+// preference can be used to satisfy the given sort pattern (specifically for time series
+// collections).
+bool sortMatchesTraversalPreference(const TraversalPreference& traversalPreference,
+                                    const BSONObj& indexPattern) {
+    BSONObjIterator sortIter(traversalPreference.sortPattern);
+    BSONObjIterator indexIter(indexPattern);
+    while (sortIter.more() && indexIter.more()) {
+        BSONElement sortPart = sortIter.next();
+        BSONElement indexPart = indexIter.next();
+
+        if (!sortPart.isNumber() || !indexPart.isNumber()) {
+            return false;
+        }
+
+        // If the field doesn't match or the directions don't match, we return false.
+        if (strcmp(sortPart.fieldName(), indexPart.fieldName()) != 0 ||
+            (sortPart.safeNumberInt() > 0) != (indexPart.safeNumberInt() > 0)) {
+            return false;
+        }
+    }
+
+    if (!indexIter.more() && sortIter.more()) {
+        // The sort still has more, so it cannot be a prefix of the index.
+        return false;
+    }
+    return true;
+}
+
+bool isShardedCollScan(QuerySolutionNode* solnRoot) {
+    return solnRoot->getType() == StageType::STAGE_SHARDING_FILTER &&
+        solnRoot->children.size() == 1 &&
+        solnRoot->children[0]->getType() == StageType::STAGE_COLLSCAN;
+}
+
 // static
 std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
     const CanonicalQuery& query,
@@ -864,9 +917,27 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
     *blockingSortOut = false;
 
     const FindCommandRequest& findCommand = query.getFindCommandRequest();
-    tassert(5746105,
-            "ntoreturn on the find command should not be set",
-            findCommand.getNtoreturn() == boost::none);
+    if (params.traversalPreference) {
+        // If we've been passed a traversal preference, we might want to reverse the order we scan
+        // the data to avoid a blocking sort later in the pipeline.
+        auto providedSorts = solnRoot->providedSorts();
+
+        BSONObj solnSortPattern;
+        if (solnRoot->getType() == StageType::STAGE_COLLSCAN || isShardedCollScan(solnRoot.get())) {
+            BSONObjBuilder builder;
+            builder.append(params.traversalPreference->clusterField, 1);
+            solnSortPattern = builder.obj();
+        } else {
+            solnSortPattern = providedSorts.getBaseSortPattern();
+        }
+
+        if (sortMatchesTraversalPreference(params.traversalPreference.get(), solnSortPattern) &&
+            QueryPlannerCommon::scanDirectionsEqual(solnRoot.get(),
+                                                    -params.traversalPreference->direction)) {
+            QueryPlannerCommon::reverseScans(solnRoot.get(), true);
+            return solnRoot;
+        }
+    }
 
     const BSONObj& sortObj = findCommand.getSort();
 

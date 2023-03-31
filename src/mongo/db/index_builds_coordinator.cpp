@@ -28,9 +28,9 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/index_builds_coordinator.h"
+
+#include <fmt/format.h>
 
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -90,8 +90,9 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeBuildingIndexSecond);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildBeforeWaitingUntilMajorityOpTime);
 MONGO_FAIL_POINT_DEFINE(failSetUpResumeIndexBuild);
 
-IndexBuildsCoordinator::ActiveIndexBuildsSSS::ActiveIndexBuildsSSS()
-    : ServerStatusSection("activeIndexBuilds"),
+IndexBuildsCoordinator::IndexBuildsSSS::IndexBuildsSSS()
+    : ServerStatusSection("indexBuilds"),
+      registered(0),
       scanCollection(0),
       drainSideWritesTable(0),
       drainSideWritesTablePreCommit(0),
@@ -550,16 +551,15 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
         // 1) Drop all unfinished indexes.
         // 2) Start, but do not complete the index build process.
         WriteUnitOfWork wuow(opCtx);
-        auto indexCatalog = collection.getWritableCollection()->getIndexCatalog();
+        auto indexCatalog = collection.getWritableCollection(opCtx)->getIndexCatalog();
 
 
         for (size_t i = 0; i < indexNames.size(); i++) {
-            bool includeUnfinished = false;
-            auto descriptor =
-                indexCatalog->findIndexByName(opCtx, indexNames[i], includeUnfinished);
+            auto descriptor = indexCatalog->findIndexByName(
+                opCtx, indexNames[i], IndexCatalog::InclusionPolicy::kReady);
             if (descriptor) {
-                Status s =
-                    indexCatalog->dropIndex(opCtx, collection.getWritableCollection(), descriptor);
+                Status s = indexCatalog->dropIndex(
+                    opCtx, collection.getWritableCollection(opCtx), descriptor);
                 if (!s.isOK()) {
                     return s;
                 }
@@ -592,11 +592,14 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
             // If the unfinished index is in the IndexCatalog, drop it through there, otherwise drop
             // it from the DurableCatalog. Rollback-via-refetch does not clear any in-memory state,
             // so we should do it manually here.
-            includeUnfinished = true;
-            descriptor = indexCatalog->findIndexByName(opCtx, indexNames[i], includeUnfinished);
+            descriptor = indexCatalog->findIndexByName(
+                opCtx,
+                indexNames[i],
+                IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished |
+                    IndexCatalog::InclusionPolicy::kFrozen);
             if (descriptor) {
                 Status s = indexCatalog->dropUnfinishedIndex(
-                    opCtx, collection.getWritableCollection(), descriptor);
+                    opCtx, collection.getWritableCollection(opCtx), descriptor);
                 if (!s.isOK()) {
                     return s;
                 }
@@ -605,14 +608,21 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
                 // to pass in a nullptr for the index 'ident', promising that the index is not in
                 // use.
                 catalog::removeIndex(
-                    opCtx, indexNames[i], collection.getWritableCollection(), nullptr /* ident */);
+                    opCtx,
+                    indexNames[i],
+                    collection.getWritableCollection(opCtx),
+                    nullptr /* ident */,
+                    // Unfinished or partially dropped indexes do not need two-phase drop b/c the
+                    // incomplete index will never be recovered. This is an optimization that will
+                    // return disk space to the user more quickly.
+                    catalog::DataRemoval::kImmediate);
             }
         }
 
         // We need to initialize the collection to rebuild the indexes. The collection may already
         // be initialized when rebuilding indexes with rollback-via-refetch.
         if (!collection->isInitialized()) {
-            collection.getWritableCollection()->init(opCtx);
+            collection.getWritableCollection(opCtx)->init(opCtx);
         }
 
         auto dbName = nss.db().toString();
@@ -623,6 +633,7 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
         if (!status.isOK()) {
             return status;
         }
+        indexBuildsSSS.registered.addAndFetch(1);
 
         IndexBuildsManager::SetupOptions options;
         options.protocol = protocol;
@@ -694,7 +705,7 @@ Status IndexBuildsCoordinator::_setUpResumeIndexBuild(OperationContext* opCtx,
 
     if (!collection->isInitialized()) {
         WriteUnitOfWork wuow(opCtx);
-        collection.getWritableCollection()->init(opCtx);
+        collection.getWritableCollection(opCtx)->init(opCtx);
         wuow.commit();
     }
 
@@ -706,6 +717,7 @@ Status IndexBuildsCoordinator::_setUpResumeIndexBuild(OperationContext* opCtx,
     if (!status.isOK()) {
         return status;
     }
+    indexBuildsSSS.registered.addAndFetch(1);
 
     IndexBuildsManager::SetupOptions options;
     options.protocol = protocol;
@@ -924,7 +936,6 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
 
             IndexCatalog* indexCatalog = coll.getWritableCollection(opCtx)->getIndexCatalog();
 
-            const bool includeUnfinished = false;
             for (const auto& spec : oplogEntry.indexSpecs) {
                 std::string name =
                     spec.getStringField(IndexDescriptor::kIndexNameFieldName).toString();
@@ -932,7 +943,8 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
                         str::stream() << "Index spec is missing the 'name' field " << spec,
                         !name.empty());
 
-                if (auto desc = indexCatalog->findIndexByName(opCtx, name, includeUnfinished)) {
+                if (auto desc = indexCatalog->findIndexByName(
+                        opCtx, name, IndexCatalog::InclusionPolicy::kReady)) {
                     uassertStatusOK(
                         indexCatalog->dropIndex(opCtx, coll.getWritableCollection(opCtx), desc));
                 }
@@ -1119,7 +1131,8 @@ void IndexBuildsCoordinator::applyAbortIndexBuild(OperationContext* opCtx,
             const IndexDescriptor* desc = indexCatalog->findIndexByName(
                 opCtx,
                 indexSpec.getStringField(IndexDescriptor::kIndexNameFieldName),
-                /*includeUnfinishedIndexes=*/true);
+                IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished |
+                    IndexCatalog::InclusionPolicy::kFrozen);
 
             LOGV2(6455400,
                   "Dropping unfinished index during oplog recovery as standalone",
@@ -1661,19 +1674,39 @@ void IndexBuildsCoordinator::assertNoIndexBuildInProgress() const {
 
 void IndexBuildsCoordinator::assertNoIndexBuildInProgForCollection(
     const UUID& collectionUUID) const {
+    boost::optional<UUID> firstIndexBuildUUID;
+    auto indexBuilds = activeIndexBuilds.filterIndexBuilds([&](const auto& replState) {
+        auto isIndexBuildForCollection = (collectionUUID == replState.collectionUUID);
+        if (isIndexBuildForCollection && !firstIndexBuildUUID) {
+            firstIndexBuildUUID = replState.buildUUID;
+        };
+        return isIndexBuildForCollection;
+    });
+
     uassert(ErrorCodes::BackgroundOperationInProgressForNamespace,
-            str::stream() << "cannot perform operation: an index build is currently running for "
-                             "collection with UUID: "
-                          << collectionUUID,
-            !inProgForCollection(collectionUUID));
+            fmt::format("cannot perform operation: an index build is currently running for "
+                        "collection with UUID: {}. Found index build: {}",
+                        collectionUUID.toString(),
+                        firstIndexBuildUUID->toString()),
+            indexBuilds.empty());
 }
 
 void IndexBuildsCoordinator::assertNoBgOpInProgForDb(StringData db) const {
+    boost::optional<UUID> firstIndexBuildUUID;
+    auto indexBuilds = activeIndexBuilds.filterIndexBuilds([&](const auto& replState) {
+        auto isIndexBuildForCollection = (db == replState.dbName);
+        if (isIndexBuildForCollection && !firstIndexBuildUUID) {
+            firstIndexBuildUUID = replState.buildUUID;
+        };
+        return isIndexBuildForCollection;
+    });
+
     uassert(ErrorCodes::BackgroundOperationInProgressForDatabase,
-            str::stream() << "cannot perform operation: an index build is currently running for "
-                             "database "
-                          << db,
-            !inProgForDb(db));
+            fmt::format("cannot perform operation: an index build is currently running for "
+                        "database {}. Found index build: {}",
+                        db,
+                        firstIndexBuildUUID->toString()),
+            indexBuilds.empty());
 }
 
 void IndexBuildsCoordinator::awaitNoIndexBuildInProgressForCollection(OperationContext* opCtx,
@@ -1778,11 +1811,12 @@ void IndexBuildsCoordinator::createIndexesOnEmptyCollection(OperationContext* op
 
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
 
-    auto indexCatalog = collection.getWritableCollection()->getIndexCatalog();
+    auto indexCatalog = collection.getWritableCollection(opCtx)->getIndexCatalog();
     // Always run single phase index build for empty collection. And, will be coordinated using
     // createIndexes oplog entry.
     for (const auto& spec : specs) {
-        if (spec.hasField("clustered") && spec.getBoolField("clustered")) {
+        if (spec.hasField(IndexDescriptor::kClusteredFieldName) &&
+            spec.getBoolField(IndexDescriptor::kClusteredFieldName)) {
             // The index is already built implicitly.
             continue;
         }
@@ -1791,7 +1825,7 @@ void IndexBuildsCoordinator::createIndexesOnEmptyCollection(OperationContext* op
         // timestamp.
         opObserver->onCreateIndex(opCtx, nss, collectionUUID, spec, fromMigrate);
         uassertStatusOK(indexCatalog->createIndexOnEmptyCollection(
-            opCtx, collection.getWritableCollection(), spec));
+            opCtx, collection.getWritableCollection(opCtx), spec));
     }
 }
 
@@ -1933,6 +1967,7 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
     if (!status.isOK()) {
         return status;
     }
+    indexBuildsSSS.registered.addAndFetch(1);
 
     // The index has been registered on the Coordinator in an unstarted state. Return an
     // uninitialized Future so that the caller can set up the index build by calling
@@ -2489,7 +2524,7 @@ void IndexBuildsCoordinator::_scanCollectionAndInsertSortedKeysIntoIndex(
     boost::optional<RecordId> resumeAfterRecordId) {
     // Collection scan and insert into index.
     {
-        const ScopedCounter counter{activeIndexBuildsSSS.scanCollection};
+        indexBuildsSSS.scanCollection.addAndFetch(1);
 
         ScopeGuard scopeGuard([&] {
             opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
@@ -2555,7 +2590,7 @@ CollectionPtr IndexBuildsCoordinator::_setUpForScanCollectionAndInsertSortedKeys
  */
 void IndexBuildsCoordinator::_insertKeysFromSideTablesWithoutBlockingWrites(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {
-    const ScopedCounter counter{activeIndexBuildsSSS.drainSideWritesTable};
+    indexBuildsSSS.drainSideWritesTable.addAndFetch(1);
 
     // Perform the first drain while holding an intent lock.
     const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
@@ -2581,7 +2616,7 @@ void IndexBuildsCoordinator::_insertKeysFromSideTablesBlockingWrites(
     OperationContext* opCtx,
     std::shared_ptr<ReplIndexBuildState> replState,
     const IndexBuildOptions& indexBuildOptions) {
-    const ScopedCounter counter{activeIndexBuildsSSS.drainSideWritesTablePreCommit};
+    indexBuildsSSS.drainSideWritesTablePreCommit.addAndFetch(1);
     const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
     // Perform the second drain while stopping writes on the collection.
     {
@@ -2687,7 +2722,7 @@ IndexBuildsCoordinator::CommitResult IndexBuildsCoordinator::_insertKeysFromSide
                             << ", collection UUID: " << replState->collectionUUID);
 
     {
-        const ScopedCounter counter{activeIndexBuildsSSS.drainSideWritesTableOnCommit};
+        indexBuildsSSS.drainSideWritesTableOnCommit.addAndFetch(1);
         // Perform the third and final drain after releasing a shared lock and reacquiring an
         // exclusive lock on the collection.
         uassertStatusOK(_indexBuildsManager.drainBackgroundWrites(
@@ -2729,8 +2764,7 @@ IndexBuildsCoordinator::CommitResult IndexBuildsCoordinator::_insertKeysFromSide
         // can be called for two-phase builds in all replication states except during initial sync
         // when this node is not guaranteed to be consistent.
         {
-            const ScopedCounter counter{
-                activeIndexBuildsSSS.processConstraintsViolatonTableOnCommit};
+            indexBuildsSSS.processConstraintsViolatonTableOnCommit.addAndFetch(1);
             bool twoPhaseAndNotInitialSyncing =
                 IndexBuildProtocol::kTwoPhase == replState->protocol &&
                 !replCoord->getMemberState().startup2();
@@ -2740,7 +2774,7 @@ IndexBuildsCoordinator::CommitResult IndexBuildsCoordinator::_insertKeysFromSide
                     opCtx, collection.get(), replState->buildUUID));
             }
         }
-        const ScopedCounter counter{activeIndexBuildsSSS.commit};
+        indexBuildsSSS.commit.addAndFetch(1);
 
         // If two phase index builds is enabled, index build will be coordinated using
         // startIndexBuild and commitIndexBuild oplog entries.

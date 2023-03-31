@@ -377,6 +377,7 @@ public:
     void visit(const ExpressionLn* expr) final {}
     void visit(const ExpressionLog* expr) final {}
     void visit(const ExpressionLog10* expr) final {}
+    void visit(const ExpressionInternalFLEEqual* expr) final {}
     void visit(const ExpressionMap* expr) final {}
     void visit(const ExpressionMeta* expr) final {}
     void visit(const ExpressionMod* expr) final {}
@@ -609,6 +610,7 @@ public:
     void visit(const ExpressionLn* expr) final {}
     void visit(const ExpressionLog* expr) final {}
     void visit(const ExpressionLog10* expr) final {}
+    void visit(const ExpressionInternalFLEEqual* expr) final {}
     void visit(const ExpressionMap* expr) final {}
     void visit(const ExpressionMeta* expr) final {}
     void visit(const ExpressionMod* expr) final {}
@@ -751,6 +753,7 @@ public:
         Difference,
         Intersection,
         Union,
+        Equals,
     };
 
     void visit(const ExpressionConstant* expr) final {
@@ -2316,6 +2319,9 @@ public:
         _context->pushExpr(
             sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(log10Expr)));
     }
+    void visit(const ExpressionInternalFLEEqual* expr) final {
+        unsupportedExpression("$_internalFleEq");
+    }
     void visit(const ExpressionMap* expr) final {
         unsupportedExpression("$map");
     }
@@ -2633,7 +2639,9 @@ public:
         generateSetExpression(expr, SetOperation::Difference);
     }
     void visit(const ExpressionSetEquals* expr) final {
-        unsupportedExpression(expr->getOpName());
+        invariant(expr->getChildren().size() >= 2);
+
+        generateSetExpression(expr, SetOperation::Equals);
     }
     void visit(const ExpressionSetIntersection* expr) final {
         if (expr->getChildren().size() == 0) {
@@ -3575,6 +3583,9 @@ private:
                 case SetOperation::Union:
                     return std::make_pair("setUnion"_sd,
                                           collatorSlot ? "collSetUnion"_sd : "setUnion"_sd);
+                case SetOperation::Equals:
+                    return std::make_pair("setEquals"_sd,
+                                          collatorSlot ? "collSetEquals"_sd : "setEquals"_sd);
                 default:
                     MONGO_UNREACHABLE;
             }

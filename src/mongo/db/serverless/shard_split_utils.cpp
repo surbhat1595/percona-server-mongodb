@@ -98,8 +98,8 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
         if (isRecipient) {
             auto memberBSON = member.toBSON();
             auto recipientTags = memberBSON.getField("tags").Obj().removeField(recipientTagName);
-            BSONObjBuilder bob(
-                memberBSON.removeFields(StringDataSet{"votes", "priority", "_id", "tags"}));
+            BSONObjBuilder bob(memberBSON.removeFields(
+                StringDataSet{"votes", "priority", "_id", "tags", "hidden"}));
 
             bob.appendNumber("_id", recipientIndex);
             bob.append("tags", recipientTags);
@@ -149,7 +149,7 @@ repl::ReplSetConfig makeSplitConfig(const repl::ReplSetConfig& config,
 }
 
 Status insertStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& stateDoc) {
-    const auto nss = NamespaceString::kTenantSplitDonorsNamespace;
+    const auto nss = NamespaceString::kShardSplitDonorsNamespace;
     AutoGetCollection collection(opCtx, nss, MODE_IX);
 
     uassert(ErrorCodes::PrimarySteppedDown,
@@ -176,7 +176,7 @@ Status insertStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& st
 }
 
 Status updateStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& stateDoc) {
-    const auto nss = NamespaceString::kTenantSplitDonorsNamespace;
+    const auto nss = NamespaceString::kShardSplitDonorsNamespace;
     AutoGetCollection collection(opCtx, nss, MODE_IX);
 
     if (!collection) {
@@ -198,7 +198,7 @@ Status updateStateDoc(OperationContext* opCtx, const ShardSplitDonorDocument& st
 }
 
 StatusWith<bool> deleteStateDoc(OperationContext* opCtx, const UUID& shardSplitId) {
-    const auto nss = NamespaceString::kTenantSplitDonorsNamespace;
+    const auto nss = NamespaceString::kShardSplitDonorsNamespace;
     AutoGetCollection collection(opCtx, nss, MODE_IX);
 
     if (!collection) {
@@ -268,7 +268,7 @@ Status validateRecipientNodesForShardSplit(const ShardSplitDonorDocument& stateD
         }
     }
 
-    bool allRecipientNodesNonVoting =
+    const bool allRecipientNodesNonVoting =
         std::none_of(recipientNodes.cbegin(), recipientNodes.cend(), [&](const auto& member) {
             return member.isVoter() || member.getPriority() != 0;
         });
@@ -277,6 +277,16 @@ Status validateRecipientNodesForShardSplit(const ShardSplitDonorDocument& stateD
         return Status(ErrorCodes::InvalidOptions,
                       str::stream() << "Local members tagged with '" << *recipientTagName
                                     << "' must be non-voting and with a priority set to 0.");
+    }
+
+    const bool allHiddenRecipientNodes =
+        std::all_of(recipientNodes.cbegin(), recipientNodes.cend(), [&](const auto& member) {
+            return member.isHidden();
+        });
+    if (!allHiddenRecipientNodes) {
+        return Status(ErrorCodes::InvalidOptions,
+                      str::stream() << "Local members tagged with '" << *recipientTagName
+                                    << "' must be hidden.");
     }
 
     return Status::OK();

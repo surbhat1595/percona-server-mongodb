@@ -424,8 +424,8 @@ public:
     //
 
     /**
-     * Creates index in collection.
-     * Assumes callers has necessary locks.
+     * Creates the specified index without yielding locks.
+     * Assumes the caller has collection MODE_X lock.
      * Throws exception on error.
      */
     void createIndex(OperationContext* opCtx,
@@ -435,12 +435,11 @@ public:
                      bool fromMigrate);
 
     /**
-     * Creates indexes on an empty collection.
-     * Assumes we are enclosed in a WriteUnitOfWork and caller has necessary locks.
-     * For two phase index builds, writes both startIndexBuild and commitIndexBuild oplog entries
-     * on success. No two phase index build oplog entries, including abortIndexBuild, will be
-     * written on failure.
-     * Throws exception on error.
+     * Creates the specified indexes on an empty collection without yielding locks.
+     * Assumes we are enclosed in a WriteUnitOfWork and the caller has exclusive access to the
+     * collection. For two phase index builds, writes both startIndexBuild and commitIndexBuild
+     * oplog entries on success. No two phase index build oplog entries, including abortIndexBuild,
+     * will be written on failure. Throws exception on error.
      */
     static void createIndexesOnEmptyCollection(OperationContext* opCtx,
                                                CollectionWriter& collection,
@@ -490,9 +489,9 @@ public:
      */
     static int getNumIndexesTotal(OperationContext* opCtx, const CollectionPtr& collection);
 
-    class ActiveIndexBuildsSSS : public ServerStatusSection {
+    class IndexBuildsSSS : public ServerStatusSection {
     public:
-        ActiveIndexBuildsSSS();
+        IndexBuildsSSS();
 
         bool includeByDefault() const final {
             return true;
@@ -505,10 +504,7 @@ public:
             BSONObjBuilder indexBuilds;
             BSONObjBuilder phases;
 
-            indexBuilds.append(
-                "total",
-                static_cast<int>(
-                    IndexBuildsCoordinator::get(opCtx)->activeIndexBuilds.getActiveIndexBuilds()));
+            indexBuilds.append("total", registered.loadRelaxed());
 
             phases.append("scanCollection", scanCollection.loadRelaxed());
             phases.append("drainSideWritesTable", drainSideWritesTable.loadRelaxed());
@@ -526,6 +522,7 @@ public:
             return indexBuilds.obj();
         }
 
+        AtomicWord<int> registered;
         AtomicWord<int> scanCollection;
         AtomicWord<int> drainSideWritesTable;
         AtomicWord<int> drainSideWritesTablePreCommit;
@@ -533,7 +530,7 @@ public:
         AtomicWord<int> drainSideWritesTableOnCommit;
         AtomicWord<int> processConstraintsViolatonTableOnCommit;
         AtomicWord<int> commit;
-    } activeIndexBuildsSSS;
+    } indexBuildsSSS;
 
 private:
     /**

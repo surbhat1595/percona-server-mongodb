@@ -52,10 +52,10 @@ public:
     static ClusterServerParameterInitializer* get(OperationContext* opCtx);
     static ClusterServerParameterInitializer* get(ServiceContext* serviceContext);
 
-    void updateParameter(BSONObj doc, StringData mode);
-    void clearParameter(ServerParameter* sp);
-    void clearParameter(StringData id);
-    void clearAllParameters();
+    void updateParameter(OperationContext* opCtx, BSONObj doc, StringData mode);
+    void clearParameter(OperationContext* opCtx, ServerParameter* sp);
+    void clearParameter(OperationContext* opCtx, StringData id);
+    void clearAllParameters(OperationContext* opCtx);
 
     /**
      * Used to initialize in-memory cluster parameter state based on the on-disk contents after
@@ -92,9 +92,9 @@ private:
 
         DBDirectClient client(opCtx);
         FindCommandRequest findRequest{NamespaceString::kClusterParametersNamespace};
-        client.find(std::move(findRequest), ReadPreferenceSetting{}, [&](BSONObj doc) {
+        client.find(std::move(findRequest), [&](BSONObj doc) {
             try {
-                onEntry(doc, mode);
+                onEntry(opCtx, doc, mode);
             } catch (const DBException& ex) {
                 failures.push_back(ex.toStatus());
             }

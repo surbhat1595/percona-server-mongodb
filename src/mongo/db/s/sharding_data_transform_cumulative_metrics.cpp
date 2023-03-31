@@ -50,8 +50,8 @@ constexpr auto kCountFailed = "countFailed";
 constexpr auto kCountCanceled = "countCanceled";
 constexpr auto kLastOpEndingChunkImbalance = "lastOpEndingChunkImbalance";
 constexpr auto kActive = "active";
-constexpr auto kDocumentsProcessed = "documentsProcessed";
-constexpr auto kBytesWritten = "bytesWritten";
+constexpr auto kDocumentsCopied = "documentsCopied";
+constexpr auto kBytesCopied = "bytesCopied";
 constexpr auto kOplogEntriesFetched = "oplogEntriesFetched";
 constexpr auto kOplogEntriesApplied = "oplogEntriesApplied";
 constexpr auto kInsertsApplied = "insertsApplied";
@@ -240,8 +240,8 @@ void ShardingDataTransformCumulativeMetrics::reportForServerStatus(BSONObjBuilde
 
 void ShardingDataTransformCumulativeMetrics::reportActive(BSONObjBuilder* bob) const {
     BSONObjBuilder s(bob->subobjStart(kActive));
-    s.append(kDocumentsProcessed, _documentsProcessed.load());
-    s.append(kBytesWritten, _bytesWritten.load());
+    s.append(kDocumentsCopied, _documentsCopied.load());
+    s.append(kBytesCopied, _bytesCopied.load());
     s.append(kOplogEntriesFetched, _oplogEntriesFetched.load());
     s.append(kOplogEntriesApplied, _oplogEntriesApplied.load());
     s.append(kInsertsApplied, _insertsApplied.load());
@@ -349,20 +349,16 @@ void ShardingDataTransformCumulativeMetrics::onStarted() {
     _countStarted.fetchAndAdd(1);
 }
 
-void ShardingDataTransformCumulativeMetrics::onCompletion(ReshardingOperationStatusEnum status) {
-    switch (status) {
-        case ReshardingOperationStatusEnum::kSuccess:
-            _countSucceeded.fetchAndAdd(1);
-            break;
-        case ReshardingOperationStatusEnum::kFailure:
-            _countFailed.fetchAndAdd(1);
-            break;
-        case ReshardingOperationStatusEnum::kCanceled:
-            _countCancelled.fetchAndAdd(1);
-            break;
-        default:
-            MONGO_UNREACHABLE;
-    }
+void ShardingDataTransformCumulativeMetrics::onSuccess() {
+    _countSucceeded.fetchAndAdd(1);
+}
+
+void ShardingDataTransformCumulativeMetrics::onFailure() {
+    _countFailed.fetchAndAdd(1);
+}
+
+void ShardingDataTransformCumulativeMetrics::onCanceled() {
+    _countCancelled.fetchAndAdd(1);
 }
 
 void ShardingDataTransformCumulativeMetrics::setLastOpEndingChunkImbalance(int64_t imbalanceCount) {
@@ -426,8 +422,8 @@ const char* ShardingDataTransformCumulativeMetrics::fieldNameFor(
 void ShardingDataTransformCumulativeMetrics::onInsertsDuringCloning(
     int64_t count, int64_t bytes, const Milliseconds& elapsedTime) {
     _collectionCloningTotalLocalBatchInserts.fetchAndAdd(1);
-    _documentsProcessed.fetchAndAdd(count);
-    _bytesWritten.fetchAndAdd(bytes);
+    _documentsCopied.fetchAndAdd(count);
+    _bytesCopied.fetchAndAdd(bytes);
     _collectionCloningTotalLocalInsertTimeMillis.fetchAndAdd(
         durationCount<Milliseconds>(elapsedTime));
 }

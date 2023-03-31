@@ -91,7 +91,7 @@
 #include "mongo/db/index_builds_coordinator_mongod.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/initialize_server_global_state.h"
-#include "mongo/db/initialize_snmp.h"
+#include "mongo/db/internal_transactions_reap_service.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/json.h"
 #include "mongo/db/keys_collection_client_direct.h"
@@ -160,6 +160,7 @@
 #include "mongo/db/serverless/shard_split_donor_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
+#include "mongo/db/session_catalog.h"
 #include "mongo/db/session_killer.h"
 #include "mongo/db/startup_recovery.h"
 #include "mongo/db/startup_warnings_mongod.h"
@@ -317,6 +318,7 @@ void initializeCommandHooks(ServiceContext* serviceContext) {
 
         void onAfterRun(OperationContext* opCtx, const OpMsgRequest&, CommandInvocation*) {
             MirrorMaestro::tryMirrorRequest(opCtx);
+            MirrorMaestro::onReceiveMirroredRead(opCtx);
         }
     };
 
@@ -342,7 +344,9 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
     } else {
         services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
-        services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
+        if (getGlobalReplSettings().isServerless()) {
+            services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
+        }
     }
 
     for (auto& service : services) {
@@ -385,7 +389,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 #endif
 
     logProcessDetails(nullptr);
-    audit::logStartupOptions(Client::getCurrent(), serverGlobalParams.parsedOpts);
 
     serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(serviceContext));
 
@@ -542,8 +545,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     BackupCursorHooks::initialize(serviceContext);
 
     startMongoDFTDC();
-
-    initializeSNMP();
 
     if (mongodGlobalParams.scriptingEnabled) {
         ScriptEngine::setup();
@@ -850,10 +851,18 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         }
     }
 
+    if (!initialize_server_global_state::writePidFile()) {
+        quickExit(EXIT_FAILURE);
+    }
+
+    // Startup options are written to the audit log at the end of startup so that cluster server
+    // parameters are guaranteed to have been initialized from disk at this point.
+    audit::logStartupOptions(Client::getCurrent(), serverGlobalParams.parsedOpts);
+
     serviceContext->notifyStartupComplete();
 
 #ifndef _WIN32
-    mongo::signalForkSuccess();
+    initialize_server_global_state::signalForkSuccess();
 #else
     if (ntservice::shouldStartService()) {
         ntservice::reportStatus(SERVICE_RUNNING);
@@ -905,7 +914,7 @@ ExitCode initService() {
 
 MONGO_INITIALIZER_GENERAL(ForkServer, ("EndStartupOptionHandling"), ("default"))
 (InitializerContext* context) {
-    mongo::forkServerOrDie();
+    initialize_server_global_state::forkServerOrDie();
 }
 
 #ifdef __linux__
@@ -1133,8 +1142,10 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
         opObserverRegistry->addObserver(
             std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
+        if (getGlobalReplSettings().isServerless()) {
+            opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
+        }
     } else if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
         opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
@@ -1144,17 +1155,16 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
         opObserverRegistry->addObserver(
             std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
+        if (getGlobalReplSettings().isServerless()) {
+            opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
+        }
     }
     opObserverRegistry->addObserver(std::make_unique<AuthOpObserver>());
     opObserverRegistry->addObserver(
         std::make_unique<repl::PrimaryOnlyServiceOpObserver>(serviceContext));
     opObserverRegistry->addObserver(std::make_unique<FcvOpObserver>());
-
-    if (gFeatureFlagClusterWideConfig.isEnabledAndIgnoreFCV()) {
-        opObserverRegistry->addObserver(std::make_unique<ClusterServerParameterOpObserver>());
-    }
+    opObserverRegistry->addObserver(std::make_unique<ClusterServerParameterOpObserver>());
 
     setupFreeMonitoringOpObserver(opObserverRegistry.get());
 
@@ -1541,13 +1551,15 @@ int mongod_main(int argc, char* argv[]) {
     setUpReplication(service);
     setUpObservers(service);
     service->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(service));
+    SessionCatalog::get(service)->setOnEagerlyReapedSessionsFn(
+        InternalTransactionsReapService::onEagerlyReapedSessions);
 
     ErrorExtraInfo::invariantHaveAllParsers();
 
     startupConfigActions(std::vector<std::string>(argv, argv + argc));
     cmdline_utils::censorArgvArray(argc, argv);
 
-    if (!initializeServerGlobalState(service))
+    if (!initialize_server_global_state::checkSocketPath())
         quickExit(EXIT_FAILURE);
 
     // There is no single-threaded guarantee beyond this point.
@@ -1555,7 +1567,7 @@ int mongod_main(int argc, char* argv[]) {
     LOGV2(5945603, "Multi threading initialized");
 
     // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
-    // initializeServerGlobalState) and before the creation of any other threads
+    // initialize_server_global_state::forkServerOrDie) and before the creation of any other threads
     startSignalProcessingThread();
 
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);

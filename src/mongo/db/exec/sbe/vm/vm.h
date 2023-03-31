@@ -281,7 +281,9 @@ struct Instruction {
         collComparisonKey,
         getFieldOrElement,
         traverseP,  // traverse projection paths
+        traversePConst,
         traverseF,  // traverse filter paths
+        traverseFConst,
         setField,
         getArraySize,  // number of elements
 
@@ -319,6 +321,8 @@ struct Instruction {
 
         fail,
 
+        applyClassicMatcher,  // Instruction which calls into the classic engine MatchExpression.
+
         lastInstruction  // this is just a marker used to calculate number of instructions
     };
 
@@ -327,6 +331,19 @@ struct Instruction {
         True,
         False,
     };
+
+    static const char* toStringConstants(Constants k) {
+        switch (k) {
+            case Null:
+                return "Null";
+            case True:
+                return "True";
+            case False:
+                return "False";
+            default:
+                return "unknown";
+        }
+    }
 
     // Make sure that values in this arrays are always in-sync with the enum.
     static int stackOffset[];
@@ -413,8 +430,12 @@ struct Instruction {
                 return "getFieldOrElement";
             case traverseP:
                 return "traverseP";
+            case traversePConst:
+                return "traversePConst";
             case traverseF:
                 return "traverseF";
+            case traverseFConst:
+                return "traverseFConst";
             case setField:
                 return "setField";
             case getArraySize:
@@ -475,6 +496,8 @@ struct Instruction {
                 return "ret";
             case fail:
                 return "fail";
+            case applyClassicMatcher:
+                return "applyClassicMatcher";
             default:
                 return "unrecognized";
         }
@@ -560,9 +583,11 @@ enum class Builtin : uint8_t {
     setUnion,
     setIntersection,
     setDifference,
+    setEquals,
     collSetUnion,
     collSetIntersection,
     collSetDifference,
+    collSetEquals,
     runJsPredicate,
     regexCompile,  // compile <pattern, options> into value::pcreRegex
     regexFind,
@@ -713,9 +738,11 @@ public:
     void appendTraverseP() {
         appendSimpleInstruction(Instruction::traverseP);
     }
+    void appendTraverseP(int codePosition);
     void appendTraverseF() {
         appendSimpleInstruction(Instruction::traverseF);
     }
+    void appendTraverseF(int codePosition, Instruction::Constants k);
     void appendSetField() {
         appendSimpleInstruction(Instruction::setField);
     }
@@ -759,8 +786,12 @@ public:
         appendSimpleInstruction(Instruction::fail);
     }
     void appendNumericConvert(value::TypeTags targetTag);
+    void appendApplyClassicMatcher(const MatchExpression*);
 
     void fixup(int offset);
+
+    // For printing from an interactive debugger.
+    std::string toString() const;
 
 private:
     void appendSimpleInstruction(Instruction::Tags tag);
@@ -774,9 +805,6 @@ private:
     void copyCodeAndFixup(CodeFragment&& from);
 
 private:
-    // For printing from an interactive debugger.
-    std::string toString() const;
-
     absl::InlinedVector<uint8_t, 16> _instrs;
 
     /**
@@ -976,12 +1004,17 @@ private:
                                                                       value::Value fieldValue);
 
     std::tuple<bool, value::TypeTags, value::Value> traverseP(const CodeFragment* code);
+    std::tuple<bool, value::TypeTags, value::Value> traverseP(const CodeFragment* code,
+                                                              int64_t position);
     std::tuple<bool, value::TypeTags, value::Value> traverseP_nested(const CodeFragment* code,
                                                                      int64_t position,
                                                                      value::TypeTags tag,
                                                                      value::Value val);
 
     std::tuple<bool, value::TypeTags, value::Value> traverseF(const CodeFragment* code);
+    std::tuple<bool, value::TypeTags, value::Value> traverseF(const CodeFragment* code,
+                                                              int64_t position,
+                                                              bool compareArray);
     std::tuple<bool, value::TypeTags, value::Value> setField();
 
     std::tuple<bool, value::TypeTags, value::Value> getArraySize(value::TypeTags tag,
@@ -1157,9 +1190,11 @@ private:
     std::tuple<bool, value::TypeTags, value::Value> builtinSetUnion(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinSetIntersection(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinSetDifference(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinSetEquals(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinCollSetUnion(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinCollSetIntersection(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinCollSetDifference(ArityType arity);
+    std::tuple<bool, value::TypeTags, value::Value> builtinCollSetEquals(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinRunJsPredicate(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinRegexCompile(ArityType arity);
     std::tuple<bool, value::TypeTags, value::Value> builtinRegexFind(ArityType arity);

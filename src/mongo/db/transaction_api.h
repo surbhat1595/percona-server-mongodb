@@ -91,7 +91,8 @@ public:
      * transaction metadata to requests and parsing it from responses. Must be called before any
      * commands have been sent and cannot be called more than once.
      */
-    virtual void injectHooks(std::unique_ptr<details::TxnMetadataHooks> hooks) = 0;
+    virtual void initialize(std::unique_ptr<details::TxnMetadataHooks> hooks,
+                            const CancellationToken& token) = 0;
 
     /**
      * Runs the given command as part of the transaction that owns this transaction client.
@@ -138,9 +139,9 @@ public:
     virtual bool supportsClientTransactionContext() const = 0;
 
     /**
-     * Returns if the client is safe to use within an operation with a shard or database version.
+     * Returns if the client is eligible to run cluster operations.
      */
-    virtual bool canRunInShardedOperations() const = 0;
+    virtual bool runsClusterOperations() const = 0;
 };
 
 using Callback =
@@ -195,6 +196,7 @@ public:
     }
 
 private:
+    CancellationSource _source;
     std::unique_ptr<ResourceYielder> _resourceYielder;
     std::shared_ptr<details::TransactionWithRetries> _txn;
 };
@@ -226,10 +228,9 @@ public:
                                              const Message& request) const = 0;
 
     /**
-     * Returns if a client with these behaviors is safe to use within an operation with a shard or
-     * database version.
+     * Returns if the client is eligible to run cluster operations.
      */
-    virtual bool canRunInShardedOperations() const = 0;
+    virtual bool runsClusterOperations() const = 0;
 };
 
 /**
@@ -245,10 +246,7 @@ public:
     Future<DbResponse> handleRequest(OperationContext* opCtx,
                                      const Message& request) const override;
 
-    bool canRunInShardedOperations() const {
-        // Commands are run directly on the local service entry point, so if the caller is in an
-        // operation that requires shard versions, spawned commands won't include shard versions and
-        // won't obey sharding protocols.
+    bool runsClusterOperations() const {
         return false;
     }
 };
@@ -264,17 +262,17 @@ public:
                          std::unique_ptr<SEPTransactionClientBehaviors> behaviors)
         : _serviceContext(opCtx->getServiceContext()),
           _executor(executor),
-          _behaviors(std::move(behaviors)) {
-        _cancelableOpCtxFactory = std::make_unique<CancelableOperationContextFactory>(
-            opCtx->getCancellationToken(), executor);
-    }
+          _token(CancellationToken::uncancelable()),
+          _behaviors(std::move(behaviors)) {}
 
     SEPTransactionClient(const SEPTransactionClient&) = delete;
     SEPTransactionClient operator=(const SEPTransactionClient&) = delete;
 
-    virtual void injectHooks(std::unique_ptr<details::TxnMetadataHooks> hooks) override {
+    virtual void initialize(std::unique_ptr<details::TxnMetadataHooks> hooks,
+                            const CancellationToken& token) override {
         invariant(!_hooks);
         _hooks = std::move(hooks);
+        _token = token;
     }
 
     virtual SemiFuture<BSONObj> runCommand(StringData dbName, BSONObj cmd) const override;
@@ -289,16 +287,16 @@ public:
         return true;
     }
 
-    virtual bool canRunInShardedOperations() const override {
-        return _behaviors->canRunInShardedOperations();
+    virtual bool runsClusterOperations() const override {
+        return _behaviors->runsClusterOperations();
     }
 
 private:
     ServiceContext* const _serviceContext;
     std::shared_ptr<executor::TaskExecutor> _executor;
+    CancellationToken _token;
     std::unique_ptr<SEPTransactionClientBehaviors> _behaviors;
     std::unique_ptr<details::TxnMetadataHooks> _hooks;
-    std::unique_ptr<CancelableOperationContextFactory> _cancelableOpCtxFactory;
 };
 
 /**
@@ -331,12 +329,13 @@ public:
      */
     Transaction(OperationContext* opCtx,
                 std::shared_ptr<executor::TaskExecutor> executor,
+                const CancellationToken& token,
                 std::unique_ptr<TransactionClient> txnClient)
         : _executor(executor),
           _txnClient(std::move(txnClient)),
           _service(opCtx->getServiceContext()) {
         _primeTransaction(opCtx);
-        _txnClient->injectHooks(_makeTxnMetadataHooks());
+        _txnClient->initialize(_makeTxnMetadataHooks(), token);
     }
 
     /**
@@ -491,9 +490,11 @@ public:
 
     TransactionWithRetries(OperationContext* opCtx,
                            std::shared_ptr<executor::TaskExecutor> executor,
+                           const CancellationToken& token,
                            std::unique_ptr<TransactionClient> txnClient)
-        : _internalTxn(std::make_shared<Transaction>(opCtx, executor, std::move(txnClient))),
-          _executor(executor) {}
+        : _internalTxn(std::make_shared<Transaction>(opCtx, executor, token, std::move(txnClient))),
+          _executor(executor),
+          _token(token) {}
 
     /**
      * Returns a bundle with the commit command status and write concern error, if any. Any error
@@ -526,6 +527,7 @@ private:
 
     std::shared_ptr<Transaction> _internalTxn;
     std::shared_ptr<executor::TaskExecutor> _executor;
+    CancellationToken _token;
 };
 
 }  // namespace details

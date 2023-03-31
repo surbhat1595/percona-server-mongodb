@@ -85,11 +85,11 @@ ShardingDataTransformInstanceMetrics::ShardingDataTransformInstanceMetrics(
       _originalCommand{std::move(originalCommand)},
       _sourceNs{std::move(sourceNs)},
       _role{role},
+      _startTime{startTime},
       _clockSource{clockSource},
       _observer{std::move(observer)},
       _cumulativeMetrics{cumulativeMetrics},
       _deregister{_cumulativeMetrics->registerInstanceMetrics(_observer.get())},
-      _startTime{startTime},
       _copyingStartTime{kNoDate},
       _copyingEndTime{kNoDate},
       _approxDocumentsToCopy{0},
@@ -118,7 +118,8 @@ ShardingDataTransformInstanceMetrics::~ShardingDataTransformInstanceMetrics() {
 Milliseconds ShardingDataTransformInstanceMetrics::getHighEstimateRemainingTimeMillis() const {
     switch (_role) {
         case Role::kRecipient: {
-            auto estimate = estimateRemainingRecipientTime(_applyingStartTime.load() != kNoDate,
+            auto estimate =
+                resharding::estimateRemainingRecipientTime(_applyingStartTime.load() != kNoDate,
                                                            _bytesCopied.load(),
                                                            _approxBytesToCopy.load(),
                                                            getCopyingElapsedTimeSecs(),
@@ -350,6 +351,10 @@ void ShardingDataTransformInstanceMetrics::onOplogEntriesApplied(int64_t numEntr
     _cumulativeMetrics->onOplogEntriesApplied(numEntries);
 }
 
+void ShardingDataTransformInstanceMetrics::restoreOplogEntriesApplied(int64_t numEntries) {
+    _oplogEntriesApplied.store(numEntries);
+}
+
 void ShardingDataTransformInstanceMetrics::onWriteDuringCriticalSection() {
     _writesDuringCriticalSection.addAndFetch(1);
     _cumulativeMetrics->onWriteDuringCriticalSection();
@@ -406,6 +411,31 @@ void ShardingDataTransformInstanceMetrics::onCloningTotalRemoteBatchRetrieval(
 
 void ShardingDataTransformInstanceMetrics::onOplogLocalBatchApplied(Milliseconds elapsed) {
     _cumulativeMetrics->onOplogLocalBatchApplied(elapsed);
+}
+
+ShardingDataTransformCumulativeMetrics*
+ShardingDataTransformInstanceMetrics::getCumulativeMetrics() {
+    return _cumulativeMetrics;
+}
+
+void ShardingDataTransformInstanceMetrics::onStarted() {
+    _cumulativeMetrics->onStarted();
+}
+
+void ShardingDataTransformInstanceMetrics::onSuccess() {
+    _cumulativeMetrics->onSuccess();
+}
+
+void ShardingDataTransformInstanceMetrics::onFailure() {
+    _cumulativeMetrics->onFailure();
+}
+
+void ShardingDataTransformInstanceMetrics::onCanceled() {
+    _cumulativeMetrics->onCanceled();
+}
+
+void ShardingDataTransformInstanceMetrics::setLastOpEndingChunkImbalance(int64_t imbalanceCount) {
+    _cumulativeMetrics->setLastOpEndingChunkImbalance(imbalanceCount);
 }
 
 }  // namespace mongo

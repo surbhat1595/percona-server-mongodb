@@ -37,7 +37,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/client/query.h"
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
@@ -93,13 +92,10 @@ MONGO_FAIL_POINT_DEFINE(hangInRefreshFilteringMetadataUntilSuccessInterruptible)
 MONGO_FAIL_POINT_DEFINE(hangInRefreshFilteringMetadataUntilSuccessThenSimulateErrorUninterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInPersistMigrateCommitDecisionInterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInPersistMigrateCommitDecisionThenSimulateErrorUninterruptible);
-MONGO_FAIL_POINT_DEFINE(hangInPersistMigrateAbortDecisionInterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInPersistMigrateAbortDecisionThenSimulateErrorUninterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInDeleteRangeDeletionOnRecipientInterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInDeleteRangeDeletionOnRecipientThenSimulateErrorUninterruptible);
-MONGO_FAIL_POINT_DEFINE(hangInDeleteRangeDeletionLocallyInterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInDeleteRangeDeletionLocallyThenSimulateErrorUninterruptible);
-MONGO_FAIL_POINT_DEFINE(hangInReadyRangeDeletionOnRecipientInterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInReadyRangeDeletionOnRecipientThenSimulateErrorUninterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInReadyRangeDeletionLocallyInterruptible);
 MONGO_FAIL_POINT_DEFINE(hangInReadyRangeDeletionLocallyThenSimulateErrorUninterruptible);
@@ -523,14 +519,27 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
             FindCommandRequest findCommand(NamespaceString::kRangeDeletionNamespace);
             findCommand.setFilter(BSON(RangeDeletionTask::kProcessingFieldName << true));
             auto cursor = client.find(std::move(findCommand));
-            if (cursor->more()) {
-                return migrationutil::submitRangeDeletionTask(
+
+            auto retFuture = ExecutorFuture<void>(getMigrationUtilExecutor(serviceContext));
+
+            int rangeDeletionsMarkedAsProcessing = 0;
+            while (cursor->more()) {
+                retFuture = migrationutil::submitRangeDeletionTask(
                     opCtx.get(),
                     RangeDeletionTask::parse(IDLParserErrorContext("rangeDeletionRecovery"),
                                              cursor->next()));
-            } else {
-                return ExecutorFuture<void>(getMigrationUtilExecutor(serviceContext));
+                rangeDeletionsMarkedAsProcessing++;
             }
+
+            if (rangeDeletionsMarkedAsProcessing > 1) {
+                LOGV2_WARNING(
+                    6695800,
+                    "Rescheduling several range deletions marked as processing. Orphans count "
+                    "may be off while they are not drained",
+                    "numRangeDeletionsMarkedAsProcessing"_attr = rangeDeletionsMarkedAsProcessing);
+            }
+
+            return retFuture;
         })
         .then([serviceContext] {
             ThreadClient tc("ResubmitRangeDeletions", serviceContext);
@@ -700,11 +709,7 @@ void persistUpdatedNumOrphans(OperationContext* opCtx,
                               const UUID& migrationId,
                               const UUID& collectionUuid,
                               long long changeInOrphans) {
-    // TODO (SERVER-63819) Remove numOrphanDocsFieldName field from the query
-    // Add $exists to the query to ensure that on upgrade and downgrade, the numOrphanDocs field
-    // is only updated after the upgrade procedure has populated it with an initial value.
-    BSONObj query = BSON("_id" << migrationId << RangeDeletionTask::kNumOrphanDocsFieldName
-                               << BSON("$exists" << true));
+    BSONObj query = BSON("_id" << migrationId);
     try {
         PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
         ScopedRangeDeleterLock rangeDeleterLock(opCtx, collectionUuid);
@@ -750,7 +755,7 @@ long long retrieveNumOrphansFromRecipient(OperationContext* opCtx,
     }
     const auto numOrphanDocsElem =
         rangeDeletionResponse.docs[0].getField(RangeDeletionTask::kNumOrphanDocsFieldName);
-    return numOrphanDocsElem ? numOrphanDocsElem.safeNumberLong() : 0;
+    return numOrphanDocsElem.safeNumberLong();
 }
 
 void notifyChangeStreamsOnRecipientFirstChunk(OperationContext* opCtx,
@@ -849,7 +854,6 @@ void persistAbortDecision(OperationContext* opCtx,
                           const MigrationCoordinatorDocument& migrationDoc) {
     invariant(migrationDoc.getDecision() && *migrationDoc.getDecision() == DecisionEnum::kAborted);
 
-    hangInPersistMigrateAbortDecisionInterruptible.pauseWhileSet(opCtx);
     try {
         PersistentTaskStore<MigrationCoordinatorDocument> store(
             NamespaceString::kMigrationCoordinatorsNamespace);
@@ -895,7 +899,6 @@ void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
 void deleteRangeDeletionTaskLocally(OperationContext* opCtx,
                                     const UUID& deletionTaskId,
                                     const WriteConcernOptions& writeConcern) {
-    hangInDeleteRangeDeletionLocallyInterruptible.pauseWhileSet(opCtx);
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
     store.remove(opCtx, BSON(RangeDeletionTask::kIdFieldName << deletionTaskId), writeConcern);
 
@@ -921,8 +924,6 @@ void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
 
     retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
         opCtx, "ready remote range deletion", [&](OperationContext* newOpCtx) {
-            hangInReadyRangeDeletionOnRecipientInterruptible.pauseWhileSet(newOpCtx);
-
             try {
                 sendWriteCommandToRecipient(
                     newOpCtx,

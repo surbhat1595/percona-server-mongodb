@@ -36,7 +36,6 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/client/query.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/dbmessage.h"
 
@@ -92,11 +91,6 @@ Status validateFindCommandRequest(const FindCommandRequest& findCommand) {
             (findCommand.getMin().nFields() != findCommand.getMax().nFields())) {
             return Status(ErrorCodes::Error(51176), "min and max must have the same field names");
         }
-    }
-
-    if ((findCommand.getLimit() || findCommand.getBatchSize()) && findCommand.getNtoreturn()) {
-        return Status(ErrorCodes::BadValue,
-                      "'limit' or 'batchSize' fields can not be set with 'ntoreturn' field.");
     }
 
     if (query_request_helper::getTailableMode(findCommand) != TailableModeEnum::kNormal) {
@@ -236,9 +230,6 @@ void validateCursorResponse(const BSONObj& outputAsBson) {
 
 StatusWith<BSONObj> asAggregationCommand(const FindCommandRequest& findCommand) {
     BSONObjBuilder aggregationBuilder;
-
-    // The find command will translate away ntoreturn above this layer.
-    tassert(5746106, "ntoreturn should not be set in the findCommand", !findCommand.getNtoreturn());
 
     // First, check if this query has options that are not supported in aggregation.
     if (!findCommand.getMin().isEmpty()) {

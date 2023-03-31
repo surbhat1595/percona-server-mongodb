@@ -34,7 +34,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
-#include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/functional.h"
 #include <set>
@@ -97,7 +96,9 @@ public:
     void reportForServerStatus(BSONObjBuilder* bob) const;
 
     void onStarted();
-    void onCompletion(ReshardingOperationStatusEnum status);
+    void onSuccess();
+    void onFailure();
+    void onCanceled();
 
     void setLastOpEndingChunkImbalance(int64_t imbalanceCount);
 
@@ -190,8 +191,8 @@ private:
     AtomicWord<int64_t> _totalBatchRetrievedDuringCloneMillis{0};
     AtomicWord<int64_t> _oplogBatchApplied{0};
     AtomicWord<int64_t> _oplogBatchAppliedMillis{0};
-    AtomicWord<int64_t> _documentsProcessed{0};
-    AtomicWord<int64_t> _bytesWritten{0};
+    AtomicWord<int64_t> _documentsCopied{0};
+    AtomicWord<int64_t> _bytesCopied{0};
 
     AtomicWord<int64_t> _lastOpEndingChunkImbalance{0};
     AtomicWord<int64_t> _readsDuringCriticalSection{0};

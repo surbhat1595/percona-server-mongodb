@@ -49,7 +49,6 @@
 #include "mongo/db/s/resharding/document_source_resharding_add_resume_id.h"
 #include "mongo/db/s/resharding/document_source_resharding_iterate_transaction.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
-#include "mongo/db/s/resharding/resharding_metrics_new.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
@@ -64,6 +63,7 @@
 
 
 namespace mongo {
+namespace resharding {
 
 namespace {
 /**
@@ -415,4 +415,5 @@ boost::optional<Milliseconds> estimateRemainingRecipientTime(bool applyingBegan,
     return {};
 }
 
+}  // namespace resharding
 }  // namespace mongo

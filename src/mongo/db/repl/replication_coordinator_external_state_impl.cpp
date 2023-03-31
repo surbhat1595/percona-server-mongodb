@@ -80,6 +80,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/balancer/balancer.h"
 #include "mongo/db/s/chunk_splitter.h"
+#include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/dist_lock_manager.h"
 #include "mongo/db/s/migration_util.h"
@@ -559,10 +560,9 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
 
     // TODO: SERVER-65948 move the change collection creation logic from here to the PM-2502 hooks.
     // The change collection will be created when the change stream is enabled.
-    if (::mongo::feature_flags::gFeatureFlagServerlessChangeStreams.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx);
-        auto status = changeCollectionManager.createChangeCollection(opCtx, boost::none);
+    if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+        auto status = ChangeStreamChangeCollectionManager::get(opCtx).createChangeCollection(
+            opCtx, boost::none);
         if (!status.isOK()) {
             fassert(6520900, status);
         }
@@ -1032,9 +1032,10 @@ bool ReplicationCoordinatorExternalStateImpl::tooStale() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationContext* opCtx) {
-    // Acquire the GlobalLock in mode IS to conflict with database drops which acquire the
-    // GlobalLock in mode X.
-    Lock::GlobalLock lk(opCtx, MODE_IS);
+    // Acquire the GlobalLock in mode IX to conflict with database drops which acquire the
+    // GlobalLock in mode X. Additionally, acquire the GlobalLock in IX instead of IS to prevent
+    // lock upgrade when removing the temporary collections.
+    Lock::GlobalLock lk(opCtx, MODE_IX);
 
     StorageEngine* storageEngine = _service->getStorageEngine();
     std::vector<DatabaseName> dbNames = storageEngine->listDatabases();

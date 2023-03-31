@@ -183,6 +183,10 @@ ReplOperation MutableOplogEntry::makeInsertOperation(const NamespaceString& nss,
                                                      const BSONObj& docKey) {
     ReplOperation op;
     op.setOpType(OpTypeEnum::kInsert);
+
+    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
+    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        op.setTid(nss.tenantId());
     op.setNss(nss);
     op.setUuid(uuid);
     op.setObject(docToInsert.getOwned());
@@ -221,6 +225,10 @@ ReplOperation MutableOplogEntry::makeUpdateOperation(const NamespaceString nss,
                                                      const BSONObj& criteria) {
     ReplOperation op;
     op.setOpType(OpTypeEnum::kUpdate);
+
+    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
+    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        op.setTid(nss.tenantId());
     op.setNss(nss);
     op.setUuid(uuid);
     op.setObject(update.getOwned());
@@ -262,6 +270,10 @@ ReplOperation MutableOplogEntry::makeDeleteOperation(const NamespaceString& nss,
                                                      const BSONObj& docToDelete) {
     ReplOperation op;
     op.setOpType(OpTypeEnum::kDelete);
+
+    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
+    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        op.setTid(nss.tenantId());
     op.setNss(nss);
     op.setUuid(uuid);
     op.setObject(docToDelete.getOwned());

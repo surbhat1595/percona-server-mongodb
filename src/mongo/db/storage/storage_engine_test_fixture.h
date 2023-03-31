@@ -183,7 +183,10 @@ public:
         Collection* collection =
             CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForMetadataWrite(opCtx,
                                                                                        collNs);
-        auto descriptor = collection->getIndexCatalog()->findIndexByName(opCtx, key, true);
+        auto descriptor = collection->getIndexCatalog()->findIndexByName(
+            opCtx,
+            key,
+            IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
         collection->indexBuildSuccess(opCtx, descriptor->getEntry());
     }
 
@@ -199,7 +202,8 @@ public:
 
 class StorageEngineRepairTest : public StorageEngineTest {
 public:
-    StorageEngineRepairTest() : StorageEngineTest(Options{}.repair(RepairAction::kRepair)) {}
+    StorageEngineRepairTest()
+        : StorageEngineTest(Options{}.repair(RepairAction::kRepair).ephemeral(false)) {}
 
     void tearDown() {
         auto repairObserver = StorageRepairObserver::get(getGlobalServiceContext());
@@ -215,6 +219,11 @@ public:
                   logv2::seqLog(boost::make_transform_iterator(modifications.begin(), asString),
                                 boost::make_transform_iterator(modifications.end(), asString)));
     }
+};
+
+class StorageEngineTestNotEphemeral : public StorageEngineTest {
+public:
+    StorageEngineTestNotEphemeral() : StorageEngineTest(Options{}.ephemeral(false)){};
 };
 
 }  // namespace mongo

@@ -1,23 +1,19 @@
 """FCV and Server binary version constants used for multiversion testing."""
 import os
 import shutil
-from subprocess import call, CalledProcessError, check_output, STDOUT, DEVNULL
+from subprocess import DEVNULL, STDOUT, CalledProcessError, call, check_output
+
 import structlog
 
-try:
-    # when running resmoke
-    from buildscripts.resmokelib.multiversion.multiversion_service import MongoReleases, MongoVersion, MultiversionService
-    from buildscripts.resmokelib.multiversionsetupconstants import USE_EXISTING_RELEASES_FILE
-except ImportError:
-    # when running db-contrib-tool
-    from multiversionsetupconstants import USE_EXISTING_RELEASES_FILE
-    from multiversion.multiversion_service import MongoReleases, MongoVersion, MultiversionService
+from buildscripts.resmokelib.multiversion.multiversion_service import (
+    MongoReleases, MongoVersion, MultiversionService, MONGO_VERSION_YAML, RELEASES_YAML)
+from buildscripts.resmokelib.multiversionsetupconstants import \
+    USE_EXISTING_RELEASES_FILE
+
+LAST_LTS = "last_lts"
+LAST_CONTINUOUS = "last_continuous"
 
 LOGGER = structlog.getLogger(__name__)
-
-# These values must match the include paths for artifacts.tgz in evergreen.yml.
-MONGO_VERSION_YAML = ".resmoke_mongo_version.yml"
-RELEASES_YAML = ".resmoke_mongo_release_values.yml"
 
 
 def generate_mongo_version_file():
@@ -73,11 +69,6 @@ else:
         "Skipping generating releases file since the --useExistingReleasesFile flag has been set")
 
 
-def version_str(version):
-    """Return a string of the given version in 'MAJOR.MINOR' form."""
-    return '{}.{}'.format(version.major, version.minor)
-
-
 def evg_project_str(version):
     """Return the evergreen project name for the given version."""
     return 'mongodb-mongo-v{}.{}'.format(version.major, version.minor)
@@ -88,33 +79,34 @@ multiversion_service = MultiversionService(
     mongo_releases=MongoReleases.from_yaml_file(RELEASES_YAML),
 )
 
-fcv_constants = multiversion_service.calculate_fcv_constants()
+version_constants = multiversion_service.calculate_version_constants()
 
-LAST_LTS_BIN_VERSION = version_str(fcv_constants.last_lts)
-LAST_CONTINUOUS_BIN_VERSION = version_str(fcv_constants.last_continuous)
+LAST_LTS_BIN_VERSION = version_constants.get_last_lts_fcv()
+LAST_CONTINUOUS_BIN_VERSION = version_constants.get_last_continuous_fcv()
 
-LAST_LTS_FCV = version_str(fcv_constants.last_lts)
-LAST_CONTINUOUS_FCV = version_str(fcv_constants.last_continuous)
-LATEST_FCV = version_str(fcv_constants.latest)
+LAST_LTS_FCV = version_constants.get_last_lts_fcv()
+LAST_CONTINUOUS_FCV = version_constants.get_last_continuous_fcv()
+LATEST_FCV = version_constants.get_latest_fcv()
 
-LAST_CONTINUOUS_MONGO_BINARY = "mongo-" + LAST_CONTINUOUS_BIN_VERSION
-LAST_CONTINUOUS_MONGOD_BINARY = "mongod-" + LAST_CONTINUOUS_BIN_VERSION
-LAST_CONTINUOUS_MONGOS_BINARY = "mongos-" + LAST_CONTINUOUS_BIN_VERSION
+LAST_CONTINUOUS_MONGO_BINARY = version_constants.build_last_continuous_binary("mongo")
+LAST_CONTINUOUS_MONGOD_BINARY = version_constants.build_last_continuous_binary("mongod")
+LAST_CONTINUOUS_MONGOS_BINARY = version_constants.build_last_continuous_binary("mongos")
 
-LAST_LTS_MONGO_BINARY = "mongo-" + LAST_LTS_BIN_VERSION
-LAST_LTS_MONGOD_BINARY = "mongod-" + LAST_LTS_BIN_VERSION
-LAST_LTS_MONGOS_BINARY = "mongos-" + LAST_LTS_BIN_VERSION
+LAST_LTS_MONGO_BINARY = version_constants.build_last_lts_binary("mongo")
+LAST_LTS_MONGOD_BINARY = version_constants.build_last_lts_binary("mongod")
+LAST_LTS_MONGOS_BINARY = version_constants.build_last_lts_binary("mongos")
 
-REQUIRES_FCV_TAG_LATEST = fcv_constants.get_latest_tag()
+REQUIRES_FCV_TAG_LATEST = version_constants.get_latest_tag()
 
 # Generate tags for all FCVS in (lastLTS, latest], or (lowerBoundOverride, latest] if requested.
 # All multiversion tests should be run with these tags excluded.
-REQUIRES_FCV_TAG = fcv_constants.get_fcv_tag_list()
+REQUIRES_FCV_TAG = version_constants.get_fcv_tag_list()
 
 # Generate evergreen project names for all FCVs less than latest.
 EVERGREEN_PROJECTS = ['mongodb-mongo-master']
-EVERGREEN_PROJECTS.extend([evg_project_str(fcv) for fcv in fcv_constants.fcvs_less_than_latest])
+EVERGREEN_PROJECTS.extend([evg_project_str(fcv) for fcv in version_constants.fcvs_less_than_latest])
 
-OLD_VERSIONS = ["last_lts"]
-if LAST_LTS_FCV != LAST_CONTINUOUS_FCV:
-    OLD_VERSIONS.append("last_continuous")
+OLD_VERSIONS = [
+    LAST_LTS
+] if LAST_CONTINUOUS_FCV == LAST_LTS_FCV or LAST_CONTINUOUS_FCV in version_constants.get_eols(
+) else [LAST_LTS, LAST_CONTINUOUS]

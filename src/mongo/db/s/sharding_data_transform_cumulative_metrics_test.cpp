@@ -232,7 +232,7 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsSucceededCount)
         ASSERT_EQ(report.getObjectField(kTestMetricsName).getIntField("countSucceeded"), 0);
     }
 
-    _cumulativeMetrics.onCompletion(ReshardingOperationStatusEnum::kSuccess);
+    _cumulativeMetrics.onSuccess();
 
     {
         BSONObjBuilder bob;
@@ -254,7 +254,7 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsFailedCount) {
         ASSERT_EQ(report.getObjectField(kTestMetricsName).getIntField("countFailed"), 0);
     }
 
-    _cumulativeMetrics.onCompletion(ReshardingOperationStatusEnum::kFailure);
+    _cumulativeMetrics.onFailure();
 
     {
         BSONObjBuilder bob;
@@ -276,7 +276,7 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsCanceledCount) 
         ASSERT_EQ(report.getObjectField(kTestMetricsName).getIntField("countCanceled"), 0);
     }
 
-    _cumulativeMetrics.onCompletion(ReshardingOperationStatusEnum::kCanceled);
+    _cumulativeMetrics.onCanceled();
 
     {
         BSONObjBuilder bob;
@@ -330,8 +330,8 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringCl
     ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 0);
 
     auto activeSection = getActiveSection(_cumulativeMetrics);
-    ASSERT_EQ(activeSection.getIntField("documentsProcessed"), 0);
-    ASSERT_EQ(activeSection.getIntField("bytesWritten"), 0);
+    ASSERT_EQ(activeSection.getIntField("documentsCopied"), 0);
+    ASSERT_EQ(activeSection.getIntField("bytesCopied"), 0);
 
     _cumulativeMetrics.onInsertsDuringCloning(140, 20763, Milliseconds(15));
 
@@ -340,8 +340,8 @@ TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringCl
     ASSERT_EQ(latencySection.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 15);
 
     activeSection = getActiveSection(_cumulativeMetrics);
-    ASSERT_EQ(activeSection.getIntField("documentsProcessed"), 140);
-    ASSERT_EQ(activeSection.getIntField("bytesWritten"), 20763);
+    ASSERT_EQ(activeSection.getIntField("documentsCopied"), 140);
+    ASSERT_EQ(activeSection.getIntField("bytesCopied"), 20763);
 }
 
 TEST_F(ShardingDataTransformCumulativeMetricsTest, ReportContainsInsertsDuringFetching) {

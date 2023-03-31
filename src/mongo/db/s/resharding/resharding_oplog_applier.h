@@ -36,7 +36,7 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
 #include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
-#include "mongo/db/s/resharding/resharding_metrics_new.h"
+#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_application.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_batch_applier.h"
@@ -48,7 +48,6 @@
 
 namespace mongo {
 
-class ReshardingMetrics;
 class ServiceContext;
 
 /**
@@ -67,16 +66,11 @@ class ReshardingOplogApplier {
 public:
     class Env {
     public:
-        Env(ServiceContext* service,
-            ReshardingMetrics* metrics,
-            ReshardingOplogApplierMetrics* applierMetrics)
-            : _service(service), _metrics(metrics), _applierMetrics(applierMetrics) {}
+        Env(ServiceContext* service, ReshardingOplogApplierMetrics* applierMetrics)
+            : _service(service), _applierMetrics(applierMetrics) {}
 
         ServiceContext* service() const {
             return _service;
-        }
-        ReshardingMetrics* metrics() const {
-            return _metrics;
         }
 
         ReshardingOplogApplierMetrics* applierMetrics() {
@@ -85,7 +79,6 @@ public:
 
     private:
         ServiceContext* _service;
-        ReshardingMetrics* _metrics;
         ReshardingOplogApplierMetrics* _applierMetrics;
     };
 

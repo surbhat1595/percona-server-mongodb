@@ -36,7 +36,6 @@
 #include "mongo/db/s/resharding/resharding_collection_cloner.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
-#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
@@ -83,12 +82,11 @@ void ensureFulfilledPromise(SharedPromise<void>& sp, Status error) {
 
 std::unique_ptr<ReshardingCollectionCloner> ReshardingDataReplication::_makeCollectionCloner(
     ReshardingMetrics* metrics,
-    ReshardingMetricsNew* metricsNew,
     const CommonReshardingMetadata& metadata,
     const ShardId& myShardId,
     Timestamp cloneTimestamp) {
     return std::make_unique<ReshardingCollectionCloner>(
-        std::make_unique<ReshardingCollectionCloner::Env>(metrics, metricsNew),
+        metrics,
         ShardKeyPattern{metadata.getReshardingKey()},
         metadata.getSourceNss(),
         metadata.getSourceUUID(),
@@ -115,7 +113,6 @@ std::vector<std::unique_ptr<ReshardingTxnCloner>> ReshardingDataReplication::_ma
 std::vector<std::unique_ptr<ReshardingOplogFetcher>> ReshardingDataReplication::_makeOplogFetchers(
     OperationContext* opCtx,
     ReshardingMetrics* metrics,
-    ReshardingMetricsNew* metricsNew,
     const CommonReshardingMetadata& metadata,
     const std::vector<DonorShardFetchTimestamp>& donorShards,
     const ShardId& myShardId) {
@@ -124,15 +121,14 @@ std::vector<std::unique_ptr<ReshardingOplogFetcher>> ReshardingDataReplication::
 
     for (const auto& donor : donorShards) {
         auto oplogBufferNss =
-            getLocalOplogBufferNamespace(metadata.getSourceUUID(), donor.getShardId());
+            resharding::getLocalOplogBufferNamespace(metadata.getSourceUUID(), donor.getShardId());
         auto minFetchTimestamp = *donor.getMinFetchTimestamp();
         auto idToResumeFrom = getOplogFetcherResumeId(
             opCtx, metadata.getReshardingUUID(), oplogBufferNss, minFetchTimestamp);
         invariant((idToResumeFrom >= ReshardingDonorOplogId{minFetchTimestamp, minFetchTimestamp}));
 
         oplogFetchers.emplace_back(std::make_unique<ReshardingOplogFetcher>(
-            std::make_unique<ReshardingOplogFetcher::Env>(
-                opCtx->getServiceContext(), metrics, metricsNew),
+            std::make_unique<ReshardingOplogFetcher::Env>(opCtx->getServiceContext(), metrics),
             metadata.getReshardingUUID(),
             metadata.getSourceUUID(),
             // The recipient fetches oplog entries from the donor starting from the largest _id
@@ -168,7 +164,6 @@ std::shared_ptr<executor::TaskExecutor> ReshardingDataReplication::_makeOplogFet
 
 std::vector<std::unique_ptr<ReshardingOplogApplier>> ReshardingDataReplication::_makeOplogAppliers(
     OperationContext* opCtx,
-    ReshardingMetrics* metrics,
     ReshardingApplierMetricsMap* applierMetricsMap,
     const CommonReshardingMetadata& metadata,
     const std::vector<DonorShardFetchTimestamp>& donorShards,
@@ -187,12 +182,12 @@ std::vector<std::unique_ptr<ReshardingOplogApplier>> ReshardingDataReplication::
         invariant((idToResumeFrom >= ReshardingDonorOplogId{minFetchTimestamp, minFetchTimestamp}));
 
         const auto& oplogBufferNss =
-            getLocalOplogBufferNamespace(metadata.getSourceUUID(), donorShardId);
+            resharding::getLocalOplogBufferNamespace(metadata.getSourceUUID(), donorShardId);
 
         auto applierMetrics = (*applierMetricsMap)[donorShardId].get();
         oplogAppliers.emplace_back(std::make_unique<ReshardingOplogApplier>(
-            std::make_unique<ReshardingOplogApplier::Env>(
-                opCtx->getServiceContext(), metrics, applierMetrics),
+            std::make_unique<ReshardingOplogApplier::Env>(opCtx->getServiceContext(),
+                                                          applierMetrics),
             std::move(sourceId),
             oplogBufferNss,
             metadata.getTempReshardingNss(),
@@ -212,7 +207,6 @@ std::vector<std::unique_ptr<ReshardingOplogApplier>> ReshardingDataReplication::
 std::unique_ptr<ReshardingDataReplicationInterface> ReshardingDataReplication::make(
     OperationContext* opCtx,
     ReshardingMetrics* metrics,
-    ReshardingMetricsNew* metricsNew,
     ReshardingApplierMetricsMap* applierMetricsMap,
     CommonReshardingMetadata metadata,
     const std::vector<DonorShardFetchTimestamp>& donorShards,
@@ -224,19 +218,16 @@ std::unique_ptr<ReshardingDataReplicationInterface> ReshardingDataReplication::m
     std::vector<std::unique_ptr<ReshardingTxnCloner>> txnCloners;
 
     if (!cloningDone) {
-        collectionCloner =
-            _makeCollectionCloner(metrics, metricsNew, metadata, myShardId, cloneTimestamp);
+        collectionCloner = _makeCollectionCloner(metrics, metadata, myShardId, cloneTimestamp);
         txnCloners = _makeTxnCloners(metadata, donorShards);
     }
 
-    auto oplogFetchers =
-        _makeOplogFetchers(opCtx, metrics, metricsNew, metadata, donorShards, myShardId);
+    auto oplogFetchers = _makeOplogFetchers(opCtx, metrics, metadata, donorShards, myShardId);
 
     auto oplogFetcherExecutor = _makeOplogFetcherExecutor(donorShards.size());
 
     auto stashCollections = ensureStashCollectionsExist(opCtx, sourceChunkMgr, donorShards);
     auto oplogAppliers = _makeOplogAppliers(opCtx,
-                                            metrics,
                                             applierMetricsMap,
                                             metadata,
                                             donorShards,
@@ -465,7 +456,7 @@ ReshardingDonorOplogId ReshardingDataReplication::getOplogFetcherResumeId(
 
         if (highestOplogBufferId) {
             auto oplogEntry = repl::OplogEntry{highestOplogBufferId->toBson()};
-            if (isFinalOplog(oplogEntry, reshardingUUID)) {
+            if (resharding::isFinalOplog(oplogEntry, reshardingUUID)) {
                 return ReshardingOplogFetcher::kFinalOpAlreadyFetched;
             }
 

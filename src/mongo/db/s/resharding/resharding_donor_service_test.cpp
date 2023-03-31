@@ -85,7 +85,9 @@ public:
                                    const BSONObj& query,
                                    const BSONObj& update) override {}
 
-    void clearFilteringMetadata(OperationContext* opCtx) override {}
+    void clearFilteringMetadata(OperationContext* opCtx,
+                                const NamespaceString& sourceNss,
+                                const NamespaceString& tempReshardingNss) override {}
 };
 
 class DonorOpObserverForTest : public OpObserverForTest {
@@ -148,12 +150,13 @@ public:
 
         NamespaceString sourceNss("sourcedb.sourcecollection");
         auto sourceUUID = UUID::gen();
-        auto commonMetadata =
-            CommonReshardingMetadata(UUID::gen(),
-                                     sourceNss,
-                                     sourceUUID,
-                                     constructTemporaryReshardingNss(sourceNss.db(), sourceUUID),
-                                     BSON("newKey" << 1));
+        auto commonMetadata = CommonReshardingMetadata(
+            UUID::gen(),
+            sourceNss,
+            sourceUUID,
+            resharding::constructTemporaryReshardingNss(sourceNss.db(), sourceUUID),
+            BSON("newKey" << 1));
+        commonMetadata.setStartTime(getServiceContext()->getFastClockSource()->now());
 
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
         return doc;
@@ -347,7 +350,7 @@ TEST_F(ReshardingDonorServiceTest, WritesFinalReshardOpOplogEntriesWhileWritesBl
 
     DBDirectClient client(opCtx.get());
     FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
-    findRequest.setFilter(BSON("o2.type" << kReshardFinalOpLogType));
+    findRequest.setFilter(BSON("o2.type" << resharding::kReshardFinalOpLogType));
     auto cursor = client.find(std::move(findRequest));
 
     ASSERT_TRUE(cursor->more()) << "Found no oplog entries for source collection";
@@ -709,7 +712,7 @@ TEST_F(ReshardingDonorServiceTest, TruncatesXLErrorOnDonorDocument) {
             // to the primitive truncation algorithm - Check that the total size is less than
             // kReshardErrorMaxBytes + a couple additional bytes to provide a buffer for the field
             // name sizes.
-            int maxReshardErrorBytesCeiling = kReshardErrorMaxBytes + 200;
+            int maxReshardErrorBytesCeiling = resharding::kReshardErrorMaxBytes + 200;
             ASSERT_LT(persistedAbortReasonBSON->objsize(), maxReshardErrorBytesCeiling);
             ASSERT_EQ(persistedAbortReasonBSON->getIntField("code"),
                       ErrorCodes::ReshardCollectionTruncatedError);
@@ -736,22 +739,11 @@ TEST_F(ReshardingDonorServiceTest, RestoreMetricsOnKBlockingWrites) {
     };
     doc.setMutableState(makeDonorCtx());
 
-    auto makeMetricsTimeInterval = [&](const Date_t startTime) {
-        ReshardingMetricsTimeInterval timeInterval;
-        timeInterval.setStart(startTime);
-        return timeInterval;
-    };
-
-    auto timeNow = Date_t::now();
-    auto opTimeDurationSecs = 60;
-    auto critSecDurationSecs = 10;
-
-    ReshardingDonorMetrics reshardingDonorMetrics;
-    reshardingDonorMetrics.setOperationRuntime(
-        makeMetricsTimeInterval(timeNow - Seconds(opTimeDurationSecs)));
-    reshardingDonorMetrics.setCriticalSection(
-        makeMetricsTimeInterval(timeNow - Seconds(critSecDurationSecs)));
-    doc.setMetrics(reshardingDonorMetrics);
+    auto timeNow = getServiceContext()->getFastClockSource()->now();
+    const auto opTimeDurationSecs = 60;
+    auto commonMetadata = doc.getCommonReshardingMetadata();
+    commonMetadata.setStartTime(timeNow - Seconds(opTimeDurationSecs));
+    doc.setCommonReshardingMetadata(std::move(commonMetadata));
 
     createSourceCollection(opCtx.get(), doc);
     DonorStateMachine::insertStateDocument(opCtx.get(), doc);
@@ -779,7 +771,6 @@ TEST_F(ReshardingDonorServiceTest, RestoreMetricsOnKBlockingWrites) {
     ASSERT_EQ(currOp.getStringField("donorState"),
               DonorState_serializer(DonorStateEnum::kBlockingWrites));
     ASSERT_GTE(currOp.getField("totalOperationTimeElapsedSecs").Long(), opTimeDurationSecs);
-    ASSERT_GTE(currOp.getField("totalCriticalSectionTimeElapsedSecs").Long(), critSecDurationSecs);
 
     stateTransitionsGuard.unset(kDoneState);
     ASSERT_OK(donor->getCompletionFuture().getNoThrow());

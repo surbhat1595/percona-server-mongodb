@@ -51,7 +51,6 @@
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
-#include "mongo/db/s/resharding/resharding_metrics_new.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context.h"
@@ -81,14 +80,14 @@ bool collectionHasSimpleCollation(OperationContext* opCtx, const NamespaceString
 
 }  // namespace
 
-ReshardingCollectionCloner::ReshardingCollectionCloner(std::unique_ptr<Env> env,
+ReshardingCollectionCloner::ReshardingCollectionCloner(ReshardingMetrics* metrics,
                                                        ShardKeyPattern newShardKeyPattern,
                                                        NamespaceString sourceNss,
                                                        const UUID& sourceUUID,
                                                        ShardId recipientShard,
                                                        Timestamp atClusterTime,
                                                        NamespaceString outputNss)
-    : _env(std::move(env)),
+    : _metrics(metrics),
       _newShardKeyPattern(std::move(newShardKeyPattern)),
       _sourceNss(std::move(sourceNss)),
       _sourceUUID(std::move(sourceUUID)),
@@ -110,7 +109,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::makePipel
     resolvedNamespaces[_sourceNss.coll()] = {_sourceNss, std::vector<BSONObj>{}};
 
     // Assume that the config.cache.chunks collection isn't a view either.
-    auto tempNss = constructTemporaryReshardingNss(_sourceNss.db(), _sourceUUID);
+    auto tempNss = resharding::constructTemporaryReshardingNss(_sourceNss.db(), _sourceUUID);
     auto tempCacheChunksNss =
         NamespaceString(NamespaceString::kConfigDb, "cache.chunks." + tempNss.ns());
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
@@ -270,12 +269,9 @@ bool ReshardingCollectionCloner::doOneBatch(OperationContext* opCtx, Pipeline& p
     Timer latencyTimer;
     auto batch = resharding::data_copy::fillBatchForInsert(
         pipeline, resharding::gReshardingCollectionClonerBatchSizeInBytes.load());
-    _env->metrics()->onCollClonerFillBatchForInsert(
+
+    _metrics->onCloningTotalRemoteBatchRetrieval(
         duration_cast<Milliseconds>(latencyTimer.elapsed()));
-    if (ShardingDataTransformMetrics::isEnabled()) {
-        _env->metricsNew()->onCloningTotalRemoteBatchRetrieval(
-            duration_cast<Milliseconds>(latencyTimer.elapsed()));
-    }
 
     if (batch.empty()) {
         return false;
@@ -294,15 +290,9 @@ bool ReshardingCollectionCloner::doOneBatch(OperationContext* opCtx, Pipeline& p
     int bytesInserted = resharding::data_copy::withOneStaleConfigRetry(
         opCtx, [&] { return resharding::data_copy::insertBatch(opCtx, _outputNss, batch); });
 
-    _env->metrics()->onDocumentsCopied(batch.size(), bytesInserted);
-    _env->metrics()->gotInserts(batch.size());
-    if (ShardingDataTransformMetrics::isEnabled()) {
-        _env->metricsNew()->onDocumentsCopied(
-            batch.size(), bytesInserted, Milliseconds(batchInsertTimer.millis()));
-        // TODO: Remove this comment when ReshardingMetrics are replaced with ReshardingMetricsNew.
-        // ReshardingMetricsNew::onInsertsApplied is intentionally not called here. Documents copied
-        // are no longer considered applied inserts.
-    }
+    _metrics->onDocumentsCopied(
+        batch.size(), bytesInserted, Milliseconds(batchInsertTimer.millis()));
+
     return true;
 }
 

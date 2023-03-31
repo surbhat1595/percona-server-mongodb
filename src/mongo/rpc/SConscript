@@ -37,6 +37,7 @@ protoEnv.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/wire_version',
     ],
     LIBDEPS_PRIVATE=[
@@ -52,7 +53,6 @@ protoEnv.Library(
 env.Library(
     target='rpc',
     source=[
-        'deprecated_wire_ops.idl',
         'factory.cpp',
         'legacy_reply.cpp',
         'legacy_reply_builder.cpp',
@@ -60,7 +60,8 @@ env.Library(
         'object_check.cpp',
         'object_check.idl',
         'reply_builder_interface.cpp',
-        'warn_deprecated_wire_ops.cpp',
+        'unsupported_wire_ops.idl',
+        'warn_unsupported_wire_ops.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -90,7 +91,7 @@ env.Library(
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/s/is_mongos',
-        '$BUILD_DIR/third_party/shim_pcrecpp',
+        '$BUILD_DIR/mongo/util/pcre_wrapper',
         'message',
     ],
 )
@@ -191,6 +192,7 @@ if wiredtiger:
         LIBDEPS=[
             '$BUILD_DIR/mongo/client/clientdriver_minimal',
             '$BUILD_DIR/mongo/db/auth/auth',
+            '$BUILD_DIR/mongo/db/auth/authmocks',
             '$BUILD_DIR/mongo/db/multitenancy_params',
             '$BUILD_DIR/mongo/db/service_context_test_fixture',
             '$BUILD_DIR/third_party/wiredtiger/wiredtiger_checksum',

@@ -29,6 +29,7 @@
 
 #include "mongo/client/replica_set_monitor_server_parameters.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/global_settings.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/serverless/shard_split_commands_gen.h"
@@ -49,14 +50,17 @@ public:
         using InvocationBase::InvocationBase;
 
         Response typedRun(OperationContext* opCtx) {
-            uassert(6057900,
-                    "feature \"shard split\" not supported",
+            uassert(ErrorCodes::IllegalOperation,
+                    "Feature 'shard split' not supported",
                     repl::feature_flags::gShardSplit.isEnabled(
                         serverGlobalParams.featureCompatibility));
             uassert(ErrorCodes::IllegalOperation,
-                    "shard split is not available on config servers",
+                    "Shard split is not available on config servers",
                     serverGlobalParams.clusterRole == ClusterRole::None ||
                         serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+            uassert(ErrorCodes::CommandNotSupported,
+                    "Shard split is only supported in serverless mode",
+                    getGlobalReplSettings().isServerless());
 
             const auto& cmd = request();
             auto stateDoc = ShardSplitDonorDocument(cmd.getMigrationId());
@@ -134,10 +138,13 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            uassert(6057902,
-                    "feature \"shard split\" not supported",
+            uassert(ErrorCodes::IllegalOperation,
+                    "Feature 'shard split' not supported",
                     repl::feature_flags::gShardSplit.isEnabled(
                         serverGlobalParams.featureCompatibility));
+            uassert(ErrorCodes::CommandNotSupported,
+                    "Shard split is only supported in serverless mode",
+                    getGlobalReplSettings().isServerless());
 
             const RequestType& cmd = request();
 
@@ -208,10 +215,13 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            uassert(6236600,
-                    "feature \"shard split\" not supported",
+            uassert(ErrorCodes::IllegalOperation,
+                    "Feature 'shard split' not supported",
                     repl::feature_flags::gShardSplit.isEnabled(
                         serverGlobalParams.featureCompatibility));
+            uassert(ErrorCodes::CommandNotSupported,
+                    "Shard split is only supported in serverless mode",
+                    getGlobalReplSettings().isServerless());
 
             const RequestType& cmd = request();
 

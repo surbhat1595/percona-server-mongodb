@@ -665,7 +665,7 @@ Status AuthzManagerExternalStateLocal::getRolesDescription(
 
 Status AuthzManagerExternalStateLocal::getRoleDescriptionsForDB(
     OperationContext* opCtx,
-    StringData dbname,
+    const DatabaseName& dbname,
     PrivilegeFormat showPrivileges,
     AuthenticationRestrictionsFormat showRestrictions,
     bool showBuiltinRoles,
@@ -716,7 +716,7 @@ Status AuthzManagerExternalStateLocal::getRoleDescriptionsForDB(
 
     return query(opCtx,
                  getRolesCollection(getActiveTenant(opCtx)),
-                 BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << dbname),
+                 BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << dbname.db()),
                  BSONObj(),
                  [&](const BSONObj& roleDoc) {
                      try {

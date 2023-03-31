@@ -58,6 +58,7 @@
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/catalog/rename_collection.h"
+#include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
@@ -385,6 +386,12 @@ void _logOpsInner(OperationContext* opCtx,
                     "write to oplog failed: {error}",
                     "Write to oplog failed",
                     "error"_attr = result.toString());
+    }
+
+    // Insert the oplog records to the respective tenants change collections.
+    if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+        ChangeStreamChangeCollectionManager::get(opCtx).insertDocumentsToChangeCollection(
+            opCtx, *records, timestamps);
     }
 
     // Set replCoord last optime only after we're sure the WUOW didn't abort and roll back.
@@ -1571,7 +1578,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     invariant(op.getObject2());
                     auto&& documentId = *op.getObject2();
                     auto documentFound = Helpers::findById(
-                        opCtx, db, collection->ns().ns(), documentId, changeStreamPreImage);
+                        opCtx, collection->ns().ns(), documentId, changeStreamPreImage);
                     invariant(documentFound);
                 }
 

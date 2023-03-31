@@ -79,8 +79,6 @@ var $config = extendWorkload($config, function($config, $super) {
         // filter out those errors.
         let skippableErrors = [
             ErrorCodes.StaleConfig,
-            // TODO (SERVER-64449): Get rid of this exception
-            ErrorCodes.OBSOLETE_StaleShardVersion,
             ErrorCodes.WriteConflict,
             ErrorCodes.LockTimeout,
             ErrorCodes.PreparedTransactionInProgress,
@@ -143,7 +141,7 @@ var $config = extendWorkload($config, function($config, $super) {
         const replacementStyle = (Math.floor(Math.random() * 2) == 0);
 
         if (replacementStyle) {
-            return {_id: currentId, skey: newShardKey, counter: counterForId + 1};
+            return {_id: currentId, skey: newShardKey, tid: this.tid, counter: counterForId + 1};
         } else {
             // Op style
             return {$set: {skey: newShardKey}, $inc: {counter: 1}};
@@ -193,11 +191,11 @@ var $config = extendWorkload($config, function($config, $super) {
         jsTestLog(logString);
     };
 
-    function assertDocWasUpdated(collection, idToUpdate, currentShardKey, newShardKey, newCounter) {
+    function assertDocWasUpdated(
+        collection, idToUpdate, currentShardKey, newShardKey, newCounter, tid) {
         assertWhenOwnColl.isnull(collection.findOne({_id: idToUpdate, skey: currentShardKey}));
-        assertWhenOwnColl.eq(
-            collection.findOne({_id: idToUpdate, skey: newShardKey}),
-            {_id: idToUpdate, skey: newShardKey, tid: this.tid, counter: newCounter});
+        assertWhenOwnColl.eq(collection.findOne({_id: idToUpdate, skey: newShardKey}),
+                             {_id: idToUpdate, skey: newShardKey, tid: tid, counter: newCounter});
     }
 
     function wasDocUpdated(collection, idToUpdate, currentShardKey) {
@@ -247,8 +245,12 @@ var $config = extendWorkload($config, function($config, $super) {
                     // write succeeded, so we can treat this error as success.
                     if (this.updateDocumentShardKeyUsingTransactionApiEnabled) {
                         print("Internal transactions are on so assuming the operation succeeded");
-                        assertDocWasUpdated(
-                            collection, idToUpdate, currentShardKey, newShardKey, counterForId + 1);
+                        assertDocWasUpdated(collection,
+                                            idToUpdate,
+                                            currentShardKey,
+                                            newShardKey,
+                                            counterForId + 1,
+                                            this.tid);
                         this.expectedCounters[idToUpdate] = counterForId + 1;
                         return;
                     }
@@ -325,8 +327,12 @@ var $config = extendWorkload($config, function($config, $super) {
                     // write succeeded, so we can treat this error as success.
                     if (this.updateDocumentShardKeyUsingTransactionApiEnabled) {
                         print("Internal transactions are on so assuming the operation succeeded");
-                        assertDocWasUpdated(
-                            collection, idToUpdate, currentShardKey, newShardKey, counterForId + 1);
+                        assertDocWasUpdated(collection,
+                                            idToUpdate,
+                                            currentShardKey,
+                                            newShardKey,
+                                            counterForId + 1,
+                                            this.tid);
                         this.expectedCounters[idToUpdate] = counterForId + 1;
                         return;
                     }

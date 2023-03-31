@@ -30,15 +30,15 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/query/query_planner.h"
-
 #include <boost/optional.hpp>
 #include <vector>
 
 #include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
+#include "mongo/db/exec/bucket_unpacker.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_algo.h"
@@ -46,11 +46,11 @@
 #include "mongo/db/matcher/expression_text.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
-#include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/plan_enumerator.h"
 #include "mongo/db/query/planner_access.h"
@@ -58,9 +58,11 @@
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/assert_util_core.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -171,8 +173,8 @@ bool hintMatchesClusterKey(const boost::optional<ClusteredCollectionInfo>& clust
 }
 
 /**
- * Returns the dependencies for the CanoncialQuery, split by those needed to answer the filter, and
- * those needed for "everything else" which is the project and sort.
+ * Returns the dependencies for the CanoncialQuery, split by those needed to answer the filter,
+ * and those needed for "everything else" which is the project and sort.
  */
 std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params,
                                                 const CanonicalQuery& query) {
@@ -183,8 +185,7 @@ std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params
         outputDeps.needWholeDocument = true;
         return {std::move(filterDeps), std::move(outputDeps)};
     }
-    auto projectionFields = query.getProj()->getRequiredFields();
-    outputDeps.fields.insert(projectionFields.begin(), projectionFields.end());
+    outputDeps.fields = query.getProj()->getRequiredFields();
     if (auto sortPattern = query.getSortPattern()) {
         sortPattern->addDependencies(&outputDeps);
     }
@@ -193,8 +194,8 @@ std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params
             outputDeps.fields.emplace(field.fieldNameStringData());
         }
     }
-    // There's no known way a sort would depend on the whole document, and we already verified that
-    // the projection doesn't depend on the whole document.
+    // There's no known way a sort would depend on the whole document, and we already verified
+    // that the projection doesn't depend on the whole document.
     tassert(6430503, "Unexpectedly required entire object", !outputDeps.needWholeDocument);
     return {std::move(filterDeps), std::move(outputDeps)};
 }
@@ -289,8 +290,8 @@ string optionString(size_t options) {
         ss << "DEFAULT ";
     }
     while (options) {
-        // The expression (x & (x - 1)) yields x with the lowest bit cleared.  Then the exclusive-or
-        // of the result with the original yields the lowest bit by itself.
+        // The expression (x & (x - 1)) yields x with the lowest bit cleared.  Then the
+        // exclusive-or of the result with the original yields the lowest bit by itself.
         size_t new_options = options & (options - 1);
         QueryPlannerParams::Options opt = QueryPlannerParams::Options(new_options ^ options);
         options = new_options;
@@ -481,12 +482,16 @@ std::unique_ptr<QuerySolution> buildCollscanSoln(const CanonicalQuery& query,
     return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
 }
 
-std::unique_ptr<QuerySolution> buildWholeIXSoln(const IndexEntry& index,
-                                                const CanonicalQuery& query,
-                                                const QueryPlannerParams& params,
-                                                int direction = 1) {
+std::unique_ptr<QuerySolution> buildWholeIXSoln(
+    const IndexEntry& index,
+    const CanonicalQuery& query,
+    const QueryPlannerParams& params,
+    const boost::optional<int>& direction = boost::none) {
+    tassert(6499400,
+            "Cannot pass both an explicit direction and a traversal preference",
+            !(direction.has_value() && params.traversalPreference));
     std::unique_ptr<QuerySolutionNode> solnRoot(
-        QueryPlannerAccess::scanWholeIndex(index, query, params, direction));
+        QueryPlannerAccess::scanWholeIndex(index, query, params, direction.value_or(1)));
     return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
 }
 
@@ -706,7 +711,8 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
         return s;
     }
 
-    // The MatchExpression tree is in canonical order. We must order the nodes for access planning.
+    // The MatchExpression tree is in canonical order. We must order the nodes for access
+    // planning.
     prepareForAccessPlanning(clone.get());
 
     LOGV2_DEBUG(20965, 5, "Tagged tree", "tree"_attr = redact(clone->debugString()));
@@ -737,8 +743,8 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
 
 StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     const CanonicalQuery& query, const QueryPlannerParams& params) {
-    // It's a little silly to ask for a count and for owned data. This could indicate a bug earlier
-    // on.
+    // It's a little silly to ask for a count and for owned data. This could indicate a bug
+    // earlier on.
     tassert(5397500,
             "Count and owned data requested",
             !((params.options & QueryPlannerParams::IS_COUNT) &&
@@ -784,10 +790,10 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         const BSONObj& hintObj = query.getFindCommandRequest().getHint();
         const auto naturalHint = hintObj[query_request_helper::kNaturalSortField];
         if (naturalHint || hintMatchesClusterKey(params.clusteredInfo, hintObj)) {
-            // The hint can be {$natural: +/-1}. If this happens, output a collscan. We expect any
-            // $natural sort to have been normalized to a $natural hint upstream. Additionally, if
-            // the hint matches the collection's cluster key, we also output a collscan utilizing
-            // the cluster key.
+            // The hint can be {$natural: +/-1}. If this happens, output a collscan. We expect
+            // any $natural sort to have been normalized to a $natural hint upstream.
+            // Additionally, if the hint matches the collection's cluster key, we also output a
+            // collscan utilizing the cluster key.
 
             if (naturalHint) {
                 // Perform validation specific to $natural.
@@ -808,8 +814,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
                 const auto clusterKey = params.clusteredInfo->getIndexSpec().getKey();
 
-                // Check if the query collator is compatible with the collection collator for the
-                // provided min and max values.
+                // Check if the query collator is compatible with the collection collator for
+                // the provided min and max values.
                 if ((!minObj.isEmpty() &&
                      !indexCompatibleMaxMin(minObj,
                                             query.getCollator(),
@@ -850,17 +856,17 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         }
     }
 
-    // Hints require us to only consider the hinted index. If index filters in the query settings
-    // were used to override the allowed indices for planning, we should not use the hinted index
-    // requested in the query.
+    // Hints require us to only consider the hinted index. If index filters in the query
+    // settings were used to override the allowed indices for planning, we should not use the
+    // hinted index requested in the query.
     BSONObj hintedIndex;
     if (!params.indexFiltersApplied) {
         hintedIndex = query.getFindCommandRequest().getHint();
     }
 
-    // Either the list of indices passed in by the caller, or the list of indices filtered according
-    // to the hint. This list is later expanded in order to allow the planner to handle wildcard
-    // indexes.
+    // Either the list of indices passed in by the caller, or the list of indices filtered
+    // according to the hint. This list is later expanded in order to allow the planner to
+    // handle wildcard indexes.
     std::vector<IndexEntry> fullIndexList;
 
     // Will hold a copy of the index entry chosen by the hint.
@@ -900,7 +906,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     } else {
         relevantIndices = fullIndexList;
 
-        // Relevant indices should only ever exceed a size of 1 when there is a hint in the case of
+        // Relevant indices should only ever exceed a size of 1 when there is a hint in the case
+        // of
         // $** index.
         if (relevantIndices.size() > 1) {
             for (auto&& entry : relevantIndices) {
@@ -935,13 +942,13 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         invariant(*hintedIndexEntry == fullIndexList.front());
 
         // In order to be fully compatible, the min has to be less than the max according to the
-        // index key pattern ordering. The first step in verifying this is "finish" the min and max
-        // by replacing empty objects and stripping field names.
+        // index key pattern ordering. The first step in verifying this is "finish" the min and
+        // max by replacing empty objects and stripping field names.
         BSONObj finishedMinObj = finishMinObj(*hintedIndexEntry, minObj, maxObj);
         BSONObj finishedMaxObj = finishMaxObj(*hintedIndexEntry, minObj, maxObj);
 
-        // Now we have the final min and max. This index is only relevant for the min/max query if
-        // min < max.
+        // Now we have the final min and max. This index is only relevant for the min/max query
+        // if min < max.
         if (finishedMinObj.woCompare(finishedMaxObj, hintedIndexEntry->keyPattern, false) >= 0) {
             return Status(ErrorCodes::Error(51175),
                           "The value provided for min() does not come before the value provided "
@@ -1073,9 +1080,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                         "About to build solntree from tagged tree",
                         "tree"_attr = redact(nextTaggedTree->debugString()));
 
-            // Store the plan cache index tree before calling prepareForAccessingPlanning(), so that
-            // the PlanCacheIndexTree has the same sort as the MatchExpression used to generate the
-            // plan cache key.
+            // Store the plan cache index tree before calling prepareForAccessingPlanning(), so
+            // that the PlanCacheIndexTree has the same sort as the MatchExpression used to
+            // generate the plan cache key.
             std::unique_ptr<MatchExpression> clone(nextTaggedTree->shallowClone());
             std::unique_ptr<PlanCacheIndexTree> cacheData;
             auto statusWithCacheData = cacheDataFromTaggedTree(clone.get(), relevantIndices);
@@ -1088,8 +1095,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 cacheData = std::move(statusWithCacheData.getValue());
             }
 
-            // We have already cached the tree in canonical order, so now we can order the nodes for
-            // access planning.
+            // We have already cached the tree in canonical order, so now we can order the nodes
+            // for access planning.
             prepareForAccessPlanning(nextTaggedTree.get());
 
             // This can fail if enumeration makes a mistake.
@@ -1138,7 +1145,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // An index was hinted. If there are any solutions, they use the hinted index.  If not, we
     // scan the entire index to provide results and output that as our plan.  This is the
-    // desired behavior when an index is hinted that is not relevant to the query. In the case that
+    // desired behavior when an index is hinted that is not relevant to the query. In the case
+    // that
     // $** index is hinted, we do not want this behavior.
     if (!hintedIndex.isEmpty() && relevantIndices.size() == 1) {
         if (out.size() > 0) {
@@ -1149,6 +1157,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 ErrorCodes::NoQueryExecutionPlans,
                 "$hint: refusing to build whole-index solution, because it's a wildcard index");
         }
+
         // Return hinted index solution if found.
         auto soln = buildWholeIXSoln(relevantIndices.front(), query, params);
         if (!soln) {
@@ -1181,8 +1190,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         if (!usingIndexToSort) {
             for (size_t i = 0; i < fullIndexList.size(); ++i) {
                 const IndexEntry& index = fullIndexList[i];
-                // Only a regular index or the non-hashed prefix of a compound hashed index can be
-                // used to provide a sort. In addition, the index needs to be a non-sparse index.
+                // Only a regular index or the non-hashed prefix of a compound hashed index can
+                // be used to provide a sort. In addition, the index needs to be a non-sparse
+                // index.
                 //
                 // TODO: Sparse indexes can't normally provide a sort, because non-indexed
                 // documents could potentially be missing from the result set.  However, if the
@@ -1202,14 +1212,14 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                     continue;
                 }
 
-                // If the index collation differs from the query collation, the index should not be
-                // used to provide a sort, because strings will be ordered incorrectly.
+                // If the index collation differs from the query collation, the index should not
+                // be used to provide a sort, because strings will be ordered incorrectly.
                 if (!CollatorInterface::collatorsMatch(index.collator, query.getCollator())) {
                     continue;
                 }
 
-                // Partial indexes can only be used to provide a sort only if the query predicate is
-                // compatible.
+                // Partial indexes can only be used to provide a sort only if the query
+                // predicate is compatible.
                 if (index.filterExpr && !expression::isSubsetOf(query.root(), index.filterExpr)) {
                     continue;
                 }
@@ -1268,10 +1278,10 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 if (direction != 0) {
                     auto soln = buildCollscanSoln(query, isTailable, params, direction);
                     if (soln) {
-                        LOGV2_DEBUG(
-                            6082401,
-                            5,
-                            "Planner: outputting soln that uses clustered index to provide sort");
+                        LOGV2_DEBUG(6082401,
+                                    5,
+                                    "Planner: outputting soln that uses clustered index to "
+                                    "provide sort");
                         SolutionCacheData* scd = new SolutionCacheData();
                         scd->solnType = SolutionCacheData::COLLSCAN_SOLN;
                         scd->wholeIXSolnDir = direction;
@@ -1284,8 +1294,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         }
     }
 
-    // If a projection exists, there may be an index that allows for a covered plan, even if none
-    // were considered earlier.
+    // If a projection exists, there may be an index that allows for a covered plan, even if
+    // none were considered earlier.
     const auto projection = query.getProj();
     if (params.options & QueryPlannerParams::GENERATE_COVERED_IXSCANS && out.size() == 0 &&
         query.getQueryObj().isEmpty() && projection && !projection->requiresDocument()) {
@@ -1365,8 +1375,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 }
 
 /**
- * The 'query' might contain parts of aggregation pipeline. For now, we plan those separately
- * and later attach the agg portion of the plan to the solution(s) for the "find" part of the query.
+ * The 'query' might contain parts of aggregation pipeline. For now, we plan those separately and
+ * later attach the agg portion of the plan to the solution(s) for the "find" part of the query.
  */
 std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     const CanonicalQuery& query,
@@ -1389,49 +1399,32 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
-        auto projStage =
-            dynamic_cast<DocumentSourceSingleDocumentTransformation*>(innerStage->documentSource());
-        if (projStage) {
-            auto projObj =
-                projStage->getTransformer().serializeTransformation(boost::none).toBson();
-            auto projAst =
-                projection_ast::parseAndAnalyze(projStage->getContext(),
-                                                projObj,
-                                                ProjectionPolicies::aggregateProjectionPolicies());
-
-            if (projAst.isSimple()) {
-                solnForAgg = std::make_unique<ProjectionNodeSimple>(
-                    std::move(solnForAgg), *query.root(), projAst);
-            } else {
-                solnForAgg = std::make_unique<ProjectionNodeDefault>(
-                    std::move(solnForAgg), *query.root(), projAst);
-            }
-            continue;
-        }
-
         auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(innerStage->documentSource());
         if (lookupStage) {
             tassert(6369000,
                     "This $lookup stage should be compatible with SBE",
                     lookupStage->sbeCompatible());
+            auto [strategy, idxEntry] = QueryPlannerAnalysis::determineLookupStrategy(
+                lookupStage->getFromNs().toString(),
+                lookupStage->getForeignField()->fullPath(),
+                secondaryCollInfos,
+                query.getExpCtx()->allowDiskUse,
+                query.getCollator());
             auto eqLookupNode =
                 std::make_unique<EqLookupNode>(std::move(solnForAgg),
                                                lookupStage->getFromNs().toString(),
                                                lookupStage->getLocalField()->fullPath(),
                                                lookupStage->getForeignField()->fullPath(),
                                                lookupStage->getAsField().fullPath(),
+                                               strategy,
+                                               std::move(idxEntry),
                                                innerStage->isLastSource() /* shouldProduceBson */);
-            QueryPlannerAnalysis::determineLookupStrategy(eqLookupNode.get(),
-                                                          secondaryCollInfos,
-                                                          query.getExpCtx()->allowDiskUse,
-                                                          query.getCollator());
             solnForAgg = std::move(eqLookupNode);
             continue;
         }
 
         tasserted(5842400,
-                  "Cannot support pushdown of a stage other than $group $project or $lookup at the "
-                  "moment");
+                  "Cannot support pushdown of a stage other than $group or $lookup at the moment");
     }
 
     solution->extendWith(std::move(solnForAgg));

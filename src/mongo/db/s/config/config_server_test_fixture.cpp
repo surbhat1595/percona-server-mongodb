@@ -70,7 +70,6 @@
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
-#include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/s/shard_id.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/clock_source_mock.h"
@@ -292,7 +291,7 @@ StatusWith<BSONObj> ConfigServerTestFixture::findOneOnConfigCollection(Operation
 }
 
 void ConfigServerTestFixture::setupShards(const std::vector<ShardType>& shards) {
-    const NamespaceString shardNS(ShardType::ConfigNS);
+    const NamespaceString shardNS(NamespaceString::kConfigsvrShardsNamespace);
     for (const auto& shard : shards) {
         ASSERT_OK(insertToConfigCollection(operationContext(), shardNS, shard.toBSON()));
     }
@@ -300,8 +299,8 @@ void ConfigServerTestFixture::setupShards(const std::vector<ShardType>& shards) 
 
 StatusWith<ShardType> ConfigServerTestFixture::getShardDoc(OperationContext* opCtx,
                                                            const std::string& shardId) {
-    auto doc =
-        findOneOnConfigCollection(opCtx, ShardType::ConfigNS, BSON(ShardType::name(shardId)));
+    auto doc = findOneOnConfigCollection(
+        opCtx, NamespaceString::kConfigsvrShardsNamespace, BSON(ShardType::name(shardId)));
     if (!doc.isOK()) {
         if (doc.getStatus() == ErrorCodes::NoMatchingDocument) {
             return {ErrorCodes::ShardNotFound,
@@ -323,8 +322,8 @@ void ConfigServerTestFixture::setupCollection(const NamespaceString& nss,
     if (!dbDoc.isOK()) {
         // If the database is not setup, choose the first available shard as primary to implicitly
         // create the db
-        auto swShardDoc =
-            findOneOnConfigCollection(operationContext(), ShardType::ConfigNS, BSONObj());
+        auto swShardDoc = findOneOnConfigCollection(
+            operationContext(), NamespaceString::kConfigsvrShardsNamespace, BSONObj());
         invariant(swShardDoc.isOK(),
                   "At least one shard should be setup when initializing a collection");
         auto shard = uassertStatusOK(ShardType::fromBSON(swShardDoc.getValue()));
@@ -450,30 +449,6 @@ std::vector<KeysCollectionDocument> ConfigServerTestFixture::getKeys(OperationCo
     }
 
     return keys;
-}
-
-void ConfigServerTestFixture::expectSetShardVersion(
-    const HostAndPort& expectedHost,
-    const ShardType& expectedShard,
-    const NamespaceString& expectedNs,
-    boost::optional<ChunkVersion> expectedChunkVersion) {
-    onCommand([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(expectedHost, request.target);
-        ASSERT_BSONOBJ_EQ(rpc::makeEmptyMetadata(),
-                          rpc::TrackingMetadata::removeTrackingData(request.metadata));
-
-        SetShardVersionRequest ssv =
-            assertGet(SetShardVersionRequest::parseFromBSON(request.cmdObj));
-
-        ASSERT(ssv.isAuthoritative());
-        ASSERT_EQ(expectedNs.toString(), ssv.getNS().ns());
-
-        if (expectedChunkVersion) {
-            ASSERT_EQ(*expectedChunkVersion, ssv.getNSVersion());
-        }
-
-        return BSON("ok" << true);
-    });
 }
 
 void ConfigServerTestFixture::setupOpObservers() {

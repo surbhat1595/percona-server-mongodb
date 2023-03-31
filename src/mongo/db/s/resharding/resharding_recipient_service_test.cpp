@@ -43,7 +43,6 @@
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_data_replication.h"
-#include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
@@ -84,7 +83,7 @@ public:
         std::vector<ChunkType> chunks = {ChunkType{
             _sourceUUID,
             ChunkRange{BSON(_currentShardKey << MINKEY), BSON(_currentShardKey << MAXKEY)},
-            ChunkVersion(100, 0, epoch, Timestamp(1, 1)),
+            ChunkVersion({epoch, Timestamp(1, 1)}, {100, 0}),
             _someDonorId}};
 
         auto rt = RoutingTableHistory::makeNew(_sourceNss,
@@ -137,7 +136,9 @@ public:
                                    const BSONObj& query,
                                    const BSONObj& update) override {}
 
-    void clearFilteringMetadata(OperationContext* opCtx) override {}
+    void clearFilteringMetadata(OperationContext* opCtx,
+                                const NamespaceString& sourceNss,
+                                const NamespaceString& tempReshardingNss) override {}
 
 private:
     RoutingTableHistoryValueHandle _makeStandaloneRoutingTableHistory(RoutingTableHistory rt) {
@@ -235,9 +236,8 @@ public:
         return _controller.get();
     }
 
-    ReshardingMetrics* metrics() {
-        auto serviceContext = getServiceContext();
-        return ReshardingMetrics::get(serviceContext);
+    BSONObj newShardKeyPattern() {
+        return BSON("newKey" << 1);
     }
 
     ReshardingRecipientDocument makeStateDocument(bool isAlsoDonor) {
@@ -252,12 +252,13 @@ public:
 
         NamespaceString sourceNss("sourcedb", "sourcecollection");
         auto sourceUUID = UUID::gen();
-        auto commonMetadata =
-            CommonReshardingMetadata(UUID::gen(),
-                                     sourceNss,
-                                     sourceUUID,
-                                     constructTemporaryReshardingNss(sourceNss.db(), sourceUUID),
-                                     BSON("newKey" << 1));
+        auto commonMetadata = CommonReshardingMetadata(
+            UUID::gen(),
+            sourceNss,
+            sourceUUID,
+            resharding::constructTemporaryReshardingNss(sourceNss.db(), sourceUUID),
+            newShardKeyPattern());
+        commonMetadata.setStartTime(getServiceContext()->getFastClockSource()->now());
 
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
         return doc;
@@ -507,7 +508,6 @@ DEATH_TEST_REGEX_F(ReshardingRecipientServiceTest, CommitFn, "4457001.*tripwire"
 }
 
 TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort) {
-    auto metrics = ReshardingRecipientServiceTest::metrics();
     for (bool isAlsoDonor : {false, true}) {
         LOGV2(5551107,
               "Running case",
@@ -567,11 +567,6 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
             ASSERT_FALSE(bool(coll));
         }
     }
-
-    BSONObjBuilder result;
-    metrics->serializeCumulativeOpMetrics(&result);
-
-    ASSERT_EQ(result.obj().getField("countReshardingFailures").numberLong(), 2);
 }
 
 TEST_F(ReshardingRecipientServiceTest, RenamesTemporaryReshardingCollectionWhenDone) {
@@ -632,10 +627,12 @@ TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryOnReshardDoneCatchUp)
               ErrorCodes::InterruptedDueToReplStateChange);
 
     DBDirectClient client(opCtx.get());
-    NamespaceString sourceNss = constructTemporaryReshardingNss("sourcedb", doc.getSourceUUID());
+    NamespaceString sourceNss =
+        resharding::constructTemporaryReshardingNss("sourcedb", doc.getSourceUUID());
 
     FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
-    findRequest.setFilter(BSON("ns" << sourceNss.toString()));
+    findRequest.setFilter(
+        BSON("ns" << sourceNss.toString() << "o2.reshardDoneCatchUp" << BSON("$exists" << true)));
     auto cursor = client.find(std::move(findRequest));
 
     ASSERT_TRUE(cursor->more()) << "Found no oplog entries for source collection";
@@ -656,9 +653,53 @@ TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryOnReshardDoneCatchUp)
     ASSERT_FALSE(bool(op.getDestinedRecipient())) << op.getEntry();
 }
 
-TEST_F(ReshardingRecipientServiceTest, TruncatesXLErrorOnRecipientDocument) {
-    auto metrics = ReshardingRecipientServiceTest::metrics();
+TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryForImplicitShardCollection) {
+    boost::optional<PauseDuringStateTransitions> doneTransitionGuard;
+    doneTransitionGuard.emplace(controller(), RecipientStateEnum::kDone);
 
+    auto doc = makeStateDocument(false /* isAlsoDonor */);
+    auto opCtx = makeOperationContext();
+    auto rawOpCtx = opCtx.get();
+    RecipientStateMachine::insertStateDocument(rawOpCtx, doc);
+    auto recipient = RecipientStateMachine::getOrCreate(rawOpCtx, _service, doc.toBSON());
+
+    notifyToStartCloning(rawOpCtx, *recipient, doc);
+    notifyReshardingCommitting(opCtx.get(), *recipient, doc);
+
+    doneTransitionGuard->wait(RecipientStateEnum::kDone);
+
+    stepDown();
+    doneTransitionGuard.reset();
+    ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+
+    DBDirectClient client(opCtx.get());
+    NamespaceString sourceNss =
+        resharding::constructTemporaryReshardingNss("sourcedb", doc.getSourceUUID());
+
+    FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
+    findRequest.setFilter(
+        BSON("ns" << sourceNss.toString() << "o2.shardCollection" << BSON("$exists" << true)));
+    auto cursor = client.find(std::move(findRequest));
+
+    ASSERT_TRUE(cursor->more()) << "Found no oplog entries for source collection";
+    repl::OplogEntry shardCollectionOp(cursor->next());
+
+    ASSERT_EQ(OpType_serializer(shardCollectionOp.getOpType()),
+              OpType_serializer(repl::OpTypeEnum::kNoop))
+        << shardCollectionOp.getEntry();
+    ASSERT_EQ(*shardCollectionOp.getUuid(), doc.getReshardingUUID())
+        << shardCollectionOp.getEntry();
+    ASSERT_EQ(shardCollectionOp.getObject()["msg"].type(), BSONType::Object)
+        << shardCollectionOp.getEntry();
+    ASSERT_FALSE(shardCollectionOp.getFromMigrate());
+
+    auto shardCollEventExpected =
+        BSON("shardCollection" << sourceNss.toString() << "shardKey" << newShardKeyPattern());
+    ASSERT_BSONOBJ_EQ(*shardCollectionOp.getObject2(), shardCollEventExpected);
+}
+
+TEST_F(ReshardingRecipientServiceTest, TruncatesXLErrorOnRecipientDocument) {
     for (bool isAlsoDonor : {false, true}) {
         LOGV2(5568600,
               "Running case",
@@ -702,7 +743,7 @@ TEST_F(ReshardingRecipientServiceTest, TruncatesXLErrorOnRecipientDocument) {
             // to the primitive truncation algorithm - Check that the total size is less than
             // kReshardErrorMaxBytes + a couple additional bytes to provide a buffer for the field
             // name sizes.
-            int maxReshardErrorBytesCeiling = kReshardErrorMaxBytes + 200;
+            int maxReshardErrorBytesCeiling = resharding::kReshardErrorMaxBytes + 200;
             ASSERT_LT(persistedAbortReasonBSON->objsize(), maxReshardErrorBytesCeiling);
             ASSERT_EQ(persistedAbortReasonBSON->getIntField("code"),
                       ErrorCodes::ReshardCollectionTruncatedError);
@@ -711,14 +752,9 @@ TEST_F(ReshardingRecipientServiceTest, TruncatesXLErrorOnRecipientDocument) {
         recipient->abort(false);
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
     }
-    BSONObjBuilder result;
-    metrics->serializeCumulativeOpMetrics(&result);
-
-    ASSERT_EQ(result.obj().getField("countReshardingFailures").numberLong(), 2);
 }
 
 TEST_F(ReshardingRecipientServiceTest, MetricsSuccessfullyShutDownOnUserCancelation) {
-    auto metrics = ReshardingRecipientServiceTest::metrics();
     auto doc = makeStateDocument(false);
     auto opCtx = makeOperationContext();
     RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
@@ -731,11 +767,6 @@ TEST_F(ReshardingRecipientServiceTest, MetricsSuccessfullyShutDownOnUserCancelat
 
     recipient->abort(true);
     ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
-    BSONObjBuilder result;
-    metrics->serializeCumulativeOpMetrics(&result);
-    BSONObj obj = result.obj();
-    ASSERT_EQ(obj.getField("countReshardingCanceled").numberLong(), 1);
-    ASSERT_EQ(obj.getField("countReshardingFailures").numberLong(), 0);
 }
 
 TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
@@ -788,7 +819,8 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
             for (const auto& donor : donorShards) {
                 // Setup oplogBuffer collection.
                 ReshardingDonorOplogId donorOplogId{{20, i}, {19, 0}};
-                insertFn(getLocalOplogBufferNamespace(doc.getSourceUUID(), donor.getShardId()),
+                insertFn(resharding::getLocalOplogBufferNamespace(doc.getSourceUUID(),
+                                                                  donor.getShardId()),
                          InsertStatement{BSON("_id" << donorOplogId.toBSON())});
                 ++i;
 
@@ -833,8 +865,9 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
                                   MongoProcessInterface::CurrentOpConnectionsMode::kExcludeIdle,
                                   MongoProcessInterface::CurrentOpSessionsMode::kExcludeIdle)
                               .get();
-            ASSERT_EQ(currOp.getField("documentsCopied").Long(), 1L);
-            ASSERT_EQ(currOp.getField("bytesCopied").Long(), (long)reshardedDoc.objsize());
+
+            ASSERT_EQ(currOp.getField("documentsCopied").numberLong(), 1L);
+            ASSERT_EQ(currOp.getField("bytesCopied").numberLong(), (long)reshardedDoc.objsize());
             ASSERT_EQ(currOp.getStringField("recipientState"),
                       RecipientState_serializer(RecipientStateEnum::kApplying));
         } else if (state == RecipientStateEnum::kDone) {
@@ -843,11 +876,12 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
                                   MongoProcessInterface::CurrentOpConnectionsMode::kExcludeIdle,
                                   MongoProcessInterface::CurrentOpSessionsMode::kExcludeIdle)
                               .get();
-            ASSERT_EQ(currOp.getField("documentsCopied").Long(), 1L);
-            ASSERT_EQ(currOp.getField("bytesCopied").Long(), (long)reshardedDoc.objsize());
-            ASSERT_EQ(currOp.getField("oplogEntriesFetched").Long(),
+
+            ASSERT_EQ(currOp.getField("documentsCopied").numberLong(), 1L);
+            ASSERT_EQ(currOp.getField("bytesCopied").numberLong(), (long)reshardedDoc.objsize());
+            ASSERT_EQ(currOp.getField("oplogEntriesFetched").numberLong(),
                       (long)(1 * doc.getDonorShards().size()));
-            ASSERT_EQ(currOp.getField("oplogEntriesApplied").Long(),
+            ASSERT_EQ(currOp.getField("oplogEntriesApplied").numberLong(),
                       oplogEntriesAppliedOnEachDonor * doc.getDonorShards().size());
             ASSERT_EQ(currOp.getStringField("recipientState"),
                       RecipientState_serializer(RecipientStateEnum::kStrictConsistency));
@@ -872,9 +906,6 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
 }
 
 TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUpWithMissingProgressDoc) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagShardingDataTransformMetrics", true);
-
     auto doc = makeStateDocument(false);
     auto instanceId =
         BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
@@ -897,7 +928,7 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUpWithMissingProgr
 
         // Setup oplogBuffer collection.
         ReshardingDonorOplogId donorOplogId{{20, i}, {19, 0}};
-        insertFn(getLocalOplogBufferNamespace(doc.getSourceUUID(), donor.getShardId()),
+        insertFn(resharding::getLocalOplogBufferNamespace(doc.getSourceUUID(), donor.getShardId()),
                  InsertStatement{BSON("_id" << donorOplogId.toBSON())});
 
         // Setup reshardingApplierProgress collection.

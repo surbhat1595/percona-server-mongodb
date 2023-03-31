@@ -34,6 +34,7 @@ namespace mongo::optimizer::cascades {
 
 LogicalRewriter::RewriteSet LogicalRewriter::_explorationSet = {
     {LogicalRewriteType::GroupByExplore, 1},
+    {LogicalRewriteType::FilterExplore, 1},
     {LogicalRewriteType::SargableSplit, 2},
     {LogicalRewriteType::FilterRIDIntersectReorder, 2},
     {LogicalRewriteType::EvaluationRIDIntersectReorder, 2}};
@@ -597,12 +598,13 @@ struct SubstituteConvert<LimitSkipNode> {
     }
 };
 
-static void addElemMatchAndSargableNode(const ABT& node, ABT sargableNode, RewriteContext& ctx) {
+static void addSargableChildNode(const ABT& node, ABT sargableNode, RewriteContext& ctx) {
     ABT newNode = node;
     newNode.cast<FilterNode>()->getChild() = std::move(sargableNode);
     ctx.addNode(newNode, false /*substitute*/, true /*addExistingNodeWithNewChild*/);
 }
 
+template <bool isSubstitution>
 static void convertFilterToSargableNode(ABT::reference_type node,
                                         const FilterNode& filterNode,
                                         RewriteContext& ctx) {
@@ -622,16 +624,17 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         return;
     }
 
-    PartialSchemaReqConversion conversion = convertExprToPartialSchemaReq(filterNode.getFilter());
-    if (!conversion._success) {
+    auto conversion =
+        convertExprToPartialSchemaReq(filterNode.getFilter(), true /*isFilterContext*/);
+    if (!conversion) {
         return;
     }
-    if (conversion._hasEmptyInterval) {
+    if (conversion->_hasEmptyInterval) {
         addEmptyValueScanNode(ctx);
         return;
     }
 
-    for (const auto& entry : conversion._reqMap) {
+    for (const auto& entry : conversion->_reqMap) {
         uassert(6624111,
                 "Filter partial schema requirement must contain a variable name.",
                 !entry.first._projectionName.empty());
@@ -643,22 +646,56 @@ static void convertFilterToSargableNode(ABT::reference_type node,
                 !isIntervalReqFullyOpenDNF(entry.second.getIntervals()));
     }
 
+    // If in substitution mode, disallow retaining original predicate. If in exploration mode, only
+    // allow retaining the original predicate and if we have at least one index available.
+    if constexpr (isSubstitution) {
+        if (conversion->_retainPredicate) {
+            return;
+        }
+    } else if (!conversion->_retainPredicate || scanDef.getIndexDefs().empty()) {
+        return;
+    }
+
     bool hasEmptyInterval = false;
     auto candidateIndexMap = computeCandidateIndexMap(ctx.getPrefixId(),
                                                       indexingAvailability.getScanProjection(),
-                                                      conversion._reqMap,
+                                                      conversion->_reqMap,
                                                       scanDef,
                                                       hasEmptyInterval);
 
     if (hasEmptyInterval) {
         addEmptyValueScanNode(ctx);
     } else {
-        ABT sargableNode = make<SargableNode>(std::move(conversion._reqMap),
+        ABT sargableNode = make<SargableNode>(std::move(conversion->_reqMap),
                                               std::move(candidateIndexMap),
                                               IndexReqTarget::Complete,
                                               filterNode.getChild());
 
-        ctx.addNode(sargableNode, true /*substitute*/);
+        if (conversion->_retainPredicate) {
+            const GroupIdType childGroupId =
+                filterNode.getChild().cast<MemoLogicalDelegatorNode>()->getGroupId();
+            if (childGroupId == indexingAvailability.getScanGroupId()) {
+                // Add node directly.
+                addSargableChildNode(node, std::move(sargableNode), ctx);
+            } else {
+                // Look at the child group to find SargableNodes and attempt to combine.
+                const auto& logicalNodes = ctx.getMemo().getGroup(childGroupId)._logicalNodes;
+                for (const ABT& childNode : logicalNodes.getVector()) {
+                    if (auto childSargableNode = childNode.cast<SargableNode>();
+                        childSargableNode != nullptr) {
+                        const auto& result = mergeSargableNodes(indexingAvailability,
+                                                                *sargableNode.cast<SargableNode>(),
+                                                                *childSargableNode,
+                                                                ctx);
+                        if (result) {
+                            addSargableChildNode(node, std::move(*result), ctx);
+                        }
+                    }
+                }
+            }
+        } else {
+            ctx.addNode(sargableNode, isSubstitution);
+        }
     }
 }
 
@@ -706,7 +743,7 @@ struct SubstituteConvert<FilterNode> {
             }
         }
 
-        convertFilterToSargableNode(node, filterNode, ctx);
+        convertFilterToSargableNode<true /*isSubstitution*/>(node, filterNode, ctx);
     }
 };
 
@@ -777,18 +814,24 @@ struct SubstituteConvert<EvaluationNode> {
         }
 
         // We still want to extract sargable nodes from EvalNode to use for PhysicalScans.
-        PartialSchemaReqConversion conversion =
-            convertExprToPartialSchemaReq(evalNode.getProjection());
-        if (!conversion._success || conversion._reqMap.size() != 1) {
+        auto conversion =
+            convertExprToPartialSchemaReq(evalNode.getProjection(), false /*isFilterContext*/);
+        if (!conversion) {
+            return;
+        }
+        uassert(6624165,
+                "Should not be getting retainPredicate set for EvalNodes",
+                !conversion->_retainPredicate);
+        if (conversion->_reqMap.size() != 1) {
             // For evaluation nodes we expect to create a single entry.
             return;
         }
-        if (conversion._hasEmptyInterval) {
+        if (conversion->_hasEmptyInterval) {
             addEmptyValueScanNode(ctx);
             return;
         }
 
-        for (auto& entry : conversion._reqMap) {
+        for (auto& entry : conversion->_reqMap) {
             PartialSchemaRequirement& req = entry.second;
             req.setBoundProjectionName(evalNode.getProjectionName());
 
@@ -802,12 +845,12 @@ struct SubstituteConvert<EvaluationNode> {
 
         bool hasEmptyInterval = false;
         auto candidateIndexMap = computeCandidateIndexMap(
-            ctx.getPrefixId(), scanProjName, conversion._reqMap, scanDef, hasEmptyInterval);
+            ctx.getPrefixId(), scanProjName, conversion->_reqMap, scanDef, hasEmptyInterval);
 
         if (hasEmptyInterval) {
             addEmptyValueScanNode(ctx);
         } else {
-            ABT newNode = make<SargableNode>(std::move(conversion._reqMap),
+            ABT newNode = make<SargableNode>(std::move(conversion->_reqMap),
                                              std::move(candidateIndexMap),
                                              IndexReqTarget::Complete,
                                              evalNode.getChild());
@@ -971,6 +1014,13 @@ struct ExploreConvert<SargableNode> {
                 }
             }
         }
+    }
+};
+
+template <>
+struct ExploreConvert<FilterNode> {
+    void operator()(ABT::reference_type node, RewriteContext& ctx) {
+        convertFilterToSargableNode<false /*isSubstitution*/>(node, *node.cast<FilterNode>(), ctx);
     }
 };
 
@@ -1167,6 +1217,8 @@ void LogicalRewriter::initializeRewrites() {
         LogicalRewriteType::ExchangeValueScanPropagate,
         &LogicalRewriter::bindAboveBelow<ExchangeNode, ValueScanNode, SubstituteReorder>);
 
+    registerRewrite(LogicalRewriteType::FilterExplore,
+                    &LogicalRewriter::bindSingleNode<FilterNode, ExploreConvert>);
     registerRewrite(LogicalRewriteType::GroupByExplore,
                     &LogicalRewriter::bindSingleNode<GroupByNode, ExploreConvert>);
     registerRewrite(LogicalRewriteType::SargableSplit,

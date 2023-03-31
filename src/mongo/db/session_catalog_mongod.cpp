@@ -38,6 +38,7 @@
 #include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
@@ -136,18 +137,15 @@ LogicalSessionIdSet removeExpiredTransactionSessionsNotInUseFromMemory(
 
     // Find the possibly expired logical session ids in the in-memory catalog.
     LogicalSessionIdSet possiblyExpiredLogicalSessionIds;
-    catalog->scanSessions(
-        SessionKiller::Matcher(KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)}),
-        [&](const ObservableSession& session) {
-            const auto sessionId = session.getSessionId();
-
-            // Skip child transaction sessions since they correspond to the same logical session as
-            // their parent transaction session so they have the same last check-out time as the
-            // the parent's.
-            if (session.getLastCheckout() < possiblyExpired && !getParentSessionId(sessionId)) {
-                possiblyExpiredLogicalSessionIds.insert(sessionId);
-            }
-        });
+    // Skip child transaction sessions since they correspond to the same logical session as their
+    // parent transaction session so they have the same last check-out time as the the parent's.
+    catalog->scanParentSessions([&](const ObservableSession& session) {
+        const auto sessionId = session.getSessionId();
+        invariant(isParentSessionId(sessionId));
+        if (session.getLastCheckout() < possiblyExpired) {
+            possiblyExpiredLogicalSessionIds.insert(sessionId);
+        }
+    });
     // From the possibly expired logical session ids, find the ones that have been removed from
     // from the config.system.sessions collection.
     LogicalSessionIdSet expiredLogicalSessionIds =
@@ -157,7 +155,7 @@ LogicalSessionIdSet removeExpiredTransactionSessionsNotInUseFromMemory(
     // longer in use from the in-memory catalog.
     LogicalSessionIdSet expiredTransactionSessionIdsStillInUse;
     for (const auto& expiredLogicalSessionId : expiredLogicalSessionIds) {
-        invariant(!getParentSessionId(expiredLogicalSessionId));
+        invariant(isParentSessionId(expiredLogicalSessionId));
 
         // Scan all the transaction sessions for this logical session at once so reaping can be done
         // atomically.
@@ -212,25 +210,10 @@ const auto kIdProjection = BSON(SessionTxnRecord::kSessionIdFieldName << 1);
 const auto kSortById = BSON(SessionTxnRecord::kSessionIdFieldName << 1);
 const auto kLastWriteDateFieldName = SessionTxnRecord::kLastWriteDateFieldName;
 
-/**
- * Removes the the config.transactions and the config.image_collection entries for the transaction
- * sessions in 'possiblyExpiredTransactionSessionIds' that are actually expired. Returns the number
- * of transaction sessions whose entries were removed.
- */
-int removeSessionsTransactionRecords(
-    OperationContext* opCtx,
-    SessionsCollection& sessionsCollection,
-    const LogicalSessionIdSet& possiblyExpiredTransactionSessionIds) {
-    if (possiblyExpiredTransactionSessionIds.empty()) {
-        return 0;
-    }
-
-    // From the possibly expired transaction session ids, find the ones which are actually
-    // expired/removed.
-    auto expiredTransactionSessionIds =
-        sessionsCollection.findRemovedSessions(opCtx, possiblyExpiredTransactionSessionIds);
-
-    if (expiredTransactionSessionIds.empty()) {
+template <typename SessionContainer>
+int removeSessionsTransactionRecordsFromDisk(OperationContext* opCtx,
+                                             const SessionContainer& transactionSessionIdsToReap) {
+    if (transactionSessionIdsToReap.empty()) {
         return 0;
     }
 
@@ -251,7 +234,7 @@ int removeSessionsTransactionRecords(
         }());
         imageDeleteOp.setDeletes([&] {
             std::vector<write_ops::DeleteOpEntry> entries;
-            for (const auto& transactionSessionId : expiredTransactionSessionIds) {
+            for (const auto& transactionSessionId : transactionSessionIdsToReap) {
                 entries.emplace_back(
                     BSON(LogicalSessionRecord::kIdFieldName << transactionSessionId.toBSON()),
                     false /* multi = false */);
@@ -272,7 +255,7 @@ int removeSessionsTransactionRecords(
         }());
         sessionDeleteOp.setDeletes([&] {
             std::vector<write_ops::DeleteOpEntry> entries;
-            for (const auto& transactionSessionId : expiredTransactionSessionIds) {
+            for (const auto& transactionSessionId : transactionSessionIdsToReap) {
                 entries.emplace_back(
                     BSON(LogicalSessionRecord::kIdFieldName << transactionSessionId.toBSON()),
                     false /* multi = false */);
@@ -283,6 +266,68 @@ int removeSessionsTransactionRecords(
     }()));
 
     return sessionDeleteReply.getN();
+}
+
+/**
+ * Removes the the config.transactions and the config.image_collection entries for the transaction
+ * sessions in 'expiredTransactionSessionIdsNotInUse' that are safe to reap. Returns the number
+ * of transaction sessions whose entries were removed.
+ */
+int removeSessionsTransactionRecordsIfExpired(
+    OperationContext* opCtx,
+    SessionsCollection& sessionsCollection,
+    const LogicalSessionIdSet& expiredTransactionSessionIdsNotInUse) {
+    if (expiredTransactionSessionIdsNotInUse.empty()) {
+        return 0;
+    }
+
+    // From the expired transaction session ids that are no longer in use, find the ones that are
+    // safe to reap.
+    LogicalSessionIdSet transactionSessionIdsToReap;
+    {
+        LogicalSessionIdSet possiblyExpiredLogicalSessionIds;
+        LogicalSessionIdMap<LogicalSessionIdSet>
+            transactionSessionIdsToReapIfLogicalSessionsExpired;
+
+        for (const auto& transactionSessionId : expiredTransactionSessionIdsNotInUse) {
+            if (isInternalSessionForRetryableWrite(transactionSessionId)) {
+                // It is safe to reap an internal transaction session for retryable write if it
+                // its transaction record has already expired since by design internal transaction
+                // sessions for retryable write are never reused and reaping them would not
+                // interrupt operations on other transaction sessions for the logical sessions that
+                // they correspond to.
+                transactionSessionIdsToReap.insert(transactionSessionId);
+            } else {
+                // It not safe to reap an internal transaction session for non-retryable write until
+                // the logical session that it corresponds to has expired, even if its transaction
+                // record has already expired. The reason is that each internal transaction session
+                // for non-retryable write is kept in the internal session pool and is reusable
+                // as long as the logical session that its correspond to has not expired and so
+                // reaping it would interrupt any operation that is running on it. The same applies
+                // to a parent transaction session since reaping it would interrupt all operations
+                // on that logical session.
+                auto logicalSessionId = castToParentSessionId(transactionSessionId);
+                possiblyExpiredLogicalSessionIds.insert(logicalSessionId);
+                transactionSessionIdsToReapIfLogicalSessionsExpired[logicalSessionId].insert(
+                    transactionSessionId);
+            }
+        }
+
+        if (!transactionSessionIdsToReapIfLogicalSessionsExpired.empty()) {
+            auto expiredLogicalSessionIds =
+                sessionsCollection.findRemovedSessions(opCtx, possiblyExpiredLogicalSessionIds);
+            for (const auto& [logicalSessionId, transactionSessionIds] :
+                 transactionSessionIdsToReapIfLogicalSessionsExpired) {
+                if (expiredLogicalSessionIds.find(logicalSessionId) !=
+                    expiredLogicalSessionIds.end()) {
+                    transactionSessionIdsToReap.insert(transactionSessionIds.begin(),
+                                                       transactionSessionIds.end());
+                }
+            }
+        }
+    }
+
+    return removeSessionsTransactionRecordsFromDisk(opCtx, transactionSessionIdsToReap);
 }
 
 /**
@@ -303,11 +348,7 @@ int removeExpiredTransactionSessionsFromDisk(
     findRequest.setProjection(kIdProjection);
     auto cursor = client.find(std::move(findRequest));
 
-    // The max batch size is chosen so that a single batch won't exceed the 16MB BSON object size
-    // limit.
-    const int kMaxBatchSize = 10'000;
-
-    LogicalSessionIdSet possiblyExpiredTransactionSessionIds;
+    LogicalSessionIdSet expiredTransactionSessionIdsNotInUse;
     int numReaped = 0;
     while (cursor->more()) {
         auto transactionSession = SessionsCollectionFetchResultIndividualResult::parse(
@@ -319,39 +360,74 @@ int removeExpiredTransactionSessionsFromDisk(
             continue;
         }
 
-        possiblyExpiredTransactionSessionIds.insert(transactionSessionId);
-        if (possiblyExpiredTransactionSessionIds.size() > kMaxBatchSize) {
-            numReaped += removeSessionsTransactionRecords(
-                opCtx, sessionsCollection, possiblyExpiredTransactionSessionIds);
-            possiblyExpiredTransactionSessionIds.clear();
+        expiredTransactionSessionIdsNotInUse.insert(transactionSessionId);
+        if (expiredTransactionSessionIdsNotInUse.size() >
+            MongoDSessionCatalog::kMaxSessionDeletionBatchSize) {
+            numReaped += removeSessionsTransactionRecordsIfExpired(
+                opCtx, sessionsCollection, expiredTransactionSessionIdsNotInUse);
+            expiredTransactionSessionIdsNotInUse.clear();
         }
     }
-    numReaped += removeSessionsTransactionRecords(
-        opCtx, sessionsCollection, possiblyExpiredTransactionSessionIds);
+    numReaped += removeSessionsTransactionRecordsIfExpired(
+        opCtx, sessionsCollection, expiredTransactionSessionIdsNotInUse);
 
     return numReaped;
 }
 
 void createTransactionTable(OperationContext* opCtx) {
-    auto serviceCtx = opCtx->getServiceContext();
     CollectionOptions options;
-    auto createCollectionStatus =
-        repl::StorageInterface::get(serviceCtx)
-            ->createCollection(opCtx, NamespaceString::kSessionTransactionsTableNamespace, options);
-    if (createCollectionStatus == ErrorCodes::NamespaceExists) {
-        return;
-    }
+    auto storageInterface = repl::StorageInterface::get(opCtx);
+    auto createCollectionStatus = storageInterface->createCollection(
+        opCtx, NamespaceString::kSessionTransactionsTableNamespace, options);
 
-    uassertStatusOKWithContext(
-        createCollectionStatus,
-        str::stream() << "Failed to create the "
-                      << NamespaceString::kSessionTransactionsTableNamespace.ns() << " collection");
+    if (createCollectionStatus == ErrorCodes::NamespaceExists) {
+        bool collectionIsEmpty = false;
+        {
+            AutoGetCollection autoColl(
+                opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_IS);
+            invariant(autoColl);
+
+            if (autoColl->getIndexCatalog()->findIndexByName(
+                    opCtx, MongoDSessionCatalog::kConfigTxnsPartialIndexName)) {
+                // Index already exists, so there's nothing to do.
+                return;
+            }
+
+            collectionIsEmpty = autoColl->isEmpty(opCtx);
+        }
+
+        if (!collectionIsEmpty) {
+            // Unless explicitly enabled, don't create the index to avoid delaying step up.
+            if (feature_flags::gFeatureFlagAlwaysCreateConfigTransactionsPartialIndexOnStepUp
+                    .isEnabledAndIgnoreFCV()) {
+                AutoGetCollection autoColl(
+                    opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_X);
+                IndexBuildsCoordinator::get(opCtx)->createIndex(
+                    opCtx,
+                    autoColl->uuid(),
+                    MongoDSessionCatalog::getConfigTxnPartialIndexSpec(),
+                    IndexBuildsManager::IndexConstraints::kEnforce,
+                    false /* fromMigration */);
+            }
+
+            return;
+        }
+
+        // The index does not exist and the collection is empty, so fall through to create it on the
+        // empty collection. This can happen after a failover because the collection and index
+        // creation are recorded as separate oplog entries.
+    } else {
+        uassertStatusOKWithContext(createCollectionStatus,
+                                   str::stream()
+                                       << "Failed to create the "
+                                       << NamespaceString::kSessionTransactionsTableNamespace.ns()
+                                       << " collection");
+    }
 
     auto indexSpec = MongoDSessionCatalog::getConfigTxnPartialIndexSpec();
 
-    const auto createIndexStatus =
-        repl::StorageInterface::get(opCtx)->createIndexesOnEmptyCollection(
-            opCtx, NamespaceString::kSessionTransactionsTableNamespace, {indexSpec});
+    const auto createIndexStatus = storageInterface->createIndexesOnEmptyCollection(
+        opCtx, NamespaceString::kSessionTransactionsTableNamespace, {indexSpec});
     uassertStatusOKWithContext(
         createIndexStatus,
         str::stream() << "Failed to create partial index for the "
@@ -582,6 +658,22 @@ int MongoDSessionCatalog::reapSessionsOlderThan(OperationContext* opCtx,
 
     return removeExpiredTransactionSessionsFromDisk(
         opCtx, sessionsCollection, possiblyExpired, expiredTransactionSessionIdsStillInUse);
+}
+
+int MongoDSessionCatalog::removeSessionsTransactionRecords(
+    OperationContext* opCtx, const std::vector<LogicalSessionId>& transactionSessionIdsToRemove) {
+    std::vector<LogicalSessionId> nextLsidBatch;
+    int numReaped = 0;
+    for (const auto& transactionSessionIdToRemove : transactionSessionIdsToRemove) {
+        nextLsidBatch.push_back(transactionSessionIdToRemove);
+        if (nextLsidBatch.size() > MongoDSessionCatalog::kMaxSessionDeletionBatchSize) {
+            numReaped += removeSessionsTransactionRecordsFromDisk(opCtx, nextLsidBatch);
+            nextLsidBatch.clear();
+        }
+    }
+    numReaped += removeSessionsTransactionRecordsFromDisk(opCtx, nextLsidBatch);
+
+    return numReaped;
 }
 
 MongoDOperationContextSession::MongoDOperationContextSession(OperationContext* opCtx)

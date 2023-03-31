@@ -30,6 +30,7 @@
 #include "mongo/db/exec/sbe/values/sort_spec.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/platform/basic.h"
+#include "mongo/util/pcre_util.h"
 
 namespace mongo::sbe::value {
 
@@ -155,6 +156,9 @@ void ValuePrinter<T>::writeTagToStream(TypeTags tag) {
             break;
         case TypeTags::indexBounds:
             stream << "indexBounds";
+            break;
+        case TypeTags::classicMatchExpresion:
+            stream << "classicMatchExpression";
             break;
         default:
             stream << "unknown tag";
@@ -402,7 +406,8 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
         }
         case TypeTags::pcreRegex: {
             auto regex = getPcreRegexView(val);
-            stream << "PcreRegex(/" << regex->pattern() << "/" << regex->options() << ")";
+            stream << "PcreRegex(/" << regex->pattern() << "/"
+                   << pcre_util::optionsToFlags(regex->options()) << ")";
             break;
         }
         case TypeTags::timeZoneDB: {
@@ -459,8 +464,6 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
         case TypeTags::sortSpec:
             stream << "SortSpec(";
             writeObjectToStream(getSortSpecView(val)->getPattern());
-            stream << ", ";
-            writeCollatorToStream(getSortSpecView(val)->getCollator());
             stream << ')';
             break;
         case TypeTags::indexBounds:
@@ -473,6 +476,9 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
             writeStringDataToStream(
                 getIndexBoundsView(val)->toString(true /* hasNonSimpleCollation */));
             stream << ")";
+            break;
+        case TypeTags::classicMatchExpresion:
+            stream << "ClassicMatcher(" << getClassicMatchExpressionView(val)->toString() << ")";
             break;
         default:
             MONGO_UNREACHABLE;

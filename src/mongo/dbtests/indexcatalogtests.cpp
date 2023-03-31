@@ -90,8 +90,8 @@ public:
 
         ASSERT_TRUE(indexCatalog(&opCtx)->numIndexesReady(&opCtx) == numFinishedIndexesStart + 2);
 
-        std::unique_ptr<IndexCatalog::IndexIterator> ii =
-            indexCatalog(&opCtx)->getIndexIterator(&opCtx, false);
+        auto ii =
+            indexCatalog(&opCtx)->getIndexIterator(&opCtx, IndexCatalog::InclusionPolicy::kReady);
         int indexesIterated = 0;
         bool foundIndex = false;
         while (ii->more()) {
@@ -205,7 +205,7 @@ public:
             CollectionWriter coll(&opCtx, autoColl);
 
             WriteUnitOfWork wuow(&opCtx);
-            coll.getWritableCollection()->updateTTLSetting(&opCtx, "x_1", 10);
+            coll.getWritableCollection(&opCtx)->updateTTLSetting(&opCtx, "x_1", 10);
             wuow.commit();
         }
 
@@ -219,8 +219,8 @@ public:
 
             // Notify the catalog of the change.
             WriteUnitOfWork wuow(&opCtx);
-            desc = coll.getWritableCollection()->getIndexCatalog()->refreshEntry(
-                &opCtx, coll.getWritableCollection(), desc, CreateIndexEntryFlags::kIsReady);
+            desc = coll.getWritableCollection(&opCtx)->getIndexCatalog()->refreshEntry(
+                &opCtx, coll.getWritableCollection(&opCtx), desc, CreateIndexEntryFlags::kIsReady);
             wuow.commit();
         }
 

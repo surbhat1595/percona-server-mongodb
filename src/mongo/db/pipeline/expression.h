@@ -29,13 +29,13 @@
 
 #pragma once
 
+#include "mongo/base/data_range.h"
 #include "mongo/platform/basic.h"
 
 #include <algorithm>
 #include <boost/intrusive_ptr.hpp>
 #include <functional>
 #include <map>
-#include <pcre.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +56,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/update/pattern_cmp.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/pcre.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -2197,6 +2198,38 @@ public:
     }
 };
 
+class ExpressionInternalFLEEqual final : public Expression {
+public:
+    ExpressionInternalFLEEqual(ExpressionContext* expCtx,
+                               boost::intrusive_ptr<Expression> field,
+                               ConstDataRange serverToken,
+                               int64_t contentionFactor,
+                               ConstDataRange edcToken);
+    Value serialize(bool explain) const final;
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    const char* getOpName() const;
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps);
+    void _doAddDependencies(DepsTracker* deps) const final;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+private:
+    std::array<std::uint8_t, 32> _serverToken;
+    std::array<std::uint8_t, 32> _edcToken;
+    int64_t _contentionFactor;
+    stdx::unordered_set<std::array<std::uint8_t, 32>> _cachedEDCTokens;
+};
+
 class ExpressionMap final : public Expression {
 public:
     ExpressionMap(
@@ -2731,9 +2764,7 @@ public:
 class ExpressionSetEquals final : public ExpressionVariadic<ExpressionSetEquals> {
 public:
     explicit ExpressionSetEquals(ExpressionContext* const expCtx)
-        : ExpressionVariadic<ExpressionSetEquals>(expCtx) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionVariadic<ExpressionSetEquals>(expCtx) {}
     ExpressionSetEquals(ExpressionContext* const expCtx, ExpressionVector&& children)
         : ExpressionVariadic<ExpressionSetEquals>(expCtx, std::move(children)) {}
 
@@ -2827,7 +2858,10 @@ public:
     }
 
     bool isCommutative() const final {
-        return true;
+        // Only commutative when performing binary string comparison. The first value entered when
+        // multiple collation-equal but binary-unequal values are added will dictate what is stored
+        // in the set.
+        return getExpressionContext()->getCollator() == nullptr;
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -3685,7 +3719,7 @@ public:
          * and '_initialExecStateForConstantRegex'. If not, then the active RegexExecutionState is
          * the sole owner.
          */
-        std::shared_ptr<pcre> pcrePtr;
+        std::shared_ptr<pcre::Regex> pcrePtr;
 
         /**
          * The input text and starting position for the current execution context.
@@ -3710,11 +3744,11 @@ public:
     RegexExecutionState buildInitialState(const Document& root, Variables* variables) const;
 
     /**
-     * Checks if there is a match for the given input and pattern that are part of 'executionState'.
-     * The method will return a positive number if there is a match and '-1' if there is no match.
-     * Throws 'uassert()' for any errors.
+     * Checks if there is a match for the input, options, and pattern of 'executionState'.
+     * Returns the pcre::MatchData yielded by that match operation.
+     * Will uassert for any errors other than `pcre::Errc::ERROR_NOMATCH`.
      */
-    int execute(RegexExecutionState* executionState) const;
+    pcre::MatchData execute(RegexExecutionState* executionState) const;
 
     /**
      * Finds the next possible match for the given input and pattern that are part of

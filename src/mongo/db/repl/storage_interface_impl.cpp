@@ -50,6 +50,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -323,12 +324,6 @@ template <typename AutoGetCollectionType>
 StatusWith<const CollectionPtr*> getCollection(const AutoGetCollectionType& autoGetCollection,
                                                const NamespaceStringOrUUID& nsOrUUID,
                                                const std::string& message) {
-    if (!autoGetCollection.getDb()) {
-        StringData dbName = nsOrUUID.nss() ? nsOrUUID.nss()->db() : nsOrUUID.dbname();
-        return {ErrorCodes::NamespaceNotFound,
-                str::stream() << "Database [" << dbName << "] not found. " << message};
-    }
-
     const auto& collection = autoGetCollection.getCollection();
     if (!collection) {
         return {ErrorCodes::NamespaceNotFound,
@@ -347,6 +342,8 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
     boost::optional<AutoGetOplog> autoOplog;
     const CollectionPtr* collection;
 
+    bool shouldWriteToChangeCollections = false;
+
     auto nss = nsOrUUID.nss();
     if (nss && nss->isOplog()) {
         // Simplify locking rules for oplog collection.
@@ -355,6 +352,9 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
         if (!*collection) {
             return {ErrorCodes::NamespaceNotFound, "Oplog collection does not exist"};
         }
+
+        shouldWriteToChangeCollections =
+            ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive();
     } else {
         autoColl.emplace(opCtx, nsOrUUID, MODE_IX);
         auto collectionResult = getCollection(
@@ -371,6 +371,18 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
     if (!status.isOK()) {
         return status;
     }
+
+    // Insert oplog entries to change collections if we are running in the serverless and the 'nss'
+    // is 'local.oplog.rs'.
+    if (shouldWriteToChangeCollections) {
+        auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx);
+        status = changeCollectionManager.insertDocumentsToChangeCollection(
+            opCtx, begin, end, nullOpDebug);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
     wunit.commit();
 
     return Status::OK();
@@ -640,7 +652,9 @@ Status StorageInterfaceImpl::setIndexIsMultikey(OperationContext* opCtx,
         }
 
         auto idx = collection->getIndexCatalog()->findIndexByName(
-            opCtx, indexName, true /* includeUnfinishedIndexes */);
+            opCtx,
+            indexName,
+            IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
         if (!idx) {
             return Status(ErrorCodes::IndexNotFound,
                           str::stream()
@@ -730,27 +744,40 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                                .getKey()
                                .firstElement()
                                .fieldNameStringData() == "_id") {
-                // This collection is clustered by _id. Use a bounded collection scan, since a
-                // separate _id index is likely not available.
-                if (boundInclusion != BoundInclusion::kIncludeBothStartAndEndKeys) {
-                    return Result(
-                        ErrorCodes::InvalidOptions,
-                        "bound inclusion must be BoundInclusion::kIncludeBothStartAndEndKeys for "
-                        "bounded collection scan");
-                }
 
-                // Note: this is a limitation of this helper, not bounded collection scans.
-                if (direction != InternalPlanner::FORWARD) {
-                    return Result(ErrorCodes::InvalidOptions,
-                                  "bounded collection scans only support forward scans");
-                }
+                auto collScanBoundInclusion = [boundInclusion]() {
+                    switch (boundInclusion) {
+                        case BoundInclusion::kExcludeBothStartAndEndKeys:
+                            return CollectionScanParams::ScanBoundInclusion::
+                                kExcludeBothStartAndEndRecords;
+                        case BoundInclusion::kIncludeStartKeyOnly:
+                            return CollectionScanParams::ScanBoundInclusion::
+                                kIncludeStartRecordOnly;
+                        case BoundInclusion::kIncludeEndKeyOnly:
+                            return CollectionScanParams::ScanBoundInclusion::kIncludeEndRecordOnly;
+                        case BoundInclusion::kIncludeBothStartAndEndKeys:
+                            return CollectionScanParams::ScanBoundInclusion::
+                                kIncludeBothStartAndEndRecords;
+                        default:
+                            MONGO_UNREACHABLE;
+                    }
+                }();
 
                 boost::optional<RecordIdBound> minRecord, maxRecord;
-                if (!startKey.isEmpty()) {
-                    minRecord = RecordIdBound(record_id_helpers::keyForObj(startKey));
-                }
-                if (!endKey.isEmpty()) {
-                    maxRecord = RecordIdBound(record_id_helpers::keyForObj(endKey));
+                if (direction == InternalPlanner::FORWARD) {
+                    if (!startKey.isEmpty()) {
+                        minRecord = RecordIdBound(record_id_helpers::keyForObj(startKey));
+                    }
+                    if (!endKey.isEmpty()) {
+                        maxRecord = RecordIdBound(record_id_helpers::keyForObj(endKey));
+                    }
+                } else {
+                    if (!startKey.isEmpty()) {
+                        maxRecord = RecordIdBound(record_id_helpers::keyForObj(startKey));
+                    }
+                    if (!endKey.isEmpty()) {
+                        minRecord = RecordIdBound(record_id_helpers::keyForObj(endKey));
+                    }
                 }
 
                 planExecutor = isFind
@@ -760,7 +787,8 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                                                       direction,
                                                       boost::none /* resumeAfterId */,
                                                       minRecord,
-                                                      maxRecord)
+                                                      maxRecord,
+                                                      collScanBoundInclusion)
                     : InternalPlanner::deleteWithCollectionScan(
                           opCtx,
                           &collection,
@@ -768,14 +796,14 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                           PlanYieldPolicy::YieldPolicy::NO_YIELD,
                           direction,
                           minRecord,
-                          maxRecord);
+                          maxRecord,
+                          collScanBoundInclusion);
             } else {
                 // Use index scan.
                 auto indexCatalog = collection->getIndexCatalog();
                 invariant(indexCatalog);
-                bool includeUnfinishedIndexes = false;
-                const IndexDescriptor* indexDescriptor =
-                    indexCatalog->findIndexByName(opCtx, *indexName, includeUnfinishedIndexes);
+                const IndexDescriptor* indexDescriptor = indexCatalog->findIndexByName(
+                    opCtx, *indexName, IndexCatalog::InclusionPolicy::kReady);
                 if (!indexDescriptor) {
                     return Result(ErrorCodes::IndexNotFound,
                                   str::stream() << "Index not found, ns:" << nsOrUUID.toString()

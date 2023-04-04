@@ -51,6 +51,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 
 #include "mongo/base/init.h"
 #include "mongo/bson/bson_field.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/audit/audit_parameters_gen.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -65,6 +66,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/logv2/log_util.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
@@ -1257,6 +1259,52 @@ namespace audit {
 
         const BSONObj params = BSON("ns" << nssToString(nss) << "doc" << doc);
         _auditEvent(client, "removeOperation", params);
+    }
+
+    void logGetClusterParameter(
+        Client* client,
+        const stdx::variant<std::string, std::vector<std::string>>& requestedParameters) {
+        if (!_auditLog) {
+            return;
+        }
+
+        BSONObjBuilder params;
+        stdx::visit(visit_helper::Overloaded{
+                        [&](const std::string& strParameterName) {
+                            params << "requestedClusterServerParameters" << strParameterName;
+                        },
+                        [&](const std::vector<std::string>& listParameterNames) {
+                            BSONArrayBuilder abuilder(
+                                params.subarrayStart("requestedClusterServerParameters"));
+                            for (auto p : listParameterNames) {
+                                abuilder.append(p);
+                            }
+                            abuilder.doneFast();
+                        }},
+                    requestedParameters);
+        _auditEvent(client, "getClusterParameter", params.done());
+    }
+
+    void logSetClusterParameter(Client* client, const BSONObj& oldValue, const BSONObj& newValue) {
+        if (!_auditLog) {
+            return;
+        }
+
+        const BSONObj params = BSON("originalClusterServerParameter"
+                                    << oldValue << "updatedClusterServerParameter" << newValue);
+        _auditEvent(client, "setClusterParameter", params);
+    }
+
+    void logUpdateCachedClusterParameter(Client* client,
+                                         const BSONObj& oldValue,
+                                         const BSONObj& newValue) {
+        if (!_auditLog) {
+            return;
+        }
+
+        const BSONObj params = BSON("originalClusterServerParameter"
+                                    << oldValue << "updatedClusterServerParameter" << newValue);
+        _auditEvent(client, "updateCachedClusterServerParameter", params);
     }
 
     void writeImpersonatedUsersToMetadata(OperationContext* txn,

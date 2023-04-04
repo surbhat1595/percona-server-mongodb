@@ -29,6 +29,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
+#include <fstream>
 #include <iostream>
 
 #include <boost/crc.hpp>

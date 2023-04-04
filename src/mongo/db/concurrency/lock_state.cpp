@@ -40,7 +40,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/flow_control.h"
-#include "mongo/db/storage/ticketholders.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/new.h"
@@ -295,7 +294,7 @@ LockerImpl::LockerImpl(ServiceContext* serviceCtx)
     : _id(idCounter.addAndFetch(1)),
       _wuowNestingLevel(0),
       _threadId(stdx::this_thread::get_id()),
-      _ticketHolders(&TicketHolders::get(serviceCtx)) {}
+      _ticketHolder(TicketHolder::get(serviceCtx)) {}
 
 stdx::thread::id LockerImpl::getThreadId() const {
     return _threadId;
@@ -363,13 +362,17 @@ void LockerImpl::reacquireTicket(OperationContext* opCtx) {
 }
 
 bool LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadline) {
+    _admCtx.setLockMode(mode);
     const bool reader = isSharedLockMode(mode);
-    auto holder = shouldAcquireTicket() ? _ticketHolders->getTicketHolder(mode) : nullptr;
-    if (holder) {
+    auto holder = shouldAcquireTicket() ? _ticketHolder : nullptr;
+    // MODE_X is exclusive of all other locks, thus acquiring a ticket is unnecessary.
+    if (mode != MODE_X && mode != MODE_NONE && holder) {
         _clientState.store(reader ? kQueuedReader : kQueuedWriter);
-
         // If the ticket wait is interrupted, restore the state of the client.
-        ScopeGuard restoreStateOnErrorGuard([&] { _clientState.store(kInactive); });
+        ScopeGuard restoreStateOnErrorGuard([&] {
+            _clientState.store(kInactive);
+            _admCtx.setLockMode(MODE_NONE);
+        });
 
         // Acquiring a ticket is a potentially blocking operation. This must not be called after a
         // transaction timestamp has been set, indicating this transaction has created an oplog
@@ -378,6 +381,7 @@ bool LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t d
 
         auto waitMode = _uninterruptibleLocksRequested ? TicketHolder::WaitMode::kUninterruptible
                                                        : TicketHolder::WaitMode::kInterruptible;
+        _admCtx.setLockMode(mode);
         if (deadline == Date_t::max()) {
             _ticket = holder->waitForTicket(opCtx, &_admCtx, waitMode);
         } else if (auto ticket = holder->waitForTicketUntil(opCtx, &_admCtx, deadline, waitMode)) {
@@ -1076,6 +1080,7 @@ void LockerImpl::releaseTicket() {
 
 void LockerImpl::_releaseTicket() {
     _ticket.reset();
+    _admCtx.setLockMode(MODE_NONE);
     _clientState.store(kInactive);
 }
 

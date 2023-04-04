@@ -74,6 +74,7 @@
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
+#include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -86,7 +87,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/pm2423_feature_flags_gen.h"
-#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/exit.h"
@@ -393,12 +393,6 @@ public:
 
             if (request.getPhase() == SetFCVPhaseEnum::kStart) {
                 invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
-                if (actualVersion > requestedVersion &&
-                    !feature_flags::gOrphanTracking.isEnabledOnVersion(requestedVersion)) {
-                    BalancerStatsRegistry::get(opCtx)->terminate();
-                    ScopedRangeDeleterLock rangeDeleterLock(opCtx);
-                    clearOrphanCountersFromRangeDeletionTasks(opCtx);
-                }
 
                 // TODO SERVER-65077: Remove FCV check once 6.0 is released
                 if (actualVersion > requestedVersion &&
@@ -429,29 +423,19 @@ public:
         {
             boost::optional<MigrationBlockingGuard> drainOldMoveChunks;
 
-            bool orphanTrackingCondition =
-                serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
-                !feature_flags::gOrphanTracking.isEnabledOnVersion(actualVersion) &&
-                feature_flags::gOrphanTracking.isEnabledOnVersion(requestedVersion);
             // Drain moveChunks if the actualVersion relies on the old migration protocol but the
             // requestedVersion uses the new one (upgrading), we're persisting the new chunk
             // version format, or we are adding the numOrphans field to range deletion documents.
-            if ((!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
-                     actualVersion) &&
-                 feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
-                     requestedVersion)) ||
-                orphanTrackingCondition) {
+            if (!feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                    actualVersion) &&
+                feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabledOnVersion(
+                    requestedVersion)) {
                 drainOldMoveChunks.emplace(opCtx, "setFeatureCompatibilityVersionUpgrade");
 
                 // At this point, because we are holding the MigrationBlockingGuard, no new
                 // migrations can start and there are no active ongoing ones. Still, there could
                 // be migrations pending recovery. Drain them.
                 migrationutil::drainMigrationsPendingRecovery(opCtx);
-
-                if (orphanTrackingCondition) {
-                    setOrphanCountersOnRangeDeletionTasks(opCtx);
-                    BalancerStatsRegistry::get(opCtx)->initializeAsync(opCtx);
-                }
             }
 
             // Complete transition by updating the local FCV document to the fully upgraded or
@@ -530,6 +514,11 @@ private:
             createChangeStreamPreImagesCollection(opCtx);
         }
 
+        // TODO SERVER-67392: Remove once FCV 7.0 becomes last-lts.
+        if (feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
+            uassertStatusOK(sharding_util::createGlobalIndexesIndexes(opCtx));
+        }
+
         hangWhileUpgrading.pauseWhileSet(opCtx);
     }
 
@@ -574,8 +563,7 @@ private:
         if (serverGlobalParams.featureCompatibility
                 .isFCVDowngradingOrAlreadyDowngradedFromLatest()) {
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& db = dbName.db();
-                Lock::DBLock dbLock(opCtx, db, MODE_IX);
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
                 catalog::forEachCollectionFromDb(
                     opCtx,
                     dbName,
@@ -597,6 +585,48 @@ private:
                         // FCV 6.0 becomes last-lts.
                         return preImagesFeatureFlagDisabledOnDowngradeVersion &&
                             collection->isChangeStreamPreAndPostImagesEnabled();
+                    });
+
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_S,
+                    [&](const CollectionPtr& collection) {
+                        invariant(collection->getTimeseriesOptions());
+
+                        auto indexCatalog = collection->getIndexCatalog();
+                        auto indexIt = indexCatalog->getIndexIterator(
+                            opCtx,
+                            IndexCatalog::InclusionPolicy::kReady |
+                                IndexCatalog::InclusionPolicy::kUnfinished);
+
+                        while (indexIt->more()) {
+                            auto indexEntry = indexIt->next();
+                            // Fail to downgrade if the time-series collection has a partial, TTL
+                            // index.
+                            if (indexEntry->descriptor()->isPartial()) {
+                                // TODO (SERVER-67659): Remove partial, TTL index check once FCV 7.0
+                                // becomes last-lts.
+                                uassert(
+                                    ErrorCodes::CannotDowngrade,
+                                    str::stream()
+                                        << "Cannot downgrade the cluster when there are secondary "
+                                           "TTL indexes with partial filters on time-series "
+                                           "collections. Drop all partial, TTL indexes on "
+                                           "time-series collections before downgrading. First "
+                                           "detected incompatible index name: '"
+                                        << indexEntry->descriptor()->indexName()
+                                        << "' on collection: '"
+                                        << collection->ns().getTimeseriesViewNamespace() << "'",
+                                    !indexEntry->descriptor()->infoObj().hasField(
+                                        IndexDescriptor::kExpireAfterSecondsFieldName));
+                            }
+                        }
+
+                        return true;
+                    },
+                    [&](const CollectionPtr& collection) {
+                        return collection->getTimeseriesOptions() != boost::none;
                     });
             }
 
@@ -620,8 +650,7 @@ private:
             // Block downgrade for collections with encrypted fields
             // TODO SERVER-65077: Remove once FCV 6.0 becomes last-lts.
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-                const auto& db = dbName.db();
-                Lock::DBLock dbLock(opCtx, db, MODE_IX);
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
                 catalog::forEachCollectionFromDb(
                     opCtx, dbName, MODE_X, [&](const CollectionPtr& collection) {
                         uassert(
@@ -655,41 +684,29 @@ private:
             // Ensure that we can interrupt clean up during stepup or stepdown.
             newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
-            _cleanupInternalSessions(newOpCtx, opCtx);
-
             LOGV2(5876101, "Completed removal of internal sessions from config.transactions.");
         }
 
-        // TODO: SERVER-62375 Remove upgrade/downgrade code for internal transactions.
-        // We want to wait for all of the transaction coordinator entries related to internal
-        // transactions to be removed. This is because the corresponding coordinator document
-        // contains has a special lsid which downgraded binaries cannot properly parse.
-        if (serverGlobalParams.clusterRole != ClusterRole::None) {
-            auto coordinatorService = TransactionCoordinatorService::get(opCtx);
-            for (const auto& future :
-                 coordinatorService->getAllRemovalFuturesForCoordinatorsForInternalTransactions(
-                     opCtx)) {
-                auto status = future.getNoThrow(opCtx);
-                uassertStatusOKWithContext(status,
-                                           str::stream()
-                                               << "Unable to remove all "
-                                               << NamespaceString::kTransactionCoordinatorsNamespace
-                                               << " documents for internal transactions");
+        // TODO SERVER-67392: Remove when 7.0 branches-out.
+        if (requestedVersion == GenericFCV::kLastLTS) {
+            NamespaceString indexCatalogNss;
+            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+                indexCatalogNss = NamespaceString::kConfigsvrIndexCatalogNamespace;
+            } else {
+                indexCatalogNss = NamespaceString::kShardsIndexCatalogNamespace;
             }
-        }
-
-        // TODO SERVER-62338 Remove when 6.0 branches-out
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
-            !resharding::gFeatureFlagRecoverableShardsvrReshardCollectionCoordinator
-                 .isEnabledOnVersion(requestedVersion)) {
-            // No more (recoverable) ReshardCollectionCoordinators will start because we
-            // have already switched the FCV value to kDowngrading. Wait for the ongoing
-            // ReshardCollectionCoordinators to finish. The fact that the the configsvr has already
-            // executed 'abortAllReshardCollection' after switching to kDowngrading FCV ensures that
-            // ReshardCollectionCoordinators will finish (Interrupted) promptly.
-            ShardingDDLCoordinatorService::getService(opCtx)
-                ->waitForCoordinatorsOfGivenTypeToComplete(
-                    opCtx, DDLCoordinatorTypeEnum::kReshardCollection);
+            LOGV2(6280502, "Droping global indexes collection", "nss"_attr = indexCatalogNss);
+            DropReply dropReply;
+            const auto deletionStatus =
+                dropCollection(opCtx,
+                               indexCatalogNss,
+                               &dropReply,
+                               DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops);
+            uassert(deletionStatus.code(),
+                    str::stream() << "Failed to drop " << indexCatalogNss
+                                  << causedBy(deletionStatus.reason()),
+                    deletionStatus.isOK() ||
+                        deletionStatus.code() == ErrorCodes::NamespaceNotFound);
         }
 
         uassert(ErrorCodes::Error(549181),
@@ -765,150 +782,6 @@ private:
         }
     }
 
-    /**
-     * Removes all child sessions from the config.transactions collection and updates the parent
-     * sessions to have the highest txnNumber of either itself or its child sessions.
-     */
-    void _cleanupInternalSessions(OperationContext* opCtx, OperationContext* setFCVOpCtx) {
-        // Take in the setFCV command opCtx and manually check if it has been interrupted to stop
-        // session clean up.
-        auto lsidToTxnNumberMap = _constructParentLsidToTxnNumberMap(opCtx);
-        setFCVOpCtx->checkForInterrupt();
-        _updateSessionDocuments(opCtx, std::move(lsidToTxnNumberMap));
-        setFCVOpCtx->checkForInterrupt();
-        _deleteChildSessionDocuments(opCtx);
-    }
-
-    /**
-     * Constructs a map consisting of a mapping between the parent session and the highest
-     * txnNumber of its child sessions.
-     */
-    LogicalSessionIdMap<TxnNumber> _constructParentLsidToTxnNumberMap(OperationContext* opCtx) {
-        DBDirectClient client(opCtx);
-
-        LogicalSessionIdMap<TxnNumber> parentLsidToTxnNum;
-        FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
-        findRequest.setFilter(BSON("parentLsid" << BSON("$exists" << true)));
-        findRequest.setProjection(BSON("_id" << 1 << "parentLsid" << 1));
-        auto cursor = client.find(std::move(findRequest));
-
-        while (cursor->more()) {
-            auto doc = cursor->next();
-            auto lsid = LogicalSessionId::parse(
-                IDLParserErrorContext("parse lsid for session document modification"),
-                doc.getField("_id").Obj());
-            auto parentLsid = LogicalSessionId::parse(
-                IDLParserErrorContext("parse parentLsid for session document modification"),
-                doc.getField("parentLsid").Obj());
-            auto txnNum = lsid.getTxnNumber();
-            if (auto it = parentLsidToTxnNum.find(parentLsid); it != parentLsidToTxnNum.end()) {
-                it->second = std::max(*txnNum, it->second);
-            } else {
-                parentLsidToTxnNum[parentLsid] = *txnNum;
-            }
-        }
-
-        return parentLsidToTxnNum;
-    }
-
-    /**
-     * Update each parent session's txnNumber to the highest txnNumber seen for that session
-     * (including child sessions). We do this to account for the case where a child session
-     * ran a transaction with a higher txnNumber than the last recorded txnNumber for a
-     * parent session. The parent session should know what the most recent txnNumber sent by
-     * the driver is.
-     */
-    void _updateSessionDocuments(OperationContext* opCtx,
-                                 const LogicalSessionIdMap<TxnNumber>& parentLsidToTxnNum) {
-        DBDirectClient client(opCtx);
-
-        auto runUpdates = [&](std::vector<write_ops::UpdateOpEntry> updates) {
-            write_ops::UpdateCommandRequest updateOp(
-                NamespaceString::kSessionTransactionsTableNamespace);
-            updateOp.setUpdates(updates);
-            updateOp.getWriteCommandRequestBase().setOrdered(false);
-            auto updateReply = client.update(updateOp);
-            if (auto& writeErrors = updateReply.getWriteErrors()) {
-                for (auto&& writeError : *writeErrors) {
-                    if (writeError.getStatus() == ErrorCodes::DuplicateKey) {
-                        // There is a transaction or retryable write with a higher txnNumber that
-                        // committed between when the check below was done and when the write was
-                        // applied.
-                        continue;
-                    }
-                    uassertStatusOK(writeError.getStatus());
-                }
-            }
-        };
-
-        std::vector<write_ops::UpdateOpEntry> updates;
-        for (const auto& [lsid, txnNumber] : parentLsidToTxnNum) {
-            SessionTxnRecord modifiedDoc;
-            bool parentSessionExists = false;
-            FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
-            findRequest.setFilter(BSON("_id" << lsid.toBSON()));
-            auto cursor = client.find(std::move(findRequest));
-            if ((parentSessionExists = cursor->more())) {
-                modifiedDoc = SessionTxnRecord::parse(
-                    IDLParserErrorContext("parse transaction document to modify"), cursor->next());
-
-                // We do not want to override the transaction state of a parent session with a
-                // greater txnNumber than that of its child sessions.
-                if (modifiedDoc.getTxnNum() > txnNumber) {
-                    continue;
-                }
-            }
-
-            // Upsert a new transaction document for a parent session if it doesn't already
-            // exist in the config.transactions collection.
-            if (!parentSessionExists) {
-                modifiedDoc.setSessionId(lsid);
-            }
-
-            modifiedDoc.setLastWriteDate(Date_t::now());
-            modifiedDoc.setTxnNum(txnNumber);
-            modifiedDoc.setState(boost::none);
-
-            // We set this timestamp to ensure that retry attempts fail with
-            // IncompleteTransactionHistory. This is to stop us from double applying an
-            // operation.
-            modifiedDoc.setLastWriteOpTime(repl::OpTime(Timestamp(1, 0), 1));
-
-            write_ops::UpdateOpEntry updateEntry;
-            updateEntry.setQ(BSON("_id" << lsid.toBSON() << "txnNum"
-                                        << BSON("$lte" << modifiedDoc.getTxnNum())));
-            updateEntry.setU(
-                write_ops::UpdateModification::parseFromClassicUpdate(modifiedDoc.toBSON()));
-            updateEntry.setUpsert(true);
-            updates.push_back(updateEntry);
-
-            if (updates.size() == write_ops::kMaxWriteBatchSize) {
-                runUpdates(updates);
-                updates.clear();
-            }
-        }
-
-        if (updates.size() > 0) {
-            runUpdates(updates);
-        }
-    }
-
-    /**
-     * Delete the remaining child sessions from the config.transactions collection.
-     */
-    void _deleteChildSessionDocuments(OperationContext* opCtx) {
-        DBDirectClient client(opCtx);
-
-        write_ops::DeleteCommandRequest deleteOp(
-            NamespaceString::kSessionTransactionsTableNamespace);
-        write_ops::DeleteOpEntry deleteEntry;
-        deleteEntry.setQ(BSON("_id.txnUUID" << BSON("$exists" << true)));
-        deleteEntry.setMulti(true);
-        deleteOp.setDeletes({deleteEntry});
-
-        auto response = client.runCommand(deleteOp.serialize({}));
-        uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
-    }
 } setFeatureCompatibilityVersionCommand;
 
 }  // namespace

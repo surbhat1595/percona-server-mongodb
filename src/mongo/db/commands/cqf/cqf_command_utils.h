@@ -31,7 +31,34 @@
 
 #include "mongo/db/catalog/collection.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+constexpr bool kMongoOptimizerStdCoutDebugOutput = false;
+
 namespace mongo {
+
+template <typename T>
+void coutPrintAttr(const logv2::detail::NamedArg<T>& arg) {
+    std::cout << arg.name << " : " << arg.value << "\n";
+}
+
+template <typename T, typename... Args>
+void coutPrintAttr(const logv2::detail::NamedArg<T>& arg,
+                   const logv2::detail::NamedArg<Args>&... args) {
+    std::cout << arg.name << " : " << arg.value << "\n";
+    coutPrintAttr(args...);
+}
+
+template <typename... Args>
+void coutPrint(const std::string& msg, const logv2::detail::NamedArg<Args>&... args) {
+    std::cout << "********* " << msg << " *********\n";
+    coutPrintAttr(args...);
+    std::cout << "********* " << msg << " *********\n";
+}
+
+#define OPTIMIZER_DEBUG_LOG(ID, DLEVEL, FMTSTR_MESSAGE, ...) \
+    LOGV2_DEBUG(ID, DLEVEL, FMTSTR_MESSAGE, ##__VA_ARGS__);  \
+    if (kMongoOptimizerStdCoutDebugOutput)                   \
+        ::mongo::coutPrint(FMTSTR_MESSAGE, __VA_ARGS__);
 
 /**
  * Returns whether the given Pipeline and aggregate command is eligible to use the bonsai
@@ -45,9 +72,9 @@ bool isEligibleForBonsai(const AggregateCommandRequest& request,
 /**
  * Returns whether the given find command is eligible to use the bonsai optimizer.
  */
-bool isEligibleForBonsai(const FindCommandRequest& request,
-                         const MatchExpression& expression,
+bool isEligibleForBonsai(const CanonicalQuery& cq,
                          OperationContext* opCtx,
                          const CollectionPtr& collection);
 
 }  // namespace mongo
+#undef MONGO_LOGV2_DEFAULT_COMPONENT

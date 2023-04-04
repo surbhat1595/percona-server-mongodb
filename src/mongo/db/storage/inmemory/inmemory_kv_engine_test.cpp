@@ -60,7 +60,6 @@ public:
                                              "checkpoint=(wait=0,log_size=0)",
                                              100,
                                              0,
-                                             false,
                                              true,
                                              false));
         repl::ReplicationCoordinator::set(

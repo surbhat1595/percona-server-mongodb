@@ -222,7 +222,12 @@ let assertErrorOnRequestWhenFilesAreCorruptOrMissing = function(
  */
 let runWiredTigerTool = function(...args) {
     const cmd = ['wt'].concat(args);
-    assert.eq(run.apply(undefined, cmd), 0, "error executing: " + cmd.join(' '));
+    // TODO (SERVER-67632): Check the return code on Windows variants again.
+    if (_isWindows()) {
+        run.apply(undefined, cmd);
+    } else {
+        assert.eq(run.apply(undefined, cmd), 0, "error executing: " + cmd.join(' '));
+    }
 };
 
 /**
@@ -233,4 +238,54 @@ let truncateUriAndRestartMongod = function(uri, conn, mongodOptions) {
     MongoRunner.stopMongod(conn, null, {skipValidation: true});
     runWiredTigerTool("-h", conn.dbpath, "truncate", uri);
     return startMongodOnExistingPath(conn.dbpath, mongodOptions);
+};
+
+/**
+ * Stops the given mongod, dumps the table with the uri, modifies the content, and loads it back to
+ * the table.
+ */
+let rewriteTable = function(uri, conn, modifyData) {
+    MongoRunner.stopMongod(conn, null, {skipValidation: true});
+    const separator = _isWindows() ? '\\' : '/';
+    const tempDumpFile = conn.dbpath + separator + "temp_dump";
+    const newTableFile = conn.dbpath + separator + "new_table_file";
+    runWiredTigerTool("-h",
+                      conn.dbpath,
+                      "-r",
+                      "-C",
+                      "log=(compressor=snappy,path=journal)",
+                      "dump",
+                      "-x",
+                      "-f",
+                      tempDumpFile,
+                      "table:" + uri);
+    let dumpLines = cat(tempDumpFile).split("\n");
+    modifyData(dumpLines);
+    writeFile(newTableFile, dumpLines.join("\n"));
+    runWiredTigerTool("-h", conn.dbpath, "load", "-f", newTableFile, "-r", uri);
+};
+
+// In WiredTiger table dumps, the first seven lines are the header and key that we don't want to
+// modify. We will skip them and start from the line containing the first value.
+const wtHeaderLines = 7;
+
+/**
+ * Inserts the documents with duplicate field names into the MongoDB server.
+ */
+let insertDocDuplicateFieldName = function(coll, uri, conn, numDocs) {
+    for (let i = 0; i < numDocs; ++i) {
+        coll.insert({a: "aaaaaaa", b: "bbbbbbb"});
+    }
+    // The format of the BSON documents will be {_id: ObjectId(), a: "aaaaaaa", a: "bbbbbbb"}.
+    let makeDuplicateFieldNames = function(lines) {
+        // The offset of the document's field name 'b' in the hex string dumped by wt tool.
+        const offsetToFieldB = 75;
+        // Each record takes two lines with a key and a value. We will only modify the values.
+        for (let i = wtHeaderLines; i < lines.length; i += 2) {
+            // Switch the field name 'b' to 'a' to create a duplicate field name.
+            lines[i] = lines[i].substring(0, offsetToFieldB) + "1" +
+                lines[i].substring(offsetToFieldB + 1);
+        }
+    };
+    rewriteTable(uri, conn, makeDuplicateFieldNames);
 };

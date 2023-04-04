@@ -45,6 +45,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer_impl.h"
 #include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer_util.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
@@ -120,8 +121,6 @@ void beginRetryableInternalTransactionWithTxnNumber(
     OperationContext* opCtx,
     TxnNumber txnNumber,
     std::unique_ptr<MongoDOperationContextSession>& contextSession) {
-    RAIIServerParameterControllerForTest controller{"featureFlagInternalTransactions", true};
-
     opCtx->setLogicalSessionId(makeLogicalSessionIdWithTxnNumberAndUUIDForTest());
     opCtx->setTxnNumber(txnNumber);
     opCtx->setInMultiDocumentTransaction();
@@ -797,7 +796,7 @@ TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
     // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
     // of setting of `documentKey` on the delete for sharding purposes.
     // `OpObserverImpl::onDelete` asserts its existence.
-    documentKeyDecoration(opCtx.get()).emplace(BSON("_id" << 0), boost::none);
+    repl::documentKeyDecoration(opCtx.get()).emplace(BSON("_id" << 0), boost::none);
     opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, deleteEntryArgs);
     wuow.commit();
 
@@ -2657,6 +2656,15 @@ struct DeleteTestCase {
 };
 
 class BatchedWriteOutputsTest : public OpObserverTest {
+public:
+    void setUp() override {
+        OpObserverTest::setUp();
+
+        auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
+        opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+        getServiceContext()->setOpObserver(std::move(opObserverRegistry));
+    }
+
 protected:
     // The maximum numbers of documents that can be deleted in a batch. Assumes _id of integer type.
     static const int maxDocsInBatch = 203669;
@@ -2754,9 +2762,6 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
     reset(opCtx, NamespaceString::kRsOplogNamespace);
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
 
     // Run the test with WUOW's grouping 1 to 5 deletions.
     for (size_t docsToBeBatched = 1; docsToBeBatched <= nDocsToDelete; docsToBeBatched++) {
@@ -2774,7 +2779,8 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
             // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
             // of setting of `documentKey` on the delete for sharding purposes.
             // `OpObserverImpl::onDelete` asserts its existence.
-            documentKeyDecoration(opCtx).emplace(docsToDelete[doc]["_id"].wrap(), boost::none);
+            repl::documentKeyDecoration(opCtx).emplace(docsToDelete[doc]["_id"].wrap(),
+                                                       boost::none);
             const OplogDeleteEntryArgs args;
             opCtx->getServiceContext()->getOpObserver()->onDelete(
                 opCtx, _nss, _uuid, kUninitializedStmtId, args);
@@ -2814,9 +2820,6 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
     reset(opCtx, NamespaceString::kRsOplogNamespace);
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
 
     // Start a WUOW with groupOplogEntries=true. Verify that initialises the
     // BatchedWriteContext.
@@ -2837,7 +2840,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
     }
     // (1) Delete
     {
-        documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
+        repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
             opCtx, _nss, _uuid, kUninitializedStmtId, args);
@@ -2903,9 +2906,6 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
     reset(opCtx, NamespaceString::kRsOplogNamespace);
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
 
     // Start a WUOW with groupOplogEntries=true. Verify that initialises the
     // BatchedWriteContext.
@@ -2926,7 +2926,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
     }
     // (1) Delete
     {
-        documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
+        repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
             opCtx, _nssWithTid, _uuid, kUninitializedStmtId, args);
@@ -3016,9 +3016,6 @@ TEST_F(BatchedWriteOutputsTest, testEmptyWUOW) {
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
     reset(opCtx, NamespaceString::kRsOplogNamespace);
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
 
     // Start and commit an empty WUOW.
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
@@ -3034,9 +3031,6 @@ TEST_F(BatchedWriteOutputsTest, testWUOWLarge) {
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
     reset(opCtx, NamespaceString::kRsOplogNamespace);
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
 
     AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
 
@@ -3048,7 +3042,7 @@ TEST_F(BatchedWriteOutputsTest, testWUOWLarge) {
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
-        documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
+        repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
             opCtx, _nss, _uuid, kUninitializedStmtId, args);
@@ -3084,9 +3078,6 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
     reset(opCtx, NamespaceString::kRsOplogNamespace);
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
 
     AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
 
@@ -3098,7 +3089,7 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
-        documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
+        repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
             opCtx, _nss, _uuid, kUninitializedStmtId, args);
@@ -3441,7 +3432,7 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
-        documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
+        repl::documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
         opObserver.onDelete(
             opCtx, _nss, _uuid, testCase.isRetryable() ? 1 : kUninitializedStmtId, deleteEntryArgs);
         wuow.commit();
@@ -3492,7 +3483,7 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
-        documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
+        repl::documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
         opObserver.onDelete(opCtx, _nss, _uuid, stmtId, deleteEntryArgs);
         commitUnpreparedTransaction<OpObserverRegistry>(opCtx, opObserver);
         wuow.commit();
@@ -3538,7 +3529,7 @@ TEST_F(OnDeleteOutputsTest,
     // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
     // of setting of `documentKey` on the delete for sharding purposes.
     // `OpObserverImpl::onDelete` asserts its existence.
-    documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
+    repl::documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
     ASSERT_THROWS_CODE(opObserver.onDelete(opCtx, _nss, _uuid, 1 /* stmtId */, deleteEntryArgs),
                        DBException,
                        6462401);

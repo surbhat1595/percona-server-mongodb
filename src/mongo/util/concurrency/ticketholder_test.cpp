@@ -64,7 +64,7 @@ void basicTimeout(OperationContext* opCtx) {
     ServiceContext serviceContext;
     serviceContext.setTickSource(std::make_unique<TickSourceMock<Microseconds>>());
     auto mode = TicketHolder::WaitMode::kInterruptible;
-    std::unique_ptr<TicketHolder> holder = std::make_unique<H>(1, &serviceContext);
+    std::unique_ptr<TicketHolderWithQueueingStats> holder = std::make_unique<H>(1, &serviceContext);
     ASSERT_EQ(holder->used(), 0);
     ASSERT_EQ(holder->available(), 1);
     ASSERT_EQ(holder->outof(), 1);
@@ -249,7 +249,7 @@ TEST_F(TicketHolderTest, FifoCanceled) {
         auto ticket =
             holder.waitForTicket(_opCtx.get(), &admCtx, TicketHolder::WaitMode::kInterruptible);
 
-        stdx::thread waiting([this, &holder]() {
+        stdx::thread waiting([&]() {
             auto client = this->getServiceContext()->makeClient("waiting");
             auto opCtx = client->makeOperationContext();
 

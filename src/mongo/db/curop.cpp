@@ -30,8 +30,6 @@
 // CHECK_LOG_REDACTION
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/curop.h"
 
 #include <iomanip>
@@ -69,9 +67,7 @@ using std::string;
 
 namespace {
 
-TimerStats oplogGetMoreStats;
-ServerStatusMetricField<TimerStats> displayBatchesReceived("repl.network.oplogGetMoresProcessed",
-                                                           &oplogGetMoreStats);
+auto& oplogGetMoreStats = makeServerStatusMetric<TimerStats>("repl.network.oplogGetMoresProcessed");
 
 }  // namespace
 
@@ -836,6 +832,14 @@ void OpDebug::report(OperationContext* opCtx,
 
     if (prepareConflictDurationMillis > Milliseconds::zero()) {
         pAttrs->add("prepareConflictDuration", prepareConflictDurationMillis);
+    }
+
+    if (databaseVersionRefreshMillis > Milliseconds::zero()) {
+        pAttrs->add("databaseVersionRefreshDuration", databaseVersionRefreshMillis);
+    }
+
+    if (shardVersionRefreshMillis > Milliseconds::zero()) {
+        pAttrs->add("shardVersionRefreshDuration", shardVersionRefreshMillis);
     }
 
     if (dataThroughputLastSecond) {

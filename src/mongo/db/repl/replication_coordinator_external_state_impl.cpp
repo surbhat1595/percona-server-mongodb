@@ -28,8 +28,6 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/repl/replication_coordinator_external_state_impl.h"
 
 #include <functional>
@@ -90,6 +88,7 @@
 #include "mongo/db/s/shard_local.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_state_recovery.h"
+#include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -133,7 +132,8 @@ namespace repl {
 namespace {
 
 const char localDbName[] = "local";
-const auto configDatabaseName = localDbName;
+// TODO SERVER-62491 Use SystemTenantId
+const auto configDatabaseName = DatabaseName(boost::none, localDbName);
 const auto lastVoteDatabaseName = localDbName;
 const char meCollectionName[] = "local.me";
 const auto meDatabaseName = localDbName;
@@ -144,14 +144,7 @@ const NamespaceString configCollectionNS{"local", "system.replset"};
 MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 
 // The count of items in the buffer
-OplogBuffer::Counters bufferGauge;
-ServerStatusMetricField<Counter64> displayBufferCount("repl.buffer.count", &bufferGauge.count);
-// The size (bytes) of items in the buffer
-ServerStatusMetricField<Counter64> displayBufferSize("repl.buffer.sizeBytes", &bufferGauge.size);
-// The max size (bytes) of the buffer. If the buffer does not have a size constraint, this is
-// set to 0.
-ServerStatusMetricField<Counter64> displayBufferMaxSize("repl.buffer.maxSizeBytes",
-                                                        &bufferGauge.maxSize);
+OplogBuffer::Counters bufferGauge("repl.buffer");
 
 /**
  * Returns new thread pool for thread pool task executor.
@@ -558,7 +551,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
         createChangeStreamPreImagesCollection(opCtx);
     }
 
-    // TODO: SERVER-65948 move the change collection creation logic from here to the PM-2502 hooks.
+    // TODO: SERVER-66631 move the change collection creation logic from here to the PM-2502 hooks.
     // The change collection will be created when the change stream is enabled.
     if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
         auto status = ChangeStreamChangeCollectionManager::get(opCtx).createChangeCollection(
@@ -932,30 +925,43 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
         TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
-    } else if (ShardingState::get(opCtx)->enabled()) {
-        Status status = ShardingStateRecovery::recover(opCtx);
-        VectorClockMutable::get(opCtx)->recoverDirect(opCtx);
+    } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        if (ShardingState::get(opCtx)->enabled()) {
+            Status status = ShardingStateRecovery::recover(opCtx);
+            VectorClockMutable::get(opCtx)->recoverDirect(opCtx);
 
-        // If the node is shutting down or it lost quorum just as it was becoming primary, don't
-        // run the sharding onStepUp machinery. The onStepDown counterpart to these methods is
-        // already idempotent, so the machinery will remain in the stepped down state.
-        if (ErrorCodes::isShutdownError(status.code()) ||
-            ErrorCodes::isNotPrimaryError(status.code())) {
-            return;
+            // If the node is shutting down or it lost quorum just as it was becoming primary, don't
+            // run the sharding onStepUp machinery. The onStepDown counterpart to these methods is
+            // already idempotent, so the machinery will remain in the stepped down state.
+            if (ErrorCodes::isShutdownError(status.code()) ||
+                ErrorCodes::isNotPrimaryError(status.code())) {
+                return;
+            }
+            fassert(40107, status);
+
+            CatalogCacheLoader::get(_service).onStepUp();
+            ChunkSplitter::get(_service).onStepUp();
+            PeriodicBalancerConfigRefresher::get(_service).onStepUp(_service);
+            TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
+
+            const auto configsvrConnStr =
+                Grid::get(opCtx)->shardRegistry()->getConfigShard()->getConnString();
+            ShardingInitializationMongoD::get(opCtx)->updateShardIdentityConfigString(
+                opCtx, configsvrConnStr);
+
+            // Note, these must be done after the configOpTime is recovered via
+            // ShardingStateRecovery::recover above, because they may trigger filtering metadata
+            // refreshes which should use the recovered configOpTime.
+            migrationutil::resubmitRangeDeletionsOnStepUp(_service);
+            migrationutil::resumeMigrationCoordinationsOnStepUp(opCtx);
+            migrationutil::resumeMigrationRecipientsOnStepUp(opCtx);
+
+            const bool scheduleAsyncRefresh = true;
+            resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
         }
-        fassert(40107, status);
-
-        const auto configsvrConnStr =
-            Grid::get(opCtx)->shardRegistry()->getConfigShard()->getConnString();
-        ShardingInitializationMongoD::get(opCtx)->updateShardIdentityConfigString(opCtx,
-                                                                                  configsvrConnStr);
-
-        CatalogCacheLoader::get(_service).onStepUp();
-        ChunkSplitter::get(_service).onStepUp();
-        PeriodicBalancerConfigRefresher::get(_service).onStepUp(_service);
-        TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
-
-        // Create uuid index on config.rangeDeletions if needed
+        // The code above will only be executed after a stepdown happens, however the code below
+        // needs to be executed also on startup, and the enabled check might fail in shards during
+        // startup. Create uuid index on config.rangeDeletions if needed
         auto minKeyFieldName = RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinKey;
         auto maxKeyFieldName = RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxKey;
         Status indexStatus = createIndexOnConfigCollection(
@@ -979,15 +985,24 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
                                         "shard's first transition to primary"));
         }
 
-        // Note, these must be done after the configOpTime is recovered via
-        // ShardingStateRecovery::recover above, because they may trigger filtering metadata
-        // refreshes which should use the recovered configOpTime.
-        migrationutil::resubmitRangeDeletionsOnStepUp(_service);
-        migrationutil::resumeMigrationCoordinationsOnStepUp(opCtx);
-        migrationutil::resumeMigrationRecipientsOnStepUp(opCtx);
-
-        const bool scheduleAsyncRefresh = true;
-        resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
+        // Create indexes in config.shard.indexes if needed.
+        indexStatus = sharding_util::createGlobalIndexesIndexes(opCtx);
+        if (!indexStatus.isOK()) {
+            // If the node is shutting down or it lost quorum just as it was becoming primary,
+            // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
+            // methods is already idempotent, so the machinery will remain in the stepped down
+            // state.
+            if (ErrorCodes::isShutdownError(indexStatus.code()) ||
+                ErrorCodes::isNotPrimaryError(indexStatus.code())) {
+                return;
+            }
+            fassertFailedWithStatus(
+                6280501,
+                indexStatus.withContext(str::stream()
+                                        << "Failed to create index on "
+                                        << NamespaceString::kShardsIndexCatalogNamespace
+                                        << " on shard's first transition to primary"));
+        }
     } else {  // unsharded
         if (auto validator = LogicalTimeValidator::get(_service)) {
             validator->enableKeyGenerator(opCtx, true);

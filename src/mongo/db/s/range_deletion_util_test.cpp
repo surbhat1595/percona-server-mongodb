@@ -264,64 +264,6 @@ TEST_F(RangeDeleterTest,
     ASSERT_EQUALS(dbclient.count(kNss, BSONObj()), 0);
 }
 
-TEST_F(RangeDeleterTest, RemoveDocumentsInRangeInsertsDocumentToNotifySecondariesOfRangeDeletion) {
-    const ChunkRange range(BSON(kShardKey << 0), BSON(kShardKey << 10));
-    auto queriesComplete = SemiFuture<void>::makeReady();
-
-    setFilteringMetadataWithUUID(uuid());
-    auto task = insertRangeDeletionTask(_opCtx, uuid(), range, 1);
-    DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
-
-    auto cleanupComplete =
-        removeDocumentsInRange(executor(),
-                               std::move(queriesComplete),
-                               kNss,
-                               uuid(),
-                               kShardKeyPattern,
-                               range,
-                               task.getId(),
-                               Seconds(0) /* delayForActiveQueriesOnSecondariesToComplete*/);
-
-    cleanupComplete.get();
-
-    ASSERT_EQUALS(dbclient.count(NamespaceString::kServerConfigurationNamespace,
-                                 BSON(kShardKey << "startRangeDeletion")),
-                  1);
-}
-
-TEST_F(
-    RangeDeleterTest,
-    RemoveDocumentsInRangeOnlyInsertsStartRangeDeletionDocumentOnceWhenSeveralBatchesAreRequired) {
-    const ChunkRange range(BSON(kShardKey << 0), BSON(kShardKey << 10));
-    // More documents than the batch size.
-    const auto numDocsToInsert = 3;
-    auto queriesComplete = SemiFuture<void>::makeReady();
-
-    // Insert documents in range.
-    setFilteringMetadataWithUUID(uuid());
-    auto task = insertRangeDeletionTask(_opCtx, uuid(), range, numDocsToInsert);
-    DBDirectClient dbclient(_opCtx);
-    for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
-    }
-
-    auto cleanupComplete =
-        removeDocumentsInRange(executor(),
-                               std::move(queriesComplete),
-                               kNss,
-                               uuid(),
-                               kShardKeyPattern,
-                               range,
-                               task.getId(),
-                               Seconds(0) /* delayForActiveQueriesOnSecondariesToComplete*/);
-
-    cleanupComplete.get();
-    ASSERT_EQUALS(dbclient.count(NamespaceString::kServerConfigurationNamespace,
-                                 BSON(kShardKey << "startRangeDeletion")),
-                  1);
-}
-
 TEST_F(RangeDeleterTest,
        RemoveDocumentsInRangeDoesNotRemoveDocumentsWithKeysLowerThanMinKeyOfRange) {
     const auto numDocsToInsert = 3;
@@ -1021,53 +963,6 @@ TEST_F(RenameRangeDeletionsTest, IdempotentRenameRangeDeletionsTest) {
     PersistentTaskStore<RangeDeletionTask> forRenameStore(
         NamespaceString::kRangeDeletionForRenameNamespace);
     ASSERT_EQ(0, forRenameStore.count(_opCtx, BSONObj()));
-}
-
-TEST_F(RangeDeleterTest,
-       setOrphanCountersOnRangeDeletionTasksUpdatesTaskWithExpectedNumberOfOrphans) {
-    const auto numOrphansInRange = 5;
-    setFilteringMetadataWithUUID(uuid());
-
-    DBDirectClient dbClient(_opCtx);
-    const ChunkRange orphansRange(BSON(kShardKey << 0), BSON(kShardKey << numOrphansInRange));
-    auto t = insertRangeDeletionTask(_opCtx, uuid(), orphansRange);
-    for (auto i = 0; i < numOrphansInRange; ++i) {
-        dbClient.insert(kNss.toString(), BSON(kShardKey << i));  // orphaned documents
-        dbClient.insert(kNss.toString(), BSON(kShardKey << -i));
-    }
-
-    setOrphanCountersOnRangeDeletionTasks(_opCtx);
-
-    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    ASSERT_EQ(
-        store.count(_opCtx, BSON(RangeDeletionTask::kNumOrphanDocsFieldName << numOrphansInRange)),
-        1);
-}
-
-TEST_F(RangeDeleterTest, setOrphanCountersOnRangeDeletionTasksAddsZeroValueWhenNamespaceNotFound) {
-    NamespaceString unexistentCollection("foo", "iDontExist");
-    auto collUuid = UUID::gen();
-    DBDirectClient dbClient(_opCtx);
-    const ChunkRange orphansRange(BSON(kShardKey << 0), BSON(kShardKey << 20));
-    auto t = insertRangeDeletionTask(_opCtx, unexistentCollection, collUuid, orphansRange, 3);
-
-    setOrphanCountersOnRangeDeletionTasks(_opCtx);
-
-    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    ASSERT_EQ(store.count(_opCtx, BSON(RangeDeletionTask::kNumOrphanDocsFieldName << 0)), 1);
-}
-
-TEST_F(RangeDeleterTest, clearOrphanCountersFromRangeDeletionTasksRemovesFieldFromAllDocs) {
-    DBDirectClient dbClient(_opCtx);
-    const ChunkRange orphansRange(BSON(kShardKey << 0), BSON(kShardKey << 20));
-    auto t1 = insertRangeDeletionTask(_opCtx, uuid(), orphansRange, 3);
-
-    clearOrphanCountersFromRangeDeletionTasks(_opCtx);
-
-    auto cursor = dbClient.find(FindCommandRequest(NamespaceString::kRangeDeletionNamespace));
-    ASSERT_TRUE(cursor->more());
-    ASSERT_FALSE(cursor->next().hasField(RangeDeletionTask::kNumOrphanDocsFieldName));
-    ASSERT_FALSE(cursor->more());
 }
 
 }  // namespace

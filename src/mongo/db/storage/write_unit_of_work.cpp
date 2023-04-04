@@ -32,15 +32,10 @@
 
 #include "mongo/db/storage/write_unit_of_work.h"
 
-#include "mongo/db/batched_write_context.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
-
 
 namespace mongo {
 
@@ -54,8 +49,9 @@ WriteUnitOfWork::WriteUnitOfWork(OperationContext* opCtx, bool groupOplogEntries
     invariant(_toplevel || !_groupOplogEntries);
 
     if (_groupOplogEntries) {
-        auto& batchedWriteContext = BatchedWriteContext::get(_opCtx);
-        batchedWriteContext.setWritesAreBatched(true);
+        const auto opObserver = _opCtx->getServiceContext()->getOpObserver();
+        invariant(opObserver);
+        opObserver->onBatchedWriteStart(_opCtx);
     }
 
     _opCtx->lockState()->beginWriteUnitOfWork();
@@ -88,9 +84,9 @@ WriteUnitOfWork::~WriteUnitOfWork() {
     }
 
     if (_groupOplogEntries) {
-        auto& batchedWriteContext = BatchedWriteContext::get(_opCtx);
-        batchedWriteContext.clearBatchedOperations(_opCtx);
-        batchedWriteContext.setWritesAreBatched(false);
+        const auto opObserver = _opCtx->getServiceContext()->getOpObserver();
+        invariant(opObserver);
+        opObserver->onBatchedWriteAbort(_opCtx);
     }
 }
 
@@ -134,10 +130,6 @@ void WriteUnitOfWork::commit() {
         const auto opObserver = _opCtx->getServiceContext()->getOpObserver();
         invariant(opObserver);
         opObserver->onBatchedWriteCommit(_opCtx);
-
-        auto& batchedWriteContext = BatchedWriteContext::get(_opCtx);
-        batchedWriteContext.clearBatchedOperations(_opCtx);
-        batchedWriteContext.setWritesAreBatched(false);
     }
     if (_toplevel) {
         if (MONGO_unlikely(sleepBeforeCommit.shouldFail())) {

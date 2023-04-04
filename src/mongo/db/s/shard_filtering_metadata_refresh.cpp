@@ -33,6 +33,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -64,6 +65,11 @@ void onDbVersionMismatch(OperationContext* opCtx,
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
+    Timer t{};
+    ScopeGuard finishTiming([&] {
+        CurOp::get(opCtx)->debug().databaseVersionRefreshMillis += Milliseconds(t.millis());
+    });
+
     {
         // Take the DBLock directly rather than using AutoGetDb, to prevent a recursive call into
         // checkDbVersion().
@@ -71,7 +77,8 @@ void onDbVersionMismatch(OperationContext* opCtx,
         // TODO: It is not safe here to read the DB version without checking for critical section
         //
         if (clientDbVersion) {
-            Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+            // TODO SERVER-67440 Use dbName directly
+            Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, dbName), MODE_IS);
             auto dss = DatabaseShardingState::get(opCtx, dbName);
             auto dssLock = DatabaseShardingState::DSSLock::lockShared(opCtx, dss);
             const auto serverDbVersion = dss->getDbVersion(opCtx, dssLock);
@@ -157,7 +164,7 @@ SharedSemiFuture<void> recoverRefreshShardVersion(ServiceContext* serviceContext
                 // version. It is then ok to lock views in order to clear filtering metadata.
                 //
                 // DBLock and CollectionLock must be used in order to avoid shard version checks
-                Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+                Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IX);
                 Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
 
                 auto* const csr = CollectionShardingRuntime::get(opCtx, nss);
@@ -190,7 +197,7 @@ SharedSemiFuture<void> recoverRefreshShardVersion(ServiceContext* serviceContext
                     {
                         // DBLock and CollectionLock must be used in order to avoid shard version
                         // checks
-                        Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+                        Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IX);
                         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
 
                         auto const& csr = CollectionShardingRuntime::get(opCtx, nss);
@@ -242,6 +249,10 @@ void onShardVersionMismatch(OperationContext* opCtx,
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
+    Timer t{};
+    ScopeGuard finishTiming(
+        [&] { CurOp::get(opCtx)->debug().shardVersionRefreshMillis += Milliseconds(t.millis()); });
+
     if (nss.isNamespaceAlwaysUnsharded()) {
         return;
     }
@@ -259,7 +270,7 @@ void onShardVersionMismatch(OperationContext* opCtx,
         {
             boost::optional<Lock::DBLock> dbLock;
             boost::optional<Lock::CollectionLock> collLock;
-            dbLock.emplace(opCtx, nss.db(), MODE_IS);
+            dbLock.emplace(opCtx, nss.dbName(), MODE_IS);
             collLock.emplace(opCtx, nss, MODE_IS);
 
             auto* const csr = CollectionShardingRuntime::get(opCtx, nss);
@@ -380,7 +391,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
         // DBLock and CollectionLock are used here to avoid throwing further recursive stale
         // config errors, as well as a possible InvalidViewDefinition error if an invalid view
         // is in the 'system.views' collection.
-        Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+        Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
         CollectionShardingRuntime::get(opCtx, nss)
             ->setFilteringMetadata(opCtx, CollectionMetadata());
@@ -394,7 +405,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
         // DBLock and CollectionLock are used here to avoid throwing further recursive stale
         // config errors, as well as a possible InvalidViewDefinition error if an invalid view
         // is in the 'system.views' collection.
-        Lock::DBLock dbLock(opCtx, nss.db(), MODE_IS);
+        Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IS);
         Lock::CollectionLock collLock(opCtx, nss, MODE_IS);
         auto optMetadata = CollectionShardingRuntime::get(opCtx, nss)->getCurrentMetadataIfKnown();
 
@@ -423,7 +434,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
     // DBLock and CollectionLock are used here to avoid throwing further recursive stale config
     // errors, as well as a possible InvalidViewDefinition error if an invalid view is in the
     // 'system.views' collection.
-    Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
+    Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IX);
     Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
     auto* const csr = CollectionShardingRuntime::get(opCtx, nss);
 
@@ -485,7 +496,8 @@ void forceDatabaseRefresh(OperationContext* opCtx, const StringData dbName) {
 
     if (swRefreshedDbInfo == ErrorCodes::NamespaceNotFound) {
         // db has been dropped, set the db version to boost::none
-        Lock::DBLock dbLock(opCtx, dbName, MODE_X);
+        // TODO SERVER-67440 Use dbName directly
+        Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, dbName), MODE_X);
         auto dss = DatabaseShardingState::get(opCtx, dbName);
         dss->clearDatabaseInfo(opCtx);
         return;
@@ -500,7 +512,8 @@ void forceDatabaseRefresh(OperationContext* opCtx, const StringData dbName) {
     {
         // Take the DBLock directly rather than using AutoGetDb, to prevent a recursive call
         // into checkDbVersion().
-        Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+        // TODO SERVER-67440 Use dbName directly
+        Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, dbName), MODE_IS);
         auto dss = DatabaseShardingState::get(opCtx, dbName);
         auto dssLock = DatabaseShardingState::DSSLock::lockShared(opCtx, dss);
 
@@ -518,7 +531,8 @@ void forceDatabaseRefresh(OperationContext* opCtx, const StringData dbName) {
     }
 
     // The cached version is older than the refreshed version; update the cached version.
-    Lock::DBLock dbLock(opCtx, dbName, MODE_X);
+    // TODO SERVER-67440 Use dbName directly
+    Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, dbName), MODE_X);
     auto dss = DatabaseShardingState::get(opCtx, dbName);
     auto dssLock = DatabaseShardingState::DSSLock::lockExclusive(opCtx, dss);
 

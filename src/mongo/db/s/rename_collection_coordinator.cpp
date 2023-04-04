@@ -74,7 +74,7 @@ boost::optional<UUID> getCollectionUUID(OperationContext* opCtx,
     if (optCollectionType) {
         return optCollectionType->getUuid();
     }
-    Lock::DBLock dbLock(opCtx, nss.db(), MODE_IS);
+    Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IS);
     Lock::CollectionLock collLock(opCtx, nss, MODE_IS);
     const auto collPtr = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
     if (!collPtr && !throwOnNotFound) {
@@ -102,7 +102,7 @@ void RenameCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) con
     const auto& otherReq = otherDoc.getRenameCollectionRequest().toBSON();
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
-            str::stream() << "Another rename collection for namespace " << nss()
+            str::stream() << "Another rename collection for namespace " << originalNss()
                           << " is being executed with different parameters: " << selfReq,
             SimpleBSONObjComparator::kInstance.evaluate(selfReq == otherReq));
 }
@@ -134,6 +134,14 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     sharding_ddl_util::getCriticalSectionReasonForRename(fromNss, toNss);
 
                 try {
+                    uassert(ErrorCodes::IllegalOperation,
+                            "Renaming a timeseries collection is not allowed",
+                            !fromNss.isTimeseriesBucketsCollection());
+
+                    uassert(ErrorCodes::IllegalOperation,
+                            "Renaming to a bucket namespace is not allowed",
+                            !toNss.isTimeseriesBucketsCollection());
+
                     uassert(ErrorCodes::InvalidOptions,
                             "Cannot provide an expected collection UUID when renaming between "
                             "databases",

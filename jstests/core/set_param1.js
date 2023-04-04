@@ -1,6 +1,7 @@
 // @tags: [
 //   assumes_superuser_permissions,
 //   does_not_support_stepdowns,
+//   requires_fcv_61,
 //   # This test attempts to compare the response from running the {getParameter: "*"}
 //   # command multiple times, which may observe the change to the failpoint enabled by the
 //   # migration hook.
@@ -9,6 +10,9 @@
 
 // Tests for accessing logLevel server parameter using getParameter/setParameter commands
 // and shell helpers.
+
+(function() {
+'use strict';
 
 function scrub(obj) {
     delete obj["operationTime"];
@@ -21,12 +25,12 @@ function scrub(obj) {
     return obj;
 }
 
-old = scrub(assert.commandWorked(db.adminCommand({"getParameter": "*"})));
+const old = scrub(assert.commandWorked(db.adminCommand({"getParameter": "*"})));
 // the first time getParameter sends a request to with a shardingTaskExecutor and this sets an
 // operationTime. The following commands do not use shardingTaskExecutor.
-tmp1 = assert.commandWorked(db.adminCommand({"setParameter": 1, "logLevel": 5}));
-tmp2 = assert.commandWorked(db.adminCommand({"setParameter": 1, "logLevel": old.logLevel}));
-now = scrub(assert.commandWorked(db.adminCommand({"getParameter": "*"})));
+const tmp1 = assert.commandWorked(db.adminCommand({"setParameter": 1, "logLevel": 5}));
+const tmp2 = assert.commandWorked(db.adminCommand({"setParameter": 1, "logLevel": old.logLevel}));
+const now = scrub(assert.commandWorked(db.adminCommand({"getParameter": "*"})));
 
 assert.eq(old, now, "A");
 assert.eq(old.logLevel, tmp1.was, "B");
@@ -68,8 +72,8 @@ assert.commandWorked(db.adminCommand({
     }
 }));
 
-var result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
-                 .logComponentVerbosity;
+const result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
+                   .logComponentVerbosity;
 
 assert.eq(2, result.verbosity);
 assert.eq(0, result.accessControl.verbosity);
@@ -92,8 +96,8 @@ assert.commandFailed(db.adminCommand({
     }
 }));
 
-var result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
-                 .logComponentVerbosity;
+const result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
+                   .logComponentVerbosity;
 
 assert.eq(2, result.verbosity);
 assert.eq(0, result.accessControl.verbosity);
@@ -108,8 +112,8 @@ assert.commandWorked(db.adminCommand({
     logComponentVerbosity: {verbosity: -1, storage: {journal: {verbosity: -1}}}
 }));
 
-var result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
-                 .logComponentVerbosity;
+const result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
+                   .logComponentVerbosity;
 
 assert.eq(0, result.verbosity);
 assert.eq(0, result.accessControl.verbosity);
@@ -123,8 +127,8 @@ assert.eq(-1, result.storage.journal.verbosity);
 assert.commandWorked(
     db.adminCommand({"setParameter": 1, logComponentVerbosity: {accessControl: 5}}));
 
-var result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
-                 .logComponentVerbosity;
+const result = assert.commandWorked(db.adminCommand({"getParameter": 1, logComponentVerbosity: 1}))
+                   .logComponentVerbosity;
 
 assert.eq(5, result.accessControl.verbosity);
 })();
@@ -133,12 +137,23 @@ assert.eq(5, result.accessControl.verbosity);
 assert.commandWorked(
     db.adminCommand({"setParameter": 1, logComponentVerbosity: old.logComponentVerbosity}));
 
-var isMongos = (db.hello().msg === 'isdbgrid');
+// Checks server parameter for redaction of encrypted fields in BSON Objects.
+assert(old.hasOwnProperty('redactEncryptedFields'),
+       'server parameter for toggling bindata 6 redaction not available: ' + tojson(old));
+assert.commandWorked(db.adminCommand({"setParameter": 1, redactEncryptedFields: false}));
+const result = assert.commandWorked(db.adminCommand({"getParameter": 1, redactEncryptedFields: 1}))
+                   .redactEncryptedFields;
+assert(!result,
+       'setParameter worked on redaction setting but getParameter returned unexpected result.');
+assert.commandWorked(
+    db.adminCommand({"setParameter": 1, redactEncryptedFields: old.redactEncryptedFields}));
+
+const isMongos = (db.hello().msg === 'isdbgrid');
 if (!isMongos) {
     //
     // oplogFetcherSteadyStateMaxFetcherRestarts
     //
-    var origRestarts = assert
+    let origRestarts = assert
                            .commandWorked(db.adminCommand(
                                {getParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: 1}))
                            .oplogFetcherSteadyStateMaxFetcherRestarts;
@@ -189,3 +204,4 @@ if (!isMongos) {
     assert.commandWorked(db.adminCommand(
         {setParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: origRestarts}));
 }
+})();

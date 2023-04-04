@@ -394,28 +394,6 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
         .ignoreValue();
 }
 
-/**
- * Notify the secondaries that this range is being deleted. Secondaries will watch for this update,
- * and kill any queries that may depend on documents in the range -- excepting any queries with a
- * read-concern option 'ignoreChunkMigration'.
- */
-void notifySecondariesThatDeletionIsOccurring(const NamespaceString& nss,
-                                              const UUID& collectionUuid,
-                                              const ChunkRange& range) {
-    withTemporaryOperationContext(
-        [&](OperationContext* opCtx) {
-            AutoGetCollection autoAdmin(
-                opCtx, NamespaceString::kServerConfigurationNamespace, MODE_IX);
-            Helpers::upsert(opCtx,
-                            NamespaceString::kServerConfigurationNamespace.ns(),
-                            BSON("_id"
-                                 << "startRangeDeletion"
-                                 << "ns" << nss.ns() << "uuid" << collectionUuid << "min"
-                                 << range.getMin() << "max" << range.getMax()));
-        },
-        nss);
-}
-
 void removePersistentRangeDeletionTask(const NamespaceString& nss, UUID migrationId) {
     withTemporaryOperationContext(
         [&](OperationContext* opCtx) {
@@ -549,8 +527,6 @@ SharedSemiFuture<void> removeDocumentsInRange(
                         "namespace"_attr = nss.ns(),
                         "range"_attr = redact(range.toString()));
 
-            notifySecondariesThatDeletionIsOccurring(nss, collectionUuid, range);
-
             return deleteRangeInBatches(
                        executor, nss, collectionUuid, keyPattern, range, migrationId)
                 .onCompletion([=](Status s) {
@@ -631,81 +607,6 @@ SharedSemiFuture<void> removeDocumentsInRange(
         })
         .semi()
         .share();
-}
-
-void setOrphanCountersOnRangeDeletionTasks(OperationContext* opCtx) {
-    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    auto setNumOrphansOnTask = [opCtx, &store](const RangeDeletionTask& deletionTask,
-                                               int64_t numOrphans) {
-        store.update(opCtx,
-                     BSON(RangeDeletionTask::kIdFieldName << deletionTask.getId()),
-                     BSON("$set" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName << numOrphans)),
-                     ShardingCatalogClient::kLocalWriteConcern);
-    };
-
-    store.forEach(
-        opCtx,
-        BSONObj(),
-        [opCtx, &store, &setNumOrphansOnTask](const RangeDeletionTask& deletionTask) {
-            AutoGetCollection collection(opCtx, deletionTask.getNss(), MODE_IX);
-            ScopedRangeDeleterLock rangeDeleterLock(opCtx, deletionTask.getCollectionUuid());
-            if (!collection || collection->uuid() != deletionTask.getCollectionUuid()) {
-                // The deletion task is referring to a collection that has been dropped
-                setNumOrphansOnTask(deletionTask, 0);
-                return true;
-            }
-
-            KeyPattern keyPattern;
-            uassertStatusOK(deletionTask.getRange().extractKeyPattern(&keyPattern));
-            auto shardKeyIdx = findShardKeyPrefixedIndex(opCtx,
-                                                         *collection,
-                                                         collection->getIndexCatalog(),
-                                                         keyPattern.toBSON(),
-                                                         /*requireSingleKey=*/false);
-
-            uassert(ErrorCodes::IndexNotFound,
-                    str::stream() << "couldn't find index over shard key " << keyPattern.toBSON()
-                                  << " for collection " << deletionTask.getNss()
-                                  << " (uuid: " << deletionTask.getCollectionUuid() << ")",
-                    shardKeyIdx);
-
-            const auto& range = deletionTask.getRange();
-            auto forwardIdxScanner =
-                InternalPlanner::shardKeyIndexScan(opCtx,
-                                                   &(*collection),
-                                                   *shardKeyIdx,
-                                                   range.getMin(),
-                                                   range.getMax(),
-                                                   BoundInclusion::kIncludeStartKeyOnly,
-                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                   InternalPlanner::FORWARD);
-            int64_t numOrphansInRange = 0;
-            BSONObj indexEntry;
-            while (forwardIdxScanner->getNext(&indexEntry, nullptr) != PlanExecutor::IS_EOF) {
-                ++numOrphansInRange;
-            }
-
-            setNumOrphansOnTask(deletionTask, numOrphansInRange);
-            return true;
-        });
-}
-
-void clearOrphanCountersFromRangeDeletionTasks(OperationContext* opCtx) {
-    BSONObj allDocsQuery;
-    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    try {
-        // TODO SERVER-65996 Remove writeConflictRetry loop
-        writeConflictRetry(
-            opCtx, "clearOrphanCounters", NamespaceString::kRangeDeletionNamespace.ns(), [&] {
-                store.update(
-                    opCtx,
-                    allDocsQuery,
-                    BSON("$unset" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName << "")),
-                    WriteConcerns::kLocalWriteConcern);
-            });
-    } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
-        // There may be no range deletion tasks, so it is possible no document is updated
-    }
 }
 
 }  // namespace mongo

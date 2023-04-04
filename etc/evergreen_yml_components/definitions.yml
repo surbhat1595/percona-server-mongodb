@@ -791,6 +791,28 @@ functions:
       content_type: text/plain
       display_name: Pip Requirements
 
+  "upload clang tidy results": &upload_clang_tidy_results
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/clang_tidy_fixes.tgz
+        remote_file: ${project}/${build_variant}/${revision}/${task_id}/clang_tidy_fixes.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/gzip
+        display_name: clang_tidy_fixes.tgz
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/clang_tidy_fixes/clang_tidy_fixes.json
+        remote_file: ${project}/${build_variant}/${revision}/${task_id}/clang_tidy_fixes.json
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/json
+        display_name: clang_tidy_fixes.json
+
   "send benchmark results":
   - command: json.send
     params:
@@ -2327,8 +2349,6 @@ tasks:
         default
       task_compile_flags: >-
         --ninja
-      targets:
-        generate-ninja
   - *f_expansions_write
   - command: subprocess.exec
     params:
@@ -2351,8 +2371,6 @@ tasks:
       task_compile_flags: >-
         --build-tools=next
         --ninja
-      targets:
-        generate-ninja
   - *f_expansions_write
   - command: subprocess.exec
     params:
@@ -2444,7 +2462,7 @@ tasks:
   commands:
   - func: "scons compile"
     vars:
-      targets: generated-sources compiledb
+      targets: compiledb
       compiling_for_test: true
   - command: subprocess.exec
     type: test
@@ -2453,6 +2471,26 @@ tasks:
       binary: bash
       args:
       - "./src/evergreen/run_clang_tidy.sh"
+
+## clang_tidy_condensed - run clang_tidy with python making the results clearer
+- name: clang_tidy_condensed
+  tags: []
+  exec_timeout_secs: 7200 # 1 hour timeout for the task overall
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: compiledb
+      compiling_for_test: true
+  - command: subprocess.exec
+    type: test
+    timeout_secs: 7000 # 1 hour timeout for no output
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/run_clang_tidy_condensed.sh"
 
 ## compile_unittests ##
 - &compile_unittests
@@ -3483,6 +3521,21 @@ tasks:
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
+## jstestfuzz standalone fuzzer for checking find equivalence with and without plan cache ##
+- <<: *jstestfuzz_template
+  name: query_fuzzer_plan_cache_gen
+  tags: ["query_fuzzer", "require_npm", "random_name"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 5
+      num_tasks: 5
+      jstestfuzz_vars: --diffTestingMode plan_cache
+      npm_command: query-fuzzer
+      suite: generational_fuzzer
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
 ## jstestfuzz sharded fuzzer for checking find and aggregate equivalence ##
 - <<: *jstestfuzz_template
   name: query_fuzzer_sharded_gen
@@ -4319,13 +4372,6 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *task_template
-  name: change_streams_update_v1_oplog
-  tags: ["change_streams"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
   name: change_streams_mongos_sessions_passthrough
   tags: ["change_streams"]
   depends_on:
@@ -4496,6 +4542,20 @@ tasks:
 - <<: *task_template
   name: change_streams_per_shard_cursor_passthrough
   tags: ["change_streams"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: change_streams_multitenant_passthrough
+  tags: [] # TODO SERVER-67543 Add 'change_streams' tag.
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: change_streams_multitenant_sharded_collections_passthrough
+  tags: [] # TODO SERVER-67543 Add 'change_streams' tag.
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -4944,12 +5004,6 @@ tasks:
   - func: "run tests"
 
 - <<: *gen_task_template
-  name: replica_sets_update_v1_oplog_jscore_passthrough_gen
-  tags: ["replica_sets", "non_maj_read"]
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
   name: replica_sets_initsync_jscore_passthrough_gen
   tags: ["replica_sets", "san", "large"]
   commands:
@@ -5112,15 +5166,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       fallback_num_sub_suites: 5
-
-- <<: *task_template
-  name: sharding_update_v1_oplog_jscore_passthrough
-  tags: ["sharding", "jscore"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      suite: sharding_jscore_passthrough
 
 - <<: *task_template
   name: sharded_multi_stmt_txn_jscore_passthrough
@@ -5714,12 +5759,6 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
-  name: replica_sets_update_v1_oplog_gen
-  tags: ["replica_sets", "san"]
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
   name: replica_sets_multiversion_gen
   tags: ["random_multiversion_ds", "multiversion"]
   commands:
@@ -5819,14 +5858,6 @@ tasks:
 - <<: *gen_task_template
   name: sharding_last_lts_mongos_and_mixed_shards_gen
   tags: ["sharding", "common", "multiversion", "no_version_combination"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: sharding_update_v1_oplog_gen
-  tags: ["sharding", "common"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -7267,6 +7298,13 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
+  name: cqf_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
   name: cqf_parallel
   tags: []
   commands:
@@ -7602,6 +7640,39 @@ task_groups:
   teardown_task:
   tasks:
   - clang_tidy
+
+# This is a copy of clang_tidy_TG and will hopefully replace it
+- name: clang_tidy_condensed_TG
+  setup_group_can_fail_task: true
+  setup_group:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - func: "set task expansion macros"
+  - func: "f_expansions_write"
+  - func: "kill processes"
+  - func: "cleanup environment"
+  - func: "set up venv"
+  - func: "upload pip requirements"
+  - func: "configure evergreen api credentials"
+  - func: "get buildnumber"
+  - func: "f_expansions_write"
+  - func: "set up credentials"
+  - func: "set up win mount script"
+  - func: "generate compile expansions"
+  teardown_group:
+  - func: "f_expansions_write"
+  - func: "attach report"
+  - func: "upload clang tidy results"
+  - func: "umount shared scons directory"
+  - func: "cleanup environment"
+  setup_task:
+  - func: "apply compile expansions"
+  - func: "f_expansions_write"
+  - func: "set task expansion macros"
+  - func: "f_expansions_write"
+  teardown_task:
+  tasks:
+  - clang_tidy_condensed
 
 - name: visibility_test_TG
   setup_group_can_fail_task: true

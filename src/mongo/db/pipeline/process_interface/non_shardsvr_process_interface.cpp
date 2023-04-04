@@ -176,23 +176,25 @@ void NonShardServerProcessInterface::createIndexesOnEmptyCollection(
 }
 void NonShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     OperationContext* opCtx,
-    const BSONObj& renameCommandObj,
+    const NamespaceString& sourceNs,
     const NamespaceString& targetNs,
+    bool dropTarget,
+    bool stayTemp,
     const BSONObj& originalCollectionOptions,
     const std::list<BSONObj>& originalIndexes) {
-    NamespaceString sourceNs = NamespaceString(renameCommandObj["renameCollection"].String());
     RenameCollectionOptions options;
-    options.dropTarget = renameCommandObj["dropTarget"].trueValue();
-    options.stayTemp = renameCommandObj["stayTemp"].trueValue();
+    options.dropTarget = dropTarget;
+    options.stayTemp = stayTemp;
     // skip sharding validation on non sharded servers
     doLocalRenameIfOptionsAndIndexesHaveNotChanged(
         opCtx, sourceNs, targetNs, options, originalIndexes, originalCollectionOptions);
 }
 
 void NonShardServerProcessInterface::createCollection(OperationContext* opCtx,
-                                                      const std::string& dbName,
+                                                      const DatabaseName& dbName,
                                                       const BSONObj& cmdObj) {
-    uassertStatusOK(mongo::createCollection(opCtx, dbName, cmdObj));
+    // TODO SERVER-67409 change mongo::createCollection to take in DatabaseName
+    uassertStatusOK(mongo::createCollection(opCtx, dbName.toStringWithTenantId(), cmdObj));
 }
 
 void NonShardServerProcessInterface::dropCollection(OperationContext* opCtx,

@@ -92,10 +92,6 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kReshardCollection:
             return std::make_shared<ReshardCollectionCoordinator>(service, std::move(initialState));
             break;
-        case DDLCoordinatorTypeEnum::kReshardCollectionNoResilient:
-            return std::make_shared<ReshardCollectionCoordinator_NORESILIENT>(
-                service, std::move(initialState));
-            break;
         case DDLCoordinatorTypeEnum::kCompactStructuredEncryptionData:
             return std::make_shared<CompactStructuredEncryptionDataCoordinator>(
                 service, std::move(initialState));
@@ -290,11 +286,6 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx, BSON
             throw;
         }
     }();
-
-    // If the existing instance doesn't have conflicting options just return that one
-    if (!created) {
-        coordinator->checkIfOptionsConflict(coorDoc);
-    }
 
     return coordinator;
 }

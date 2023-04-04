@@ -40,6 +40,7 @@
 #include "mongo/db/matcher/expression_text_noop.h"
 #include "mongo/db/matcher/expression_where.h"
 #include "mongo/db/matcher/expression_where_noop.h"
+#include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/query/analyze_regex.h"
 #include "mongo/db/query/projection.h"
@@ -446,6 +447,10 @@ void encodePipeline(const std::vector<std::unique_ptr<InnerPipelineStageInterfac
                     serializedArray.size() == 1 && serializedArray[0].getType() == Object);
             const auto bson = serializedArray[0].getDocument().toBson();
             bufBuilder->appendBuf(bson.objdata(), bson.objsize());
+        } else if (auto groupStage = dynamic_cast<DocumentSourceGroup*>(stage->documentSource())) {
+            auto serializedGroup = groupStage->serialize();
+            const auto bson = serializedGroup.getDocument().toBson();
+            bufBuilder->appendBuf(bson.objdata(), bson.objsize());
         } else {
             tasserted(6443200,
                       str::stream() << "Pipeline stage cannot be encoded in plan cache key: "
@@ -673,8 +678,16 @@ void encodeFindCommandRequest(const FindCommandRequest& findCommand, BufBuilder*
         bufBuilder->appendBuf(obj.objdata(), obj.objsize());
     };
     encodeBSONObj(findCommand.getResumeAfter());
-    encodeBSONObj(findCommand.getMin());
-    encodeBSONObj(findCommand.getMax());
+
+    // Read concern "available" results in SBE plans that do not perform shard filtering, so it must
+    // be encoded differently from other read concerns.
+    bool isAvailableReadConcern{false};
+    if (const auto readConcern = findCommand.getReadConcern()) {
+        isAvailableReadConcern =
+            readConcern->getField(repl::ReadConcernArgs::kLevelFieldName).valueStringDataSafe() ==
+            repl::readConcernLevels::kAvailableName;
+    }
+    bufBuilder->appendChar(isAvailableReadConcern ? 't' : 'f');
 }
 }  // namespace
 
@@ -1130,15 +1143,6 @@ CanonicalQuery::IndexFilterKey encodeForIndexFilters(const CanonicalQuery& cq) {
 
 uint32_t computeHash(StringData key) {
     return SimpleStringDataComparator::kInstance.hash(key);
-}
-
-bool canUseSbePlanCache(const CanonicalQuery& cq) {
-    for (auto& stage : cq.pipeline()) {
-        if (StringData{stage->documentSource()->getSourceName()} != "$lookup") {
-            return false;
-        }
-    }
-    return true;
 }
 }  // namespace canonical_query_encoder
 }  // namespace mongo

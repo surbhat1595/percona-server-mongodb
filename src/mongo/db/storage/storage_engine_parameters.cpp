@@ -28,8 +28,6 @@
  */
 
 #include "mongo/db/storage/storage_engine_parameters.h"
-#include "mongo/db/storage/ticketholders.h"
-#include "mongo/util/concurrency/ticketholder.h"
 
 namespace mongo {
 
@@ -46,6 +44,8 @@ Status TicketQueueingPolicy::setFromString(const std::string& protocolStr) {
         gTicketQueueingPolicy = QueueingPolicyEnum::Semaphore;
     } else if (protocolStr == QueueingPolicy_serializer(QueueingPolicyEnum::FifoQueue)) {
         gTicketQueueingPolicy = QueueingPolicyEnum::FifoQueue;
+    } else if (protocolStr == QueueingPolicy_serializer(QueueingPolicyEnum::SchedulingQueue)) {
+        gTicketQueueingPolicy = QueueingPolicyEnum::SchedulingQueue;
     } else {
         return Status{ErrorCodes::BadValue,
                       str::stream() << "Unrecognized ticketQueueingPolicy '" << protocolStr << "'"};

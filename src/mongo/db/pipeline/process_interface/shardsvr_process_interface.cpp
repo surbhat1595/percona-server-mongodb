@@ -172,14 +172,16 @@ std::unique_ptr<ShardFilterer> ShardServerProcessInterface::getShardFilterer(
 
 void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     OperationContext* opCtx,
-    const BSONObj& renameCommandObj,
-    const NamespaceString& destinationNs,
+    const NamespaceString& sourceNs,
+    const NamespaceString& targetNs,
+    bool dropTarget,
+    bool stayTemp,
     const BSONObj& originalCollectionOptions,
     const std::list<BSONObj>& originalIndexes) {
     auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, destinationNs.db()));
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, targetNs.db()));
     auto newCmdObj = CommonMongodProcessInterface::_convertRenameToInternalRename(
-        opCtx, renameCommandObj, originalCollectionOptions, originalIndexes);
+        opCtx, sourceNs, targetNs, originalCollectionOptions, originalIndexes);
     BSONObjBuilder newCmdWithWriteConcernBuilder(std::move(newCmdObj));
     newCmdWithWriteConcernBuilder.append(WriteConcernOptions::kWriteConcernField,
                                          opCtx->getWriteConcern().toBSON());
@@ -286,17 +288,18 @@ std::list<BSONObj> ShardServerProcessInterface::getIndexSpecs(OperationContext* 
 }
 
 void ShardServerProcessInterface::createCollection(OperationContext* opCtx,
-                                                   const std::string& dbName,
+                                                   const DatabaseName& dbName,
                                                    const BSONObj& cmdObj) {
-    auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbName));
+    auto cachedDbInfo = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbName.toStringWithTenantId()));
     BSONObjBuilder finalCmdBuilder(cmdObj);
     finalCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
                            opCtx->getWriteConcern().toBSON());
     BSONObj finalCmdObj = finalCmdBuilder.obj();
+    // TODO SERVER-67411 change executeCommandAgainstDatabasePrimary to take in DatabaseName
     auto response =
         executeCommandAgainstDatabasePrimary(opCtx,
-                                             dbName,
+                                             dbName.toStringWithTenantId(),
                                              std::move(cachedDbInfo),
                                              finalCmdObj,
                                              ReadPreferenceSetting(ReadPreference::PrimaryOnly),

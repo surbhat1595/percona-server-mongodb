@@ -22,7 +22,6 @@ env.Library(
     target='server_status_core',
     source=[
         'server_status.cpp',
-        'server_status_internal.cpp',
         'server_status_metric.cpp',
     ],
     LIBDEPS=[
@@ -125,6 +124,7 @@ env.Library(
         '$BUILD_DIR/mongo/idl/basic_types',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/idl/server_parameter',
+        '$BUILD_DIR/mongo/logv2/logv2_options',
         '$BUILD_DIR/mongo/rpc/message',
         'test_commands_enabled',
     ],
@@ -559,6 +559,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/catalog_impl',
         '$BUILD_DIR/mongo/db/catalog/database_holder',
         '$BUILD_DIR/mongo/db/catalog/index_key_validate',
+        '$BUILD_DIR/mongo/db/change_stream_change_collection_manager',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/cluster_transaction_api',
         '$BUILD_DIR/mongo/db/commands',

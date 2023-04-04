@@ -188,7 +188,9 @@ public:
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
                                        std::vector<repl::ReplOperation>* statements,
                                        size_t numberOfPrePostImagesToWrite) final;
+    void onBatchedWriteStart(OperationContext* opCtx) final;
     void onBatchedWriteCommit(OperationContext* opCtx) final;
+    void onBatchedWriteAbort(OperationContext* opCtx) final;
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
         OplogSlot commitOplogEntryOpTime,
@@ -246,7 +248,5 @@ private:
         const repl::OpTime& prepareOrCommitOptime) {}
     void _onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
 };
-
-extern const OperationContext::Decoration<boost::optional<repl::DocumentKey>> documentKeyDecoration;
 
 }  // namespace mongo

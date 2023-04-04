@@ -28,19 +28,16 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/fcv_op_observer.h"
-#include "mongo/db/op_observer_impl.h"
 
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer_util.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_options.h"
 #include "mongo/executor/egress_tag_closer_manager.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/service_entry_point.h"
@@ -179,7 +176,7 @@ void FcvOpObserver::onDelete(OperationContext* opCtx,
                              const OplogDeleteEntryArgs& args) {
     // documentKeyDecoration is set in OpObserverImpl::aboutToDelete. So the FcvOpObserver
     // relies on the OpObserverImpl also being in the opObserverRegistry.
-    auto optDocKey = documentKeyDecoration(opCtx);
+    auto optDocKey = repl::documentKeyDecoration(opCtx);
     invariant(optDocKey, nss.ns());
     if (nss.isServerConfigurationCollection()) {
         auto id = optDocKey.get().getId().firstElement();

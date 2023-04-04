@@ -29,8 +29,7 @@
 
 #pragma once
 
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/server_options.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/util/version/releases.h"
 
 namespace mongo {
@@ -206,7 +205,11 @@ public:
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) final{};
 
+    void onBatchedWriteStart(OperationContext* opCtx) final {}
+
     void onBatchedWriteCommit(OperationContext* opCtx) final {}
+
+    void onBatchedWriteAbort(OperationContext* opCtx) final {}
 
     void onMajorityCommitPointUpdate(ServiceContext* service,
                                      const repl::OpTime& newCommitPoint) final {}

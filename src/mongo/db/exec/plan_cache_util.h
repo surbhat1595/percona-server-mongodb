@@ -172,7 +172,10 @@ void updatePlanCache(
 
     // Store the choice we just made in the cache, if the query is of a type that is safe to
     // cache.
-    if (shouldCacheQuery(query) && canCache) {
+    //
+    // TODO SERVER-67576: re-enable caching of "explode for sort" plans in the SBE cache.
+    if (shouldCacheQuery(query) && canCache &&
+        (!winningPlan.solution->hasExplodedForSort || std::is_same_v<PlanStageType, PlanStage*>)) {
         auto rankingDecision = ranking.get();
         auto cacheClassicPlan = [&]() {
             auto buildDebugInfoFn = [&]() -> plan_cache_debug_info::DebugInfo {
@@ -197,10 +200,7 @@ void updatePlanCache(
 
         if (winningPlan.solution->cacheData != nullptr) {
             if constexpr (std::is_same_v<PlanStageType, std::unique_ptr<sbe::PlanStage>>) {
-                // TODO SERVER-61507: Remove canUseSbePlanCache check once $group pushdown
-                // is integrated with SBE plan cache.
-                if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() &&
-                    canonical_query_encoder::canUseSbePlanCache(query)) {
+                if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
                     tassert(6142201,
                             "The winning CandidatePlan should contain the original plan",
                             winningPlan.clonedPlan);
@@ -224,9 +224,8 @@ void updatePlanCache(
                         &callbacks,
                         boost::none /* worksGrowthCoefficient */));
                 } else {
-                    // TODO(SERVER-64882, SERVER-61507): Fall back to use the classic plan cache.
-                    // Remove this branch after "gFeatureFlagSbePlanCache" is removed and $group
-                    // pushdown is integrated with SBE plan cache.
+                    // TODO SERVER-64882: Fall back to use the classic plan cache.
+                    // Remove this branch after "gFeatureFlagSbePlanCache" is removed.
                     cacheClassicPlan();
                 }
             } else {

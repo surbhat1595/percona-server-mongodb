@@ -113,8 +113,9 @@ void DocumentSourceOut::initialize() {
     // to be the target collection once we are done.
     // Note that this temporary collection name is used by MongoMirror and thus should not be
     // changed without consultation.
-    _tempNs = NamespaceString(str::stream()
-                              << outputNs.dbName().toString() << ".tmp.agg_out." << UUID::gen());
+    _tempNs = NamespaceString(outputNs.tenantId(),
+                              str::stream() << outputNs.dbName().toString() << ".tmp.agg_out."
+                                            << UUID::gen());
 
     // Save the original collection options and index specs so we can check they didn't change
     // during computation.
@@ -139,7 +140,7 @@ void DocumentSourceOut::initialize() {
         cmd.appendElementsUnique(_originalOutOptions);
 
         pExpCtx->mongoProcessInterface->createCollection(
-            pExpCtx->opCtx, _tempNs.dbName().toString(), cmd.done());
+            pExpCtx->opCtx, _tempNs.dbName(), cmd.done());
     }
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -170,11 +171,13 @@ void DocumentSourceOut::finalize() {
     DocumentSourceWriteBlock writeBlock(pExpCtx->opCtx);
 
     const auto& outputNs = getOutputNs();
-    auto renameCommandObj =
-        BSON("renameCollection" << _tempNs.ns() << "to" << outputNs.ns() << "dropTarget" << true);
-
-    pExpCtx->mongoProcessInterface->renameIfOptionsAndIndexesHaveNotChanged(
-        pExpCtx->opCtx, renameCommandObj, outputNs, _originalOutOptions, _originalIndexes);
+    pExpCtx->mongoProcessInterface->renameIfOptionsAndIndexesHaveNotChanged(pExpCtx->opCtx,
+                                                                            _tempNs,
+                                                                            outputNs,
+                                                                            true /* dropTarget */,
+                                                                            false /* stayTemp */,
+                                                                            _originalOutOptions,
+                                                                            _originalIndexes);
 
     // The rename succeeded, so the temp collection no longer exists.
     _tempNs = {};

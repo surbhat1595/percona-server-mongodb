@@ -28,6 +28,7 @@
  */
 #pragma once
 
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/util/tick_source.h"
 
 namespace mongo {
@@ -47,20 +48,29 @@ public:
         }
     }
 
-    TickSource::Tick getStartProcessingTime() {
+    TickSource::Tick getStartProcessingTime() const {
         return _startProcessingTime;
     }
 
     /**
      * Returns the number of times this context has taken a ticket.
      */
-    int getAdmissions() {
+    int getAdmissions() const {
         return admissions;
+    }
+
+    void setLockMode(LockMode lockMode) {
+        _lockMode = lockMode;
+    }
+
+    LockMode getLockMode() const {
+        return _lockMode;
     }
 
 private:
     TickSource::Tick _startProcessingTime{};
     int admissions{};
+    LockMode _lockMode = LockMode::MODE_NONE;
 };
 
 }  // namespace mongo

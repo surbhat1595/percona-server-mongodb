@@ -1099,10 +1099,7 @@ protected:
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildCachedPlan(
         const sbe::PlanCacheKey& planCacheKey) final {
         if (shouldCacheQuery(*_cq)) {
-            // TODO SERVER-61507: remove canUseSbePlanCache check when $group pushdown is
-            // integrated with SBE plan cache.
-            if (!feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() ||
-                !canonical_query_encoder::canUseSbePlanCache(*_cq)) {
+            if (!feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
                 // If the feature flag is off, we first try to build an "id hack" plan because the
                 // id hack plans are not cached in the classic cache. We then fall back to use the
                 // classic plan cache.
@@ -1690,7 +1687,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
 
     // TODO (SERVER-64506): support change streams' pre- and post-images.
     // TODO (SERVER-66079): allow batched deletions in the config.* namespace.
-    const bool batchDelete = feature_flags::gBatchMultiDeletes.isEnabledAndIgnoreFCV() &&
+    const bool batchDelete =
+        feature_flags::gBatchMultiDeletes.isEnabled(serverGlobalParams.featureCompatibility) &&
         gBatchUserMultiDeletes.load() &&
         (opCtx->recoveryUnit()->getState() == RecoveryUnit::State::kInactive ||
          opCtx->recoveryUnit()->getState() == RecoveryUnit::State::kActiveNotInUnitOfWork) &&

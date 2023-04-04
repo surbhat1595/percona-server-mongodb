@@ -275,7 +275,7 @@ pipelineEnv.InjectThirdParty(libraries=['snappy'])
 pipelineEnv.Library(
     target='pipeline',
     source=[
-        'abt/abt_document_source_visitor.cpp',
+        'abt/document_source_visitor.cpp',
         'abt/agg_expression_visitor.cpp',
         'abt/expr_algebrizer_context.cpp',
         'abt/field_map_builder.cpp',
@@ -336,6 +336,7 @@ pipelineEnv.Library(
         'semantic_analysis.cpp',
         'sequential_document_cache.cpp',
         'skip_and_limit.cpp',
+        'sort_reorder_helpers.cpp',
         'tee_buffer.cpp',
         'visitors/document_source_walker.cpp',
         'visitors/transformer_interface_walker.cpp',

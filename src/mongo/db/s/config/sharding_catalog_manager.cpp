@@ -62,6 +62,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/transport/service_entry_point.h"
@@ -474,6 +475,14 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
         return result.withContext("couldn't create ns_1_tag_1 index on config db");
     }
 
+    if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        result = sharding_util::createGlobalIndexesIndexes(opCtx);
+        if (!result.isOK()) {
+            return result;
+        }
+    }
+
     return Status::OK();
 }
 
@@ -670,12 +679,6 @@ boost::optional<BSONObj> ShardingCatalogManager::findOneConfigDocumentInTxn(
 void ShardingCatalogManager::withTransactionAPI(OperationContext* opCtx,
                                                 const NamespaceString& namespaceForInitialFind,
                                                 txn_api::Callback callback) {
-    // Callers should check this, but including as a sanity check.
-    uassert(ErrorCodes::IllegalOperation,
-            "Internal transaction API not enabled",
-            feature_flags::gFeatureFlagInternalTransactions.isEnabled(
-                serverGlobalParams.featureCompatibility));
-
     auto txn =
         txn_api::SyncTransactionWithRetries(opCtx,
                                             Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),

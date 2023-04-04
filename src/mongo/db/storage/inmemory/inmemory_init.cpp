@@ -68,7 +68,6 @@ public:
         syncInMemoryAndWiredTigerOptions();
 
         size_t cacheMB = WiredTigerUtil::getCacheSizeMB(wiredTigerGlobalOptions.cacheSizeGB);
-        const bool durable = false;
         const bool ephemeral = true;
         auto kv =
             std::make_unique<WiredTigerKVEngine>(getCanonicalName().toString(),
@@ -77,7 +76,6 @@ public:
                                                  wiredTigerGlobalOptions.engineConfig,
                                                  cacheMB,
                                                  0,
-                                                 durable,
                                                  ephemeral,
                                                  params.repair);
         kv->setRecordStoreExtraOptions(wiredTigerGlobalOptions.collectionConfig);

@@ -87,6 +87,15 @@ public:
         const CollectionOptions& collOptions,
         StringData ident,
         const IndexDescriptor* desc);
+
+    Status createColumnStore(OperationContext* opCtx,
+                             const NamespaceString& ns,
+                             const CollectionOptions& collOptions,
+                             StringData ident,
+                             const IndexDescriptor* desc) override {
+        return Status(ErrorCodes::NotImplemented, "createColumnStore()");
+    }
+
     std::unique_ptr<ColumnStore> getColumnStore(OperationContext* opCtx,
                                                 const NamespaceString& nss,
                                                 const CollectionOptions& collOptions,
@@ -104,13 +113,6 @@ public:
     virtual void dropIdentForImport(OperationContext* opCtx, StringData ident) {}
 
     virtual bool supportsDirectoryPerDB() const {
-        return false;
-    }
-
-    /**
-     * devnull does no journaling, so don't report the engine as durable.
-     */
-    virtual bool isDurable() const {
         return false;
     }
 

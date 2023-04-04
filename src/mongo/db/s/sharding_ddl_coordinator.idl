@@ -52,7 +52,6 @@ enums:
             kSetAllowMigrations: "setAllowMigrations"
             kCollMod: "collMod_V2"
             kReshardCollection: "reshardCollection"
-            kReshardCollectionNoResilient: "reshardCollectionNoResilient"
             kCompactStructuredEncryptionData: "compactStructuredEncryptionData"
 
 types:
@@ -111,4 +110,8 @@ structs:
                 optional: true
             session:
                 type: ShardingDDLSession
+                optional: true
+            bucketNss:
+                description: "In case of sharded timeseries this variable will hold the underlying bucket namespace"
+                type: namespacestring
                 optional: true

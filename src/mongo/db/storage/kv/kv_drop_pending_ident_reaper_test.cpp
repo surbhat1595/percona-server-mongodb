@@ -70,6 +70,15 @@ public:
         const IndexDescriptor* desc) override {
         return nullptr;
     }
+
+    Status createColumnStore(OperationContext* opCtx,
+                             const NamespaceString& ns,
+                             const CollectionOptions& collOptions,
+                             StringData ident,
+                             const IndexDescriptor* desc) override {
+        MONGO_UNREACHABLE;
+    }
+
     std::unique_ptr<ColumnStore> getColumnStore(OperationContext* opCtx,
                                                 const NamespaceString& nss,
                                                 const CollectionOptions& collOptions,
@@ -106,9 +115,7 @@ public:
     Status repairIdent(OperationContext* opCtx, StringData ident) override {
         return Status::OK();
     }
-    bool isDurable() const override {
-        return false;
-    }
+
     bool isEphemeral() const override {
         return false;
     }

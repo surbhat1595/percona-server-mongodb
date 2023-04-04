@@ -63,16 +63,13 @@ MONGO_FAIL_POINT_DEFINE(pauseBatchApplicationAfterWritingOplogEntries);
 MONGO_FAIL_POINT_DEFINE(hangAfterRecordingOpApplicationStartTime);
 
 // The oplog entries applied
-Counter64 opsAppliedStats;
-ServerStatusMetricField<Counter64> displayOpsApplied("repl.apply.ops", &opsAppliedStats);
+CounterMetric opsAppliedStats("repl.apply.ops");
 
 // Tracks the oplog application batch size.
-Counter64 oplogApplicationBatchSize;
-ServerStatusMetricField<Counter64> displayOplogApplicationBatchSize("repl.apply.batchSize",
-                                                                    &oplogApplicationBatchSize);
+CounterMetric oplogApplicationBatchSize("repl.apply.batchSize");
+
 // Number and time of each ApplyOps worker pool round
-TimerStats applyBatchStats;
-ServerStatusMetricField<TimerStats> displayOpBatchesApplied("repl.apply.batches", &applyBatchStats);
+auto& applyBatchStats = makeServerStatusMetric<TimerStats>("repl.apply.batches");
 
 /**
  * Used for logging a report of ops that take longer than "slowMS" to apply. This is called
@@ -265,9 +262,9 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
     invariant(!_replCoord->getMemberState().arbiter());
 
     std::unique_ptr<ApplyBatchFinalizer> finalizer{
-        getGlobalServiceContext()->getStorageEngine()->isDurable()
-            ? new ApplyBatchFinalizerForJournal(_replCoord)
-            : new ApplyBatchFinalizer(_replCoord)};
+        getGlobalServiceContext()->getStorageEngine()->isEphemeral()
+            ? new ApplyBatchFinalizer(_replCoord)
+            : new ApplyBatchFinalizerForJournal(_replCoord)};
 
     while (true) {  // Exits on message from OplogBatcher.
         // Use a new operation context each iteration, as otherwise we may appear to use a single

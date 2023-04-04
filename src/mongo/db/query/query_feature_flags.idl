@@ -48,12 +48,6 @@ feature_flags:
       default: true
       version: 5.1
 
-    featureFlagExactTopNAccumulator:
-      description: "Feature flag for allowing use of topN family of accumulators"
-      cpp_varname: gFeatureFlagExactTopNAccumulator
-      default: true
-      version: 5.2
-
     featureFlagShardedLookup:
       description: "Feature flag for allowing $lookup/$graphLookup into a sharded collection"
       cpp_varname: gFeatureFlagShardedLookup
@@ -76,18 +70,6 @@ feature_flags:
       description: "Feature flag for enabling use of the SBE plan cache"
       cpp_varname: gFeatureFlagSbePlanCache
       default: false
-
-    featureFlagSortArray:
-        description: "Feature flag for allowing use of the $sortArray aggregation expression"
-        cpp_varname: gFeatureFlagSortArray
-        default: true
-        version: 5.2
-
-    featureFlagChangeStreamsVisibility:
-      description: "Feature flag for enabling improved change streams visibility"
-      cpp_varname: gFeatureFlagChangeStreamsVisibility
-      default: true
-      version: 6.0
 
     featureFlagChangeStreamsFurtherEnrichedEvents:
       description: "Feature flag for enabling the reshardCollection and refineCollectionShardKey events, as well as enhancements to the updateDescription field for update events"

@@ -335,11 +335,12 @@ __wt_checkpoint_get_handles(WT_SESSION_IMPL *session, const char *cfg[])
 }
 
 /*
- * __checkpoint_reduce_dirty_cache --
- *     Release clean trees from the list cached for checkpoints.
+ * __checkpoint_wait_reduce_dirty_cache --
+ *     Try to reduce the amount of dirty data in cache so there is less work do during the critical
+ *     section of the checkpoint.
  */
 static void
-__checkpoint_reduce_dirty_cache(WT_SESSION_IMPL *session)
+__checkpoint_wait_reduce_dirty_cache(WT_SESSION_IMPL *session)
 {
     WT_CACHE *cache;
     WT_CONNECTION_IMPL *conn;
@@ -352,11 +353,8 @@ __checkpoint_reduce_dirty_cache(WT_SESSION_IMPL *session)
     conn = S2C(session);
     cache = conn->cache;
 
-    /*
-     * Give up if scrubbing is disabled, including when checkpointing with a timestamp on close (we
-     * can't evict dirty pages in that case, so scrubbing cannot help).
-     */
-    if (F_ISSET(conn, WT_CONN_CLOSING_TIMESTAMP) || cache->eviction_checkpoint_target < DBL_EPSILON)
+    /* Give up if scrubbing is disabled. */
+    if (cache->eviction_checkpoint_target < DBL_EPSILON)
         return;
 
     time_start = __wt_clock(session);
@@ -855,7 +853,7 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
      * Try to reduce the amount of dirty data in cache so there is less work do during the critical
      * section of the checkpoint.
      */
-    __checkpoint_reduce_dirty_cache(session);
+    __checkpoint_wait_reduce_dirty_cache(session);
 
     /* Tell logging that we are about to start a database checkpoint. */
     if (full && logging)
@@ -1021,6 +1019,15 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
     WT_ERR(__wt_txn_commit(session, NULL));
 
     /*
+     * Flush all the logs that are generated during the checkpoint. It is possible that checkpoint
+     * may include the changes that are written in parallel by an eviction. To have a consistent
+     * view of the data, make sure that all the logs are flushed to disk before the checkpoint is
+     * complete.
+     */
+    if (FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED))
+        WT_ERR(__wt_log_flush(session, WT_LOG_FSYNC));
+
+    /*
      * Ensure that the metadata changes are durable before the checkpoint is resolved. Do this by
      * either checkpointing the metadata or syncing the log file. Recovery relies on the checkpoint
      * LSN in the metadata only being updated by full checkpoints so only checkpoint the metadata
@@ -1046,6 +1053,11 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
     } else
         WT_WITH_DHANDLE(session, WT_SESSION_META_DHANDLE(session),
           ret = __wt_txn_checkpoint_log(session, false, WT_TXN_LOG_CKPT_SYNC, NULL));
+
+    WT_STAT_CONN_SET(session, txn_checkpoint_stop_stress_active, 1);
+    /* Wait prior to flush the checkpoint stop log record. */
+    __checkpoint_timing_stress(session, WT_TIMING_STRESS_CHECKPOINT_STOP, &tsp);
+    WT_STAT_CONN_SET(session, txn_checkpoint_stop_stress_active, 0);
 
     /*
      * Now that the metadata is stable, re-open the metadata file for regular eviction by clearing
@@ -1337,6 +1349,15 @@ __checkpoint_lock_dirty_tree_int(WT_SESSION_IMPL *session, bool is_checkpoint, b
             continue;
         is_wt_ckpt = WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT);
 
+        /*
+         * If we are restarting from a backup and we're in recovery do not delete any checkpoints.
+         * In the event of a crash we may need to restart from the backup and all checkpoints that
+         * were in the backup file must remain.
+         */
+        if (F_ISSET(conn, WT_CONN_RECOVERING) && F_ISSET(conn, WT_CONN_WAS_BACKUP)) {
+            F_CLR(ckpt, WT_CKPT_DELETE);
+            continue;
+        }
         /*
          * If there is a hot backup, don't delete any WiredTiger checkpoint that could possibly have
          * been created before the backup started. Fail if trying to delete any other named
@@ -2107,9 +2128,9 @@ __wt_checkpoint_close(WT_SESSION_IMPL *session, bool final)
      * is a stable timestamp set or the connection is configured to disallow such operation.
      * Flushing trees can lead to files that are inconsistent on disk after a crash.
      */
-    if (btree->modified && !bulk && !__wt_btree_immediately_durable(session) &&
+    if (btree->modified && !bulk && !__wt_btree_immediately_durable(session) && !metadata &&
       (S2C(session)->txn_global.has_stable_timestamp ||
-        (!F_ISSET(S2C(session), WT_CONN_FILE_CLOSE_SYNC) && !metadata)))
+        !F_ISSET(S2C(session), WT_CONN_FILE_CLOSE_SYNC)))
         return (__wt_set_return(session, EBUSY));
 
     /*

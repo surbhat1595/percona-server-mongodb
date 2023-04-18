@@ -1,6 +1,11 @@
 /**
  * Tests that out-of-order keys are detected by validation during both the collection and index scan
  * phases.
+ *
+ * @tags: [
+ *   requires_replication,
+ *   requires_wiredtiger
+ * ]
  */
 (function() {
 "use strict";
@@ -24,6 +29,9 @@ let res = assert.commandWorked(coll.validate());
 assert(!res.valid);
 assert.commandWorked(
     primary.adminCommand({configureFailPoint: "WTRecordStoreUassertOutOfOrder", mode: "off"}));
+
+// Ensure that $collStats info gets logged when validation fails.
+checkLog.containsJson(primary, 7463200);
 
 // Test index entry out-of-order detection.
 assert.commandWorked(

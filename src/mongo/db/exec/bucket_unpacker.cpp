@@ -31,9 +31,22 @@
 
 #include "mongo/bson/util/bsoncolumn.h"
 #include "mongo/db/exec/bucket_unpacker.h"
-#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/matcher/expression_always_boolean.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
+#include "mongo/logv2/log.h"
 
 namespace mongo {
+
+bool BucketSpec::fieldIsComputed(StringData field) const {
+    return std::any_of(computedMetaProjFields.begin(), computedMetaProjFields.end(), [&](auto& s) {
+        return s == field || expression::isPathPrefixOf(field, s) ||
+            expression::isPathPrefixOf(s, field);
+    });
+}
+
 class BucketUnpacker::UnpackingImpl {
 public:
     UnpackingImpl() = default;
@@ -387,6 +400,14 @@ Document BucketUnpacker::getNext() {
         measurement.addField(name, Value{_computedMetaProjections[name]});
     }
 
+    if (_includeMinTimeAsMetadata && _minTime) {
+        measurement.metadata().setTimeseriesBucketMinTime(*_minTime);
+    }
+
+    if (_includeMaxTimeAsMetadata && _maxTime) {
+        measurement.metadata().setTimeseriesBucketMaxTime(*_maxTime);
+    }
+
     return measurement.freeze();
 }
 
@@ -459,11 +480,40 @@ void BucketUnpacker::reset(BSONObj&& bucket) {
                 !_metaValue);
     }
 
-
     auto&& controlField = _bucket[timeseries::kBucketControlFieldName];
     uassert(5857902,
             "The $_internalUnpackBucket stage requires 'control' object to be present",
             controlField && controlField.type() == BSONType::Object);
+
+    if (_includeMinTimeAsMetadata) {
+        auto&& controlMin = controlField.Obj()[timeseries::kBucketControlMinFieldName];
+        uassert(6460203,
+                str::stream() << "The $_internalUnpackBucket stage requires '"
+                              << timeseries::kControlMinFieldNamePrefix << "' object to be present",
+                controlMin && controlMin.type() == BSONType::Object);
+        auto&& minTime = controlMin.Obj()[_spec.timeField];
+        uassert(6460204,
+                str::stream() << "The $_internalUnpackBucket stage requires '"
+                              << timeseries::kControlMinFieldNamePrefix << "." << _spec.timeField
+                              << "' to be a date",
+                minTime && minTime.type() == BSONType::Date);
+        _minTime = minTime.date();
+    }
+
+    if (_includeMaxTimeAsMetadata) {
+        auto&& controlMax = controlField.Obj()[timeseries::kBucketControlMaxFieldName];
+        uassert(6460205,
+                str::stream() << "The $_internalUnpackBucket stage requires '"
+                              << timeseries::kControlMaxFieldNamePrefix << "' object to be present",
+                controlMax && controlMax.type() == BSONType::Object);
+        auto&& maxTime = controlMax.Obj()[_spec.timeField];
+        uassert(6460206,
+                str::stream() << "The $_internalUnpackBucket stage requires '"
+                              << timeseries::kControlMaxFieldNamePrefix << "." << _spec.timeField
+                              << "' to be a date",
+                maxTime && maxTime.type() == BSONType::Date);
+        _maxTime = maxTime.date();
+    }
 
     auto&& versionField = controlField.Obj()[timeseries::kBucketControlVersionFieldName];
     uassert(5857903,
@@ -587,6 +637,17 @@ void BucketUnpacker::setBucketSpecAndBehavior(BucketSpec&& bucketSpec, Behavior 
     eraseMetaFromFieldSetAndDetermineIncludeMeta();
     determineIncludeTimeField();
     eraseExcludedComputedMetaProjFields();
+
+    _includeMinTimeAsMetadata = _spec.includeMinTimeAsMetadata;
+    _includeMaxTimeAsMetadata = _spec.includeMaxTimeAsMetadata;
+}
+
+void BucketUnpacker::setIncludeMinTimeAsMetadata() {
+    _includeMinTimeAsMetadata = true;
+}
+
+void BucketUnpacker::setIncludeMaxTimeAsMetadata() {
+    _includeMaxTimeAsMetadata = true;
 }
 
 const std::set<std::string>& BucketUnpacker::fieldsToIncludeExcludeDuringUnpack() {

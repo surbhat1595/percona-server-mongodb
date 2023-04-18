@@ -33,6 +33,9 @@
 #include <vector>
 
 #include "mongo/db/exec/bucket_unpacker.h"
+#include "mongo/db/exec/collection_scan.h"
+#include "mongo/db/exec/index_scan.h"
+#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_match.h"
 
@@ -43,7 +46,10 @@ public:
     static constexpr StringData kStageNameExternal = "$_unpackBucket"_sd;
     static constexpr StringData kInclude = "include"_sd;
     static constexpr StringData kExclude = "exclude"_sd;
+    static constexpr StringData kUsesExtendedRange = "usesExtendedRange"_sd;
     static constexpr StringData kBucketMaxSpanSeconds = "bucketMaxSpanSeconds"_sd;
+    static constexpr StringData kIncludeMinTimeAsMetadata = "includeMinTimeAsMetadata"_sd;
+    static constexpr StringData kIncludeMaxTimeAsMetadata = "includeMaxTimeAsMetadata"_sd;
 
     static boost::intrusive_ptr<DocumentSource> createFromBsonInternal(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
@@ -97,6 +103,18 @@ public:
         }
         deps->needWholeDocument = true;
         return DepsTracker::State::EXHAUSTIVE_ALL;
+    }
+
+    int getBucketMaxSpanSeconds() const {
+        return _bucketMaxSpanSeconds;
+    }
+
+    std::string getMinTimeField() const {
+        return _bucketUnpacker.getMinField(_bucketUnpacker.getTimeField());
+    }
+
+    std::string getMaxTimeField() const {
+        return _bucketUnpacker.getMaxField(_bucketUnpacker.getTimeField());
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
@@ -173,6 +191,14 @@ public:
         _bucketMaxCount = bucketMaxCount;
     }
 
+    void setIncludeMinTimeAsMetadata() {
+        _bucketUnpacker.setIncludeMinTimeAsMetadata();
+    }
+
+    void setIncludeMaxTimeAsMetadata() {
+        _bucketUnpacker.setIncludeMaxTimeAsMetadata();
+    }
+
     boost::optional<long long> sampleSize() const {
         return _sampleSize;
     }
@@ -205,6 +231,10 @@ public:
 
 private:
     GetNextResult doGetNext() final;
+
+    // If any bucket contains dates outside the range of 1970-2038, we are unable to rely on
+    // the _id index, as _id is truncates to 32 bits
+    bool _usesExtendedRange = false;
 
     BucketUnpacker _bucketUnpacker;
     int _bucketMaxSpanSeconds;

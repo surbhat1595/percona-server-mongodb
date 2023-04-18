@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/exec/bucket_unpacker.h"
 #include <boost/intrusive_ptr.hpp>
 #include <memory>
 
@@ -240,6 +241,42 @@ private:
                                long long sampleSize,
                                long long numRecords,
                                boost::optional<BucketUnpacker> bucketUnpacker);
+
+    typedef bool IndexSortOrderAgree;
+    typedef bool IndexOrderedByMinTime;
+
+    /*
+     * Takes a leaf plan stage and a sort pattern and returns a pair if they support the Bucket
+Unpacking with Sort Optimization.
+     * The pair includes whether the index order and sort order agree with each other as its first
+     * member and the order of the index as the second parameter.
+     *
+     * Note that the index scan order is different from the index order.
+     */
+    static boost::optional<std::pair<IndexSortOrderAgree, IndexOrderedByMinTime>> supportsSort(
+        const BucketUnpacker& bucketUnpacker, PlanStage* root, const SortPattern& sort);
+
+    /* This is a helper method for supportsSort. It takes the current iterator for the index
+     * keyPattern, the direction of the index scan, the timeField path we're sorting on, and the
+     * direction of the sort. It returns a pair if this data agrees and none if it doesn't.
+     *
+     * The pair contains whether the index order and the sort order agree with each other as the
+     * firstmember and the order of the index as the second parameter.
+     *
+     * Note that the index scan order may be different from the index order.
+     * N.B.: It ASSUMES that there are two members left in the keyPatternIter iterator, and that the
+     * timeSortFieldPath is in fact the path on time.
+     */
+    static boost::optional<std::pair<IndexSortOrderAgree, IndexOrderedByMinTime>> checkTimeHelper(
+        const BucketUnpacker& bucketUnpacker,
+        BSONObj::iterator& keyPatternIter,
+        bool scanIsForward,
+        const FieldPath& timeSortFieldPath,
+        bool sortIsAscending);
+
+    static bool sortAndKeyPatternPartAgreeAndOnMeta(const BucketUnpacker& bucketUnpacker,
+                                                    StringData keyPatternFieldName,
+                                                    const FieldPath& sortFieldPath);
 };
 
 }  // namespace mongo

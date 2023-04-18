@@ -336,73 +336,96 @@ public:
 
 extern DotsAndDollarsFieldsCounters dotsAndDollarsFieldsCounters;
 
-class OperatorCountersAggExpressions {
-private:
-    struct AggExprCounter {
-        AggExprCounter(StringData name)
-            : metric("operatorCounters.expressions." + name, &counter) {}
-
-        Counter64 counter;
-        ServerStatusMetricField<Counter64> metric;
-    };
-
-public:
-    void addAggExpressionCounter(StringData name) {
-        operatorCountersAggExpressionMap[name] = std::make_unique<AggExprCounter>(name);
-    }
-
-    void mergeCounters(StringMap<uint64_t>& toMerge) {
-        for (auto&& [name, cnt] : toMerge) {
-            if (auto it = operatorCountersAggExpressionMap.find(name);
-                it != operatorCountersAggExpressionMap.end()) {
-                it->second->counter.increment(cnt);
-            }
-        }
-    }
-
-private:
-    // Map of aggregation expressions to the number of occurrences in aggregation pipelines.
-    StringMap<std::unique_ptr<AggExprCounter>> operatorCountersAggExpressionMap = {};
-};
-
-extern OperatorCountersAggExpressions operatorCountersAggExpressions;
-
 /**
- * Global counters for match expressions.
+ * Generic class for counters of expressions inside various MQL statements.
  */
-class OperatorCountersMatchExpressions {
+class OperatorCounters {
 private:
-    struct MatchExprCounter {
-        MatchExprCounter(StringData name) : metric("operatorCounters.match." + name, &counter) {}
-
+    struct ExprCounter {
+        ExprCounter(const std::string name) : metric(name, &counter) {}
         Counter64 counter;
         ServerStatusMetricField<Counter64> metric;
     };
 
 public:
-    void addMatchExprCounter(StringData name) {
-        operatorCountersMatchExprMap[name] = std::make_unique<MatchExprCounter>(name);
+    OperatorCounters(const std::string prefix) : _prefix{prefix} {}
+
+    void addCounter(const std::string name) {
+        const StringData sdName(name);
+        operatorCountersExprMap[sdName] = std::make_unique<ExprCounter>(_prefix + name);
     }
 
     void mergeCounters(StringMap<uint64_t>& toMerge) {
         for (auto&& [name, cnt] : toMerge) {
-            if (auto it = operatorCountersMatchExprMap.find(name);
-                it != operatorCountersMatchExprMap.end()) {
+            if (auto it = operatorCountersExprMap.find(name); it != operatorCountersExprMap.end()) {
                 it->second->counter.increment(cnt);
             }
         }
     }
 
 private:
-    // Map of match expressions to the number of occurrences in queries.
-    StringMap<std::unique_ptr<MatchExprCounter>> operatorCountersMatchExprMap = {};
+    const std::string _prefix;
+    // Map of expressions to the number of occurrences in queries.
+    StringMap<std::unique_ptr<ExprCounter>> operatorCountersExprMap = {};
 };
 
-extern OperatorCountersMatchExpressions operatorCountersMatchExpressions;
+// Global counters for expressions inside aggregation pipelines.
+extern OperatorCounters operatorCountersAggExpressions;
+// Global counters for match expressions.
+extern OperatorCounters operatorCountersMatchExpressions;
+// Global counters for accumulator expressions apply to $group.
+extern OperatorCounters operatorCountersGroupAccumulatorExpressions;
+// Global counters for accumulator expressions apply to $setWindowFields.
+extern OperatorCounters operatorCountersWindowAccumulatorExpressions;
+
+class ValidatorCounters {
+public:
+    ValidatorCounters() {
+        _validatorCounterMap["create"] = std::make_unique<ValidatorCounter>("create");
+        _validatorCounterMap["collMod"] = std::make_unique<ValidatorCounter>("collMod");
+    }
+
+    void incrementCounters(const StringData cmdName,
+                           const BSONObj& validator,
+                           bool parsingSucceeded) {
+        if (!validator.isEmpty()) {
+            auto validatorCounter = _validatorCounterMap.find(cmdName);
+            tassert(7139200,
+                    str::stream() << "The validator counters are not support for the command: "
+                                  << cmdName,
+                    validatorCounter != _validatorCounterMap.end());
+            validatorCounter->second->total.increment();
+
+            if (!parsingSucceeded) {
+                validatorCounter->second->failed.increment();
+            }
+            if (validator.hasField("$jsonSchema")) {
+                validatorCounter->second->jsonSchema.increment();
+            }
+        }
+    }
+
+private:
+    struct ValidatorCounter {
+        ValidatorCounter(const StringData name)
+            : totalMetric("commands." + name + ".validator.total", &total),
+              failedMetric("commands." + name + ".validator.failed", &failed),
+              jsonSchemaMetric("commands." + name + ".validator.jsonSchema", &jsonSchema) {}
+        Counter64 total;
+        Counter64 failed;
+        Counter64 jsonSchema;
+        ServerStatusMetricField<Counter64> totalMetric;
+        ServerStatusMetricField<Counter64> failedMetric;
+        ServerStatusMetricField<Counter64> jsonSchemaMetric;
+    };
+
+    StringMap<std::unique_ptr<ValidatorCounter>> _validatorCounterMap = {};
+};
+
+extern ValidatorCounters validatorCounters;
 
 // Track the number of {multi:true} updates.
 extern Counter64 updateManyCount;
 // Track the number of deleteMany calls.
 extern Counter64 deleteManyCount;
-
 }  // namespace mongo

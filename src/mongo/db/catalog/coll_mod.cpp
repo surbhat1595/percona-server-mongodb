@@ -55,6 +55,7 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/ttl_collection_cache.h"
@@ -111,7 +112,7 @@ struct CollModRequest {
     boost::optional<Collection::Validator> collValidator;
     boost::optional<ValidationActionEnum> collValidationAction;
     boost::optional<ValidationLevelEnum> collValidationLevel;
-    bool recordPreImages = false;
+    boost::optional<bool> recordPreImages;
 };
 
 StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
@@ -278,6 +279,11 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* opCtx,
                                                      e.Obj().getOwned(),
                                                      MatchExpressionParser::kDefaultSpecialFeatures,
                                                      maxFeatureCompatibilityVersion);
+
+            // Increment counters to track the usage of schema validators.
+            validatorCounters.incrementCounters(
+                "collMod", cmr.collValidator->validatorDoc, cmr.collValidator->isOK());
+
             if (!cmr.collValidator->isOK()) {
                 return cmr.collValidator->getStatus();
             }
@@ -671,8 +677,9 @@ Status _collModInternal(OperationContext* opCtx,
                                        "Failed to set validationLevel");
         }
 
-        if (cmrNew.recordPreImages != oldCollOptions.recordPreImages) {
-            coll.getWritableCollection()->setRecordPreImages(opCtx, cmrNew.recordPreImages);
+        if (cmrNew.recordPreImages.has_value() &&
+            *cmrNew.recordPreImages != oldCollOptions.recordPreImages) {
+            coll.getWritableCollection()->setRecordPreImages(opCtx, *cmrNew.recordPreImages);
         }
 
         if (ts.isABSONObj()) {

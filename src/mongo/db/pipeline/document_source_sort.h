@@ -42,6 +42,28 @@ namespace mongo {
 
 class DocumentSourceSort final : public DocumentSource {
 public:
+    static constexpr StringData kMin = "min"_sd;
+    static constexpr StringData kMax = "max"_sd;
+    static constexpr StringData kOffset = "offsetSeconds"_sd;
+
+    struct SortableDate {
+        Date_t date;
+
+        struct SorterDeserializeSettings {};  // unused
+        void serializeForSorter(BufBuilder& buf) const {
+            buf.appendNum(date.toMillisSinceEpoch());
+        }
+        static SortableDate deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
+            return {Date_t::fromMillisSinceEpoch(buf.read<LittleEndian<long long>>().value)};
+        }
+        int memUsageForSorter() const {
+            return sizeof(SortableDate);
+        }
+        std::string toString() const {
+            return date.toString();
+        }
+    };
+
     static constexpr StringData kStageName = "$sort"_sd;
 
     const char* getSourceName() const final {
@@ -110,6 +132,18 @@ public:
         return create(pExpCtx, {sortOrder, pExpCtx});
     }
 
+    static boost::intrusive_ptr<DocumentSourceSort> createBoundedSort(
+        SortPattern pat,
+        StringData boundBase,
+        long long boundOffset,
+        boost::optional<long long> limit,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+    /**
+     * Parse a stage that uses BoundedSorter.
+     */
+    static boost::intrusive_ptr<DocumentSourceSort> parseBoundedSort(
+        BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
     /**
      * Returns the the limit, if a subsequent $limit stage has been coalesced with this $sort stage.
      * Otherwise, returns boost::none.
@@ -137,6 +171,10 @@ public:
     bool isPopulated() {
         return _populated;
     };
+
+    bool isBoundedSortStage() {
+        return (_timeSorter) ? true : false;
+    }
 
     bool hasLimit() const {
         return _sortExecutor->hasLimit();
@@ -182,11 +220,54 @@ private:
      */
     std::pair<Value, Document> extractSortKey(Document&& doc) const;
 
+    /**
+     * Returns the time value used to sort 'doc', as well as the document that should be entered
+     * into the sorter to eventually be returned. If we will need to later merge the sorted results
+     * with other results, this method adds the full sort key as metadata onto 'doc' to speed up the
+     * merge later.
+     */
+    std::pair<Date_t, Document> extractTime(Document&& doc) const;
+
+    /**
+     * Peeks at the next document in the input. The next document is cached in _timeSorterNextDoc
+     * to support peeking without advancing.
+     */
+    GetNextResult::ReturnStatus timeSorterPeek();
+
+    /**
+     * Peeks at the next document in the input, but ignores documents whose partition key differs
+     * from the current partition key (if there is one).
+     */
+    GetNextResult::ReturnStatus timeSorterPeekSamePartition();
+
+    /**
+     * Gets the next document from the input. Caller must call timeSorterPeek() first, and it's
+     * only valid to call timeSorterGetNext() if peek returned kAdvanced.
+     */
+    Document timeSorterGetNext();
+
     bool _populated = false;
 
     boost::optional<SortExecutor<Document>> _sortExecutor;
 
     boost::optional<SortKeyGenerator> _sortKeyGen;
+
+    using TimeSorterInterface = BoundedSorterInterface<SortableDate, Document>;
+    std::unique_ptr<TimeSorterInterface> _timeSorter;
+    boost::optional<SortKeyGenerator> _timeSorterPartitionKeyGen;
+    // The next document that will be returned by timeSorterGetNext().
+    // timeSorterPeek() fills it in, and timeSorterGetNext() empties it.
+    boost::optional<Document> _timeSorterNextDoc;
+    // The current partition key.
+    // If _timeSorterNextDoc has a document then this represents the partition key of
+    // that document.
+    // If _timeSorterNextDoc is empty then this represents the partition key of
+    // the document last returned by timeSorterGetNext().
+    boost::optional<Value> _timeSorterCurrentPartition;
+    // Used in timeSorterPeek() to avoid calling getNext() on an exhausted pSource.
+    bool _timeSorterInputEOF = false;
+
+    QueryMetadataBitSet _requiredMetadata;
 };
 
 }  // namespace mongo

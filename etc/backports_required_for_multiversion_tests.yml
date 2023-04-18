@@ -96,6 +96,20 @@ last-continuous:
     ticket: SERVER-72620
   - test_file: jstests/core/partial_index_logical.js
     ticket: SERVER-68434
+  - test_file: jstests/core/timeseries/bucket_unpacking_with_sort_extended_range.js
+    ticket: SERVER-73110
+  - test_file: jstests/core/doc_validation_with_now_variable.js
+    ticket: SERVER-73125
+  - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
+    ticket: SERVER-74124
+  - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
+    ticket: SERVER-69952
+  - test_file: jstests/noPassthrough/operator_counters_accumulators.js
+    ticket: SERVER-63049
+  - test_file: jstests/replsets/quiesce_mode_fails_elections.js
+    ticket: SERVER-72774
+  - test_file: jstests/core/map_reduce_subplanning.js
+    ticket: SERVER-74131
   suites:
     change_streams_multiversion_passthrough: null
     change_streams_sharded_collections_multiversion_passthrough: null
@@ -287,6 +301,18 @@ last-lts:
     ticket: SERVER-72620
   - test_file: jstests/core/partial_index_logical.js
     ticket: SERVER-68434
+  - test_file: jstests/core/timeseries/bucket_unpacking_with_sort_extended_range.js
+    ticket: SERVER-73110
+  - test_file: jstests/core/doc_validation_with_now_variable.js
+    ticket: SERVER-73125
+  - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
+    ticket: SERVER-74124
+  - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
+    ticket: SERVER-69952
+  - test_file: jstests/replsets/quiesce_mode_fails_elections.js
+    ticket: SERVER-72774
+  - test_file: jstests/core/map_reduce_subplanning.js
+    ticket: SERVER-74131
   suites:
     change_streams_multiversion_passthrough: null
     change_streams_sharded_collections_multiversion_passthrough: null

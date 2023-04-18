@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/document_source.h"
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/platform/basic.h"
@@ -98,6 +99,10 @@ public:
         return *this;
     }
 
+    std::string toString() const {
+        return std::to_string(_i);
+    }
+
 private:
     int _i;
 };
@@ -140,6 +145,9 @@ public:
         _current += _increment;
         return out;
     }
+    const IWPair& current() {
+        MONGO_UNREACHABLE;
+    }
 
 private:
     int _current;
@@ -156,6 +164,9 @@ public:
     }
     Data next() {
         verify(false);
+    }
+    const Data& current() {
+        MONGO_UNREACHABLE;
     }
 };
 
@@ -176,6 +187,9 @@ public:
         verify(more());
         _remaining--;
         return _source->next();
+    }
+    const Data& current() {
+        MONGO_UNREACHABLE;
     }
 
 private:
@@ -213,6 +227,38 @@ void _assertIteratorsEquivalent(It1 it1, It2 it2, int line) {
     }
 }
 #define ASSERT_ITERATORS_EQUIVALENT(it1, it2) _assertIteratorsEquivalent(it1, it2, __LINE__)
+
+template <typename It1, typename It2>
+void _assertIteratorsEquivalentForNSteps(It1 it1, It2 it2, int maxSteps, int line) {
+    int iteration;
+    try {
+        it1->openSource();
+        it2->openSource();
+        for (iteration = 0; iteration < maxSteps; iteration++) {
+            ASSERT_EQUALS(it1->more(), it2->more());
+            ASSERT_EQUALS(it1->more(), it2->more());  // make sure more() is safe to call twice
+            if (!it1->more())
+                return;
+
+            IWPair pair1 = it1->next();
+            IWPair pair2 = it2->next();
+            ASSERT_EQUALS(pair1.first, pair2.first);
+            ASSERT_EQUALS(pair1.second, pair2.second);
+        }
+        it1->closeSource();
+        it2->closeSource();
+    } catch (...) {
+        LOGV2(6409300,
+              "Failure from line {line} on iteration {iteration}",
+              "line"_attr = line,
+              "iteration"_attr = iteration);
+        it1->closeSource();
+        it2->closeSource();
+        throw;
+    }
+}
+#define ASSERT_ITERATORS_EQUIVALENT_FOR_N_STEPS(it1, it2, n) \
+    _assertIteratorsEquivalentForNSteps(it1, it2, n, __LINE__)
 
 template <int N>
 std::shared_ptr<IWIterator> makeInMemIterator(const int (&array)[N]) {
@@ -266,6 +312,9 @@ public:
                     IWPair ret(unsorted[_pos], -unsorted[_pos]);
                     _pos++;
                     return ret;
+                }
+                const IWPair& current() {
+                    MONGO_UNREACHABLE;
                 }
                 size_t _pos;
             } unsortedIter;
@@ -365,6 +414,27 @@ public:
             ASSERT_ITERATORS_EQUIVALENT(
                 mergeIterators(iterators, ASC, SortOptions().Limit(10)),
                 std::make_shared<LimitIterator>(10, std::make_shared<IntIterator>(0, 20, 1)));
+        }
+
+        {  // test ASC with additional merging
+            auto itFull = std::make_shared<IntIterator>(0, 20, 1);
+
+            auto itA = std::make_shared<IntIterator>(0, 5, 1);    // 0, 1, ... 4
+            auto itB = std::make_shared<IntIterator>(5, 10, 1);   // 5, 6, ... 9
+            auto itC = std::make_shared<IntIterator>(10, 15, 1);  // 10, 11, ... 14
+            auto itD = std::make_shared<IntIterator>(15, 20, 1);  // 15, 16, ... 19
+
+            std::shared_ptr<IWIterator> iteratorsAD[] = {itD, itA};
+            auto mergedAD = mergeIterators(iteratorsAD, ASC);
+            ASSERT_ITERATORS_EQUIVALENT_FOR_N_STEPS(mergedAD, itFull, 5);
+
+            std::shared_ptr<IWIterator> iteratorsABD[] = {mergedAD, itB};
+            auto mergedABD = mergeIterators(iteratorsABD, ASC);
+            ASSERT_ITERATORS_EQUIVALENT_FOR_N_STEPS(mergedABD, itFull, 5);
+
+            std::shared_ptr<IWIterator> iteratorsABCD[] = {itC, mergedABD};
+            auto mergedABCD = mergeIterators(iteratorsABCD, ASC);
+            ASSERT_ITERATORS_EQUIVALENT_FOR_N_STEPS(mergedABCD, itFull, 5);
         }
     }
 };
@@ -874,6 +944,669 @@ TEST_F(SorterMakeFromExistingRangesTest, RoundTrip) {
     }
 }
 
+class BoundedSorterTest : public unittest::Test {
+public:
+    using Key = IntWrapper;
+    struct Doc {
+        Key time;
+
+        bool operator==(const Doc& other) const {
+            return time == other.time;
+        }
+
+        void serializeForSorter(BufBuilder& buf) const {
+            time.serializeForSorter(buf);
+        }
+
+        struct SorterDeserializeSettings {};  // unused
+        static Doc deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
+            return {IntWrapper::deserializeForSorter(buf, {})};
+        }
+
+        int memUsageForSorter() const {
+            return sizeof(Doc);
+        }
+    };
+    struct ComparatorAsc {
+        int operator()(Key x, Key y) const {
+            return x - y;
+        }
+    };
+    struct ComparatorDesc {
+        int operator()(Key x, Key y) const {
+            return y - x;
+        }
+    };
+    struct BoundMakerAsc {
+        Key operator()(Key k, const Doc&) const {
+            return k - 10;
+        }
+        Document serialize() const {
+            MONGO_UNREACHABLE;
+        }
+    };
+    struct BoundMakerDesc {
+        Key operator()(Key k, const Doc&) const {
+            return k + 10;
+        }
+        Document serialize() const {
+            MONGO_UNREACHABLE;
+        }
+    };
+
+    using S = BoundedSorterInterface<Key, Doc>;
+    using SAsc = BoundedSorter<Key, Doc, ComparatorAsc, BoundMakerAsc>;
+    using SDesc = BoundedSorter<Key, Doc, ComparatorDesc, BoundMakerDesc>;
+
+    /**
+     * Feed the input into the sorter one-by-one, taking any output as soon as it's available.
+     */
+    std::vector<Doc> sort(std::vector<Doc> input, int expectedSize = -1) {
+        std::vector<Doc> output;
+        auto push = [&](Doc doc) { output.push_back(doc); };
+
+        for (auto&& doc : input) {
+            sorter->add(doc.time, doc);
+            while (sorter->getState() == S::State::kReady)
+                push(sorter->next().second);
+        }
+        sorter->done();
+
+        while (sorter->getState() == S::State::kReady)
+            push(sorter->next().second);
+        ASSERT(sorter->getState() == S::State::kDone);
+
+        ASSERT_EQ(output.size(), expectedSize == -1 ? input.size() : expectedSize);
+        return output;
+    }
+
+    static void assertSorted(const std::vector<Doc>& docs, bool ascending = true) {
+        for (size_t i = 1; i < docs.size(); ++i) {
+            Doc prev = docs[i - 1];
+            Doc curr = docs[i];
+            if (ascending) {
+                ASSERT_LTE(prev.time, curr.time);
+            } else {
+                ASSERT_GTE(prev.time, curr.time);
+            }
+        }
+    }
+
+    std::unique_ptr<S> makeAsc(SortOptions options, bool checkInput = true) {
+        return std::make_unique<SAsc>(options, ComparatorAsc{}, BoundMakerAsc{}, checkInput);
+    }
+    std::unique_ptr<S> makeDesc(SortOptions options, bool checkInput = true) {
+        return std::make_unique<SDesc>(options, ComparatorDesc{}, BoundMakerDesc{}, checkInput);
+    }
+
+    std::unique_ptr<S> sorter = makeAsc({});
+};
+TEST_F(BoundedSorterTest, Empty) {
+    ASSERT(sorter->getState() == S::State::kWait);
+
+    sorter->done();
+    ASSERT(sorter->getState() == S::State::kDone);
+}
+TEST_F(BoundedSorterTest, Sorted) {
+    auto output = sort({
+        {0},
+        {3},
+        {10},
+        {11},
+        {12},
+        {13},
+        {14},
+        {15},
+        {16},
+    });
+    assertSorted(output);
+}
+
+TEST_F(BoundedSorterTest, SortedExceptOne) {
+    auto output = sort({
+        {0},
+        {3},
+        {10},
+        // Swap 11 and 12.
+        {12},
+        {11},
+        {13},
+        {14},
+        {15},
+        {16},
+    });
+    assertSorted(output);
+}
+
+TEST_F(BoundedSorterTest, AlmostSorted) {
+    auto output = sort({
+        // 0 and 11 cannot swap.
+        {0},
+        {11},
+        {13},
+        {10},
+        {12},
+        // 3 and 14 cannot swap.
+        {3},
+        {14},
+        {15},
+        {16},
+    });
+    assertSorted(output);
+}
+
+TEST_F(BoundedSorterTest, WrongInput) {
+    std::vector<Doc> input = {
+        {3},
+        {4},
+        {5},
+        {10},
+        {15},
+        // This 1 is too far out of order: it's more than 10 away from 15.
+        // So it will appear too late in the output.
+        // We will still be hanging on to anything in the range [5, inf).
+        // So we will have already returned 3, 4.
+        {1},
+        {16},
+    };
+
+    // Disable input order checking so we can see what happens.
+    sorter = makeAsc({}, /* checkInput */ false);
+    auto output = sort(input);
+    ASSERT_EQ(output.size(), 7);
+
+    ASSERT_EQ(output[0].time, 3);
+    ASSERT_EQ(output[1].time, 4);
+    ASSERT_EQ(output[2].time, 1);  // Out of order.
+    ASSERT_EQ(output[3].time, 5);
+    ASSERT_EQ(output[4].time, 10);
+    ASSERT_EQ(output[5].time, 15);
+    ASSERT_EQ(output[6].time, 16);
+
+    // Test that by default, bad input like this would be detected.
+    sorter = makeAsc({});
+    ASSERT(sorter->checkInput());
+    ASSERT_THROWS_CODE(sort(input), DBException, 6369910);
+}
+
+TEST_F(BoundedSorterTest, MemoryLimitsNoExtSortAllowed) {
+    auto options = SortOptions().MaxMemoryUsageBytes(16);
+    sorter = makeAsc(options);
+
+    std::vector<Doc> input = {
+        {0},
+        {3},
+        {10},
+        {11},
+        {12},
+        {13},
+        {14},
+        {15},
+        {16},
+    };
+
+    ASSERT_THROWS_CODE(
+        sort(input), DBException, ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed);
+}
+
+TEST_F(BoundedSorterTest, SpillSorted) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(16);
+    sorter = makeAsc(options);
+
+    auto output = sort({
+        {0},
+        {3},
+        {10},
+        {11},
+        {12},
+        {13},
+        {14},
+        {15},
+        {16},
+    });
+    assertSorted(output);
+
+    ASSERT_EQ(sorter->numSpills(), 3);
+}
+
+TEST_F(BoundedSorterTest, SpillSortedExceptOne) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(16);
+    sorter = makeAsc(options);
+
+    auto output = sort({
+        {0},
+        {3},
+        {10},
+        // Swap 11 and 12.
+        {12},
+        {11},
+        {13},
+        {14},
+        {15},
+        {16},
+    });
+    assertSorted(output);
+
+    ASSERT_EQ(sorter->numSpills(), 3);
+}
+
+TEST_F(BoundedSorterTest, SpillAlmostSorted) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(16);
+    sorter = makeAsc(options);
+
+    auto output = sort({
+        // 0 and 11 cannot swap.
+        {0},
+        {11},
+        {13},
+        {10},
+        {12},
+        // 3 and 14 cannot swap.
+        {3},
+        {14},
+        {15},
+        {16},
+    });
+    assertSorted(output);
+
+    ASSERT_EQ(sorter->numSpills(), 2);
+}
+
+TEST_F(BoundedSorterTest, SpillWrongInput) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(16);
+
+    std::vector<Doc> input = {
+        {3},
+        {4},
+        {5},
+        {10},
+        {15},
+        // This 1 is too far out of order: it's more than 10 away from 15.
+        // So it will appear too late in the output.
+        // We will still be hanging on to anything in the range [5, inf).
+        // So we will have already returned 3, 4.
+        {1},
+        {16},
+    };
+
+    // Disable input order checking so we can see what happens.
+    sorter = makeAsc(options, /* checkInput */ false);
+    auto output = sort(input);
+    ASSERT_EQ(output.size(), 7);
+
+    ASSERT_EQ(output[0].time, 3);
+    ASSERT_EQ(output[1].time, 4);
+    ASSERT_EQ(output[2].time, 1);  // Out of order.
+    ASSERT_EQ(output[3].time, 5);
+    ASSERT_EQ(output[4].time, 10);
+    ASSERT_EQ(output[5].time, 15);
+    ASSERT_EQ(output[6].time, 16);
+
+    ASSERT_EQ(sorter->numSpills(), 2);
+
+    // Test that by default, bad input like this would be detected.
+    sorter = makeAsc(options);
+    ASSERT(sorter->checkInput());
+    ASSERT_THROWS_CODE(sort(input), DBException, 6369910);
+}
+
+TEST_F(BoundedSorterTest, LimitNoSpill) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(40).Limit(2);
+    sorter = makeAsc(options);
+
+    auto output = sort(
+        {
+            // 0 and 11 cannot swap.
+            {0},
+            {11},
+            {13},
+            {10},
+            {12},
+            // 3 and 14 cannot swap.
+            {3},
+            {14},
+            {15},
+            {16},
+        },
+        2);
+    assertSorted(output);
+    // Also check that the correct values made it into the top K.
+    ASSERT_EQ(output[0].time, 0);
+    ASSERT_EQ(output[1].time, 3);
+
+    ASSERT_EQ(sorter->numSpills(), 0);
+}
+
+TEST_F(BoundedSorterTest, LimitSpill) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(40).Limit(3);
+    sorter = makeAsc(options);
+
+    auto output = sort(
+        {
+            // 0 and 11 cannot swap.
+            {0},
+            {11},
+            {13},
+            {10},
+            {12},
+            // 3 and 14 cannot swap.
+            {3},
+            {14},
+            {15},
+            {16},
+        },
+        3);
+    assertSorted(output);
+    // Also check that the correct values made it into the top K.
+    ASSERT_EQ(output[0].time, 0);
+    ASSERT_EQ(output[1].time, 3);
+    ASSERT_EQ(output[2].time, 10);
+
+    ASSERT_EQ(sorter->numSpills(), 1);
+}
+
+TEST_F(BoundedSorterTest, DescSorted) {
+    sorter = makeDesc({});
+    auto output = sort({
+        {16},
+        {15},
+        {14},
+        {13},
+        {12},
+        {11},
+        {10},
+        {3},
+        {0},
+    });
+    assertSorted(output, /* ascending */ false);
+}
+
+TEST_F(BoundedSorterTest, DescSortedExceptOne) {
+    sorter = makeDesc({});
+
+    auto output = sort({
+
+        {16},
+        {15},
+        {14},
+        {13},
+        // Swap 11 and 12.
+        {11},
+        {12},
+        {10},
+        {3},
+        {0},
+    });
+    assertSorted(output, /* ascending */ false);
+}
+
+TEST_F(BoundedSorterTest, DescAlmostSorted) {
+    sorter = makeDesc({});
+
+    auto output = sort({
+        {16},
+        {15},
+        // 3 and 14 cannot swap.
+        {14},
+        {3},
+        {12},
+        {10},
+        {13},
+        // 0 and 11 cannot swap.
+        {11},
+        {0},
+    });
+    assertSorted(output, /* ascending */ false);
+}
+
+TEST_F(BoundedSorterTest, DescWrongInput) {
+    std::vector<Doc> input = {
+        {16},
+        {14},
+        {10},
+        {5},
+        {3},
+        // This 15 is too far out of order: it's more than 10 away from 3.
+        // So it will appear too late in the output.
+        // We will still be hanging on to anything in the range [-inf, 13).
+        // So we will have already returned 16, 14.
+        {15},
+        {1},
+    };
+
+    // Disable input order checking so we can see what happens.
+    sorter = makeDesc({}, /* checkInput */ false);
+    auto output = sort(input);
+    ASSERT_EQ(output.size(), 7);
+
+    ASSERT_EQ(output[0].time, 16);
+    ASSERT_EQ(output[1].time, 14);
+    ASSERT_EQ(output[2].time, 15);  // Out of order.
+    ASSERT_EQ(output[3].time, 10);
+    ASSERT_EQ(output[4].time, 5);
+    ASSERT_EQ(output[5].time, 3);
+    ASSERT_EQ(output[6].time, 1);
+
+    // Test that by default, bad input like this would be detected.
+    sorter = makeDesc({});
+    ASSERT(sorter->checkInput());
+    ASSERT_THROWS_CODE(sort(input), DBException, 6369910);
+}
+
+TEST_F(BoundedSorterTest, CompoundAsc) {
+    {
+        auto output = sort({
+            {1001},
+            {1005},
+            {1004},
+            {1007},
+        });
+        assertSorted(output);
+    }
+
+    {
+        // After restart(), the sorter accepts new input.
+        // The new values are compared to each other, but not compared to any of the old values,
+        // so it's fine for the new values to be smaller even though the sort is ascending.
+        sorter->restart();
+        auto output = sort({
+            {1},
+            {5},
+            {4},
+            {7},
+        });
+        assertSorted(output);
+    }
+
+    {
+        // restart() can be called any number of times.
+        sorter->restart();
+        auto output = sort({
+            {11},
+            {15},
+            {14},
+            {17},
+        });
+        assertSorted(output);
+    }
+}
+
+TEST_F(BoundedSorterTest, CompoundDesc) {
+    sorter = makeDesc({});
+    {
+        auto output = sort({
+            {1007},
+            {1004},
+            {1005},
+            {1001},
+        });
+        assertSorted(output, /* ascending */ false);
+    }
+
+    {
+        // After restart(), the sorter accepts new input.
+        // The new values are compared to each other, but not compared to any of the old values,
+        // so it's fine for the new values to be smaller even though the sort is ascending.
+        sorter->restart();
+        auto output = sort({
+            {7},
+            {4},
+            {5},
+            {1},
+        });
+        assertSorted(output, /* ascending */ false);
+    }
+
+    {
+        // restart() can be called any number of times.
+        sorter->restart();
+        auto output = sort({
+            {17},
+            {14},
+            {15},
+            {11},
+        });
+        assertSorted(output, /* ascending */ false);
+    }
+}
+
+TEST_F(BoundedSorterTest, CompoundLimit) {
+    // A limit applies to the entire sorter, not to each partition of a compound sort.
+
+    // Example where the limit lands in the first partition.
+    sorter = makeAsc(SortOptions().Limit(2));
+    {
+        auto output = sort(
+            {
+                {1001},
+                {1005},
+                {1004},
+                {1007},
+            },
+            2);
+        assertSorted(output);
+        // Also check that the correct values made it into the top K.
+        ASSERT_EQ(output[0].time, 1001);
+        ASSERT_EQ(output[1].time, 1004);
+
+        sorter->restart();
+        output = sort(
+            {
+                {1},
+                {5},
+                {4},
+                {7},
+            },
+            0);
+
+        sorter->restart();
+        output = sort(
+            {
+                {11},
+                {15},
+                {14},
+                {17},
+            },
+            0);
+    }
+
+    // Example where the limit lands in the second partition.
+    sorter = makeAsc(SortOptions().Limit(6));
+    {
+        auto output = sort({
+            {1001},
+            {1005},
+            {1004},
+            {1007},
+        });
+        assertSorted(output);
+
+        sorter->restart();
+        output = sort(
+            {
+                {1},
+                {5},
+                {4},
+                {7},
+            },
+            2);
+        // Also check that the correct values made it into the top K.
+        ASSERT_EQ(output[0].time, 1);
+        ASSERT_EQ(output[1].time, 4);
+
+        sorter->restart();
+        output = sort(
+            {
+                {11},
+                {15},
+                {14},
+                {17},
+            },
+            0);
+    }
+}
+
+TEST_F(BoundedSorterTest, CompoundSpill) {
+    auto options =
+        SortOptions().ExtSortAllowed().TempDir("unused_temp_dir").MaxMemoryUsageBytes(40);
+    sorter = makeAsc(options);
+
+    // When each partition is small enough, we don't spill.
+    ASSERT_EQ(sorter->numSpills(), 0);
+    auto output = sort({
+        {1001},
+        {1007},
+    });
+    assertSorted(output);
+    ASSERT_EQ(sorter->numSpills(), 0);
+
+    // If any individual partition is large enough, we do spill.
+    sorter->restart();
+    ASSERT_EQ(sorter->numSpills(), 0);
+    output = sort({
+        {1},
+        {5},
+        {5},
+        {5},
+        {5},
+        {5},
+        {5},
+        {5},
+        {5},
+        {4},
+        {7},
+    });
+    assertSorted(output);
+    ASSERT_EQ(sorter->numSpills(), 1);
+
+    // If later partitions are small again, they don't spill.
+    sorter->restart();
+    ASSERT_EQ(sorter->numSpills(), 1);
+    output = sort({
+        {11},
+        {17},
+    });
+    assertSorted(output);
+    ASSERT_EQ(sorter->numSpills(), 1);
+}
+
 }  // namespace
 }  // namespace sorter
 }  // namespace mongo
+
+template class ::mongo::Sorter<::mongo::sorter::BoundedSorterTest::Key,
+                               ::mongo::sorter::BoundedSorterTest::Doc>;
+template class ::mongo::BoundedSorter<::mongo::sorter::BoundedSorterTest::Key,
+                                      ::mongo::sorter::BoundedSorterTest::Doc,
+                                      ::mongo::sorter::BoundedSorterTest::ComparatorAsc,
+                                      ::mongo::sorter::BoundedSorterTest::BoundMakerAsc>;
+template class ::mongo::BoundedSorter<::mongo::sorter::BoundedSorterTest::Key,
+                                      ::mongo::sorter::BoundedSorterTest::Doc,
+                                      ::mongo::sorter::BoundedSorterTest::ComparatorDesc,
+                                      ::mongo::sorter::BoundedSorterTest::BoundMakerDesc>;

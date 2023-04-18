@@ -221,6 +221,8 @@ intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
     // Note that we intentionally skip copying the value of '_interruptCounter' because 'expCtx' is
     // intended to be used for executing a separate aggregation pipeline.
 
+    expCtx->_requiresTimeseriesExtendedRangeSupport = _requiresTimeseriesExtendedRangeSupport;
+
     return expCtx;
 }
 
@@ -242,11 +244,27 @@ void ExpressionContext::incrementAggExprCounter(StringData name) {
     }
 }
 
+void ExpressionContext::incrementGroupAccumulatorExprCounter(StringData name) {
+    if (enabledCounters && _expressionCounters) {
+        ++_expressionCounters.get().groupAccumulatorExprCountersMap[name];
+    }
+}
+
+void ExpressionContext::incrementWindowAccumulatorExprCounter(StringData name) {
+    if (enabledCounters && _expressionCounters) {
+        ++_expressionCounters.get().windowAccumulatorExprCountersMap[name];
+    }
+}
+
 void ExpressionContext::stopExpressionCounters() {
     if (enabledCounters && _expressionCounters) {
         operatorCountersMatchExpressions.mergeCounters(
             _expressionCounters.get().matchExprCountersMap);
         operatorCountersAggExpressions.mergeCounters(_expressionCounters.get().aggExprCountersMap);
+        operatorCountersGroupAccumulatorExpressions.mergeCounters(
+            _expressionCounters.get().groupAccumulatorExprCountersMap);
+        operatorCountersWindowAccumulatorExpressions.mergeCounters(
+            _expressionCounters.get().windowAccumulatorExprCountersMap);
     }
     _expressionCounters = boost::none;
 }

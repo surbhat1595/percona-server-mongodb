@@ -35,13 +35,16 @@
 #include <deque>
 #include <fstream>
 #include <memory>
+#include <queue>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/sorter/sorter_gen.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 
 /**
@@ -214,6 +217,7 @@ public:
 
     virtual bool more() = 0;
     virtual std::pair<Key, Value> next() = 0;
+    virtual const std::pair<Key, Value>& current() = 0;
 
     virtual ~SortIteratorInterface() {}
 
@@ -270,8 +274,8 @@ public:
     };
 
     /**
-     * Represents the file that a Sorter uses to spill to disk. Supports reading after writing (or
-     * reading without any writing), but does not support writing after any reading has been done.
+     * Represents the file that a Sorter uses to spill to disk. Supports reading and writing
+     * (append-only).
      */
     class File {
     public:
@@ -312,13 +316,16 @@ public:
     private:
         void _open();
 
+        /**
+         * Ensures that the file is open and that _offset is set to the end of the file.
+         */
         void _ensureOpenForWriting();
 
         boost::filesystem::path _path;
         std::fstream _file;
 
-        // The current offset of the end of the file, or -1 if the file either has not yet been
-        // opened or is already being read.
+        // The current offset of the end of the file if there may be unflushed data, or -1 if the
+        // file either has not yet been opened or has been flushed.
         std::streamoff _offset = -1;
 
         // Whether to keep the on-disk file even after this in-memory object has been destructed.
@@ -386,6 +393,181 @@ protected:
     std::shared_ptr<File> _file;
 
     std::vector<std::shared_ptr<Iterator>> _iters;  // Data that has already been spilled.
+};
+
+
+template <typename Key, typename Value>
+class BoundedSorterInterface {
+public:
+    virtual ~BoundedSorterInterface() {}
+
+    // Feed one item of input to the sorter.
+    // Together, add() and done() represent the input stream.
+    virtual void add(Key key, Value value) = 0;
+
+    // Indicate that no more input will arrive.
+    // Together, add() and done() represent the input stream.
+    virtual void done() = 0;
+
+    // Prepare the sorter to receive a new stream of input.
+    //
+    // The new input stream is treated as unrelated to the old one: new elements are only compared
+    // against each other, not against any elements of the old input stream.
+    //
+    // However, any SortOptions::limit applies to the entire sorter, not to each input stream
+    // separately.
+    virtual void restart() = 0;
+
+    enum class State {
+        // An output document is not available yet, but this may change as more input arrives.
+        kWait,
+        // An output document is available now: you may call next() once.
+        kReady,
+        // All output has been returned.
+        kDone,
+    };
+    // Together, state() and next() represent the output stream.
+    // See BoundedSorter::State for the meaning of each case.
+    virtual State getState() const = 0;
+
+    // Remove and return one item of output.
+    // Only valid to call when getState() == kReady.
+    // Together, state() and next() represent the output stream.
+    virtual std::pair<Key, Value> next() = 0;
+
+    // Serialize the bound for explain output
+    virtual Document serializeBound() const = 0;
+
+    virtual size_t totalDataSizeBytes() const = 0;
+    virtual size_t numSpills() const = 0;
+    virtual size_t limit() const = 0;
+
+    // By default, uassert that the input meets our assumptions of being almost-sorted.
+    // But if _checkInput is false, don't do that check.
+    // The output will be in the wrong order but otherwise it should work.
+    virtual bool checkInput() const = 0;
+};
+
+/**
+ * Sorts data that is already "almost sorted", meaning we can put a bound on how out-of-order
+ * any two input elements are. For example, maybe we are sorting by {time: 1} and we know that no
+ * two documents are more than an hour out of order. This means as soon as we see {time: t}, we know
+ * that any document earlier than {time: t - 1h} is safe to return.
+ *
+ * Note what's bounded is the difference in sort-key values, not the number of inversions.
+ * This means we don't know how much space we'll need.
+ *
+ * This is not a subclass of Sorter because the interface is different: Sorter has a strict
+ * separation between reading input and returning results, while BoundedSorter can alternate
+ * between the two.
+ *
+ * Comparator does a 3-way comparison between two Keys: comp(x, y) < 0 iff x < y.
+ *
+ * BoundMaker takes a Key from the input, and computes a bound. The bound is a Key that is
+ * less-or-equal to all future Keys that will be seen in the input.
+ */
+template <typename Key, typename Value, typename Comparator, typename BoundMaker>
+class BoundedSorter : public BoundedSorterInterface<Key, Value> {
+public:
+    // 'Comparator' is a 3-way comparison, but std::priority_queue wants a '<' comparison.
+    // But also, std::priority_queue is a max-heap, and we want a min-heap.
+    // And also, 'Comparator' compares Keys, but std::priority_queue calls its comparator
+    // on whole elements.
+    struct Greater {
+        // Prevent default construction.
+        explicit Greater(Comparator const* compare) : compare(compare) {}
+
+        bool operator()(const std::pair<Key, Value>& p1, const std::pair<Key, Value>& p2) const {
+            return (*compare)(p1.first, p2.first) > 0;
+        }
+        Comparator const* compare;
+    };
+
+    BoundedSorter(const SortOptions& opts,
+                  Comparator comp,
+                  BoundMaker makeBound,
+                  bool checkInput = true);
+
+    BoundedSorter(const BoundedSorter&) = delete;
+    BoundedSorter(BoundedSorter&&) = delete;
+    BoundedSorter& operator=(const BoundedSorter&) = delete;
+    BoundedSorter& operator=(BoundedSorter&&) = delete;
+
+    // Feed one item of input to the sorter.
+    // Together, add() and done() represent the input stream.
+    void add(Key key, Value value);
+
+    // Indicate that no more input will arrive.
+    // Together, add() and done() represent the input stream.
+    void done() {
+        invariant(!_done);
+        _done = true;
+    }
+
+    void restart();
+
+    // Together, state() and next() represent the output stream.
+    // See BoundedSorter::State for the meaning of each case.
+    using State = typename BoundedSorterInterface<Key, Value>::State;
+    State getState() const;
+
+    // Remove and return one item of output.
+    // Only valid to call when getState() == kReady.
+    // Together, state() and next() represent the output stream.
+    std::pair<Key, Value> next();
+
+    // Serialize the bound for explain output
+    Document serializeBound() const {
+        return {makeBound.serialize()};
+    };
+
+    size_t totalDataSizeBytes() const {
+        return _totalDataSizeSorted;
+    }
+
+    size_t numSpills() const {
+        return _numSpills;
+    }
+
+    size_t limit() const {
+        return _opts.limit;
+    }
+
+    bool checkInput() const {
+        return _checkInput;
+    }
+
+    const Comparator compare;
+    const BoundMaker makeBound;
+
+private:
+    using SpillIterator = SortIteratorInterface<Key, Value>;
+    struct PairComparator {
+        int operator()(const std::pair<Key, Value>& p1, const std::pair<Key, Value>& p2) const;
+        const Comparator& compare;
+    };
+
+    void _spill();
+
+    const PairComparator _comparePairs;
+
+    bool _checkInput;
+
+    size_t _numSorted = 0;              // Keeps track of the number of keys sorted.
+    uint64_t _totalDataSizeSorted = 0;  // Keeps track of the total size of data sorted.
+
+    const SortOptions _opts;
+
+    using KV = std::pair<Key, Value>;
+    std::priority_queue<KV, std::vector<KV>, Greater> _heap;
+
+    std::shared_ptr<typename Sorter<Key, Value>::File> _file;
+    std::shared_ptr<SpillIterator> _spillIter;
+    std::size_t _numSpills = 0;  // Keeps track of the number of spills that have happened.
+
+    boost::optional<Key> _min;
+    bool _done = false;
+    size_t _memUsed = 0;
 };
 
 /**

@@ -337,8 +337,12 @@ NetworkCounter networkCounter;
 AuthCounter authCounter;
 AggStageCounters aggStageCounters;
 DotsAndDollarsFieldsCounters dotsAndDollarsFieldsCounters;
-OperatorCountersAggExpressions operatorCountersAggExpressions;
-OperatorCountersMatchExpressions operatorCountersMatchExpressions;
+
+OperatorCounters operatorCountersAggExpressions{"operatorCounters.expressions."};
+OperatorCounters operatorCountersMatchExpressions{"operatorCounters.match."};
+OperatorCounters operatorCountersGroupAccumulatorExpressions{"operatorCounters.groupAccumulators."};
+OperatorCounters operatorCountersWindowAccumulatorExpressions{
+    "operatorCounters.windowAccumulators."};
 
 Counter64 updateManyCount;
 ServerStatusMetricField<Counter64> displayUpdateManyCount("query.updateManyCount",
@@ -346,4 +350,5 @@ ServerStatusMetricField<Counter64> displayUpdateManyCount("query.updateManyCount
 Counter64 deleteManyCount;
 ServerStatusMetricField<Counter64> displayeleteManyCount("query.deleteManyCount", &deleteManyCount);
 
+ValidatorCounters validatorCounters;
 }  // namespace mongo

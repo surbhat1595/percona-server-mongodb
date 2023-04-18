@@ -125,9 +125,23 @@ public:
 
     std::unique_ptr<PlanStageStats> getStats() final;
 
-    const SpecificStats* getSpecificStats() const final;
+    const IndexScanStats* getSpecificStats() const final {
+        return &_specificStats;
+    }
 
     static const char* kStageType;
+
+    const BSONObj& getKeyPattern() const {
+        return _keyPattern;
+    }
+
+    bool isForward() const {
+        return _forward;
+    }
+
+    const IndexBounds& getBounds() const {
+        return _bounds;
+    }
 
 protected:
     void doSaveStateRequiresIndex() final;

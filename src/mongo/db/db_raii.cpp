@@ -32,6 +32,7 @@
 
 #include "mongo/db/db_raii.h"
 
+#include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/concurrency/locker.h"
@@ -499,12 +500,9 @@ AutoGetCollectionForReadBase<AutoGetCollectionType, EmplaceAutoCollFunc>::
 
         // Once we have our locks, check whether or not we should override the ReadSource that was
         // set before acquiring locks.
-        auto [newReadSource, shouldReadAtLastApplied] =
-            SnapshotHelper::shouldChangeReadSource(opCtx, nss);
-        if (newReadSource) {
-            opCtx->recoveryUnit()->setTimestampReadSource(*newReadSource);
-            readSource = *newReadSource;
-        }
+        const bool shouldReadAtLastApplied = SnapshotHelper::changeReadSourceIfNeeded(opCtx, nss);
+        // Update readSource in case it was updated.
+        readSource = opCtx->recoveryUnit()->getTimestampReadSource();
 
         const auto readTimestamp = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
         if (readTimestamp && afterClusterTime) {
@@ -704,11 +702,7 @@ void AutoGetCollectionForReadLockFree::EmplaceHelper::emplace(
                     // replication state may have changed, invalidating our current choice of
                     // ReadSource. Using the same preconditions, change our ReadSource if necessary.
                     if (coll) {
-                        auto [newReadSource, _] =
-                            SnapshotHelper::shouldChangeReadSource(opCtx, coll->ns());
-                        if (newReadSource) {
-                            opCtx->recoveryUnit()->setTimestampReadSource(*newReadSource);
-                        }
+                        SnapshotHelper::changeReadSourceIfNeeded(opCtx, coll->ns());
                     }
 
                     return std::make_pair(coll, /* isView */ false);
@@ -884,11 +878,11 @@ AutoGetCollectionForReadCommandLockFree::AutoGetCollectionForReadCommandLockFree
     }
 }
 
-OldClientContext::OldClientContext(OperationContext* opCtx, const std::string& ns, bool doVersion)
+OldClientContext::OldClientContext(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   bool doVersion)
     : _opCtx(opCtx) {
-    // TODO SERVER-65488 Grab the DatabaseName from the NamespaceString passed in
-    const auto db = nsToDatabaseSubstring(ns);
-    const DatabaseName dbName(boost::none, db);
+    const auto dbName = nss.dbName();
     _db = DatabaseHolder::get(opCtx)->getDb(opCtx, dbName);
 
     if (!_db) {
@@ -905,14 +899,13 @@ OldClientContext::OldClientContext(OperationContext* opCtx, const std::string& n
             case dbDelete:   // path, so no need to check them here as well
                 break;
             default:
-                CollectionShardingState::get(_opCtx, NamespaceString(ns))
-                    ->checkShardVersionOrThrow(_opCtx);
+                CollectionShardingState::get(_opCtx, nss)->checkShardVersionOrThrow(_opCtx);
                 break;
         }
     }
 
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
-    currentOp->enter_inlock(ns.c_str(),
+    currentOp->enter_inlock(nss.toString().c_str(),
                             CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_db->name()));
 }
 
@@ -1003,9 +996,7 @@ AutoGetDbForReadLockFree::AutoGetDbForReadLockFree(OperationContext* opCtx,
             // Note: this must always be checked, regardless of whether the collection exists, so
             // that the dbVersion of this node or the caller gets updated quickly in case either is
             // stale.
-            auto dss = DatabaseShardingState::getSharedForLockFreeReads(opCtx, dbName);
-            auto dssLock = DatabaseShardingState::DSSLock::lockShared(opCtx, dss.get());
-            dss->checkDbVersion(opCtx, dssLock);
+            catalog_helper::assertMatchingDbVersion(opCtx, dbName);
             return std::make_pair(&fakeColl, /* isView */ false);
         },
         /* ResetFunc */

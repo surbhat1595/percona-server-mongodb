@@ -51,7 +51,7 @@
 #include "mongo/db/s/shard_key_index_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/util/visit_helper.h"
+#include "mongo/util/overloaded_visitor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -155,29 +155,29 @@ bool containsClusteredIndex(const CollectionPtr& collection, const IndexArgument
 
     auto clusteredIndexSpec = collection->getClusteredInfo()->getIndexSpec();
     return stdx::visit(
-        visit_helper::Overloaded{[&](const std::string& indexName) -> bool {
-                                     // While the clusteredIndex's name is optional during user
-                                     // creation, it should always be filled in by default on the
-                                     // collection object.
-                                     auto clusteredIndexName = clusteredIndexSpec.getName();
-                                     invariant(clusteredIndexName.is_initialized());
+        OverloadedVisitor{[&](const std::string& indexName) -> bool {
+                              // While the clusteredIndex's name is optional during user
+                              // creation, it should always be filled in by default on the
+                              // collection object.
+                              auto clusteredIndexName = clusteredIndexSpec.getName();
+                              invariant(clusteredIndexName.is_initialized());
 
-                                     return clusteredIndexName.get() == indexName;
-                                 },
-                                 [&](const std::vector<std::string>& indexNames) -> bool {
-                                     // While the clusteredIndex's name is optional during user
-                                     // creation, it should always be filled in by default on the
-                                     // collection object.
-                                     auto clusteredIndexName = clusteredIndexSpec.getName();
-                                     invariant(clusteredIndexName.is_initialized());
+                              return clusteredIndexName.get() == indexName;
+                          },
+                          [&](const std::vector<std::string>& indexNames) -> bool {
+                              // While the clusteredIndex's name is optional during user
+                              // creation, it should always be filled in by default on the
+                              // collection object.
+                              auto clusteredIndexName = clusteredIndexSpec.getName();
+                              invariant(clusteredIndexName.is_initialized());
 
-                                     return std::find(indexNames.begin(),
-                                                      indexNames.end(),
-                                                      clusteredIndexName.get()) != indexNames.end();
-                                 },
-                                 [&](const BSONObj& indexKey) -> bool {
-                                     return clusteredIndexSpec.getKey().woCompare(indexKey) == 0;
-                                 }},
+                              return std::find(indexNames.begin(),
+                                               indexNames.end(),
+                                               clusteredIndexName.get()) != indexNames.end();
+                          },
+                          [&](const BSONObj& indexKey) -> bool {
+                              return clusteredIndexSpec.getKey().woCompare(indexKey) == 0;
+                          }},
         index);
 }
 
@@ -191,7 +191,7 @@ StatusWith<std::vector<std::string>> getIndexNames(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_IX));
 
     return stdx::visit(
-        visit_helper::Overloaded{
+        OverloadedVisitor{
             [](const std::string& arg) -> StatusWith<std::vector<std::string>> { return {{arg}}; },
             [](const std::vector<std::string>& arg) -> StatusWith<std::vector<std::string>> {
                 return arg;
@@ -414,13 +414,13 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
               "CMD: dropIndexes",
               "namespace"_attr = nss,
               "uuid"_attr = collectionUUID,
-              "indexes"_attr = stdx::visit(
-                  visit_helper::Overloaded{[](const std::string& arg) { return arg; },
-                                           [](const std::vector<std::string>& arg) {
-                                               return boost::algorithm::join(arg, ",");
-                                           },
-                                           [](const BSONObj& arg) { return arg.toString(); }},
-                  index));
+              "indexes"_attr =
+                  stdx::visit(OverloadedVisitor{[](const std::string& arg) { return arg; },
+                                                [](const std::vector<std::string>& arg) {
+                                                    return boost::algorithm::join(arg, ",");
+                                                },
+                                                [](const BSONObj& arg) { return arg.toString(); }},
+                              index));
     }
 
     if ((*collection)->isClustered() &&
@@ -510,7 +510,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
             WriteUnitOfWork wuow(opCtx);
 
             // This is necessary to check shard version.
-            OldClientContext ctx(opCtx, (*collection)->ns().ns());
+            OldClientContext ctx(opCtx, (*collection)->ns());
 
             // Iterate through all the aborted indexes and drop any indexes that are ready in
             // the index catalog. This would indicate that while we yielded our locks during the
@@ -574,7 +574,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
             WriteUnitOfWork wunit(opCtx);
 
             // This is necessary to check shard version.
-            OldClientContext ctx(opCtx, (*collection)->ns().ns());
+            OldClientContext ctx(opCtx, (*collection)->ns());
             dropReadyIndexes(
                 opCtx, collection->getWritableCollection(opCtx), indexNames, &reply, false);
             wunit.commit();
@@ -623,7 +623,7 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
         WriteUnitOfWork wunit(opCtx);
 
         // This is necessary to check shard version.
-        OldClientContext ctx(opCtx, nss.ns());
+        OldClientContext ctx(opCtx, nss);
 
         DropIndexesReply ignoredReply;
         dropReadyIndexes(opCtx,

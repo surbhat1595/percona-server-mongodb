@@ -250,11 +250,11 @@ public:
         BSONObjBuilder result;
         result.append("latestOptime", replCoord->getMyLastAppliedOpTime().getTimestamp());
 
-        auto earliestOplogTimestampFetch = [&]() -> StatusWith<Timestamp> {
+        auto earliestOplogTimestampFetch = [&]() -> Timestamp {
             auto oplog = CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(
                 opCtx, NamespaceString::kRsOplogNamespace);
             if (!oplog) {
-                return StatusWith<Timestamp>(ErrorCodes::NamespaceNotFound, "oplog doesn't exist");
+                return Timestamp();
             }
 
             // Try to get the lock. If it's already locked, immediately return null timestamp.
@@ -279,18 +279,17 @@ public:
                 // Note that getSingleton will take a global IS lock, but this won't block because
                 // we are already holding the global IS lock.
                 BSONObj o;
-                if (Helpers::getSingleton(
-                        opCtx, NamespaceString::kRsOplogNamespace.ns().c_str(), o)) {
+                if (Helpers::getSingleton(opCtx, NamespaceString::kRsOplogNamespace, o)) {
                     return o["ts"].timestamp();
                 }
             }
-
-            return swEarliestOplogTimestamp;
+            if (!swEarliestOplogTimestamp.isOK()) {
+                return Timestamp();
+            }
+            return swEarliestOplogTimestamp.getValue();
         }();
 
-        uassert(
-            17347, "Problem reading earliest entry from oplog", earliestOplogTimestampFetch.isOK());
-        result.append("earliestOptime", earliestOplogTimestampFetch.getValue());
+        result.append("earliestOptime", earliestOplogTimestampFetch);
 
         return result.obj();
     }
@@ -344,7 +343,7 @@ public:
                                std::vector<Privilege>* out) const final {}  // No auth required
 
     bool runWithReplyBuilder(OperationContext* opCtx,
-                             const string&,
+                             const DatabaseName& dbName,
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) final {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
@@ -538,7 +537,7 @@ public:
             }
         }
 
-        handleHelloAuth(opCtx, cmd, &result);
+        handleHelloAuth(opCtx, dbName, cmd, &result);
 
         if (getTestCommandsEnabled()) {
             validateResult(&result);

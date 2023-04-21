@@ -61,8 +61,6 @@ private:
                                 const CollectionType& coll,
                                 std::shared_ptr<executor::ScopedTaskExecutor> executor);
 
-    void _clearDatabaseInfoOnPrimary(OperationContext* opCtx);
-
     void _clearDatabaseInfoOnSecondaries(OperationContext* opCtx);
 
     StringData _dbName;

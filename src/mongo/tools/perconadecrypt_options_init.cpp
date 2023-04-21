@@ -45,7 +45,7 @@ MONGO_GENERAL_STARTUP_OPTIONS_REGISTER(PerconaDecryptOptions)(InitializerContext
 
 MONGO_STARTUP_OPTIONS_VALIDATE(PerconaDecryptOptions)(InitializerContext* context) {
     if (!handlePreValidationPerconaDecryptOptions(moe::startupOptionsParsed)) {
-        quickExit(EXIT_SUCCESS);
+        quickExit(ExitCode::clean);
     }
     uassertStatusOK(moe::startupOptionsParsed.validate());
 }
@@ -55,7 +55,7 @@ MONGO_STARTUP_OPTIONS_STORE(PerconaDecryptOptions)(InitializerContext* context) 
     if (!ret.isOK()) {
         std::cerr << ret.toString() << std::endl;
         std::cerr << "try '" << context->args()[0] << " --help' for more information" << std::endl;
-        quickExit(EXIT_BADOPTIONS);
+        quickExit(ExitCode::badOptions);
     }
 }
 }

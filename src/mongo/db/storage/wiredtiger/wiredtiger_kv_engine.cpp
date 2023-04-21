@@ -35,6 +35,7 @@
         ID, DLEVEL, {logv2::LogComponent::kReplicationRollback}, MESSAGE, ##__VA_ARGS__)
 
 #include "mongo/platform/basic.h"
+#include "mongo/util/exit_code.h"
 
 #ifdef _WIN32
 #define NVALGRIND
@@ -1152,7 +1153,7 @@ void WiredTigerKVEngine::cleanShutdown() {
               "initialDataTimestamp and enableMajorityReadConcern is false",
               "stableTimestamp"_attr = stableTimestamp,
               "initialDataTimestamp"_attr = initialDataTimestamp);
-        quickExit(EXIT_SUCCESS);
+        quickExit(ExitCode::clean);
     }
 
     bool downgrade = false;

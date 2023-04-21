@@ -81,7 +81,7 @@ public:
             renameCollReq.setStayTemp(request().getStayTemp());
             renameCollReq.setExpectedSourceUUID(request().getCollectionUUID());
             stdx::visit(
-                visit_helper::Overloaded{
+                OverloadedVisitor{
                     [&renameCollReq](bool dropTarget) { renameCollReq.setDropTarget(dropTarget); },
                     [&renameCollReq](const UUID& uuid) {
                         renameCollReq.setDropTarget(true);
@@ -93,6 +93,10 @@ public:
             ShardsvrRenameCollection renameCollRequest(fromNss);
             renameCollRequest.setDbName(fromNss.db());
             renameCollRequest.setRenameCollectionRequest(renameCollReq);
+            renameCollRequest.setAllowEncryptedCollectionRename(
+                AuthorizationSession::get(opCtx->getClient())
+                    ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                       ActionType::setUserWriteBlockMode));
 
             auto catalogCache = Grid::get(opCtx)->catalogCache();
             auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db());

@@ -71,6 +71,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/net/sock.h"
+#include "mongo/util/overloaded_visitor.h"
 #include "mongo/util/string_map.h"
 
 #include "audit_options.h"
@@ -96,7 +97,7 @@ namespace audit {
         LOGV2(29013, "calling regular ::exit() so coverage data may flush...");
         ::exit( rc );
 #else
-        ::_exit( rc );
+        ::_exit(static_cast<int>(rc));
 #endif
     }
 
@@ -300,7 +301,7 @@ namespace audit {
                                 "datalen"_attr = data.length(),
                                 "file"_attr = _fileName,
                                 "err_desc"_attr = errnoWithDescription(writeRet));
-                    realexit(EXIT_AUDIT_ERROR);
+                    realexit(ExitCode::perconaAuditError);
                 }
                 LOGV2_WARNING(29018,
                     "Audit system cannot write {datalen} bytes to log file {file}. "
@@ -324,7 +325,7 @@ namespace audit {
                     "datalen"_attr = data.length(),
                     "file"_attr = _fileName,
                     "err_desc"_attr = errnoWithDescription(writeRet));
-                realexit(EXIT_AUDIT_ERROR);
+                realexit(ExitCode::perconaAuditError);
             }
 
             _file->flush();
@@ -343,7 +344,7 @@ namespace audit {
                         "As audit cannot make progress, the server will now shut down.",
                         "file"_attr = _fileName,
                         "err_desc"_attr = errnoWithDescription(fsyncRet));
-                    realexit(EXIT_AUDIT_ERROR);
+                    realexit(ExitCode::perconaAuditError);
                 }
                 LOGV2_WARNING(29021,
                     "Audit system cannot fsync log file {file}. "
@@ -364,7 +365,7 @@ namespace audit {
                     "As audit cannot make progress, the server will now shut down.",
                     "file"_attr = _fileName,
                     "err_desc"_attr = errnoWithDescription(fsyncRet));
-                realexit(EXIT_AUDIT_ERROR);
+                realexit(ExitCode::perconaAuditError);
             }
         }
     };    
@@ -1269,7 +1270,7 @@ namespace audit {
         }
 
         BSONObjBuilder params;
-        stdx::visit(visit_helper::Overloaded{
+        stdx::visit(OverloadedVisitor{
                         [&](const std::string& strParameterName) {
                             params << "requestedClusterServerParameters" << strParameterName;
                         },

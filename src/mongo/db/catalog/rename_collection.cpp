@@ -33,6 +33,7 @@
 #include "mongo/db/catalog/rename_collection.h"
 
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
+#include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database_holder.h"
@@ -116,7 +117,10 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
                       str::stream() << "Source collection " << source.ns() << " does not exist");
     }
 
-    if (sourceColl->getCollectionOptions().encryptedFieldConfig) {
+    if (sourceColl->getCollectionOptions().encryptedFieldConfig &&
+        !AuthorizationSession::get(opCtx->getClient())
+             ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                ActionType::setUserWriteBlockMode)) {
         return Status(ErrorCodes::IllegalOperation, "Cannot rename an encrypted collection");
     }
 
@@ -129,7 +133,10 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
             return Status(ErrorCodes::NamespaceExists,
                           str::stream() << "a view already exists with that name: " << target);
     } else {
-        if (targetColl->getCollectionOptions().encryptedFieldConfig) {
+        if (targetColl->getCollectionOptions().encryptedFieldConfig &&
+            !AuthorizationSession::get(opCtx->getClient())
+                 ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                    ActionType::setUserWriteBlockMode)) {
             return Status(ErrorCodes::IllegalOperation,
                           "Cannot rename to an existing encrypted collection");
         }
@@ -480,11 +487,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
         targetDBLock.emplace(opCtx, target.dbName(), MODE_X);
     }
 
-    {
-        auto dss = DatabaseShardingState::get(opCtx, source.db());
-        auto dssLock = DatabaseShardingState::DSSLock::lockShared(opCtx, dss);
-        dss->checkDbVersion(opCtx, dssLock);
-    }
+    catalog_helper::assertMatchingDbVersion(opCtx, source.db());
 
     DisableDocumentValidation validationDisabler(opCtx);
 

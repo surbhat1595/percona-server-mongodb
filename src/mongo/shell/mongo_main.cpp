@@ -74,6 +74,7 @@
 #include "mongo/util/ctype.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit.h"
+#include "mongo/util/exit_code.h"
 #include "mongo/util/file.h"
 #include "mongo/util/net/ocsp/ocsp_manager.h"
 #include "mongo/util/net/ssl_options.h"
@@ -310,7 +311,7 @@ void killOps() {
 }
 
 extern "C" void quitNicely(int sig) {
-    shutdown(EXIT_CLEAN);
+    shutdown(ExitCode::clean);
 }
 
 // the returned string is allocated with strdup() or malloc() and must be freed by calling free()
@@ -358,7 +359,7 @@ std::string getURIFromArgs(const std::string& arg,
     if ((arg.find('/') != std::string::npos) && (host.size() || port.size())) {
         std::cerr << "If a full URI is provided, you cannot also specify --host or --port"
                   << std::endl;
-        quickExit(-1);
+        quickExit(ExitCode::badOptions);
     }
 
     const auto parseDbHost = [port](const std::string& db, const std::string& host) -> std::string {
@@ -426,7 +427,7 @@ std::string getURIFromArgs(const std::string& arg,
                         std::cerr
                             << "connection string bears different port than provided by --port"
                             << std::endl;
-                        quickExit(-1);
+                        quickExit(ExitCode::badOptions);
                     }
                     ss << ':' << uriEncode(myport);
                 } else if (port.size()) {
@@ -904,7 +905,8 @@ int mongo_main(int argc, char* argv[]) {
                     pids.begin(), pids.end(), std::ostream_iterator<ProcessId>(std::cout, " "));
                 std::cout << std::endl;
 
-                if (mongo::shell_utils::KillMongoProgramInstances() != EXIT_SUCCESS) {
+                if (mongo::shell_utils::KillMongoProgramInstances() !=
+                    static_cast<int>(ExitCode::clean)) {
                     std::cout << "one more more child processes exited with an error during "
                               << shellGlobalParams.files[i] << std::endl;
                     std::cout << "exiting with code " << static_cast<int>(kProcessTerminationError)

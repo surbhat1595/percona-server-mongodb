@@ -160,7 +160,7 @@ int decryptCBC(const encryption::Key& masterKey,
     if (crc32c() != checksum)
         return printErrorMsg("Checksum does not match stored value.");
 
-    return EXIT_SUCCESS;
+    return static_cast<int>(ExitCode::clean);
 }
 
 int decryptGCM(const encryption::Key& masterKey,
@@ -213,7 +213,7 @@ int decryptGCM(const encryption::Key& masterKey,
     if (!dst.write(d_buf, decrypted_len))
         return printErrorMsg("Cannot write to decrypted file");
 
-    return EXIT_SUCCESS;
+    return static_cast<int>(ExitCode::clean);
 }
 
 encryption::Key readMasterKey() {
@@ -229,7 +229,7 @@ encryption::Key readMasterKey() {
 
 
 int decryptMain(int argc, char** argv, char** envp) {
-    int ret{EXIT_BADOPTIONS};
+    int ret{static_cast<int>(ExitCode::badOptions)};
     runGlobalInitializersOrDie(std::vector<std::string>(argv, argv + argc));
 
     try{
@@ -271,7 +271,7 @@ int decryptMain(int argc, char** argv, char** envp) {
 
     } catch (std::exception& e) {
         std::cerr << e.what() << std::endl;
-        return EXIT_BADOPTIONS;
+        return static_cast<int>(ExitCode::badOptions);
     }
     return ret;
 }

@@ -54,6 +54,7 @@
 #include "mongo/logv2/plain_formatter.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/exit_code.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/stacktrace.h"
@@ -405,12 +406,12 @@ std::unique_ptr<Result> Suite::run(const std::string& filter,
 
     for (const auto& tc : _tests) {
         if (filterRe && !filterRe->matchView(tc.name)) {
-            LOGV2_DEBUG(23057, 1, "skipped due to filter", "test"_attr = tc.name);
+            LOGV2_DEBUG(23057, 3, "skipped due to filter", "test"_attr = tc.name);
             continue;
         }
 
         if (fileNameFilterRe && !fileNameFilterRe->matchView(tc.fileName)) {
-            LOGV2_DEBUG(23058, 1, "skipped due to fileNameFilter", "testFile"_attr = tc.fileName);
+            LOGV2_DEBUG(23058, 3, "skipped due to fileNameFilter", "testFile"_attr = tc.fileName);
             continue;
         }
 
@@ -478,7 +479,7 @@ int Suite::run(const std::vector<std::string>& suites,
                int runsPerTest) {
     if (suitesMap().empty()) {
         LOGV2_ERROR(23061, "no suites registered.");
-        return EXIT_FAILURE;
+        return static_cast<int>(ExitCode::fail);
     }
 
     for (unsigned int i = 0; i < suites.size(); i++) {
@@ -486,7 +487,7 @@ int Suite::run(const std::vector<std::string>& suites,
             LOGV2_ERROR(23062,
                         "invalid test suite, use --list to see valid names",
                         "suite"_attr = suites[i]);
-            return EXIT_FAILURE;
+            return static_cast<int>(ExitCode::fail);
         }
     }
 

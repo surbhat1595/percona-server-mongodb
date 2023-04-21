@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2022-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,43 +27,27 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#pragma once
 
-#include "mongo/base/status.h"
-#include "mongo/db/commands.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/s/database_version.h"
 
-namespace mongo {
-namespace {
+namespace mongo::catalog_helper {
 
-class AvailableQueryOptions : public BasicCommand {
-public:
-    AvailableQueryOptions() : BasicCommand("availableQueryOptions", "availablequeryoptions") {}
+/**
+ * Checks that the cached database version matches the one attached to the operation, which means
+ * that the operation is routed to the right shard (database owner).
+ *
+ * Throws `StaleDbRoutingVersion` exception when the critical section is taken, there is no cached
+ * database version, or the cached database version does not match the one sent by the client.
+ */
+void assertMatchingDbVersion(OperationContext* opCtx, const StringData& dbName);
 
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
-        return AllowedOnSecondary::kAlways;
-    }
+/**
+ * Checks that the current shard server is the primary for the given database, throwing
+ * `IllegalOperation` if it is not.
+ */
+void assertIsPrimaryShardForDb(OperationContext* opCtx, const StringData& dbName);
 
-    bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return false;
-    }
-
-    Status checkAuthForCommand(Client* client,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj) const override {
-        return Status::OK();
-    }
-
-    bool run(OperationContext* opCtx,
-             const std::string& dbname,
-             const BSONObj& cmdObj,
-             BSONObjBuilder& result) override {
-        // TODO SERVER-60892: Remove this command entirely along with the corresponding mongod
-        // implementation.
-        uasserted(ErrorCodes::CommandNotSupported,
-                  "'availableQueryOptions' command is not supported on mongos");
-    }
-
-} clusterAvailableQueryOptionsCmd;
-
-}  // namespace
-}  // namespace mongo
+}  // namespace mongo::catalog_helper

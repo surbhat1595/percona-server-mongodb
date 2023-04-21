@@ -191,6 +191,7 @@ let viewsCommandTests = {
     addShard: {skip: isUnrelated},
     addShardToZone: {skip: isUnrelated},
     aggregate: {command: {aggregate: "view", pipeline: [{$match: {}}], cursor: {}}},
+    analyze: {skip: isUnrelated},
     appendOplogNote: {skip: isUnrelated},
     applyOps: {
         command: {applyOps: [{op: "i", o: {_id: 1}, ns: "test.view"}]},
@@ -206,7 +207,6 @@ let viewsCommandTests = {
         },
         expectFailure: true,
     },
-    availableQueryOptions: {skip: isAnInternalCommand},
     balancerCollectionStatus: {
         command: {balancerCollectionStatus: "test.view"},
         setup: function(conn) {
@@ -708,7 +708,7 @@ let viewsCommandTests = {
 };
 
 commandsRemovedFromMongodSinceLastLTS.forEach(function(cmd) {
-    viewsCommandTests[cmd] = {skip: "must define test coverage for 4.4 backwards compatibility"};
+    viewsCommandTests[cmd] = {skip: "must define test coverage for backwards compatibility"};
 });
 
 /**

@@ -106,11 +106,11 @@ let testCases = {
         },
         behavior: "versioned"
     },
+    analyze: {skip: "primary only"},
     appendOplogNote: {skip: "primary only"},
     applyOps: {skip: "primary only"},
     authSchemaUpgrade: {skip: "primary only"},
     authenticate: {skip: "does not return user data"},
-    availableQueryOptions: {skip: "does not return user data"},
     balancerCollectionStatus: {skip: "primary only"},
     balancerStart: {skip: "primary only"},
     balancerStatus: {skip: "primary only"},
@@ -367,7 +367,7 @@ let testCases = {
 };
 
 commandsRemovedFromMongosSinceLastLTS.forEach(function(cmd) {
-    testCases[cmd] = {skip: "must define test coverage for 4.4 backwards compatibility"};
+    testCases[cmd] = {skip: "must define test coverage for backwards compatibility"};
 });
 
 let scenarios = {

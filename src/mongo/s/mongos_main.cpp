@@ -111,6 +111,7 @@
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/exception_filter_win32.h"
 #include "mongo/util/exit.h"
+#include "mongo/util/exit_code.h"
 #include "mongo/util/fast_clock_source_factory.h"
 #include "mongo/util/latch_analyzer.h"
 #include "mongo/util/net/ocsp/ocsp_manager.h"
@@ -673,7 +674,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         LOGV2_ERROR(6067901,
                     "Load balancer port must be different from the normal ingress port.",
                     "port"_attr = serverGlobalParams.port);
-        quickExit(EXIT_BADOPTIONS);
+        quickExit(ExitCode::badOptions);
     }
 
     auto tl = transport::TransportLayerManager::createWithConfig(
@@ -684,7 +685,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                     "Error setting up listener: {error}",
                     "Error setting up listener",
                     "error"_attr = res);
-        return EXIT_NET_ERROR;
+        return ExitCode::netError;
     }
     serviceContext->setTransportLayer(std::move(tl));
 
@@ -707,7 +708,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     DBClientReplicaSet::setAuthPooledSecondaryConn(false);
 
     if (getHostName().empty()) {
-        quickExit(EXIT_BADOPTIONS);
+        quickExit(ExitCode::badOptions);
     }
 
     ReadWriteConcernDefaults::create(serviceContext, readWriteConcernDefaultsCacheLookupMongoS);
@@ -722,14 +723,14 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         if (ex.code() == ErrorCodes::CallbackCanceled) {
             invariant(globalInShutdownDeprecated());
             LOGV2(22850, "Shutdown called before mongos finished starting up");
-            return EXIT_CLEAN;
+            return ExitCode::clean;
         }
 
         LOGV2_ERROR(22857,
                     "Error initializing sharding system: {error}",
                     "Error initializing sharding system",
                     "error"_attr = redact(ex));
-        return EXIT_SHARDING_ERROR;
+        return ExitCode::shardingError;
     }
 
     Grid::get(serviceContext)
@@ -761,7 +762,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                     "Error initializing authorization data: {error}",
                     "Error initializing authorization data",
                     "error"_attr = status);
-        return EXIT_SHARDING_ERROR;
+        return ExitCode::shardingError;
     }
 
     // Construct the sharding uptime reporter after the startup parameters have been parsed in order
@@ -796,7 +797,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                     "Error completing initial health check: {error}",
                     "Error completing initial health check",
                     "error"_attr = redact(status));
-        return EXIT_PROCESS_HEALTH_CHECK;
+        return ExitCode::processHealthCheck;
     }
 
     SessionKiller::set(serviceContext,
@@ -814,7 +815,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                     "Error starting service entry point: {error}",
                     "Error starting service entry point",
                     "error"_attr = redact(status));
-        return EXIT_NET_ERROR;
+        return ExitCode::netError;
     }
 
     status = serviceContext->getTransportLayer()->start();
@@ -823,11 +824,11 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                     "Error starting transport layer: {error}",
                     "Error starting transport layer",
                     "error"_attr = redact(status));
-        return EXIT_NET_ERROR;
+        return ExitCode::netError;
     }
 
     if (!initialize_server_global_state::writePidFile()) {
-        return EXIT_ABRUPT;
+        return ExitCode::abrupt;
     }
 
     // Startup options are written to the audit log at the end of startup so that cluster server
@@ -886,7 +887,7 @@ ExitCode main(ServiceContext* serviceContext) {
             LOGV2_OPTIONS(22852,
                           {LogComponent::kDefault},
                           "cannot mix localhost and ip addresses in configdbs");
-            return EXIT_BADOPTIONS;
+            return ExitCode::badOptions;
         }
     }
 
@@ -931,7 +932,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
     setMongos();
 
     if (argc < 1)
-        return EXIT_BADOPTIONS;
+        return ExitCode::badOptions;
 
 
     setupSignalHandlers();
@@ -944,7 +945,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
             "Error during global initialization: {error}",
             "Error during global initialization",
             "error"_attr = status);
-        return EXIT_ABRUPT;
+        return ExitCode::abrupt;
     }
 
     try {
@@ -960,7 +961,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
             "Error creating service context: {error}",
             "Error creating service context",
             "error"_attr = redact(cause));
-        return EXIT_ABRUPT;
+        return ExitCode::abrupt;
     }
 
     // Attempt to rotate the audit log pre-emptively on startup to avoid any potential conflicts
@@ -972,7 +973,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
         Status err = mongo::exceptionToStatus();
         LOGV2(6169901, "Error rotating audit log", "error"_attr = err);
 
-        quickExit(ExitCode::EXIT_AUDIT_ROTATE_ERROR);
+        quickExit(ExitCode::auditRotateError);
     }
 
     registerShutdownTask(cleanupTask);
@@ -988,7 +989,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
 
     try {
         if (!initialize_server_global_state::checkSocketPath())
-            return EXIT_ABRUPT;
+            return ExitCode::abrupt;
 
         startSignalProcessingThread();
 
@@ -998,16 +999,16 @@ ExitCode mongos_main(int argc, char* argv[]) {
                     "uncaught DBException in mongos main: {error}",
                     "uncaught DBException in mongos main",
                     "error"_attr = redact(e));
-        return EXIT_UNCAUGHT;
+        return ExitCode::uncaught;
     } catch (const std::exception& e) {
         LOGV2_ERROR(22863,
                     "uncaught std::exception in mongos main: {error}",
                     "uncaught std::exception in mongos main",
                     "error"_attr = redact(e.what()));
-        return EXIT_UNCAUGHT;
+        return ExitCode::uncaught;
     } catch (...) {
         LOGV2_ERROR(22864, "uncaught unknown exception in mongos main");
-        return EXIT_UNCAUGHT;
+        return ExitCode::uncaught;
     }
 }
 

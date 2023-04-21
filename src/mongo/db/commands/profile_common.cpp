@@ -94,7 +94,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
             "cannot set both sampleRate/filter and ratelimit to non-default values",
             (newSampleRate == 1.0 && !request.getFilter()) || newRateLimit == 1);
 
-    // TODO SERVER-66561: For _applyProfilingLevel, takes the passed in "const DatabaseName& dbName"
+    // TODO SERVER-67459: For _applyProfilingLevel, takes the passed in "const DatabaseName& dbName"
     // directly.
     // Delegate to _applyProfilingLevel to set the profiling level appropriately whether
     // we are on mongoD or mongoS.
@@ -145,7 +145,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
         }
         attrs.add("from", oldState.obj());
 
-        // TODO SERVER-66561: For getDatabaseProfileSettings, takes the passed in "const
+        // TODO SERVER-67459: For getDatabaseProfileSettings, takes the passed in "const
         // DatabaseName& dbName" directly.
 
         // newSettings.level may differ from profilingLevel: profilingLevel is part of the request,

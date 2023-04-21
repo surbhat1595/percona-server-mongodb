@@ -845,6 +845,7 @@ env.Library(
 env.Library(
     target='catalog_raii',
     source=[
+        'catalog/catalog_helper.cpp',
         'catalog_raii.cpp',
     ],
     LIBDEPS=[

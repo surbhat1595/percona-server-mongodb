@@ -556,7 +556,7 @@ void Balancer::_consumeActionStreamLoop() {
 
         _outstandingStreamingOps.fetchAndAdd(1);
         stdx::visit(
-            visit_helper::Overloaded{
+            OverloadedVisitor{
                 [&, selectedStream](MergeInfo&& mergeAction) {
                     applyThrottling();
                     auto result =
@@ -780,7 +780,7 @@ void Balancer::_mainThread() {
                                   "Failed to split chunks",
                                   "error"_attr = status);
                 } else {
-                    LOGV2_DEBUG(21861, 1, "Done enforcing tag range boundaries.");
+                    LOGV2_DEBUG(21861, 1, "Done enforcing zone range boundaries.");
                 }
 
                 stdx::unordered_set<ShardId> usedShards;

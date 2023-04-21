@@ -1324,7 +1324,7 @@ buildvariants:
       <<: *compile-expansions
       compile_variant: -arm64
     run_on:
-      - "amazon2-arm64"
+      - "amazon2-arm64-large"
     tasks:
       - name: compile
 
@@ -2548,106 +2548,6 @@ buildvariants:
       - name: linkbench
       - name: linkbench2
 
-  - name: linux-3-node-replSet-last-continuous-fcv.2022-11
-    display_name: Linux 3-Node ReplSet (Last Continuous FCV) 2022-11
-    modules: *modules
-    expansions:
-      mongodb_setup_release: 2022-11
-      mongodb_setup: replica-last-continuous-fcv
-      infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: replica
-      workload_setup: 2022-11
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-      compile_variant: "-arm64"
-    run_on:
-      - "rhel70-perf-replset"
-    depends_on: *_compile_amazon_linux2_arm64
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-      - name: ycsb_60GB
-      - name: industry_benchmarks_secondary_reads
-      - name: crud_workloads
-      - name: mixed_workloads
-      - name: misc_workloads
-      - name: map_reduce_workloads
-      - name: refine_shard_key_transaction_stress
-      - name: smoke_test
-      - name: secondary_performance # Uses a special 2 node mongodb setup
-      - name: non_sharded_workloads
-      - name: bestbuy_agg
-      - name: bestbuy_agg_merge_different_db
-      - name: bestbuy_agg_merge_same_db
-      - name: bestbuy_agg_merge_wordcount
-      - name: bestbuy_query
-      - name: change_streams_throughput
-      - name: change_streams_latency
-      - name: change_streams_listen_throughput
-      - name: snapshot_reads
-      - name: secondary_reads
-      - name: tpcc
-      # TODO: Enable in SERVER-66572.
-      - name: linkbench
-      - name: linkbench2
-      # Time-series collections are available since v5.0.
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_manual_bucketing
-
-  - name: linux-3-node-replSet-last-lts-fcv.2022-11
-    display_name: Linux 3-Node ReplSet (Last LTS FCV) 2022-11
-    modules: *modules
-    expansions:
-      mongodb_setup_release: 2022-11
-      mongodb_setup: replica-last-lts-fcv
-      infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: replica
-      workload_setup: 2022-11
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-      compile_variant: "-arm64"
-    run_on:
-      - "rhel70-perf-replset"
-    depends_on: *_compile_amazon_linux2_arm64
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-      - name: ycsb_60GB
-      - name: industry_benchmarks_secondary_reads
-      - name: crud_workloads
-      - name: mixed_workloads
-      - name: misc_workloads
-      - name: map_reduce_workloads
-      - name: refine_shard_key_transaction_stress
-      - name: smoke_test
-      - name: secondary_performance # Uses a special 2 node mongodb setup
-      - name: non_sharded_workloads
-      - name: bestbuy_agg
-      - name: bestbuy_agg_merge_different_db
-      - name: bestbuy_agg_merge_same_db
-      - name: bestbuy_agg_merge_wordcount
-      - name: bestbuy_query
-      - name: change_streams_throughput
-      - name: change_streams_latency
-      - name: change_streams_listen_throughput
-      - name: snapshot_reads
-      - name: secondary_reads
-      - name: tpcc
-      # TODO: Enable in SERVER-66572.
-      - name: linkbench
-      - name: linkbench2
-      # Time-series collections are available since v5.0.
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_manual_bucketing
-
   - name: linux-3-node-replSet-notls.2022-11
     display_name: Linux 3-Node ReplSet (No TLS) 2022-11
     modules: *modules
@@ -2795,7 +2695,7 @@ buildvariants:
   - &linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory.2023-01
-    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    cron: "0 2 * * 0"   # Weekly, Sundays at 2 AM
     modules: *modules
     expansions: &standalone-arm-expansions
       mongodb_setup_release: 2022-11
@@ -2855,7 +2755,7 @@ buildvariants:
   - &linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-arm.2023-01
     display_name: MicroBenchmarks Arm 1-Node ReplSet inMemory.2023-01
-    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    cron: "0 2 * * 0"   # Weekly, Sundays at 2 AM
     modules: *modules
     expansions: &repl-arm-expansions
       mongodb_setup_release: 2022-11
@@ -2890,7 +2790,7 @@ buildvariants:
     <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-intel.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory.2023-01
-    cron: "0 */12 * * *" # Every 12 hours starting at midnight
+    cron: "0 2 * * 0"   # Weekly, Sundays at 2 AM
     expansions: &standalone-intel-expansions
       <<: *standalone-arm-expansions
       infrastructure_provisioning: workload_client_mongod_combined_intel.2023-01
@@ -2906,7 +2806,7 @@ buildvariants:
     <<: *linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-intel.2023-01
     display_name: MicroBenchmarks Intel 1-Node ReplSet inMemory.2023-01
-    cron: "0 */12 * * *" # Every 12 hours starting at midnight
+    cron: "0 2 * * 0"   # Weekly, Sundays at 2 AM
     expansions: &repl-intel-expansions
       <<: *repl-arm-expansions
       infrastructure_provisioning: workload_client_mongod_combined_intel.2023-01

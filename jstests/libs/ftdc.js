@@ -40,6 +40,7 @@ function verifyGetDiagnosticData(adminDb) {
             assert(data.hasOwnProperty("serverStatus"),
                    "does not have 'serverStatus' in '" + tojson(data) + "'");
             assert(data.hasOwnProperty("end"), "does not have 'end' in '" + tojson(data) + "'");
+
             foundGoodDocument = true;
 
             jsTestLog("Got good getDiagnosticData: " + tojson(result));
